@@ -1,46 +1,50 @@
-//! The media store's vocabulary and its two codec halves.
+//! The media store defines asset types and two codec stages.
 //!
-//! Image nodes are characters, not illustrations: 427 786 nodes in
-//! `docs/research/dict-shapes.md` carry a `data.gaiji` marker and sit at
-//! `height: 1em` in the middle of a definition, and 字通 averages more than
-//! four per term row. So an asset has to be *sized* before the popup can
-//! lay a line out, and **99 807 census image nodes declare neither `width`
-//! nor `height`**. That is the whole reason this module exists.
+//! A Dictionary Entry treats an image node as a character, not an illustration.
+//! `docs/research/dict-shapes.md` reports 427 786 nodes with a
+//! `data.gaiji` marker. These nodes use `height: 1em` inside a definition.
+//! The Dictionary 字通 uses more than four such nodes in each term row. The
+//! layout pass needs an asset size before it places a line that contains the
+//! asset. The census reports 99 807 image nodes with neither `width` nor
+//! `height`. This module gets those sizes.
 //!
-//! Two halves, at opposite ends of the pipeline:
+//! [`probe`] runs once for each asset during dictionary build. It reads the
+//! intrinsic size from the container header and does not decode pixels. Each
+//! format stores its size in the first few hundred bytes:
+//! - a PNG, in its `IHDR` chunk
+//! - a GIF, in its logical screen descriptor
+//! - a JPEG, in its `SOFn` marker
+//! - an AVIF, in its `ispe` property
+//! - an SVG, in its root element
 //!
-//! - [`probe`] runs once per asset at dictionary build time and reads the
-//!   intrinsic size out of the **container header**. No pixels are decoded:
-//!   a PNG's `IHDR`, a GIF's logical screen descriptor, a JPEG's `SOFn`, an
-//!   AVIF's `ispe` property and an SVG's root element all carry the size in
-//!   the first few hundred bytes. That is what keeps images out of the
-//!   measurement seam entirely - the row already knows how big the thing
-//!   is, so `layout` never touches a decoder.
-//! - [`decode`] runs at paint time in the bin, behind that bin's own
-//!   surface cache, and is the only place in this tree that turns encoded
-//!   asset bytes into pixels. One rasterizer per census format, and the
-//!   size still only ever flows *into* it: a raster asset's pixels are a
-//!   property of its bytes, and the one size that is a choice - an SVG's,
-//!   because a vector has no pixels until something picks one - is handed
-//!   down from the resolved box, never read back.
+//! The media row records this size. The TextMeasure seam then avoids a decoder,
+//! and `layout` avoids one as well.
+//! - [`decode`] runs when a platform bin paints an asset. The decoded-surface
+//!   cache of that platform bin holds its result. This function alone changes
+//!   encoded asset bytes into pixels.
+//!   Each census format has one rasterizer. A raster asset gets pixels from its
+//!   bytes. An SVG is a vector without pixels until the layout pass resolves a
+//!   box. The layout pass then gives that size to [`decode`].
 //!
-//! Reading the header rather than decoding is what let the build support
-//! AVIF before an AVIF decoder existed: `ispe` is a container property, so
-//! sizing an AVIF is box-walking, not entropy decoding. The same walk now
-//! bounds the decode, refusing a hostile declaration before an AV1 frame is
-//! allocated for it.
+//! [`probe`] gets an asset size from its header and does not decode the asset.
+//! This design let the build support AVIF before this module had an AVIF
+//! decoder. The `ispe` property is inside the container, so [`probe`] reads
+//! only container boxes. It does not decode entropy-coded data. [`decode`]
+//! uses the same box pass to apply a size limit. It rejects a hostile size
+//! before code allocates an AV1 frame.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::hash::Hash;
 
-/// What names one asset: the dictionary that shipped it and the `path` its
-/// image node declared, **verbatim**.
+/// A `MediaKey` names one asset. It contains the Dictionary that supplied the
+/// asset and the exact `path` text from its image node.
 ///
-/// Verbatim matters. The path is a dictionary-authored string that only has
-/// to round-trip, and normalising it would mean the key a scene element
-/// carries and the key the build wrote could disagree. Archive lookup does
-/// normalise, once, at extraction time - see `dict::build`.
+/// The system must reuse the exact text that the Dictionary author wrote. A
+/// normalized path can differ between a scene element key and the key that
+/// the build wrote. The archive lookup normalizes each path once during
+/// extraction. See `dict::build`.
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct MediaKey {
     pub dict_id: i64,
@@ -59,27 +63,28 @@ impl fmt::Display for MediaKey {
     }
 }
 
-/// The five formats `docs/research/dict-shapes.md` found across 30 image
-/// dictionaries, and nothing else.
+/// The five formats that `docs/research/dict-shapes.md` found across 30 image
+/// dictionaries. The census found no other formats.
 ///
-/// `.jpg` and `.jpeg` are one format; the census counts them separately
-/// because it counts extensions, and this does not because it sniffs magic
-/// bytes. A format outside this set is [`Unreadable::Unrecognised`]: no
-/// media row, and the `alt`-text ladder takes over.
+/// `.jpg` and `.jpeg` use one format here. The census counts them separately
+/// as file extensions. This code uses magic bytes instead. A format outside
+/// this set produces [`Unreadable::Unrecognised`]. The build writes no media
+/// row, and the `alt` text ladder acts.
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum MediaFormat {
     Png,
     Jpeg,
-    /// Animated or not. The intrinsic size is the logical screen, which is
-    /// also the canvas the first frame composites into.
+/// The logical screen gives the intrinsic size for an animated or static GIF.
+/// The first frame uses this screen as its composite canvas.
     Gif,
     Svg,
     Avif,
 }
 
 impl MediaFormat {
-    /// The `media.format` column's value.
+    /// Gets the value in the `media.format` column.
     pub fn as_str(self) -> &'static str {
         match self {
             MediaFormat::Png => "png",
@@ -90,8 +95,8 @@ impl MediaFormat {
         }
     }
 
-    /// Reads the column back. `None` for a value this build does not know,
-    /// which can only mean a database written by a newer one.
+    /// Reads a value from the column. Returns `None` for an unknown value. Only a
+    /// newer build can write an unknown database value.
     pub fn parse(s: &str) -> Option<MediaFormat> {
         Some(match s {
             "png" => MediaFormat::Png,
@@ -110,13 +115,13 @@ impl fmt::Display for MediaFormat {
     }
 }
 
-/// An asset's intrinsic size in CSS pixels, recorded on the media row.
+/// The intrinsic size of an asset in CSS pixels. The media row stores this size.
 ///
-/// `aspect` is `width / height`, carried as its own column rather than
-/// derived on read: an image that declares only one of `width`/`height` -
-/// the `height: 1em` shape 字通 and 三省堂 both use - is sized by
-/// multiplying, and deriving would put a division and a zero guard on a
-/// path that runs tens of times per hover.
+/// `aspect` is its own column and equals `width / height`. The code does not
+/// calculate it when it reads a row. An image can declare `width` alone or
+/// `height` alone. This shape occurs with `height: 1em`, which 字通 and 三省堂
+/// use. The code uses `aspect` to calculate the absent side. A calculation
+/// during each hover would add a division and a zero guard.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Intrinsic {
     pub format: MediaFormat,
@@ -125,13 +130,14 @@ pub struct Intrinsic {
     pub aspect: f32,
 }
 
-/// Why an asset got no media row.
+/// Why the build wrote no media row for an asset.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unreadable {
-    /// The magic bytes match none of the five census formats.
+    /// The magic bytes do not match any of the five census formats.
     Unrecognised,
-    /// The container was recognised and then did not hold a size: a
-    /// truncated header, a zero dimension, or a JPEG with no frame header.
+    /// The build recognized the container, but the container has no size. Causes
+    /// include a truncated header, a zero dimension, or a JPEG with no frame
+    /// header.
     Malformed(MediaFormat),
 }
 
@@ -144,67 +150,65 @@ impl fmt::Display for Unreadable {
     }
 }
 
-/// Bytes of an SVG scanned for its root element, and the window the
-/// sniffer looks for `<svg` in.
+/// The byte limit for the SVG root element and the `<svg` sniff window.
 ///
-/// One number for both, so a file whose root element the parser cannot
-/// reach is also not claimed as an SVG by the sniffer. 16 KiB clears every
-/// generator preamble a real asset carries - Illustrator's comment banner
-/// is the long one - while bounding the `from_utf8_lossy` a probe does.
+/// One limit gives the parser and sniffer the same reach. 16 KiB includes
+/// every generator preamble in the asset set. The Illustrator comment banner
+/// is the longest preamble. This limit also sets the `from_utf8_lossy` input
+/// for a probe.
 const SVG_WINDOW: usize = 16 << 10;
 
-/// The largest dimension a real asset declares, by a wide margin.
+/// The maximum valid asset dimension.
 ///
-/// A header is four bytes of attacker- or bug-controlled integer, and a
-/// declared 4 294 967 295 x 1 would give the layout an aspect ratio of four
-/// billion to reason about. No dictionary asset in the census is anywhere
-/// near 65 536 px, so refusing that is refusing corruption, not content.
+/// A header contains a four-byte integer that a defect or an attacker can
+/// control. A value of 4 294 967 295 x 1 would give the layout pass an aspect
+/// ratio of four billion. No Dictionary asset in the census nears 65 536 px.
+/// This limit rejects corrupt data, not valid content.
 const MAX_DIM: f32 = 65_536.0;
 
-/// CSS Images 3's default object size, which is what a browser draws for a
-/// replaced element with neither an intrinsic size nor an intrinsic ratio.
-/// Only an SVG can reach it - every raster header states its size.
+/// The default object size from CSS Images 3.
+///
+/// A browser uses this size for a replaced element with no intrinsic size or
+/// ratio. Only an SVG can use it because each raster header states its size.
 const DEFAULT_OBJECT: (f64, f64) = (300.0, 150.0);
 
-/// The intrinsic size in an asset's container header.
+/// Gets the intrinsic size from an asset container header.
 ///
-/// Total over arbitrary bytes: every read is bounds-checked and every
-/// container walk is bounded by the slice, so a truncated or hostile asset
-/// answers [`Unreadable`] rather than panicking or looping. The build
-/// records the answer and skips the asset on an error, so a corrupt file
-/// costs one diagnostic line and never the build.
+/// This function accepts every byte sequence. Bounds checks protect every read,
+/// and each container pass stays inside the slice. A truncated or hostile asset
+/// returns [`Unreadable`] rather than a panic or an infinite loop. On an error,
+/// the build records the result and skips the asset. A corrupt file produces one
+/// diagnostic line and does not stop the build.
 pub fn probe(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     match raster_magic(bytes) {
         Some(MediaFormat::Png) => png_size(bytes),
         Some(MediaFormat::Jpeg) => jpeg_size(bytes),
         Some(MediaFormat::Gif) => gif_size(bytes),
         Some(MediaFormat::Avif) => avif_size(bytes),
-        // XML carries no magic number, so recognising an SVG *is* finding
-        // its root element - and the size comes out of that same tag, so
-        // the scan happens once here rather than once to sniff and again
-        // to measure.
+        // XML has no magic number. The `<svg` root element therefore identifies
+        // the format and supplies the size. This pass gets both results in one scan.
         Some(MediaFormat::Svg) | None => {
             svg_size(&svg_root(bytes).ok_or(Unreadable::Unrecognised)?)
         }
     }
 }
 
-/// The format, from magic bytes rather than from the file extension.
+/// Gets the format from magic bytes, not from the file extension.
 ///
-/// The census counts extensions because that is all a JSON node gives it;
-/// the build has the bytes, and a dictionary that ships a PNG named `.jpg`
-/// is a real thing.
+/// The census uses extensions because a JSON node has no bytes. The build has
+/// bytes, and some Dictionaries supply a PNG with a `.jpg` name.
 pub fn sniff(bytes: &[u8]) -> Option<MediaFormat> {
     raster_magic(bytes).or_else(|| svg_root(bytes).map(|_| MediaFormat::Svg))
 }
 
-/// The four formats with a magic number. Never [`MediaFormat::Svg`].
+/// Gets one of the four formats with magic numbers. This function never returns
+/// [`MediaFormat::Svg`].
 fn raster_magic(bytes: &[u8]) -> Option<MediaFormat> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(MediaFormat::Png);
     }
-    // SOI plus the first byte of the next marker: two bytes alone match
-    // too much.
+    // Require the JPEG start-of-image bytes and the first byte of the next
+    // marker. The first two bytes alone match too many files.
     if bytes.starts_with(b"\xff\xd8\xff") {
         return Some(MediaFormat::Jpeg);
     }
@@ -217,8 +221,8 @@ fn raster_magic(bytes: &[u8]) -> Option<MediaFormat> {
     None
 }
 
-/// Validated, so the rest of this module cannot record a size the layout
-/// would have to defend itself against.
+/// Accepts only a size that the layout pass can process. This check keeps
+/// invalid sizes out of the media row.
 fn sized(format: MediaFormat, w: f64, h: f64) -> Result<Intrinsic, Unreadable> {
     let (width, height) = (w as f32, h as f32);
     let sane = |v: f32| v.is_finite() && v > 0.0 && v <= MAX_DIM;
@@ -242,9 +246,8 @@ fn be64(b: &[u8]) -> u64 {
 
 // ---- PNG ----
 
-/// `IHDR` is mandated to be the first chunk, at a fixed offset: eight bytes
-/// of signature, four of chunk length, four of chunk type, then the two
-/// big-endian dimensions.
+/// PNG places `IHDR` at a fixed offset as its first chunk. The fields are the
+/// eight-byte signature, chunk length, chunk type, and two big-endian dimensions.
 fn png_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     let malformed = Unreadable::Malformed(MediaFormat::Png);
     let head = bytes.get(12..24).ok_or(malformed)?;
@@ -256,9 +259,9 @@ fn png_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
 
 // ---- GIF ----
 
-/// The logical screen descriptor follows the six-byte signature, little
-/// endian. It is the intrinsic size even for an animation whose first frame
-/// is smaller: the frame composites into this canvas.
+/// The six-byte signature precedes the little-endian logical screen descriptor.
+/// This descriptor gives intrinsic size when the first animation frame is
+/// smaller. The frame composites onto this canvas.
 fn gif_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     let head = bytes.get(6..10).ok_or(Unreadable::Malformed(MediaFormat::Gif))?;
     let le16 = |b: &[u8]| f64::from(u16::from_le_bytes([b[0], b[1]]));
@@ -267,23 +270,21 @@ fn gif_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
 
 // ---- JPEG ----
 
-/// A frame header, `SOF0` through `SOF15`.
+/// Identifies a frame header from `SOF0` through `SOF15`.
 ///
-/// The three holes are not frame headers despite sitting in the same
-/// marker range: `C4` is a Huffman table, `C8` a JPEG extension, `CC` an
-/// arithmetic-coding conditioning table. Walking past them is what makes
-/// this work on progressive and lossless JPEGs and not only on baseline.
+/// Three markers in this range are not frame headers. `C4` is a Huffman table.
+/// `C8` is a JPEG extension. `CC` is a table for arithmetic code conditions.
+/// The parser skips these markers for progressive, lossless, and baseline JPEGs.
 fn is_frame_header(marker: u8) -> bool {
     (0xc0..=0xcf).contains(&marker) && marker != 0xc4 && marker != 0xc8 && marker != 0xcc
 }
 
-/// Walks the marker segments to the first frame header.
+/// Reads marker segments until the first frame header.
 ///
-/// There is no fixed offset to read: JPEG allows any number of `APPn`,
-/// comment and table segments before the frame, and real assets carry
-/// EXIF and ICC blocks. The walk stops at `SOS`, because entropy-coded
-/// scan data is not a segment stream and a file with no frame header
-/// before its first scan has no readable size.
+/// JPEG permits any number of `APPn`, comment, and table segments before the
+/// frame. Real assets can contain EXIF and ICC blocks. The parser stops at
+/// `SOS`. Entropy-coded scan data is not a segment stream. A file without a
+/// frame header before its first scan has no readable size.
 fn jpeg_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     let malformed = Unreadable::Malformed(MediaFormat::Jpeg);
     let mut at = 2;
@@ -294,12 +295,12 @@ fn jpeg_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
         }
         let marker = head[1];
         at += 2;
-        // A run of `ff` is padding before the real marker byte.
+        // A sequence of `ff` bytes pads the data before the marker byte.
         if marker == 0xff {
             at -= 1;
             continue;
         }
-        // `01` and the eight restart markers stand alone: no length word.
+        // `01` and the eight restart markers have no length word.
         if marker == 0x01 || (0xd0..=0xd9).contains(&marker) {
             continue;
         }
@@ -311,7 +312,7 @@ fn jpeg_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
             return Err(malformed);
         }
         if is_frame_header(marker) {
-            // Sample precision, then height, then width.
+            // The frame fields are sample precision, height, and width.
             let frame = bytes.get(at + 2..at + 7).ok_or(malformed)?;
             let (h, w) = (be16(&frame[1..3]), be16(&frame[3..5]));
             return sized(MediaFormat::Jpeg, f64::from(w), f64::from(h));
@@ -322,12 +323,12 @@ fn jpeg_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
 
 // ---- AVIF (ISO base media file format) ----
 
-/// One ISOBMFF box: its four-character type and its payload.
+/// One ISOBMFF box with a four-character type and a payload.
 ///
-/// Stops at the first box it cannot trust rather than clamping, so a
-/// truncated file walks the boxes it does have and then ends. The
-/// `size == 0` form ("to end of file") is accepted because a single-item
-/// AVIF written by a streaming encoder uses it for `mdat`.
+/// The parser stops at the first box it cannot trust. It does not clamp a box
+/// size. A truncated file therefore supplies complete boxes before that point.
+/// The parser accepts `size == 0`, which means "to end of file." A single-item
+/// AVIF from a stream encoder can use this form for `mdat`.
 struct Boxes<'a> {
     rest: &'a [u8],
 }
@@ -358,14 +359,14 @@ impl<'a> Iterator for Boxes<'a> {
     }
 }
 
-/// A box's payload, by type, at one level.
+/// Gets a box payload by type at one level.
 fn child<'a>(payload: &'a [u8], want: &[u8; 4]) -> Option<&'a [u8]> {
     boxes(payload).find(|(ty, _)| *ty == want).map(|(_, body)| body)
 }
 
-/// `ftyp` names AVIF as either the major brand or a compatible one. `avis`
-/// is the image-sequence brand; it still carries a `meta` box describing
-/// its primary item, so it sizes the same way.
+/// `ftyp` names AVIF as the major brand or a compatible one. `avis` is the
+/// image-sequence brand. It still carries a `meta` box for its primary item, so
+/// the parser sizes it the same way.
 fn is_avif(bytes: &[u8]) -> bool {
     let Some(ftyp) = boxes(bytes).next().filter(|(ty, _)| *ty == b"ftyp").map(|(_, b)| b) else {
         return false;
@@ -376,21 +377,19 @@ fn is_avif(bytes: &[u8]) -> bool {
     tags.iter().enumerate().any(|(i, tag)| i != 1 && (tag == b"avif" || tag == b"avis"))
 }
 
-/// The size lives in an `ispe` **item property**, not in a header, so
-/// finding it is a walk: `meta` holds `pitm` (which item is the picture),
-/// `iprp/ipco` (the property list) and `ipma` (which properties belong to
-/// which item).
+/// The size lives in an `ispe` **item property**, not in a header. The parser
+/// therefore walks the boxes. `meta` holds `pitm` (the picture's item),
+/// `iprp/ipco` (the property list), and `ipma` (the properties for each item).
 ///
-/// The association walk is not pedantry. A real AVIF carries an alpha
-/// auxiliary item and often a thumbnail, each with its own `ispe`, so
-/// taking the first one can size the picture from its thumbnail. When
-/// `pitm` or `ipma` is missing the first `ispe` is the fallback, which is
-/// the right answer for the single-item files a dictionary converter
-/// emits.
+/// This association walk prevents a wrong size. A real AVIF can have an alpha
+/// auxiliary item and a thumbnail. Each can have its own `ispe`. The first
+/// property can describe a thumbnail instead of the picture. If `pitm` or
+/// `ipma` has no value, the parser uses the first `ispe`. That fallback fits the
+/// single-item files that a dictionary converter emits.
 fn avif_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     let malformed = Unreadable::Malformed(MediaFormat::Avif);
     let meta = child(bytes, b"meta").ok_or(malformed)?;
-    // `meta` is a FullBox: one version byte and three flag bytes first.
+    // `meta` is a FullBox. One version byte and three flag bytes come first.
     let meta = meta.get(4..).ok_or(malformed)?;
 
     let (mut primary, mut ipma, mut ipco) = (None, None, None);
@@ -404,7 +403,7 @@ fn avif_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     }
     let ipco = ipco.ok_or(malformed)?;
 
-    // Property index is 1-based over `ipco`'s children, in source order.
+    // The property index is 1-based over `ipco` children in source order.
     let extents: Vec<(u16, u32, u32)> = boxes(ipco)
         .enumerate()
         .filter(|(_, (ty, _))| *ty == b"ispe")
@@ -422,8 +421,8 @@ fn avif_size(bytes: &[u8]) -> Result<Intrinsic, Unreadable> {
     sized(MediaFormat::Avif, f64::from(w), f64::from(h))
 }
 
-/// `pitm`: the primary item's id, sixteen bits at version 0 and
-/// thirty-two from version 1.
+/// Gets the `pitm` primary item ID. Version 0 uses sixteen bits. Version 1 uses
+/// thirty-two bits.
 fn primary_item(body: &[u8]) -> Option<u32> {
     let version = *body.first()?;
     let id = body.get(4..)?;
@@ -434,11 +433,11 @@ fn primary_item(body: &[u8]) -> Option<u32> {
     }
 }
 
-/// `ipma`: the property indices associated with one item.
+/// Gets the `ipma` property indices associated with one item.
 ///
-/// Two independent width choices, which is why this is a parse and not an
-/// offset: the item id is sixteen or thirty-two bits by *version*, and a
-/// property index is seven or fifteen bits by the low *flag* bit.
+/// The parser has two independent width choices. The item ID uses sixteen or
+/// thirty-two bits by *version*. The low *flag* bit selects seven or fifteen
+/// bits for each property index.
 fn associated(body: &[u8], item: u32) -> Option<Vec<u16>> {
     let version = *body.first()?;
     let wide_index = body.get(3)? & 1 == 1;
@@ -482,13 +481,13 @@ fn associated(body: &[u8], item: u32) -> Option<Vec<u16>> {
 
 // ---- SVG ----
 
-/// The root element's opening tag, as text.
+/// Gets the root element tag as text.
 ///
-/// XML has no magic number, so this doubles as the sniffer: bytes that
-/// contain an `<svg` element start within [`SVG_WINDOW`] are an SVG and
-/// bytes that do not are not. Lossy decoding is deliberate - the tag is
-/// ASCII, and a Latin-1 comment in the preamble must not make the file
-/// unreadable.
+/// XML has no magic number. This function also acts as the sniffer. Bytes with
+/// an `<svg` element that starts within [`SVG_WINDOW`] identify an SVG. Other
+/// bytes do not. The conversion can replace invalid UTF-8. This behavior is
+/// deliberate. The tag is ASCII, and a Latin-1 comment in the preamble must
+/// not make the file unreadable.
 fn svg_root(bytes: &[u8]) -> Option<String> {
     let head = &bytes[..bytes.len().min(SVG_WINDOW)];
     let text = String::from_utf8_lossy(head);
@@ -505,11 +504,11 @@ fn svg_root(bytes: &[u8]) -> Option<String> {
     Some(tag[..end].to_string())
 }
 
-/// One attribute's value from an opening tag.
+/// Gets one attribute value from a root tag.
 ///
-/// Whole-name matching, so `stroke-width` never answers a `width` probe,
-/// and case-sensitive, because an SVG referenced by `<img src>` is parsed
-/// as XML - which is also why `viewBox` keeps its capital B.
+/// This function matches the whole name. Thus, `stroke-width` never answers a
+/// `width` probe. It also matches case exactly because XML parses an SVG
+/// referenced by `<img src>` as XML. This is why `viewBox` keeps its capital B.
 fn attr(tag: &str, name: &str) -> Option<String> {
     let mut rest = tag;
     loop {
@@ -524,8 +523,8 @@ fn attr(tag: &str, name: &str) -> Option<String> {
                 let end = value[1..].find(quote)?;
                 return Some(value[1..1 + end].to_string());
             }
-            // Unquoted: XML forbids it, but a hand-written file is a
-            // hand-written file. Take the run up to whitespace.
+            // XML forbids an unquoted value, but a hand-written file can contain one.
+            // Use the run up to whitespace.
             let end = value.find(char::is_whitespace).unwrap_or(value.len());
             return Some(value[..end].to_string());
         }
@@ -535,10 +534,10 @@ fn attr(tag: &str, name: &str) -> Option<String> {
 
 /// A CSS length in pixels.
 ///
-/// `None` for a percentage and for the font-relative units, because both
-/// size against a containing box the asset does not have and therefore
-/// name no *intrinsic* size. Absolute units convert at CSS's own fixed
-/// ratios, where an inch is 96 pixels by definition.
+/// Returns `None` for a percentage or a font-relative unit. Each value needs a
+/// box around the asset, but the asset has no such box, so neither gives an
+/// *intrinsic* size. Absolute units use CSS fixed ratios. CSS defines one inch
+/// as 96 pixels.
 fn css_px(value: &str) -> Option<f64> {
     let value = value.trim();
     let numeric = |c: char| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E');
@@ -557,8 +556,8 @@ fn css_px(value: &str) -> Option<f64> {
     Some(number * scale)
 }
 
-/// `viewBox`'s third and fourth numbers - the ratio when the root element
-/// declares no size, which is the common shape for a gaiji SVG.
+/// Gets the ratio from the third and fourth `viewBox` numbers. The root element
+/// uses this ratio when it declares no size. This shape is common for a gaiji SVG.
 fn view_box(value: &str) -> Option<(f64, f64)> {
     let mut nums = value
         .split(|c: char| c.is_ascii_whitespace() || c == ',')
@@ -570,14 +569,14 @@ fn view_box(value: &str) -> Option<(f64, f64)> {
     (w > 0.0 && h > 0.0).then_some((w, h))
 }
 
-/// CSS's own resolution order for a replaced element: a declared size
-/// wins, one declared length plus a ratio gives the other, a ratio alone
-/// is the size, and nothing at all is the default object size.
+/// Applies CSS resolution order for a replaced element. A declared size wins.
+/// One declared length plus a ratio gives the other. A ratio alone gives the
+/// size. With neither, CSS uses the default object size.
 ///
-/// The last arm is why an SVG never fails to size. It is not an invented
-/// number - it is what a browser draws for an intrinsic-less replaced
-/// element - so the media row's promise holds: a row exists, the bytes are
-/// there, and the size is the one the asset would render at.
+/// This last case lets an SVG always get a size. The value is not invented. A
+/// browser uses it for a replaced element with no intrinsic size or ratio. The
+/// media row therefore exists when the bytes exist, and its size matches the
+/// browser result.
 fn svg_size(tag: &str) -> Result<Intrinsic, Unreadable> {
     let w = attr(tag, "width").as_deref().and_then(css_px);
     let h = attr(tag, "height").as_deref().and_then(css_px);
@@ -599,11 +598,10 @@ fn svg_size(tag: &str) -> Result<Intrinsic, Unreadable> {
 
 /// One decoded asset: premultiplied RGBA8, top-down, `w * h * 4` bytes.
 ///
-/// Premultiplied RGBA8 is tiny-skia's own pixel layout, so the Linux panel
-/// blends a surface with no conversion at all; the Windows adapter swaps
-/// two channels once per key when it builds its Direct2D bitmap. That is
-/// the cheaper way round, because Linux converts per frame and Windows
-/// per asset.
+/// Premultiplied RGBA8 matches tiny-skia's pixel layout. The Linux panel blends
+/// a surface without conversion. The Windows adapter swaps two channels once
+/// per key while it builds its Direct2D bitmap. This choice costs less because
+/// Linux converts each frame and Windows converts each asset.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Surface {
     pub w: u32,
@@ -613,17 +611,17 @@ pub struct Surface {
 
 /// Why a decode produced no pixels.
 ///
-/// Both arms are fallback cues rather than errors, and both are reachable:
-/// this build carries a rasterizer for every census format, so "no decoder
-/// for that format" is no longer a state anything can be in.
+/// Both variants provide fallback cues, not errors, and both can occur. This
+/// build has a rasterizer for every census format, so "no decoder for that
+/// format" cannot occur.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Undecodable {
     /// A decoder ran and refused the bytes.
     Broken(MediaFormat),
-    /// Readable, and refused for its size: the surface would be over
-    /// [`MAX_PIXELS`]. Its own arm because it is not corruption - the media
-    /// row is right, the asset is real, and it is simply larger than a
-    /// popup will ever composite. A diagnostic should say so.
+    /// The decoder accepted the bytes, but the surface would exceed
+    /// [`MAX_PIXELS`]. This variant is not corruption. The media row is correct,
+    /// and the asset is larger than a popup can composite. A diagnostic can state
+    /// this cause.
     TooLarge(MediaFormat),
 }
 
@@ -638,19 +636,18 @@ impl fmt::Display for Undecodable {
 
 /// Why an asset has no pixels to paint.
 ///
-/// Every arm is a fallback case and none of them is a frame-losing error: a
-/// dictionary's broken asset costs the popup its `alt` text, then a
-/// placeholder box, and never a hole in a word. The arms differ only in
-/// what a diagnostic should say.
+/// Every variant is a fallback case. None loses a frame. For a broken asset,
+/// the popup uses its `alt` text, then a placeholder box. It never leaves a
+/// hole in a word. The variants differ only in the diagnostic text.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Missing {
-    /// No media row. Either the archive shipped nothing at that path or the
-    /// build could read no intrinsic size out of what it did ship.
+    /// No media row. The archive has no asset at that path, or the build could
+    /// not read an intrinsic size from the asset.
     NotStored,
-    /// Stored and sized, and not paintable by this build.
+    /// The build stored and sized the asset, but cannot paint it.
     Undecodable(Undecodable),
-    /// The store itself would not answer. Carries the message, so a bin
-    /// logs a real database fault once instead of swallowing it.
+    /// The store did not answer. Carries the message so a bin logs one real
+    /// database fault and does not hide it.
     Unavailable(String),
 }
 
@@ -664,33 +661,31 @@ impl fmt::Display for Missing {
     }
 }
 
-/// The largest surface a decode will hand back, in pixels.
+/// The largest surface a decode returns, in pixels.
 ///
-/// 16 Mpx is 64 MiB of RGBA8, and the largest asset in the census's
-/// heaviest image dictionary is 1024x768 - three orders of magnitude
-/// under it. The bound exists because a container header is a few bytes
-/// of third-party integer: [`MAX_DIM`] already refuses an axis over
-/// 65 536, but 65 536 x 65 536 is still 17 GB of pixels, and the store's
-/// 16 MiB byte cap does not bound *decoded* area for any format that
-/// compresses. Every arm below refuses before it allocates.
+/// 16 Mpx uses 64 MiB of RGBA8. The largest asset in the census's heaviest
+/// image dictionary is 1024x768, which is three orders of magnitude smaller.
+/// The bound exists because a container header has a few integer bytes from
+/// third-party data. [`MAX_DIM`] rejects an axis over 65 536, but 65 536 x
+/// 65 536 still gives 17 GB of pixels.
+/// The store's 16 MiB byte cap does not limit *decoded* area for compressed
+/// formats. Every variant rejects the area before allocation.
 pub const MAX_PIXELS: u32 = 16 << 20;
 
-/// Asset bytes to pixels, with the format the media row already recorded
-/// rather than a second sniff.
+/// Converts asset bytes to pixels with the format that the media row records.
+/// It does not sniff the bytes a second time.
 ///
-/// `at` is the pixel size to rasterize a **vector** at, and it is the one
-/// place a size enters this half of the module. It flows one way, from
-/// layout to the decoder: the resolved box comes from the intrinsic size
-/// the build recorded, [`crate::ui::layout::SceneImage::tint`] quantises
-/// it into `Tint::Raster`, and the bin hands that number here. Nothing
-/// reads a decoded size back out, which is what keeps a decoder off the
-/// measurement path. `None` rasterizes an SVG at its own intrinsic size,
-/// which is what an untinted vector wants - the painter scales the box.
-/// A raster format has its own pixels and ignores `at` entirely.
+/// `at` gives the pixel size for a **vector**. It is the only size input to this
+/// half of the module. The layout pass gets the resolved box from the intrinsic
+/// size that the build records. [`crate::ui::layout::SceneImage::tint`] quantizes
+/// the box into `Tint::Raster`, and the bin passes that pair here. No code reads
+/// a decoded size back, so a decoder stays outside the measurement path.
+/// `None` rasterizes an SVG at its intrinsic size, and the painter scales the
+/// box. A raster format has its own pixels and ignores `at`.
 ///
-/// Total over arbitrary bytes, like [`probe`]: a dictionary archive is
-/// third-party data, so every arm answers [`Undecodable`] rather than
-/// panicking, and the `alt`-text ladder acts on the answer.
+/// This function accepts arbitrary bytes, like [`probe`]. Dictionary archives
+/// contain third-party data, so every path returns [`Undecodable`] instead of a
+/// panic. The `alt`-text ladder then acts on the result.
 pub fn decode(
     format: MediaFormat,
     bytes: &[u8],
@@ -708,16 +703,16 @@ pub fn decode(
     })
 }
 
-/// A decode's own answer: the surface, or `true` when it was refused for
-/// its size rather than for its bytes.
+/// The result from one decode: a surface, or `true` when size caused refusal.
 ///
-/// `bool` and not a second enum because [`decode`] is the only reader and
-/// it turns the flag into the format-carrying [`Undecodable`] arm; every
-/// decoder below then reads as one `?`-chain with no error type to thread.
+/// This type uses `bool` instead of a second enum because [`decode`] is its only
+/// reader. [`decode`] maps the flag to the format-specific [`Undecodable`]
+/// variant. Each decoder below can then use one `?`-chain without another error
+/// type.
 type Decoded = Result<Surface, bool>;
 
-/// Refuses a surface over [`MAX_PIXELS`] before anything allocates it, and
-/// answers the pixel count on the way through.
+/// Rejects a surface over [`MAX_PIXELS`] before allocation and returns its pixel
+/// count.
 fn area(w: u32, h: u32) -> Result<usize, bool> {
     if w == 0 || h == 0 {
         return Err(false);
@@ -728,31 +723,31 @@ fn area(w: u32, h: u32) -> Result<usize, bool> {
     }
 }
 
-/// One channel of a premultiplied pixel: `channel * alpha / 255`, rounded.
+/// One premultiplied pixel channel: `channel * alpha / 255`, with a rounded result.
 ///
-/// The whole of the premultiplied contract, in one place because three
-/// callers need exactly this arithmetic and a rounding that disagreed
-/// between them would be a per-platform hue. [`premultiply`] below scales a
-/// straight sample on the way out of a decoder; each bin's decoded-surface
-/// cache scales a *tint* colour by an existing mask's alpha, in its own
-/// channel order. Same expression, three orderings.
+/// This function holds the premultiplied contract in one place. Three callers
+/// need the same arithmetic. Different results would create a per-platform hue.
+/// [`premultiply`] applies it to a straight sample from a decoder. Each bin's
+/// decoded-surface cache applies it to a *tint* color and the alpha of a mask,
+/// with its own channel order. The expression is the same in all three
+/// paths.
 ///
-/// Rounding rather than truncating is what keeps `channel <= alpha`, which
-/// is the invariant tiny-skia's own pixel type enforces and the one
-/// `D2D1_ALPHA_MODE_PREMULTIPLIED` blends under: at `alpha == 255` the
-/// `+ 127` carries the quotient up to `channel` exactly, and truncation
-/// would leave a fully opaque white one short of its own alpha.
+/// A rounded result keeps `channel <= alpha`. tiny-skia's pixel type enforces this
+/// invariant, and `D2D1_ALPHA_MODE_PREMULTIPLIED` uses it to blend. When
+/// `alpha == 255`, `+ 127` returns `channel` exactly. Truncation would leave
+/// fully opaque white one below its own alpha.
 pub fn premultiplied(channel: u8, alpha: u8) -> u8 {
     ((u32::from(channel) * u32::from(alpha) + 127) / 255) as u8
 }
 
-/// Straight samples to premultiplied RGBA8, `lanes` per input pixel.
+/// Converts straight samples to premultiplied RGBA8. `lanes` gives the number
+/// of input channels per pixel.
 ///
-/// One helper for four decoders, because premultiplying is the whole
-/// contract [`Surface`] states and the four differ only in how many lanes
-/// they hand over: `4` is RGBA, `3` is opaque colour, `2` is grey plus
-/// alpha, `1` is grey. `channel * a / 255` rounded is also what keeps
-/// `rgb <= a`, the invariant tiny-skia's own pixel type enforces.
+/// One helper serves four decoders because premultiplication is the full
+/// [`Surface`] contract. The decoders differ only in channel count: `4` is
+/// RGBA, `3` is opaque color, `2` is gray plus alpha, and `1` is gray.
+/// The rounded `channel * a / 255` result also keeps `rgb <= a`, as tiny-skia's
+/// pixel type requires.
 fn premultiply(raw: &[u8], lanes: usize, pixels: usize) -> Result<Vec<u8>, bool> {
     if raw.len() != pixels.checked_mul(lanes).ok_or(true)? {
         return Err(false);
@@ -775,15 +770,14 @@ fn premultiply(raw: &[u8], lanes: usize, pixels: usize) -> Result<Vec<u8>, bool>
     Ok(rgba)
 }
 
-/// Palette, grey and 16-bit PNGs all normalise to eight bits with an alpha
-/// channel, so this only has to widen grey to RGB and premultiply.
+/// Palette, gray, and 16-bit PNGs all become eight-bit values with alpha.
+/// This function widens gray to RGB and applies premultiplication.
 fn decode_png(bytes: &[u8]) -> Decoded {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
         png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
     );
-    // The `png` pin bounds its own allocations, so the area cap is stated
-    // to the decoder rather than checked after it has already allocated.
+    // The `png` pin bounds its allocations. Give it the area cap before it allocates.
     decoder.set_limits(png::Limits { bytes: MAX_PIXELS as usize * 4 });
     let mut reader = decoder.read_info().map_err(|_| false)?;
     let pixels = area(reader.info().width, reader.info().height)?;
@@ -795,19 +789,18 @@ fn decode_png(bytes: &[u8]) -> Decoded {
         png::ColorType::Rgb => 3,
         png::ColorType::GrayscaleAlpha => 2,
         png::ColorType::Grayscale => 1,
-        // `EXPAND` turns a palette into colour, so this cannot arrive.
+        // `EXPAND` turns a palette into color, so this cannot arrive.
         png::ColorType::Indexed => return Err(false),
     };
     raw.truncate(info.buffer_size());
     Ok(Surface { w, h, rgba: premultiply(&raw, lanes, pixels)? })
 }
 
-/// JPEG carries no alpha, so the only work is asking for four lanes and
-/// letting [`premultiply`] pass an opaque asset through unchanged.
+/// JPEG has no alpha. This function requests four lanes, so [`premultiply`]
+/// passes an opaque asset through unchanged.
 ///
-/// Two passes on purpose: `decode_headers` gives the dimensions out of the
-/// `SOFn` segment, which is what the area cap has to see *before* a
-/// progressive JPEG allocates its coefficient buffers.
+/// Two passes protect the area cap. `decode_headers` gets dimensions from the
+/// `SOFn` segment before a progressive JPEG allocates coefficient buffers.
 fn decode_jpeg(bytes: &[u8]) -> Decoded {
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
@@ -822,23 +815,21 @@ fn decode_jpeg(bytes: &[u8]) -> Decoded {
     Ok(Surface { w, h, rgba: premultiply(&raw, 4, pixels)? })
 }
 
-/// A GIF's first frame, composited into the logical screen.
+/// Places the first GIF frame on the logical screen.
 ///
-/// The composite is the point, and it is why this is not four lines: an
-/// animation's first frame is often smaller than the canvas and offset
-/// inside it, and the logical screen is the size the media row recorded
-/// (see [`gif_size`]) because that is the box a browser lays out. Painting
-/// the frame's own rectangle at the canvas's size would stretch it. The
-/// rest of the canvas stays transparent, which is what an animation's
-/// first frame composites onto.
+/// The logical screen is the composite canvas. The first frame can be smaller
+/// than this canvas and can have an offset. The media row records the logical
+/// screen size (see [`gif_size`]), because that size defines the browser layout.
+/// The decoder copies the frame rectangle into that canvas. It does not stretch
+/// the frame. The rest of the canvas stays transparent, as for the first frame
+/// of an animation.
 ///
-/// Later frames are read by nothing: the spec asks for the first frame,
-/// and a popup that animated a definition would be worse than one that
-/// does not.
+/// The decoder ignores later frames. The spec asks for the first frame, and an
+/// animated definition would harm the popup more than a static definition.
 fn decode_gif(bytes: &[u8]) -> Decoded {
-    /// [`MAX_PIXELS`] in bytes of RGBA8, for `gif`'s own frame limiter.
-    /// A `const` match, so the constant is proved non-zero at compile time
-    /// and no unwrap reaches a paint path.
+    /// [`MAX_PIXELS`] in RGBA8 bytes for `gif`'s frame limiter.
+    /// A `const` match proves that this value is not zero at compile time.
+    /// No unwrap can reach a paint path.
     const FRAME_CAP: std::num::NonZeroU64 =
         match std::num::NonZeroU64::new(MAX_PIXELS as u64 * 4) {
             Some(cap) => cap,
@@ -857,9 +848,8 @@ fn decode_gif(bytes: &[u8]) -> Decoded {
     let stride = w as usize * 4;
     let (left, top) = (usize::from(frame.left), usize::from(frame.top));
     let (fw, fh) = (usize::from(frame.width), usize::from(frame.height));
-    // Clipped rather than refused: a frame rectangle reaching past the
-    // logical screen is a real thing in old encoders, and the canvas is
-    // what the line was laid out for either way.
+    // Clip instead of a refusal. Old encoders can place a frame rectangle outside
+    // the logical screen, and the canvas still defines the line size.
     let span = fw.min((w as usize).saturating_sub(left));
     for row in 0..fh.min((h as usize).saturating_sub(top)) {
         let src = frame.buffer.get(row * fw * 4..).ok_or(false)?;
@@ -870,27 +860,25 @@ fn decode_gif(bytes: &[u8]) -> Decoded {
     Ok(Surface { w, h, rgba })
 }
 
-/// An SVG rasterized at `at`, or at its own intrinsic size.
+/// Rasterizes an SVG at `at`, or at its intrinsic size.
 ///
-/// This is the decoder an SVG needs and the only one whose output size
-/// is a choice rather than a property of the bytes: a vector has no pixels
-/// until something picks a size. `at` is `Tint::Raster`'s pair, already
-/// quantised and clamped by [`crate::ui::layout::SceneImage::tint`], so a
-/// theme change re-rasterizes a gaiji-sized mask and never a 300x150
-/// default-object illustration.
+/// An SVG has no pixels until code selects a size. This decoder is the only
+/// decoder whose output size comes from a choice, not from the bytes. `at` is
+/// `Tint::Raster`'s pair. [`crate::ui::layout::SceneImage::tint`] has already
+/// quantized and clamped it. Thus, a theme change rasterizes a gaiji-sized mask,
+/// not a 300x150 default-object illustration.
 ///
-/// The scale is per axis and not uniform, because the resolved box came
-/// from the recorded aspect and honouring only one axis would letterbox
-/// inside a box the line was already laid out for. tiny-skia's pixmap is
-/// premultiplied RGBA8 - [`Surface`]'s own layout - so nothing converts.
+/// The scale uses each axis separately, not one uniform value. The resolved box
+/// uses the recorded aspect. One-axis scale would leave empty space inside the
+/// box that already defines the line. tiny-skia's pixmap uses premultiplied
+/// RGBA8, the [`Surface`] layout, so no conversion is needed.
 fn decode_svg(bytes: &[u8], at: Option<(u32, u32)>) -> Decoded {
     let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
         .map_err(|_| false)?;
     let size = tree.size();
     let (w, h) = match at {
         Some(wh) => wh,
-        // `ceil`, so a fractional intrinsic size never rasterizes a
-        // column of the drawing away.
+        // `ceil` preserves a column when the intrinsic size is fractional.
         None => (size.width().ceil() as u32, size.height().ceil() as u32),
     };
     area(w, h)?;
@@ -903,17 +891,16 @@ fn decode_svg(bytes: &[u8], at: Option<(u32, u32)>) -> Decoded {
     Ok(Surface { w, h, rgba: pixmap.take() })
 }
 
-/// AVIF through `avif-rust`: the container walk, the AV1 decode, the alpha
-/// auxiliary item and the container's rotate/mirror/crop, in one call.
+/// Decodes AVIF through `avif-rust`. The call handles the container walk, AV1
+/// decode, alpha auxiliary item, and container rotate, mirror, and crop.
 ///
-/// The area cap is stated from this module's own `ispe` walk rather than
-/// from the decoder, for the reason the cap exists: `ispe` is a container
-/// property read in the first few hundred bytes, so a 65 536-square
-/// declaration is refused before an AV1 decoder allocates a frame for it.
-/// That is the same walk the build already sized the asset with, so the
-/// number checked here is the number the media row carries.
+/// This module's `ispe` walk applies the area cap before the decoder. `ispe` is
+/// a container property in the first few hundred bytes. A 65 536-square
+/// declaration therefore fails before an AV1 decoder allocates a frame. The
+/// build uses the same walk to size the asset, so this check uses the value in
+/// the media row.
 ///
-/// `avif-rust` hands back straight RGBA8; the premultiply is ours.
+/// `avif-rust` returns straight RGBA8. This module applies premultiplication.
 fn decode_avif(bytes: &[u8]) -> Decoded {
     let declared = avif_size(bytes).map_err(|_| false)?;
     area(declared.width as u32, declared.height as u32)?;
@@ -926,45 +913,43 @@ fn decode_avif(bytes: &[u8]) -> Decoded {
     Ok(Surface { w, h, rgba: premultiply(&image.rgba, 4, pixels)? })
 }
 
-// ---- the bins' decoded-surface caches ----
+// ---- decoded-surface cache policy ----
 
-/// Decoded pixels a bin's decoded-surface cache holds before it starts
-/// evicting, in bytes.
+/// Decoded pixels that a bin's decoded-surface cache retains before eviction,
+/// in bytes.
 ///
-/// The census's image nodes are gaiji at `height: 1em`, so a decoded asset
-/// is a few kilobytes and this holds thousands of them - every distinct
-/// glyph a session of hovering a kanji dictionary touches. It is a budget
-/// and not a count because one illustration can be worth a thousand gaiji.
+/// The census image nodes are gaiji at `height: 1em`. Each decoded asset uses
+/// a few kilobytes, so this budget holds thousands. It can hold each distinct
+/// glyph touched during a kanji Dictionary hover session. This is a byte
+/// budget, not an entry count, because one illustration can equal a thousand
+/// gaiji.
 ///
-/// Here rather than per bin because it is a policy number about the corpus,
-/// not about a pixel format: the two bins hold the same assets at the same
-/// sizes and only the channel order differs, so a budget that drifted
-/// between them would make one platform re-decode where the other does not.
+/// This constant belongs here, not in a bin, because it states a corpus policy,
+/// not a pixel-format policy. Both bins hold the same assets at the same sizes.
+/// Only channel order differs. A shared budget prevents a second decode on one
+/// platform when the other keeps the asset.
 pub const SURFACE_BUDGET: usize = 8 << 20;
 
-/// A map bounded by what its values retain, evicting in insertion order.
+/// A map bounded by retained value bytes. It evicts entries in insertion order.
 ///
-/// The admission policy of both bins' decoded-surface caches, once. Nothing
-/// here touches a pixel: the payload is whatever that bin decoded into -
-/// tiny-skia's premultiplied RGBA8 pixmap on Linux, a BGRA byte buffer for
-/// `CreateBitmap` on Windows - and the only thing this type learns about it
-/// is the byte count the caller states on admission. That is why it can be
-/// shared while painting stays per-platform
-/// (ARCHITECTURE.md#workspace-and-seams): the *policy* duplicated
-/// visibly, the pixels never did.
+/// This type holds the admission policy for both bins' decoded-surface caches.
+/// It does not touch pixels. The payload is whatever a bin decodes into:
+/// tiny-skia's premultiplied RGBA8 pixmap on Linux, or a BGRA byte buffer for
+/// `CreateBitmap` on Windows. This type only receives the byte count that the
+/// caller gives it. The bins can share this policy while each bin keeps its
+/// own paint format (ARCHITECTURE.md#workspace-and-seams). The pixels stay
+/// platform-specific.
 ///
-/// Insertion order, not recency, for the same reason as the parsed-tree
-/// cache in `crate::lookup::sqlite`: a hover is a sliding window over
-/// recent content, so the two orders nearly coincide and FIFO costs one
-/// push per miss instead of a touch per hit.
+/// Insertion order, not recency, matches the parsed-tree cache in
+/// `crate::lookup::sqlite`. A hover covers a window of recent content, so the
+/// orders nearly coincide. FIFO needs one push for each miss, while recency
+/// needs a touch for each hit.
 ///
-/// Bounded by retained bytes rather than by entry count, because that cache
-/// holds parsed trees of one rough size and this one holds anything from a
-/// 12x7 gaiji to a 1024x768 illustration.
+/// The cache uses retained bytes as its bound, not entry count. It holds values
+/// from a 12x7 gaiji to a 1024x768 illustration.
 pub struct ByteBudget<K, V> {
-    /// Each answer with the byte count admitted for it, so an eviction
-    /// costs no second look at the payload and the running total cannot
-    /// disagree with what was added.
+    /// Stores each answer with its admitted byte count. Eviction needs no second
+    /// payload scan, and the total remains equal to the admitted bytes.
     slots: HashMap<K, (V, usize)>,
     order: VecDeque<K>,
     bytes: usize,
@@ -976,9 +961,9 @@ impl<K: Clone + Eq + Hash, V> ByteBudget<K, V> {
         ByteBudget { slots: HashMap::new(), order: VecDeque::new(), bytes: 0, budget }
     }
 
-    /// Is this key already answered? A cached refusal counts: it is a
-    /// permanent answer, and re-asking SQLite for it once per frame would
-    /// be the same waste with none of the pixels.
+    /// Reports whether this key has an answer. A cached refusal counts as a
+    /// permanent answer. A new SQLite query each frame would waste work and
+    /// produce no pixels.
     pub fn contains_key(&self, key: &K) -> bool {
         self.slots.contains_key(key)
     }
@@ -987,28 +972,26 @@ impl<K: Clone + Eq + Hash, V> ByteBudget<K, V> {
         self.slots.get(key).map(|(value, _)| value)
     }
 
-    /// Bytes currently retained - the sum of every `bytes` admitted and not
-    /// yet evicted, which is what the budget is spent against.
+    /// Returns retained bytes. This is the sum of every admitted value that
+    /// remains in the cache, and it is the amount charged against the budget.
     pub fn footprint(&self) -> usize {
         self.bytes
     }
 
-    /// Admits one answer weighing `bytes`, then evicts until the budget
-    /// holds.
+    /// Admits one answer with `bytes`, then removes entries until the budget holds.
     ///
-    /// `len() > 1` keeps a single oversized asset: evicting the entry just
-    /// admitted would report an asset the user can see as absent, and
-    /// decode it again on the next frame. So the caller's own answer always
-    /// survives its own admission, and `get` after `admit` never misses.
+    /// `len() > 1` keeps one oversized asset. If the method removed the new
+    /// entry, the painter would report an asset that the user can see as absent.
+    /// The next frame would decode it again. The caller's answer therefore
+    /// survives its own admission, and `get` after `admit` always returns it.
     ///
-    /// `bytes` is stated rather than measured because only the bin knows
-    /// what its payload retains, and a refusal retains nothing.
+    /// The caller states `bytes` because only the bin knows what its payload
+    /// retains. A refusal retains no bytes.
     pub fn admit(&mut self, key: K, value: V, bytes: usize) {
         self.bytes += bytes;
         self.order.push_back(key.clone());
-        // Re-admission is unreachable through either cache - both test
-        // `contains_key` first - but the total has to stay true if one ever
-        // does, and the stale `order` entry then evicts to nothing below.
+        // Neither cache admits a key twice. Both call `contains_key` first. Keep the
+        // total correct if a caller does, and let the stale `order` entry remove nothing.
         if let Some((_, was)) = self.slots.insert(key, (value, bytes)) {
             self.bytes -= was;
         }

@@ -1,17 +1,15 @@
-//! The iced window: widgetry only
-//! (ARCHITECTURE.md#settings-and-config). Every value it edits lives
-//! on core's `SettingsForm` or on `LinuxFields`; this file just
-//! renders them and routes messages back.
+//! The Linux settings process owns this iced window.
+//! The window renders values from the core `SettingsForm` and `LinuxFields`.
+//! It sends changes to the settings process.
 //!
-//! The surface mirrors the Windows settings window's field list and
-//! grouping (`crates/chibipop-windows/src/ui/settings_window.rs`) with
-//! iced-native controls; `ocr.language` is hidden, the key fields are
-//! the Linux ones, and capture exclusion is a snippet, not a checkbox.
+//! The surface matches the field groups in the Windows settings window
+//! (`crates/chibipop-windows/src/ui/settings_window.rs`).
+//! It uses iced controls and hides `ocr.language`.
+//! It exposes Linux fields and shows capture exclusion as a snippet.
 //!
-//! The dictionary controls stage into core's `SettingsForm` and only
-//! [`super::rebuild`] ever touches the library on disk; the window's one
-//! piece of state about it is `rebuild_progress`, which is both the
-//! busy gate and the line the status area shows.
+//! Dictionary controls stage changes in `SettingsForm`.
+//! Only [`super::rebuild`] writes the library.
+//! `rebuild_progress` marks a rebuild and supplies the status text.
 
 use super::apply::{self, LinuxFields};
 use super::autostart;
@@ -42,7 +40,7 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-/// Everything `super::run` resolved before the window opens.
+/// `super::run` resolves every value before the window opens.
 #[derive(Clone)]
 pub struct Init {
     pub form: SettingsForm,
@@ -51,34 +49,34 @@ pub struct Init {
     pub socket_path: PathBuf,
     pub log_path: PathBuf,
     pub compositor: Compositor,
-    /// Who owns the trigger binding.
+    /// The channel that owns the trigger bind.
     pub channel: HotkeyChannel,
-    /// Who owns the add-card binding. A separate value because the
-    /// portal answers per id and a row may only name its own key
+    /// `add_channel` identifies the owner of the add-card bind.
+    /// The portal reports one bind per id, so each row needs its own channel
     /// (`super::hotkey_channel`).
     pub add_channel: HotkeyChannel,
-    /// Where the dictionary archives live; a rebuild edits it.
+    /// The directory that holds dictionary archives. A rebuild edits this directory.
     pub library_dir: PathBuf,
-    /// The database a rebuild renames over.
+    /// The database path. A rebuild renames the new database over this file.
     pub db_path: PathBuf,
-    /// The dictionary identities that database holds, read once before
-    /// the window opened (`super::read_dicts`). Apply needs them to turn
-    /// the config's exact names into the enabled frequency list.
+    /// `dicts` contains the Dictionary identities in the database.
+    /// `super::read_dicts` reads them before the window opens.
+    /// Apply uses the exact names to build the enabled frequency list.
     pub dicts: Vec<DictInfo>,
-    /// Where the library flock file goes.
+    /// The directory for the library flock file.
     pub runtime_dir: PathBuf,
-    /// `None` when no XDG config root resolves; the row says so.
+    /// `None` means that no XDG config root resolves. The row reports this state.
     pub autostart: Option<autostart::Target>,
-    /// `$HOME`, for expanding a typed `~` path; `None` when it is unset.
+    /// `$HOME` expands a typed `~` path. `None` means that HOME is unset.
     pub home: Option<PathBuf>,
-    /// The binary compositor snippets must name, resolved before the
-    /// window opened (`paths::exec_name`): a pasted bind has to exec
-    /// *this* daemon, not whatever `chibipop` PATH finds.
+    /// `exe` is the binary path for compositor snippets. `paths::exec_name`
+    /// resolves it before the window opens. A pasted bind must name this
+    /// daemon, not the `chibipop` that PATH finds.
     pub exe: PathBuf,
-    /// Which data-control protocol this session advertises, if any
-    /// (`clipboard::rung`). `None` - stock GNOME - is what the
-    /// OCR-to-clipboard row reports instead of a chord that could only
-    /// log a refusal.
+    /// `clipboard_rung` records the data-control protocol that the session
+    /// advertises, if any (`clipboard::rung`). `None` means stock GNOME.
+    /// The OCR-to-clipboard row reports this state. It does not show a chord
+    /// that only logs a refusal.
     pub clipboard_rung: Option<clipboard::Rung>,
 }
 
@@ -98,18 +96,16 @@ pub fn run(init: Init) -> anyhow::Result<()> {
         .context("running the settings window")
 }
 
-/// The one thing the dictionary controls need from outside the widget
-/// tree: the end of a drag the tree cannot see.
+/// `subscription` handles releases that dictionary rows cannot receive.
 ///
-/// [`mouse_area`] only reports a release the cursor is still over, so a
-/// row dragged out of the window and let go out there would leave the
-/// drag holding it for ever - an insertion line chasing a button nobody
-/// is pressing. A raw listener sees that release wherever it happens,
-/// and an unfocused window is the other way a pointer goes missing
-/// mid-drag. iced applies a frame's widget messages before the same
-/// frame's events reach a subscription, so a drop the lists did see has
-/// already committed by the time this arrives and it finds nothing left
-/// to cancel.
+/// [`mouse_area`] reports a release only under the cursor. If the user
+/// releases outside the window, the drag would remain active. The insertion
+/// line would then remain visible after the user releases the row.
+///
+/// A raw listener sees a release at every position. An unfocused window can
+/// also lose the pointer during a drag. iced sends widget messages before
+/// subscription events for one frame. A drop that the lists received already
+/// changed the list, so this message has nothing to cancel.
 fn subscription(_app: &App) -> iced::Subscription<Message> {
     iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
@@ -118,62 +114,54 @@ fn subscription(_app: &App) -> iced::Subscription<Message> {
     })
 }
 
-/// The row the dictionary controls are pointed at, and which of the three
-/// lists it sits in.
+/// The selected row and the Role list that contains it.
 ///
-/// One selection across all three sections rather than one each: Remove
-/// takes a Dictionary out of every list at once
-/// (ARCHITECTURE.md#dictionary-and-lookup), so a second highlighted row
-/// somewhere else would be a second answer to the question Remove asks.
-/// The role travels with the name because Move up under Frequency may
-/// never reorder Terms, and a name alone cannot say which list the user
-/// is looking at - a mixed archive is a row in two of them.
+/// One selection covers all three lists. Remove deletes a Dictionary from
+/// every list (ARCHITECTURE.md#dictionary-and-lookup). A second highlighted
+/// row would give Remove two answers. The role stays with the name because
+/// Move up under Frequency must not reorder Terms. A name alone cannot
+/// identify a list when a mixed archive appears in two lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selected {
     role: Role,
     name: String,
 }
 
-/// The height one dictionary row is drawn at, and the gap between two.
+/// The height of one dictionary row and the gap between two rows.
 ///
-/// Fixed rather than whatever the text and the checkbox happen to
-/// measure, because a drag has to answer "which place is the pointer
-/// over" and iced hands [`update`] no layout at all: the only geometry
-/// this window has is the geometry it insisted on.
+/// These values stay fixed and do not depend on text or checkbox layout.
+/// A drag needs a row position. iced gives [`update`] no layout data, so this
+/// window uses the geometry that it requests.
 const ROW_HEIGHT: f32 = 28.0;
 const ROW_SPACING: f32 = 2.0;
 
-/// One row's top to the next one's.
+/// The distance from one row top to the next row top.
 const ROW_PITCH: f32 = ROW_HEIGHT + ROW_SPACING;
 
-/// How far the cursor must travel before a press on a row becomes a drag
-/// of it. `pane_grid` guards its own drags with the same number
-/// (`DRAG_DEADBAND_DISTANCE`), and without it the pixel of travel a click
-/// carries would be a reorder.
+/// The cursor distance that turns a row press into a drag.
+/// `pane_grid` uses the same value (`DRAG_DEADBAND_DISTANCE`).
+/// Without this guard, click movement would reorder a row.
 const DRAG_DEADBAND: f32 = 10.0;
 
-/// Where the cursor last was inside one of the three lists, in that
-/// list's own space.
+/// The last cursor position inside a dictionary list.
 ///
-/// Kept whether or not a button is down, because a press carries no
-/// position of its own: [`mouse_area`]'s `on_press` is a plain message,
-/// and the move it reported on the way to the row is what says where
-/// that press landed.
+/// The window keeps this value while the button is down or up because a press
+/// carries no position. [`mouse_area`] sends a plain `on_press` message.
+/// The move event before that press supplies its position.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Hover {
     role: Role,
     y: f32,
 }
 
-/// What the pointer is doing to a row, mirroring
-/// `pane_grid::state::Action`: the toolkit's own answer to this shape,
-/// and the only drag state machine iced 0.14 ships. There is no
-/// reorderable list widget and `mouse_area` reports presses, moves and
-/// releases but no drag, so the three are assembled here.
+/// The state of a row pointer gesture. This matches `pane_grid::state::Action`.
+/// That toolkit type is the only equivalent drag state machine in iced 0.14.
+/// iced has no reorderable list widget. `mouse_area` reports presses, moves,
+/// and releases but no drag event, so this code combines those messages.
 ///
-/// `role` travels with the held row because a drag may only reorder the
-/// list it started in, and `origin` is where in that list the press
-/// landed, which is what the deadband is measured from.
+/// `role` stays with the held row because a drag can reorder only its source
+/// list. `origin` stores the press position in that list. The deadband uses
+/// `origin`.
 #[derive(Debug, Clone, PartialEq)]
 enum Drag {
     Idle,
@@ -196,38 +184,37 @@ struct App {
     autostart: Option<autostart::Target>,
     home: Option<PathBuf>,
     exe: PathBuf,
-    /// Whether this session has a clipboard protocol at all; see
-    /// [`Init::clipboard_rung`].
+    /// `clipboard_rung` tells whether this session has a clipboard protocol.
+    /// See [`Init::clipboard_rung`].
     clipboard_rung: Option<clipboard::Rung>,
-    /// Mirrors the `.desktop` file, re-read after every toggle.
+    /// `autostart_on` mirrors the `.desktop` file. The window reads that file after each toggle.
     autostart_on: bool,
-    /// The font combo's items; see [`font_items`].
+    /// The font combo items. See [`font_items`].
     fonts: Vec<Cow<'static, str>>,
-    /// Text-edited numbers stay text until Apply parses them.
+    /// Text input keeps numbers as text until Apply parses them.
     capture_w: String,
     capture_h: String,
-    /// Which row the three lists are pointed at, if any.
+    /// The row that all three lists select, if any.
     selected: Option<Selected>,
-    /// Where the cursor last was inside one of the three lists; see
+    /// `hover` stores the last cursor position in a dictionary list. See
     /// [`Hover`].
     hover: Option<Hover>,
-    /// The row the pointer is holding, if it is holding one.
+    /// `drag` stores the row that the pointer holds, if any.
     drag: Drag,
-    /// The path typed into the Add row. Kept beside the Browse button
-    /// rather than replaced by it: the portal is not on every desktop
-    /// (`filechooser::explain` says so when it is missing), and a path
-    /// entry never lies about which file it took.
+    /// The path in the Add row. This entry stays beside Browse because the
+    /// portal does not exist on every desktop. `filechooser::explain` reports
+    /// its absence. The entry always shows the file path that it uses.
     add_path: String,
-    /// A Browse dialog is open. The portal call waits on a human, so it
-    /// runs on its own thread; this is what keeps a second click from
-    /// stacking a second dialog on top of the first.
+    /// A Browse dialog is open. The portal call waits for a person, so a
+    /// separate thread makes the portal call. This flag prevents a second
+    /// dialog. Without it, a second click could open a dialog over the first.
     picking: bool,
-    /// The live rebuild's last rendered progress line; empty when idle.
-    /// Its presence *is* the busy flag - Rebuild and Apply are refused
-    /// while it is set.
+    /// The last progress line from a rebuild. Empty means idle.
+    /// This value also marks the busy state. The window rejects Rebuild and
+    /// Apply while it has a value.
     rebuild_progress: Option<String>,
-    /// A click's check is in flight; the button stays shut until the
-    /// line comes back, so a held Enter cannot start ten of them.
+    /// An update check from a click is active. The button stays disabled until
+    /// the answer arrives, so a held Enter key cannot start ten checks.
     checking_update: bool,
     status: String,
 }
@@ -267,7 +254,7 @@ impl App {
         }
     }
 
-    /// The trigger row's copyable bind: the press/release pair.
+    /// `bind_snippet` returns the trigger row's copyable press and release bind.
     fn bind_snippet(&self) -> String {
         snippets::bind_snippet(
             self.compositor,
@@ -277,9 +264,8 @@ impl App {
         )
     }
 
-    /// The add-card row's copyable bind, or `None` when there is no
-    /// chord to bind. `None` is also what the row renders on, so the
-    /// button and the text cannot disagree.
+    /// The add-card row's copyable bind, or `None` when no chord exists.
+    /// The row uses the same value for its button and text, so they cannot disagree.
     fn add_bind_snippet(&self) -> Option<String> {
         match self.add_control() {
             HotkeyControl::Snippet { text } => Some(text),
@@ -287,8 +273,8 @@ impl App {
         }
     }
 
-    /// What the add-card chord row renders: the add is a control-socket
-    /// verb, so the native rung can bind it exactly like the trigger
+    /// The add-card chord row's control. The add action uses a control-socket
+    /// verb, so the native rung binds it like the trigger
     /// (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum).
     fn add_control(&self) -> HotkeyControl {
         self.add_channel.control(
@@ -299,15 +285,13 @@ impl App {
         )
     }
 
-    /// What the static-region chord row renders.
+    /// The static-region chord row's control.
     ///
-    /// [`HotkeyChannel::Native`] unconditionally, and that is the whole
-    /// point of decision D1: the portal id set stays at exactly two, so
-    /// no GlobalShortcuts session ever registers this action and the
-    /// compositor bind is its *only* global channel. Reading
-    /// `self.channel` here would render the trigger's portal key under
-    /// this chord - a row claiming a key it was never given, which is
-    /// the one thing this window must never do.
+    /// This method always uses [`HotkeyChannel::Native`]. Decision D1 keeps
+    /// this action out of the two GlobalShortcuts ids, so the compositor bind
+    /// is its only global channel. If this method read `self.channel`, it
+    /// would show the trigger's portal key under this chord. That row would
+    /// claim a key that no one assigned to it.
     fn static_region_control(&self) -> HotkeyControl {
         HotkeyChannel::Native.control(
             self.compositor,
@@ -317,9 +301,8 @@ impl App {
         )
     }
 
-    /// The static-region row's copyable bind, or `None` when the chord
-    /// is blank. The button exists only while this is `Some`, so a
-    /// cleared chord cannot put a stale bind on the clipboard.
+    /// The static-region row's copyable bind, or `None` for a blank chord.
+    /// The button exists only for `Some`, so a cleared chord cannot copy an old bind.
     fn static_region_bind_snippet(&self) -> Option<String> {
         match self.static_region_control() {
             HotkeyControl::Snippet { text } => Some(text),
@@ -327,11 +310,11 @@ impl App {
         }
     }
 
-    /// What the mining screenshot's chord row renders.
+    /// The mining screenshot chord row's control.
     ///
-    /// [`HotkeyChannel::Native`] for exactly the reason given above:
-    /// nothing registers this action with the portal, so the
-    /// compositor bind is its only global channel.
+    /// This method always uses [`HotkeyChannel::Native`] for the reason above.
+    /// No portal action registers this chord, so the compositor bind is its
+    /// only global channel.
     fn screenshot_control(&self) -> HotkeyControl {
         HotkeyChannel::Native.control(
             self.compositor,
@@ -341,8 +324,8 @@ impl App {
         )
     }
 
-    /// The screenshot row's copyable bind, or `None` when there is no
-    /// chord to build one from.
+    /// `screenshot_bind_snippet` returns the row's copyable bind, or `None`
+    /// when no chord exists.
     fn screenshot_bind_snippet(&self) -> Option<String> {
         match self.screenshot_control() {
             HotkeyControl::Snippet { text } => Some(text),
@@ -350,8 +333,8 @@ impl App {
         }
     }
 
-    /// What the OCR-to-clipboard chord row renders. Native only, for
-    /// the same reason as the two above.
+    /// The OCR-to-clipboard chord row's control. This action uses the native
+    /// channel for the same reason as the methods above.
     fn ocr_clipboard_control(&self) -> HotkeyControl {
         HotkeyChannel::Native.control(
             self.compositor,
@@ -361,13 +344,12 @@ impl App {
         )
     }
 
-    /// The OCR-to-clipboard row's copyable bind, or `None` when there is
-    /// no chord to build one from - or when this compositor has no
-    /// clipboard protocol to copy *into*, because a bind that could only
-    /// ever log a refusal is the invalid line this window must never
-    /// hand a user.
+    /// The OCR-to-clipboard row's copyable bind.
+    /// `None` means that no chord exists or that this compositor has no
+    /// clipboard protocol. A bind that only logs a refusal is invalid, so
+    /// this window never gives the user that bind.
     fn ocr_clipboard_bind_snippet(&self) -> Option<String> {
-        // No rung, no bind: the `?` is the guard.
+        // `None` means no rung and no bind. The `?` enforces that guard.
         self.clipboard_rung?;
         match self.ocr_clipboard_control() {
             HotkeyControl::Snippet { text } => Some(text),
@@ -383,14 +365,14 @@ impl App {
         };
         self.form.capture_width = w;
         self.form.capture_height = h;
-        // A field-map row with no Anki field is not a storable state:
-        // Anki has no field called "", so core would look that name up
-        // on every add and place nothing under it forever. Add seeds
-        // exactly such a row on purpose (only the user's note type
-        // knows its field names), so this is the one place a row they
-        // opened and left blank stops - on the way to the file, not in
-        // core and not per keystroke, because a half-typed name is a
-        // normal thing for a text box to hold.
+        // Apply removes a field-map row without an Anki field.
+        // Anki has no field named "", so core would search for that name on
+        // every add and store nothing.
+        // Add creates this row because only the user's note type knows its fields.
+        // The empty row remains while the user types.
+        // Apply removes it before it reaches the file, not in core or after each
+        // keystroke. A half-typed name is normal text-box state and needs no early
+        // cleanup.
         if let Some(rows) = self.form.field_map.as_mut() {
             rows.retain(|mapping| !mapping.anki_field.trim().is_empty());
         }
@@ -403,7 +385,7 @@ impl App {
             &self.dicts,
         ) {
             Ok(applied) => {
-                // The file now holds the clamped truth; show it.
+                // The file now holds clamped values. The window shows them.
                 if let Ok(cfg) = chibipop::config::load_or_create(&self.config_path) {
                     self.form.capture_width = cfg.ocr.capture_width;
                     self.form.capture_height = cfg.ocr.capture_height;
@@ -416,14 +398,14 @@ impl App {
         }
     }
 
-    /// A rebuild is writing the library; edits to it would race.
+    /// A rebuild writes the library, so library edits could race.
     fn busy(&self) -> bool {
         self.rebuild_progress.is_some()
     }
 
-    /// Stage the typed path for import. `~` is expanded first, because
-    /// the entry takes what a shell would have expanded; the Browse
-    /// button beside it hands over absolute paths and skips this.
+    /// Stage the typed path for import. Expand `~` first because the entry
+    /// accepts shell-style text. The Browse button gives absolute paths and
+    /// skips expansion.
     fn add_dictionary(&mut self) {
         let typed = self.add_path.trim();
         if typed.is_empty() {
@@ -454,8 +436,8 @@ impl App {
                 );
                 self.add_path.clear();
             }
-            // stage_add refuses an unreadable archive and a source it
-            // already holds; the file itself is the only thing to say.
+            // stage_add refuses an unreadable archive or a source it already
+            // holds. Report only the file name.
             None => {
                 self.status = format!(
                     "{} is not a readable dictionary archive, or is already staged.",
@@ -465,12 +447,12 @@ impl App {
         }
     }
 
-    /// Open the desktop's own file dialog.
+    /// Open the desktop file dialog.
     ///
-    /// The portal call waits on a human, so it cannot run on iced's
-    /// executor: a thread makes the blocking call and the window learns
-    /// the answer through a one-shot channel, which is the same shape
-    /// the rebuild uses for its progress lines.
+    /// The portal call waits for a person, so an iced executor cannot block on
+    /// it. A separate thread makes the portal call. The window receives the
+    /// answer through a one-shot channel. The rebuild uses the same channel
+    /// shape for progress lines.
     fn browse_dictionaries(&mut self) -> Task<Message> {
         if self.picking || self.busy() {
             return Task::none();
@@ -487,9 +469,9 @@ impl App {
         }
         self.picking = true;
         self.status = "Choose one or more Yomitan .zip archives…".to_string();
-        // The sender is dropped only if the thread panics, and a
-        // cancelled dialog is already an `Ok`; either way the button has
-        // to come back, so the channel's own failure is an answer too.
+        // A panic in the thread drops the sender. A cancelled dialog still
+        // returns `Ok`. The button must return in both cases, so a channel
+        // error also gives an answer.
         Task::perform(rx, |sent| {
             Message::DictPicked(sent.unwrap_or_else(|_| {
                 Err("The file dialog stopped without answering.".to_string())
@@ -497,11 +479,11 @@ impl App {
         })
     }
 
-    /// Stage everything the dialog handed back, in the order it listed.
+    /// Stage each path from the dialog in the order shown.
     ///
-    /// Reported as one line, not one per file: picking twelve archives
-    /// is the point of the button, and twelve statuses would leave the
-    /// user reading only the last one.
+    /// This method reports one status line instead of one line per file. The
+    /// button can select twelve archives at once. Twelve lines would show only
+    /// the last file.
     fn took_picked(&mut self, picked: Result<filechooser::Picked, String>) {
         self.picking = false;
         let sources = match picked {
@@ -515,9 +497,8 @@ impl App {
                 return;
             }
         };
-        // A rebuild can have claimed the library while the dialog was
-        // open; staging into a form the builder is already reading is
-        // the race `busy` exists to refuse.
+        // A rebuild can claim the library while the dialog stays open.
+        // `busy` rejects a form change while the builder reads the form.
         if self.busy() {
             self.status = "A rebuild is running; add those archives once it finishes.".to_string();
             return;
@@ -527,9 +508,9 @@ impl App {
         for source in &sources {
             match self.form.stage_add(source) {
                 Some(_) => staged += 1,
-                // stage_add refuses an unreadable archive and a source
-                // it already holds; the file itself is the only thing to
-                // say, and naming which ones is why they are collected.
+                // stage_add refuses an unreadable archive or a source it
+                // already holds. Report only the file name. This loop
+                // collects those names.
                 None => refused.push(name_of(source)),
             }
         }
@@ -549,12 +530,11 @@ impl App {
         };
     }
 
-    /// Stage the selected row for removal, out of every list it is in.
+    /// Stage the selected row for removal from every list that contains it.
     ///
-    /// One archive is one Dictionary, so a row selected in any of the
-    /// three sections names the whole thing (`stage_remove`) - including
-    /// an unreadable archive, which is listed in the terms section for
-    /// exactly this reason and has no role to be enabled for.
+    /// One archive is one Dictionary. A row selected in any section names the
+    /// whole Dictionary (`stage_remove`). This includes an unreadable archive.
+    /// The Terms section lists such an archive because it has no role to enable.
     fn remove_dictionary(&mut self) {
         let Some(Selected { name, .. }) = self.selected.take() else {
             self.status = "Select a dictionary to remove first.".to_string();
@@ -564,7 +544,7 @@ impl App {
         self.status = format!("{name} is staged for removal; press Rebuild to apply it.");
     }
 
-    /// Take the library and start building.
+    /// Claim the library lock and start the rebuild.
     fn start_rebuild(&mut self) -> Task<Message> {
         let plan = rebuild::Plan {
             library_dir: self.library_dir.clone(),
@@ -572,8 +552,8 @@ impl App {
             runtime_dir: self.runtime_dir.clone(),
             socket: self.socket_path.clone(),
         };
-        // Bounded by the builder's own line rate; the window drains it
-        // every frame, so an unbounded channel never grows.
+        // The builder's output rate bounds this channel. The window drains it
+        // every frame, so the unbounded channel does not grow.
         let (tx, rx) = iced::futures::channel::mpsc::unbounded();
         match rebuild::spawn(&self.form, plan, move |p| {
             let _ = tx.unbounded_send(p);
@@ -594,11 +574,11 @@ impl App {
         }
     }
 
-    /// One message from the rebuild thread.
+    /// `took_progress` handles one message from the rebuild thread.
     fn took_progress(&mut self, progress: rebuild::Progress) {
         match &progress {
-            // Only lines the shared renderer has words for; the rest are
-            // builder chatter the user never asked about.
+            // Show only lines that the shared renderer can explain. The user
+            // did not ask for the other builder output.
             rebuild::Progress::Line(line) => {
                 if let Some(text) = chibipop::dict::progress::friendly(line) {
                     self.rebuild_progress = Some(text);
@@ -606,12 +586,12 @@ impl App {
                 return;
             }
             rebuild::Progress::Done { .. } => {
-                // The library on disk now matches the form.
+                // The library now matches the form.
                 self.form.clear_staged();
                 self.selected = None;
             }
-            // The archives went back; the form still describes what the
-            // user asked for, so the staged edits stay staged.
+            // The rebuild returned the archives. The form still describes the
+            // user's request, so staged edits remain staged.
             rebuild::Progress::Failed(_) => {}
         }
         self.rebuild_progress = None;
@@ -619,9 +599,8 @@ impl App {
     }
 }
 
-/// A refused archive named the way the user picked it: the file name,
-/// not the whole path. A dialog's worth of absolute paths in one status
-/// line is unreadable, and the directory is the one part they just saw.
+/// Return the picked archive's file name, not its full path. One status line
+/// cannot show many absolute paths, and the user already saw the directory.
 fn name_of(source: &std::path::Path) -> String {
     source
         .file_name()
@@ -629,7 +608,7 @@ fn name_of(source: &std::path::Path) -> String {
         .unwrap_or_else(|| source.display().to_string())
 }
 
-/// The `s` in "2 archives"; empty for one.
+/// The `s` in "2 archives". Empty for one archive.
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -652,59 +631,51 @@ enum Message {
     Scroll(bool),
     SidePanel(bool),
     LayerPicked(String),
-    /// The layout-mode picker's label; mapped back through
-    /// [`LAYOUT_MODES`], never by index or by string comparison at the
-    /// call site.
+    /// The layout-mode picker label. [`LAYOUT_MODES`] maps the label back,
+    /// so the call site does not compare strings or indexes.
     LayoutModePicked(String),
-    /// `popup.dictionary_styling`: whether a dictionary's own `style`
-    /// declarations and its `styles.css` reach the panel at all.
+    /// Whether `popup.dictionary_styling` sends Dictionary `style` declarations
+    /// and `styles.css` to the panel.
     DictStyling(bool),
     ShowExamples(bool),
     ShowAttributions(bool),
     ShowImages(bool),
     ShowPartOfSpeech(bool),
-    /// A row pressed in one of the three lists. The role is the list it
-    /// was pressed in, because a mixed archive is a row in two of them
-    /// and the name alone could not say which.
+    /// A row press in one of the three lists. The role identifies the list that
+    /// received it. A mixed archive can appear in two lists, so the name alone
+    /// cannot identify the list.
     ///
-    /// A press is also where a drag begins: it selects the row and takes
-    /// hold of it, and whether the hold turns out to be a drag or a click
-    /// is what the deadband decides ([`press_row`]).
+    /// A press also starts a hold. The deadband decides whether the hold becomes
+    /// a drag or a click ([`press_row`]).
     DictSelected(Role, String),
-    /// The cursor moved over a row: which list, which row in it, and
-    /// where inside that row. [`mouse_area`] reports a point local to the
-    /// widget it wraps and the wrapped widget is one row, so the row's
-    /// index is what turns that point back into a place in the list
-    /// ([`list_y`]).
+    /// A cursor move over a row. The fields identify the list, row, and local point.
+    /// [`mouse_area`] reports a point local to its wrapped one-row widget.
+    /// [`list_y`] adds the row index to recover the list position.
     DictHover(Role, usize, Point),
-    /// The pointer let go over the three lists: the held row lands where
-    /// the insertion line is, or nowhere if the press never left the
-    /// deadband.
+    /// A pointer release over the three lists. The held row moves to the insertion
+    /// line unless the press stayed inside the deadband.
     DictDropped,
-    /// The left button came up somewhere the lists could not see it -
-    /// over another section, or outside the window entirely. A drag that
-    /// ends there is cancelled rather than dropped, because there is no
-    /// place in a list to have released it at ([`subscription`]).
+    /// A left-button release outside the list area. The window cancels the drag
+    /// because no list received a position ([`subscription`]).
     DictReleased,
-    /// This section's Move up. The role is the button's section, not the
-    /// selection's: a press only ever reorders the list it sits under.
+    /// Move the selected row up in this section. The role belongs to the button,
+    /// not the selection, so the message reorders only this list.
     DictUp(Role),
-    /// This section's Move down.
+    /// Move the selected row down in this section.
     DictDown(Role),
-    /// A row's per-role checkbox. Enabling is per role
-    /// (ARCHITECTURE.md#dictionary-and-lookup), so this touches only the
-    /// list the box sits in.
+    /// A row's enabled state for one role. Each role has its own state
+    /// (ARCHITECTURE.md#dictionary-and-lookup), so this message changes only
+    /// the list with the checkbox.
     DictEnabled(Role, String, bool),
-    /// The ranking-strategy picker's label, above the Frequency list;
-    /// mapped back through [`RANKING_STRATEGIES`], never by index or by
-    /// string comparison at the call site.
+    /// The ranking strategy label above the Frequency list. [`RANKING_STRATEGIES`]
+    /// maps the label back, so the call site does not compare strings or indexes.
     RankingPicked(String),
     AddPath(String),
     DictAdd,
     DictRemove,
-    /// Open the desktop's file dialog (`super::filechooser`).
+    /// `super::filechooser` opens the desktop file dialog.
     DictBrowse,
-    /// What that dialog came back with, off its own thread.
+    /// The answer from the dialog thread.
     DictPicked(Result<filechooser::Picked, String>),
     Rebuild,
     RebuildProgress(rebuild::Progress),
@@ -721,38 +692,36 @@ enum Message {
     AnkiModel(String),
     AnkiAddKey(String),
     FirstDictOnly(bool),
-    /// `actions.screenshot.include_on_add`: whether an add carries a
-    /// mining picture (core's gate, `chibipop::shot::plan_add`).
+    /// Whether an add carries a mining picture. The core gate is
+    /// `chibipop::shot::plan_add`.
     IncludeScreenshot(bool),
-    /// The mining screenshot's chord. Empty text is `None` on the
-    /// config field, and this arm is the only place that mapping lives.
+    /// The mining screenshot chord. Empty text becomes `None` in the config field,
+    /// and this arm stores that value.
     ScreenshotKey(String),
     ScreenshotSaveDir(String),
-    /// The OCR-to-clipboard chord. Empty text is `None` on the config
-    /// field, and this arm is the only place that mapping lives.
+    /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
+    /// and this arm stores that value.
     OcrClipboardKey(String),
-    /// The sentence-capture picker's label; mapped back through
-    /// [`SENTENCE_MODES`], never by index or by string comparison at the
-    /// call site.
+    /// The sentence-capture picker label. [`SENTENCE_MODES`] maps it back, so the
+    /// call site does not compare strings or indexes.
     SentenceModePicked(String),
     ShowStaticOverlay(bool),
     StaticRegionKey(String),
-    /// A field-map row's Anki field name, as typed. Free text because
-    /// only the user's note type knows its own field names and this
-    /// window never asks Anki for them (see [`field_map_rows`]).
+    /// An Anki field name from a field-map row. The field is free text because
+    /// only the user's note type knows its fields. This window does not query
+    /// Anki for them (see [`field_map_rows`]).
     FieldMapAnki(usize, String),
-    /// A field-map row's picked source, mapped back through
-    /// [`FIELD_SOURCES`] by [`field_source_of`] rather than trusted as
-    /// it arrives: the vocabulary is closed, and `anki::mapped_fields`
-    /// drops a row naming anything outside it without a word.
+    /// A field-map row's source label. [`field_source_of`] maps it through
+    /// [`FIELD_SOURCES`]. The vocabulary is closed.
+    /// `anki::mapped_fields` drops an unknown source without a warning.
     FieldMapSource(usize, String),
-    /// Append a field-map row, seeded on [`NEW_ROW_SOURCE`]. Until this
-    /// existed the shipped `field_map` was the only one a Linux user
-    /// could have - `screenshot` included, which is to say excluded.
+    /// Append a field-map row. The new row starts with [`NEW_ROW_SOURCE`].
+    /// Before this message, Linux users could use only the shipped `field_map`.
+    /// That map has no row for `screenshot`.
     FieldMapAdd,
-    /// Drop the field-map row at this position.
+    /// Remove the field-map row at this index.
     FieldMapRemove(usize),
-    /// Copy the trigger chord's press/release bind.
+    /// Copy the trigger chord's press and release bind.
     CopyBind,
     /// Copy the add-card chord's one-press bind.
     CopyAddBind,
@@ -796,18 +765,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.hover = Some(Hover { role, y: list_y(at, point.y) });
         }
         Message::DictDropped => drop_held(app),
-        // Whatever the pointer was holding, it is not holding it any
-        // more; the drop that would have committed it has already run
-        // ([`subscription`]).
+        // The pointer releases its row here. A drop that commits the row
+        // already passed through [`subscription`].
         Message::DictReleased => app.drag = Drag::Idle,
         Message::DictUp(role) => move_selected(app, role, -1),
         Message::DictDown(role) => move_selected(app, role, 1),
         Message::DictEnabled(role, name, on) => set_enabled(app, role, &name, on),
-        // A strategy, an order or a checkbox in the Frequency list is
-        // what `settings::dictionary_work` reads off the saved config, so
-        // there is nothing to decide here: Apply compares the file it
-        // re-read with the one it is about to write and reindexes if any
-        // of the three moved (`super::apply`).
+        // `settings::dictionary_work` reads strategy, order, and Frequency enabled
+        // state from the saved config. This arm stores the picked strategy. Apply
+        // compares the current file with the next file and runs a reindex when one
+        // value changes (`super::apply`).
         Message::RankingPicked(label) => app.form.ranking_strategy = ranking_strategy_of(&label),
         Message::AddPath(v) => app.add_path = v,
         Message::DictAdd => app.add_dictionary(),
@@ -830,16 +797,15 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
         Message::FirstDictOnly(v) => app.form.first_dict_only = v,
         Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
-        // The one place empty text becomes `None`: the config field is
-        // an `Option` so that absence stays typed, and a `""` chord
-        // written into it would be a sentinel the daemon would then
-        // have to know about.
+        // This is the only place where empty text becomes `None`. The config field
+        // uses `Option`, so absence has a distinct value. An empty chord would be a
+        // sentinel that the daemon would need to interpret.
         Message::ScreenshotKey(v) => {
             app.linux.screenshot_key_linux = (!v.trim().is_empty()).then_some(v);
         }
         Message::ScreenshotSaveDir(v) => app.linux.screenshot_save_dir = v,
-        // Same mapping, same reason (this sentinel was removed from
-        // the Windows twin too).
+        // The OCR-to-clipboard key uses the same empty-text rule. The Windows
+        // counterpart also rejects this sentinel.
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
         }
@@ -851,32 +817,29 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 m.anki_field = v;
             }
         }
-        // The picker hands out [`FIELD_SOURCES`] entries and nothing
-        // else, so the vocabulary check is unreachable through the UI.
-        // It is here because this arm is the only way a source reaches
-        // the form, and a row naming something outside the closed set
-        // is one core silently contributes nothing for (`anki.rs`'s
-        // `mapped_fields`) - a mapping that looks set and is not.
+        // The picker returns only [`FIELD_SOURCES`] entries, so the UI cannot produce
+        // an invalid source. This arm still checks the value because it is the only
+        // path from this message to the form. `anki.rs`'s `mapped_fields` silently
+        // drops an unknown source, which would leave a row that looks configured but
+        // does nothing.
         Message::FieldMapSource(i, v) => {
             let row = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i));
             if let (Some(source), Some(m)) = (field_source_of(&v), row) {
                 m.source = source.to_string();
             }
         }
-        // The Anki field starts blank: it is the user's note type that
-        // names its fields. `App::apply` is what refuses to store the
-        // row if they never fill it in. A user adding a row is a window
-        // that knows its rows, so this creates the list rather than
-        // dropping the press when the form has no answer yet.
+        // The Anki field starts empty because only the user's note type knows its
+        // field names. `App::apply` removes the row if the field stays empty. The
+        // field-map list can be `None`, so this arm creates the list and records the row.
         Message::FieldMapAdd => {
             app.form.field_map.get_or_insert_with(Vec::new).push(FieldMapping {
                 anki_field: String::new(),
                 source: NEW_ROW_SOURCE.to_string(),
             });
         }
-        // The index is a position in the list the last frame rendered,
-        // so a stale one would panic `Vec::remove`; bounds-checked
-        // rather than trusting message ordering to rule that out.
+        // The index comes from the list that the last frame rendered, so it can be
+        // stale and make `Vec::remove` panic. This arm checks the bound, so
+        // message order is not enough.
         Message::FieldMapRemove(i) => {
             if let Some(rows) = app.form.field_map.as_mut() {
                 if i < rows.len() {
@@ -885,9 +848,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::CopyBind => return iced::clipboard::write(app.bind_snippet()),
-        // The button only exists while there is a snippet, so `None`
-        // here is unreachable through the UI; it stays a no-op rather
-        // than putting a stale bind on the clipboard.
+        // The button exists only when a snippet exists, so `None` cannot come from
+        // the UI. This arm remains a no-op for other callers and does not copy an
+        // old bind.
         Message::CopyAddBind => {
             if let Some(snippet) = app.add_bind_snippet() {
                 return iced::clipboard::write(snippet);
@@ -914,8 +877,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::Autostart(on) => {
-            // Write or remove, then re-read: the file is the state, so
-            // the widget shows what the filesystem has, not the click.
+            // The handler writes or removes the file, then reads it again. The file
+            // is the state, so the widget shows filesystem state instead of the
+            // click result.
             let Some(target) = &app.autostart else {
                 app.status = "Autostart needs an XDG config directory \
                               (set XDG_CONFIG_HOME or HOME)."
@@ -933,9 +897,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::CheckUpdate => {
             app.checking_update = true;
             app.status = "Checking for updates\u{2026}".to_string();
-            // ureq blocks and this is the UI thread: one click, one
-            // thread, one line back - the rebuild row's shape, with a
-            // single message instead of a stream.
+            // ureq blocks, and this code runs on the UI thread. The code uses one
+            // click, one thread, and one status line. This matches the rebuild row
+            // but sends one message instead of a stream.
             let (tx, rx) = iced::futures::channel::mpsc::unbounded();
             std::thread::spawn(move || {
                 let _ = tx.unbounded_send(super::update::report(env!("CARGO_PKG_VERSION")));
@@ -951,14 +915,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Put the row at `from` at `to`, sliding everything between them one
-/// place the other way.
+/// Move the row from `from` to `to`. Each row between them shifts one place.
 ///
-/// The one place a list is reordered. A move button asks for the
-/// neighbouring index and a drop asks for wherever the pointer let go, so
-/// routing both through here is what makes them mean the same thing by
-/// "moved" - two reorderings would be two answers that agree until the
-/// day they do not.
+/// This is the only function that changes list order. A move button supplies
+/// an adjacent index, and a drop supplies the pointer position. Both paths
+/// call this function, so both use the same order rule.
 fn move_row(app: &mut App, role: Role, from: usize, to: usize) {
     let rows = app.form.list_mut(role);
     if from == to || from >= rows.len() || to >= rows.len() {
@@ -968,17 +929,16 @@ fn move_row(app: &mut App, role: Role, from: usize, to: usize) {
     rows.insert(to, row);
 }
 
-/// Move the selected dictionary one place in this role's list.
+/// Move the selected Dictionary one place in this role's list.
 ///
-/// `role` is the pressed button's section and not the selection's, so a
-/// press under Frequency while a terms row is highlighted moves nothing:
-/// each section's order is its own, and a row cannot cross into a list
-/// whose role it may not even have
+/// `role` comes from the pressed button, not the selection. A Frequency button
+/// therefore does nothing when the user selects a Terms row. Each section has its own
+/// order, and a row cannot enter a list without its role
 /// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
-/// One place, which leaves every other row exactly where it was, and the
-/// ends of the list have nowhere to go rather than wrapping round to the
-/// other one. This is the keyboard path and the drag never replaces it.
+/// A move changes one place. Other rows keep their positions. A list end has no
+/// destination, so the move does not wrap. This is the keyboard path, and the
+/// drag path uses `move_row`.
 fn move_selected(app: &mut App, role: Role, delta: i32) {
     let Some(selected) = &app.selected else { return };
     if selected.role != role {
@@ -996,57 +956,47 @@ fn move_selected(app: &mut App, role: Role, delta: i32) {
     }
 }
 
-/// Where in its list a cursor sitting `at` pixels down row `index` is.
+/// Return the list position for row `index` and local offset `at`.
 ///
-/// [`mouse_area`] reports a point local to the widget it wraps and the
-/// wrapped widget is one row, so the row's own place in the list is what
-/// turns that point back into a position in the list.
+/// [`mouse_area`] reports a point for one row widget. The row index and local
+/// offset restore the cursor position in the full list.
 fn list_y(index: usize, at: f32) -> f32 {
     index as f32 * ROW_PITCH + at
 }
 
-/// Where in a list of `len` rows a cursor `y` pixels down it would drop
-/// the row it is holding: the number of row boundaries above the cursor,
-/// so the top half of a row inserts before it and the bottom half after.
-/// Above the first row and below the last one there are no more
-/// boundaries to count, which is what clamps a drag to the ends of its
-/// own list.
+/// Return the drop boundary for a cursor `y` in a list of `len` rows.
+/// The top half of a row inserts before it. The bottom half inserts after it.
+/// Values above or below the list clamp to its ends.
 ///
-/// Free of iced, so the one piece of arithmetic the gesture rests on is
-/// testable without a window, a renderer or a font behind it.
+/// This function has no iced code. Tests can check this arithmetic without a
+/// window, renderer, or font.
 fn drop_index(y: f32, len: usize) -> usize {
     (y / ROW_PITCH).round().clamp(0.0, len as f32) as usize
 }
 
-/// Whether the cursor has travelled far enough from where a row was
-/// grabbed for the press to be a drag rather than a click.
+/// Whether the cursor moved far enough from the grab point to make the press
+/// a drag instead of a click.
 ///
-/// Vertical only, because this list reorders vertically: sliding sideways
-/// across a row never changes where that row would land, so counting the
-/// sideways travel would only make a wobbly click into a reorder.
+/// This check uses only vertical distance because the list order is vertical.
+/// Horizontal distance does not affect the row's destination.
 fn past_deadband(origin: f32, cursor: f32) -> bool {
     (cursor - origin).abs() > DRAG_DEADBAND
 }
 
-/// Whether the press that grabbed a row in `held`'s list has become a
-/// drag of it.
+/// Whether a held press has crossed the deadband.
 ///
-/// A cursor that has left that list is past any deadband by definition,
-/// and could not be measured against one anyway: two lists' heights are
-/// two different rulers.
+/// A cursor outside the source list counts as past the deadband. Lists have
+/// different heights, so they cannot share a second position measure.
 fn left_the_deadband(held: Role, origin: f32, hover: Hover) -> bool {
     hover.role != held || past_deadband(origin, hover.y)
 }
 
-/// Where a cursor at `hover` would drop a row grabbed from `held`'s list
-/// of `len` rows.
+/// Return the drop boundary for a row held from `held` when the cursor is at
+/// `hover`, in a list of `len` rows.
 ///
-/// A position in another role's list is not a position in this one, so it
-/// clamps to whichever end the cursor left through - the sections are
-/// stacked in [`Role::EVERY`] order, so a hover in a later one is this
-/// list's bottom and one in an earlier one is its top. That is the whole
-/// of "a drag never crosses into another list": the row it is holding has
-/// nowhere else it could land.
+/// A cursor in another role's list maps to the end that it crossed. Sections
+/// follow [`Role::EVERY`] order. A later section means the bottom, and an earlier
+/// section means the top. The held row cannot enter another list.
 fn drop_at(held: Role, hover: Hover, len: usize) -> usize {
     match hover.role.cmp(&held) {
         Ordering::Less => 0,
@@ -1055,14 +1005,11 @@ fn drop_at(held: Role, hover: Hover, len: usize) -> usize {
     }
 }
 
-/// Where in its list the press that grabbed `name` landed.
+/// Return the press position for `name` in the `role` list.
 ///
-/// [`mouse_area`]'s `on_press` carries no position, but the cursor cannot
-/// reach a row without that row having reported a move on the way in, so
-/// the live hover is where the press is. A press in a list this window
-/// has not seen the cursor in falls back to the middle of the row itself,
-/// which keeps the deadband measured from somewhere inside the row rather
-/// than from nowhere.
+/// [`mouse_area`]'s `on_press` has no position. A cursor must first report a
+/// move before it can press a row, so `hover` normally supplies the position.
+/// If no hover exists, use the row center to keep the deadband inside the row.
 fn grab_origin(app: &App, role: Role, name: &str) -> Option<f32> {
     if let Some(hover) = app.hover.filter(|hover| hover.role == role) {
         return Some(hover.y);
@@ -1071,28 +1018,25 @@ fn grab_origin(app: &App, role: Role, name: &str) -> Option<f32> {
     Some(list_y(at, ROW_HEIGHT / 2.0))
 }
 
-/// A press on a row: it becomes the selection, and the pointer takes hold
-/// of it in case the press turns out to be a drag.
+/// Select a row and hold it for a possible drag.
 ///
-/// Holding is not yet dragging: the deadband decides that, and until the
-/// cursor has crossed it there is no insertion line and a release moves
-/// nothing, so a plain click leaves only the selection behind.
+/// The deadband decides whether the hold becomes a drag. Before the cursor
+/// crosses it, no drop line appears and release changes no order. A click only
+/// changes the selection.
 fn press_row(app: &mut App, role: Role, name: String) {
     app.drag = match grab_origin(app, role, &name) {
         Some(origin) => Drag::Dragging { role, row: name.clone(), origin },
-        // A name no list holds is not a row this window drew. It still
-        // selects, because that is what the name is for, and grabs
-        // nothing there is to grab.
+        // The name is not in any list that this window drew. Keep the selection, but
+        // do not hold a row that does not exist.
         None => Drag::Idle,
     };
     app.selected = Some(Selected { role, name });
 }
 
-/// The pointer let go of the row it was holding.
+/// Release the held row.
 ///
-/// A press that never left the deadband was a click and moves nothing,
-/// which is what keeps a selection - or the pixel of travel a press
-/// carries - from quietly reordering the list.
+/// A press inside the deadband is a click and changes no order. This rule
+/// leaves the list unchanged after a small pointer move.
 fn drop_held(app: &mut App) {
     let Drag::Dragging { role, row, origin } = std::mem::replace(&mut app.drag, Drag::Idle) else {
         return;
@@ -1102,20 +1046,19 @@ fn drop_held(app: &mut App) {
     };
     let rows = app.form.list(role);
     let Some(from) = rows.iter().position(|dict| dict.name == row) else { return };
-    // An insertion index counts the boundaries above it, so lifting the
-    // row out of the list first pulls every boundary below it up by one.
+    // The drop boundary counts rows above it. After the code removes the row,
+    // every lower boundary shifts up by one.
     let at = drop_at(role, hover, rows.len());
     move_row(app, role, from, if at > from { at - 1 } else { at });
 }
 
-/// Which boundary of `role`'s list the insertion line is drawn at, or
-/// `None` when no live drag is holding a row from it.
+/// Return the drop boundary for `role`, or `None` when no drag holds a row
+/// from that list.
 ///
-/// The only feedback a drag gets. A floating copy of the row would be
-/// drawn with `with_translation` and `with_layer`, and neither escapes a
-/// `scrollable`'s clip rect in iced 0.14, so a row dragged towards the
-/// edge of its section would be sliced off there - worse than no preview.
-/// A line drawn inside the list cannot be clipped.
+/// The drop line is the only drag feedback. A row that follows the pointer would need
+/// `with_translation` and `with_layer`, but iced 0.14 clips it inside
+/// `scrollable`. The row could disappear at a section edge. A line inside the
+/// list avoids that clip.
 fn drop_line(app: &App, role: Role) -> Option<usize> {
     let Drag::Dragging { role: held, origin, .. } = &app.drag else { return None };
     if *held != role {
@@ -1125,32 +1068,25 @@ fn drop_line(app: &App, role: Role) -> Option<usize> {
     Some(drop_at(role, hover, app.form.list(role).len()))
 }
 
-/// How far down the list the insertion line sits for a drop before row
-/// `index` of `len`.
+/// Return the vertical position of the drop line before row `index` in `len`.
 ///
-/// The gap between two rows is exactly the line's thickness, so a line at
-/// a boundary fills that gap and nudges no row out of place. The two ends
-/// are the exception - there is no gap outside the list - so the line
-/// sits just inside it rather than a hair outside, where the stacked
-/// layer has no room left to draw it.
+/// The gap between rows equals the line thickness. The line fills the gap.
+/// It does not move a row. At either end, no outside gap exists. The line stays
+/// inside the list because the stacked layer has no outside space.
 fn line_top(index: usize, len: usize) -> f32 {
     let height = (len as f32 * ROW_PITCH - ROW_SPACING).max(0.0);
     (index as f32 * ROW_PITCH - ROW_SPACING).clamp(0.0, (height - ROW_SPACING).max(0.0))
 }
 
-/// Turn one row's role on or off.
+/// Set one role's enabled state.
 ///
-/// Only the list the checkbox sits in: unchecking a mixed archive's
-/// definitions must not silently kill its frequency data, so enabling is
-/// per role and never per Dictionary
-/// (ARCHITECTURE.md#dictionary-and-lookup). The row keeps its position,
-/// because order and enabling are separate questions and a dictionary
-/// that loses its place every time it is parked is one whose order the
-/// user cannot curate.
+/// The checkbox changes only its own list. A mixed archive can keep frequency
+/// data when the user disables its Terms row, because each role has separate
+/// state (ARCHITECTURE.md#dictionary-and-lookup). The row keeps its position
+/// because order and enabled state are separate.
 ///
-/// Named rather than indexed: the press names the row the last frame
-/// drew, and a removal or a finished rebuild can have restaged the list
-/// since.
+/// This code uses the row name instead of its index. A rebuild or removal can
+/// change the list before the next press.
 fn set_enabled(app: &mut App, role: Role, name: &str, on: bool) {
     if let Some(row) = app.form.list_mut(role).iter_mut().find(|row| row.name == name) {
         row.enabled = on;
@@ -1159,8 +1095,8 @@ fn set_enabled(app: &mut App, role: Role, name: &str, on: bool) {
 
 fn view(app: &App) -> Element<'_, Message> {
     let content = column![
-        // 設定 doubles as the JP-fallback proof: kanji in the very
-        // first line of the window, straight through cosmic-text.
+        // `設定` tests the Japanese fallback. The first window line contains kanji,
+        // and cosmic-text renders it.
         text("chibipop 設定 (settings)").size(24),
         trigger_section(app),
         popup_section(app),
@@ -1194,8 +1130,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     let selected = if app.form.mode == TriggerMode::Live {
         TriggerMode::Live
     } else {
-        // The legacy `hold-shift` alias reads as HoldKey, exactly like
-        // the Windows radios.
+        // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
         TriggerMode::HoldKey
     };
     let mode = row![
@@ -1217,11 +1152,10 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // The portal rung. There is no in-app rebind to offer and
-        // pretending otherwise would be the one thing this window must
-        // never do: the portal owns the binding, the dialog it raises at
-        // bind time and the desktop's own shortcut editor are where a key
-        // changes, and the chord above is only what we ask for next time.
+        // This is the portal rung. The window cannot offer an in-app rebind because
+        // the portal owns the bind. The portal dialog and the desktop shortcut editor
+        // change the key. The chord above is the value this window gives the portal at
+        // the next start.
         HotkeyControl::Rebind { current } => column![
             text("Portal channel: the GlobalShortcuts portal owns this binding."),
             text(match &current {
@@ -1291,8 +1225,8 @@ fn popup_section(app: &App) -> Element<'_, Message> {
                 "Font",
                 pick_list(app.fonts.as_slice(), font_now.cloned(), Message::FontPicked),
             ),
-            // Kanji and kana beside the combo, painted with the family
-            // just picked: the live proof that it renders Japanese.
+            // Kanji and kana use the selected family. This preview confirms that the family
+            // renders Japanese.
             labeled("Preview", text("日本語プレビュー: 辞書・漢字・かな").font(preview_font(font_now))),
             labeled(
                 "Max width (% of screen)",
@@ -1337,11 +1271,11 @@ fn popup_section(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// The layout-mode picker, in the order it is offered.
+/// The layout-mode picker items, in display order.
 ///
-/// One ordered table for both halves of the UI edge, exactly as
-/// [`SENTENCE_MODES`] is: the labels going out and the mode coming back,
-/// so nothing in between gets to decide the mapping.
+/// One ordered table supplies both directions of the UI map, like
+/// [`SENTENCE_MODES`]. The table provides labels to the picker and receives the
+/// selected mode without a second map.
 const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
     (LayoutMode::Roomy, "Roomy (one item per line)"),
     (LayoutMode::Compact, "Compact (one line per dictionary)"),
@@ -1352,28 +1286,26 @@ fn layout_labels() -> Vec<String> {
     LAYOUT_MODES.iter().map(|&(_, label)| label.to_string()).collect()
 }
 
-/// The label a mode is offered under. Every `LayoutMode` is in the
-/// table, so the fallback is unreachable.
+/// The label for a layout mode. Every `LayoutMode` appears in the table, so the
+/// fallback cannot occur.
 fn layout_mode_label(mode: LayoutMode) -> &'static str {
     LAYOUT_MODES.iter().find(|&&(m, _)| m == mode).map_or(LAYOUT_MODES[0].1, |&(_, l)| l)
 }
 
-/// The mode a picked label names. Only labels this table handed out can
-/// come back, so the default is unreachable through the UI.
+/// The layout mode for a picked label. Only labels from this table return from
+/// the UI, so the fallback cannot occur there.
 fn layout_mode_of(label: &str) -> LayoutMode {
     LAYOUT_MODES.iter().find(|&&(_, l)| l == label).map_or(LayoutMode::Roomy, |&(m, _)| m)
 }
 
-/// How much of an entry the popup draws: the render settings' decision
-/// table, one control per knob.
+/// The controls that decide entry content.
 ///
-/// Its own group rather than more rows under Popup, and the Windows
-/// window groups them the same way: these six decide what an entry
-/// *contains*, where the rows above decide how big the panel is.
+/// This group sits apart from Popup because these fields decide entry content,
+/// while the rows above decide panel size. The Windows window uses the same
+/// group.
 ///
-/// Every one of them is a portable field. Neither platform may drop one,
-/// so a config file shared between a Windows and a Linux machine means
-/// the same thing on both.
+/// Every field is a portable field. Each platform must preserve all of them,
+/// so one config file has the same meaning on Windows and Linux.
 fn content_section(app: &App) -> Element<'_, Message> {
     section(
         "Entry content",
@@ -1406,13 +1338,11 @@ fn content_section(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// The ranking-strategy picker, in the order it is offered.
+/// The ranking strategy picker items, in display order.
 ///
-/// One ordered table for both halves of the UI edge, exactly as
-/// [`SENTENCE_MODES`] and [`LAYOUT_MODES`] are: the labels going out and
-/// the strategy coming back, so nothing in between gets to decide the
-/// mapping. The Windows window offers these same three labels, because a
-/// user reading both screens is reading one setting.
+/// One ordered table supplies both directions of the map, like
+/// [`SENTENCE_MODES`] and [`LAYOUT_MODES`]. The Windows window uses the same
+/// labels, so both settings windows show one value.
 const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
     (RankingStrategy::BestRank, "Best rank (rank by highest frequency out of all freq dicts)"),
     (RankingStrategy::Priority, "Priority (rank using highest prioritized freq dict available)"),
@@ -1424,8 +1354,8 @@ fn ranking_labels() -> Vec<String> {
     RANKING_STRATEGIES.iter().map(|&(_, label)| label.to_string()).collect()
 }
 
-/// The label a strategy is offered under. Every `RankingStrategy` is in
-/// the table, so the fallback is unreachable.
+/// The label for a `RankingStrategy`. Every strategy appears in the table, so
+/// the fallback cannot occur.
 fn ranking_strategy_label(strategy: RankingStrategy) -> &'static str {
     RANKING_STRATEGIES
         .iter()
@@ -1433,8 +1363,8 @@ fn ranking_strategy_label(strategy: RankingStrategy) -> &'static str {
         .map_or(RANKING_STRATEGIES[0].1, |&(_, l)| l)
 }
 
-/// The strategy a picked label names. Only labels this table handed out
-/// can come back, so the default is unreachable through the UI.
+/// The strategy for a picked label. Only labels from this table return from the
+/// UI, so the fallback cannot occur there.
 fn ranking_strategy_of(label: &str) -> RankingStrategy {
     RANKING_STRATEGIES
         .iter()
@@ -1442,11 +1372,10 @@ fn ranking_strategy_of(label: &str) -> RankingStrategy {
         .map_or(RankingStrategy::BestRank, |&(s, _)| s)
 }
 
-/// The heading a role's list is drawn under, and what that role decides.
+/// The caption for one role's list.
 ///
-/// Three sentences rather than one "Dictionaries" list, because the same
-/// dictionary's checkbox means a different thing in each section and this
-/// is the only place that difference is said out loud
+/// Each section has its own checkbox purpose, so the UI uses three captions
+/// instead of one "Dictionaries" list. This function states that difference
 /// (ARCHITECTURE.md#dictionary-and-lookup).
 fn role_caption(role: Role) -> &'static str {
     match role {
@@ -1456,12 +1385,11 @@ fn role_caption(role: Role) -> &'static str {
     }
 }
 
-/// The highlight the selected row wears.
+/// The style for a selected row.
 ///
-/// A styled container and no longer a button: the row is what a drag
-/// takes hold of, and `iced_widget::button` captures the press before the
-/// [`mouse_area`] wrapped round it can see one, so a row whose name was a
-/// button could be clicked but never grabbed.
+/// This row uses a styled container instead of a button. `iced_widget::button`
+/// captures the press before [`mouse_area`] can see it. A button row could
+/// receive clicks but could not start a drag.
 fn picked_row(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
@@ -1472,31 +1400,28 @@ fn picked_row(theme: &Theme) -> container::Style {
     }
 }
 
-/// The line that says where a dragged row would land.
+/// The style for the drop line.
 ///
-/// The accent colour rather than the divider grey a rule wears by
-/// default: this one is a live answer to where the pointer is, not a
-/// separator, and it has to read as one at a glance down a list of thirty
-/// dictionaries.
+/// The line uses the accent color instead of the default divider gray. It shows
+/// the pointer's drop position, not a separator, so it must stand out in a
+/// long Dictionary list.
 fn insertion_line(theme: &Theme) -> rule::Style {
     rule::Style { color: theme.extended_palette().primary.base.color, ..rule::default(theme) }
 }
 
-/// One role's rows: the checkbox holding that role's enable flag, and the
-/// name, which is the selection and the thing a drag takes hold of.
+/// Render the rows for one role. Each row has an enabled checkbox and a name
+/// that serves as the selection and drag target.
 ///
-/// Every row the list holds, in the order it holds them - including a
-/// name no installed dictionary answers to, because the row on screen is
-/// what keeps that name in the file, and an unplugged drive must not
-/// delete a list.
+/// The list preserves row order and keeps a name that no installed Dictionary
+/// answers. It keeps that name in the file, so an absent archive cannot
+/// remove it.
 ///
-/// Each row is wrapped in a [`mouse_area`], which is as close to a drag
-/// as iced 0.14 comes: it reports the press that grabs a row and the
-/// moves that carry it, and [`update`] assembles those into the gesture.
-/// The checkbox keeps its own press, so a click on it toggles the row and
-/// never grabs it. `line` is where a live drag would drop what it is
-/// holding, drawn as a rule stacked over the list so that it takes no
-/// layout space and cannot shove the rows about under the cursor.
+/// Each row uses [`mouse_area`] because iced 0.14 has no reorderable list
+/// widget. `mouse_area` reports the press and pointer moves. [`update`] turns
+/// those messages into a drag. The checkbox handles its own press, so it
+/// toggles the row and does not start a drag. `line` gives the drop boundary.
+/// The window draws it as a stacked rule, so it uses no layout space and does
+/// not move the rows.
 fn dict_rows<'a>(
     role: Role,
     rows: &'a [DictRow],
@@ -1543,11 +1468,10 @@ fn dict_rows<'a>(
     .into()
 }
 
-/// The rule the enabled frequency lists are reduced to one rank by.
+/// The rule that reduces enabled frequency lists to one rank.
 ///
-/// Its own row above the list rather than a control on each row: the
-/// strategy is one fact about the whole section, and a per-row picker
-/// would read as a per-dictionary one.
+/// This control sits above the list because the strategy applies to the whole
+/// section. A per-row picker would imply a per-Dictionary value.
 fn ranking_row(app: &App) -> Element<'_, Message> {
     row![
         text("Ranking").size(14),
@@ -1562,18 +1486,15 @@ fn ranking_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// One role's section: its caption, its list, and its own pair of move
-/// buttons.
+/// Render one role section with its caption, list, and move buttons.
 ///
-/// The buttons carry the role, so a press reorders this list and nothing
-/// else - a row can never be moved into a section whose role it may not
-/// even hold. They are also the keyboard path to reordering, which is why
-/// they stay whatever else the section grows.
+/// The buttons carry the role, so each press reorders only this list. A row
+/// cannot move to a section without that role. The buttons provide keyboard
+/// moves and remain when the section gains more controls.
 ///
-/// `above` is what sits between the caption and the list: the
-/// ranking-strategy picker under Frequency, nothing under the other two,
-/// because the strategy is a fact about frequency alone and this helper
-/// has no business knowing which role that is.
+/// `above` contains the control between the caption and list. Frequency passes
+/// the ranking-strategy picker. Other roles pass nothing. This helper does not
+/// depend on the role that owns the picker.
 fn role_section<'a>(
     app: &'a App,
     role: Role,
@@ -1599,15 +1520,13 @@ fn role_section<'a>(
 }
 
 fn dictionaries_section(app: &App) -> Element<'_, Message> {
-    // Browse first, because it is the one that opens a picker and the
-    // entry beside it is the fallback for a desktop with no portal. All
-    // three are shut while a rebuild owns the library, and Browse is shut
-    // again while its own dialog is up.
+    // Browse appears first because it opens the picker. The adjacent entry supports
+    // desktops without a portal. All three controls stay disabled during a rebuild,
+    // and Browse also stays disabled while its dialog is open.
     //
-    // Remove sits on this row and not beside a section's move buttons:
-    // adding and removing are the two things that touch the library, and
-    // a removal takes the Dictionary out of every section at once, so it
-    // belongs to none of them.
+    // Remove stays on this row instead of beside move buttons. Add and Remove are
+    // the two library operations. Remove deletes a Dictionary from every section,
+    // so it belongs to none of them.
     let library = row![
         button("Browse…")
             .on_press_maybe((!app.busy() && !app.picking).then_some(Message::DictBrowse)),
@@ -1620,11 +1539,9 @@ fn dictionaries_section(app: &App) -> Element<'_, Message> {
     .spacing(8)
     .align_y(iced::Center);
 
-    // The three sections are wrapped in one release area rather than each
-    // row carrying its own: a drag clamped past the end of its list has
-    // the cursor outside every row, and letting go there has to land the
-    // row all the same. A release anywhere else - or outside the window -
-    // reaches [`subscription`] instead and cancels.
+    // The three sections share one release area. A drag past a list end leaves the
+    // pointer outside every row, but the row must still land at that end. A release
+    // elsewhere or outside the window reaches [`subscription`] and cancels.
     let lists = mouse_area(
         column![
             role_section(app, Role::Terms, None),
@@ -1651,10 +1568,10 @@ fn dictionaries_section(app: &App) -> Element<'_, Message> {
     section("Dictionaries", body)
 }
 
-/// The Rebuild button and whatever the running build last said.
+/// The Rebuild button and the latest progress line.
 ///
-/// One live rebuild at a time: `rebuild_progress` is both the button's
-/// gate and the line it replaces itself with.
+/// Only one rebuild can run at a time. `rebuild_progress` disables the button
+/// and supplies its status line.
 fn rebuild_row(app: &App) -> Element<'_, Message> {
     let note = match &app.rebuild_progress {
         Some(line) => line.clone(),
@@ -1674,9 +1591,9 @@ fn rebuild_row(app: &App) -> Element<'_, Message> {
 }
 
 fn ocr_section(app: &App) -> Element<'_, Message> {
-    // ocr.language is hidden on Linux
-    // (ARCHITECTURE.md#settings-and-config): meikiocr is JA-only; the
-    // stored value is preserved by the whole-struct save.
+    // Hide `ocr.language` on Linux
+    // (ARCHITECTURE.md#settings-and-config). meikiocr supports Japanese only, so
+    // whole-struct saves preserve the stored value.
     let passes: Vec<u8> = (PASSES_RANGE.0..=PASSES_RANGE.1).collect();
     section(
         "OCR",
@@ -1708,10 +1625,8 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.show_scan_region)
                 .label("Outline what each hover captured")
                 .on_toggle(Message::ShowScanRegion),
-            // OCR-to-clipboard lives here rather than in a group of its
-            // own: it reads the screen with the same engine and the same
-            // settings every row above configures, and the only thing
-            // it does differently is where the text goes.
+            // OCR-to-clipboard stays here because it uses the same engine and settings
+            // as the controls above. It differs only in its text destination.
             labeled(
                 "OCR-to-clipboard chord (portal syntax)",
                 text_input(
@@ -1727,15 +1642,11 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// The OCR-to-clipboard chord's copyable bind, or the reason there is
-/// none.
+/// The OCR-to-clipboard bind, or the reason that no bind exists.
 ///
-/// Two reasons there might be none, and they are different facts: no
-/// chord typed, or no clipboard protocol on this compositor at all. The
-/// second is checked first, because a bind pasted on a session where
-/// chibipop cannot write the selection would be a key that only ever
-/// logs a refusal - and this window does not hand out lines that cannot
-/// work.
+/// No bind can mean that the user typed no chord or that the compositor has no
+/// clipboard protocol. Check the protocol first. A pasted bind that can only
+/// log a refusal cannot work, so this window does not provide it.
 fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
     if app.clipboard_rung.is_none() {
         return text(
@@ -1758,9 +1669,8 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // Unreachable: `ocr_clipboard_control` always asks as
-        // `HotkeyChannel::Native`, precisely so this row can never claim
-        // a portal key. Rendered honestly rather than unwrapped.
+        // This arm cannot occur because `ocr_clipboard_control` always uses
+        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
         HotkeyControl::Rebind { .. } => {
             text("OCR-to-clipboard has no portal shortcut; bind it in your compositor.")
                 .size(13)
@@ -1774,45 +1684,41 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
     }
 }
 
-/// The sentence-capture picker, in the order it is offered.
+/// The sentence-capture picker items, in display order.
 ///
-/// One ordered table is both halves of the UI edge - the labels going
-/// out and the mode coming back - so nothing in between gets to decide
-/// the mapping. The Windows window's `SENTENCE_MODES` exists because a
-/// Win32 combo answers with an index; iced answers with the label, which
-/// is the same problem and gets the same answer rather than a `match` on
-/// a string literal at the call site.
+/// One ordered table supplies both directions of the UI map. The labels go
+/// to the picker and the mode comes back. iced returns a label, while the
+/// Windows combo returns an index. Both windows use one table instead of a
+/// string match at the call site.
 const SENTENCE_MODES: [(SentenceMode, &str); 3] = [
     (SentenceMode::Line, "Current line"),
     (SentenceMode::All, "All lines"),
     (SentenceMode::Static, "Static region"),
 ];
 
-/// The picker's items, in table order.
+/// The picker items in table order.
 fn sentence_labels() -> Vec<String> {
     SENTENCE_MODES.iter().map(|&(_, label)| label.to_string()).collect()
 }
 
-/// The label a mode is offered under. Every `SentenceMode` is in the
-/// table, so the fallback is unreachable; it is the first item because
-/// that is the one a fourth, untabled mode would want.
+/// The label for a `SentenceMode`. Every mode appears in the table, so the
+/// fallback cannot occur. The first item remains the default if a future mode
+/// lacks a table entry.
 fn sentence_mode_label(mode: SentenceMode) -> &'static str {
     SENTENCE_MODES.iter().find(|&&(m, _)| m == mode).map_or(SENTENCE_MODES[0].1, |&(_, l)| l)
 }
 
-/// The mode a picked label names. Only labels this table handed out can
-/// come back, so the default is unreachable through the UI.
+/// The sentence mode for a picked label. Only labels from this table return
+/// from the UI, so the fallback cannot occur there.
 fn sentence_mode_of(label: &str) -> SentenceMode {
     SENTENCE_MODES.iter().find(|&&(_, l)| l == label).map_or(SentenceMode::Line, |&(m, _)| m)
 }
 
-/// The static-region chord's copyable bind, or the reason there is none.
+/// The static-region row's copyable bind, or the reason that no bind exists.
 ///
-/// Its caption says "native channel" in every case, unlike the trigger's
-/// and the add's: this action has no portal id at all, so a
-/// compositor bind is not one of two ways to reach it - it is the only
-/// way, and a row that left that implicit would be inviting the user to
-/// wait for a consent dialog that is never coming.
+/// The caption always says "native channel" because this action has no portal
+/// id. A compositor bind is the only path. The row must not suggest a portal
+/// consent dialog for this action.
 fn static_region_bind(app: &App) -> Element<'_, Message> {
     match app.static_region_control() {
         HotkeyControl::Snippet { text: snippet } => column![
@@ -1825,9 +1731,8 @@ fn static_region_bind(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // Unreachable: `static_region_control` always asks as
-        // `HotkeyChannel::Native`, precisely so this row can never claim
-        // a portal key. Rendered honestly rather than unwrapped.
+        // This arm cannot occur because `static_region_control` always uses
+        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
         HotkeyControl::Rebind { .. } => {
             text("The static region has no portal shortcut; bind it in your compositor.")
                 .size(13)
@@ -1841,14 +1746,12 @@ fn static_region_bind(app: &App) -> Element<'_, Message> {
     }
 }
 
-/// The sentence-capture group: which text the Anki sentence field gets,
-/// and - only where it means anything - the static region's two rows.
+/// The sentence-capture rows. They choose the Anki sentence field and, in
+/// Static mode, show the static region controls.
 ///
-/// Windows hides its region rows unless the mode is Static, and so does
-/// this, with one deliberate exception: the *chord* row stays. The region
-/// can be set in any mode (that is how a user decides to switch to
-/// Static), so hiding the only way to bind the key until they had
-/// already switched would be a chicken and egg.
+/// Windows hides region rows outside Static, and Linux does the same. The chord
+/// row remains visible in every mode because the user must set it before the mode
+/// changes to Static.
 fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = vec![labeled(
         "Anki sentence field",
@@ -1884,13 +1787,10 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     rows
 }
 
-/// The mining screenshot's copyable bind, or the reason there is none.
+/// The mining screenshot row's copyable bind, or the reason that no bind exists.
 ///
-/// Native-channel wording in every case, for the same reason
-/// `static_region_bind` uses it: this action has no portal id, so
-/// a compositor bind is not one of two ways to reach it but the only
-/// one, and a row that left that implicit would be inviting the user to
-/// wait for a consent dialog that is never coming.
+/// This action has no portal id, so the compositor bind is its only path. The
+/// row uses "Native channel" text for the same reason as `static_region_bind`.
 fn screenshot_bind(app: &App) -> Element<'_, Message> {
     match app.screenshot_control() {
         HotkeyControl::Snippet { text: snippet } => column![
@@ -1903,9 +1803,8 @@ fn screenshot_bind(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // Unreachable: `screenshot_control` always asks as
-        // `HotkeyChannel::Native`, precisely so this row can never claim
-        // a portal key. Rendered honestly rather than unwrapped.
+        // This arm cannot occur because `screenshot_control` always uses
+        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
         HotkeyControl::Rebind { .. } => {
             text("The mining screenshot has no portal shortcut; bind it in your compositor.")
                 .size(13)
@@ -1920,12 +1819,11 @@ fn screenshot_bind(app: &App) -> Element<'_, Message> {
     }
 }
 
-/// The mining screenshot's group: the gate that puts a picture on an
-/// add, where the PNG lands, and the chord for taking one on its own.
+/// The mining screenshot rows. They control inclusion on add, the save folder,
+/// and the standalone screenshot chord.
 ///
-/// Every row is shown whatever the gate says, unlike Windows' Anki tab:
-/// the folder and the chord both matter to the standalone screenshot
-/// action, which `include_on_add` has nothing to do with.
+/// Show every row in every state. The folder and chord also affect the
+/// standalone screenshot action, so `include_on_add` does not control them.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     vec![
         checkbox(app.form.include_screenshot)
@@ -1965,46 +1863,31 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     ]
 }
 
-/// The source a picked item names, or `None` when core's vocabulary
-/// does not hold it.
+/// Return the source for a picked label, or `None` when core does not know it.
 ///
-/// [`FIELD_SOURCES`] is one ordered sequence serving both halves of the
-/// UI edge - the items going out and the source coming back - so nothing
-/// in between gets to decide the mapping, exactly as [`SENTENCE_MODES`]
-/// does for the sentence picker. `None` is unreachable from the picker;
-/// it is what a source hand-written into the TOML gets, and it is why
-/// such a row renders unset rather than dressing an unknown string up
-/// as a mapping core would honour.
+/// [`FIELD_SOURCES`] supplies both picker items and returned sources. `None`
+/// cannot come from the picker. It represents a source written directly in
+/// TOML, so the row stays unset. Core ignores an unknown map.
 fn field_source_of(picked: &str) -> Option<&'static str> {
     FIELD_SOURCES.iter().copied().find(|&source| source == picked)
 }
 
-/// The source a freshly added row starts on.
+/// The source for a new field-map row.
 ///
-/// `screenshot`, not the vocabulary's first entry: `default_field_map`
-/// ships no row for `glossary_html`, `sentence` or `screenshot`, and of
-/// those three only `screenshot`'s absence makes another setting inert -
-/// `actions.screenshot.include_on_add` can be on and still put no
-/// picture anywhere, because `shot::plan_add` reads the picture's field
-/// name straight off this row. That gap is the whole reason this section
-/// grew an Add button, so it is what Add guesses; a wrong guess costs
-/// one pick.
+/// Use `screenshot` instead of the first vocabulary item. `default_field_map`
+/// has no row for `glossary_html`, `sentence`, or `screenshot`. Only the absent
+/// `screenshot` row can make `actions.screenshot.include_on_add` inert.
+/// `shot::plan_add` reads the picture field name from this row. Add therefore
+/// chooses this source, which saves one picker change.
 const NEW_ROW_SOURCE: &str = "screenshot";
 
-/// The field-map group: one row per mapping, and the two controls that
-/// make the list growable.
+/// Render the field-map group. Each row has an Anki field and a source picker.
 ///
-/// Windows builds its rows from a live AnkiConnect `modelFieldNames`
-/// call - one combo per field the note type actually has
-/// (`ui/settings_window.rs`) - and this deliberately does not. Fetching
-/// makes the row list a property of whichever model happened to be
-/// reachable, which is why the Windows window drops a config row for a
-/// field the fetched model lacks: a silent edit to a saved mapping
-/// whenever Anki is closed or pointed at another note type. These rows
-/// are the config's rows, so an explicit Add/Remove pair is both simpler
-/// and free of that failure mode. The cost is that the Anki field name
-/// is typed rather than picked; the source, which is core's closed
-/// vocabulary and not the user's, is picked.
+/// Windows gets row names from a live AnkiConnect `modelFieldNames` call
+/// (`ui/settings_window.rs`). Linux keeps the rows from config instead. A live
+/// query could remove a saved row when the user closes Anki or selects another
+/// note type. Add and Remove keep config rows stable. The user types the Anki
+/// field name, and the picker uses core's closed source vocabulary.
 fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = app
         .form
@@ -2045,12 +1928,10 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 }
 
 fn anki_section(app: &App) -> Element<'_, Message> {
-    // The add-card chord's own hotkey control, the same shape the
-    // trigger row has: on the native rung the compositor bind is the
-    // only thing that can reach the add at all
-    // (ARCHITECTURE.md#input-ladders, rung 2 plus its 2026-08-26
-    // addendum), so a row without a copyable bind was a chord the user
-    // could type and never bind.
+    // The add-card row uses the same hotkey control as the trigger row. On the
+    // native rung, the compositor bind is the only path to the add
+    // (ARCHITECTURE.md#input-ladders, rung 2 plus its 2026-08-26 addendum).
+    // Without a copyable bind, a typed chord could never reach the add.
     let add_bind: Element<'_, Message> = match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns this binding. Paste this into its config:"),
@@ -2059,12 +1940,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // The portal rung, with the key the portal published for the
-        // *add-card* id - the same status vocabulary the
-        // trigger row uses, because it is the same fact about a
-        // different action. `current: None` is the honest absence: a
-        // desktop that reports no key, or one that never answered for
-        // this id.
+        // The portal published the key for the *add-card* id. Use the trigger row's
+        // status vocabulary because both values describe portal ownership. `current:
+        // None` means that the desktop reported no key or did not answer for this id.
         HotkeyControl::Rebind { current } => column![
             text("Portal channel: the GlobalShortcuts portal owns this binding."),
             text(match &current {
@@ -2110,10 +1988,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .width(200),
         ),
         add_bind,
-        // Windows' "First dictionary only" (`ui/settings_window.rs`),
-        // the same field on the same form: the daemon already honours
-        // `anki.first_dict_only`, so without this row the only way to
-        // use it was hand-editing the TOML.
+        // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
+        // The daemon reads `anki.first_dict_only`, so this row lets the user change it
+        // without a TOML edit.
         checkbox(app.form.first_dict_only)
             .label("First dictionary only")
             .on_toggle(Message::FirstDictOnly),
@@ -2126,10 +2003,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
     section("Anki", body)
 }
 
-/// The autostart row: stateless per
-/// ARCHITECTURE.md#settings-and-config — the checkbox *is* the XDG
-/// autostart `.desktop` file, applied on toggle, no Apply needed and no
-/// TOML field anywhere.
+/// The autostart row uses the XDG `.desktop` file as its state
+/// (ARCHITECTURE.md#settings-and-config). The checkbox changes the file
+/// immediately. No Apply action or TOML field stores this state.
 fn startup_section(app: &App) -> Element<'_, Message> {
     let body: Element<'_, Message> = match &app.autostart {
         Some(target) => column![
@@ -2154,10 +2030,10 @@ fn startup_section(app: &App) -> Element<'_, Message> {
     section("Startup", body)
 }
 
-/// The Updates row, mirroring the Windows window's group of the same
-/// name - and stopping where ARCHITECTURE.md#packaging-and-ci says it
-/// stops. The check reports; there is no swap on this platform to
-/// offer, so the row says which asset to fetch and who owns the binary.
+/// The Updates row matches the Windows group and the Linux packaging rule
+/// (ARCHITECTURE.md#packaging-and-ci). Linux only reports an update. It does
+/// not replace the binary, so the row identifies the asset to fetch and the
+/// process that owns the binary.
 fn update_section(app: &App) -> Element<'_, Message> {
     section(
         "Updates",
@@ -2203,15 +2079,14 @@ fn status_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The installed families the combo offers: fontdb's JP-capable ones
-/// (ARCHITECTURE.md#settings-and-config), sorted and deduplicated,
-/// owned by the process. The filter is the popup's own classifier
-/// ([`popup::jp_capable`]) and not a second marker table, so both halves
-/// of the product agree on what "draws Japanese" means.
+/// The installed font families that the combo offers. `fontdb` supplies
+/// JP-capable names, and this list sorts and deduplicates them
+/// (ARCHITECTURE.md#settings-and-config). [`popup::jp_capable`] provides the
+/// classifier, so the combo and popup use the same Japanese test.
 ///
-/// A `static` because iced's [`iced::font::Family::Name`] takes a
-/// `&'static str`: the preview label has to name the family it paints
-/// with, and these names are the only honest source of one.
+/// `FAMILIES` is static because iced's [`iced::font::Family::Name`] requires an
+/// `&'static str`. The preview must name the selected family, so these names
+/// provide that source.
 static FAMILIES: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
@@ -2221,16 +2096,12 @@ static FAMILIES: LazyLock<Vec<String>> = LazyLock::new(|| {
     offered(names)
 });
 
-/// The names [`FAMILIES`] keeps, and what happens when none of them
-/// draws Japanese.
+/// The names that [`FAMILIES`] keeps and the fallback when no family draws Japanese.
 ///
-/// A machine with no Japanese face gets the whole list back: an empty
-/// combo is a control the user cannot use at all, and the popup meets
-/// the same machine by painting anyway and naming the missing package
-/// (the degrade-visibly posture) rather than by refusing.
-///
-/// Pure, so the filter is testable without a font stack - the property
-/// the popup's classifier tables are written for.
+/// If no Japanese face exists, the function returns every family. An empty
+/// combo gives the user no usable control. The popup also paints and reports
+/// the absent package and does not reject the choice.
+/// This function stays pure, so tests can check the filter without a font stack.
 fn offered(all: Vec<String>) -> Vec<String> {
     let (jp, rest): (Vec<String>, Vec<String>) =
         all.into_iter().partition(|name| popup::jp_capable(name));
@@ -2241,15 +2112,13 @@ fn offered(all: Vec<String>) -> Vec<String> {
     }
 }
 
-/// The font combo's items.
+/// The font combo items.
 ///
-/// `Borrowed` is one of [`FAMILIES`], so iced can be told to paint the
-/// preview with it. `Owned` is the configured literal the combo would
-/// not otherwise offer - uninstalled, or installed but not a family
-/// that draws Japanese. It is still offered and still selected
-/// (ARCHITECTURE.md#settings-and-config: no sentinel semantics); it
-/// just previews as iced's default, which is where a family with no
-/// kanji in it would have ended up glyph by glyph anyway.
+/// `Borrowed` names come from [`FAMILIES`], so iced can paint the preview with
+/// them. `Owned` stores a configured name that the combo would otherwise omit.
+/// The name can lack an installed face or Japanese glyphs. The combo still offers
+/// and selects it (ARCHITECTURE.md#settings-and-config). The preview uses iced's
+/// default for that name.
 fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
     let mut items: Vec<Cow<'static, str>> =
         FAMILIES.iter().map(|f| Cow::Borrowed(f.as_str())).collect();
@@ -2259,18 +2128,17 @@ fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
     items
 }
 
-/// The combo item the form's font names.
+/// The combo item that matches the form font.
 ///
-/// [`font_items`] guarantees a hit for the font the window opened with;
-/// after that every write to `form.font` comes from a picked item, so
-/// `None` is unreachable and only means "nothing to preview with".
+/// [`font_items`] always includes the font used when the window opens. Later
+/// writes to `form.font` come from picked items, so `None` only means that no
+/// preview family exists.
 fn selected_family(app: &App) -> Option<&Cow<'static, str>> {
     app.fonts.iter().find(|f| f.as_ref() == app.form.font.as_str())
 }
 
-/// The family the preview paints with: the selection when the combo
-/// offers that name itself, iced's default when it is the configured
-/// literal ([`font_items`]).
+/// The preview uses the selected family when the combo offers it. Otherwise it
+/// uses iced's default for the configured literal ([`font_items`]).
 fn preview_font(selected: Option<&Cow<'static, str>>) -> Font {
     match selected {
         Some(Cow::Borrowed(name)) => Font::with_name(name),
@@ -2278,10 +2146,9 @@ fn preview_font(selected: Option<&Cow<'static, str>>) -> Font {
     }
 }
 
-/// The dictionary controls, driven the way iced drives them: one
-/// `Message` at a time through [`update`]. No window is opened - the
-/// widgetry is one `view` call over this same state, and what matters
-/// here is which state a press leaves behind.
+/// The dictionary controls receive one [`Message`] at a time through [`update`].
+/// No window opens here. `view` builds widgets from the same state, so the
+/// tests check the state after each press.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2289,10 +2156,9 @@ mod tests {
     use crate::paths::Env;
     use std::path::Path;
 
-    /// The rows the window is editing. Linux's rows are the config's
-    /// rows, so this form always has an answer about the field map;
-    /// `None` is the Windows-only state where AnkiConnect never named
-    /// the fields (`chibipop::settings::SettingsForm::field_map`).
+    /// The field-map rows that the window edits. Linux always has an answer, while
+    /// `None` represents the Windows-only state where AnkiConnect did not return
+    /// field names (`chibipop::settings::SettingsForm::field_map`).
     fn form_rows(app: &App) -> &[FieldMapping] {
         app.form.field_map.as_deref().expect("a Linux form always has field-map rows")
     }
@@ -2303,8 +2169,7 @@ mod tests {
             .join(name)
     }
 
-    /// A list where every row is checked, which is what an untouched list
-    /// looks like.
+    /// A list with every row enabled. This matches an untouched list.
     fn rows(names: &[&str]) -> Vec<DictRow> {
         names
             .iter()
@@ -2312,42 +2177,38 @@ mod tests {
             .collect()
     }
 
-    /// The names one section renders, in the order it renders them.
+    /// The names that one section renders, in order.
     fn listed(app: &App, role: Role) -> Vec<String> {
         app.form.list(role).iter().map(|row| row.name.clone()).collect()
     }
 
-    /// The names one section renders with their checkbox state, which is
-    /// the whole of what a row shows.
+    /// The names and enabled state that one section renders.
     fn checked(app: &App, role: Role) -> Vec<(String, bool)> {
         app.form.list(role).iter().map(|row| (row.name.clone(), row.enabled)).collect()
     }
 
-    /// The config the form is about to be saved as. Both the reindex seam
-    /// and the lookup pipeline read the file and not the form, so this is
-    /// where a press's real effect is asserted.
+    /// The config that the form will save. Reindex and lookup read the file, not
+    /// the form, so this captures a press's actual effect.
     fn saved(app: &App) -> chibipop::config::Config {
         chibipop::settings::apply_to(&app.form, &chibipop::config::Config::default())
     }
 
-    /// What Apply would do beyond writing the file: the in-place
-    /// reindex, or nothing at all. The rule is core's
-    /// (`settings::dictionary_work`), asked here of the config the window
-    /// opened with and the one a press leaves behind - which is exactly
-    /// what `super::apply` asks it (`apply.rs`).
+    /// The work that Apply needs beyond the file write.
+    ///
+    /// Core defines this rule in `settings::dictionary_work`. The helper compares
+    /// the config before and after the press, as `apply.rs` does.
     fn work(opened: &chibipop::config::Config, app: &App) -> DictionaryWork {
         chibipop::settings::dictionary_work(opened, &saved(app))
     }
 
-    /// The cursor arriving `at` pixels down row `index` of `role`'s list,
-    /// which is exactly what that row's `mouse_area` reports on a move.
-    /// The x is arbitrary: a list reorders vertically, so nothing reads
-    /// it.
+    /// Set the hover position for row `index` in `role` at `at` pixels.
+    /// This matches the point that the row's [`mouse_area`] reports.
+    /// The x coordinate has no effect because the list moves rows vertically.
     fn hover(app: &mut App, role: Role, index: usize, at: f32) {
         let _ = update(app, Message::DictHover(role, index, Point::new(4.0, at)));
     }
 
-    /// The window's state without touching fontdb or the filesystem.
+    /// The window state without fontdb or filesystem access.
     fn app(dir: &Path) -> App {
         let cfg = chibipop::config::Config::default();
         App {
@@ -2366,9 +2227,8 @@ mod tests {
             autostart: None,
             home: None,
             exe: PathBuf::from("/usr/bin/chibipop"),
-            // A session that can copy, so the OCR-to-clipboard row's
-            // chord half is what a test drives; the no-protocol case is
-            // asserted by setting this to `None`.
+            // This session can copy, so tests exercise the OCR-to-clipboard chord.
+            // The no-protocol case sets this field to `None`.
             clipboard_rung: Some(clipboard::Rung::Wlr),
             autostart_on: false,
             fonts: vec![Cow::Borrowed("Noto Sans")],
@@ -2385,10 +2245,9 @@ mod tests {
         }
     }
 
-    /// The add-card row carries the trigger row's status vocabulary:
-    /// on the portal rung it names the key the portal published for
-    /// `anki-add` and offers no snippet, because a pasted compositor
-    /// bind is not what owns that key.
+    /// The add-card row uses the trigger row's status vocabulary. On the portal
+    /// rung, it names the key published for `anki-add` and offers no snippet.
+    /// A pasted compositor bind does not own that key.
     #[test]
     fn the_add_card_row_reports_the_portals_own_add_key() {
         let dir = scratch("addportalrow");
@@ -2399,11 +2258,11 @@ mod tests {
             HotkeyControl::Rebind { current: Some("Meta+A".into()) },
             app.add_control()
         );
-        // And no copy button, so a portal row cannot hand out a bind
-        // that would not be the one in force.
+        // No copy button: a portal row must not offer a bind that differs from the
+        // active key.
         assert_eq!(None, app.add_bind_snippet());
 
-        // The trigger row keeps its own key: two rows, two channels.
+        // The trigger row keeps its own key. The two rows use two channels.
         app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
         assert_eq!(
             HotkeyControl::Rebind { current: Some("Meta+F".into()) },
@@ -2414,15 +2273,13 @@ mod tests {
                 snippets::Bind::Hold,
             )
         );
-        // The whole window still builds a widget tree with both rows on
-        // the portal rung: the status block is real widgetry, not just a
-        // control value.
+        // The full window still builds both portal rows. The status block is a widget
+        // tree, not only a control value.
         let _ = view(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No daemon has published anything, so the add row falls back to
-    /// the affordance a user can act on: the pasteable bind.
+    /// When the daemon publishes no key, the add row offers a pasteable bind.
     #[test]
     fn a_silent_daemon_leaves_the_add_card_row_offering_a_snippet() {
         let dir = scratch("addsnippetrow");
@@ -2436,9 +2293,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The checkbox is only worth having if it reaches the file: the
-    /// toggle must land on `anki.first_dict_only`, which the Linux
-    /// daemon already reads.
+    /// The checkbox matters only if it reaches the config. This toggle writes
+    /// `anki.first_dict_only`, which the Linux daemon already reads.
     #[test]
     fn the_first_dictionary_only_checkbox_round_trips_into_the_config() {
         let dir = scratch("firstdict");
@@ -2454,11 +2310,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The OCR-to-clipboard row's whole point on the native rung: the
-    /// typed chord comes back as a bind naming the running binary and the
-    /// `ocr-clipboard` verb, and never as a portal key - this action has
-    /// no portal id, so borrowing the trigger's would be a row
-    /// claiming a key it was never given.
+    /// On the native rung, this row turns the typed chord into a bind for the
+    /// binary in use and the `ocr-clipboard` verb. It never uses a portal key
+    /// because this action has no portal id.
     #[test]
     fn the_ocr_clipboard_chord_offers_a_pasteable_native_bind() {
         let dir = scratch("ocrclipbind");
@@ -2476,9 +2330,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A cleared box is an absent `Option`, not a `""` chord: the config
-    /// field is `Option<String>` precisely so absence stays typed, and
-    /// the row offers no bind.
+    /// A cleared box stores an absent `Option`, not a `""` chord. The config field
+    /// keeps absence typed, so the row offers no bind.
     #[test]
     fn a_cleared_ocr_clipboard_chord_is_absent_rather_than_an_empty_string() {
         let dir = scratch("ocrclipclear");
@@ -2490,16 +2343,15 @@ mod tests {
         let _ = update(&mut app, Message::OcrClipboardKey("   ".to_string()));
         assert_eq!(None, app.linux.ocr_clipboard_key_linux, "whitespace is not a chord");
         assert_eq!(None, app.ocr_clipboard_bind_snippet());
-        // And the copy message is inert rather than pasting a stale bind.
+        // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyOcrClipboardBind);
         assert_eq!(None, app.ocr_clipboard_bind_snippet());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Stock GNOME: a chord that could only ever log a refusal is not a
-    /// bind this window hands out
-    /// (ARCHITECTURE.md#settings-and-config), so the row withholds it
-    /// even though the chord itself is perfectly well typed.
+    /// Stock GNOME has no usable clipboard protocol. This window offers no
+    /// OCR-to-clipboard bind because such a chord would only log a refusal
+    /// (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn a_session_with_no_clipboard_protocol_offers_no_ocr_clipboard_bind() {
         let dir = scratch("ocrclipnoproto");
@@ -2510,17 +2362,16 @@ mod tests {
         app.clipboard_rung = None;
 
         assert_eq!(None, app.ocr_clipboard_bind_snippet());
-        // The chord is still carried: a GNOME user who later moves to a
-        // compositor with data control must not lose what they typed.
+        // The chord remains in the form. A user who later moves to a compositor with
+        // data control keeps the value they typed.
         assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The add-card row's whole point: on the native rung the chord the
-    /// user typed comes back as a bind they can paste, naming the
-    /// running binary and the `anki-add` verb. Without this the chord
-    /// was uneditable into anything (ARCHITECTURE.md#input-ladders:
-    /// rung 2 is the only rung a sway session has).
+    /// On the native rung, this row turns the typed chord into a pasteable bind
+    /// for the binary in use and the `anki-add` verb. The action has no portal
+    /// id, and rung 2 is the only rung for a sway session
+    /// (ARCHITECTURE.md#input-ladders).
     #[test]
     fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("addbind");
@@ -2533,8 +2384,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A cleared chord has nothing to bind, so the row must say so
-    /// rather than hand out `bind = , A, …`.
+    /// A cleared chord has no bind. The row must not offer `bind = , A, …`.
     #[test]
     fn a_cleared_add_card_chord_offers_no_bind_at_all() {
         let dir = scratch("addnobind");
@@ -2544,14 +2394,13 @@ mod tests {
 
         assert_eq!(HotkeyControl::NoChord, app.add_control());
         assert_eq!(None, app.add_bind_snippet());
-        // And the copy message is inert rather than pasting a stale one.
+        // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyAddBind);
         assert_eq!(None, app.add_bind_snippet());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The trigger row is untouched by all of it: the default chord
-    /// still produces the hold pair, byte for byte.
+    /// The trigger row still produces the default press and release pair.
     #[test]
     fn the_trigger_row_still_hands_out_the_hold_pair() {
         let dir = scratch("holdpair");
@@ -2566,11 +2415,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The static-region row's whole point: the chord the user typed
-    /// comes back as a bind naming the running binary and the
-    /// `static-region` verb. Without it a shipped, editable chord could
-    /// not be bound at all, because this action has no portal rung to
-    /// fall back on.
+    /// On the native rung, this row turns the typed chord into a bind for the
+    /// binary in use and the `static-region` verb. The action has no portal rung,
+    /// so the chord has no other bind path.
     #[test]
     fn the_static_region_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("srbind");
@@ -2583,11 +2430,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Decision D1, in the one place a user could notice it broken: this
-    /// action is never portal-registered, so its row asks as
-    /// `HotkeyChannel::Native` however the *trigger* resolved. A row that
-    /// read `app.channel` would print the trigger's portal key under the
-    /// static-region chord - a window claiming a key it was never given.
+    /// Decision D1 covers the user-visible case. This action never registers with
+    /// the portal, so the row uses `HotkeyChannel::Native` regardless of the
+    /// trigger channel. If it read `app.channel`, it would show the trigger's
+    /// portal key under the static-region chord.
     #[test]
     fn the_static_region_row_never_borrows_the_portals_trigger_key() {
         let dir = scratch("srnative");
@@ -2607,9 +2453,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The default is unset (`anki.static_region_key_linux` ships
-    /// empty), so out of the box the row has nothing to copy and says so
-    /// rather than handing out `bind = , R, …`.
+    /// The default `anki.static_region_key_linux` value is empty. The row therefore
+    /// offers no bind instead of `bind = , R, …`.
     #[test]
     fn an_unset_static_region_chord_offers_no_bind_at_all() {
         let dir = scratch("srnobind");
@@ -2618,16 +2463,15 @@ mod tests {
         assert_eq!("", app.linux.static_region_key_linux, "the shipped default is unset");
         assert_eq!(HotkeyControl::NoChord, app.static_region_control());
         assert_eq!(None, app.static_region_bind_snippet());
-        // Inert rather than pasting a stale bind.
+        // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyStaticRegionBind);
         assert_eq!(None, app.static_region_bind_snippet());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The screenshot row's own bind, and the `Option` at its edge: the
-    /// text box is the only place `""` becomes `None`, so a typed chord
-    /// lands as `Some` and a cleared one as absence - never as an
-    /// empty-string sentinel in the config file.
+    /// The screenshot row uses an `Option` chord. Only the text box maps `""` to
+    /// `None`, so a typed chord is `Some` and a cleared chord is absent, never an
+    /// empty-string sentinel in config.
     #[test]
     fn the_screenshot_chord_offers_a_pasteable_bind_and_clears_to_none() {
         let dir = scratch("shotbind");
@@ -2646,14 +2490,14 @@ mod tests {
         let _ = update(&mut app, Message::ScreenshotKey("   ".to_string()));
         assert_eq!(None, app.linux.screenshot_key_linux, "blank is absence, not an empty chord");
         assert_eq!(None, app.screenshot_bind_snippet());
-        // Inert rather than pasting a stale bind.
+        // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyScreenshotBind);
         assert_eq!(None, app.screenshot_bind_snippet());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Decision D1 again, for this row: never portal-registered, so it
-    /// asks as `HotkeyChannel::Native` however the trigger resolved.
+    /// Decision D1 also covers this row. It never registers with the portal, so
+    /// it uses `HotkeyChannel::Native` regardless of the trigger channel.
     #[test]
     fn the_screenshot_row_never_borrows_the_portals_trigger_key() {
         let dir = scratch("shotnative");
@@ -2673,10 +2517,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The two rows beside the chord: the gate is core's own form field,
-    /// and an emptied folder box means the default folder rather than
-    /// the data directory itself (a relative `save_dir` is joined onto
-    /// it, so `""` would scatter PNGs among the database).
+    /// These rows apply the inclusion flag and folder. An empty folder uses the
+    /// default folder instead of the data directory itself. A relative `save_dir`
+    /// joins that directory, so `""` would scatter PNG files beside the database.
     #[test]
     fn the_screenshot_rows_apply_the_gate_and_never_save_an_empty_folder() {
         let dir = scratch("shotrows");
@@ -2701,10 +2544,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The picker is an ordered table, so a label round-trips to its own
-    /// mode and nothing between the two halves gets to decide. Every
-    /// `SentenceMode` has to be in it: a mode the table forgot would be
-    /// unreachable in the window and would silently read as `Line`.
+    /// The sentence picker uses one ordered table. Each `SentenceMode` must appear
+    /// in the table, or the window cannot offer it and falls back to `Line`.
     #[test]
     fn every_sentence_mode_round_trips_through_its_own_label() {
         for mode in [SentenceMode::Line, SentenceMode::All, SentenceMode::Static] {
@@ -2715,8 +2556,8 @@ mod tests {
         assert_eq!(3, sentence_labels().len(), "the table is the whole list");
     }
 
-    /// Picking *Static region* stages the mode on the shared form, which
-    /// is what Apply then writes and the daemon reads.
+    /// A *Static region* choice stores the mode on the shared form. Apply writes it,
+    /// and the daemon reads it.
     #[test]
     fn picking_the_static_region_mode_stages_it_on_the_form() {
         let dir = scratch("srmode");
@@ -2731,26 +2572,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Windows hides its region rows unless the mode is Static, and so
-    /// does this - except the chord row, because the region can be set in
-    /// any mode and hiding the only way to bind the key until the user
-    /// had already switched would be a chicken and egg. Row *count* is
-    /// the observable: iced widgets are opaque, and what matters is which
-    /// rows exist.
+    /// Windows hides region rows outside Static, and Linux does the same. The chord
+    /// row remains visible because the user can set the region before the mode
+    /// changes. Row count is the observable because iced hides widget details.
     #[test]
     fn the_outline_checkbox_is_static_only_but_the_chord_row_always_shows() {
         let dir = scratch("srrows");
         let mut app = app(&dir);
 
-        // Picker, chord, bind text: three rows and no checkbox.
+        // The picker, chord, and bind text make three rows without the checkbox.
         assert_eq!(3, sentence_rows(&app).len(), "not static: no region checkbox");
 
         let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
-        // Plus the checkbox and its layer-shell caption.
+        // Static mode adds the checkbox and its layer-shell caption.
         assert_eq!(5, sentence_rows(&app).len(), "static: the checkbox joins");
 
-        // And the chord row is still there in the non-static case, which
-        // is the deliberate divergence from Windows.
+        // The chord row remains in a non-static mode. This differs from Windows.
         let _ = update(&mut app, Message::SentenceModePicked("All lines".to_string()));
         let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
         assert!(
@@ -2760,11 +2597,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The gap: until this window could add a row and pick a source,
-    /// `shot::plan` had nothing to find and a Linux user's only way to
-    /// name the picture's field was hand-editing the TOML. Asserted the
-    /// way `plan` reads it - the first row whose source is `screenshot`,
-    /// and the Anki field named on that row.
+    /// This test covers the absent screenshot map.
+    /// Before this window could add a row and pick a source, `shot::plan` had no
+    /// field to read. A Linux user had to edit TOML.
+    /// The test checks the first `screenshot` row and its Anki field because `plan`
+    /// reads those values.
     #[test]
     fn adding_a_row_can_finally_name_the_screenshot_field() {
         let dir = scratch("fmadd");
@@ -2776,8 +2613,8 @@ mod tests {
 
         let _ = update(&mut app, Message::FieldMapAdd);
         let at = form_rows(&app).len() - 1;
-        // The seed is a pickable source, so the row means something
-        // before the user has touched the picker at all.
+        // The new row starts with a source that the user can pick.
+        // It has a value before the user touches the picker.
         assert_eq!(Some(NEW_ROW_SOURCE), field_source_of(&form_rows(&app)[at].source));
         let _ = update(&mut app, Message::FieldMapAnki(at, "Picture".to_string()));
 
@@ -2790,16 +2627,15 @@ mod tests {
             "this is the row and the field name `shot::plan` looks for"
         );
 
-        // And the picker moves that row to any other source without the
-        // typed field name following it.
+        // The picker can change the source and preserve the typed Anki field.
         let _ = update(&mut app, Message::FieldMapSource(at, "sentence".to_string()));
         assert_eq!("sentence", form_rows(&app)[at].source);
         assert_eq!("Picture", form_rows(&app)[at].anki_field);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An off-by-one here silently destroys a mapping the user still
-    /// wants, so the survivors are asserted by name and not by count.
+    /// An invalid index could remove a field-map row that the user still needs.
+    /// Check survivor names instead of only the row count.
     #[test]
     fn removing_a_row_takes_the_one_that_was_pressed() {
         let dir = scratch("fmremove");
@@ -2815,17 +2651,16 @@ mod tests {
         let names: Vec<&str> = form_rows(&app).iter().map(|m| m.anki_field.as_str()).collect();
         assert_eq!(vec!["First", "Last"], names);
 
-        // A press that arrived after its row was already gone is inert
-        // rather than a `Vec::remove` panic in the UI thread.
+        // A press that arrives after its row is gone does nothing. It cannot make
+        // `Vec::remove` panic in the UI thread.
         let _ = update(&mut app, Message::FieldMapRemove(9));
         assert_eq!(2, form_rows(&app).len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A row the user added and never named cannot be stored: Anki has
-    /// no field called "", so such a row is a mapping that looks set and
-    /// can never place anything. Driven through Apply, the one place
-    /// that filter lives, and read back off the file Apply wrote.
+    /// An unnamed row cannot reach the config. Anki has no field named "", so the row
+    /// would look valid but place nothing. Apply owns this filter, so the test
+    /// reads the file that Apply writes.
     #[test]
     fn a_row_with_no_anki_field_never_reaches_the_saved_config() {
         let dir = scratch("fmblank");
@@ -2835,8 +2670,8 @@ mod tests {
         let _ = update(&mut app, Message::FieldMapAdd);
         let named = form_rows(&app).len() - 1;
         let _ = update(&mut app, Message::FieldMapAnki(named, "Picture".to_string()));
-        // One row the user opened and walked away from, and one they
-        // filled with spaces, which is no more a field name than "".
+        // Add one untouched row and one row that contains spaces. Spaces are no more
+        // a field name than "".
         let _ = update(&mut app, Message::FieldMapAdd);
         let _ = update(&mut app, Message::FieldMapAdd);
         let blank = form_rows(&app).len() - 1;
@@ -2860,17 +2695,15 @@ mod tests {
                 .map(|m| m.anki_field.clone()),
             "the sibling rows are untouched and the screenshot row is the saved one"
         );
-        // The window shows what the file holds, the same way Apply
-        // re-reads the clamped capture size.
+        // The window shows the saved file state, as it does for the clamped capture size.
         assert_eq!(shipped + 1, form_rows(&app).len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Removing every row is an answer, not a window that never had
-    /// rows to show, so Apply writes the empty map instead of silently
-    /// keeping the shipped one. Read off the file Apply wrote, because
-    /// the guard this replaced was invisible from inside the form - the
-    /// save reported success either way.
+    /// When the user removes every row, that is a valid answer. Apply must write an
+    /// empty map, not the shipped map. Read the saved file
+    /// because the old guard was invisible in the form and both paths reported
+    /// success.
     #[test]
     fn removing_every_row_saves_an_empty_map() {
         let dir = scratch("fmempty");
@@ -2886,11 +2719,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The vocabulary is core's [`FIELD_SOURCES`] and this window keeps
-    /// no second copy: every item it offers round-trips to itself, and a
-    /// source the set does not hold never reaches the form -
-    /// `anki::mapped_fields` drops such a row without a word, so a
-    /// picker that accepted one would be showing a mapping that is not.
+    /// The picker uses core's [`FIELD_SOURCES`] and keeps no duplicate vocabulary.
+    /// Every offered item round-trips. An unknown source never reaches the form.
+    /// `anki::mapped_fields` drops it without a message, so the picker must reject
+    /// it.
     #[test]
     fn the_source_picker_only_ever_yields_a_source_core_understands() {
         let dir = scratch("fmvocab");
@@ -2898,8 +2730,7 @@ mod tests {
         for source in FIELD_SOURCES {
             assert_eq!(Some(source), field_source_of(source), "{source} must be offered");
         }
-        // Windows' combo prepends this for "unmapped": that one UI's
-        // idiom for no row, never a storable source.
+        // Windows adds this value for "unmapped". Linux does not store this source.
         assert_eq!(None, field_source_of("(none)"));
         assert_eq!(None, field_source_of("sceenshot"));
 
@@ -2913,11 +2744,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Row *count* is the observable, as with the sentence rows: iced
-    /// widgets are opaque, and what matters is that every mapping is
-    /// rendered and that the affordances the section grew - Add and its
-    /// caption - are there even when the list is empty, which is the
-    /// state a user who removed everything is left in.
+    /// Row count is the observable because iced hides widget details. The function
+    /// must render every field-map row and keep Add with its caption when the list
+    /// is empty.
     #[test]
     fn every_mapping_is_rendered_and_the_add_control_always_is() {
         let dir = scratch("fmrows");
@@ -2935,8 +2764,8 @@ mod tests {
         app.form.field_map = Some(Vec::new());
         assert_eq!(2, field_map_rows(&app).len(), "an emptied map still offers Add");
 
-        // The whole window builds with a screenshot row in the map: the
-        // picker is real widgetry, not just a lookup.
+        // The full window builds with a screenshot row. The picker is a widget, not
+        // only a lookup.
         let _ = update(&mut app, Message::FieldMapAdd);
         let _ = view(&app);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2951,8 +2780,7 @@ mod tests {
         dir
     }
 
-    /// The regression: the preview label used to render in iced's
-    /// default font no matter what the combo said.
+    /// The preview label previously ignored the combo font and used iced's default font.
     #[test]
     fn picking_an_installed_family_repaints_the_preview_with_it() {
         let dir = scratch("font");
@@ -2979,9 +2807,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A font the config names but no face carries stays selectable, and
-    /// the preview says so by falling back instead of naming a family
-    /// iced cannot resolve.
+    /// A configured font with no installed face remains selectable. The preview uses
+    /// iced's default and does not name a family that iced cannot resolve.
     #[test]
     fn an_uninstalled_configured_family_is_offered_and_previews_as_default() {
         let dir = scratch("font_absent");
@@ -2994,9 +2821,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The combo is populated from the JP-capable families, and it
-    /// borrows the popup's classifier to decide - a Chinese pan-CJK face
-    /// and a Latin "Gothic" are both out.
+    /// The combo uses JP-capable families from the popup classifier. A Chinese
+    /// pan-CJK face and a Latin "Gothic" family do not pass.
     #[test]
     fn the_font_combo_offers_only_families_that_draw_japanese() {
         let installed =
@@ -3008,8 +2834,8 @@ mod tests {
         );
     }
 
-    /// No Japanese face installed is the popup's degrade-visibly case,
-    /// not a reason to hand the user a combo with nothing in it.
+    /// If no Japanese face exists, the popup's visible fallback returns every
+    /// installed family instead of an empty combo.
     #[test]
     fn a_machine_with_no_japanese_face_is_offered_every_family() {
         let installed: Vec<String> =
@@ -3038,8 +2864,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The whole point of the Browse button: one dialog, many archives,
-    /// all staged from a single answer.
+    /// One Browse dialog can return many archives, and the window stages all of them.
     #[test]
     fn a_picked_selection_stages_every_archive_in_it() {
         let dir = scratch("picked");
@@ -3059,9 +2884,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A mixed selection stages what it can and names what it did not,
-    /// because a status line that only counted successes would leave the
-    /// user hunting for the file that never arrived.
+    /// A mixed result stages readable archives and names refused files. A count of
+    /// successes alone would make the user search for a refused file.
     #[test]
     fn a_picked_selection_names_the_files_it_refused() {
         let dir = scratch("picked-mixed");
@@ -3080,14 +2904,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A dismissed dialog is not a failure, and it must not read as one.
+    /// A dismissed dialog is not an error. The window must not report it as one.
     #[test]
     fn a_dismissed_dialog_stages_nothing_and_reopens_the_button() {
         let dir = scratch("picked-cancel");
         let mut app = app(&dir);
         app.picking = true;
-        // Both halves of the Browse button's gate build a widget tree:
-        // a shut button and a live one take different iced paths.
+        // Both states of the Browse gate build a widget tree. A disabled button and an
+        // enabled button use different iced paths.
         let _ = view(&app);
         let _ = update(&mut app, Message::DictPicked(Ok(filechooser::Picked::Cancelled)));
 
@@ -3098,9 +2922,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A rebuild can claim the library while the dialog is open, and
-    /// staging into a form the builder is already reading is the race
-    /// `busy` exists to refuse.
+    /// A rebuild can claim the library while the dialog stays open. `busy` rejects
+    /// a form update while the builder reads the form.
     #[test]
     fn a_selection_that_lands_during_a_rebuild_is_refused_rather_than_staged() {
         let dir = scratch("picked-busy");
@@ -3116,8 +2939,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No portal on this desktop: the window says so in the one place
-    /// the user is looking, and the typed path beside it still works.
+    /// If the desktop has no portal, the window reports that state and keeps the
+    /// typed path available.
     #[test]
     fn a_portal_failure_becomes_the_status_line_and_reopens_the_button() {
         let dir = scratch("picked-err");
@@ -3130,8 +2953,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The expansion itself, on the pure function so no test has to move
-    /// the process's `HOME` out from under its siblings.
+    /// Test the expansion function directly. This avoids a change to the process
+    /// `HOME` for other tests.
     #[test]
     fn a_typed_tilde_path_expands_against_home() {
         use crate::paths::{expand_tilde, Typed};
@@ -3142,29 +2965,28 @@ mod tests {
             Typed::Path(PathBuf::from("/home/u/Downloads/jitendex.zip")),
             expand_tilde("~/Downloads/jitendex.zip", h)
         );
-        // Bare `~` and `~/` are the home directory, with no stray
-        // trailing separator and no panic.
+        // Bare `~` and `~/` resolve to the home directory without an extra separator
+        // or a panic.
         assert_eq!(Typed::Path(home.to_path_buf()), expand_tilde("~", h));
         assert_eq!(Typed::Path(home.to_path_buf()), expand_tilde("~/", h));
-        // Nothing else is touched: an absolute path and a plain relative
-        // one both pass through, and a `~` mid-path is a real file name.
+        // Other paths remain unchanged. Absolute and relative paths keep their form, and
+        // `~` in the middle is a literal file-name character.
         assert_eq!(Typed::Path(PathBuf::from("/tmp/a.zip")), expand_tilde("/tmp/a.zip", h));
         assert_eq!(Typed::Path(PathBuf::from("dl/a.zip")), expand_tilde("dl/a.zip", h));
         assert_eq!(Typed::Path(PathBuf::from("dl/~/a.zip")), expand_tilde("dl/~/a.zip", h));
-        // The two refusals.
+        // These two forms return refusal states.
         assert_eq!(Typed::UserRelative, expand_tilde("~root/a.zip", h));
         assert_eq!(Typed::NoHome, expand_tilde("~/a.zip", None));
         assert_eq!(Typed::NoHome, expand_tilde("~", None));
     }
 
-    /// End to end through the real message handler: a `~` path stages the
-    /// same archive the absolute path does.
+    /// Test the full message path. A `~` path stages the same archive as its absolute path.
     #[test]
     fn adding_a_tilde_path_stages_the_same_archive_the_absolute_path_does() {
         let dir = scratch("add_tilde");
         let mut app = app(&dir);
-        // The fixture tree stands in for a home directory; injecting it
-        // beats mutating the shared process environment.
+        // The test uses the fixture directory as the home path and leaves the shared
+        // process environment unchanged.
         app.home = Some(fixture("terms.zip").parent().unwrap().to_path_buf());
 
         let _ = update(&mut app, Message::AddPath("~/terms.zip".to_string()));
@@ -3177,8 +2999,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Bare `~` is a directory, not an archive: refused by the resolved
-    /// path, which is what the message must name.
+    /// Bare `~` resolves to a directory, not an archive. The message must name that
+    /// resolved path.
     #[test]
     fn adding_a_bare_tilde_is_refused_by_its_resolved_path() {
         let dir = scratch("add_bare_tilde");
@@ -3194,8 +3016,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `~user/…` and a missing `$HOME` each say what is wrong instead of
-    /// probing a literal `~` path.
+    /// `~user/…` and an unset `$HOME` report their reasons. The code does not probe
+    /// a literal `~` path.
     #[test]
     fn a_user_relative_tilde_and_a_missing_home_are_refused_with_a_reason() {
         let dir = scratch("add_tilde_bad");
@@ -3216,7 +3038,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A path that is not a dictionary is refused, not silently ignored.
+    /// A non-dictionary path produces a refusal, not silent omission.
     #[test]
     fn adding_an_unreadable_path_says_so_and_stages_nothing() {
         let dir = scratch("add_bad");
@@ -3256,11 +3078,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Three sections, one list each, every row reading and writing its
-    /// own role. A built widget tree is opaque, so what is asserted is the
-    /// state each section is built from plus the fact that every path
-    /// through the rows builds: a checked row, an unchecked one, the
-    /// selected one, and the placeholder an empty list gets.
+    /// Each section renders its own role list. The test checks enabled, disabled,
+    /// selected, and empty-list rows because iced hides widget details.
     #[test]
     fn each_section_renders_its_own_role_s_list() {
         let dir = scratch("sections");
@@ -3288,9 +3107,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A pitch archive supplies no definitions and no ranks, so it is a
-    /// row in one section only - and it reaches the file, which is the
-    /// half that had no UI at all before this change.
+    /// A pitch archive has no terms or frequency rank. It appears only in Pitch and
+    /// still reaches the config.
     #[test]
     fn a_pitch_only_import_is_a_row_in_the_pitch_section_and_nowhere_else() {
         let dir = scratch("add_pitch");
@@ -3305,9 +3123,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An archive supplying two roles is one row in each of their
-    /// sections, once, and no row in the third's. `both.zip` carries a
-    /// term bank and pitch rows.
+    /// An archive with two roles appears once in each section for its role and nowhere
+    /// else. `both.zip` contains a term bank and pitch rows.
     #[test]
     fn a_mixed_import_is_one_row_in_each_of_its_sections() {
         let dir = scratch("add_both");
@@ -3321,10 +3138,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The same dictionary in two sections holds two independent places.
-    /// The terms-and-frequency pair has no fixture archive, so the state
-    /// `stage_add` would leave for one is seeded directly; what is under
-    /// test is what the sections do with a name two of them hold.
+    /// One Dictionary can have independent positions in two sections. No fixture
+    /// covers the terms and frequency pair, so the test seeds that state directly.
+    /// It checks how each section handles the shared name.
     #[test]
     fn a_dictionary_in_two_sections_keeps_a_place_in_each() {
         let dir = scratch("mixed_order");
@@ -3352,12 +3168,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A checkbox may only affect the section it sits in: unchecking a
-    /// mixed archive's definitions must not silently kill its frequency
-    /// data or its accents (ARCHITECTURE.md#dictionary-and-lookup). And
-    /// it flips in place, because a dictionary that loses its priority
-    /// every time the user parks it is one whose order the user cannot
-    /// curate.
+    /// A checkbox changes only its own section. It must not disable frequency data
+    /// or pitch data for a mixed archive. The row keeps its position because order
+    /// and enabled state are separate.
     #[test]
     fn a_checkbox_turns_off_only_the_role_of_its_own_section() {
         let dir = scratch("checkbox");
@@ -3376,14 +3189,14 @@ mod tests {
         assert_eq!(vec![("大辞林".to_string(), true)], checked(&app, Role::Frequency));
         assert_eq!(vec![("大辞林".to_string(), true)], checked(&app, Role::Pitch));
 
-        // And back on, in the place it never left.
+        // Enable the row again. It keeps its position.
         let _ = update(&mut app, Message::DictEnabled(Role::Terms, "大辞林".to_string(), true));
         assert_eq!(rows(&["Jitendex", "大辞林"]), app.form.terms);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Move up and Move down reorder the section they sit under, one place
-    /// at a time, and the ends of a list have nowhere to go.
+    /// Move up and Move down change one section at a time. A list end has no
+    /// destination.
     #[test]
     fn moving_a_row_reorders_only_its_own_section_and_stops_at_the_ends() {
         let dir = scratch("move");
@@ -3404,15 +3217,15 @@ mod tests {
             "a terms move is not a frequency move",
         );
 
-        // And back, so Move down is the same walk the other way.
+        // Move down returns the row to its prior position.
         let _ = update(&mut app, Message::DictDown(Role::Terms));
         assert_eq!(
             vec!["Jitendex".to_string(), "Daijirin".to_string(), "Kenkyusha".to_string()],
             listed(&app, Role::Terms),
         );
 
-        // Both ends: a press there is a no-op, not a wrap and not a jump
-        // into the section below.
+        // At both ends, a button press does nothing. It does not wrap or enter the
+        // next section.
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         let _ = update(&mut app, Message::DictUp(Role::Terms));
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "Kenkyusha".to_string()));
@@ -3426,10 +3239,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A section's buttons answer only to a selection inside it. One
-    /// dictionary can be a row in two sections, so a press under Frequency
-    /// while a terms row is highlighted must move nothing at all rather
-    /// than find that name in the frequency list and reorder it there.
+    /// A section button responds only to a selection in that section. A Dictionary
+    /// can occur in two sections, so a Frequency button must not reorder a name
+    /// selected in Terms.
     #[test]
     fn a_move_button_does_nothing_while_the_selection_is_in_another_section() {
         let dir = scratch("move_elsewhere");
@@ -3443,20 +3255,17 @@ mod tests {
         assert_eq!(vec!["Jitendex".to_string(), "JPDB".to_string()], listed(&app, Role::Frequency));
         assert_eq!(vec!["Jitendex".to_string(), "大辞林".to_string()], listed(&app, Role::Terms));
 
-        // The same press under the section the selection is in does move.
+        // A button in the selected section does move the row.
         let _ = update(&mut app, Message::DictDown(Role::Terms));
         assert_eq!(vec!["大辞林".to_string(), "Jitendex".to_string()], listed(&app, Role::Terms));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The drop index is where the held row would be inserted, so it
-    /// counts the row boundaries above the cursor: the top half of a row
-    /// inserts before it, the bottom half after it, and past either end
-    /// there are no more boundaries left to count, which is what pins a
-    /// drag to the ends of its own list.
+    /// `drop_index` returns the drop boundary above the pointer. The top half of a
+    /// row sets the boundary before it, and the bottom half sets it after it. Values
+    /// outside the list clamp to its ends.
     ///
-    /// Arithmetic only, asserted with no window, no renderer and no font
-    /// anywhere near it.
+    /// The test checks only arithmetic. It does not need a window, renderer, or font.
     #[test]
     fn the_drop_index_counts_the_row_boundaries_above_the_cursor() {
         assert_eq!(0, drop_index(0.0, 3), "the very top of the list");
@@ -3469,10 +3278,8 @@ mod tests {
         assert_eq!(0, drop_index(ROW_PITCH * 9.0, 0), "an empty list has one place to be");
     }
 
-    /// The insertion line fills the gap between the two rows it separates,
-    /// so drawing it moves nothing; at the ends, where there is no gap, it
-    /// sits just inside the list rather than a hair outside it, where the
-    /// stacked layer would have no room left to draw it at all.
+    /// The drop line fills the gap between rows without a layout change. At either
+    /// end, it stays inside the list because the stack has no space outside.
     #[test]
     fn the_insertion_line_fills_the_gap_it_marks_and_stays_inside_the_list() {
         assert_eq!(0.0, line_top(0, 3), "the top of the list, not two pixels above it");
@@ -3484,12 +3291,10 @@ mod tests {
         assert_eq!(0.0, line_top(0, 0));
     }
 
-    /// Without the deadband the pixel of travel a click carries would be a
-    /// reorder. A cursor that has left the list it grabbed from is past
-    /// any deadband by definition, because two lists' heights are not one
-    /// ruler and there is nothing to measure it against.
+    /// A click must not reorder a row. A pointer outside the source list counts as
+    /// past the deadband because the lists use different heights.
     ///
-    /// Arithmetic only, like the drop index it guards.
+    /// The test checks only arithmetic, like the `drop_index` test.
     #[test]
     fn a_press_only_becomes_a_drag_once_the_cursor_leaves_the_deadband() {
         assert!(!past_deadband(40.0, 40.0), "a press that has not moved at all");
@@ -3503,9 +3308,8 @@ mod tests {
         assert!(left_the_deadband(Role::Terms, 40.0, Hover { role: Role::Pitch, y: 40.0 }));
     }
 
-    /// The whole gesture, one message at a time: the cursor arrives on a
-    /// row, the press grabs it, the moves carry it, and the release lands
-    /// it where the insertion line was.
+    /// This test sends the gesture messages in order. The pointer reaches a row,
+    /// the press holds it, moves set the drop line, and release moves it.
     #[test]
     fn dragging_a_row_reorders_it_where_the_pointer_let_go() {
         let dir = scratch("drag");
@@ -3523,7 +3327,7 @@ mod tests {
         );
         assert_eq!(Drag::Idle, app.drag, "the pointer is holding nothing after a drop");
 
-        // And back up the same way, so a drag is not a one-way trip.
+        // Repeat the gesture upward. A drag can move both directions.
         hover(&mut app, Role::Terms, 2, ROW_HEIGHT / 2.0);
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         hover(&mut app, Role::Terms, 0, ROW_HEIGHT * 0.15);
@@ -3536,12 +3340,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A row dragged out of its own section has nowhere to land but the
-    /// end of the list it came from: the sections are stacked in
-    /// `Role::EVERY` order, so a cursor in a later one clamps to the
-    /// bottom and one in an earlier one to the top. The section it was
-    /// dragged over is not touched at all - a Dictionary's terms rank has
-    /// no meaning in the pitch list.
+    /// A row that leaves its section moves to the end that it crossed. Sections
+    /// follow `Role::EVERY` order, so a later section means the bottom and an earlier
+    /// section means the top. The other section stays unchanged because a Dictionary
+    /// has no cross-role order.
     #[test]
     fn a_drag_that_leaves_its_section_clamps_to_that_sections_ends() {
         let dir = scratch("drag_out");
@@ -3550,7 +3352,7 @@ mod tests {
         app.form.frequency = rows(&["JPDB", "BCCWJ", "Innocent"]);
         app.form.pitch = rows(&["NHK", "大辞林"]);
 
-        // Down and out of Terms, past Frequency, into Pitch.
+        // Move down from Terms, across Frequency, and into Pitch.
         hover(&mut app, Role::Terms, 0, ROW_HEIGHT / 2.0);
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "Jitendex".to_string()));
         hover(&mut app, Role::Pitch, 1, ROW_HEIGHT * 0.75);
@@ -3566,7 +3368,7 @@ mod tests {
             "the list it was dragged over gains nothing",
         );
 
-        // And up and out of Frequency, into Terms.
+        // Move up from Frequency and into Terms.
         hover(&mut app, Role::Frequency, 2, ROW_HEIGHT / 2.0);
         let _ = update(&mut app, Message::DictSelected(Role::Frequency, "Innocent".to_string()));
         hover(&mut app, Role::Terms, 0, ROW_HEIGHT * 0.25);
@@ -3584,10 +3386,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A press and a release with barely any travel between them is a
-    /// click: it selects the row and leaves the order alone. The same
-    /// press carried far enough does move it, so what is being asserted is
-    /// the deadband and not an inert drop.
+    /// A press and release inside the deadband selects the row and preserves order.
+    /// A longer move reorders it. The test checks the deadband, not a no-op drop.
     #[test]
     fn a_press_and_release_inside_the_deadband_selects_and_moves_nothing() {
         let dir = scratch("drag_deadband");
@@ -3610,7 +3410,7 @@ mod tests {
             "a click is still a selection",
         );
 
-        // The same grab, carried past the deadband, does reorder.
+        // The same held row moves after it crosses the deadband.
         hover(&mut app, Role::Terms, 1, ROW_HEIGHT / 2.0);
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "Daijirin".to_string()));
         hover(&mut app, Role::Terms, 2, ROW_HEIGHT * 0.75);
@@ -3623,10 +3423,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A checkbox keeps its own press - `iced_widget::checkbox` captures
-    /// it before the row's `mouse_area` is offered it - so toggling a role
-    /// off never grabs the row, and the release that follows finds nothing
-    /// to drop. The row stays exactly where it stood.
+    /// The checkbox handles its own press before the row's [`mouse_area`] sees it.
+    /// A role toggle does not hold the row, and the release has nothing to drop.
+    /// The row keeps its position.
     #[test]
     fn toggling_a_checkbox_never_grabs_or_moves_its_row() {
         let dir = scratch("drag_checkbox");
@@ -3650,10 +3449,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A release the lists never see - outside the window, or anywhere
-    /// else in it - ends the drag without moving anything. Otherwise the
-    /// window would be left drawing an insertion line for a button nobody
-    /// is pressing.
+    /// A release outside the list ends the drag and leaves the row in place. Otherwise
+    /// the window would keep the drop line for a row that no pointer holds.
     #[test]
     fn a_drag_released_outside_the_window_cancels_and_moves_nothing() {
         let dir = scratch("drag_escape");
@@ -3676,9 +3473,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The only feedback a drag gets, and it belongs to one section: the
-    /// list holding the row draws the line, the other two draw nothing,
-    /// and the whole window still builds with it.
+    /// The drop line belongs to the section that contains the row. Other sections
+    /// draw no line, and the window still builds the widget tree.
     #[test]
     fn the_insertion_line_marks_the_drop_position_in_the_held_rows_section() {
         let dir = scratch("drag_line");
@@ -3695,8 +3491,8 @@ mod tests {
         assert_eq!(None, drop_line(&app, Role::Pitch));
         let _ = view(&app);
 
-        // Dragged out of its section, the line pins itself to the end it
-        // left through and still belongs to the section it came from.
+        // Outside its section, the line stays at the crossed end and remains in the
+        // source section.
         hover(&mut app, Role::Frequency, 1, ROW_HEIGHT / 2.0);
         assert_eq!(Some(3), drop_line(&app, Role::Terms));
         assert_eq!(None, drop_line(&app, Role::Frequency), "the list it is over is not its list");
@@ -3704,8 +3500,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Nothing about the gesture is per role: the same three messages over
-    /// the same three rows leave the same order behind in every section.
+    /// Every role uses the same gesture path. The same three messages produce the
+    /// same order in each section.
     #[test]
     fn every_section_drags_the_same_way() {
         let dir = scratch("drag_every");
@@ -3727,8 +3523,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One archive is one Dictionary, so a row selected in any section
-    /// names the whole thing.
+    /// One archive is one Dictionary. A row selected in any section names the whole Dictionary.
     #[test]
     fn removing_a_dictionary_drops_it_from_every_section() {
         let dir = scratch("remove_all");
@@ -3748,11 +3543,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An archive this build cannot read supplies no role at all, so it
-    /// belongs to no section - and it is listed in Terms regardless
-    /// (`settings::with_library`), because being listed is the only way
-    /// the user can get rid of it. It reaches neither config array while
-    /// it sits there.
+    /// An unreadable archive has no role and appears in no role section.
+    /// `settings::with_library` still lists it in Terms so the user can remove it.
+    /// The config arrays do not contain it while it stays unreadable.
     #[test]
     fn an_unreadable_archive_is_listed_in_terms_and_can_still_be_removed() {
         let dir = scratch("unreadable_row");
@@ -3789,8 +3582,8 @@ mod tests {
         assert_eq!(RANKING_STRATEGIES.len(), ranking_labels().len());
     }
 
-    /// The picker above the Frequency list writes the form field the
-    /// reindex reduces by, and it is the whole of what that control does.
+    /// The picker writes the form field that the Frequency reindex uses. This is
+    /// the only effect of that control.
     #[test]
     fn picking_a_ranking_strategy_stages_it_on_the_form() {
         let dir = scratch("ranking");
@@ -3808,8 +3601,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Reordering the frequency list makes every stored rank stale, so
-    /// Apply recomputes them in place before the `reload`.
+    /// A Frequency order change makes stored ranks stale. Apply therefore runs an
+    /// in-place reindex before it sends `reload`.
     #[test]
     fn reordering_the_frequency_list_reaches_the_reindex_seam() {
         let dir = scratch("seam_order");
@@ -3854,9 +3647,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The other side of the same seam: a terms or pitch edit is a config
-    /// write plus the `reload` the window already sends, and recomputing
-    /// every rank for it would be minutes of work for nothing.
+    /// A Terms or Pitch edit writes config and sends `reload`. It does not change
+    /// Frequency ranks, so it does not need a reindex.
     #[test]
     fn a_terms_or_pitch_change_never_reaches_the_reindex_seam() {
         let dir = scratch("seam_none");
@@ -3880,9 +3672,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The whole point of the checkbox, end to end: the form goes back
-    /// onto the config and the config is what the lookup pipeline reads.
-    /// An exact name, and no substring ladder behind it.
+    /// The checkbox changes the form and the config that the lookup pipeline reads.
+    /// The pipeline uses the exact Dictionary name, not a substring.
     #[test]
     fn an_unchecked_terms_row_never_reaches_the_lookup_pipeline() {
         let dir = scratch("unchecked_terms");
@@ -3902,8 +3693,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Builder lines reach the user through the shared renderer, and the
-    /// raw ones stay out of sight.
+    /// The shared renderer shows lines for the user and hides raw lines.
     #[test]
     fn progress_lines_render_through_the_shared_renderer() {
         let dir = scratch("progress");
@@ -3914,8 +3704,7 @@ mod tests {
         assert_eq!(Some("12,500 of 768,636 entries…".to_string()), app.rebuild_progress);
         assert!(app.busy(), "a live rebuild keeps the library controls shut");
 
-        // Nothing to say about it: the last line must not replace the one
-        // the user can read.
+        // The last raw line must not replace the visible progress line.
         let _ = update(&mut app, line("wrote /tmp/x.sqlite.building: 3 entries"));
         assert_eq!(Some("12,500 of 768,636 entries…".to_string()), app.rebuild_progress);
         let _ = std::fs::remove_dir_all(&dir);
@@ -3945,7 +3734,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The archives went back, so the request must survive for a retry.
+    /// A failed rebuild returns the archives, so staged edits remain available for a retry.
     #[test]
     fn a_failed_rebuild_keeps_the_staged_edits() {
         let dir = scratch("failed");
@@ -3967,8 +3756,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Pressing Rebuild while another process holds the library says who
-    /// holds it, and starts nothing.
+    /// If another process holds the library lock, Rebuild reports that process and
+    /// starts no build.
     #[test]
     fn a_rebuild_refused_by_the_flock_reports_the_holder() {
         let dir = scratch("contend");
@@ -4009,11 +3798,9 @@ mod tests {
         }
     }
 
-    /// What the checkbox click actually does, driven through the real
-    /// message handler: the `.desktop` file appears and disappears, a
-    /// reopened window reads its state back off the file, and no config
-    /// is written on the way (ARCHITECTURE.md#settings-and-config: the
-    /// file is the whole state).
+    /// The checkbox handler writes the `.desktop` file and a new window reads its
+    /// state from that file. It writes no config file
+    /// (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn toggling_autostart_writes_the_file_and_leaves_the_config_alone() {
         let home = std::env::temp_dir().join(format!("chibipop_app_autostart_{}", std::process::id()));
@@ -4026,15 +3813,15 @@ mod tests {
         let form_before = app.form.clone();
         assert!(!app.autostart_on, "a fresh config home opens with the box clear");
 
-        // The toggle is applied in the handler; the returned task is a
-        // no-op here because nothing about it reaches the filesystem.
+        // The handler applies the toggle. The returned task is a no-op because the
+        // handler writes the filesystem directly.
         let _ = update(&mut app, Message::Autostart(true));
         assert!(app.autostart_on);
         assert!(entry.is_file(), "the click wrote {}", entry.display());
         assert!(std::fs::read_to_string(&entry).unwrap().starts_with("[Desktop Entry]"));
 
-        // Reopening is a fresh App over the same paths: it must read the
-        // box's state off the file, not off anything it remembered.
+        // A new App uses the same paths and reads the checkbox state from the file, not
+        // from prior state.
         assert!(App::new(init_at(&home)).autostart_on, "a reopened window sees the entry");
 
         let _ = update(&mut app, Message::Autostart(false));
@@ -4048,8 +3835,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// Without a config root the row is inert rather than lying: the box
-    /// stays clear and the status line says why.
+    /// Without a config root, the row stays inactive and reports the reason. The
+    /// checkbox stays clear.
     #[test]
     fn autostart_without_a_config_root_reports_instead_of_toggling() {
         let mut init = init_at(&std::env::temp_dir());
@@ -4061,10 +3848,9 @@ mod tests {
         assert!(app.status.contains("XDG config directory"), "{}", app.status);
     }
 
-    /// The check's answer is a status line and an open button again.
-    /// Only the click's own arm reaches the network, so what is driven
-    /// here is the line coming back - what it says for each outcome is
-    /// [`super::super::update`]'s to prove.
+    /// A completed update check supplies a status line and enables the button.
+    /// Only the click arm uses the network. This test checks the returned line.
+    /// [`super::super::update`] defines each result.
     #[test]
     fn a_finished_update_check_reports_and_reopens_the_button() {
         let dir = scratch("update");

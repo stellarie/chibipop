@@ -1,17 +1,16 @@
-//! What the popup shows of an entry, and the furniture around it.
+//! This module builds the popup content for one Entry and the chrome around it.
 //!
-//! **One reason to change:** the panel's own content - a row added or
-//! dropped, a heading reworded, an affordance reserved.
+//! **One reason to change:** Change this module when the panel content changes.
+//! The panel can add or remove a row, change a heading, or reserve space for a control.
 //!
-//! The one place the render settings are read
-//! ([`build_elements`]), which is what keeps [`RenderSettings`] a decision
-//! table rather than a cascade: its four facts resolve here into the two
-//! things the gloss walk takes, and nothing below this point consults a
-//! setting again.
+//! [`build_elements`] is the only function that reads render settings.
+//! This keeps [`RenderSettings`] as a decision table instead of a cascade.
+//! [`build_elements`] resolves four facts into the two values used by the gloss walk.
+//! Code after that point does not read a setting.
 //!
-//! Everything here is the panel's, not a dictionary's: a chrome element
-//! carries one style, so it has one span, and it gets the seam exactly the
-//! request it got before the inline pass existed.
+//! Every element here belongs to the panel, not to a Dictionary.
+//! Each chrome element has one style and one span.
+//! Each element uses the seam as before the inline pass.
 
 use crate::dict::gloss::RoleFilter;
 use crate::dict::pitch::marked_morae;
@@ -35,35 +34,32 @@ pub(super) const LINE_GAP: f32 = 4.0;
 /// Gap before a new block.
 pub(super) const SECTION_GAP: f32 = 10.0;
 
-/// Gap beside the corner elem.
+/// Gap beside the corner element.
 pub(super) const CORNER_GAP: f32 = 8.0;
 
 /// Gap around the rule.
 pub(super) const SEPARATOR_MARGIN: f32 = 10.0;
 
-/// The side column's vertical rule.
+/// Width of the vertical rule in the side column.
 ///
-/// Not `Theme::separator_height`: that
-/// themes the horizontal rule between
-/// blocks, and a height cannot set the
-/// width of a vertical one.
+/// `Theme::separator_height` sets the height of the horizontal rule between blocks.
+/// It cannot set the width of a vertical rule.
 pub(super) const SEPARATOR_THICKNESS: f32 = 1.0;
 
-/// The overline and the downstep tick, in px.
+/// Thickness of the overline and downstep tick in pixels.
 ///
-/// The whole of marked kana's ink. One pixel is what Yomitan's own
-/// `border-top` and `border-right` draw it at, and a mark heavier than the
-/// stroke of the kana under it would read as a highlight rather than as a
-/// mark.
+/// This value gives the full ink thickness for marked kana.
+/// Yomitan draws `border-top` and `border-right` at one pixel.
+/// This value matches that width.
+/// A thicker mark looks like a highlight instead of a pitch mark.
 pub(super) const PITCH_MARK: f32 = 1.0;
 
-/// What separates a pitch row's marked reading from the dictionaries that
-/// gave the accent.
+/// Space between a marked reading and the Dictionaries that report its accent.
 ///
-/// U+2003 EM SPACE: one gap, no glyph. The collapsed row puts an em dash
-/// between its headword and its summary because those are two different
-/// things; a reading and its sources are one statement, so the space alone
-/// is what separates them.
+/// This constant is one U+2003 EM SPACE.
+/// It reserves space but draws no glyph.
+/// The collapsed row uses an em dash between its headword and summary because they are separate.
+/// A reading and its Dictionary sources form one statement, so one space separates them.
 pub(super) const PITCH_SOURCE_GAP: &str = "\u{2003}";
 
 /// Fixed "See also" column width.
@@ -72,106 +68,71 @@ pub(super) const SIDE_PANEL_W: f32 = 110.0;
 /// Gap before the side panel.
 pub(super) const SIDE_GAP: f32 = 12.0;
 
-/// What the popup shows of an entry,
-/// as the scene builder spends it.
+/// Popup content in the form that the scene builder uses.
 ///
-/// Render settings are a decision
-/// table, not a style engine:
-/// Yomitan's own
-/// configurability is a small fixed
-/// set of root attributes driving
-/// fixed CSS rules, and this is
-/// chibipop's mirror of it -
-/// `popup`'s six knobs resolved to
-/// the four facts the gloss walk
-/// actually spends. Resolved by
-/// `PopupConfig::render_settings`, so
-/// the enum-to-flag mapping lives
-/// once and the walk never sees a
-/// config type.
+/// Render settings form a decision table, not a cascade of style rules.
+/// Yomitan lets a user set a fixed group of root attributes.
+/// Those attributes drive fixed CSS rules.
+/// This struct mirrors that design.
+/// `PopupConfig::render_settings` resolves six `popup` settings into four facts.
+/// The gloss walk uses those facts.
+/// The enum-to-flag table stays in that function.
+/// The gloss walk does not see a `PopupConfig` value.
 ///
-/// Read in exactly one place
-/// ([`build_elements`]), which is
-/// what keeps this a table rather
-/// than a cascade: nothing below that
-/// point consults a setting again.
+/// [`build_elements`] reads this struct in one place.
+/// This keeps [`RenderSettings`] as a decision table instead of a cascade.
+/// Code after that point does not read a setting again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderSettings {
-    /// Does a glossary list stack its
-    /// items?
+    /// Does a glossary list place each item on a separate line?
     ///
-    /// `true` gives each item its own
-    /// line, marked and indented;
-    /// `false` joins them into one
-    /// paragraph with
-    /// [`ITEM_SEPARATOR`] between
-    /// them, which is the terse popup
-    /// chibipop drew before it could
-    /// do better. The same parameter
-    /// the list pass already had
-    /// ([`Paragraphs::stack_items`]) -
-    /// compact mode flips it and
-    /// invents nothing.
+    /// `true` gives each item its own line with a marker and an indent.
+    /// `false` joins the items into one paragraph with [`ITEM_SEPARATOR`] between them.
+    /// This was the plain form that chibipop used before the panel could stack a list.
+    /// This is the same parameter that the list pass already had ([`Paragraphs::stack_items`]).
+    /// Compact mode changes only this value.
+    /// It adds no other behavior.
     ///
     /// [`ITEM_SEPARATOR`]: super::gloss::ITEM_SEPARATOR
     /// [`Paragraphs::stack_items`]: super::gloss::Paragraphs::stack_items
     pub stack_items: bool,
-    /// Do a dictionary's own
-    /// declarations apply?
+    /// Do a Dictionary's style declarations apply?
     ///
-    /// Off draws every entry in the
-    /// theme's own font and colours.
-    /// One flag for both sources by
-    /// construction: inline `style`
-    /// and a dictionary's own
-    /// `styles.css` land in the same
-    /// resolved record, and
-    /// [`Paragraphs::declarations`] is
-    /// the single gate over it.
+    /// Off draws every Entry with the theme's font and colors.
+    /// The same flag controls both style sources.
+    /// The Dictionary's inline `style` attribute and its `styles.css` file resolve into one record.
+    /// [`Paragraphs::declarations`] is the only gate for that record.
     ///
     /// [`Paragraphs::declarations`]: super::gloss::Paragraphs::declarations
     pub styling: bool,
-    /// Do image assets reach the
-    /// panel?
+    /// Do image assets reach the panel?
     ///
-    /// Off leaves the `alt` text: an
-    /// image node is a *character*
-    /// far more often than an
-    /// illustration, so a node cut out
-    /// whole would leave a hole in a
-    /// word.
+    /// Off keeps the `alt` text in place.
+    /// An image node usually represents a character, not an illustration.
+    /// Removing the whole node would leave a hole in a word.
     pub images: bool,
-    /// Which editorial roles reach the
-    /// panel.
+    /// Which editorial roles reach the panel?
     ///
-    /// The card renderer's own
-    /// vocabulary, and a separate
-    /// *value* of it: the popup's
-    /// answer and the card's are two
-    /// filters over one enum, which is
-    /// what lets a user hide examples
-    /// on screen and keep them on a
-    /// mined card. The card's is
-    /// [`RoleFilter::CARD`] and no
-    /// setting reaches it.
+    /// This field reuses the card renderer's `RoleFilter` type.
+    /// It stores a separate value of that type.
+    /// The popup filter and the card filter are two values of one enum.
+    /// This lets a user hide examples on screen but retain them on a mined card.
+    /// The card filter stays at [`RoleFilter::CARD`]. No setting changes it.
     pub roles: RoleFilter,
 }
 
 impl Default for RenderSettings {
-    /// What a fresh install draws: a
-    /// stacked list, the dictionary's
-    /// own styling, its images, and
-    /// its editorial matter minus the
-    /// part-of-speech labels the card
-    /// already prints above the
-    /// glosses.
+    /// Values that a fresh install draws:
     ///
-    /// The same values `PopupConfig`'s
-    /// own defaults resolve to - a
-    /// test pins the two together -
-    /// so a geometry fixture and a
-    /// fresh install draw the same
-    /// panel.
+    /// - A stacked list.
+    /// - The Dictionary's style.
+    /// - The Dictionary's images.
+    /// - The Dictionary's editorial matter except part-of-speech labels.
+    ///   The card already prints those labels above the glosses.
+    ///
+    /// `PopupConfig` defaults resolve to these values.
+    /// A test checks that both sets match.
+    /// A geometry fixture and a fresh install therefore draw the same panel.
     fn default() -> RenderSettings {
         RenderSettings {
             stack_items: true,
@@ -182,7 +143,7 @@ impl Default for RenderSettings {
     }
 }
 
-/// The shared text-element shape.
+/// Shared shape for a text element.
 pub(super) fn text_elem(
     kind: ElemKind,
     line: &Line,
@@ -210,27 +171,20 @@ pub(super) fn text_elem(
         marker: Vec::new(),
         block_box: None,
         inline_boxes: Vec::new(),
-        // The panel's own chrome: a
-        // headword, a reading, a
-        // dictionary label and a
-        // collapsed row are built from
-        // a `Presentation` and not from
-        // a parsed tree, so none of
-        // them addresses a node.
+        // This element belongs to the panel chrome, not gloss content.
+        // A headword, reading, Dictionary label, or collapsed row comes from a
+        // `Presentation`, not from a parsed tree.
+        // None of these elements can address a node.
+        // Chrome elements do not use an asset.
         origin: None,
-        // Chrome composites no asset.
         image: None,
     }
 }
 
-/// The one span a `Line` is, as the
-/// scene carries it.
+/// The one span that a `Line` becomes in the scene.
 ///
-/// Every element the panel's own
-/// chrome builds has one style, so it
-/// has one span - and the seam gets
-/// exactly the request it got before
-/// the inline pass existed.
+/// Every element that the panel chrome builds has one style and one span.
+/// The seam receives the same request that it received before the inline pass.
 pub(super) fn one_span(line: &Line) -> Vec<ElemSpan> {
     vec![ElemSpan {
         at: 0,
@@ -243,14 +197,11 @@ pub(super) fn one_span(line: &Line) -> Vec<ElemSpan> {
     }]
 }
 
-/// The one span a `Line` is, as the
-/// seam takes it.
+/// The one span that a `Line` becomes for the seam.
 ///
-/// Every element the panel's own
-/// chrome builds carries one style; a
-/// gloss paragraph is what hands the
-/// seam more than one, through
-/// [`Flow::styled_spans`].
+/// Every panel chrome element has one style.
+/// A gloss paragraph is the only element that gives the seam more than one span.
+/// It does so through [`Flow::styled_spans`].
 pub(super) fn span<'a>(font: &'a str, line: &'a Line) -> StyledSpan<'a> {
     StyledSpan {
         text: &line.text,
@@ -275,10 +226,9 @@ pub(super) fn measure_line(
 
 /// One "See also" row's span.
 ///
-/// One role for the whole column, the
-/// collapsed one, so its rows differ
-/// only in text and colour - and no
-/// geometry rides on colour.
+/// The collapsed row supplies the role for the whole column.
+/// Rows differ only in text and color.
+/// Color does not affect geometry.
 pub(super) fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> StyledSpan<'a> {
     StyledSpan {
         text,
@@ -290,30 +240,32 @@ pub(super) fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> Styl
     }
 }
 
-/// One pitch row, measured and marked.
+/// Measures one pitch row and marks its accent.
 ///
-/// Two spans, where every other element the panel's own chrome builds has
-/// one: the reading draws in the card's reading style and the dictionaries
-/// that gave the accent draw dimmed beside it. The reading is the *first*
-/// span, so a UTF-16 offset into the run and a UTF-16 offset into the
-/// reading are the same number.
+/// This element has two spans.
+/// Every other panel chrome element has one span.
+/// The reading uses the card reading style.
+/// Dictionaries that report the accent use dimmed text beside the reading.
+/// The reading is the first span.
+/// Therefore, a UTF-16 offset in the run equals the offset in the reading.
 ///
-/// The marks come from [`TextMeasure::caret_boxes`] - the same probe the
-/// headword's per-character hit targets take - because only the measurer
-/// knows where a mora landed. Every character of the reading is probed and
-/// not only every mora's first: a mora is one or two characters, so
-/// `きょ`'s box is the union of two of them and its first alone would leave
-/// half the mora unmarked.
+/// The marks come from [`TextMeasure::caret_boxes`].
+/// [`TextMeasure::caret_boxes`] also produces the headword's per-character hit targets.
+/// Only the measurer knows each mora position.
+/// The code probes every character in the reading, not only each mora's first character.
+/// A mora has one or two characters, so `きょ` uses both boxes.
+/// The first character's box would leave half the mora unmarked.
 ///
-/// One box per marked mora rather than one per run of them. Adjacent moras
-/// abut, so a run still reads as one overline, and a reading that wrapped
-/// gets each mora's mark on the mora's own line instead of one box stretched
-/// across the break.
+/// The code draws one box for each marked mora, not one box for each run.
+/// Adjacent moras touch, so boxes in a run appear as one overline.
+/// A reading that wraps across two lines gets each mora's mark on its own line.
+/// The code does not stretch a box across the line break.
 ///
-/// The pen is where the row goes, absolute, exactly as the gloss and table
-/// walks take it. What is left is the measurer, the text, and the two
-/// scratch buffers the seam fills; there is no smaller grouping of those
-/// that is not just this function's frame spelled twice.
+/// The `pen` parameter gives the row's absolute position.
+/// The gloss walk and the table walk pass this position.
+/// The function also needs the measurer, the text, and two scratch buffers that the seam fills.
+/// No smaller parameter group exists.
+/// A smaller group would repeat this function's own parameters.
 pub(super) fn pitch_elem(
     m: &mut dyn TextMeasure,
     font: &str,
@@ -380,14 +332,14 @@ pub(super) fn pitch_elem(
         marker: Vec::new(),
         block_box: None,
         inline_boxes,
-        // The panel's own chrome: an accent belongs to a reading and not to
-        // a node of anyone's tree, so it addresses none.
+        // This belongs to the panel chrome.
+        // An accent belongs to a reading, not to a tree node, so it has no node address.
         origin: None,
         image: None,
     })
 }
 
-/// One `Line` as a span of an element that holds several.
+/// Builds one span from a `Line` for an element that holds several spans.
 fn elem_span(at: u32, len: u32, line: &Line) -> ElemSpan {
     ElemSpan {
         at,
@@ -400,14 +352,14 @@ fn elem_span(at: u32, len: u32, line: &Line) -> ElemSpan {
     }
 }
 
-/// The border edges one marked mora draws.
+/// Border edges that draw one marked mora.
 ///
-/// A top edge over every high mora, so a run of them reads as one overline,
-/// and a right edge on the mora the pitch falls after, which is the
-/// downstep tick. No padding, no margin and no background: a box that only
-/// decorates takes no room from the line it sits on, so a pitch row
-/// measures and stacks exactly as the same text would with no accent at
-/// all.
+/// A top edge sits over each high mora, so adjacent high moras form one overline.
+/// A right edge marks the mora after the pitch falls.
+/// This edge is the downstep tick.
+/// The style sets no padding, margin, or background.
+/// A box that only decorates does not take space from its line.
+/// A pitch row therefore measures and stacks like the same text without an accent.
 fn mark_style(color: Rgb, fall: bool) -> BoxStyle {
     let tick = if fall { PITCH_MARK } else { 0.0 };
     let tick_style = if fall { BorderStyle::Solid } else { BorderStyle::None };
@@ -423,7 +375,7 @@ fn mark_style(color: Rgb, fall: bool) -> BoxStyle {
     }
 }
 
-/// The "See also" column's geometry.
+/// Geometry for the "See also" column.
 pub(super) fn side_panel(
     entries: &[SideEntry],
     theme: &Theme,
@@ -473,7 +425,7 @@ pub(super) fn side_panel(
 /// The side column's heading.
 pub(super) const SIDE_HEADING: &str = "See also";
 
-/// CJK ideograph check.
+/// Returns whether a character is a CJK ideograph.
 pub(super) fn is_kanji(c: char) -> bool {
     matches!(c,
         '\u{4E00}'..='\u{9FFF}'
@@ -482,45 +434,49 @@ pub(super) fn is_kanji(c: char) -> bool {
     )
 }
 
-/// One line to lay out or draw.
+/// One text line that the code can measure or draw.
 ///
-/// Rebuilt, never cached.
+/// The code creates a new `Line` each time.
+/// It does not cache this structure.
 pub(super) struct Line {
     pub(super) text: String,
     pub(super) color: Rgb,
     pub(super) size: f32,
     /// Extra space above this line.
     pub(super) top_gap: f32,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     pub(super) weight: u16,
     pub(super) italic: bool,
 }
 
-/// One accent, as marked kana.
+/// One accent represented as marked kana.
 ///
-/// The marks *are* the notation and not a decoration of it: an overline
-/// over every high mora, and a tick down the right edge of the mora the
-/// pitch falls after. Both are one border edge of an inline box, which is
-/// what Yomitan's own stylesheet draws them with - so chibipop draws pitch
-/// in its own text stack and needs no SVG for it.
+/// The marks are notation, not decoration.
+/// An overline sits over each high mora.
+/// A tick marks the right edge of the mora after which the pitch falls.
+/// Both marks are one border edge of an inline box.
+/// Yomitan's stylesheet draws the marks with the same border edges.
+/// Therefore, chibipop draws pitch in its text stack and needs no SVG.
 pub(super) struct Pitch {
-    /// The reading itself, in the card's own reading style. What the marks
-    /// are placed over, and the element's first span.
+    /// The reading in the card's own reading style.
+    /// The marks sit over this text.
+    /// This is the element's first span.
+    /// Dimmed names of the Dictionaries that report this accent, after [`PITCH_SOURCE_GAP`].
+    /// This is the element's second span.
+    /// The code does not read its `top_gap`.
+    /// The row gets its gap from the reading's `top_gap`.
     pub(super) reading: Line,
-    /// The dictionaries that gave this accent, dimmed, after
-    /// [`PITCH_SOURCE_GAP`]. The element's second span, so its own
-    /// `top_gap` is never read - the row's gap is the reading's.
     pub(super) sources: Line,
-    /// The reading's moras, marked, in order.
+    /// The reading's moras with their mark state, in order.
     pub(super) morae: Vec<Marked>,
 }
 
-/// One mora of a marked reading, in the coordinates the seam addresses.
+/// One mora of a marked reading in the coordinates that the seam addresses.
 ///
-/// A copy of what [`marked_morae`] worked out rather than a borrow of it: a
-/// mora is one or two *characters* and the measurer addresses a run by
-/// UTF-16 unit, so neither number is derivable from the other and both have
-/// to travel.
+/// This struct copies the value that [`marked_morae`] computes.
+/// It does not borrow that value.
+/// A mora has one or two *characters*, but the measurer addresses a run by UTF-16 unit.
+/// The code cannot derive either count from the other, so it stores both.
 pub(super) struct Marked {
     /// UTF-16 offset of the mora's first unit, into the reading.
     pub(super) at: u32,
@@ -533,57 +489,46 @@ pub(super) struct Marked {
 
 pub(super) enum Elem {
     Text(Line),
-    /// Right-aligned, advances no y.
+    /// Draws right-aligned without advancing the layout's y position.
     ///
-    /// Steals width from the next.
+    /// It removes width from the next element.
     Corner(Line),
     Separator { top_gap: f32 },
-    /// A clickable collapsed row.
+    /// A collapsed row that accepts clicks.
     Collapsed(usize, Line),
-    /// Per-char click targets.
+    /// One click target for each character.
     Headword {
         headword: String,
         prefix_u16: usize,
         line: Line,
     },
-    /// One accent, as marked kana.
+    /// One accent represented as marked kana.
     ///
-    /// Two spans and a box per marked
-    /// mora, which is what makes it
-    /// the one chrome element with
-    /// more than one style
-    /// ([`Pitch`]).
+    /// This element has two spans and one box for each marked mora.
+    /// It is the only chrome element with more than one style ([`Pitch`]).
     Pitch(Pitch),
-    /// One paragraph of a gloss tree.
+    /// One paragraph from a gloss tree.
     ///
-    /// The only element the panel
-    /// builds that can hold more than
-    /// one style, and the only one
-    /// that can earn a hit target
-    /// inside its own text.
+    /// This is the only panel element that can hold more than one style.
+    /// It is also the only element that can have a hit target inside its text.
     Gloss(Flow),
-    /// One table of a gloss tree.
+    /// One table from a gloss tree.
     ///
-    /// A grid rather than a run: its
-    /// cells are measured and placed
-    /// by [`Pass::table`], which is
-    /// the only element that produces
-    /// more than one [`SceneElem`].
+    /// This is a grid, not a run.
+    /// [`Pass::table`] measures and places its cells.
+    /// Of all elements that this module builds, only a table produces more than one [`SceneElem`].
     ///
     /// [`Pass::table`]: super::pass::Pass::table
     Table(Grid),
-    /// One boxed block of a gloss
-    /// tree.
+    /// One boxed block from a gloss tree.
     ///
-    /// A container rather than a run:
-    /// its box wraps every paragraph
-    /// inside it, and everything in it
-    /// is measured at the width the
-    /// box left ([`Pass::boxed`]).
+    /// This is a container, not a run.
+    /// Its box surrounds every paragraph inside it.
+    /// [`Pass::boxed`] measures everything inside the box at the width that the box leaves free.
     ///
     /// [`Pass::boxed`]: super::pass::Pass::boxed
     Boxed(Boxed),
-    /// Navigate back in history.
+    /// A control that navigates back in history.
     BackButton(Line),
 }
 
@@ -594,21 +539,16 @@ pub(super) struct SideEntry {
     pub(super) color: Rgb,
 }
 
-/// `p`'s content, in draw order.
+/// Content of `p` in draw order.
 ///
-/// **The one place the render settings
-/// are read.** [`RenderSettings`]'
-/// four facts resolve here into the
-/// two things the gloss walk takes -
-/// a list's layout and a [`Render`]
-/// record - and nothing below this
-/// point consults a setting again.
-/// That is a decision table, not
-/// a style engine:
-/// Yomitan drives the same handful of
-/// root attributes into fixed CSS
-/// rules rather than offering a
-/// cascade.
+/// **This is the only place that reads the render settings.**
+/// [`RenderSettings`] supplies four facts here.
+/// This function resolves them into two values for the gloss walk:
+/// the list layout and a [`Render`] record.
+/// Code after this point does not read a setting again.
+/// This design uses a decision table, not a cascade of style rules.
+/// Yomitan drives the same small set of root attributes into fixed CSS rules.
+/// It does not offer a cascade.
 pub(super) fn build_elements(
     p: &Presentation,
     theme: &Theme,
@@ -630,7 +570,7 @@ pub(super) fn build_elements(
     }
 
     if let Some(card) = &p.top {
-        // Before the headword: same y.
+        // This corner element comes before the headword and uses the same y position.
         if let Some(freq) = card.freq {
             out.push(Elem::Corner(Line {
                 text: format!("freq {freq}"),
@@ -660,10 +600,11 @@ pub(super) fn build_elements(
             });
         }
 
-        // Only if the headword differs - and only when no accent follows.
-        // A pitch row *is* the reading, in marked kana, so a plain reading
-        // line above it is the same string twice; the marked one carries
-        // everything the plain one said and more.
+        // The code shows this line only when the headword differs from the reading.
+        // It also requires that no accent follows.
+        // A Pitch row is the reading in marked kana.
+        // A plain reading line would repeat the same string.
+        // The marked reading contains the plain reading plus the pitch marks.
         if card.written.is_some() && card.pitch.is_empty() {
             if let Some(reading) = card.reading.as_deref().filter(|r| !r.is_empty()) {
                 out.push(Elem::Text(Line {
@@ -677,13 +618,12 @@ pub(super) fn build_elements(
             }
         }
 
-        // Straight under the headword: marked kana repeats the reading
-        // rather than annotating a line above it, so it needs no reading
-        // line of its own to hang off - and the plain one is suppressed
-        // above precisely because these rows replace it. Nothing at all
-        // when no enabled pitch dictionary has the reading: `card.pitch`
-        // is then empty, and an empty row would say something untrue
-        // about the word.
+        // Pitch rows sit directly under the headword.
+        // A Pitch row repeats the reading in marked kana, so no plain reading line is needed.
+        // The code omits the plain reading because pitch rows replace it.
+        // When no enabled Dictionary reports pitch for this reading, `card.pitch` is empty.
+        // The code then draws no row.
+        // An empty row would claim an accent that no Dictionary reported.
         if let Some(reading) = card.reading.as_deref().filter(|r| !r.is_empty()) {
             for row in &card.pitch {
                 out.push(Elem::Pitch(pitch_line(reading, row, theme)));
@@ -710,14 +650,15 @@ pub(super) fn build_elements(
                 weight: theme.dict_label_weight,
                 italic: theme.dict_label_italic,
             }));
-            // Yomitan's `<ol>` holds one item per matched term-bank row, and
-            // Hoshi Reader emits the list at all only when a dictionary
-            // contributed more than one row - so one row is unnumbered. Never
-            // the Senses inside a row: 大辞林 draws its own ①②③ in the tree,
-            // and an outer number would double-number it.
+            // Yomitan's `<ol>` has one item for each matched term-bank row.
+            // Hoshi Reader emits this list only when a Dictionary contributes more than one row.
+            // Therefore, the code leaves a single row unnumbered.
+            // This rule does not apply to Senses inside one row.
+            // 大辞林 draws its own ①②③ marks in the tree.
+            // An outer number would add a second number.
             let numbered = block.entries.len() > 1;
             for (i, entry) in block.entries.iter().enumerate() {
-                // Empty means "same set as the row above" (see `GlossEntry`).
+                // An empty tag set means "same set as the row above" (see `GlossEntry`).
                 if !entry.tags.is_empty() {
                     out.push(Elem::Text(Line {
                         text: entry.tags.join(" · "),
@@ -728,11 +669,10 @@ pub(super) fn build_elements(
                         italic: theme.dimmed_italic,
                     }));
                 }
-                // The panel renders the parsed tree, not the plain-text
-                // render of it: `GlossEntry::glosses` is what the Anki
-                // plain-text field and the collapsed summary still need,
-                // and a third view of one tree is the bug class this spec
-                // set out to close.
+                // The panel renders the parsed tree, not a plain-text copy.
+                // `GlossEntry::glosses` is a separate plain-text view.
+                // The Anki plain-text field and the collapsed summary still need that view.
+                // The design rejects a third independent view of one tree.
                 let assets = Assets { dict_id: block.dict_id, sizes: &entry.media };
                 let mut pieces = paragraphs(
                     &entry.doc,
@@ -749,28 +689,19 @@ pub(super) fn build_elements(
                 if pieces.is_empty() {
                     continue;
                 }
-                // The row behind every
-                // paragraph of it, which the
-                // tree itself cannot know.
-                // With the node path each
-                // paragraph already carries,
-                // this is what turns "select
-                // the text" into "select sense
-                // 3 of 大辞林".
+                // The code stamps each paragraph with its containing row.
+                // The tree cannot know that row.
+                // Each paragraph already carries its node path.
+                // Together, the row and node path let selection target "sense 3 of 大辞林".
                 for piece in &mut pieces {
                     piece.stamp(block.dict_id, entry.entry_id);
                 }
                 if numbered {
-                    // Yomitan's number is the
-                    // `<li>` marker, outside the
-                    // content, so a row that opens
-                    // with a table takes its
-                    // number on the line above
-                    // rather than losing it. Every
-                    // other row prefixes the
-                    // paragraph it already has,
-                    // which is what the geometry
-                    // goldens hold.
+                    // When a row starts with a table, the code puts the number above the table.
+                    // The number appears on a separate line.
+                    // The row keeps its number.
+                    // Every other row adds the number to the paragraph already present.
+                    // The geometry goldens pin this behavior.
                     if !matches!(pieces.first(), Some(Piece::Flow(_))) {
                         pieces.insert(
                             0,
@@ -834,12 +765,13 @@ pub(super) fn build_elements(
     (out, side)
 }
 
-/// One inline related row's headword, as the panel reads it.
+/// One inline related row's headword in the form that the panel reads.
 ///
-/// A related entry is a different term, so its reading carries as much of the
-/// identity as its written form: 猫 and 描 read apart only by their kana. The
-/// side panel stays headword-only because its column has no room for both,
-/// and a kana-only entry would otherwise print the same string twice.
+/// A related Entry is a different term.
+/// Its reading identifies the term as much as its written form.
+/// For example, 猫 and 描 differ in their kana.
+/// The side panel shows only the headword because its column has no room for both fields.
+/// An Entry with only kana would otherwise print the same string twice.
 fn related_inline_head(written: Option<&str>, reading: Option<&str>) -> String {
     match (
         written.filter(|s| !s.is_empty()),
@@ -852,13 +784,14 @@ fn related_inline_head(written: Option<&str>, reading: Option<&str>) -> String {
     }
 }
 
-/// One accent as the panel draws it: the reading in marked kana, and the
-/// dictionaries that gave the accent.
+/// One accent in the form that the panel draws.
+/// It contains marked kana and the Dictionaries that report the accent.
 ///
-/// The reading and not the headword, because a Pitch pattern is per reading
-/// and its moras are what the marks land on. The mora arithmetic is
-/// [`marked_morae`]'s and is not repeated here: the mined note's HTML field
-/// renders the same answer, so the two views of one accent cannot drift.
+/// This function uses the reading, not the headword.
+/// A Pitch pattern applies to one reading, and its moras receive the marks.
+/// [`marked_morae`] computes the mora arithmetic, so this function does not repeat it.
+/// The mined note's HTML field renders the same result with the same function.
+/// The two views of one accent therefore cannot diverge.
 fn pitch_line(reading: &str, row: &PitchRow, theme: &Theme) -> Pitch {
     Pitch {
         reading: Line {
@@ -889,9 +822,9 @@ fn pitch_line(reading: &str, row: &PitchRow, theme: &Theme) -> Pitch {
     }
 }
 
-/// The Anki button's label.
+/// Label for the Anki button.
 ///
-/// `None` means: show no button.
+/// `None` means that the panel shows no button.
 pub fn anki_button_label(
     p: &Presentation,
     theme: &Theme,

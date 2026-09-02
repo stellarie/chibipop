@@ -1,4 +1,4 @@
-//! The plugin wire protocol.
+//! Define the JSON messages for the wire protocol between the plugin host and each plugin.
 
 use crate::plugin::manifest::Role;
 use serde::{Deserialize, Serialize};

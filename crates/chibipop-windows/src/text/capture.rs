@@ -1,4 +1,7 @@
-//! Screen capture. Win32.
+//! Capture screen regions with Win32 APIs.
+//!
+//! DXGI Desktop Duplication is the primary path. GDI `BitBlt` is the fallback
+//! when DXGI cannot provide a usable frame.
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::text::{Frame, RegionCapture};
@@ -36,7 +39,9 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 
-/// First; else DPI-scaled.
+/// Set per-monitor DPI awareness before capture starts.
+///
+/// DPI awareness keeps GDI coordinates aligned with physical pixels.
 pub fn init_dpi_awareness() -> Result<()> {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
@@ -45,34 +50,39 @@ pub fn init_dpi_awareness() -> Result<()> {
     Ok(())
 }
 
-/// Wake the pump. +2 is tray's.
+/// Wake the main pump for a capture-guard request.
+///
+/// The capture guard uses `WM_APP + 3`. The tray uses `WM_APP + 2`.
 pub const WM_APP_CAPTURE_GUARD: u32 = WM_APP + 3;
 
-/// Hide-ack wait, then capture.
+/// Set the maximum hide acknowledgement wait before capture continues.
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Popup out of one capture.
+/// Messages that the main thread handles for the capture guard.
 pub enum CaptureGuardMsg {
-    /// Hide now; ack when done.
+    /// Ask the main thread to hide chibipop windows and send an acknowledgement.
     Hide { ack: mpsc::Sender<()> },
-    /// Undo a Hide. Fire-and-forget.
+    /// Ask the main thread to restore chibipop windows. This message needs no acknowledgement.
     Restore,
 }
 
-/// The worker's guard handle.
+/// Handle that lets the Worker hide chibipop windows before capture.
 pub struct CaptureGuard {
-    /// Recomputed by `apply_live`.
+    /// `apply_live` sets this when a surface needs capture exclusion.
     pub active: Arc<AtomicBool>,
     pub main_tid: u32,
     pub request_tx: mpsc::Sender<CaptureGuardMsg>,
 }
 
 impl CaptureGuard {
-    /// Blocks until hidden.
+    /// Ask the main thread to hide windows before capture.
+    ///
+    /// Wait up to `ACK_TIMEOUT` for the acknowledgement. Continue without the
+    /// acknowledgement if the main thread does not respond.
     fn hide_for_capture(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
         if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
-            return; // main thread gone - nothing left to hide.
+            return; // The main thread is gone, so capture cannot hide its windows.
         }
         self.wake_main_thread();
         if ack_rx.recv_timeout(ACK_TIMEOUT).is_err() {
@@ -83,13 +93,13 @@ impl CaptureGuard {
         }
     }
 
-    /// Undoes `hide_for_capture`.
+    /// Ask the main thread to restore windows after capture.
     fn restore_after_capture(&self) {
         let _ = self.request_tx.send(CaptureGuardMsg::Restore);
         self.wake_main_thread();
     }
 
-    /// Thread message, not window.
+    /// Wake the main thread with a thread message, not a window message.
     fn wake_main_thread(&self) {
         unsafe {
             let _ = PostThreadMessageW(self.main_tid, WM_APP_CAPTURE_GUARD, WPARAM(0), LPARAM(0));
@@ -97,15 +107,21 @@ impl CaptureGuard {
     }
 }
 
-/// The Windows capture backend: DXGI first, BitBlt fallback.
+/// Capture screen regions with DXGI Desktop Duplication first and GDI `BitBlt` as a fallback.
+///
+/// An active `CaptureGuard` hides chibipop windows before a capture.
 pub struct WinCapture {
     guard: Option<CaptureGuard>,
-    /// `begin_read` hid; `end_read` reshows.
+    /// Record that `begin_read` requested a hide.
+    ///
+    /// `end_read` uses this state to request a restore.
     hiding: bool,
 }
 
 impl WinCapture {
-    /// DPI awareness before any GDI.
+    /// Create a capture backend and set per-monitor DPI awareness first.
+    ///
+    /// DPI awareness keeps GDI coordinates aligned with physical pixels.
     pub fn new(guard: Option<CaptureGuard>) -> Result<Self> {
         init_dpi_awareness()?;
         Ok(WinCapture { guard, hiding: false })
@@ -121,7 +137,7 @@ impl RegionCapture for WinCapture {
         monitor_bounds_containing(p)
     }
 
-    // Fresh check per read, so no ordering rule.
+    // Read the current guard state for each capture. Do not assume a fixed call order.
     fn begin_read(&mut self) {
         let Some(guard) = &self.guard else { return };
         if guard.active.load(Ordering::SeqCst) {
@@ -140,7 +156,7 @@ impl RegionCapture for WinCapture {
     }
 }
 
-/// The monitor holding `p`.
+/// Return the monitor bounds that contain `p`.
 fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
     unsafe {
         let hmon = MonitorFromPoint(POINT { x: p.x, y: p.y }, MONITOR_DEFAULTTONEAREST);
@@ -156,48 +172,47 @@ fn monitor_bounds_containing(p: PhysPoint) -> PhysRect {
 
 // -- DXGI Desktop Duplication -----------------------------------------
 
-/// DXGI_ERROR_ACCESS_LOST.
+/// `DXGI_ERROR_ACCESS_LOST` means that the desktop duplication is no longer valid.
 const ACCESS_LOST: HRESULT = HRESULT(0x887A0026u32 as i32);
 
-/// DXGI_ERROR_WAIT_TIMEOUT.
+/// `DXGI_ERROR_WAIT_TIMEOUT` means that no new frame arrived before the wait ended.
 const WAIT_TIMEOUT: HRESULT = HRESULT(0x887A0027u32 as i32);
 
-/// Cold wait for a first frame.
+/// Set the maximum wait for the first usable desktop frame.
 ///
-/// A presenting source yields one inside a
-/// frame time; a still desktop never will,
-/// so this is a ceiling, not a target.
+/// A source that presents frames can provide one within one frame time. A still
+/// desktop cannot provide a new frame, so this duration is a limit, not a target.
 const COLD_BUDGET: Duration = Duration::from_millis(50);
 
-/// Warm: the kept frame is current.
+/// Limit each warm acquire to a short wait because a retained frame remains usable.
 const WARM_ACQUIRE_MS: u32 = 4;
 
-/// Warn about DXGI once only.
+/// Track whether the DXGI fallback notice already went to stderr.
 static DXGI_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Cached DXGI resources.
+/// Store DXGI resources and the latest usable desktop frame for one thread.
 struct DxgiState {
     dev: ID3D11Device,
     ctx: ID3D11DeviceContext,
     dup: IDXGIOutputDuplication,
     mon: RECT,
-    /// Newest real desktop frame.
+    /// Retain the newest usable desktop frame for later crops.
     last: Option<ID3D11Texture2D>,
     tex_w: u32,
     tex_h: u32,
 }
 
-/// Is `r` wholly inside `mon`?
+/// Return whether `r` lies completely inside `mon`.
 fn rect_inside(mon: &RECT, r: &PhysRect) -> bool {
     r.x >= mon.left && r.y >= mon.top && r.x + r.w <= mon.right && r.y + r.h <= mon.bottom
 }
 
-/// Rotated outputs need remapping.
+/// Return whether an output uses a rotation that this capture path cannot map.
 fn is_rotated(rot: DXGI_MODE_ROTATION) -> bool {
     rot != DXGI_MODE_ROTATION_IDENTITY && rot != DXGI_MODE_ROTATION_UNSPECIFIED
 }
 
-/// Every pixel bit-identical?
+/// Return whether every complete BGRA pixel has the same value.
 fn is_uniform(buf: &[u8]) -> bool {
     let (px, _) = buf.as_chunks::<4>();
     let Some(first) = px.first() else { return true };
@@ -205,22 +220,26 @@ fn is_uniform(buf: &[u8]) -> bool {
 }
 
 thread_local! {
-    /// Per-thread DXGI cache.
+    /// Keep one DXGI cache for each thread.
+    ///
+    /// The resources remain thread-affine.
     static DXGI: RefCell<Option<DxgiState>> = const { RefCell::new(None) };
 }
 
-/// DXGI first, BitBlt fallback.
+/// Capture a region with DXGI first.
+///
+/// Use GDI `BitBlt` when DXGI fails or returns a flat frame.
 fn capture_region(region: PhysRect) -> Result<Frame> {
     match capture_dxgi(region) {
-        // A flat frame is never real text.
+        // A flat frame cannot provide text, so use the fallback.
         Ok(buf) if !is_uniform(&buf) => Ok(Frame {
             buf,
             w: region.w,
             h: region.h,
             source: "dxgi",
             fallback: None,
-            // DXGI's AcquireNextFrame does report "no new frame", but
-            // this backend never holds a previous one to compare with.
+            // `AcquireNextFrame` can report "no new frame", but this backend has no
+            // previous frame to compare with.
             unchanged: false,
         }),
         Ok(_) => bitblt_after(region, "DXGI frame was one flat colour".to_string()),
@@ -228,11 +247,11 @@ fn capture_region(region: PhysRect) -> Result<Frame> {
     }
 }
 
-/// One-shot capture + nearest-neighbour upscale by `factor`; BGRA.
+/// Capture the current pixels and scale them by `factor` with nearest-neighbor interpolation.
+/// Return BGRA pixels.
 ///
-/// For the main thread's actions (mining screenshot, OCR-to-clipboard):
-/// each call captures fresh via this thread's own DXGI/BitBlt path -
-/// the worker's `WinCapture` is thread-affine and unreachable here.
+/// This function runs on its caller thread for a mining screenshot or OCR-to-clipboard.
+/// It uses a capture separate from the Worker's thread-affine `WinCapture`.
 pub fn capture_upscaled_by(region: PhysRect, factor: i32) -> Result<Frame> {
     let cap = capture_region(region)?;
     let need = (region.w as usize)
@@ -249,7 +268,9 @@ pub fn capture_upscaled_by(region: PhysRect, factor: i32) -> Result<Frame> {
     Ok(Frame { buf, w, h, ..cap })
 }
 
-/// BitBlt, remembering DXGI's reason.
+/// Use BitBlt after DXGI fails.
+///
+/// Keep the DXGI failure reason in the returned frame.
 fn bitblt_after(region: PhysRect, why: String) -> Result<Frame> {
     if !DXGI_WARNED.swap(true, Ordering::Relaxed) {
         eprintln!("chibipop: DXGI capture unavailable ({why}); using BitBlt");
@@ -266,7 +287,7 @@ fn bitblt_after(region: PhysRect, why: String) -> Result<Frame> {
     })
 }
 
-/// Acquire + copy subregion.
+/// Acquire a desktop frame and copy the requested subregion.
 fn capture_dxgi(region: PhysRect) -> Result<Vec<u8>> {
     let (w, h) = (region.w, region.h);
     if w <= 0 || h <= 0 {
@@ -298,21 +319,19 @@ fn capture_dxgi(region: PhysRect) -> Result<Vec<u8>> {
     })
 }
 
-/// Wait for a live frame, then crop.
+/// Wait for a usable desktop frame, then copy the requested region.
 fn refresh_and_copy(st: &mut DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
     refresh_desktop(st)?;
     copy_out(st, region)
 }
 
-/// Loop until the desktop image is real.
+/// Refresh the retained desktop frame when a new frame exists.
 ///
-/// A pointer-only update leaves the surface
-/// undefined; on a fresh duplication it is
-/// blank. `LastPresentTime` is the tell.
+/// A pointer-only update leaves the surface undefined. A fresh duplication can
+/// return a blank surface. Use `LastPresentTime` to identify a real frame.
 ///
-/// Once a frame is kept, "nothing new" means
-/// the kept one is still accurate, so warm
-/// calls must not wait out the cold budget.
+/// After the first frame, no new frame means the retained frame remains valid.
+/// Warm calls use the short wait instead of the cold budget.
 fn refresh_desktop(st: &mut DxgiState) -> Result<()> {
     let warm = st.last.is_some();
     let deadline = Instant::now() + COLD_BUDGET;
@@ -325,9 +344,8 @@ fn refresh_desktop(st: &mut DxgiState) -> Result<()> {
         };
         let mut fi = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut res: Option<IDXGIResource> = None;
-        // SAFETY: `fi` and `res` are live locals; the
-        // frame is released on every path below before
-        // the next acquire, as the API requires.
+        // SAFETY: `fi` and `res` are live locals. This code releases each acquired
+        // frame before the next acquire, as the API requires.
         let got = unsafe { st.dup.AcquireNextFrame(wait, &mut fi, &mut res) };
         match got {
             Ok(()) => {
@@ -342,7 +360,7 @@ fn refresh_desktop(st: &mut DxgiState) -> Result<()> {
                         Err(e) => failed = Some(e),
                     }
                 }
-                // SAFETY: pairs with the acquire above.
+                // SAFETY: This call releases the frame acquired above.
                 unsafe {
                     let _ = st.dup.ReleaseFrame();
                 }
@@ -367,11 +385,11 @@ fn refresh_desktop(st: &mut DxgiState) -> Result<()> {
     }
 }
 
-/// Keep this frame for later crops.
+/// Copy this desktop frame into the retained texture for later crops.
 fn store_desktop(st: &mut DxgiState, res: &IDXGIResource) -> Result<()> {
     let tex: ID3D11Texture2D = res.cast()?;
     let mut d = D3D11_TEXTURE2D_DESC::default();
-    // SAFETY: `tex` is a live texture from DXGI.
+    // SAFETY: DXGI returned `tex` as a live texture.
     unsafe { tex.GetDesc(&mut d) };
     if d.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
         anyhow::bail!("desktop format {} is not BGRA8", d.Format.0);
@@ -389,7 +407,7 @@ fn store_desktop(st: &mut DxgiState, res: &IDXGIResource) -> Result<()> {
             ..Default::default()
         };
         let mut keep = None;
-        // SAFETY: `desc` is fully initialised above.
+        // SAFETY: The code initializes every field in `desc` before this call.
         unsafe { st.dev.CreateTexture2D(&desc, None, Some(&mut keep))? };
         st.last = Some(keep.context("no retained texture")?);
         st.tex_w = d.Width;
@@ -397,13 +415,13 @@ fn store_desktop(st: &mut DxgiState, res: &IDXGIResource) -> Result<()> {
     }
 
     let keep = st.last.as_ref().context("no retained texture")?;
-    // SAFETY: both textures share `dev`, have the
-    // same desc, and neither is mapped here.
+    // SAFETY: Both textures share `dev` and the same description. This call maps
+    // neither texture.
     unsafe { st.ctx.CopyResource(keep, &tex) };
     Ok(())
 }
 
-/// Crop the retained frame to `region`.
+/// Copy `region` from the retained desktop frame.
 fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
     let (w, h) = (region.w, region.h);
     let len = (w as usize)
@@ -439,7 +457,7 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
             ..Default::default()
         };
         let mut staging = None;
-        // SAFETY: `stg_desc` is fully initialised.
+        // SAFETY: The code initializes every field in `stg_desc` before this call.
         st.dev.CreateTexture2D(&stg_desc, None, Some(&mut staging))?;
         let staging: ID3D11Texture2D = staging.context("no staging texture")?;
 
@@ -451,7 +469,7 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
             bottom,
             back: 1,
         };
-        // SAFETY: the box is bounds-checked above.
+        // SAFETY: The code checked the box bounds against the retained texture above.
         st.ctx.CopySubresourceRegion(&staging, 0, 0, 0, 0, src, 0, Some(&src_box));
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -461,9 +479,8 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
         let src_pitch = mapped.RowPitch as usize;
         let dst_pitch = w as usize * 4;
         for row in 0..h as usize {
-            // SAFETY: mapped memory is valid for
-            // Height rows of RowPitch bytes each;
-            // we read dst_pitch <= RowPitch per row.
+            // SAFETY: The mapped memory has `Height` rows of `RowPitch` bytes.
+            // This code reads `dst_pitch` from each row. It never exceeds `RowPitch`.
             let src = std::slice::from_raw_parts(
                 (mapped.pData as *const u8).add(row * src_pitch),
                 dst_pitch,
@@ -477,7 +494,7 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
     }
 }
 
-/// Find output, create device.
+/// Find the output that contains `region` and create its DXGI device.
 fn init_dxgi(region: &PhysRect) -> Result<DxgiState> {
     unsafe {
         let fac: IDXGIFactory1 = CreateDXGIFactory1()?;
@@ -500,7 +517,7 @@ fn init_dxgi(region: &PhysRect) -> Result<DxgiState> {
                     && region.y >= r.top
                     && region.y < r.bottom
                 {
-                    // Bail before making a device.
+                    // Reject a region that crosses monitors before the code creates the device.
                     if !rect_inside(&r, region) {
                         anyhow::bail!("region spans monitors");
                     }
@@ -547,7 +564,7 @@ fn init_dxgi(region: &PhysRect) -> Result<DxgiState> {
 
 // -- BitBlt fallback --------------------------------------------------
 
-/// Releases the screen DC.
+/// Release the screen DC when `ScreenDc` drops.
 struct ScreenDc(HDC);
 
 impl Drop for ScreenDc {
@@ -556,7 +573,7 @@ impl Drop for ScreenDc {
     }
 }
 
-/// Deletes the memory DC.
+/// Delete the memory DC when `MemDc` drops.
 struct MemDc(HDC);
 
 impl Drop for MemDc {
@@ -567,7 +584,7 @@ impl Drop for MemDc {
     }
 }
 
-/// Deletes the bitmap.
+/// Delete the bitmap when `Bitmap` drops.
 struct Bitmap(HBITMAP);
 
 impl Drop for Bitmap {
@@ -578,7 +595,7 @@ impl Drop for Bitmap {
     }
 }
 
-/// Reselects the old object.
+/// Reselect the old GDI object when `Selection` drops.
 struct Selection {
     dc: HDC,
     prev: HGDIOBJ,
@@ -590,7 +607,7 @@ impl Drop for Selection {
     }
 }
 
-/// GDI BitBlt capture path.
+/// Capture a region with the GDI `BitBlt` path.
 fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
     let (w, h) = (region.w, region.h);
     if w <= 0 || h <= 0 {
@@ -619,13 +636,13 @@ fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
         BitBlt(mem.0, 0, 0, w, h, Some(screen.0), region.x, region.y, SRCCOPY)
             .context("BitBlt of the screen region")?;
 
-        // GetDIBits wants it deselected.
+        // Deselect the bitmap before `GetDIBits` reads it.
         drop(sel);
 
         let mut bmi = BITMAPINFO::default();
         bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
         bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h; // top-down rows
+        bmi.bmiHeader.biHeight = -h; // Store rows in top-down order.
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB.0;
@@ -643,7 +660,7 @@ fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
 }
 
 
-/// The cursor's position.
+/// Return the cursor position in physical pixels.
 pub fn cursor_position() -> Result<PhysPoint> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -667,7 +684,7 @@ mod tests {
         assert!(is_uniform(&[0xFFu8; 16]));
     }
 
-    /// A dark scene is not a dead frame.
+    /// A dark scene can contain different pixel values, so it is not a dead frame.
     #[test]
     fn one_differing_pixel_is_not_uniform() {
         let mut buf = [0u8; 16];
@@ -707,7 +724,7 @@ mod tests {
         assert!(rect_inside(&mon(), &r));
     }
 
-    /// The seam case that hid this bug.
+    /// Check the monitor seam case that previously hid this bug.
     #[test]
     fn a_region_crossing_the_seam_is_not_inside() {
         let r = PhysRect { x: 2445, y: 155, w: 500, h: 100 };

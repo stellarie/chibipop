@@ -1,21 +1,19 @@
-//! The AUR packages' install layout, produced by the real PKGBUILDs.
+//! Test the install layout of the AUR packages from the real PKGBUILDs.
 //!
-//! `packaging/aur/*/PKGBUILD` decides where a pacman install puts the
-//! models and the deconjugation rules; `src/ocr/models.rs` decides where
-//! `/usr/bin/chibipop` looks for them. Those are separate files, and the
-//! failure between them is the quiet kind: a package that builds, installs
-//! and then refuses to OCR because the models are one directory off. A
-//! clean-chroot build cannot catch it either - the models are *there*, just
-//! not where the binary walks.
+//! `packaging/aur/*/PKGBUILD` sets the install paths for the models and the
+//! deconjugation rules. `src/ocr/models.rs` sets the search path for
+//! `/usr/bin/chibipop`. These files must agree. Otherwise a package can build
+//! and install, then refuse OCR because the models sit one directory away.
+//! A clean-chroot build cannot catch this case. The models exist, but their
+//! directory does not match the binary search path.
 //!
-//! So this runs each PKGBUILD's own `package()` in plain bash over a stub
-//! `$srcdir`, and asks the binary's search where the models are in the
-//! `$pkgdir` that comes out. `makepkg` is not needed and is not on a CI
-//! runner: `package()` is a shell function over `install`, and `$srcdir`
-//! and `$pkgdir` are just variables.
+//! This test runs each PKGBUILD's `package()` in Bash with a stub `$srcdir`.
+//! It checks the binary search against the models in the `$pkgdir` that
+//! `package()` creates. `makepkg` is not needed or available on a CI runner.
+//! `package()` is a shell function that calls `install`. `$srcdir` and `$pkgdir`
+//! are variables.
 //!
-//! The two packages install one layout deliberately, so both are checked
-//! against the same assertions.
+//! Both packages use one layout. Apply the same assertions to both packages.
 #![cfg(target_os = "linux")]
 
 use chibipop_linux::ocr::models;
@@ -32,8 +30,8 @@ fn aur() -> PathBuf {
     repo().join("packaging/aur")
 }
 
-/// A scratch root, per test, cleaned on entry rather than on exit: a
-/// failure that leaves the tree behind is a failure you can go and look at.
+/// Create a scratch root for one test. Delete it before the test, not after it.
+/// If a failure leaves the tree, you can inspect it.
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("chibipop-aur-{tag}-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
@@ -41,15 +39,16 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Whatever the template says today. Read from the template rather than
-/// pinned here: `bump.sh` moves it, and a test that has to be bumped in
-/// the same commit is a test that will be bumped without being read.
+/// Read the current version from a template.
+///
+/// Get the value from the template instead of a fixed value here. `bump.sh` moves
+/// the value. This avoids a version edit in the test when the template changes.
 fn pkgver(pkgbuild: &Path) -> String {
     let out = bash(&format!("source '{}'; printf %s \"$pkgver\"", pkgbuild.display()));
     String::from_utf8(out).unwrap()
 }
 
-/// Run a bash snippet, refusing anything but a clean exit.
+/// Run a Bash snippet and require a clean exit.
 fn bash(script: &str) -> Vec<u8> {
     let out = Command::new("bash")
         .arg("-euo")
@@ -67,8 +66,7 @@ fn bash(script: &str) -> Vec<u8> {
     out.stdout
 }
 
-/// `package()` out of `pkgbuild`, with makepkg's two directories supplied
-/// by hand.
+/// Run `package()` from `pkgbuild`. Set makepkg's two directories by hand.
 fn run_package(pkgbuild: &Path, srcdir: &Path, pkgdir: &Path) {
     bash(&format!(
         "export srcdir='{}' pkgdir='{}'; cd \"$srcdir\"; source '{}'; package",
@@ -78,8 +76,8 @@ fn run_package(pkgbuild: &Path, srcdir: &Path, pkgdir: &Path) {
     ));
 }
 
-/// Enough of a binary to be packaged: nothing here reads it, and copying
-/// the real 62 MB one would only measure `cp`.
+/// Create a binary file for the package. The test never reads it. A copy of the
+/// real 62 MB file would measure only `cp`.
 fn stub_binary(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, b"\x7fELF stub binary, not a real one\n").unwrap();
@@ -90,16 +88,16 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// Everything both packages promise, asserted against a real `$pkgdir`.
+/// Check every package requirement against a real `$pkgdir`.
 ///
-/// The two loud ones are first: a `/usr/bin` install resolves its models
-/// through `models::LAYOUTS`' second entry (`../share/chibipop/models`),
-/// and the daemon's rules search has the same shape one directory over. Get
-/// either wrong and the package still installs.
+/// Check the two path rules first. A `/usr/bin` install finds its models through
+/// the second `models::LAYOUTS` entry (`../share/chibipop/models`). The daemon
+/// finds its rules in the same relative location. If either path is wrong, the
+/// package can still install.
 fn assert_installed_tree(pkgdir: &Path) {
     let bin_dir = pkgdir.join("usr/bin");
-    // `beside` answers with the layout's own `..` in it, so compare where
-    // the two paths actually land.
+    // `beside` returns a path that contains `..`. Compare the canonical paths to
+    // check where both paths point.
     let found = models::beside(&bin_dir)
         .expect("/usr/bin/chibipop would not find the packaged models at all");
     assert_eq!(
@@ -115,8 +113,8 @@ fn assert_installed_tree(pkgdir: &Path) {
 
     for (name, _) in models::ALL {
         let path = pkgdir.join("usr/share/chibipop/models/meiki").join(name);
-        // Real bytes, not a stub: `models::verify` re-digests these when
-        // the engine opens, and `package()` checks them as it stages.
+        // Use real bytes instead of a stub. `models::verify` hashes them when the
+        // engine opens, and `package()` checks them as it stages them.
         assert!(path.is_file(), "the package is missing {name}");
     }
 
@@ -134,8 +132,8 @@ fn assert_installed_tree(pkgdir: &Path) {
         assert!(pkgdir.join(rel).is_file(), "the package is missing {rel}");
     }
 
-    // GPL-3.0-or-later plus the LGPL weights: shipping the models without
-    // their licence would be a violation, and pacman looks here for it.
+    // Ship the GPL-3.0-or-later license and the LGPL weights. Without the license,
+    // the package violates the terms, and pacman expects the files here.
     let licenses: Vec<PathBuf> = std::fs::read_dir(pkgdir.join("usr/share/licenses"))
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -144,16 +142,16 @@ fn assert_installed_tree(pkgdir: &Path) {
     assert!(licenses[0].join("LICENSE").is_file());
     assert!(licenses[0].join("LICENSE.models.md").is_file());
 
-    // Only the binary is executable: a data file arriving with the
-    // executable bit is how a package ends up looking like malware.
+    // Make only the binary executable. An executable data file can make a package
+    // look like malware.
     assert_eq!(0o755, mode(&pkgdir.join("usr/bin/chibipop")));
     assert_eq!(0o644, mode(&pkgdir.join("usr/share/chibipop/data/deconjugator.json")));
     assert_eq!(0o644, mode(&pkgdir.join("usr/lib/systemd/user/chibipop.service")));
 }
 
-/// `chibipop-bin` repacks the release asset, so its `$srcdir` is the real
-/// asset: built here by the real packaging script, which is what makes this
-/// a test of the two files agreeing rather than of my idea of the tarball.
+/// `chibipop-bin` repacks the release asset. Its `$srcdir` is the asset from
+/// `scripts/package-linux.sh`. The test checks that the script and the PKGBUILD
+/// agree, not an assumption about the tarball.
 #[test]
 fn the_binary_package_installs_a_tree_the_daemon_can_read() {
     let root = scratch("bin");
@@ -177,9 +175,9 @@ fn the_binary_package_installs_a_tree_the_daemon_can_read() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // The script leaves the staged tree beside the tarball, and it is
-    // byte-identical to what `tar xzf` gives makepkg (tarball_layout.rs
-    // proves that half); the icon is the PKGBUILD's second source.
+    // The script leaves the staged tree beside the tarball. It is byte-identical to
+    // the tree that `tar xzf` gives makepkg. `tarball_layout.rs` checks that half.
+    // The icon is the second PKGBUILD source.
     std::fs::copy(
         repo().join("crates/chibipop-windows/assets/chibipop.svg"),
         srcdir.join(format!("chibipop-{version}.svg")),
@@ -193,9 +191,9 @@ fn the_binary_package_installs_a_tree_the_daemon_can_read() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The source package builds from the tag archive, which is this tree - so
-/// `$srcdir` is this tree, symlinked in under the name GitHub's archive
-/// unpacks to, plus the binary its `build()` would have produced.
+/// The source package builds from a tag archive. This tree stands in for that
+/// archive. Link it under the name that GitHub's archive uses. Add the binary
+/// that its `build()` would create.
 #[test]
 fn the_source_package_installs_the_same_tree() {
     let root = scratch("src");
@@ -222,9 +220,9 @@ fn sha256_of(path: &Path) -> String {
     Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// What `bump.sh` is for: a tag's worth of edits nobody should make by
-/// hand. Run over a copy of the templates, with every source supplied from
-/// disk so the digests are known and nothing touches the network.
+/// Test the edits that `bump.sh` makes for a tag. Run it on template copies.
+/// Supply each source from disk so the digests are known and the script makes no
+/// network request.
 #[test]
 fn bump_rewrites_both_templates_for_a_new_tag() {
     let root = scratch("bump");
@@ -237,8 +235,8 @@ fn bump_rewrites_both_templates_for_a_new_tag() {
         .unwrap()
         .success());
 
-    // A version this repo will never carry, so a template left behind by a
-    // failure cannot be mistaken for a real one.
+    // Use a version that this repository will never carry. A failed run must not
+    // look like a valid template.
     let sources = root.join("sources");
     std::fs::create_dir_all(&sources).unwrap();
     let mut files = Vec::new();
@@ -264,9 +262,9 @@ fn bump_rewrites_both_templates_for_a_new_tag() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The digests, in source order, and the version in both templates:
-    // a bump that moves the version but not the checksums is the failure
-    // this script exists to make impossible.
+    // Check the digests in source order and the version in both templates. A bump
+    // that moves the version but not the checksums is the failure that this script
+    // must prevent.
     for (pkg, want) in [
         ("chibipop-bin", vec![sha256_of(&files[0]), sha256_of(&files[1])]),
         ("chibipop", vec![sha256_of(&files[2])]),
@@ -286,8 +284,8 @@ fn bump_rewrites_both_templates_for_a_new_tag() {
             read("sha256sums"),
             "{pkg} carries checksums for other bytes than its sources"
         );
-        // The rewrite must leave a template makepkg can still read, and
-        // the URLs must have followed the version.
+        // The rewrite must leave a template that makepkg can read. The URLs must use
+        // the new version.
         let sources = read("source");
         assert!(
             sources.contains("chibipop-v99.98.97-linux-x64.tar.gz")
@@ -299,10 +297,10 @@ fn bump_rewrites_both_templates_for_a_new_tag() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The release asset name is a forever contract
-/// (ARCHITECTURE.md#packaging-and-ci) and `chibipop-bin`'s source URL is
-/// that name, so a version the contract cannot express has to stop here -
-/// not produce a PKGBUILD pointing at an asset no release will ever carry.
+/// Keep the release asset name as a permanent contract
+/// (ARCHITECTURE.md#packaging-and-ci). `chibipop-bin` uses that name in its
+/// source URL. Reject a version that cannot produce that name. Do not create a
+/// PKGBUILD for an asset that no release carries.
 #[test]
 fn bump_refuses_a_version_that_breaks_the_asset_name() {
     for bad in ["0.9.0", "v0.9", "release-1"] {

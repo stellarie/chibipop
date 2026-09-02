@@ -1,13 +1,11 @@
-//! `chibipop settings`: a separate process on iced
-//! (ARCHITECTURE.md#settings-and-config), so a settings crash can never
-//! take live-hover down.
+//! `chibipop settings` is a separate `iced` process
+//! (ARCHITECTURE.md#settings-and-config). A settings crash cannot stop live hover.
 //!
-//! Core's `Config` + `SettingsForm` drive the window; this module owns
-//! only widgetry and the process discipline around it: the
-//! settings-scoped flock, the read-only dictionary listing, and the
-//! save-then-`reload` Apply. The window needs no Wayland globals beyond
-//! what any toplevel client uses — it opens fine where hover is
-//! unsupported and where no daemon runs at all.
+//! Core `Config` and `SettingsForm` drive the window. This module owns only
+//! widgets and process rules: the settings-scoped `flock`, the read-only Dictionary list,
+//! and the save-then-`reload` Apply action. The window needs no extra Wayland globals
+//! beyond those that a toplevel client uses. It opens when hover is unsupported or when
+//! no daemon exists.
 
 mod app;
 mod apply;
@@ -35,14 +33,15 @@ pub fn run(paths: Paths) -> Result<()> {
     let display = wayland::display_name()?;
     let runtime_dir = paths.runtime_dir()?;
 
-    // The settings-scoped flock, distinct from the daemon's: one window
-    // per compositor instance, released by the kernel on any death.
+    // This settings-scoped `flock` differs from the daemon lock.
+    // It permits one window per compositor instance.
+    // The kernel releases it when the lock owner dies.
     let lock = match lock::acquire_at(runtime_dir, &lock::settings_file_name(&display)) {
         Ok(lock) => lock,
         Err(LockError::AlreadyRunning { path, pid }) => {
-            // A notice, not an error: the window the user wants is up.
-            // No cross-process raise - compositors routinely ignore
-            // self-activation.
+            // This is a notice, not an error. The requested window already exists.
+            // The code does not raise the window across processes.
+            // Compositors often ignore self-activation.
             let holder = match pid {
                 Some(pid) => format!("pid {pid}"),
                 None => "an unknown pid".to_string(),
@@ -73,13 +72,13 @@ pub fn run(paths: Paths) -> Result<()> {
     let form = chibipop::settings::from_config(&cfg, &dicts);
     let form = match Library::load(&library_dir) {
         Ok(lib) => chibipop::settings::with_library(form, &lib),
-        // No library yet is the common fresh-install case; the lists
-        // just come from the config's order.
+        // A fresh install often has no library.
+        // In that case, the lists use the order from the configuration.
         Err(_) => form,
     };
 
     let env = paths::Env::from_process();
-    // One read, two rows: see `hotkey_channel`.
+    // Read the state once for both rows. See `hotkey_channel`.
     let published = shortcuts::state::read(&paths.state_dir);
     let init = app::Init {
         form,
@@ -96,18 +95,16 @@ pub fn run(paths: Paths) -> Result<()> {
         runtime_dir: runtime_dir.to_path_buf(),
         autostart: autostart::Target::resolve(&env),
         home: env.home.clone(),
-        // Resolved in this process, which is the same binary as the
-        // daemon (`chibipop settings`), so the snippet names the exe
-        // the user is actually running.
+        // Resolve this name in the same binary as the daemon (`chibipop settings`).
+        // The snippet names the executable that the user runs.
         exe: paths::exec_name(),
-        // Whether a focus-less client can write the selection here is a
-        // fact about the compositor, not about the daemon, so this
-        // window asks the registry itself rather than reading a status
-        // the daemon published: the OCR-to-clipboard row has to be right
-        // on a machine where no daemon is running at all. One roundtrip
-        // on a throwaway connection - the same probe `chibipop probe`
-        // prints. A display we cannot reach is simply no rung, which is
-        // the honest answer for a row about a Wayland protocol.
+        // The compositor decides whether a client without focus can write the selection.
+        // The daemon does not decide this. Ask the registry for the status.
+        // The OCR-to-clipboard row must stay correct when no daemon exists.
+        // Use one throwaway connection for one roundtrip.
+        // The `chibipop probe` command uses the same check.
+        // If the display is unreachable, report no rung.
+        // This is the honest result for a Wayland protocol row.
         clipboard_rung: clipboard_rung(),
     };
     app::run(init)?;
@@ -116,37 +113,35 @@ pub fn run(paths: Paths) -> Result<()> {
     Ok(())
 }
 
-/// Which data-control protocol this session advertises, for the
+/// Return the data-control protocol that this session advertises for the
 /// OCR-to-clipboard row.
 ///
-/// A connection and one roundtrip of its own, thrown away immediately:
-/// this process is already a Wayland client (iced owns a toplevel), and
-/// asking the registry is what makes the row true with no daemon
-/// running. Unreachable display or a failed roundtrip is `None` - a row
-/// about a Wayland protocol has nothing else to say about a session it
-/// cannot see.
+/// The function opens a separate connection and makes one roundtrip.
+/// It discards the connection after the roundtrip.
+/// This process is already a Wayland client because `iced` owns a toplevel.
+/// The registry gives the correct row when no daemon exists.
+/// The function returns `None` when the display is unreachable or the roundtrip fails.
+/// A Wayland protocol row cannot report more about a session it cannot inspect.
 fn clipboard_rung() -> Option<clipboard::Rung> {
     let conn = wayland_client::Connection::connect_to_env().ok()?;
     clipboard::rung(&wayland::collect_globals(&conn).ok()?)
 }
 
-/// Who owns one action's binding, as the daemon published it.
+/// Return the owner of one action bind from the daemon state.
 ///
-/// Resolved per portal id: the daemon requests both ids in one session,
-/// so its published answer names each one separately and a row can
-/// render its own key without borrowing another's. `published` is read
-/// once by the caller so the two rows can never disagree about which
-/// file they read.
+/// Resolve each portal ID separately. The daemon requests both IDs in one session.
+/// Its published state names each ID, so each row can render its own key.
+/// The caller reads `published` once, so both rows use the same file state.
 ///
-/// The portal control is only rendered when a daemon actually got the
-/// GlobalShortcuts session *and* the bind through — never on a bus
-/// probe. The hotkey section cannot lie about who owns the key, and "a
-/// portal exists on this machine" is not the same fact as "the portal
-/// owns this binding": the frontend refuses shortcut sessions to a
-/// launch with no app id, so a probe would print a portal binding for a
-/// daemon that has none. No file, or a file saying native, therefore
-/// means the compositor bind is the truth and the snippet is what
-/// helps.
+/// Render the portal control only after the daemon acquires the
+/// `GlobalShortcuts` session and completes the bind.
+/// Do not use a bus probe as proof.
+/// The hotkey section must show the actual bind owner.
+/// A portal on the machine does not prove that the portal owns this bind.
+/// The frontend refuses a shortcut session when a launch has no app ID.
+/// A probe would therefore show a portal bind for a daemon that has none.
+/// If no file exists, or the file says native, treat the compositor bind as truth.
+/// The snippet then helps the user create the compositor bind.
 fn hotkey_channel(
     published: Option<&shortcuts::state::Published>,
     id: shortcuts::ShortcutId,
@@ -159,9 +154,10 @@ fn hotkey_channel(
     }
 }
 
-/// The built DB's dictionary names, read-only: what the daemon would see
-/// right now. Absent or unreadable is simply an empty list — a fresh
-/// install has no database until the first rebuild.
+/// Return the Dictionary names from the built database.
+/// Read-only access shows what the daemon would see now.
+/// Return an empty list when the database is absent or unreadable.
+/// A fresh install has no database before the first rebuild.
 fn read_dicts(db: &Path) -> Vec<DictInfo> {
     let Ok(dictionary) = SqliteDictionary::open(db) else {
         return Vec::new();
@@ -184,13 +180,13 @@ mod tests {
         dir
     }
 
-    /// What `run` does: read the file once, resolve one channel per id.
+    /// This mirrors `run`: it reads the file once and resolves one channel for each ID.
     fn channel_for(dir: &Path, id: ShortcutId) -> HotkeyChannel {
         hotkey_channel(shortcuts::state::read(dir).as_ref(), id)
     }
 
-    /// The portal rung reaches the window with the key the portal named,
-    /// and the window renders the rebind control instead of a snippet.
+    /// The portal rung gives the window the key that the portal names.
+    /// The window renders a rebind control instead of a snippet.
     #[test]
     fn a_published_portal_binding_becomes_the_portal_control() {
         let dir = scratch("portal");
@@ -216,9 +212,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Bound but with no key reported (every Hyprland session): still the
-    /// portal's binding, and the control says so rather than claiming a
-    /// compositor snippet would help.
+    /// Every Hyprland session can report a portal bind without a key.
+    /// Keep the portal bind and show that state in the control.
+    /// Do not claim that a compositor snippet can help.
     #[test]
     fn a_portal_that_reports_no_key_is_still_the_portal_channel() {
         let dir = scratch("nokey");
@@ -234,8 +230,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The native rung, and a machine where no daemon has ever run, both
-    /// show the snippet: the compositor bind is the only truth there is.
+    /// The native rung and a machine where no daemon has run both show the snippet.
+    /// The compositor bind provides the only available status.
     #[test]
     fn the_native_rung_and_a_silent_daemon_both_show_the_snippet() {
         let dir = scratch("native");
@@ -260,9 +256,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The add-card row's own status: when the portal answered for
-    /// `anki-add`, that row names *its* key and the trigger row names the
-    /// trigger's - two rows, two keys, one file.
+    /// The add-card row keeps its own status.
+    /// When the portal answers for `anki-add`, that row names *its* key.
+    /// The trigger row names the trigger key. Two rows, two keys, one file.
     #[test]
     fn the_add_card_row_gets_the_key_the_portal_published_for_it() {
         let dir = scratch("addportal");
@@ -285,9 +281,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A portal that bound the trigger and never answered for the add:
-    /// the add row is still on the portal rung (the session owns it),
-    /// but it names no key rather than the trigger's.
+    /// A portal can bind the trigger without an answer for `anki-add`.
+    /// Keep the add row on the portal rung because the session owns it.
+    /// Show no key instead of the trigger key.
     #[test]
     fn an_unanswered_add_id_is_still_the_portal_rung_with_no_key() {
         let dir = scratch("addsilent");

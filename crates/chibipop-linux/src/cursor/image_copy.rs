@@ -1,15 +1,16 @@
-//! Rung 1: the ext-image-copy-capture pointer cursor session
-//! (ARCHITECTURE.md#input-ladders). Event-driven — positions arrive on
-//! the daemon's existing Wayland calloop source, so a parked cursor
-//! costs zero wakeups (ARCHITECTURE.md#hover-cadence).
+//! Rung 1 uses the ext-image-copy-capture cursor session
+//! (ARCHITECTURE.md#input-ladders). The session is event-driven.
+//! Positions arrive on the daemon's Wayland calloop source.
+//! A parked cursor causes zero wakeups (ARCHITECTURE.md#hover-cadence).
 //!
-//! Only the *cursor session* is created, never the inner capture
-//! session: this module wants positions, not pixels. The session's
-//! `position` events are transformed buffer pixels relative to one
-//! output; `outputs::OutputGeometry` lifts them to global physical.
+//! Create only the *cursor session*. Do not create the inner capture
+//! session. This module needs positions, not pixels. A `position` event
+//! normally gives transformed buffer pixels relative to one output.
+//! Affected Hyprland versions can send output-local logical units instead.
+//! `outputs::OutputGeometry` converts both forms to global physical pixels.
 //!
-//! Outputs present at startup get sessions; hotplug is not this
-//! module's concern (the registry listener in `daemon.rs` logs it).
+//! Create sessions for outputs present at startup. Hotplug does not
+//! belong to this module. The registry listener in `daemon.rs` logs it.
 
 use super::outputs::{self, OutputGeometry};
 use crate::wayland::Advertised;
@@ -29,8 +30,8 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
 
-/// The daemon-side seam: `CursorState` dispatches into whatever owns
-/// it (via `delegate_dispatch!`) and hands finished positions up.
+/// This daemon-side seam lets `CursorState` dispatch events to its owner
+/// through `delegate_dispatch!`. The owner receives completed positions.
 pub trait CursorHandler:
     Dispatch<WlOutput, u32>
     + Dispatch<ZxdgOutputManagerV1, ()>
@@ -44,38 +45,41 @@ pub trait CursorHandler:
     + 'static
 {
     fn cursor(&mut self) -> &mut CursorState;
-    /// One global-physical-pixel sample — the channel's output.
+    /// Send one sample in global physical pixels. This is the channel output.
     fn on_cursor_position(&mut self, pos: PhysPoint);
 }
 
 struct OutputEntry {
     output: WlOutput,
     geo: OutputGeometry,
-    /// zxdg_output_v1 spoke; wl_output.geometry no longer overwrites.
+    /// `xdg_position_seen` is true after `zxdg_output_v1` supplies a position.
+    /// This prevents later `wl_output.geometry` data from replacing that position.
     xdg_position_seen: bool,
-    /// Kept alive for the session's lifetime.
+    /// The source stays alive for the session lifetime.
     _source: Option<ExtImageCaptureSourceV1>,
     session: Option<ExtImageCopyCaptureCursorSessionV1>,
 }
 
-/// Everything the cursor channel binds, keyed by registry name.
+/// This state covers every object that the cursor channel binds.
+/// The output map uses the registry name as its key.
 #[derive(Default)]
 pub struct CursorState {
     outputs: BTreeMap<u32, OutputEntry>,
     source_manager: Option<ExtOutputImageCaptureSourceManagerV1>,
     capture_manager: Option<ExtImageCopyCaptureManagerV1>,
     pointer: Option<WlPointer>,
-    /// Which output's session the cursor last entered, for trace only.
+    /// Store the registry name of the output that the cursor last entered.
+    /// The trace uses this value only.
     active: Option<u32>,
-    /// Hyprland <= 0.55 sends `position` in output-local logical
-    /// units, not the spec's buffer pixels — see
+    /// Affected Hyprland versions can send `position` in output-local logical
+    /// units. The protocol defines buffer pixels, not logical units. See
     /// `OutputGeometry::session_to_global`.
     session_positions_logical: bool,
 }
 
 impl CursorState {
-    /// Bind `wl_output` (+ xdg-output for logical geometry). Both
-    /// rungs need this: it is how positions become physical pixels.
+    /// Bind `wl_output` and `zxdg_output_v1` for logical geometry. Both
+    /// cursor rungs need this data to convert positions to physical pixels.
     pub fn bind_outputs<D: CursorHandler>(
         &mut self,
         registry: &WlRegistry,
@@ -104,16 +108,16 @@ impl CursorState {
         }
     }
 
-    /// Bind the rung-1 capture stack. Sessions are created once the
-    /// seat advertises a pointer (see the `wl_seat` dispatch below).
+    /// Bind the rung-1 capture stack. Create sessions after the seat
+    /// advertises a pointer. See the `wl_seat` dispatch below.
     pub fn bind_capture<D: CursorHandler>(
         &mut self,
         registry: &WlRegistry,
         globals: &[Advertised],
         qh: &QueueHandle<D>,
     ) {
-        // The one place the Hyprland coordinate quirk is decided;
-        // conversion lives in `OutputGeometry::session_to_global`.
+        // Decide the Hyprland coordinate quirk in this one place.
+        // `OutputGeometry::session_to_global` does the conversion.
         self.session_positions_logical = super::hyprctl::available();
         for g in globals {
             match g.interface.as_str() {
@@ -130,8 +134,8 @@ impl CursorState {
                         Some(registry.bind::<ExtImageCopyCaptureManagerV1, _, D>(g.name, 1, qh, ()));
                 }
                 "wl_seat" if self.pointer.is_none() => {
-                    // Bound for get_pointer only; the capabilities
-                    // event below actually creates it.
+                    // Bind this object for get_pointer only. The capabilities
+                    // event below creates the pointer.
                     registry.bind::<WlSeat, _, D>(g.name, g.version.min(5), qh, ());
                 }
                 _ => {}
@@ -139,31 +143,33 @@ impl CursorState {
         }
     }
 
-    /// A logical layout point (the hyprctl rung's space) to global
-    /// physical; `None` until output geometry has arrived.
+    /// Convert a logical layout point from the hyprctl rung to global physical pixels.
+    /// Use default or fallback geometry when complete data is unavailable.
+    /// Return `None` only when no output exists.
     pub fn logical_to_global(&self, x: f64, y: f64) -> Option<PhysPoint> {
         outputs::logical_to_global(self.outputs.values().map(|e| &e.geo), x, y)
     }
 
-    /// For trace lines: how many outputs have live cursor sessions.
+    /// Return the number of outputs with live cursor sessions.
+    /// The daemon logs this diagnostic unconditionally.
     pub fn session_count(&self) -> usize {
         self.outputs.values().filter(|e| e.session.is_some()).count()
     }
 
-    /// Every output's layout facts, in registry order.
+    /// Return each output's layout facts in registry order.
     ///
-    /// The portal capture rung anchors its monitors against these
-    /// (capture ladder rung 2, ARCHITECTURE.md#capture-and-masking),
-    /// and both seams must use the same numbers or a hover on the
-    /// second monitor lands on the first.
+    /// The portal capture rung anchors its monitors with these facts.
+    /// This is capture ladder rung 2 (ARCHITECTURE.md#capture-and-masking).
+    /// Both seams must use the same values. Otherwise, a hover on the
+    /// second monitor can land on the first.
     pub fn geometries(&self) -> Vec<OutputGeometry> {
         self.outputs.values().map(|e| e.geo).collect()
     }
 }
 
-/// Sessions for every sessionless output, once managers + pointer
-/// exist. Proxies are cloned out first so object creation never
-/// aliases the `&mut D` borrow.
+/// Create a session for each output without a session after all managers
+/// and the pointer exist. Clone the proxies before object creation.
+/// This avoids aliasing the `&mut D` borrow.
 fn create_sessions<D: CursorHandler>(data: &mut D, qh: &QueueHandle<D>) {
     let c = data.cursor();
     let (Some(source_manager), Some(capture_manager), Some(pointer)) =
@@ -286,9 +292,11 @@ impl<D: CursorHandler> Dispatch<ExtImageCopyCaptureCursorSessionV1, u32, D> for 
                     c.active = None;
                 }
             }
+            // The protocol defines this position as
             // "Relative to the main buffer's top left corner in
-            // transformed buffer pixel coordinates" — physical pixels
-            // on this output.
+            // transformed buffer pixel coordinates".
+            // wlroots sends physical pixels, but affected Hyprland versions can
+            // send output-local logical units.
             ext_image_copy_capture_cursor_session_v1::Event::Position { x, y } => {
                 let c = data.cursor();
                 let logical = c.session_positions_logical;
@@ -297,13 +305,13 @@ impl<D: CursorHandler> Dispatch<ExtImageCopyCaptureCursorSessionV1, u32, D> for 
                     data.on_cursor_position(pos);
                 }
             }
-            // Hotspot is cursor-image metadata; irrelevant to hover.
+            // The hotspot is cursor-image metadata. Hover does not use it.
             _ => {}
         }
     }
 }
 
-/// Eventless (or ignored-event) helpers the channel binds.
+/// Bind helpers for events that the cursor channel ignores.
 macro_rules! ignore_events {
     ($($iface:ty),+ $(,)?) => {
         $(
@@ -330,7 +338,7 @@ ignore_events!(
     ExtImageCopyCaptureManagerV1,
 );
 
-/// A throwaway `CursorHandler` that only settles output geometry.
+/// Use a temporary `CursorHandler` to settle output geometry.
 struct Probe(CursorState);
 
 impl CursorHandler for Probe {
@@ -338,7 +346,7 @@ impl CursorHandler for Probe {
         &mut self.0
     }
 
-    /// No sessions are created, so no position can arrive.
+    /// This probe creates no sessions. Therefore, no position can arrive.
     fn on_cursor_position(&mut self, _: PhysPoint) {}
 }
 
@@ -364,19 +372,19 @@ impl Dispatch<WlRegistry, ()> for Probe {
     }
 }
 
-/// Settle output geometry on a connection nobody else holds.
+/// Settle output geometry on a connection that no other component holds.
 ///
-/// The portal capture rung's consent is *eager*
-/// (ARCHITECTURE.md#capture-and-masking): it runs before the pump
-/// exists, and the channel-status row it produces has to be right the
-/// first time the tray is published - which means the monitors it
-/// approves must be anchorable before `App` and its queue are built.
-/// Two roundtrips on a throwaway connection is a smaller price than
-/// reordering the whole startup around a dialog, and it is only paid
-/// on the sessions that select that rung.
+/// The portal capture rung requests consent *eagerly*
+/// (ARCHITECTURE.md#capture-and-masking). It runs before the pump
+/// exists. The tray must show the correct channel-status row on its first
+/// publish. The approved monitors therefore need anchors before `App`
+/// and its queue exist.
 ///
-/// An empty answer is normal, not an error: the caller degrades to an
-/// unanchored stream rather than refusing to start.
+/// Two roundtrips on a temporary connection cost less than a startup
+/// reorder around a dialog. This cost applies only to the portal capture rung.
+///
+/// An empty result is normal, not an error. The caller uses an
+/// unanchored stream instead of refusing to start.
 pub fn probe_geometry(globals: &[Advertised]) -> Vec<OutputGeometry> {
     let Ok(conn) = Connection::connect_to_env() else {
         return Vec::new();
@@ -386,8 +394,8 @@ pub fn probe_geometry(globals: &[Advertised]) -> Vec<OutputGeometry> {
     let registry = conn.display().get_registry(&qh, ());
     let mut probe = Probe(CursorState::default());
     probe.0.bind_outputs(&registry, globals, &qh);
-    // Geometry lands across two rounds: the binds, then the events
-    // those binds provoke.
+    // Geometry arrives in two rounds. The first round processes the binds.
+    // The second round processes the events that the binds cause.
     for _ in 0..2 {
         if queue.roundtrip(&mut probe).is_err() {
             break;

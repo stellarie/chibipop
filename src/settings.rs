@@ -1,4 +1,7 @@
-//! The settings window's model.
+//! The SettingsForm model and the configuration update rules.
+//!
+//! The settings process edits a shared Config through this form.
+//! The core keeps Dictionary roles, language lists, and staged changes here.
 
 use crate::config::{
     Config, FieldMapping, LayoutMode, OcrClipboardConfig, SentenceMode, TriggerMode,
@@ -10,13 +13,13 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Re-exported for config.rs.
+/// This module re-exports these names for config.rs.
 pub use crate::config::{
     CAPTURE_H_RANGE, CAPTURE_W_RANGE, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
     SUMMARY_RANGE,
 };
 
-/// What the window edits.
+/// The fields that the settings window edits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsForm {
     pub mode: TriggerMode,
@@ -29,7 +32,7 @@ pub struct SettingsForm {
     pub highlight_match: bool,
     pub scroll_popup: bool,
     pub side_panel: bool,
-    /// Compact or roomy.
+    /// The popup layout mode.
     pub layout_mode: LayoutMode,
     pub dictionary_styling: bool,
     pub show_examples: bool,
@@ -37,23 +40,22 @@ pub struct SettingsForm {
     pub show_images: bool,
     pub show_part_of_speech: bool,
     pub exclude_from_capture: bool,
-    /// The terms Dictionary list: every Dictionary the config names or the
-    /// library holds with that role, in priority order, each row carrying
-    /// its own checkbox.
+    /// The terms Dictionary list. It contains every Dictionary that the config
+    /// names or that the Library holds with that role, in priority order. Each
+    /// row has its own checkbox.
     ///
-    /// One list per role and not one list plus an exclusion box: order and
-    /// enabling are separate questions, so reordering can never silently
-    /// exclude anything (ARCHITECTURE.md#dictionary-and-lookup).
+    /// Each role has one list, not one list and an exclusion box. List order
+    /// and enabled state are separate. A reorder therefore does not exclude a
+    /// Dictionary (ARCHITECTURE.md#dictionary-and-lookup).
     pub terms: Vec<DictRow>,
-    /// The frequency Dictionary list. Position is the order
-    /// [`RankingStrategy::Priority`] reads, and a checkbox here never
-    /// touches the same Dictionary's row in another list.
+    /// The frequency Dictionary list. Position is the order that
+    /// [`RankingStrategy::Priority`] reads. A checkbox here does not affect the
+    /// same Dictionary in another list.
     pub frequency: Vec<DictRow>,
-    /// The pitch Dictionary list. Enabling a pitch Dictionary is the only
-    /// switch pitch gets.
+    /// The pitch Dictionary list. This checkbox is the only pitch enable switch.
     pub pitch: Vec<DictRow>,
-    /// The rule reducing the enabled frequency Dictionaries' Reported
-    /// frequencies to one Frequency rank.
+    /// The rule that reduces Reported frequencies from enabled frequency
+    /// Dictionaries to one Frequency rank.
     pub ranking_strategy: RankingStrategy,
     pub dict_list_language: String,
     pub per_language: BTreeMap<String, Vec<String>>,
@@ -64,7 +66,7 @@ pub struct SettingsForm {
     pub scan_alphanumeric: bool,
     pub per_character_lookup: bool,
     pub ocr_language: String,
-    /// "builtin" or a plugin's name.
+    /// "builtin" or the name of a plugin.
     pub engine: String,
     pub show_scan_region: bool,
     pub show_engine_log: bool,
@@ -73,60 +75,58 @@ pub struct SettingsForm {
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
     pub library_empty: bool,
-    /// Files nothing can read.
+    /// Files that no archive reader can read.
     ///
-    /// Listed, never ordered.
+    /// The window lists these files but does not order them.
     pub unreadable: Vec<String>,
     pub anki_enabled: bool,
     pub anki_url: String,
     pub anki_deck: String,
     pub anki_model: String,
     pub anki_add_key: String,
-    /// `None`: this window has no answer about the field map, so Apply
-    /// leaves the saved one alone. Windows fills its rows from a live
-    /// AnkiConnect `modelFieldNames` call that answers with an empty
-    /// vector whenever Anki is unreachable
-    /// (`crates/chibipop-windows/src/app.rs:797-806`), and a window that
-    /// was never told the field names must not wipe a good mapping.
-    /// `Some(vec![])` is a user who mapped nothing, which is an answer
-    /// and saves.
+    /// `None` means that this window has no answer about the field map, so Apply
+    /// leaves the saved map unchanged. Windows fills its rows from a live
+    /// AnkiConnect `modelFieldNames` call. That call returns an empty vector when
+    /// Anki is unreachable
+    /// (`crates/chibipop-windows/src/app.rs:797-806`). A window that has not
+    /// learned field names must not wipe a good field map. `Some(vec![])` means
+    /// that a user mapped no fields. That is an answer, and the form saves it.
     pub field_map: Option<Vec<FieldMapping>>,
     pub notify_on_add: bool,
     pub sentence_mode: SentenceMode,
     pub static_region_key: String,
     pub show_static_overlay: bool,
-    /// `None`: the action is off.
+    /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
-    /// Only the top dict's entry.
+    /// Whether the note uses only the top Dictionary's Entry.
     pub first_dict_only: bool,
-    /// Plugin names allowed to run.
+    /// The plugin names that can run.
     pub enabled_plugins: Vec<String>,
 }
 
-/// One Dictionary's row in one role's list.
+/// One Dictionary row in one role list.
 ///
-/// The name is the identity and the flag is that role's checkbox. Enabled
-/// is per *role* and not per Dictionary: unchecking a mixed archive's
-/// definitions must not silently kill its frequency data, so a checkbox
-/// only ever affects the list it sits in
-/// (ARCHITECTURE.md#dictionary-and-lookup).
+/// The name identifies the Dictionary. The flag enables that role.
+/// Enabled state belongs to each role, not to the Dictionary. A mixed archive
+/// can provide definitions and frequency data, so one checkbox affects only
+/// its own role list (ARCHITECTURE.md#dictionary-and-lookup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictRow {
     pub name: String,
     pub enabled: bool,
 }
 
-/// An import waiting for Apply.
+/// An import staged until Apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedAdd {
     pub source: PathBuf,
-    /// The dictionary's own title.
+    /// The title that the Dictionary provides.
     pub name: String,
 }
 
 impl SettingsForm {
-    /// This role's list.
+    /// The list of this role.
     pub fn list(&self, role: Role) -> &[DictRow] {
         match role {
             Role::Terms => &self.terms,
@@ -135,7 +135,7 @@ impl SettingsForm {
         }
     }
 
-    /// This role's list, to reorder or to check.
+    /// The list of this role, to reorder or to check.
     pub fn list_mut(&mut self, role: Role) -> &mut Vec<DictRow> {
         match role {
             Role::Terms => &mut self.terms,
@@ -144,22 +144,21 @@ impl SettingsForm {
         }
     }
 
-    /// Stage an archive for import.
+    /// Stages an archive for import.
     ///
-    /// It lands at the bottom of every list its role set names, enabled,
-    /// and moves no row that is already there: installing a Dictionary
-    /// never reorders the lists the user curated, and never silently does
-    /// nothing.
+    /// The archive goes to the bottom of every list for its roles, enabled. It
+    /// does not move a prior row. An import therefore preserves the user's
+    /// list order.
     ///
-    /// `None` when the archive is unreadable - an empty role set has no
-    /// list to land in - or already staged.
+    /// The function returns `None` when the archive is unreadable or already
+    /// staged. An unreadable archive has no role list.
     pub fn stage_add(&mut self, source: &Path) -> Option<Roles> {
         let roles = roles_of(source);
         if roles.is_empty() {
             return None;
         }
         let name = archive_title(source)?;
-        // Titles repeat: split editions.
+        // Titles can repeat because split editions use one title.
         if self.staged_adds.iter().any(|a| a.source == source) {
             return None;
         }
@@ -173,10 +172,10 @@ impl SettingsForm {
         Some(roles)
     }
 
-    /// Stage a row for removal.
+    /// Stages a row for removal.
     ///
-    /// Out of every list: one archive is one Dictionary, so removing it
-    /// removes it from all three roles at once.
+    /// The row leaves all role lists. One archive is one Dictionary, so removal
+    /// removes it from all three roles.
     pub fn stage_remove(&mut self, name: &str) {
         let was_freq = self.frequency.iter().any(|row| row.name == name);
         for role in Role::EVERY {
@@ -184,7 +183,7 @@ impl SettingsForm {
         }
         let staged = self.staged_adds.len();
         self.staged_adds.retain(|a| a.name != name);
-        // Never reached the library.
+        // The staged import never reached the Library.
         if self.staged_adds.len() == staged && !self.staged_removes.iter().any(|n| n == name) {
             self.staged_removes.push(name.to_string());
         }
@@ -193,32 +192,32 @@ impl SettingsForm {
         }
     }
 
-    /// Anything for the library.
+    /// Returns true when the form has staged changes.
     pub fn has_staged(&self) -> bool {
         !self.staged_adds.is_empty() || !self.staged_removes.is_empty()
     }
 
-    /// Forget what Apply did.
+    /// Clears staged changes after Apply.
     pub fn clear_staged(&mut self) {
         self.staged_adds.clear();
         self.staged_removes.clear();
         self.freq_changed = false;
     }
 
-    /// Take what Apply wrote.
+    /// Copies the per-language lists that Apply wrote.
     pub fn reseed_per_language(&mut self, written: &BTreeMap<String, Vec<String>>) {
         self.per_language = written.clone();
     }
 
-    /// Is this row a pending import?
+    /// Returns true when this row names a staged import.
     pub fn is_staged_add(&self, name: &str) -> bool {
         self.staged_adds.iter().any(|a| a.name == name)
     }
 }
 
-/// The dictionary's own title.
+/// Returns the title that the Dictionary provides.
 ///
-/// A filename would never match.
+/// A file name does not replace this title.
 pub fn archive_title(source: &Path) -> Option<String> {
     let index = crate::dict::archive::read_index(source).ok()?;
     let title = index.get("title").and_then(|v| v.as_str()).filter(|t| !t.is_empty());
@@ -228,33 +227,31 @@ pub fn archive_title(source: &Path) -> Option<String> {
     }
 }
 
-/// How an archive is listed.
+/// The file name that the list displays for an archive.
 pub fn shown_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// Does this window's terms list belong to the OCR language it names?
+/// Returns whether this window's terms list belongs to its OCR language.
 ///
-/// A per-language list is only rewritten when the rows on screen were drawn
-/// for that language and the language already has one - anything else and
-/// Apply would key one language's arrangement to another's tag.
+/// The code rewrites a per-language list only when the visible rows belong to
+/// that language and the language already has a list. Without this check,
+/// Apply can assign one language's arrangement to another language's tag.
 pub fn is_scoped(form: &SettingsForm) -> bool {
     form.dict_list_language == form.ocr_language
         && form.per_language.contains_key(&form.ocr_language)
 }
 
-/// Show the library's lists.
+/// Merges the form's Dictionary rows with the Library.
 ///
-/// The library is the authority on roles, because roles are read from an
-/// archive's banks and the library is what holds archives. So a name the
-/// library holds *without* a role leaves that role's list, a library
-/// archive holding a role the list does not name lands at the bottom of it
-/// enabled, and a name the library knows nothing about - an unplugged
-/// drive, or a database built outside the app - is left exactly where the
-/// config put it.
+/// The Library is the authority on roles because roles come from archive banks.
+/// A Library name with no role leaves that role's list. An archive with a role
+/// absent from a list goes to that list's bottom, enabled. An unknown name
+/// stays in the config's position. It can name an archive on a disconnected
+/// drive or an archive from a database built outside the app.
 ///
-/// Unreadable files are listed in the terms list so they can still be
-/// removed, which is the only reason an empty role set is listed at all.
+/// The terms list also holds unreadable files so the user can remove them.
+/// This is the only reason the window shows a row with no roles.
 pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     for role in Role::EVERY {
         let rows = form.list_mut(role);
@@ -278,7 +275,7 @@ pub fn with_library(mut form: SettingsForm, lib: &Library) -> SettingsForm {
     form
 }
 
-/// Files a removal names.
+/// Returns files for staged removals.
 pub fn removed_files(form: &SettingsForm, lib: &Library) -> Vec<String> {
     form.staged_removes
         .iter()
@@ -287,9 +284,9 @@ pub fn removed_files(form: &SettingsForm, lib: &Library) -> Vec<String> {
         .collect()
 }
 
-/// Term archives Apply leaves.
+/// Counts the term archives that Apply would leave.
 ///
-/// Read, never asked of a list.
+/// The code reads this count. It does not use a form list for the count.
 pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
     let gone = removed_files(form, lib);
     let kept = lib
@@ -304,10 +301,10 @@ pub fn terms_after_apply(form: &SettingsForm, lib: &Library) -> usize {
         .count()
 }
 
-/// Do what Apply staged.
+/// Applies the staged changes to the Library.
 ///
-/// Refuses before it moves.
-/// Reversible until commit.
+/// The function checks the term archive count before it moves files.
+/// A failed change restores the Library before commit.
 pub fn stage_into_library(form: &SettingsForm, dir: &Path) -> Result<Pending> {
     let mut lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
     if terms_after_apply(form, &lib) == 0 {
@@ -326,7 +323,7 @@ pub fn stage_into_library(form: &SettingsForm, dir: &Path) -> Result<Pending> {
     }
 }
 
-/// Import, quarantine, save.
+/// Imports staged archives, quarantines removed files, and saves the Library.
 fn mutate(
     lib: &mut Library,
     pending: &mut Pending,
@@ -334,7 +331,7 @@ fn mutate(
     form: &SettingsForm,
     gone: &[String],
 ) -> Result<()> {
-    // A source may live in `dir`.
+    // A source can already be in `dir`.
     for add in &form.staged_adds {
         let entry = lib
             .import(dir, &add.source)
@@ -348,13 +345,12 @@ fn mutate(
     lib.save(dir)
 }
 
-/// One role's rows, as the config holds them plus whatever the database
-/// has that no list names.
+/// Builds one role list from config names and Library entries.
 ///
-/// The config comes first because it is what the user arranged, and a name
-/// it holds that names nothing installed stays as a row: keeping it on
-/// screen is what keeps it in the file, so unplugging the drive a library
-/// sits on cannot delete a list. `with_library` then corrects the roles.
+/// The function starts with the config order. A name that matches no
+/// installed Dictionary remains a row. The row stays in the file, so a
+/// disconnected drive cannot remove it from the list.
+/// `with_library` then corrects the roles.
 fn rows_for(cfg: &Config, role: Role, dicts: &[DictInfo]) -> Vec<DictRow> {
     cfg.dictionaries
         .listed(role, dicts)
@@ -363,16 +359,16 @@ fn rows_for(cfg: &Config, role: Role, dicts: &[DictInfo]) -> Vec<DictRow> {
         .collect()
 }
 
-/// The config's lists, plus the language's own terms scope where it has
-/// one.
+/// Builds the config's lists and the active language's terms scope.
 pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     let mut terms = rows_for(cfg, Role::Terms, dicts);
     let frequency = rows_for(cfg, Role::Frequency, dicts);
     let pitch = rows_for(cfg, Role::Pitch, dicts);
-    // A database built outside the app has dictionaries no list has ever
-    // named and no library entry to read a role off, and the popup only
-    // ever spends the terms list - so that is where they are listed, and
-    // `with_library` moves them the moment the library holds the archive.
+    // A database built outside the app can contain Dictionaries that no list has
+    // named. The Library has no entry for them, so it cannot read their roles.
+    // The popup searches only the terms list, so the code places these
+    // Dictionaries there.
+    // `with_library` moves them when the Library holds the archive.
     for dict in dicts {
         let named = [&terms, &frequency, &pitch]
             .iter()
@@ -381,9 +377,9 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             terms.push(DictRow { name: dict.name.clone(), enabled: true });
         }
     }
-    // The language's own list is the terms arrangement this window edits, so
-    // where it has one its rows are the checked ones, in its order, and
-    // everything else trails behind them unchecked.
+    // The active language's list supplies the terms order that this window edits.
+    // Its rows come first and stay checked. Other Dictionaries follow and stay
+    // unchecked.
     if let Some(scope) = cfg.dictionaries.language_scope(&cfg.ocr.language, dicts) {
         let mut rows: Vec<DictRow> =
             scope.into_iter().map(|name| DictRow { name, enabled: true }).collect();
@@ -456,13 +452,13 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 }
 
-/// The terms one language searches, out of the rows on screen.
+/// Returns the Dictionaries that one language searches from the visible rows.
 ///
-/// The enabled rows, by exact name, in the order they sit in - an
-/// unreadable file is a row so it can be removed and never a Dictionary to
-/// search. `None` when that leaves nothing, because a language entry naming
-/// no dictionary is indistinguishable from having no entry and the caller
-/// should leave the saved one alone.
+/// The result contains enabled rows by exact name and screen order. An
+/// unreadable file remains a row for removal, but it is not a Dictionary to
+/// search. The function returns `None` when no searchable name remains,
+/// because an entry with no Dictionary equals no entry. The caller leaves
+/// the saved entry unchanged.
 pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<String>> {
     let named: Vec<String> = rows
         .iter()
@@ -472,7 +468,7 @@ pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<Strin
     (!named.is_empty()).then_some(named)
 }
 
-/// The form, back onto the config it was drawn from.
+/// Converts the form back into its source Config.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.trigger.mode = form.mode;
@@ -518,9 +514,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
     out.anki.first_dict_only = form.first_dict_only;
-    // The form renders the Windows chord only, so the Linux twin rides
-    // through untouched - turning one off never deletes the other, and
-    // the section survives while either is set.
+    // The form renders only the Windows chord, so the Linux chord stays unchanged.
+    // The section stays when either chord has a value. The code can clear one
+    // chord and keep the other.
     let hotkey_linux = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone());
     out.actions.ocr_clipboard = match (&form.ocr_clipboard_key, &hotkey_linux) {
         (None, None) => None,
@@ -531,11 +527,11 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     };
     out.actions.screenshot.include_on_add = form.include_screenshot;
     out.plugins.enabled = form.enabled_plugins.clone();
-    // Each list splits into its pair: the checked rows in the order they
-    // sit in, then the unchecked ones. An unreadable file is a row so it
-    // can be removed and is never a Dictionary, so it reaches neither
-    // array - and `display_order` reaches nothing at all, which is what
-    // retires it from the file on the first save after an upgrade.
+    // Each role list becomes an enabled array and a disabled array. Each array
+    // keeps its rows in screen order. An unreadable file remains a row for
+    // removal, but it is not a Dictionary and reaches neither array.
+    // `display_order` receives no values. The empty field disappears from the
+    // file after an upgrade.
     for role in Role::EVERY {
         let named = |enabled: bool| -> Vec<String> {
             form.list(role)
@@ -560,7 +556,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out
 }
 
-/// What `apply_to` had to move.
+/// Reports capture-size values that `apply_to` changed.
 pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
     let mut parts = Vec::new();
     if form.capture_width != applied.ocr.capture_width {
@@ -576,7 +572,7 @@ pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
     }
 }
 
-/// The clamp notice's exact sentence.
+/// Builds the exact clamp notice sentence.
 fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
     let (verb, bound) = if got > asked {
         ("raised", "minimum")
@@ -586,12 +582,11 @@ fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
     format!("Capture {axis} {verb} to the {got}px {bound}.")
 }
 
-/// Names no installed Dictionary answers to.
+/// Returns names that match no installed Dictionary.
 ///
-/// A list may legitimately hold one - an unplugged drive keeps its place -
-/// but from inside the settings window it is also exactly what a renamed
-/// archive looks like, so the window says so rather than silently ignoring
-/// the entry.
+/// A list can preserve a name for an unplugged drive. The settings window
+/// cannot distinguish that name from a renamed archive, so it reports the
+/// name and keeps the entry.
 pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
     let mut stale: Vec<String> = Vec::new();
     for role in Role::EVERY {
@@ -605,12 +600,12 @@ pub fn stale_order_entries(cfg: &Config, dicts: &[DictInfo]) -> Vec<String> {
     stale
 }
 
-/// Drop a removed Dictionary.
+/// Removes a Dictionary from every configuration list.
 ///
-/// Out of all six arrays and every language list, because one archive is
-/// one Dictionary and removing it removes every role it held. An emptied
-/// language list is removed with it: an entry naming nothing is the same
-/// state as having no entry.
+/// The function removes the name from all six arrays and every language list.
+/// One archive is one Dictionary, so removal affects every role it held.
+/// The function also removes an empty language list because an entry with no
+/// name has the same state as no entry.
 pub fn dictionary_removed(cfg: &mut Config, name: &str) {
     for role in Role::EVERY {
         let (mut on, mut off) = {
@@ -627,12 +622,12 @@ pub fn dictionary_removed(cfg: &mut Config, name: &str) {
     });
 }
 
-/// List an added Dictionary.
+/// Adds a Dictionary to its role lists and the active language list.
 ///
-/// At the bottom of the enabled array of every role it holds, so an import
-/// reorders nothing that was already arranged. The active language's list
-/// gains it too where that language has one, because a term Dictionary the
-/// language scope never names would arrive switched off.
+/// The function adds it to the bottom of each enabled role array. It does
+/// not reorder prior names. It also adds the name to the active language's
+/// list when that list is present and non-empty. Otherwise, a term Dictionary
+/// that the scope does not name starts disabled.
 pub fn dictionary_added(cfg: &mut Config, name: &str, roles: Roles) {
     if name.trim().is_empty() {
         return;
@@ -658,27 +653,24 @@ pub fn dictionary_added(cfg: &mut Config, name: &str, roles: Roles) {
     }
 }
 
-/// What applying a change costs beyond writing the file.
+/// The work that a Dictionary change needs beyond the file save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictionaryWork {
-    /// Save and `reload`, and nothing else.
+    /// Save the file and send `reload` only.
     None,
     /// Recompute every Frequency rank in place first.
     Reindex,
 }
 
-/// Does this change need a Reindex?
+/// Chooses whether a Dictionary change needs a Reindex.
 ///
-/// Exactly three inputs decide `term.freq`: which frequency Dictionaries
-/// are enabled, the order they rank in, and the strategy that reduces them.
-/// Change one and the ranks in the file were computed from something else;
-/// change anything in the terms or pitch lists and they were not, because
-/// neither role contributes a number to reduce
-/// (ARCHITECTURE.md#dictionary-and-lookup).
+/// Exactly three inputs determine `term.freq`: enabled frequency Dictionaries,
+/// their order, and the Ranking strategy. A change to one input makes stored
+/// ranks stale. Terms and pitch lists do not affect `term.freq`, so they need
+/// no Reindex (ARCHITECTURE.md#dictionary-and-lookup).
 ///
-/// The rule lives here so that neither settings window carries a copy of
-/// it, and so that a Reindex is never mistaken for a rebuild: nothing here
-/// reads an archive.
+/// This rule stays here instead of in a settings window. A Reindex is not a
+/// rebuild because this code does not read an archive.
 pub fn dictionary_work(before: &Config, after: &Config) -> DictionaryWork {
     let changed = before.dictionaries.frequency != after.dictionaries.frequency
         || before.dictionaries.frequency_disabled != after.dictionaries.frequency_disabled
@@ -690,18 +682,19 @@ pub fn dictionary_work(before: &Config, after: &Config) -> DictionaryWork {
     }
 }
 
-/// Where the two sides differ.
+/// The differences between the Library and the source list.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Drift {
-    /// In the library, never built.
+    /// Archives in the Library that the source list does not name.
     unbuilt: Vec<String>,
-    /// Built from, now gone.
+    /// Archives in the source list that the Library no longer has.
     orphaned: Vec<String>,
 }
 
-/// Library vs source_hashes.
+/// Compares the Library with `source_hashes`.
 ///
-/// Parsed: the bytes vary.
+/// The function parses the source list and compares archive names. It does
+/// not compare record byte values.
 fn drift(sources: Option<&str>, lib: &Library) -> Drift {
     let Some(raw) = sources else { return Drift::default() };
     let Ok(listed) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
@@ -719,21 +712,22 @@ fn drift(sources: Option<&str>, lib: &Library) -> Drift {
     Drift { unbuilt: only_in(&built, &recorded), orphaned: only_in(&recorded, &built) }
 }
 
-/// Names in one list only.
+/// Returns names that occur in one list but not the other.
 fn only_in(these: &[String], those: &[String]) -> Vec<String> {
     these.iter().filter(|name| !those.contains(name)).cloned().collect()
 }
 
-/// Offer a rebuild, or not.
+/// Builds a rebuild notice when the Library and database differ.
 ///
-/// CRLF: the box is an EDIT.
+/// The function returns no notice when the Library has no term archive.
+/// CRLF separates the notice from the command because the destination box is an EDIT.
 pub fn drift_notice(
     sources: Option<&str>,
     lib: &Library,
     dir: &Path,
     db: &Path,
 ) -> Option<String> {
-    // build-dict needs a term zip.
+    // build-dict needs a term archive.
     if !lib.entries.iter().any(|e| e.roles.has(Role::Terms)) {
         return None;
     }
@@ -784,7 +778,7 @@ mod tests {
         c
     }
 
-    /// A pre-roles config, carrying the substrings the role shape replaced.
+    /// A pre-roles config that carries the substrings that the role shape replaced.
     fn pre_roles(order: &[&str]) -> Config {
         let mut c = Config::default();
         c.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
@@ -813,9 +807,9 @@ mod tests {
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
     }
 
-    /// THE trap the substring model set: reordering used to rewrite a
-    /// pattern, so moving one edition moved every dictionary it matched.
-    /// Now a row is a name and a move is a move.
+    /// Exact names must control order changes. The older substring model changed a
+    /// pattern, so one edition change changed every Dictionary that matched it.
+    /// A row now stores one name, and a move changes only that row.
     #[test]
     fn reordering_writes_the_exact_names_in_their_new_order() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
@@ -829,9 +823,8 @@ mod tests {
         assert!(out.dictionaries.terms_disabled.is_empty());
     }
 
-    /// The upgrade, end to end: a config still naming `大辞林` opens as the
-    /// exact installed names it matched, and the first Apply writes them
-    /// into the six arrays and retires the key.
+    /// The migration converts a config with `大辞林` into exact installed names.
+    /// The first Apply writes those names into six arrays and retires the old key.
     #[test]
     fn a_pre_roles_config_is_written_back_as_exact_names() {
         let cfg = pre_roles(&["大辞林", "Kenkyusha"]);
@@ -854,8 +847,7 @@ mod tests {
         assert!(!text.contains("\"大辞林\""), "and so is the substring: {text}");
     }
 
-    /// The Windows Apply pipeline renders its subset and carries the
-    /// Linux platform fields untouched.
+    /// The Windows Apply pipeline writes its fields and preserves Linux platform fields.
     #[test]
     fn applying_the_form_preserves_the_other_platforms_fields() {
         let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
@@ -883,9 +875,8 @@ mod tests {
         assert_eq!("light", out.popup.theme);
     }
 
-    /// The name written is the dictionary's own, edition and date and all,
-    /// where the old key derivation cut everything from the first bracket
-    /// so that two editions collapsed onto one entry.
+    /// The written name includes the Dictionary's edition and date. The old key
+    /// derivation cut text at the first bracket, so two editions became one entry.
     #[test]
     fn a_never_listed_dictionary_is_written_under_its_whole_name() {
         let cfg = cfg_with(&[]);
@@ -897,8 +888,8 @@ mod tests {
         );
     }
 
-    /// An unchecked row is written to the disabled twin, keeps its order
-    /// within it, and is not searched.
+    /// An unchecked row goes to the disabled list. It keeps its position there
+    /// and does not affect searches.
     #[test]
     fn an_unchecked_row_lands_in_the_disabled_twin() {
         let cfg = cfg_with(&[]);
@@ -917,7 +908,7 @@ mod tests {
         );
     }
 
-    /// The whole point of exact names: one edition off, the other on.
+    /// Exact names let one edition stay disabled while another stays enabled.
     #[test]
     fn two_dictionaries_sharing_a_substring_are_enabled_independently() {
         let editions = vec![
@@ -933,7 +924,7 @@ mod tests {
         assert_eq!(vec!["大辞林　第四版".to_string()], out.present_config(&editions).terms);
     }
 
-    /// A rename looks like this.
+    /// A Config name with no Dictionary match must appear in the stale-name report.
     #[test]
     fn an_entry_matching_no_dictionary_is_reported() {
         let stale = stale_order_entries(&cfg_with(&["大辞林　第四版", "Kenkyusha"]), &dicts());
@@ -946,8 +937,8 @@ mod tests {
         assert!(stale_order_entries(&cfg, &dicts()).is_empty());
     }
 
-    /// Reported stale in every role, because every array names Dictionaries
-    /// the same way.
+    /// The stale-name report checks every role because all arrays store Dictionary
+    /// names with the same exact rule.
     #[test]
     fn a_stale_entry_is_reported_whichever_list_holds_it() {
         let mut cfg = Config::default();
@@ -959,7 +950,7 @@ mod tests {
         );
     }
 
-    /// Catches a bad control.
+    /// An unchanged form must produce an equal Config.
     #[test]
     fn an_untouched_form_round_trips_to_an_equal_config() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
@@ -1004,12 +995,10 @@ mod tests {
         assert_eq!(cfg, apply_to(&form, &cfg));
     }
 
-    /// Each render knob reaches the form and comes back, one at a time.
+    /// This test checks each render field in both directions, one field at a time.
     ///
-    /// One at a time rather than all six at once, because the failure
-    /// this guards against is a field wired into `from_config` and
-    /// forgotten in `apply_to` - which a single all-flipped case would
-    /// catch only if every field were wrong the same way.
+    /// A field can reach the form through `from_config` but fail to return through
+    /// `apply_to`. Separate cases show which field fails. They keep failures separate.
     #[test]
     fn every_render_knob_round_trips_through_the_form() {
         type Edit = fn(&mut Config);
@@ -1083,7 +1072,7 @@ mod tests {
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
     }
 
-    /// Untouched must not reset it.
+    /// An untouched field map must remain unchanged.
     #[test]
     fn an_untouched_field_map_survives_apply() {
         let cfg = cfg_with(&[]);
@@ -1091,8 +1080,7 @@ mod tests {
         assert_eq!(cfg.anki.field_map, apply_to(&form, &cfg).anki.field_map);
     }
 
-    /// A user who removes every row is saying "map nothing": an answer,
-    /// and a storable state.
+    /// An empty field map is an explicit user answer that Apply must save.
     #[test]
     fn emptying_the_field_map_saves_an_empty_map() {
         let mut cfg = cfg_with(&[]);
@@ -1106,8 +1094,8 @@ mod tests {
         );
     }
 
-    /// A window whose rows never loaded has no answer, which is not the
-    /// same value as an empty answer.
+    /// A form without loaded field names has no answer. That differs from an empty
+    /// field map, which is an explicit answer.
     #[test]
     fn a_window_with_nothing_to_say_cannot_wipe_the_field_map() {
         let mut cfg = cfg_with(&[]);
@@ -1178,7 +1166,7 @@ mod tests {
         );
     }
 
-    /// No section, no key: `None` all the way through, no sentinel.
+    /// An absent OCR clipboard section and key must remain `None` without a sentinel.
     #[test]
     fn an_absent_ocr_clipboard_action_reads_as_none() {
         let cfg = cfg_with(&[]);
@@ -1202,7 +1190,7 @@ mod tests {
         assert_eq!(None, apply_to(&form, &cfg).actions.ocr_clipboard);
     }
 
-    /// Clearing the Windows chord must not evict the Linux one.
+    /// The Windows chord can be clear while the Linux chord remains.
     #[test]
     fn an_unset_ocr_clipboard_key_keeps_the_linux_twin() {
         let mut cfg = cfg_with(&[]);
@@ -1367,7 +1355,7 @@ mod tests {
         assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
     }
 
-    /// The other direction, on open.
+    /// Checks that from_config copies per-character lookup into the form.
     #[test]
     fn from_config_seeds_per_character_lookup() {
         let mut cfg = Config::default();
@@ -1379,7 +1367,7 @@ mod tests {
         );
     }
 
-    /// The other direction, on open.
+    /// Checks that from_config copies the OCR language into the form.
     #[test]
     fn from_config_seeds_the_ocr_language() {
         let mut cfg = Config::default();
@@ -1396,7 +1384,7 @@ mod tests {
         assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
     }
 
-    /// The other direction, on open.
+    /// Checks that from_config copies the engine name into the form.
     #[test]
     fn from_config_seeds_the_engine() {
         let mut cfg = Config::default();
@@ -1416,7 +1404,7 @@ mod tests {
         );
     }
 
-    /// The other direction, on open.
+    /// Checks that from_config copies enabled plugin names into the form.
     #[test]
     fn from_config_seeds_enabled_plugins() {
         let mut cfg = Config::default();
@@ -1456,7 +1444,7 @@ mod tests {
         assert_eq!(vec!["大辞林　第四版".to_string()], out.dictionaries.per_language["ja"]);
     }
 
-    /// Others must survive.
+    /// Other language lists must remain unchanged.
     #[test]
     fn apply_to_preserves_other_languages() {
         let mut cfg = Config::default();
@@ -1472,8 +1460,8 @@ mod tests {
         );
     }
 
-    /// Re-checking a row keeps the key and rewrites it, under the exact
-    /// names the second Apply saw.
+    /// A second Apply must preserve the language key and write the exact names
+    /// that the second form contains.
     #[test]
     fn a_second_apply_rewrites_the_key_the_first_one_wrote() {
         let mut cfg = Config::default();
@@ -1499,7 +1487,7 @@ mod tests {
         );
     }
 
-    /// Merge must not undo scoping.
+    /// The Library merge must preserve a language's scope.
     #[test]
     fn with_library_keeps_the_exclusion_scoped() {
         let mut cfg = Config::default();
@@ -1512,7 +1500,7 @@ mod tests {
         assert!(form.terms.iter().any(|row| row.name.contains("Jitendex") && !row.enabled));
     }
 
-    /// A stale list must not win.
+    /// A stale `dict_list_language` value must not replace the real language list.
     #[test]
     fn apply_to_does_not_write_a_stale_dict_list_language() {
         let mut cfg = Config::default();
@@ -1529,7 +1517,7 @@ mod tests {
         );
     }
 
-    /// One helper, two writers.
+    /// The same function defines the no-name result for both write paths.
     #[test]
     fn a_scoped_entry_naming_nothing_is_never_written() {
         let unreadable = ["bad.zip".to_string()];
@@ -1549,7 +1537,7 @@ mod tests {
         );
     }
 
-    /// I2-a: nothing left checked.
+    /// I2-a: No searchable row remains, so Apply must preserve the current entry.
     #[test]
     fn apply_to_will_not_erase_a_list_when_nothing_is_searched() {
         let mut cfg = Config::default();
@@ -1569,7 +1557,7 @@ mod tests {
         );
     }
 
-    /// I2-b: only unreadable rows.
+    /// I2-b: Only unreadable rows remain, so Apply must preserve the current entry.
     #[test]
     fn apply_to_will_not_erase_a_list_for_an_unreadable_row() {
         let mut cfg = Config::default();
@@ -1591,10 +1579,9 @@ mod tests {
         );
     }
 
-    /// A language list naming nothing installed is still that language's
-    /// list: the guard that used to throw it away and search everything was
-    /// insurance against a substring, and an exact name cannot mistype its
-    /// way into matching all of them.
+    /// A language list that names no installed Dictionary remains that language's
+    /// list. The old guard discarded it and searched every Dictionary to avoid
+    /// substring matches. Exact names prevent that false match.
     #[test]
     fn from_config_keeps_a_language_list_naming_nothing_installed() {
         let mut cfg = Config::default();
@@ -1664,7 +1651,7 @@ mod tests {
         let mut form = from_config(&cfg, &installed);
         form.stage_add(&fixture("terms.zip")).expect("a real archive stages");
 
-        // User drags it to the top.
+        // Move the staged row to the top.
         let name = form.staged_adds[0].name.clone();
         form.terms.retain(|row| row.name != name);
         form.terms.insert(0, DictRow { name: name.clone(), enabled: true });
@@ -1678,8 +1665,8 @@ mod tests {
         );
     }
 
-    /// An import lands at the bottom of every list its roles name, enabled,
-    /// and moves nothing that was already arranged.
+    /// An import goes to the bottom of each role list, enabled. It does not move
+    /// a prior row.
     #[test]
     fn an_import_lands_at_the_bottom_of_each_of_its_role_lists() {
         let mut form = staged_form();
@@ -1701,8 +1688,8 @@ mod tests {
         );
     }
 
-    /// A pitch-only archive is in the Pitch list and in neither other one -
-    /// the filename heuristic used to file it under terms.
+    /// A pitch-only archive belongs only in the Pitch list. The old filename
+    /// heuristic placed it in the terms list.
     #[test]
     fn a_pitch_only_import_reaches_the_pitch_list_alone() {
         let mut form = staged_form();
@@ -1720,7 +1707,7 @@ mod tests {
         let mut form = staged_form();
         let terms_before = names(&form.terms);
 
-        // Picked under Dictionaries.
+        // The test starts with the archive under Dictionaries.
         assert_eq!(
             Some(Roles::only(&[Role::Frequency])),
             form.stage_add(&fixture("freq.zip")),
@@ -1778,8 +1765,8 @@ mod tests {
         assert!(form.has_staged());
     }
 
-    /// One archive is one Dictionary, so removing it removes every role it
-    /// held rather than the one list the user happened to click in.
+    /// One archive is one Dictionary. Removal therefore removes every role that
+    /// it held, not only the role list that received the click.
     #[test]
     fn a_removal_drops_the_dictionary_from_every_list() {
         let mut form = staged_form();
@@ -1839,7 +1826,7 @@ mod tests {
         assert_eq!(1, names(&form.terms).iter().filter(|n| *n == "FixtureTerms").count());
     }
 
-    /// Only the same file duplicates.
+    /// Only the same source file blocks a duplicate stage.
     #[test]
     fn a_title_an_installed_dictionary_uses_does_not_block_the_add() {
         let mut form = staged_form();
@@ -1896,7 +1883,7 @@ mod tests {
         );
     }
 
-    /// A title orders, not a file.
+    /// The Dictionary title controls order. The source file name does not.
     #[test]
     fn a_staged_add_is_ordered_by_its_title_not_its_filename() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
@@ -1950,8 +1937,8 @@ mod tests {
         assert_eq!(vec!["大辞林　第四版", "Jitendex.org [2026-07-09]"], names(&form.terms));
     }
 
-    /// An archive with two roles is one row in each of its two lists, and no
-    /// row at all in the third.
+    /// A mixed archive appears once in each role list that it provides.
+    /// It does not appear in the list for a role that it does not provide.
     #[test]
     fn a_mixed_archive_appears_in_both_its_lists_once_each() {
         let lib = Library {
@@ -1967,10 +1954,9 @@ mod tests {
         assert!(form.pitch.is_empty());
     }
 
-    /// The library is the authority on roles, so a name the config filed
-    /// under a role the archive does not hold leaves that list. A name the
-    /// library knows nothing about stays exactly where the config put it -
-    /// that is what keeps an unplugged drive's entry alive.
+    /// The Library supplies the role set. A known name in a role that its
+    /// archive does not provide leaves that list. An unknown name keeps its
+    /// config position, so a disconnected drive keeps its name.
     #[test]
     fn the_library_corrects_a_role_and_leaves_a_name_it_does_not_know() {
         let mut cfg = Config::default();
@@ -1993,7 +1979,7 @@ mod tests {
         assert!(with_library(staged_form(), &Library::default()).library_empty);
     }
 
-    /// A name, not a file.
+    /// A staged removal resolves a Dictionary name to its source file.
     #[test]
     fn a_removed_row_resolves_to_the_file_that_produced_it() {
         let mut form = with_library(staged_form(), &library());
@@ -2005,7 +1991,7 @@ mod tests {
         );
     }
 
-    /// The existing-user case.
+    /// A name absent from the Library has no source file.
     #[test]
     fn a_row_the_library_never_held_names_no_file() {
         let mut form = staged_form();
@@ -2023,7 +2009,7 @@ mod tests {
         assert_eq!(0, terms_after_apply(&form, &library()));
     }
 
-    /// Frequency alone is nothing to build definitions from.
+    /// Frequency data alone cannot provide term archives.
     #[test]
     fn a_frequency_only_library_leaves_no_term_archives() {
         let mut form = with_library(staged_form(), &Library::default());
@@ -2040,7 +2026,7 @@ mod tests {
         assert_eq!(1, terms_after_apply(&form, &Library::default()));
     }
 
-    /// A path naming nothing.
+    /// An absent source path cannot stage an import.
     #[test]
     fn an_add_that_no_longer_exists_cannot_be_staged_at_all() {
         let mut form = with_library(staged_form(), &Library::default());
@@ -2049,8 +2035,8 @@ mod tests {
         assert_eq!(0, terms_after_apply(&form, &Library::default()));
     }
 
-    /// Kept, not deleted: the row stays on screen, so Apply writes it back
-    /// and the drive it names can be plugged in again.
+    /// The stale row stays visible, so Apply writes it back. The drive can then
+    /// return without loss of its list position.
     #[test]
     fn a_stale_entry_survives_an_apply_that_never_saw_its_dictionary() {
         let cfg = cfg_with(&["Kenkyusha", "大辞林　第四版"]);
@@ -2111,14 +2097,13 @@ mod tests {
         }
     }
 
-    /// The copy lands on disk under a free name, and the manifest then
-    /// offers it as one dictionary rather than two.
+    /// The staged copy gets a free file name, but the manifest treats it as the
+    /// same Dictionary.
     ///
-    /// `stocked` already holds `terms.zip`, so staging the same fixture
-    /// copies it in as `terms (2).zip`: a second file, byte-identical to
-    /// the first. `Library::load` collapses the pair, because two names for
-    /// one archive are one dictionary and building both would answer every
-    /// headword twice. The file itself stays where it was put.
+    /// `stocked` already holds `terms.zip`, so the test copies it to
+    /// `terms (2).zip`. The files have identical bytes. `Library::load` treats
+    /// both names as one Dictionary. The duplicate file remains where the copy
+    /// placed it.
     #[test]
     fn an_add_lands_a_copy_in_the_library_and_in_the_manifest() {
         let (dir, _guard) = stocked("add");
@@ -2141,7 +2126,8 @@ mod tests {
         );
     }
 
-    /// Not before the rebuild.
+    /// The archive moves to `.removed` before commit. It is deleted only after
+    /// commit.
     #[test]
     fn a_remove_deletes_the_archive_it_names_only_once_committed() {
         let (dir, _guard) = stocked("remove");
@@ -2157,9 +2143,8 @@ mod tests {
         assert!(Library::load(&dir).unwrap().freq_paths(&dir).is_empty());
     }
 
-    /// Removing un-stages the add.
-    ///
-    /// One title names one row.
+    /// Removal cancels a staged add with the same Dictionary title.
+    /// One title identifies one row.
     #[test]
     fn removing_a_row_that_is_a_staged_add_cancels_the_add() {
         let (dir, _guard) = stocked("overlap");
@@ -2173,7 +2158,7 @@ mod tests {
         assert_eq!(before, files_in(&dir), "nothing was copied or deleted");
     }
 
-    /// Refused before deleting.
+    /// The function checks all term archives that would remain before it deletes anything.
     #[test]
     fn removing_every_dictionary_is_refused_and_changes_nothing() {
         let (dir, _guard) = stocked("refuse");
@@ -2188,19 +2173,19 @@ mod tests {
         assert_eq!(before, files_in(&dir), "nothing was deleted");
     }
 
-    /// Frequency is not a dict.
+    /// Frequency data alone is not a Dictionary for term lookup.
     #[test]
     fn a_frequency_only_library_is_refused_too() {
         let (dir, _guard) = stocked("freq_only");
         let mut form = form_for(&dir);
-        // Leaves frequency data only.
+        // The form now has only frequency data.
         form.stage_remove("FixtureTerms");
 
         assert!(stage_into_library(&form, &dir).is_err());
         assert!(dir.join("terms.zip").exists());
     }
 
-    /// Ask the file, not the list.
+    /// The archive banks determine the role, not the list where the user added it.
     #[test]
     fn a_frequency_archive_added_under_dictionaries_supplies_no_terms() {
         let (dir, _guard) = stocked("misfiled");
@@ -2208,7 +2193,7 @@ mod tests {
         let mut form = form_for(&dir);
         form.stage_remove("FixtureTerms");
         form.frequency.clear();
-        // Routed by what its banks hold.
+        // The archive banks supply this role.
         assert_eq!(
             Some(Roles::only(&[Role::Frequency])),
             form.stage_add(&fixture("freq.zip")),
@@ -2223,7 +2208,7 @@ mod tests {
         assert_eq!(before, files_in(&dir));
     }
 
-    /// Unreadable is not usable.
+    /// An unreadable archive cannot provide a usable Dictionary.
     #[test]
     fn a_corrupt_archive_does_not_satisfy_the_guard() {
         let (dir, _guard) = stocked("corrupt_guard");
@@ -2262,7 +2247,7 @@ mod tests {
         }
     }
 
-    /// It must be removable.
+    /// The user must be able to remove an unreadable file.
     #[test]
     fn removing_an_unreadable_row_quarantines_the_file_it_names() {
         let (dir, _guard) = stocked("unreadable_remove");
@@ -2275,7 +2260,7 @@ mod tests {
         assert_eq!(vec!["freq.zip", "library.json", "terms.zip"], files_in(&dir));
     }
 
-    /// A failed Apply costs none.
+    /// A failed Apply must leave the Library unchanged.
     #[test]
     fn a_rolled_back_apply_leaves_the_library_exactly_as_it_was() {
         let (dir, _guard) = stocked("rollback");
@@ -2293,7 +2278,7 @@ mod tests {
         assert_eq!(manifest.entries, Library::load(&dir).unwrap().entries);
     }
 
-    /// No copies pile up on retry.
+    /// A retry must not import a second copy.
     #[test]
     fn retrying_a_failed_apply_never_imports_a_second_copy() {
         let (dir, _guard) = stocked("retry");
@@ -2311,7 +2296,7 @@ mod tests {
         );
     }
 
-    /// Nothing left to replay.
+    /// A form with no staged changes gives Apply no work.
     #[test]
     fn clearing_the_staged_list_leaves_nothing_for_apply_to_do() {
         let (dir, _guard) = stocked("clear");
@@ -2350,7 +2335,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(form_for(&dir).library_empty);
     }
-    /// The list is what Apply builds.
+    /// Apply lists a Library term even when the database has no row for it.
     #[test]
     fn a_library_term_with_no_database_row_is_still_listed() {
         let lib = Library {
@@ -2402,7 +2387,7 @@ mod tests {
         assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
     }
 
-    /// An entry naming nothing is the same state as no entry.
+    /// When the last name is removed, the empty language entry is removed.
     #[test]
     fn a_language_list_left_empty_loses_its_key() {
         let mut cfg =
@@ -2415,7 +2400,7 @@ mod tests {
         );
     }
 
-    /// Why `[]` is not written.
+    /// An empty list still scopes the language, so dictionary_removed must delete its key.
     #[test]
     fn an_empty_list_left_behind_would_scope_the_language() {
         let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "ja", &["大辞林　第四版"]);
@@ -2429,8 +2414,7 @@ mod tests {
         );
     }
 
-    /// The substring model's worst failure, gone: a removal touches the
-    /// name it was given and no other.
+    /// Exact names limit removal to the named edition. The other edition remains.
     #[test]
     fn a_removal_leaves_the_other_edition_of_a_shared_name_alone() {
         let mut cfg = cfg_with(&["大辞林　第三版", "大辞林　第四版"]);
@@ -2454,7 +2438,7 @@ mod tests {
         assert!(cfg.dictionaries.per_language.is_empty());
     }
 
-    /// The bottom of every list its roles name, under its whole name.
+    /// An added Dictionary goes to the bottom of every role list that its roles provide.
     #[test]
     fn an_added_dictionary_is_appended_to_each_of_its_role_lists() {
         let mut cfg = cfg_with(&["大辞林　第四版"]);
@@ -2481,8 +2465,8 @@ mod tests {
         );
     }
 
-    /// `per_language` answers a question about definitions, so an archive
-    /// with no terms role has no business in one.
+    /// `per_language` lists Dictionaries for term lookup. An archive without the
+    /// Terms role does not belong in this list.
     #[test]
     fn an_added_frequency_dictionary_never_joins_a_language_list() {
         let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &["大辞林　第四版"]);
@@ -2490,7 +2474,7 @@ mod tests {
         assert_eq!(strs(&["大辞林　第四版"]), cfg.dictionaries.per_language["ja"]);
     }
 
-    /// No entry: the global list decides.
+    /// Without a language entry, dictionary_added changes only the global lists.
     #[test]
     fn an_added_dictionary_never_creates_a_language_list() {
         let mut cfg = cfg_with(&["大辞林　第四版"]);
@@ -2502,7 +2486,7 @@ mod tests {
         );
     }
 
-    /// `[]` is not a list.
+    /// An empty language list remains empty after an added Dictionary.
     #[test]
     fn an_added_dictionary_never_fills_an_empty_language_list() {
         let mut cfg = with_list(cfg_with(&["大辞林　第四版"]), "ja", &[]);
@@ -2524,7 +2508,7 @@ mod tests {
         assert_eq!(strs(&["中日大辞典"]), cfg.dictionaries.per_language["zh-Hans-CN"]);
     }
 
-    /// It is already listed, checked or not.
+    /// A prior name stays in place, whether its row is enabled or disabled.
     #[test]
     fn a_name_an_array_already_holds_is_not_added_twice() {
         let mut cfg = with_list(cfg_with(&["Jitendex.org"]), "ja", &["Jitendex.org"]);
@@ -2547,7 +2531,7 @@ mod tests {
         assert_eq!(strs(&["大辞林　第四版"]), cfg.dictionaries.per_language["ja"]);
     }
 
-    /// Two writers, one result.
+    /// The incremental removal and full Apply must produce the same result.
     #[test]
     fn an_incremental_removal_agrees_with_a_full_apply() {
         let cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);
@@ -2560,10 +2544,10 @@ mod tests {
         assert_eq!(full.dictionaries, incremental.dictionaries);
     }
 
-    // ---- what applying a change costs ----
+    // ---- what a change costs ----
 
-    /// Only the frequency inputs reduce to `term.freq`, so only they cost a
-    /// Reindex - and none of them costs a rebuild.
+    /// Only frequency inputs affect `term.freq`, so only they need a Reindex.
+    /// None of them needs a rebuild.
     #[test]
     fn reordering_the_frequency_list_costs_a_reindex() {
         let before = Config::default();
@@ -2602,7 +2586,7 @@ mod tests {
         assert_eq!(DictionaryWork::None, dictionary_work(&before, &after));
     }
 
-    /// Two writers, one result.
+    /// The incremental addition and full Apply must produce the same result.
     #[test]
     fn an_incremental_addition_agrees_with_a_full_apply() {
         let cfg = cfg_with(&["大辞林　第四版"]);
@@ -2621,14 +2605,14 @@ mod tests {
     const LIB_DIR: &str = r"C:\chibipop\library";
     const DB_FILE: &str = r"C:\chibipop\data\chibipop.sqlite";
 
-    /// build.rs, json.dumps spacing.
+    /// `build.rs` writes JSON with `json.dumps` spaces.
     const BUILT_JSON: &str = concat!(
         r#"[{"name": "jitendex.zip", "bytes": 462, "sha256": "b1a8"}, "#,
         r#"{"name": "daijirin.zip", "bytes": 385, "sha256": "d49c"}, "#,
         r#"{"name": "freq.zip", "bytes": 12, "sha256": "0f0f"}]"#
     );
 
-    /// edit.rs, keys sorted.
+    /// `edit.rs` writes the same records with sorted keys and compact JSON.
     const EDITED_JSON: &str = concat!(
         r#"[{"bytes":462,"name":"jitendex.zip","sha256":"b1a8"},"#,
         r#"{"bytes":385,"name":"daijirin.zip","sha256":"d49c"},"#,
@@ -2652,7 +2636,7 @@ mod tests {
         assert_eq!(None, notice(EDITED_JSON, &library()));
     }
 
-    /// THE trap: different bytes.
+    /// Different spaces in JSON do not indicate archive drift.
     #[test]
     fn the_builders_own_json_reports_no_drift() {
         assert_ne!(BUILT_JSON, EDITED_JSON, "same bytes proves nothing");
@@ -2669,7 +2653,7 @@ mod tests {
         assert_eq!(None, notice(shuffled, &library()));
     }
 
-    /// A hand-dropped archive.
+    /// An archive present in the Library but absent from the source list creates drift.
     #[test]
     fn an_archive_the_database_never_built_from_is_drift() {
         let mut lib = library();
@@ -2678,7 +2662,7 @@ mod tests {
         assert!(text.contains("dropped-in.zip"), "{text}");
     }
 
-    /// A hand-deleted archive.
+    /// An archive present in the source list but absent from the Library creates drift.
     #[test]
     fn an_archive_the_library_no_longer_has_is_drift() {
         let mut lib = library();
@@ -2697,7 +2681,7 @@ mod tests {
         assert_eq!(strs(&["daijirin.zip"]), found.orphaned);
     }
 
-    /// The builder skips these.
+    /// The build record excludes unreadable archives.
     #[test]
     fn an_unreadable_archive_is_not_drift() {
         let mut lib = library();
@@ -2705,7 +2689,7 @@ mod tests {
         assert_eq!(None, notice(EDITED_JSON, &lib));
     }
 
-    /// write_meta hashes freqs.
+    /// `write_meta` records a frequency archive like any other archive.
     #[test]
     fn a_frequency_archive_is_compared_like_any_other() {
         let partial = concat!(
@@ -2716,20 +2700,20 @@ mod tests {
         assert!(text.contains("freq.zip"), "{text}");
     }
 
-    /// Absence is not disagreement.
+    /// An absent source list does not report drift.
     #[test]
     fn a_database_with_no_source_list_reports_no_drift() {
         let none = drift_notice(None, &library(), Path::new(LIB_DIR), Path::new(DB_FILE));
         assert_eq!(None, none);
     }
 
-    /// Legacy files must not fail.
+    /// An unreadable source list does not report drift.
     #[test]
     fn a_source_list_that_will_not_parse_reports_no_drift() {
         assert_eq!(None, notice("not json at all", &library()));
     }
 
-    /// An unfamiliar record shape.
+    /// A source record without a name does not report drift.
     #[test]
     fn a_source_record_with_no_name_is_ignored() {
         let odd = concat!(
@@ -2739,7 +2723,7 @@ mod tests {
         assert_eq!(None, notice(odd, &library()));
     }
 
-    /// Task 7's precedent.
+    /// The notice includes the rebuild command with both supplied paths.
     #[test]
     fn the_notice_names_the_rebuild_command_with_real_paths() {
         let mut lib = library();
@@ -2751,27 +2735,27 @@ mod tests {
         assert!(text.ends_with(command), "{text}");
     }
 
-    /// build-dict would refuse.
+    /// A Library with no archive cannot offer a rebuild.
     #[test]
     fn a_library_with_no_archives_offers_no_rebuild() {
         assert_eq!(None, notice(EDITED_JSON, &Library::default()));
     }
 
-    /// Frequency builds nothing.
+    /// A Library with only frequency archives cannot offer a term rebuild.
     #[test]
     fn a_library_with_no_term_archive_offers_no_rebuild() {
         let lib = Library { entries: vec![entry("freq.zip", &[Role::Frequency])] };
         assert_eq!(None, notice(EDITED_JSON, &lib));
     }
 
-    /// The offer, not the fact.
+    /// Drift still appears when no term archive can support a rebuild.
     #[test]
     fn drift_is_still_seen_when_no_rebuild_is_offered() {
         let found = drift(Some(EDITED_JSON), &Library::default());
         assert_eq!(strs(&["jitendex.zip", "daijirin.zip", "freq.zip"]), found.orphaned);
     }
 
-    /// One side, one sentence.
+    /// The notice lists only the side that differs.
     #[test]
     fn the_notice_omits_the_side_that_agrees() {
         let mut lib = library();

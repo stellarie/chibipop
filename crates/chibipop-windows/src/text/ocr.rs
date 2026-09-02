@@ -1,4 +1,4 @@
-//! Windows OCR recognition.
+//! This module provides Windows OCR recognition.
 
 use chibipop::geom::PhysRect;
 use chibipop::text::layout::{OcrLine, OcrWord};
@@ -11,7 +11,7 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-/// Blocks; .get() is gone.
+/// Blocks until the operation finishes because `.get()` is unavailable.
 fn wait_blocking<T>(op: windows_future::IAsyncOperation<T>) -> Result<T>
 where
     T: windows::core::RuntimeType + 'static,
@@ -28,14 +28,15 @@ where
     }
 }
 
-/// Bound on one OCR call.
+/// Sets the limit for one OCR call.
+/// If the operation remains pending until `OCR_TIMEOUT`, `wait_blocking` returns an error.
 const OCR_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Coords are upscaled-image.
+/// The coordinates refer to the upscaled image.
 pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
     let ibuffer = CryptographicBuffer::CreateFromByteArray(buf)
         .context("wrapping the pixel buffer")?;
-    // 32bpp BGRA; alpha is junk.
+    // The buffer uses 32bpp BGRA. The alpha channel has no useful data.
     let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
         &ibuffer,
         BitmapPixelFormat::Bgra8,
@@ -49,7 +50,7 @@ pub fn recognise(engine: &OcrEngine, buf: &[u8], w: i32, h: i32) -> Result<Vec<O
         .context("running OCR")?;
 
     let mut lines = Vec::new();
-    // Size(), not Count().
+    // Call Size(), not Count(), for this Windows collection.
     for line in &result.Lines()? {
         let mut words = Vec::new();
         for word in &line.Words()? {
@@ -79,12 +80,12 @@ fn extends_at_boundary(long: &str, short: &str) -> bool {
             || (long.len() > short.len() + 1 && long[short.len()] == b'-'))
 }
 
-/// Subtag-boundary tag match.
+/// This function matches tags only at a subtag boundary.
 pub fn tag_matches(reported: &str, wanted: &str) -> bool {
     extends_at_boundary(reported, wanted) || extends_at_boundary(wanted, reported)
 }
 
-/// Is this recogniser installed?
+/// Reports whether Windows has an installed recognizer for `tag`.
 pub fn recogniser_available(tag: &str) -> bool {
     if !Language::IsWellFormed(&HSTRING::from(tag)).unwrap_or(false) {
         return false;
@@ -99,9 +100,11 @@ pub fn recogniser_available(tag: &str) -> bool {
     })
 }
 
-/// Installed ones: name, tag.
+/// Returns each installed recognizer as a name and tag pair.
 ///
-/// Empty if the call fails.
+/// It returns an entry only when its `LanguageTag` query succeeds.
+///
+/// Returns an empty vector if the Windows call fails.
 pub fn installed_recognisers() -> Vec<(String, String)> {
     let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
         return Vec::new();
@@ -118,7 +121,7 @@ pub fn installed_recognisers() -> Vec<(String, String)> {
     out
 }
 
-/// Builds an engine for a tag.
+/// Creates a WinRT OCR engine for a language tag.
 fn make_engine(language: &str) -> Result<OcrEngine> {
     let lang = Language::CreateLanguage(&HSTRING::from(language))?;
     OcrEngine::TryCreateFromLanguage(&lang).with_context(|| {
@@ -147,22 +150,22 @@ fn language_action(current: &str, requested: &str, available: impl FnOnce() -> b
     }
 }
 
-/// The WinRT OCR backend.
+/// This type provides the WinRT OCR backend for core's `OcrEngine` seam.
 pub struct WinrtOcr {
     engine: OcrEngine,
     language: String,
 }
 
 impl WinrtOcr {
-    /// Inits WinRT + engine once.
+    /// Initializes WinRT and the OCR engine once.
     pub fn new(language: &str) -> Result<Self> {
-        // Else CO_E_NOTINITIALIZED.
+        // Without this call, later WinRT calls can return `CO_E_NOTINITIALIZED`.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
         let engine = make_engine(language)?;
         Ok(WinrtOcr { engine, language: language.to_string() })
     }
 
-    /// The engine from `new`.
+    /// Returns the engine that `new` created.
     pub fn engine(&self) -> &OcrEngine {
         &self.engine
     }
@@ -173,7 +176,7 @@ impl chibipop::text::OcrEngine for WinrtOcr {
         recognise(&self.engine, bgra, w, h)
     }
 
-    /// Swap in a new language.
+    /// Tries to replace the OCR engine with the requested language.
     fn set_language(&mut self, language: &str) {
         match language_action(&self.language, language, || recogniser_available(language)) {
             LangAction::Keep => {}
@@ -193,8 +196,9 @@ impl chibipop::text::OcrEngine for WinrtOcr {
         }
     }
 
-    /// Upstream's plugin-parity name (0.9.x): engine selection and the
-    /// probe treat the built-in and a plugin adapter uniformly.
+    /// This is the upstream plugin-parity name for version 0.9.x.
+    /// Engine selection and the `probe` treat the built-in engine and a plugin
+    /// adapter in the same way.
     fn name(&self) -> &str {
         "windows-ocr"
     }
@@ -216,7 +220,7 @@ mod tests {
         assert_eq!(LangAction::Keep, language_action("ja", "ja", || true));
     }
 
-    /// The guard folds case.
+    /// The language guard ignores letter case.
     #[test]
     fn an_unchanged_language_is_kept_even_with_no_pack() {
         assert_eq!(LangAction::Keep, language_action("ja", "JA", || false));
@@ -232,7 +236,7 @@ mod tests {
         assert_eq!(LangAction::NoPack, language_action("ja", "ko", || false));
     }
 
-    /// No WinRT call on the no-op.
+    /// The unchanged-language path makes no WinRT call.
     #[test]
     fn an_unchanged_language_never_asks_windows() {
         let mut asked = false;
@@ -249,7 +253,7 @@ mod tests {
         assert!(!recogniser_available("xx-Fake"));
     }
 
-    /// True on any machine.
+    /// This test passes on every machine.
     #[test]
     fn every_installed_recogniser_reports_available() {
         let Ok(langs) = OcrEngine::AvailableRecognizerLanguages() else {
@@ -263,7 +267,7 @@ mod tests {
         }
     }
 
-    /// True on any machine.
+    /// This test passes on every machine.
     #[test]
     fn every_listed_recogniser_is_named_and_available() {
         for (name, tag) in installed_recognisers() {
@@ -312,7 +316,7 @@ mod tests {
         assert!(!tag_matches("zh-Hans-CN", "zh-Hant"));
     }
 
-    /// Boundary, not starts_with.
+    /// This test checks a subtag boundary instead of `starts_with`.
     #[test]
     fn a_partial_subtag_does_not_match() {
         assert!(!tag_matches("zh-Hans-CN", "zh-Han"));
@@ -365,7 +369,7 @@ mod tests {
         assert!(!tag_matches("en-US", "-US"));
     }
 
-    /// True on any machine.
+    /// This test passes on every machine.
     #[test]
     fn a_malformed_tag_is_never_available() {
         for t in ["ja-", "ja--JP", "ja--", "ja---", "JA--jp", "-ja", "-", "", "ja-JP-"] {

@@ -1,30 +1,29 @@
-//! Golden corpus: (input, expected headword) against the real dictionary.
+//! The golden corpus checks `(input, expected headword)` against a real Dictionary.
 //!
-//! No dictionary is committed here and CI builds none (the Linux job stays
-//! headless, and a 238 MB build is not a CI step), so this skips when it
-//! cannot find one. It looks where the *product* keeps its dictionary
-//! rather than at a repo path nothing writes, best rung first:
+//! CI does not build or commit a Dictionary here. The Linux job stays headless,
+//! and a 238 MB build is not a CI step. The test skips when it finds no Dictionary.
+//! The test checks the product paths in this order:
 //!
-//! 1. `$CHIBIPOP_GOLDEN_DB`, for a library kept somewhere else entirely.
+//! 1. `$CHIBIPOP_GOLDEN_DB`, for a Dictionary stored elsewhere.
 //! 2. `$XDG_DATA_HOME/chibipop/chibipop.sqlite` (`~/.local/share` when
-//!    that is unset): the Linux daemon's `data_dir`.
-//! 3. `<repo>/data/chibipop.sqlite`: where the Windows bin's default
-//!    `--out` lands in a cargo tree.
+//!    unset), which is the Linux daemon's `data_dir`.
+//! 3. `<repo>/data/chibipop.sqlite`, where the Windows bin's default `--out`
+//!    lands in a cargo tree.
 //!
-//! Rung 2 is spelled out here instead of called: the XDG resolver belongs
-//! to `chibipop-linux` (`crates/chibipop-linux/src/paths.rs`) and that
-//! crate depends on this one, so core's own tests cannot name it without
-//! a dependency cycle. Rung 3 is what `chibipop::paths::data_file` answers
-//! for a binary in `target/<profile>/` (`crates/chibipop-windows/src/entry.rs`);
-//! a test binary sits a level down in `deps/`, so asking it directly would
-//! probe `target/debug/deps/data/`, which nothing writes.
+//! This test lists rung 2 here instead of a call to the XDG resolver.
+//! The resolver belongs to `chibipop-linux` (`crates/chibipop-linux/src/paths.rs`).
+//! That crate depends on this one, so core tests cannot name it without
+//! a dependency cycle.
+//! Rung 3 uses the path from `chibipop::paths::data_file` for a binary in
+//! `target/<profile>/` (`crates/chibipop-windows/src/entry.rs`).
+//! A test binary sits one level below in `deps/`, so a direct query inspects
+//! `target/debug/deps/data/`, which no process writes.
 //!
-//! The corpus deliberately does not pin a named dictionary build. Pinning
-//! one would send it straight back to skipping everywhere. Instead every
-//! run prints the library that answered, so a failure is attributable to
-//! that build. A skip names every path it looked at, because an
-//! uncheckable skip is how this file spent its life reporting `ok`
-//! without running.
+//! The corpus does not pin a named Dictionary build.
+//! A pin makes this test skip on most systems.
+//! Each run prints the Dictionary that answers, so a failure names that build.
+//! A skip prints every path that the test checks.
+//! This prevents a silent `ok` result when the test did not run.
 
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
@@ -46,20 +45,20 @@ const CASES: &[(&str, &str)] = &[
     ("してしまった", "する"),
 ];
 
-/// Point the corpus at a library outside the default layout.
+/// Set the path to a Dictionary outside the default layout.
 const DB_ENV: &str = "CHIBIPOP_GOLDEN_DB";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every place a real library could be, best rung first.
+/// Return every path where a real Dictionary can exist, in priority order.
 fn candidates() -> Vec<PathBuf> {
     if let Some(explicit) = std::env::var_os(DB_ENV) {
         return vec![PathBuf::from(explicit)];
     }
-    // A relative `$XDG_DATA_HOME` is invalid per the basedir spec and is
-    // ignored, the same way the daemon's `paths::xdg` ignores it.
+    // Reject a relative `$XDG_DATA_HOME` under the basedir spec.
+    // The daemon's `paths::xdg` applies the same rule.
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
@@ -83,8 +82,8 @@ fn golden_corpus() {
     };
 
     let dict = SqliteDictionary::open(db).unwrap();
-    // Present but unusable is a failure, not a skip: only the genuine
-    // absence of a library is allowed to be quiet.
+    // Treat a present but unusable file as a failure, not a skip.
+    // Only an absent Dictionary can pass without output.
     let names: Vec<String> =
         dict.dicts().unwrap().into_iter().map(|d| d.name).collect();
     assert!(

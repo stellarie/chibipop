@@ -1,4 +1,4 @@
-//! Plugin list/test commands.
+//! Commands to list plugins or test one plugin.
 
 use crate::plugin::manifest::Role;
 use crate::plugin::{discover, host, proto};

@@ -1,6 +1,7 @@
 //! The scan overlay window.
 //!
-//! Shaped: the middle is clear.
+//! A window region shapes the overlay.
+//! Only the outline frames stay opaque. The area inside each rect stays clear.
 
 use crate::geom::{inset, overlay_layout, PhysRect, ScanKind, ScanRect};
 use crate::ui::theme::Theme;
@@ -16,23 +17,24 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Constant alpha, 0-255.
+/// The window's constant alpha, from 0 to 255.
 const OVERLAY_ALPHA: u8 = 90;
 
-/// Outline thickness, in pixels.
+/// The outline width in pixels.
 const FRAME_THICKNESS: i32 = 2;
 
-/// Not the popup's wndproc.
+/// The overlay window class. The popup uses a different wndproc.
 fn class_name() -> PCWSTR {
     w!("ChibipopOverlayClass")
 }
 
-/// What WM_PAINT redraws from.
+/// Stores the data that WM_PAINT uses for a redraw.
 ///
-/// Keyed by hwnd; one at a time.
+/// The `hwnd` field identifies the state.
+/// Only one overlay exists at a time, so one slot is enough.
 struct PaintState {
     hwnd: HWND,
-    /// Window-local, not screen.
+    /// The rects in window coordinates, not in screen coordinates.
     rects: Vec<ScanRect>,
     pass1: (u8, u8, u8),
     tile: (u8, u8, u8),
@@ -61,15 +63,15 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
-/// The ring just outside each rect.
+/// Returns the ring just outside each rect.
 ///
-/// The overlay draws its outlines **outset**: a stroke inside a scan rect
-/// would land in the very pixels the next grab reads, and captures must
-/// never contain chibipop's own furniture
-/// (ARCHITECTURE.md#capture-and-masking). Inflating by the stroke
-/// thickness puts the whole frame in the band around the rect, so
-/// `inset(outset(r), FRAME_THICKNESS) == r` - the capture rect itself
-/// stays clear.
+/// The overlay draws its outlines **outset**.
+/// An inside stroke would touch the same pixels that the next grab reads.
+/// A capture must never include pixels that chibipop drew
+/// (ARCHITECTURE.md#capture-and-masking).
+/// This function inflates each rect by the stroke thickness, so the full frame stays in the band
+/// around the rect.
+/// The result keeps `inset(outset(r), FRAME_THICKNESS) == r`, and the capture rect stays clear.
 fn outset(rects: &[ScanRect]) -> Vec<ScanRect> {
     rects
         .iter()
@@ -80,9 +82,10 @@ fn outset(rects: &[ScanRect]) -> Vec<ScanRect> {
         .collect()
 }
 
-/// A rect's four border strips.
+/// Returns the four border strips of a rect.
 ///
-/// Not bounds: rects overlap.
+/// The strips do not define the rect bounds.
+/// Rects can overlap, so each rect needs its own four strips.
 fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
     if inset(rect, thickness).is_none() {
         return vec![rect];
@@ -96,7 +99,7 @@ fn edge_strips(rect: PhysRect, thickness: i32) -> Vec<PhysRect> {
     ]
 }
 
-/// Ends the paint on drop.
+/// Calls `EndPaint` on drop. This closes the paint even after an early return.
 struct PaintScope {
     hwnd: HWND,
     ps: PAINTSTRUCT,
@@ -112,9 +115,9 @@ impl Drop for PaintScope {
 
 unsafe fn paint_overlay(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    // SAFETY: `wndproc` calls this only for its own `hwnd` on `WM_PAINT`,
-    // which the OS delivers with a live window handle - the same
-    // precondition `ui::window::validate_paint_region` relies on.
+    // SAFETY: `wndproc` calls this function only for its own `hwnd` and only for `WM_PAINT`.
+    // The system sends that message with a live window handle.
+    // `ui::window::validate_paint_region` has the same precondition.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
     let _scope = PaintScope { hwnd, ps };
 
@@ -132,11 +135,10 @@ unsafe fn paint_overlay(hwnd: HWND) {
                     ScanKind::Anchor => state.anchor,
                     ScanKind::Match => state.matched,
                 };
-                // SAFETY: `hdc` was validated non-invalid above; each
-                // `strip` is plain stack data borrowed only for this call;
-                // the brush is created and deleted within this same
-                // iteration, so no handle here outlives the scope that
-                // owns it.
+                // SAFETY: The check above proves that `hdc` is valid.
+                // Each `strip` is stack data, and this call borrows it only for the call.
+                // This loop creates and deletes the brush in the same pass.
+                // No handle here outlives the scope that owns it.
                 unsafe {
                     let brush = CreateSolidBrush(colorref(color));
                     if !brush.is_invalid() {
@@ -157,32 +159,32 @@ unsafe fn paint_overlay(hwnd: HWND) {
     }
 }
 
-/// Paints on WM_PAINT.
+/// Paints the outlines when the window receives WM_PAINT.
 ///
-/// Unwinding here would be UB.
+/// A panic that crosses this `extern "system"` boundary causes undefined behavior.
+/// `catch_unwind` stops that panic.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
-        // SAFETY: `hwnd` is the live handle the OS just supplied to
-        // this `wndproc` for its own `WM_PAINT`, exactly the
-        // precondition `paint_overlay`'s own `BeginPaint` SAFETY note
-        // relies on.
+        // SAFETY: `hwnd` is the live handle that the operating system gave this
+        // `wndproc` for its `WM_PAINT` message.
+        // `paint_overlay` relies on the same fact for its `BeginPaint` call.
         let _ = catch_unwind(|| unsafe { paint_overlay(hwnd) });
         return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Registers the class once.
+/// Registers the window class once.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the `..Default`
-    // spread zeroes every field this module does not set); `lpfnWndProc`
-    // points to `wndproc`, a `'static extern "system" fn` valid for the
-    // process lifetime, which is exactly what the OS requires it to be.
+    // SAFETY: `wc` is a fully initialized `WNDCLASSEXW`. The `..Default`
+    // spread zeroes every field that this module does not set.
+    // `lpfnWndProc` points to a `'static extern "system" fn` that
+    // stays valid for the process lifetime. The operating system needs this form.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -203,17 +205,15 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Union of every rect's frame.
+/// Builds the union of every rect's frame.
 unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
-    // SAFETY: every `HRGN` created below is either deleted before this
-    // function returns or is `accum`, the single handle handed back to the
-    // caller. `CombineRgn` copies its sources' geometry into the
-    // destination - it does not take ownership of `hrgnsrc1`/`hrgnsrc2` -
-    // so `outer` and `inner` are each deleted right after being combined
-    // in, on every path, including the early `bail!` returns. `accum`
-    // itself is never deleted here: ownership of it passes to the caller
-    // (`show_rects`), which is responsible for it exactly the way
-    // `ui::window::Popup::show_at` is responsible for its own region.
+    // SAFETY: This code deletes every valid `HRGN` that it creates below.
+    // It deletes `outer` and `inner` after each combine and on every
+    // `bail!` return. It also deletes `accum` on those error paths.
+    // `CombineRgn` copies source geometry into the destination.
+    // It does not take ownership of `hrgnsrc1` or `hrgnsrc2`.
+    // On success, `accum` is the only handle left.
+    // `show_rects` receives and owns `accum`, like `ui::window::Popup::show_at` owns its region.
     unsafe {
         let accum = CreateRectRgn(0, 0, 0, 0);
         if accum.is_invalid() {
@@ -261,31 +261,29 @@ unsafe fn build_region(rects: &[ScanRect]) -> Result<HRGN> {
     }
 }
 
-/// The shaped outline window.
+/// The window with the shaped outline.
 pub struct Overlay {
     hwnd: HWND,
     capture_exclusion: Cell<CaptureExclusion>,
 }
 
-/// Guards a second live Overlay.
+/// True while an `Overlay` exists. It prevents a second instance.
 static OVERLAY_LIVE: AtomicBool = AtomicBool::new(false);
 
 impl Overlay {
-    /// Creates the window, hidden.
+    /// Creates the window and leaves it hidden.
     ///
-    /// Errs if one is already alive.
+    /// Returns an error if an `Overlay` already exists.
     pub fn create(exclude_from_capture: bool) -> Result<Overlay> {
         if OVERLAY_LIVE.load(Ordering::SeqCst) {
             anyhow::bail!("an Overlay already exists; only one may be alive at a time");
         }
 
-        // SAFETY: mirrors `ui::window::Popup::create` exactly - `hinstance`
-        // comes from `GetModuleHandleW(None)`, always valid for this
-        // process; `register_class` only ever registers one well-formed
-        // class; `CreateWindowExW`'s and `SetLayeredWindowAttributes`'s
-        // results are checked via `?`; `SetWindowDisplayAffinity`'s
-        // failure is an accepted, non-fatal outcome, exactly as
-        // `Popup::create` treats it.
+        // SAFETY: This block follows `ui::window::Popup::create`.
+        // `hinstance` comes from `GetModuleHandleW(None)`, which is valid for this process.
+        // `register_class` registers one well-formed class.
+        // The `?` operator checks `CreateWindowExW` and `SetLayeredWindowAttributes`.
+        // A `SetWindowDisplayAffinity` failure is allowed and is not fatal, as in `Popup::create`.
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
 
@@ -325,24 +323,22 @@ impl Overlay {
         }
     }
 
-    /// Reshapes and shows the rects.
+    /// Reshapes the window and shows the rects.
     ///
-    /// Empty hides it instead. The outlines land outside the rects handed
-    /// in, so a scan region shown here is never a scan region painted on
-    /// (ARCHITECTURE.md#capture-and-masking).
+    /// An empty list hides the window.
+    /// The outlines stay outside the caller's rects, so the overlay never paints on a scan region
+    /// that it shows (ARCHITECTURE.md#capture-and-masking).
     pub fn show_rects(&self, rects: &[ScanRect], theme: &Theme) -> Result<()> {
         let Some((bounds, local)) = overlay_layout(&outset(rects)) else {
             self.hide();
             return Ok(());
         };
 
-        // SAFETY: `self.hwnd` was created by `create` and is destroyed
-        // only by this `Overlay`'s own `Drop`, so it is valid for the
-        // lifetime of `&self`. `build_region`'s returned `HRGN` is either
-        // consumed by a successful `SetWindowRgn` (which then owns it -
-        // never deleted on that path) or explicitly deleted on the
-        // failure path right below, exactly like
-        // `ui::window::Popup::show_at`.
+        // SAFETY: `create` made `self.hwnd`, and only `Drop` for this `Overlay` destroys it.
+        // The handle stays valid for the life of `&self`.
+        // When `SetWindowRgn` succeeds, it takes the `HRGN` from `build_region` and owns it.
+        // This path does not delete the region.
+        // The failure path deletes it, like `ui::window::Popup::show_at`.
         unsafe {
             let rgn = build_region(&local)?;
 
@@ -369,11 +365,10 @@ impl Overlay {
         Ok(())
     }
 
-    /// Hides without destroying.
+    /// Hides the window but keeps it alive.
     pub fn hide(&self) {
-        // SAFETY: `self.hwnd` is valid for the lifetime of `&self` (see
-        // `show_rects`); `ShowWindow`'s failure is intentionally ignored,
-        // mirroring `Popup::hide`.
+        // SAFETY: `self.hwnd` stays valid for the life of `&self`. See `show_rects`.
+        // This code ignores a `ShowWindow` failure on purpose, like `Popup::hide`.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -383,27 +378,27 @@ impl Overlay {
         self.hwnd
     }
 
-    /// Whether it is excluded.
+    /// Reports the overlay's capture exclusion state.
     ///
-    /// May differ from the popup's.
+    /// This state can differ from the popup's state.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion.get()
     }
 
-    /// Re-applies live; may refuse.
+    /// Applies capture exclusion to the live window. The system can refuse the request.
     pub fn set_capture_exclusion(&self, on: bool) {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
-        // SAFETY: `self.hwnd` was created by `create` and is destroyed
-        // only by this `Overlay`'s own `Drop`, so it is valid for
-        // `&self`'s lifetime. Refusal is accepted, as in `create` -
-        // here it is also recorded, because it is the new state.
+        // SAFETY: `create` made `self.hwnd`, and only `Drop` for this `Overlay` destroys it.
+        // The handle stays valid for the life of `&self`.
+        // This code accepts a refusal, as `create` does.
+        // It records that refusal because it is the new state.
         let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
         self.capture_exclusion.set(CaptureExclusion::from_attempt(on, ok));
     }
 }
 
 impl Drop for Overlay {
-    /// This one is torn down.
+    /// Clears the paint state and latch, then destroys the window.
     fn drop(&mut self) {
         PAINT_STATE.with(|cell| {
             let mut state = cell.borrow_mut();
@@ -412,9 +407,9 @@ impl Drop for Overlay {
             }
         });
         OVERLAY_LIVE.store(false, Ordering::SeqCst);
-        // SAFETY: `self.hwnd` was created by `create` and `drop` runs at
-        // most once (ordinary `Drop` semantics), so this always targets a
-        // window this process owns and has not already destroyed.
+        // SAFETY: `create` made `self.hwnd`, and `drop` runs at most once.
+        // `Drop` guarantees this behavior.
+        // The call therefore targets a window that this process owns and has not destroyed.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
@@ -426,7 +421,7 @@ mod tests {
     use super::*;
     use crate::geom::PhysPoint;
 
-    /// Frame yes, interior never.
+    /// The strips must cover the frame but never the interior.
     #[test]
     fn edge_strips_cover_the_frame_but_never_the_interior() {
         let rect = PhysRect { x: 10, y: 10, w: 100, h: 40 };
@@ -464,14 +459,14 @@ mod tests {
         }
     }
 
-    /// Too thin: no interior.
+    /// A rect that is too thin for an interior gives one strip for the whole rect.
     #[test]
     fn edge_strips_of_a_too_thin_rect_is_the_whole_rect() {
         let rect = PhysRect { x: 0, y: 0, w: 17, h: 3 };
         assert_eq!(vec![rect], edge_strips(rect, FRAME_THICKNESS));
     }
 
-    /// Nothing the overlay paints may land in a capture rect.
+    /// The overlay must never paint inside a capture rect.
     #[test]
     fn outset_strokes_never_touch_the_rect_they_outline() {
         let scan = PhysRect { x: 100, y: 200, w: 60, h: 30 };
@@ -493,7 +488,7 @@ mod tests {
         }
     }
 
-    /// The strokes still hug it: outset, not floating free.
+    /// The outset strokes touch the rect. They do not leave a gap.
     #[test]
     fn outset_strokes_sit_flush_against_the_rect() {
         let scan = PhysRect { x: 0, y: 0, w: 20, h: 20 };
@@ -509,7 +504,7 @@ mod tests {
         assert!(outset(&[]).is_empty());
     }
 
-    /// Needs a real desktop session.
+    /// This test needs a real desktop session.
     #[test]
     #[ignore]
     fn create_after_drop_succeeds_while_a_second_live_one_is_rejected() {

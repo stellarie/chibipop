@@ -1,46 +1,47 @@
-//! The trigger channel's ladder (ARCHITECTURE.md#input-ladders): the
-//! GlobalShortcuts portal rung, the ids it may ever register, and how
-//! one portal signal turns into the same effect a control-socket verb
-//! has.
+//! The trigger channel has two rungs (ARCHITECTURE.md#input-ladders).
+//! The GlobalShortcuts portal provides the first rung.
+//! A compositor keybind to the control socket provides the second rung.
+//! Both rungs convert shortcut events to the same control-socket verb.
 //!
-//! **The native rung never stops working.** The ladder lists the portal
-//! first and the compositor-keybind-into-control-socket rung second, but
-//! that order is about *who the product asks to bind a key*, not about
-//! transport exclusivity: `chibipop ctl trigger-down|trigger-up|toggle`
-//! is bound at startup on every session and keeps answering whatever the
-//! portal does. So the portal is an *additional* source of the same
-//! press/release, and a portal that is absent, refuses, or has no key
-//! assigned to it degrades to "the socket is the only source" — which is
-//! a working product, never a dead trigger. That is also why the trigger
-//! row is never `Down`: the channel is up as long as the daemon runs.
+//! **The native rung always works.** The order selects the rung that asks
+//! the user for a binding. It does not disable the other transport.
+//! Each session binds `chibipop ctl trigger-down|trigger-up|toggle` at
+//! startup. The control socket accepts requests when the portal is active.
+//! The portal then supplies another source for the same press and release
+//! events. If the portal is absent or refuses the request, the control socket
+//! remains the only source. The trigger row is never `Down` because the
+//! daemon always keeps the trigger channel available.
 //!
-//! **Exactly two ids, forever** ([`ShortcutId`]): `trigger` and
-//! `anki-add`. The consent dialog is a list of everything an app claims
-//! from the user's keyboard, and a long list is a dialog people dismiss.
-//! The set is an enum rather than a config-driven list so "only the two
-//! shortcut ids are ever registered" is a compile-time property with a
-//! test on top, not a review habit.
+//! **Exactly two ids** ([`ShortcutId`]): `trigger` and
+//! `anki-add`. The consent dialog lists each requested shortcut.
+//! Users can reject a long list. An enum fixes the set instead of config data.
+//! The compiler and a test enforce the two-identifier limit.
 //!
-//! **Two facts about the portal that shape everything here**, both read
-//! off this machine rather than remembered:
+//! **Portal interface facts.** The local interface XML confirms these facts:
 //!
-//! * `org.freedesktop.portal.GlobalShortcuts` (interface version 2, per
-//!   `/usr/share/dbus-1/interfaces/org.freedesktop.portal.GlobalShortcuts.xml`)
-//!   has **no restore token and no persist mode** — unlike ScreenCast,
-//!   whose token this tree does store (`capture/portal/token.rs`). There
-//!   is nothing to persist across launches: `BindShortcuts` is called
-//!   once per session, and the portal's own memory is what makes the
-//!   second launch quiet. `ListShortcuts` is the read-back — "if
-//!   `BindShortcuts` was called for `session` all active shortcuts for
-//!   `session` are returned. Otherwise returns the shortcuts that were
-//!   successfully bound in a previous session by this application."
-//! * The trigger is a **chord, never a bare modifier**: the shortcuts
-//!   spec (freedesktop, draft 0.1) defines a shortcut as XKB modifier
-//!   names (`CTRL`, `ALT`, `SHIFT`, `NUM`, `LOGO`) plus one keysym
-//!   identifier from `xkbcommon-keysyms.h` minus the `XKB_KEY_` prefix,
-//!   joined by `+`, limited to the base layer. Hence the Linux default
-//!   `ALT+F`, and hence [`normalize_trigger`], which spells a user's
-//!   chord the way that spec wants before it goes on the wire.
+//! * `org.freedesktop.portal.GlobalShortcuts` interface version 2 has no
+//!   restore token or persist mode. ScreenCast has a token, which
+//!   `capture/portal/token.rs` stores. `BindShortcuts` runs once for each
+//!   portal session. `ListShortcuts` returns active shortcuts after
+//!   `BindShortcuts`. Without that call, it returns shortcuts that a previous
+//!   portal session bound for this application. The interface definition is
+//!   `/usr/share/dbus-1/interfaces/org.freedesktop.portal.GlobalShortcuts.xml`.
+//! * A trigger is a chord, not a bare modifier. The shortcuts spec draft 0.1
+//!   uses XKB modifier names (`CTRL`, `ALT`, `SHIFT`, `NUM`, `LOGO`).
+//!   Each chord also contains one keysym from `xkbcommon-keysyms.h` without
+//!   the `XKB_KEY_` prefix. Use `+` between parts, and use only the base layer.
+//!   `ALT+F` is the Linux default. [`normalize_trigger`] converts a user's
+//!   chord to the required form before transport.
+//!
+//! **An app id is mandatory.** xdg-desktop-portal rejects `CreateSession`
+//!   with `NotAllowed`/"An app id is required" when it cannot name the caller.
+//!   For a non-sandboxed process, it derives the name from the systemd user
+//!   unit (`app[-<launcher>]-<ApplicationID>-<RANDOM>.scope|.slice|.service`)
+//!   and requires a matching `<ApplicationID>.desktop` file. A daemon started
+//!   from a shell has neither. This rung is unreachable, even with a new
+//!   portal. [`explain`] reports this condition. The user can launch from the
+//!   desktop entry or autostart unit. The control socket carries the trigger
+//!   in the meantime.
 
 pub mod portal;
 pub mod state;
@@ -48,28 +49,28 @@ pub mod state;
 use crate::control::Verb;
 use std::path::Path;
 
-/// Every shortcut chibipop will ever register, and nothing else
-/// (keep the consent dialog small - ARCHITECTURE.md#input-ladders).
+/// The fixed set of shortcuts that chibipop registers. It keeps the consent
+/// dialog small (ARCHITECTURE.md#input-ladders).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutId {
-    /// Hold to read: press freezes and looks up, release retracts. The
-    /// portal delivers both halves (`Activated`/`Deactivated`), which is
-    /// what makes a *hold* expressible without observing the keyboard.
+    /// Hold this shortcut to read text. A press freezes a grab and starts a
+    /// lookup. A release retracts the popup. The portal sends both
+    /// `Activated`/`Deactivated` events, so the daemon needs no keyboard
+    /// access.
     Trigger,
-    /// The Anki add affordance's keyboard path — the one contextual
-    /// interaction that keeps a global key on Wayland, since the popup
-    /// itself never takes focus.
+    /// Start the Anki add action with this shortcut. The popup never takes
+    /// focus, so this action needs a global shortcut on Wayland.
     AnkiAdd,
 }
 
 impl ShortcutId {
-    /// The whole set, in registration order. Fixed-size: the id set is
-    /// the app's shape, not data.
+    /// The complete set in the order that the daemon registers it. The
+    /// fixed-size array makes the identifier set part of the application.
     pub const ALL: [ShortcutId; 2] = [ShortcutId::Trigger, ShortcutId::AnkiAdd];
 
-    /// The id on the wire. Stable forever: a compositor keybind names it
-    /// (Hyprland `bind = ALT, F, global, chibipop:trigger`), so renaming
-    /// one would silently break every user's config.
+    /// The stable identifier on the wire. A compositor keybind uses this
+    /// identifier: `bind = ALT, F, global, chibipop:trigger`. A rename breaks
+    /// current user configurations without an error.
     pub fn as_str(self) -> &'static str {
         match self {
             ShortcutId::Trigger => "trigger",
@@ -77,15 +78,14 @@ impl ShortcutId {
         }
     }
 
-    /// The id back, or `None` for anything else — which is what a
-    /// signal for a foreign session or a stale registration looks like.
+    /// Parse a known identifier. Return `None` for a foreign portal session
+    /// or a stale binding.
     pub fn parse(id: &str) -> Option<ShortcutId> {
         ShortcutId::ALL.into_iter().find(|known| known.as_str() == id)
     }
 
-    /// The `description` the portal shows the user. It is the entire
-    /// explanation they get for a system-wide key grab, so it says what
-    /// the key does, not what the program is.
+    /// Return the `description` that the portal shows to the user. The text
+    /// explains the key action because it describes a system-wide key grab.
     pub fn description(self) -> &'static str {
         match self {
             ShortcutId::Trigger => "Hold to look up the Japanese text under the cursor",
@@ -94,15 +94,13 @@ impl ShortcutId {
     }
 }
 
-/// One shortcut as the portal reports it back (`BindShortcuts` results
-/// and `ListShortcuts`).
+/// One binding from `BindShortcuts` or `ListShortcuts`.
 ///
-/// `trigger` is the portal's `trigger_description` — *its* spelling of
-/// the key, for display only, and `None` when the implementation does
-/// not report one. xdg-desktop-portal-hyprland is exactly that case: it
-/// answers `trigger_description: ""` because the key lives in the
-/// user's Hyprland config, not in the portal. So "bound" and "we can
-/// name the key" are two different facts and are stored as such.
+/// `trigger` contains the portal's `trigger_description` for display.
+/// Some implementations report no key. For example,
+/// xdg-desktop-portal-hyprland returns `trigger_description: ""` because
+/// Hyprland stores the key in the user's configuration. A binding can exist
+/// when `trigger` is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub id: ShortcutId,
@@ -110,8 +108,8 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// How one binding reads in a status row: the key when the portal
-    /// names it, and honesty when it does not.
+    /// Format one binding for a status row. Show the reported key or state
+    /// that the portal did not report it.
     pub fn describe(&self) -> String {
         match &self.trigger {
             Some(trigger) => format!("{} {trigger}", self.id.as_str()),
@@ -120,49 +118,46 @@ impl Binding {
     }
 }
 
-/// What the portal thread tells the pump. Everything the D-Bus session
-/// learns arrives here; the thread owns no log and no tray
-/// (ARCHITECTURE.md#workspace-and-seams — the pump stays sync and
-/// single-threaded).
+/// Messages from the portal thread to the calloop pump. The thread sends
+/// each D-Bus result here and does not own the log or tray
+/// (ARCHITECTURE.md#workspace-and-seams). The calloop pump stays
+/// synchronous and single-threaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// `BindShortcuts` succeeded; the payload is what the portal says is
-    /// bound now. An empty list is a legitimate answer: the user may
-    /// approve none of them.
+    /// `BindShortcuts` succeeded. The bindings contain the portal's current
+    /// result. An empty list means that the user approved no shortcuts.
     Bound(Vec<Binding>),
-    /// `ShortcutsChanged`: the user re-bound something in the desktop's
-    /// own UI. Same payload, different line in the log.
+    /// The desktop UI reports a binding change through `ShortcutsChanged`.
+    /// The payload has the same form as `Bound`.
     Changed(Vec<Binding>),
-    /// A shortcut fired. `true` is `Activated`, `false` `Deactivated`.
+    /// A shortcut fired. `true` means `Activated`. `false` means `Deactivated`.
     Fired { id: ShortcutId, activated: bool },
-    /// The rung is not serving. `reason` is short enough for a status
-    /// row; `advice` is the longer "and here is what to do", for the
-    /// log, when there is something to do. The control socket carries
-    /// the trigger from here either way.
+    /// The portal rung cannot serve shortcuts. `reason` fits a status row.
+    /// `advice` gives a log action when one exists. The control socket
+    /// continues to carry trigger actions.
     Unavailable { reason: String, advice: Option<String> },
-    /// A diagnostic from the portal thread, written by the pump.
+    /// A diagnostic that the calloop pump writes.
     Note(String),
 }
 
 /// The `CHIBIPOP_TRIGGER_CHANNEL` test hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelOverride {
-    /// Walk the ladder in its documented order.
+    /// Use the documented ladder order.
     Auto,
-    /// Take the portal rung when the interface is there, and say so
-    /// loudly when it is not — the documented way to test the rung on a
-    /// session where it would be picked anyway.
+    /// Select the portal rung when the interface exists. If it is absent, the
+    /// daemon reports that condition. Use this value to test the same portal
+    /// rung that automatic selection uses.
     Portal,
-    /// Skip the portal entirely: the control socket is the only trigger
-    /// source, which is what a sway/wlr session looks like on a box that
-    /// happens to run a portal.
+    /// Do not use the portal. The control socket is the only trigger source.
+    /// This matches a sway or wlr session that also has a portal.
     Native,
 }
 
 impl ChannelOverride {
     pub const ENV: &'static str = "CHIBIPOP_TRIGGER_CHANNEL";
 
-    /// One of `auto|portal|native`, or `None` for anything else.
+    /// Parse `auto|portal|native`. Return `None` for any other value.
     pub fn parse(value: &str) -> Option<ChannelOverride> {
         match value {
             "auto" => Some(ChannelOverride::Auto),
@@ -172,7 +167,7 @@ impl ChannelOverride {
         }
     }
 
-    /// The override and, when the value was unrecognized, a diagnostic.
+    /// Read the override and return a diagnostic for an unknown value.
     pub fn from_env() -> (ChannelOverride, Option<String>) {
         match std::env::var(Self::ENV) {
             Err(_) => (ChannelOverride::Auto, None),
@@ -190,35 +185,35 @@ impl ChannelOverride {
     }
 }
 
-/// Why the native rung is the one asking the user to bind a key.
+/// Reasons that cause the native rung to ask the user for a binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeReason {
-    /// No `org.freedesktop.portal.GlobalShortcuts` on the session bus —
-    /// sway, generic wlr, GNOME below the supported floor.
+    /// The session bus lacks
+    /// `org.freedesktop.portal.GlobalShortcuts`. This includes sway, generic
+    /// wlr, and GNOME below the supported floor.
     NoPortal,
-    /// `CHIBIPOP_TRIGGER_CHANNEL=native`.
+    /// The user set `CHIBIPOP_TRIGGER_CHANNEL=native`.
     Forced,
-    /// `CHIBIPOP_TRIGGER_CHANNEL=portal` on a session with no such
-    /// interface: honour the ladder, but never silently.
+    /// The user set `CHIBIPOP_TRIGGER_CHANNEL=portal`, but the session has no
+    /// interface. The daemon reports this condition.
     ForcedButAbsent,
 }
 
-/// Which rung asks for the binding. The socket serves either way.
+/// The rung that requests a binding. The control socket serves both selections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
-    /// Rung 1: register the two ids with the portal, and keep the socket.
+    /// Rung 1 registers the two ids with the portal and keeps the socket.
     Portal,
-    /// Rung 2 only: the compositor keybind into the control socket.
+    /// Rung 2 uses the compositor keybind to reach the control socket.
     Native(NativeReason),
 }
 
 impl Selection {
-    /// The one startup line the daemon logs for the trigger channel.
+    /// Build the daemon's startup log line.
     ///
-    /// `exe` is the binary the native rung's advice must name, resolved
-    /// by the caller (`paths::exec_name`): the line tells the user what
-    /// to bind, and under `cargo run` the bare command name is not on
-    /// PATH, so a snippet built from it execs nothing.
+    /// `exe` identifies the binary in advice for the native rung. The caller
+    /// resolves it through `paths::exec_name`. A bare command does not resolve
+    /// under `cargo run` when PATH does not contain it.
     pub fn startup_line(self, exe: &Path) -> String {
         match self {
             Selection::Portal => format!(
@@ -245,8 +240,8 @@ impl Selection {
     }
 }
 
-/// Walk the trigger ladder (ARCHITECTURE.md#input-ladders). `portal`
-/// is the D-Bus probe the caller already ran.
+/// Select the trigger rung (ARCHITECTURE.md#input-ladders). The `portal`
+/// argument is the result of the caller's D-Bus probe.
 pub fn select(portal: bool, ov: ChannelOverride) -> Selection {
     match (ov, portal) {
         (ChannelOverride::Auto | ChannelOverride::Portal, true) => Selection::Portal,
@@ -256,10 +251,10 @@ pub fn select(portal: bool, ov: ChannelOverride) -> Selection {
     }
 }
 
-/// The two shortcuts to register, with the chords the config asks for,
-/// spelled the way the shortcuts spec wants them.
+/// Build the two shortcuts from the configured chords. Each chord uses the
+/// form that the shortcuts spec defines.
 ///
-/// A fixed-size array, so "exactly two ids" is the type.
+/// The fixed-size array enforces exactly two ids.
 pub fn preferred(config: &chibipop::config::Config) -> [(ShortcutId, String); 2] {
     [
         (ShortcutId::Trigger, normalize_trigger(&config.trigger.trigger_key_linux)),
@@ -267,17 +262,17 @@ pub fn preferred(config: &chibipop::config::Config) -> [(ShortcutId, String); 2]
     ]
 }
 
-/// A user's chord as the shortcuts spec spells it: XKB modifier names
-/// upper-case, the key an `xkbcommon-keysyms.h` identifier.
+/// Convert a user's chord to the form that the shortcuts spec defines.
+/// The result uses uppercase XKB modifier names and a key name from
+/// `xkbcommon-keysyms.h`.
 ///
-/// Two real corrections, not cosmetics. `SUPER` is what users type and
-/// what every compositor config calls that key, but the spec's name for
-/// it is `LOGO` — the portal is entitled to reject the other spelling.
-/// And a single letter is lower-cased, because `F` is the keysym
-/// `XKB_KEY_F` (i.e. shifted) while the spec asks for the base layer:
-/// the `ALT+F` default means Alt plus the F *key*. Longer identifiers
-/// (`Return`, `F1`, `space`) are passed through verbatim: they are
-/// keysym names already, and case is part of the name.
+/// Two conversions affect portal acceptance. `SUPER` is a common user term,
+/// but the shortcuts spec requires `LOGO`. The function converts a
+/// one-letter key to lowercase. `F` names the shifted keysym `XKB_KEY_F`,
+/// but the shortcuts spec requires the base layer. Therefore, the default
+/// `ALT+F` means Alt with the F key. Long names such as `Return`, `F1`, and
+/// `space` keep their original form. These values are keysym names, and
+/// case is significant.
 pub fn normalize_trigger(chord: &str) -> String {
     let parts: Vec<&str> = chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
     let Some((key, modifiers)) = parts.split_last() else {
@@ -296,9 +291,9 @@ pub fn normalize_trigger(chord: &str) -> String {
     out
 }
 
-/// One modifier, spec-spelled. Anything unrecognized is upper-cased and
-/// passed on: an unknown modifier is the user's business, and mangling
-/// it further would only hide their typo.
+/// Convert one modifier to the shortcuts spec form. Convert an unknown
+/// modifier to uppercase without other changes. The portal can then report
+/// the user's error.
 fn spec_modifier(name: &str) -> String {
     let upper = name.to_ascii_uppercase();
     match upper.as_str() {
@@ -308,39 +303,37 @@ fn spec_modifier(name: &str) -> String {
     }
 }
 
-/// What one portal signal does to the daemon.
+/// The action that one portal signal causes in the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Exactly what the control socket's verb does — one code path for
-    /// every rung, so a portal press and a `chibipop ctl <verb>` cannot
-    /// drift apart. There is no second kind of effect on purpose: every
-    /// global action has a verb, so a portal signal is only ever a verb
-    /// or nothing.
+    /// Run the same control socket verb as every other rung. One code path
+    /// prevents differences between a portal shortcut and
+    /// `chibipop ctl <verb>`. Every global action has a verb. A portal signal
+    /// therefore produces a verb or no action.
     Verb(Verb),
-    /// Nothing to do.
+    /// No action is necessary.
     Nothing,
 }
 
-/// One `Activated`/`Deactivated` mapped onto the daemon's vocabulary.
+/// Map one `Activated`/`Deactivated` signal to the daemon's action.
 pub fn action(id: ShortcutId, activated: bool) -> Action {
     match (id, activated) {
-        // The hold, both halves: press *and* release arrive on both
-        // rungs.
+        // A hold needs both events. Both rungs send the press and release.
         (ShortcutId::Trigger, true) => Action::Verb(Verb::TriggerDown),
         (ShortcutId::Trigger, false) => Action::Verb(Verb::TriggerUp),
         (ShortcutId::AnkiAdd, true) => Action::Verb(Verb::AnkiAdd),
-        // Releasing the add key cannot un-add a card.
+        // A release cannot reverse an Anki add action.
         (ShortcutId::AnkiAdd, false) => Action::Nothing,
     }
 }
 
-/// The trigger row while the portal has been asked but has not answered.
-/// On KDE that wait is a dialog the user is reading.
+/// Return the trigger detail while the portal has not answered the
+/// binding request. On KDE, the user reads the dialog during this period.
 pub fn pending_detail() -> String {
     "GlobalShortcuts portal - binding requested; control socket serving meanwhile".to_string()
 }
 
-/// The trigger row once the portal answered, naming what it bound.
+/// Return the trigger detail after the portal answers. Name each binding.
 pub fn portal_detail(bindings: &[Binding]) -> String {
     if bindings.is_empty() {
         return "GlobalShortcuts portal bound nothing - control socket is the only trigger"
@@ -350,19 +343,18 @@ pub fn portal_detail(bindings: &[Binding]) -> String {
     format!("GlobalShortcuts portal - {}", described.join(", "))
 }
 
-/// The trigger row when the portal rung is not serving: the socket is,
-/// and `why` is the part a user can act on.
+/// Return the trigger detail when the portal rung cannot serve. The
+/// control socket still serves, and `why` gives an action.
 ///
-/// Names the verbs, not the binary: a status row has one short line
-/// (ARCHITECTURE.md#platform-integration), and a bare `chibipop` in it
-/// would be a command that does not resolve under `cargo run`.
-/// The bind lines that do name the running exe are the
-/// settings window's snippet.
+/// A status row has one short line
+/// (ARCHITECTURE.md#platform-integration). It names verbs instead of the
+/// binary. A bare `chibipop` command does not resolve under `cargo run`.
+/// The settings window gives binding snippets that name the binary.
 pub fn native_detail(why: &str) -> String {
     format!("control socket (`ctl trigger-down`) - {why}")
 }
 
-/// The native rung's own reason, phrased for a status row.
+/// Format the native rung reason for a status row.
 pub fn native_reason(reason: NativeReason) -> String {
     match reason {
         NativeReason::NoPortal => {
@@ -379,8 +371,8 @@ pub fn native_reason(reason: NativeReason) -> String {
 mod tests {
     use super::*;
 
-    /// The whole consent argument: two ids, no more, ever. A new
-    /// variant has to break this test on purpose.
+    /// This test fixes the consent request at two ids. A new variant requires
+    /// a deliberate test change.
     #[test]
     fn exactly_two_ids_exist_and_they_round_trip() {
         assert_eq!(2, ShortcutId::ALL.len());
@@ -393,8 +385,8 @@ mod tests {
         assert_eq!(None, ShortcutId::parse(""));
     }
 
-    /// What gets registered comes from the config and is still exactly
-    /// the two ids, whatever the user typed.
+    /// The configuration supplies both shortcut chords. The fixed result
+    /// contains exactly two ids.
     #[test]
     fn the_registered_set_is_the_config_chords_and_only_two() {
         let mut cfg = chibipop::config::Config::default();
@@ -407,24 +399,24 @@ mod tests {
         );
     }
 
-    /// The shortcuts spec's spelling, not the user's.
+    /// This test checks the shortcuts spec form instead of the user's form.
     #[test]
     fn a_chord_is_spelled_the_way_the_spec_wants() {
         assert_eq!("ALT+f", normalize_trigger("ALT+F"));
         assert_eq!("ALT+f", normalize_trigger("alt + f"));
         assert_eq!("CTRL+SHIFT+k", normalize_trigger("Ctrl+Shift+K"));
         assert_eq!("LOGO+j", normalize_trigger("SUPER+J"));
-        // Multi-character keysym names are names: case is theirs.
+        // Multi-character keysym names keep their case.
         assert_eq!("CTRL+ALT+Return", normalize_trigger("ctrl+alt+Return"));
         assert_eq!("ALT+F1", normalize_trigger("alt+F1"));
         assert_eq!("ALT+space", normalize_trigger("ALT+space"));
-        // A bare key is passed through: the portal will refuse it, and
-        // that refusal is the honest answer to a user who insisted.
+        // A bare key reaches the portal without a modifier. The portal
+        // can refuse it and report the user's invalid value.
         assert_eq!("f", normalize_trigger("F"));
         assert_eq!("", normalize_trigger(""));
     }
 
-    /// The ladder, whole truth table.
+    /// This test covers every ladder selection.
     #[test]
     fn the_ladder_prefers_the_portal_and_falls_back_to_the_socket() {
         assert_eq!(Selection::Portal, select(true, ChannelOverride::Auto));
@@ -441,11 +433,10 @@ mod tests {
         assert_eq!(Selection::Native(NativeReason::Forced), select(false, ChannelOverride::Native));
     }
 
-    /// Every rung's startup line names the mechanism, and the native
-    /// ones name the socket so a reader knows the trigger still works.
-    /// The rung-2 line is also the user's instruction, so it must name
-    /// the running binary rather than a bare command name that PATH may
-    /// not have.
+    /// Each startup line names the active trigger source. Native lines name
+    /// the control socket, so the user knows that the trigger works.
+    /// The rung-2 line also gives binding instructions and names the active
+    /// binary. A bare command name can be absent from PATH.
     #[test]
     fn every_startup_line_names_what_serves_the_trigger() {
         let exe = Path::new("/home/u/chibipop/target/debug/chibipop");
@@ -478,25 +469,25 @@ mod tests {
         assert_eq!(None, ChannelOverride::parse("evdev"));
     }
 
-    /// The hold is the pair: a press without its release would leave a
-    /// frozen grab up forever.
+    /// A hold needs a press and a release. Without the release, the frozen grab
+    /// remains active.
     #[test]
     fn the_trigger_id_maps_to_both_halves_of_the_hold() {
         assert_eq!(Action::Verb(Verb::TriggerDown), action(ShortcutId::Trigger, true));
         assert_eq!(Action::Verb(Verb::TriggerUp), action(ShortcutId::Trigger, false));
     }
 
-    /// Anki adds on press only, and the release is not a second event.
-    /// The press resolves to the *verb*, which is what makes a portal
-    /// press and `chibipop ctl anki-add` the same code path.
+    /// Anki adds only on a press. The release does not create a second
+    /// event. The press maps to the verb. A portal press and
+    /// `chibipop ctl anki-add` therefore use the same code path.
     #[test]
     fn the_add_id_adds_once_per_press() {
         assert_eq!(Action::Verb(Verb::AnkiAdd), action(ShortcutId::AnkiAdd, true));
         assert_eq!(Action::Nothing, action(ShortcutId::AnkiAdd, false));
     }
 
-    /// A status row has to say which channel owns the binding, and the
-    /// portal rows have to survive a portal that reports no key.
+    /// A status row names the channel that owns the binding. A portal row can
+    /// also show that the portal did not report a key.
     #[test]
     fn status_details_name_the_owner_of_the_binding() {
         let named = vec![

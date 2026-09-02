@@ -1,13 +1,13 @@
-//! Where the 63 µs hover actually goes.
+//! This example shows where the 63 µs hover time goes.
 //!
 //! [docs/research/hover-parse-cost.md](../docs/research/hover-parse-cost.md)
-//! measures one hover as a single number - 63.3 µs at p50 for `terms_for` +
-//! `entries` on a twelve-dictionary library - and says out loud that the
-//! query side of that number is a *floor*, because it times one point query
-//! rather than the deconjugation fan-out a real hover issues. This example
-//! splits the number into its parts and measures the two costs an
-//! arena/bloom-filter architecture would attack: negative lookups, and
-//! per-row mapping into owned `TermRow`s.
+//! measures one hover as one number: 63.3 µs at p50 for `terms_for` +
+//! `entries` on a library with twelve Dictionaries.
+//! It states that the query part is a *floor* because it times one point query,
+//! not the deconjugation fan-out that a real hover issues.
+//! This example splits that number into its parts.
+//! It measures the two costs that an arena and bloom filter architecture can reduce:
+//! negative lookups and conversion of each row into owned `TermRow`s`.
 //!
 //! ```sh
 //! cargo run -p chibipop --release --example lookup_breakdown -- all [db] [label]
@@ -19,15 +19,16 @@
 //! cargo run -p chibipop --release --example lookup_breakdown -- bloom   [db] [label]
 //! ```
 //!
-//! Every mode opens through `SqliteDictionary::open`, which passes
-//! `SQLITE_OPEN_READ_ONLY` without `SQLITE_OPEN_CREATE` and runs no
-//! migration; the second handle this file opens to time the column reads
-//! uses the same flags and the same `mmap_size` pragma. Pointing any mode at
-//! the live database cannot modify it.
+//! Every mode opens through `SqliteDictionary::open`.
+//! It passes `SQLITE_OPEN_READ_ONLY` without `SQLITE_OPEN_CREATE` and runs no migration.
+//! A second handle in this file times the column reads.
+//! It uses the same flags and the same `mmap_size` pragma.
+//! No mode can modify the live database.
 //!
-//! The sample is the one `tools/hover-parse-bench` already extracted, read
-//! back out of `results/hover-payloads.jsonl`, so every number here lines up
-//! with the ones in `hover-parse-cost.md`. Release mode is mandatory.
+//! `tools/hover-parse-bench` extracted the sample once.
+//! This example reads it from `results/hover-payloads.jsonl`.
+//! Every number therefore matches `hover-parse-cost.md`.
+//! Release mode is mandatory.
 
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::{Deconjugator, Form};
@@ -47,26 +48,29 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Sweeps over the whole sample list. Each item's median sweep is kept.
-/// Sweeping the list rather than hammering one item keeps the access
-/// pattern close to what a real sequence of hovers sees.
+/// `SWEEPS` sets the number of full sweeps over the sample list.
+/// The benchmark keeps each item's median sweep.
+/// A list sweep keeps the access pattern close to a real hover sequence.
 const SWEEPS: usize = 5;
 
-/// The miss population is the *real* one - every surface `LookupEngine::run`
-/// probed that returned zero rows - and there are tens of thousands of
-/// distinct ones. Strided down to this many to keep the sweep quick.
+/// The miss population is the *real* one.
+/// It contains every surface that `LookupEngine::run` probes and that returns zero rows.
+/// It has tens of thousands of distinct surfaces.
+/// The benchmark reduces it to this size with a stride so the sweep stays quick.
 const MAX_MISS_PROBES: usize = 3000;
 
-/// Prose tail length harvested per run, and the pool cap.
+/// `PROSE_CHARS` sets the prose tail length that each run stores.
 const PROSE_CHARS: usize = 40;
+/// `PROSE_POOL` sets the prose pool limit.
 const PROSE_POOL: usize = 4000;
 
-/// The two hover-input lengths measured. 25 saturates `MAX_LOOKUP_CHARS`
-/// and is the fan-out ceiling; 8 stands in for a short OCR line.
+/// The benchmark measures two hover-input lengths.
+/// 25 saturates `MAX_LOOKUP_CHARS` and sets the fan-out ceiling.
+/// 8 represents a short OCR line.
 const SHORT_INPUT: usize = 8;
 
-/// Verbatim from `src/lookup/sqlite.rs`. The plans and the column-read
-/// splits below are meaningless if these drift.
+/// These SQL strings match `src/lookup/sqlite.rs`.
+/// The query plans and column-read splits below are valid only when these strings match.
 const TERM_SQL: &str = "SELECT surface, written, reading, pos, freq, entry_id, dict_id \
      FROM term WHERE surface = ?1";
 const ENTRY_SQL: &str = "SELECT entry_id, dict_id, glossary FROM entry WHERE entry_id = ?1";
@@ -77,9 +81,9 @@ fn results_dir() -> PathBuf {
 
 // ---- inputs ----
 
-/// The fields of one `hover-payloads.jsonl` line this example needs. The
-/// 178 MB `payloads` array is deliberately not declared: serde skips it
-/// without allocating.
+/// `Record` contains the fields this example needs from one `hover-payloads.jsonl` line.
+/// It does not declare the 178 MB `payloads` array.
+/// `serde` skips that array and allocates no memory.
 #[derive(Deserialize)]
 struct Record {
     term: String,
@@ -95,10 +99,11 @@ fn is_jp(c: char) -> bool {
         | '\u{3006}')
 }
 
-/// One pass over the fixture: the headword sample, and a pool of real
-/// Japanese prose runs harvested out of the raw glossary text on the same
-/// lines. The prose is what the hover inputs are padded with, so the
-/// prefix scan walks realistic characters rather than a synthetic filler.
+/// `load_fixture` reads the fixture once.
+/// It returns the headword sample and real Japanese prose runs from raw glossary
+/// text on the same lines.
+/// The hover inputs add this prose after the headword.
+/// The prefix scan therefore reads realistic characters instead of synthetic filler.
 fn load_fixture() -> Result<(Vec<Record>, Vec<String>)> {
     let path = results_dir().join("hover-payloads.jsonl");
     let file = std::fs::File::open(&path).with_context(|| {
@@ -136,10 +141,10 @@ fn load_fixture() -> Result<(Vec<Record>, Vec<String>)> {
     Ok((records, prose))
 }
 
-/// A hover input is the headword the user is pointing at, followed by real
-/// Japanese text, cut to `chars`. `worker.rs` hands `run` the rest of the
-/// OCR line from the cursor (`src/worker.rs:466`), so the tail is what
-/// makes the prefix scan issue its long, always-missing probes.
+/// `hover_inputs` builds each input from a headword and real Japanese text.
+/// It cuts each input to `chars`.
+/// `worker.rs` gives `run` the rest of the OCR line from the cursor (`src/worker.rs:466`).
+/// This tail makes the prefix scan issue long probes that always miss.
 fn hover_inputs(terms: &[String], prose: &[String], chars: usize) -> Vec<String> {
     terms
         .iter()
@@ -221,9 +226,9 @@ fn print_table(title: &str, unit: &str, rows: &[Row]) {
     }
 }
 
-/// `Instant::now()` twice around nothing. Every per-call number below
-/// carries roughly this much bias, and the instrumented fan-out carries it
-/// once per point query, so it has to be on the record.
+/// `timer_overhead_us` measures two `Instant::now()` calls around no work.
+/// Each per-call number carries about this bias.
+/// The instrumented fan-out carries it once per point query, so this bias belongs in the record.
 fn timer_overhead_us() -> f64 {
     let mut v = Vec::with_capacity(1000);
     for _ in 0..1000 {
@@ -236,8 +241,8 @@ fn timer_overhead_us() -> f64 {
 
 // ---- a second handle, for the column-read splits ----
 
-/// Same flags and same `mmap_size` as `SqliteDictionary::open`. Read-only,
-/// no `SQLITE_OPEN_CREATE`, no migration.
+/// `Raw` uses the same flags and `mmap_size` as `SqliteDictionary::open`.
+/// It opens the database read-only and does not use `SQLITE_OPEN_CREATE` or run a migration.
 struct Raw {
     conn: Connection,
 }
@@ -253,8 +258,8 @@ impl Raw {
         Ok(Raw { conn })
     }
 
-    /// SQLite alone: index seek plus one `sqlite3_step` per row, no column
-    /// decoded. The floor `terms_for` cannot go below.
+    /// SQLite alone performs an index seek and one `sqlite3_step` per row.
+    /// It decodes no columns. `terms_for` cannot cost less than this floor.
     fn term_step_only(&self, surface: &str) -> Result<usize> {
         let mut stmt = self.conn.prepare_cached(TERM_SQL)?;
         let mut rows = stmt.query([surface])?;
@@ -265,9 +270,9 @@ impl Raw {
         Ok(n)
     }
 
-    /// Every column read, nothing owned: `ValueRef` borrows straight out of
-    /// SQLite's page. This is what a zero-copy or arena-backed row read
-    /// would cost.
+    /// This method reads every column without ownership.
+    /// `ValueRef` borrows from the SQLite page.
+    /// This is the cost of a zero-copy or arena-backed row read.
     fn term_borrowed(&self, surface: &str) -> Result<u64> {
         let mut stmt = self.conn.prepare_cached(TERM_SQL)?;
         let mut rows = stmt.query([surface])?;
@@ -284,8 +289,8 @@ impl Raw {
         Ok(acc)
     }
 
-    /// `entries` minus the parse: step, then borrow the `glossary` TEXT
-    /// without copying it out of SQLite.
+    /// This measures `entries` without the parse.
+    /// It steps through rows and borrows `glossary` TEXT without a copy from SQLite.
     fn glossary_borrowed(&self, ids: &[i64]) -> Result<u64> {
         let mut stmt = self.conn.prepare_cached(ENTRY_SQL)?;
         let mut acc = 0u64;
@@ -300,9 +305,9 @@ impl Raw {
         Ok(acc)
     }
 
-    /// What `SqliteDictionary::entries` actually does before it parses:
-    /// One owned heap copy of the JSON per entry - what `entries` used to do
-    /// before it borrowed the column straight into the parser.
+    /// This matches the work that `SqliteDictionary::entries` does before it parses.
+    /// It makes one owned heap copy of the JSON per entry.
+    /// `entries` used this copy before it borrowed the column into the parser.
     fn glossary_owned(&self, ids: &[i64], out: &mut Vec<String>) -> Result<()> {
         out.clear();
         let mut stmt = self.conn.prepare_cached(ENTRY_SQL)?;
@@ -337,7 +342,7 @@ impl Raw {
     }
 }
 
-// ---- the counting / timing wrapper ----
+// ---- counter and time wrapper ----
 
 #[derive(Clone, Copy, Default)]
 struct Tally {
@@ -351,9 +356,9 @@ struct Tally {
     entry_ids: u32,
 }
 
-/// Forwards every `Dictionary` call to the real `SqliteDictionary` and
-/// times it. `LookupEngine::run` is generic over `D: Dictionary`, so this
-/// measures the real fan-out rather than a replica of it.
+/// `Probe` forwards every `Dictionary` call to the real `SqliteDictionary` and times it.
+/// `LookupEngine::run` is generic over `D: Dictionary`.
+/// This measures the real fan-out instead of a replica.
 struct Probe<'a> {
     inner: &'a SqliteDictionary,
     t: Cell<Tally>,
@@ -403,16 +408,17 @@ impl Dictionary for Probe<'_> {
         self.inner.dicts()
     }
 
-    /// Untimed: this benchmark measures the term hot path, and a pitch read
-    /// is once per card rather than once per surface probe.
+    /// This method is untimed.
+    /// The benchmark measures the term hot path.
+    /// A pitch read occurs once per card, not once per surface probe.
     fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
         self.inner.pitch_for(term, reading)
     }
 }
 
-/// Untimed twin of `Probe`: records which surfaces the engine probed and
-/// whether each hit, so the miss population the probe benchmark uses is the
-/// real one rather than an invented one.
+/// `Collect` is an untimed twin of `Probe`.
+/// It records surfaces that the engine probes and whether each probe hits.
+/// The probe benchmark therefore uses the real miss population, not an invented one.
 struct Collect<'a> {
     inner: &'a SqliteDictionary,
     hit: RefCell<HashSet<String>>,
@@ -448,9 +454,9 @@ struct Bench {
     dict: SqliteDictionary,
     raw: Raw,
     dict_count: usize,
-    /// Frequency-sample headwords that match something in this database.
+    /// Frequency-sample headwords that match a row in this database.
     freq: Vec<String>,
-    /// The deliberately over-represented worst-case headwords, kept apart.
+    /// This field keeps the deliberately over-represented worst-case headwords separate.
     worst: Vec<String>,
     prose: Vec<String>,
 }
@@ -472,7 +478,7 @@ fn setup(args: &[String]) -> Result<Bench> {
     let (records, prose) = load_fixture()?;
     let (mut freq, mut worst) = (Vec::new(), Vec::new());
     for r in &records {
-        // Untimed, and it doubles as the first cache-warming touch.
+        // This pass is untimed and also provides the first cache touch.
         if dict.terms_for(&r.term)?.is_empty() {
             continue;
         }
@@ -495,7 +501,8 @@ fn setup(args: &[String]) -> Result<Bench> {
     Ok(Bench { db, label, dict, raw, dict_count: names.len(), freq, worst, prose })
 }
 
-/// One untimed pass over every item, so no timed sweep pays a first touch.
+/// `warm` reads every item once and records no time.
+/// A timed sweep therefore pays no first-touch cost.
 fn warm(b: &Bench, items: &[String]) -> Result<()> {
     for s in items {
         let rows = b.dict.terms_for(s)?;
@@ -505,8 +512,8 @@ fn warm(b: &Bench, items: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Sweep `items` `SWEEPS` times, keep each item's median. `f` returns
-/// microseconds for one item.
+/// `sweep` runs `SWEEPS` passes over `items` and keeps each item's median.
+/// `f` returns microseconds for one item.
 fn sweep<T>(items: &[T], mut f: impl FnMut(&T) -> Result<f64>) -> Result<Vec<f64>> {
     let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(SWEEPS); items.len()];
     for _ in 0..SWEEPS {
@@ -525,8 +532,10 @@ fn time_us(mut f: impl FnMut() -> Result<()>) -> Result<f64> {
 
 // ---- mode: probe ----
 
-/// Every surface the engine probes over one full pass of realistic hover
-/// inputs, split by whether it hit. Untimed.
+/// `probed_surfaces` returns every surface that the engine probes in one pass
+/// over realistic hover inputs.
+/// It separates surfaces by hit result.
+/// This function is untimed.
 fn probed_surfaces(b: &Bench, inputs: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let (eng, _) = engine()?;
     let c = Collect {
@@ -556,10 +565,10 @@ fn mode_probe(b: &Bench) -> Result<()> {
     let inputs = hover_inputs(&b.freq, &b.prose, MAX_LOOKUP_CHARS);
     let (hit_surfaces, engine_misses) = probed_surfaces(b, &inputs)?;
 
-    // A second, independent miss generator: a sampled headword with one
-    // more kana glued on. `ゐ` is a historical kana that no modern headword
-    // ends in, and every candidate is confirmed absent before it is kept -
-    // these are plausible-looking non-words, not absurd ones.
+    // Build a second independent miss set from sampled headwords with one more kana.
+    // `ゐ` is a historical kana that no modern headword ends with.
+    // Confirm each string is absent before the benchmark keeps it.
+    // These plausible non-words avoid absurd inputs.
     let mut glued = Vec::new();
     for t in &b.freq {
         let s = format!("{t}ゐ");
@@ -595,11 +604,12 @@ fn mode_probe(b: &Bench) -> Result<()> {
     }
     print_table(&format!("{}: terms_for, per call", b.label), "µs", &rows);
 
-    // Where a miss's 4 µs actually goes. `term_step_only` is
-    // `prepare_cached` + bind + one `sqlite3_step` that returns DONE and
-    // decodes nothing; `terms_for` adds rusqlite's row mapping, which for a
-    // miss is only an empty `Vec`. If these two are equal, the whole cost is
-    // SQLite's b-tree descent and no amount of Rust-side work removes it.
+    // This shows where a miss's 4 µs goes.
+    // `term_step_only` runs `prepare_cached`, bind, and one `sqlite3_step` that returns DONE.
+    // It decodes no columns.
+    // `terms_for` adds rusqlite row conversion, which returns only an empty `Vec` for a miss.
+    // Equal values mean SQLite's b-tree descent accounts for the full cost.
+    // Rust-side work cannot remove that descent.
     let step = |s: &String| {
         time_us(|| {
             black_box(b.raw.term_step_only(s)?);
@@ -620,8 +630,8 @@ fn mode_probe(b: &Bench) -> Result<()> {
         ],
     );
 
-    // The same three-way split on the frequency sample, so the doc's
-    // 63.3 µs hover can be broken down and not just reproduced.
+    // Use the same three-way split on the frequency sample.
+    // This breaks down the 63.3 µs hover that `hover-parse-cost.md` reports.
     let hit_step = sweep(&b.freq, step)?;
     let hit_borrowed = sweep(&b.freq, |s| {
         time_us(|| {
@@ -658,10 +668,10 @@ fn mode_probe(b: &Bench) -> Result<()> {
     print_table(&format!("{}: terms_for, rows returned", b.label), "rows", &counts);
 
     // ---- prepared-statement reuse ----
-    // Pages are warm from the sweeps above, and `SqliteDictionary::open`
-    // has already forced the schema parse with its `meta` query, so the
-    // cold/warm delta is the `sqlite3_prepare_v2` of the term statement
-    // and nothing else.
+    // The sweeps above warm the pages.
+    // `SqliteDictionary::open` already forces the schema parse with its `meta` query.
+    // The cold/warm delta therefore measures `sqlite3_prepare_v2` for the term
+    // statement and nothing else.
     let n = b.freq.len().min(300);
     let (mut cold, mut warm_after) = (Vec::new(), Vec::new());
     for t in b.freq.iter().take(n) {
@@ -720,9 +730,9 @@ struct FanOut {
     residual: Vec<f64>,
 }
 
-/// The deconjugation half of `run`'s prefix loop, verbatim from
-/// `src/lookup/engine.rs:109-115` minus the dictionary probe. Measured
-/// out of band, because there is no seam inside `run` to time it through.
+/// This is the deconjugation half of `run`'s prefix loop, verbatim from
+/// `src/lookup/engine.rs:109-115` except for the dictionary probe.
+/// The benchmark measures it out of band because `run` has no internal seam.
 fn deconj_only(d: &Deconjugator, input: &str) -> f64 {
     let cleaned = clean_input(input);
     let chars: Vec<char> = cleaned.chars().collect();
@@ -775,7 +785,7 @@ fn measure_fanout(b: &Bench, inputs: &[String]) -> Result<FanOut> {
         }
     }
 
-    // Counts are deterministic per input; read them off one clean pass.
+    // Counts are deterministic per input. Read them from one clean pass.
     let (mut calls, mut hits, mut misses, mut rows, mut ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for input in inputs {
@@ -840,9 +850,9 @@ fn report_fanout(b: &Bench, title: &str, inputs: &[String], f: FanOut) {
             summarise("run, instrumented (shows probe overhead)", f.instr_total),
         ],
     );
-    // The max column is a column of maxima over different inputs, not the
-    // split of one hover. Name the single slowest hover and split *it*, so
-    // there is an honest worst-case row.
+    // The max column takes maxima from different inputs.
+    // It does not split one hover.
+    // Name the single slowest hover and split that hover for an honest worst-case row.
     if let Some((i, worst)) = f
         .plain_total
         .iter()
@@ -896,7 +906,7 @@ fn mode_fanout(b: &Bench) -> Result<()> {
 
 fn mode_entries(b: &Bench) -> Result<()> {
     warm(b, &b.freq)?;
-    // What a hover really passes to `entries`: the top `MAX_RESULTS` ids.
+    // This is what a hover passes to `entries`: the top `MAX_RESULTS` ids.
     let mut idsets: Vec<Vec<i64>> = Vec::new();
     for t in &b.freq {
         let rows = b.dict.terms_for(t)?;
@@ -923,8 +933,9 @@ fn mode_entries(b: &Bench) -> Result<()> {
             Ok(())
         })
     })?;
-    // Parse only: the strings are already in hand, fetched outside the
-    // timed region, so this is pure serde.
+    // Parse only.
+    // The strings are already in hand from outside the timed region.
+    // This measures only serde.
     let prefetched: Vec<Vec<String>> = {
         let mut v: Vec<Vec<String>> = Vec::with_capacity(idsets.len());
         for ids in &idsets {
@@ -953,10 +964,10 @@ fn mode_entries(b: &Bench) -> Result<()> {
             Ok(())
         })
     })?;
-    // The doc's headline "hover today", reproduced verbatim so the whole
-    // breakdown is anchored to a number that already exists:
-    // `examples/hover_parse_bench.rs:433-439`, one `terms_for` plus
-    // `entries` over the leading `MAX_RESULTS` ids, timed as one region.
+    // The `hover-parse-cost.md` headline "hover today" reproduces a known number.
+    // `examples/hover_parse_bench.rs:433-439` measures one `terms_for` call and
+    // `entries` over the first `MAX_RESULTS` ids as one timed region.
+    // Keep this anchor so the whole breakdown uses that number.
     let doc = sweep(&b.freq, |t| {
         time_us(|| {
             let rows = b.dict.terms_for(t)?;
@@ -1000,8 +1011,9 @@ fn mode_entries(b: &Bench) -> Result<()> {
     Ok(())
 }
 
-/// `engine.rs:30-38`, verbatim. `DEFAULT_FREQ` is private too; its value is
-/// the `999_999.0` at `engine.rs:11`.
+/// This matches `engine.rs:30-38` verbatim.
+/// `DEFAULT_FREQ` is private, so this function uses its value, `999_999.0`, from
+/// `engine.rs:11`.
 fn replica_score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     const DEFAULT_FREQ: f64 = 999_999.0;
     let f = freq.map(|v| v as f64).unwrap_or(DEFAULT_FREQ).max(1.0);
@@ -1019,8 +1031,9 @@ fn replica_kana(r: &TermRow) -> bool {
         .all(|c| matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'))
 }
 
-/// `engine.rs:135-154`: one slot per `(written, reading, dict_id)`, and the
-/// two `String` clones per row that build the key.
+/// This matches `engine.rs:135-154`.
+/// It keeps one slot per `(written, reading, dict_id)` and clones two `String`
+/// values per row to build the key.
 fn regroup(rows: &[TermRow]) -> Vec<TermRow> {
     let mut best: HashMap<(Option<String>, Option<String>, i64), TermRow> =
         HashMap::with_capacity(rows.len());
@@ -1036,8 +1049,8 @@ fn regroup(rows: &[TermRow]) -> Vec<TermRow> {
     best.into_values().collect()
 }
 
-/// `engine.rs:156-174` with the keys a single surface at a single match
-/// length can still discriminate on.
+/// This matches `engine.rs:156-174`.
+/// At one surface and one match length, these keys still distinguish rows.
 fn rank_cmp(a: &TermRow, b: &TermRow) -> std::cmp::Ordering {
     let sa = replica_score(1, a.freq, replica_kana(a));
     let sb = replica_score(1, b.freq, replica_kana(b));
@@ -1097,18 +1110,20 @@ fn mode_worst(b: &Bench) -> Result<()> {
         ],
     );
 
-    // The instrumented run reports grouping, sorting and Hit building as one
-    // residual. `Candidate`, `score` and `is_better` are private to
-    // `engine.rs`, so this apportions that residual with a REPLICA of
-    // `engine.rs:135-175`: the same `GroupKey`, the same two `String`
-    // clones per row, the same `score` (engine.rs:30-38) and a comparator
-    // of the same arity. A bare headword is one surface at one match
-    // length, so `match_len`, `whole` and `steps` are constant and the real
-    // comparator collapses to the three keys used here.
+    // The instrumented run reports the group step, sort step, and `Hit` creation
+    // as one residual.
+    // `Candidate`, `score`, and `is_better` are private to `engine.rs`.
+    // This `REPLICA` therefore apportions that residual with the same logic from
+    // `engine.rs:135-175`.
+    // It uses the same `GroupKey`, two `String` clones per row, and `score` from
+    // `engine.rs:30-38`.
+    // A bare headword has one surface and one match length.
+    // Therefore, `match_len`, `whole`, and `steps` stay constant, and the real
+    // comparator reduces to the three keys here.
     //
-    // Grouping and sorting are timed as A and A+B so the sort needs no
-    // order restoration between sweeps: sorting an already-sorted vector
-    // would measure the wrong thing.
+    // The benchmark times the group step as A and the group-and-sort step as A+B.
+    // This avoids order restoration between sweeps.
+    // An already-sorted vector gives the wrong measure.
     let fetched: Vec<Vec<TermRow>> = items
         .iter()
         .map(|t| b.dict.terms_for(t))
@@ -1157,7 +1172,7 @@ fn mode_worst(b: &Bench) -> Result<()> {
     let f = measure_fanout(b, &items)?;
     report_fanout(b, "worst-case headword, bare", &items, f);
 
-    // The single headword the doc names.
+    // The single headword named in the document.
     if let Some(k) = items.iter().find(|t| t.as_str() == "こう") {
         let rows = b.dict.terms_for(k)?;
         let one = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
@@ -1227,9 +1242,9 @@ fn mode_plan(b: &Bench) -> Result<()> {
 
 // ---- mode: bloom ----
 
-/// Ten bits per key, seven hashes: the textbook optimum, ~0.8% false
-/// positives. Small enough that the whole filter for a twelve-dictionary
-/// library fits in a few megabytes and is resident.
+/// The filter uses ten bits per key and seven hashes.
+/// This is the textbook optimum with ~0.8% false positives.
+/// A filter for a library with twelve Dictionaries fits in a few megabytes and stays resident.
 const BLOOM_BITS_PER_KEY: usize = 10;
 const BLOOM_HASHES: u32 = 7;
 
@@ -1238,9 +1253,9 @@ struct Bloom {
     mask: usize,
 }
 
-/// FNV-1a. Not the fastest choice a real implementation would make
-/// (hoshidicts uses xxHash), so the probe cost below is a ceiling, not a
-/// floor.
+/// `fnv1a` implements FNV-1a.
+/// A real implementation can use a faster hash (`hoshidicts` uses xxHash).
+/// The probe cost below is therefore a ceiling, not a floor.
 fn fnv1a(bytes: &[u8], seed: u64) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64 ^ seed;
     for &b in bytes {
@@ -1259,7 +1274,7 @@ impl Bloom {
     fn bytes(&self) -> usize {
         self.bits.len() * 8
     }
-    /// Kirsch-Mitzenmacher: two hashes stand in for `BLOOM_HASHES`.
+    /// Kirsch-Mitzenmacher uses two hashes to stand in for `BLOOM_HASHES`.
     #[inline]
     fn slots(&self, key: &str) -> impl Iterator<Item = usize> + '_ {
         let h1 = fnv1a(key.as_bytes(), 0);
@@ -1278,9 +1293,9 @@ impl Bloom {
     }
 }
 
-/// A bloom filter over `term.surface`, actually built and actually probed,
-/// so "what would a bloom filter save" is a measured number rather than a
-/// modelled one. The only modelled step is the arithmetic at the end.
+/// This function builds and probes a bloom filter over `term.surface`.
+/// It measures the savings.
+/// It uses a model only for the final arithmetic.
 fn mode_bloom(b: &Bench) -> Result<()> {
     let started = Instant::now();
     let mut surfaces = 0usize;
@@ -1323,8 +1338,9 @@ fn mode_bloom(b: &Bench) -> Result<()> {
     for s in &misses {
         black_box(bloom.maybe_contains(s));
     }
-    // Sub-microsecond: repeat inside the timed region and divide, because
-    // one probe is the same order as the timer's own overhead.
+    // One probe takes less than one microsecond.
+    // Repeat it inside the timed region and divide the result because one probe
+    // takes about as long as the timer overhead.
     const REPS: usize = 64;
     let probe_us = sweep(&misses, |s| {
         Ok(time_us(|| {
@@ -1349,9 +1365,9 @@ fn mode_bloom(b: &Bench) -> Result<()> {
         ],
     );
 
-    // The per-key sweep above keeps one key's seven cache lines hot. A
-    // whole sweep over 3 000 distinct keys, timed once and divided, is the
-    // cold-line number and the one to quote.
+    // A per-key sweep keeps one key's seven cache lines hot.
+    // Time one full sweep over 3 000 distinct keys and divide by the key count.
+    // This cold-line number is the value to report.
     let mut swept = Vec::new();
     for _ in 0..SWEEPS {
         let us = time_us(|| {
@@ -1390,9 +1406,10 @@ fn mode_bloom(b: &Bench) -> Result<()> {
         (1.0 - fpr) * (sqlite_p50 - bloom_p50),
     );
 
-    // What that buys a whole hover, per input, on the same 25-char lines
-    // the fan-out mode measures. Everything here is measured except the
-    // assumption that a false positive costs an average miss: [MODELLED].
+    // This estimates the result for one whole hover and one input.
+    // It uses the same 25-char lines as fan-out mode.
+    // All values are measured except the assumption that a false positive costs
+    // the average miss: [MODELLED].
     let f = measure_fanout(b, &inputs)?;
     let mean_miss: f64 = sqlite_us.iter().sum::<f64>() / sqlite_us.len() as f64;
     let with: Vec<f64> = (0..inputs.len())

@@ -1,23 +1,24 @@
-//! The stock-GNOME posture, on a compositor that really has no layer
+//! Tests the stock-GNOME posture on a compositor that has no layer
 //! shell.
 //!
-//! GNOME cannot be installed beside a session to test against, and a
-//! claim about "what chibipop does on Mutter" that only ever ran against
-//! a mock is not evidence. What *is* reachable is the shape of that
-//! session: `cage` (wlroots) advertises no `zwlr_layer_shell_v1` and no
-//! `wp_fractional_scale_manager_v1`, so a nested headless `cage` is a
-//! real compositor exhibiting exactly the capability gap Mutter has.
-//! This test runs the real daemon inside one and asserts the whole
-//! documented posture at once: a startup diagnostic naming the missing
-//! global, a Popup channel row that says so, every other channel still
-//! resolved, a settings window that still opens - and a daemon that is
-//! still running at the end of it. That last one is not theoretical:
-//! previously the daemon panicked on its first `wl_shm::format`
-//! here, because dropping the popup left its other Wayland objects
-//! dispatching into handlers with nothing behind them.
+//! No one can install GNOME beside a session to test against. A claim
+//! about "what chibipop does on Mutter" that only ran against a mock is
+//! not evidence. The shape of that session is reachable instead. `cage`
+//! (wlroots) advertises no `zwlr_layer_shell_v1` and no
+//! `wp_fractional_scale_manager_v1`. A nested headless `cage` is
+//! therefore a real compositor with the same capability gap as Mutter.
+//! This test runs the real daemon inside `cage`. It asserts the complete
+//! documented posture in one pass, and it expects four results. A
+//! startup diagnostic names the absent global. The Popup channel row
+//! names the absent global too. Every other channel still resolves. The
+//! settings window still opens, and the daemon still runs at the end.
+//! The last result is not theoretical. The daemon panicked here on its
+//! first `wl_shm::format`, because a dropped popup left its other
+//! Wayland objects to dispatch into handlers with nothing behind them.
 //!
-//! Headless and nested, so it takes no seat, steals no focus and puts
-//! nothing on anyone's screen. It skips when `cage` is not installed.
+//! The session is headless and nested. It takes no seat, it takes no
+//! focus, and it draws nothing on a screen. The test skips when `cage`
+//! is absent.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -27,13 +28,13 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// How long the nested session gets to come up and open its dictionary
-/// (the OCR models and SQLite open on the worker thread at startup).
+/// The time the nested session gets to start and to open its dictionary.
+/// The worker thread opens the OCR models and SQLite at startup.
 const READY: Duration = Duration::from_secs(30);
 
-/// A nested compositor plus everything started inside it, all of which
-/// dies with this guard - `cage` exits when its child does, so killing
-/// it is what stops the daemon.
+/// A nested compositor and every process inside it. This guard ends all
+/// of them. `cage` exits with its child, so a kill of `cage` stops the
+/// daemon.
 struct Nested {
     cage: Child,
     settings: Option<Child>,
@@ -41,11 +42,14 @@ struct Nested {
 }
 
 impl Nested {
-    /// Start `cage -- chibipop run` on the headless backend, in its own
-    /// XDG world: its own runtime dir (so the daemon's lock and socket
-    /// can never collide with the developer's real session) and a
-    /// session-bus address that answers nothing, which is the trayless,
-    /// portal-less half of the stock-GNOME shape.
+    /// Start `cage -- chibipop run` on the headless backend in a private
+    /// XDG world.
+    ///
+    /// The session gets its own runtime directory. The lock and the
+    /// socket of the daemon can then never collide with the real session
+    /// of the developer. The session also gets a session-bus address
+    /// that answers nothing. That address gives the half of the
+    /// stock-GNOME shape with no tray and no portal.
     fn start(root: PathBuf) -> Nested {
         let run = root.join("run");
         std::fs::create_dir_all(&run).expect("scratch runtime dir");
@@ -64,8 +68,8 @@ impl Nested {
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
             // Rung 3 of the cursor ladder must not answer through the
-            // real Hyprland outside: a nested session is niri/river
-            // shaped, and its Cursor row has to say so.
+            // real Hyprland outside. A nested session has the shape of
+            // niri or river, and its Cursor row must report that shape.
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -77,7 +81,7 @@ impl Nested {
         self.root.join("state/chibipop/chibipop.log")
     }
 
-    /// The daemon's log once `needle` shows up in it.
+    /// The log of the daemon, after `needle` appears in it.
     fn log_until(&mut self, needle: &str) -> String {
         let deadline = Instant::now() + READY;
         loop {
@@ -95,8 +99,9 @@ impl Nested {
         }
     }
 
-    /// The nested compositor's display, discovered rather than assumed:
-    /// the scratch runtime dir holds exactly one wayland socket.
+    /// The display of the nested compositor. This code finds the display
+    /// and does not assume it. The scratch runtime directory holds
+    /// exactly one wayland socket.
     fn display(&self) -> String {
         std::fs::read_dir(self.root.join("run"))
             .expect("runtime dir")
@@ -131,19 +136,19 @@ impl Drop for Nested {
     }
 }
 
-/// Every XDG variable chibipop reads, pointed inside the scratch tree -
-/// including the runtime dir, which is where the nested compositor's
-/// socket lands.
+/// Point every XDG variable that chibipop reads inside the scratch tree.
+/// The set includes the runtime directory, because the nested compositor
+/// creates its socket there.
 fn xdg(cmd: &mut Command, root: &Path) {
     cmd.env("XDG_RUNTIME_DIR", root.join("run"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CACHE_HOME", root.join("cache"))
-        // A bus that answers nothing: no ScreenCast portal, no
-        // GlobalShortcuts, no StatusNotifier host. That is stock GNOME
-        // without its extensions, and every one of those absences is
-        // supposed to be a diagnostic rather than a failure.
+        // A bus that answers nothing. There is no ScreenCast portal, no
+        // GlobalShortcuts, and no StatusNotifier host. That state is
+        // stock GNOME without its extensions. Each absence must produce
+        // a diagnostic, not a failure.
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", root.join("no-bus").display()));
 }
 
@@ -161,8 +166,8 @@ fn which(exe: &str) -> Option<PathBuf> {
     })
 }
 
-/// The whole documented GNOME posture in one pass, because it is one
-/// posture: the parts are only true together.
+/// Assert the complete documented GNOME posture in one pass. The posture
+/// is one thing, and its parts are true only together.
 #[test]
 fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
     if skip() {
@@ -174,9 +179,9 @@ fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
     let mut nested = Nested::start(root);
     let log = nested.log_until("ready: pump running");
 
-    // The capability report names the exact global and prices it at the
-    // hover loop - not at the whole app, which is still starting up
-    // around this very line.
+    // The capability report names the exact global, and it limits the
+    // cost to the hover loop. It does not limit the whole application,
+    // which still starts around this line.
     let missing = log
         .lines()
         .find(|l| l.contains("MISSING"))
@@ -190,16 +195,16 @@ fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
     );
     assert!(!log.contains("cannot run"), "the daemon is running; log was:\n{log}");
 
-    // The Popup channel row, which is the one place a user without a
-    // log ever sees this: it names the global, so an upgrade is an
-    // obvious fix.
+    // The Popup channel row. A user with no log sees this state only
+    // here. The row names the global, so the user can see that an
+    // upgrade is the fix.
     assert!(
         log.contains("channel: Popup: unsupported - missing zwlr_layer_shell_v1"),
         "log was:\n{log}"
     );
-    // ...and the other three channels still resolved to real verdicts:
-    // promptless capture, a cursor ladder that names what it lacks, and
-    // the always-bound socket.
+    // The other three channels still resolve to real verdicts. They give
+    // capture with no prompt, a cursor ladder that names the absent
+    // global, and the socket that always binds.
     assert!(log.contains("channel: Capture: wlr-screencopy region capture"), "log was:\n{log}");
     assert!(
         log.contains("channel: Cursor: unsupported - missing ext_image_copy_capture_manager_v1"),
@@ -208,10 +213,11 @@ fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
     assert!(log.contains("channel: Trigger: control socket"), "log was:\n{log}");
     assert!(log.contains("popup unavailable (no layer shell)"), "log was:\n{log}");
 
-    // The daemon is still up. `cage` exits with its child, so a live
-    // cage IS a live daemon - and this is the assertion that would have
-    // failed before the no-layer-shell fallback, when the popup's
-    // orphaned `wl_shm` panicked the pump within a second of startup.
+    // The daemon still runs. `cage` exits with its child, so a live cage
+    // means a live daemon. This assertion failed before the
+    // no-layer-shell fallback existed. At that time the orphaned
+    // `wl_shm` of the popup panicked the pump within a second of
+    // startup.
     std::thread::sleep(Duration::from_secs(2));
     assert!(
         nested.cage.try_wait().expect("polling cage").is_none(),
@@ -219,8 +225,9 @@ fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
         std::fs::read_to_string(nested.log_path()).unwrap_or_default()
     );
 
-    // And the settings window still opens: it is an ordinary xdg-shell
-    // window and owes the layer shell nothing (README § Linux → GNOME).
+    // The settings window still opens. It is an ordinary xdg-shell
+    // window, and it needs nothing from the layer shell
+    // (README § Linux → GNOME).
     nested.open_settings();
     std::thread::sleep(Duration::from_secs(5));
     let settings = nested.settings.as_mut().expect("settings child");

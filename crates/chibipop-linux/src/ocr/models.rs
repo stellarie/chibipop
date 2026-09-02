@@ -1,22 +1,21 @@
-//! Where the three meikiocr models live, and proof they are the ones the
-//! benchmark measured.
+//! Locate the three meikiocr models and prove that they match the benchmark.
 //!
-//! The models ship bundled everywhere and there is no first-run download
-//! path (ARCHITECTURE.md#ocr-engine), so "which file is this" is answered
-//! by a committed digest rather than by a URL. The check runs once when the
-//! engine opens - about 30 ms for 44 MB - and a mismatch refuses the engine
-//! instead of quietly recognising with something else. The quality gate's
-//! numbers are only meaningful for these exact bytes.
+//! Every install bundles the models and has no first-run download path
+//! (ARCHITECTURE.md#ocr-engine). A committed digest identifies each file
+//! instead of a URL. The engine checks the files once when it opens. The check
+//! takes about 30 ms for 44 MB. A mismatch stops the engine. It does not
+//! silently use another file. The quality gate values apply only to these
+//! exact bytes.
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// File name plus SHA-256, copied verbatim from
-/// `tools/ocr-bench/models/SHA256SUMS.txt` - the same digests the
-/// source-AUR package pins its download to. Upstream:
+/// A file name and its SHA-256 digest. The values come directly from
+/// `tools/ocr-bench/models/SHA256SUMS.txt`. The source-AUR package pins the
+/// same digests for its download. Upstream stores the models in
 /// `rtr46/meiki.text.detect.v0` and `rtr46/meiki.txt.recognition.v0` on
-/// Hugging Face (weights LGPL-3.0; see `models/meiki/LICENSE.md`).
+/// Hugging Face. The weights use LGPL-3.0. See `models/meiki/LICENSE.md`.
 pub const DETECT: (&str, &str) = (
     "meiki.text.detect.v0.1.960x544.onnx",
     "40b6a016667745cae7d3055929ae3b8b1e7716aac795f5904cd3c2c7c3b8404b",
@@ -32,16 +31,15 @@ pub const RECOGNISE_VERTICAL: (&str, &str) = (
 
 pub const ALL: [(&str, &str); 3] = [DETECT, RECOGNISE, RECOGNISE_VERTICAL];
 
-/// Overrides the search below. Points at the directory holding the three
-/// `.onnx` files, not at their parent.
+/// Override the search below with the directory that holds the three `.onnx` files.
+/// This path points to the model directory, not its parent.
 pub const DIR_ENV: &str = "CHIBIPOP_MODEL_DIR";
 
-/// The bundled model directory.
+/// Find the bundled model directory.
 ///
-/// `$CHIBIPOP_MODEL_DIR` first, then whichever release layout this install
-/// took ([`beside`]). A debug build also falls back to the source tree so
-/// a `cargo run` on a dev box works without an env var; a release build
-/// never carries that path.
+/// Check `$CHIBIPOP_MODEL_DIR` first. Then check each release layout with
+/// [`beside`]. A debug build also checks the source tree, so `cargo run` works
+/// without an environment variable. A release build does not include that path.
 pub fn locate() -> Result<PathBuf> {
     let mut tried: Vec<PathBuf> = Vec::new();
 
@@ -76,21 +74,21 @@ pub fn locate() -> Result<PathBuf> {
     )
 }
 
-/// The two layouts a release can take, relative to the directory holding
-/// the binary: `models/meiki` beside it (the tarball and `chibipop-bin`),
-/// and `../share/chibipop/models/meiki` (a distro `/usr/bin` install).
+/// A release supports two layouts relative to the directory that holds the binary:
+/// `models/meiki` beside it for the tarball and `chibipop-bin`, and
+/// `../share/chibipop/models/meiki` for a distro `/usr/bin` install.
 ///
-/// `scripts/package-linux.sh` builds the first one and
-/// `tests/tarball_layout.rs` asserts the asset it produces resolves here:
-/// this list and that script are one contract kept in two places.
+/// `scripts/package-linux.sh` creates the first layout. `tests/tarball_layout.rs`
+/// checks that the produced asset resolves here. This list and that script
+/// define one contract in two places.
 pub const LAYOUTS: [&str; 2] = ["models/meiki", "../share/chibipop/models/meiki"];
 
-/// Which release layout `bin` - a directory holding a chibipop binary -
-/// keeps its models in, if either.
+/// Find the release layout where `bin`, a directory that holds a chibipop
+/// binary, keeps its models. Return `None` when neither layout has all models.
 ///
-/// Split out of [`locate`] because it is the half a test can ask about:
-/// the rest turns on `current_exe` and the process environment, which
-/// tests share and must not fight over.
+/// [`locate`] calls this function for the path-only part of the search. The
+/// rest uses `current_exe` and the process environment, which tests share and
+/// must not change at the same time.
 pub fn beside(bin: &Path) -> Option<PathBuf> {
     LAYOUTS.iter().map(|rel| bin.join(rel)).find(|dir| has_models(dir))
 }
@@ -99,7 +97,7 @@ fn has_models(dir: &Path) -> bool {
     ALL.iter().all(|(name, _)| dir.join(name).is_file())
 }
 
-/// Every bundled model is byte-for-byte the one the gate measured.
+/// Check that every bundled model has the digest that the gate measured.
 pub fn verify(dir: &Path) -> Result<()> {
     for (name, want) in ALL {
         let path = dir.join(name);
@@ -128,7 +126,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// The one directory this repo guarantees.
+    /// Return the model directory that this repository guarantees.
     fn bundled() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("models/meiki")
     }
@@ -138,12 +136,11 @@ mod tests {
         verify(&bundled()).expect("bundled models must match the digests the gate was measured on");
     }
 
-    /// `scripts/package-linux.sh` verifies the staged models with
-    /// `sha256sum -c SHA256SUMS.txt`, and the shipped binary re-checks
-    /// them against the constants above. Those are two lists of digests:
-    /// if they ever disagree, a release passes its build-time gate and
-    /// then refuses its own models on the user's machine - the one
-    /// failure mode bundling was supposed to remove.
+    /// `scripts/package-linux.sh` checks staged models with
+    /// `sha256sum -c SHA256SUMS.txt`. The shipped binary checks the same models
+    /// against the constants above. These are two digest lists. If they differ,
+    /// a release can pass its build check and then reject its own models on the
+    /// user's machine. The package must prevent this failure.
     #[test]
     fn the_checksum_file_the_packaging_script_reads_agrees_with_these_constants() {
         let text = std::fs::read_to_string(bundled().join("SHA256SUMS.txt")).unwrap();
@@ -177,9 +174,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// What every step of the search order asks. Not the order itself:
-    /// that turns on `current_exe` and the process environment, which
-    /// tests share and must not fight over.
+    /// Check each path that the search order examines. Do not check the order.
+    /// `current_exe` and the process environment are shared by tests and must not
+    /// change at the same time.
     #[test]
     fn a_directory_counts_only_when_it_holds_all_three_models() {
         assert!(has_models(&bundled()));
@@ -187,9 +184,9 @@ mod tests {
         assert!(!has_models(&bundled().join("..")), "the parent holds none of them directly");
     }
 
-    /// The other half of the search: which release layout a binary
-    /// directory resolves to. `tests/tarball_layout.rs` asserts the real
-    /// asset satisfies this over a really extracted tree.
+    /// Check the other half of the search: the release layout for a binary
+    /// directory. `tests/tarball_layout.rs` checks the real asset in an extracted
+    /// tree.
     #[test]
     fn beside_finds_the_release_layouts_and_prefers_the_nearer_one() {
         let root = std::env::temp_dir().join(format!("chibipop-layout-{}", std::process::id()));
@@ -203,16 +200,17 @@ mod tests {
         for (name, _) in ALL {
             std::fs::write(distro.join(name), b"stub").unwrap();
         }
-        // The path comes back as joined, `..` and all: it is handed to
-        // `Session` and the digest read, not printed or compared.
+        // The path keeps its `..` after the join. The engine passes this path to the
+        // model check and session setup. The model check reads the digest. No code
+        // prints or compares the path.
         assert_eq!(
             Some(bin.join(LAYOUTS[1])),
             beside(&bin),
             "a /usr/bin install reaches ../share"
         );
 
-        // Beside-the-binary wins: a tarball extracted into a prefix that
-        // also holds a packaged install must run its own models.
+        // The layout beside the binary wins. A tarball extracted into a prefix that
+        // also has a packaged install must use its own models.
         let tarball = bin.join(LAYOUTS[0]);
         std::fs::create_dir_all(&tarball).unwrap();
         for (name, _) in ALL {

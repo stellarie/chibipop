@@ -1,4 +1,5 @@
-//! Pure layout; no Win32 here.
+//! This module performs layout with physical pixels.
+//! It has no Win32 code.
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::text::TextSpan;
@@ -14,25 +15,22 @@ pub struct OcrLine {
     pub words: Vec<OcrWord>,
 }
 
-/// Recognised lines as one plain-text block: words butted together, one
-/// line per [`OcrLine`].
+/// Join recognized lines into one plain-text block.
 ///
-/// No space between words, because the words are Japanese and the OCR's
-/// word split is a recognition artefact rather than orthography - a
-/// space between them would be text the screen never had. The line
-/// break *is* on screen, so it survives.
+/// The function joins words without spaces because Japanese OCR splits words for recognition, not because the source has spaces.
+/// A space adds text that does not exist on the screen.
+/// The function keeps line breaks because they appear on the screen.
 ///
-/// In core rather than in a bin because both bins now copy a region's
-/// text to the clipboard (`ocr-clipboard`) and one rule cannot be two
-/// implementations (ARCHITECTURE.md#workspace-and-seams). Byte-for-byte
-/// the joined shape the Windows action shipped - one `String` instead of
-/// a `Vec<String>` and a `join`, because a clipboard payload is built
-/// once and read once.
+/// Core owns this rule because both platform bins copy region text to the clipboard (`ocr-clipboard`).
+/// One shared rule prevents two implementations (ARCHITECTURE.md#workspace-and-seams).
+/// The result matches the Windows action byte for byte.
+/// It uses one `String` instead of a `Vec<String>` and a `join`.
+/// The code builds and reads the clipboard payload once.
 pub fn join_lines(lines: &[OcrLine]) -> String {
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        // Index, not emptiness: a line the recogniser answered with no
-        // words is still a line, so it still ends the one above it.
+        // A line index matters, not line emptiness.
+        // A wordless line still ends the line above it.
         if i > 0 {
             out.push('\n');
         }
@@ -43,7 +41,7 @@ pub fn join_lines(lines: &[OcrLine]) -> String {
     out
 }
 
-/// The word under `cursor`.
+/// Return the word at `cursor`.
 pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f64)> = None;
 
@@ -59,7 +57,7 @@ pub fn hit_scan(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Optio
             if d > (word.rect.h as f64) / 2.0 {
                 continue;
             }
-            // First on a tie wins.
+            // The first word with the same distance wins.
             match best {
                 Some((_, _, bd)) if d >= bd => {}
                 _ => best = Some((li, wi, d)),
@@ -82,7 +80,7 @@ pub struct Resolved {
     pub orientation: Orientation,
 }
 
-/// Which way the line runs.
+/// Return the orientation of the line.
 pub fn orientation_of(line: &OcrLine) -> Orientation {
     if line.words.len() < 2 {
         return Orientation::Horizontal;
@@ -102,7 +100,7 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
-/// OCR reads `ー` as a hyphen.
+/// Convert an OCR hyphen after kana to `ー`.
 pub fn normalise(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut prev: Option<char> = None;
@@ -117,22 +115,22 @@ pub fn normalise(text: &str) -> String {
     out
 }
 
-/// Upscaled space -> desktop.
+/// Map an upscaled rect into desktop physical pixels.
 pub fn map_from_upscaled(rect: PhysRect, origin: PhysPoint, factor: i32) -> PhysRect {
     rect.scaled_down(factor).translated(origin.x, origin.y)
 }
 
-/// Smaller is more accurate.
+/// A smaller region gives more accurate OCR.
 pub const REGION_W: i32 = 500;
 pub const REGION_H: i32 = 100;
 
-/// 400-500px reads correctly.
+/// A 400-500px tile gives correct OCR.
 pub const TILE_LEN: i32 = 500;
 
-/// Room for ascenders, drift.
+/// This factor leaves room for ascenders and position drift.
 pub const BAND_FACTOR: f32 = 3.0;
 
-/// Floored at the short axis.
+/// Build a band around a word and floor its short axis.
 pub fn band_of(word: PhysRect, orientation: Orientation, short_floor: i32) -> PhysRect {
     let c = word.center();
     match orientation {
@@ -147,7 +145,7 @@ pub fn band_of(word: PhysRect, orientation: Orientation, short_floor: i32) -> Ph
     }
 }
 
-/// One tile, `len` long.
+/// Build one tile with length `len`.
 pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32) -> PhysRect {
     match orientation {
         Orientation::Horizontal => PhysRect { x: start, y: band.y, w: len, h: band.h },
@@ -155,7 +153,7 @@ pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32
     }
 }
 
-/// `None` on zero extent.
+/// Return `None` when the tile has zero extent.
 pub fn clamp_tile(tile: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
     let x0 = tile.x.max(bounds.x);
     let y0 = tile.y.max(bounds.y);
@@ -165,7 +163,7 @@ pub fn clamp_tile(tile: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
     if w <= 0 || h <= 0 { None } else { Some(PhysRect { x: x0, y: y0, w, h }) }
 }
 
-/// The line under the hover.
+/// Return the OCR line nearest to the hover point.
 pub fn nearest_line(
     lines: &[OcrLine],
     perpendicular_centre: i32,
@@ -196,13 +194,13 @@ pub fn nearest_line(
     best.map(|(line, _)| line)
 }
 
-/// Clip slack at a tile edge.
+/// This margin protects words near a tile edge.
 pub const EDGE_MARGIN: i32 = 4;
 
-/// Edge on the reading axis.
+/// This function returns an edge on the scan axis.
 type AxisEdge = fn(&PhysRect) -> i32;
 
-/// Kept words + next start.
+/// Keep complete words and return the next tile start.
 pub fn split_at_clipped(
     words: &[OcrWord],
     tile: PhysRect,
@@ -226,7 +224,7 @@ pub fn split_at_clipped(
     (kept, end)
 }
 
-/// Drops words before `start`.
+/// Return words whose start edge is near or after `start`.
 pub fn drop_leading(words: &[OcrWord], start: i32, orientation: Orientation) -> Vec<OcrWord> {
     let lead: AxisEdge = match orientation {
         Orientation::Horizontal => |r| r.x,
@@ -239,7 +237,7 @@ pub fn drop_leading(words: &[OcrWord], start: i32, orientation: Orientation) -> 
         .collect()
 }
 
-/// Reads forward in tiles.
+/// Read forward through a sequence of tiles.
 pub fn tile_forward<F>(
     band: PhysRect,
     start: i32,
@@ -281,14 +279,14 @@ where
     normalise(&out)
 }
 
-/// A box and its char count.
+/// A text geometry entry stores a character count and its box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextGeom {
     pub char_count: usize,
     pub rect: PhysRect,
 }
 
-/// Rounds outward; saturates.
+/// Expand the union outward by `pad` and saturate its bounds.
 pub fn union_chars(geom: &[TextGeom], from: usize, len: usize, pad: i32) -> Option<PhysRect> {
     if len == 0 {
         return None;
@@ -331,7 +329,7 @@ pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize
     }
 }
 
-/// Gap if `next` continues `current`.
+/// Return the gap when `next` continues `current`.
 fn continuation_gap(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> Option<i32> {
     if current.words.is_empty() || next.words.is_empty() {
         return None;
@@ -374,13 +372,13 @@ fn continuation_gap(current: &OcrLine, next: &OcrLine, orientation: Orientation)
     Some(gap)
 }
 
-/// Text wraps onto next line?
+/// Return whether text continues on the next line.
 #[cfg(test)]
 fn continues_on_next_line(current: &OcrLine, next: &OcrLine, orientation: Orientation) -> bool {
     continuation_gap(current, next, orientation).is_some()
 }
 
-/// The line this wraps onto: nearest valid match.
+/// Find the nearest valid line that continues the current line.
 fn find_continuation(lines: &[OcrLine], li: usize, orientation: Orientation) -> Option<&OcrLine> {
     let current = &lines[li];
     lines
@@ -394,7 +392,7 @@ fn find_continuation(lines: &[OcrLine], li: usize, orientation: Orientation) -> 
         .map(|(_, candidate)| candidate)
 }
 
-/// Pass 1's own tail, edge-trimmed.
+/// Return pass 1's tail after edge trim.
 pub fn head_and_tail(
     lines: &[OcrLine],
     cursor: PhysPoint,
@@ -423,13 +421,13 @@ pub fn head_and_tail(
     Some((text, next, orientation))
 }
 
-/// Resolve a hover.
+/// Resolve the text under the hover.
 pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<Resolved> {
     let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
     let orientation = orientation_of(line);
 
-    // OCR order is not promised.
+    // OCR does not promise an order.
     let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
     match orientation {
         Orientation::Horizontal => ordered.sort_by_key(|w| w.rect.x),
@@ -446,7 +444,7 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option
         text.push_str(&w.text);
     }
 
-    // The wrapped tail, if any.
+    // Append the wrapped tail when one exists.
     if let Some(next_line) = find_continuation(lines, li, orientation) {
         let mut tail: Vec<&OcrWord> = next_line.words.iter().collect();
         match orientation {
@@ -459,7 +457,7 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option
         ordered.extend(tail);
     }
 
-    // Per word, never per run.
+    // Store geometry for each OCR word, not each text span.
     let geom: Vec<TextGeom> = ordered
         .iter()
         .map(|w| TextGeom {
@@ -468,7 +466,7 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option
         })
         .collect();
 
-    // '-' is 1 byte, 'ー' is 3.
+    // '-' uses 1 byte, and 'ー' uses 3 bytes.
     let prefix_len = normalise(&text[..cursor_byte_offset]).len();
     let text = normalise(&text);
 
@@ -483,7 +481,7 @@ pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option
     })
 }
 
-/// The capture box, in pixels.
+/// `CaptureSize` stores the capture box size in pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CaptureSize {
     pub w: i32,
@@ -497,13 +495,13 @@ impl Default for CaptureSize {
 }
 
 impl CaptureSize {
-    /// The perpendicular extent.
+    /// Return the extent on the perpendicular axis.
     pub fn short(self) -> i32 {
         self.w.min(self.h)
     }
 }
 
-/// Any kana or CJK ideograph?
+/// Return whether text contains kana or a CJK ideograph.
 pub fn has_scannable_script(s: &str) -> bool {
     s.chars().any(|c| {
         matches!(c,
@@ -526,7 +524,7 @@ mod tests {
     }
     fn p(x: i32, y: i32) -> PhysPoint { PhysPoint { x, y } }
 
-    /// Three 20x20 chars in a row.
+    /// This fixture contains three 20x20 characters in one row.
     fn horizontal_line() -> Vec<OcrLine> {
         vec![OcrLine {
             words: vec![
@@ -537,8 +535,8 @@ mod tests {
         }]
     }
 
-    /// Words are butted together and lines keep their break: the word
-    /// split is a recognition artefact, the line break is on screen.
+    /// The function joins adjacent words without spaces and keeps each line break.
+    /// OCR word splits do not add spaces, but line breaks appear on the screen.
     #[test]
     fn recognised_lines_join_without_spaces_and_keep_one_break_each() {
         let lines = vec![
@@ -548,16 +546,16 @@ mod tests {
         assert_eq!("これはテスト\n二行目", join_lines(&lines));
     }
 
-    /// No lines is the empty string, not a stray newline: the caller
-    /// gates on emptiness to decide there is nothing to copy.
+    /// No recognized lines produce an empty string, not a stray newline.
+    /// The caller uses emptiness to decide whether it has text to copy.
     #[test]
     fn nothing_recognised_joins_to_the_empty_string() {
         assert_eq!("", join_lines(&[]));
         assert_eq!("", join_lines(&[OcrLine { words: Vec::new() }]));
     }
 
-    /// A line the recogniser answered with no words is still a line, so
-    /// it still ends the one above it.
+    /// The OCR engine can return a wordless line.
+    /// The function still keeps its line break after the line above.
     #[test]
     fn a_wordless_line_between_two_others_keeps_both_breaks() {
         let lines = vec![
@@ -575,13 +573,13 @@ mod tests {
 
     #[test]
     fn near_miss_within_half_a_character_height_is_accepted() {
-        // Half of 20 is 10.
+        // Half of 20 equals 10.
         assert_eq!(Some((0, 0)), hit_scan(&horizontal_line(), p(105, 95), true));
     }
 
     #[test]
     fn beyond_tolerance_returns_none() {
-        // Far beyond half a height.
+        // This point lies far beyond half a word height.
         assert_eq!(None, hit_scan(&horizontal_line(), p(105, 60), true));
     }
 
@@ -593,7 +591,7 @@ mod tests {
 
     #[test]
     fn ties_break_by_document_order() {
-        // A tie needs exact geometry.
+        // Exact geometry creates the tie.
         let lines = vec![OcrLine {
             words: vec![
                 w("昨", 100, 100, 20, 20), // occupies x 100..=119
@@ -602,7 +600,7 @@ mod tests {
         }];
         assert_eq!(6.0, lines[0].words[0].rect.edge_distance_to(p(125, 105)));
         assert_eq!(6.0, lines[0].words[1].rect.edge_distance_to(p(125, 105)));
-        // The lower index must win.
+        // The lower index wins.
         for _ in 0..20 {
             assert_eq!(Some((0, 0)), hit_scan(&lines, p(125, 105), true));
         }
@@ -667,14 +665,14 @@ mod tests {
         let got = resolve(&vertical_line(), p(105, 165), true).unwrap();
         assert_eq!("昨日は", got.span.text);
         assert_eq!(Orientation::Vertical, got.orientation);
-        // 昨 and 日 are 3 bytes each.
+        // 昨 and 日 use 3 bytes each.
         assert_eq!(6, got.span.cursor_byte_offset);
     }
 
     #[test]
     fn cursor_byte_offset_lands_on_a_char_boundary() {
         let got = resolve(&horizontal_line(), p(165, 105), true).unwrap();
-        // Must not panic mid-char.
+        // The offset must never split a character.
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('は'));
     }
 
@@ -710,20 +708,20 @@ mod tests {
 
     #[test]
     fn normalise_leaves_a_hyphen_after_kanji_alone() {
-        // After kanji it stays a dash.
+        // A hyphen after kanji stays a dash.
         assert_eq!("日-本", normalise("日-本"));
     }
 
     #[test]
     fn coordinates_survive_a_negative_origin() {
-        // A monitor left of primary.
+        // The monitor sits left of the primary monitor.
         let got = map_from_upscaled(
             PhysRect { x: 40, y: 20, w: 40, h: 40 },
             PhysPoint { x: -1920, y: -100 },
             2,
         );
         assert_eq!(PhysRect { x: -1900, y: -90, w: 20, h: 20 }, got);
-        // And hit-scan still resolves.
+        // Hit-scan still resolves the word.
         let line = OcrLine {
             words: vec![OcrWord { text: "食".to_string(), rect: got }],
         };
@@ -732,7 +730,7 @@ mod tests {
 
     #[test]
     fn map_from_upscaled_divides_then_translates() {
-        // Region origin (1000,500).
+        // The region origin is (1000,500).
         let got = map_from_upscaled(
             PhysRect { x: 200, y: 100, w: 40, h: 40 },
             PhysPoint { x: 1000, y: 500 },
@@ -741,7 +739,7 @@ mod tests {
         assert_eq!(PhysRect { x: 1100, y: 550, w: 20, h: 20 }, got);
     }
 
-    /// A hyphen before the hit.
+    /// The input has a hyphen before the hovered word.
     #[test]
     fn cursor_byte_offset_is_recomputed_after_normalisation_changes_length() {
         let line = OcrLine {
@@ -755,19 +753,19 @@ mod tests {
         let got = resolve(&[line], p(195, 105), true).unwrap();
         assert_eq!("ツール箱", got.span.text);
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('箱'));
-        // 3 chars x 3 bytes = 9.
+        // Three characters use 3 bytes each, for 9 bytes.
         assert_eq!(9, got.span.cursor_byte_offset);
     }
 
-    /// ptr::eq, not text equality.
+    /// Use `ptr::eq`, not text equality.
     #[test]
     fn repeated_character_resolves_to_the_hit_occurrence() {
         let line = OcrLine {
             words: vec![
                 w("々", 100, 100, 20, 20),
                 w("人", 130, 100, 20, 20),
-                w("々", 160, 100, 20, 20), // the hit: second "々", third word
-                w("々", 190, 100, 20, 20), // trailing repeat, see doc comment
+                w("々", 160, 100, 20, 20), // The hit is the second "々", the third word.
+                w("々", 190, 100, 20, 20), // This final repeat follows the hit repeat.
             ],
         };
         let got = resolve(&[line], p(170, 110), true).unwrap();
@@ -777,7 +775,7 @@ mod tests {
         assert_eq!("々々", &got.span.text[got.span.cursor_byte_offset..]);
     }
 
-    /// Centring is the contract.
+    /// The region must center on the cursor.
     #[test]
     fn the_region_is_centred_on_the_cursor() {
         let r = region_around(p(1000, 500), false, CaptureSize::default());
@@ -817,7 +815,7 @@ mod tests {
         assert_eq!(800, r.h);
     }
 
-    /// Must out-reach hit_scan.
+    /// The capture floor must exceed the slack that `hit_scan` accepts.
     #[test]
     fn the_capture_floor_covers_hit_scan_slack() {
         let typical_word_h = 40;
@@ -847,7 +845,7 @@ mod tests {
         assert_eq!(word.y, b.y, "parallel axis untouched");
     }
 
-    /// 44px read nothing at all.
+    /// A 44px band cannot read the text.
     #[test]
     fn band_floors_small_text_at_region_h() {
         let word = PhysRect { x: 1499, y: 870, w: 20, h: 22 };
@@ -881,7 +879,7 @@ mod tests {
         assert_eq!(PhysRect { x: 100, y: 500, w: 40, h: TILE_LEN }, v);
     }
 
-    /// Measured furigana geometry.
+    /// Measured furigana forms a separate line.
     #[test]
     fn nearest_line_picks_the_real_line_over_furigana() {
         let furigana = OcrLine {
@@ -894,7 +892,7 @@ mod tests {
         assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 11));
     }
 
-    /// The same, rotated.
+    /// The same rule applies after the axes rotate.
     #[test]
     fn nearest_line_mirrors_axes_for_vertical_text() {
         let furigana = OcrLine {
@@ -920,7 +918,7 @@ mod tests {
         assert_eq!(Some(&real_line), nearest_line(&lines, 1372, Orientation::Horizontal, 15));
     }
 
-    /// A tie: both 20px away.
+    /// A tie places both lines 20px from the target.
     #[test]
     fn nearest_line_ties_break_by_document_order() {
         let first_line = OcrLine { words: vec![w("a", 0, 100, 20, 20)] };
@@ -929,7 +927,7 @@ mod tests {
         assert_eq!(Some(&first_line), nearest_line(&lines, 130, Orientation::Horizontal, 20));
     }
 
-    /// I3: inside the tolerance.
+    /// I3: The line lies inside the tolerance.
     #[test]
     fn nearest_line_within_the_bound_is_selected() {
         let line = OcrLine { words: vec![w("a", 100, 1360, 20, 20)] };
@@ -937,7 +935,7 @@ mod tests {
         assert_eq!(Some(&line), nearest_line(&lines, 1372, Orientation::Horizontal, 10));
     }
 
-    /// I3: past the tolerance.
+    /// I3: The line lies outside the tolerance.
     #[test]
     fn nearest_line_beyond_the_bound_returns_none() {
         let far_line = OcrLine { words: vec![w("a", 100, 1300, 20, 20)] };
@@ -948,7 +946,7 @@ mod tests {
         OcrWord { text: text.to_string(), rect: PhysRect { x, y: 100, w: width, h: 40 } }
     }
 
-    /// No clamp ever applies.
+    /// This helper returns a large bound, so no clamp applies.
     fn unbounded() -> PhysRect {
         PhysRect { x: -1_000_000, y: -1_000_000, w: 3_000_000, h: 3_000_000 }
     }
@@ -960,7 +958,7 @@ mod tests {
         assert_eq!(Some(tile), clamp_tile(tile, bounds));
     }
 
-    /// Wide, short: horizontal.
+    /// A wide, short tile tests horizontal text.
     #[test]
     fn clamp_tile_shrinks_a_horizontal_tile_past_the_right_edge() {
         let tile = PhysRect { x: 2300, y: 500, w: 500, h: 80 };
@@ -968,7 +966,7 @@ mod tests {
         assert_eq!(Some(PhysRect { x: 2300, y: 500, w: 260, h: 80 }), clamp_tile(tile, bounds));
     }
 
-    /// Tall, narrow: vertical.
+    /// A tall, narrow tile tests vertical text.
     #[test]
     fn clamp_tile_shrinks_a_vertical_tile_past_the_bottom_edge() {
         let tile = PhysRect { x: 500, y: 900, w: 80, h: 500 };
@@ -1015,7 +1013,7 @@ mod tests {
         assert_eq!(500, next);
     }
 
-    /// Equal is not clipped.
+    /// Equal edge distance does not count as clipped.
     #[test]
     fn trailing_edge_exactly_at_the_margin_boundary_is_kept() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
@@ -1025,7 +1023,7 @@ mod tests {
         assert_eq!(500, next);
     }
 
-    /// One pixel further: 497.
+    /// One pixel farther reaches 497.
     #[test]
     fn trailing_edge_one_pixel_past_the_margin_boundary_is_discarded() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
@@ -1035,7 +1033,7 @@ mod tests {
         assert_eq!(457, next, "must return the clipped word's own leading edge");
     }
 
-    /// D3: too narrow to advance.
+    /// D3: The first word is too wide to advance.
     #[test]
     fn a_first_word_already_clipped_keeps_nothing_and_does_not_advance() {
         let tile = PhysRect { x: 400, y: 90, w: 100, h: 60 };
@@ -1045,7 +1043,7 @@ mod tests {
         assert_eq!(400, next, "must not advance past the tile's own start");
     }
 
-    /// Word edge, not tile start.
+    /// Return the word edge, not the tile start.
     #[test]
     fn a_clipped_first_word_starting_mid_tile_returns_its_own_leading_edge() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
@@ -1068,7 +1066,7 @@ mod tests {
         assert_eq!(470, next);
     }
 
-    /// OCR does not promise order.
+    /// OCR does not promise word order.
     #[test]
     fn words_arriving_out_of_order_are_sorted_before_splitting() {
         let tile = PhysRect { x: 0, y: 90, w: 500, h: 60 };
@@ -1086,7 +1084,7 @@ mod tests {
         assert_eq!(2, kept.len());
     }
 
-    /// Load-bearing: keeps a deferred glyph.
+    /// This boundary keeps a deferred glyph.
     #[test]
     fn drop_leading_keeps_a_word_exactly_at_the_margin_boundary() {
         let words = [hword("あ", 96, 40)]; // start=100, margin=4 -> 96
@@ -1094,7 +1092,7 @@ mod tests {
         assert_eq!(1, kept.len(), "96 must not be treated as spillover");
     }
 
-    /// One pixel further back: 95.
+    /// One pixel farther back reaches 95.
     #[test]
     fn drop_leading_discards_a_word_one_pixel_past_the_margin_boundary() {
         let words = [hword("あ", 95, 40)];
@@ -1139,7 +1137,7 @@ mod tests {
         assert_eq!("012", text, "a loop that never advances would repeat one region");
     }
 
-    /// D5: restarts at 470.
+    /// D5: Restart at 470.
     #[test]
     fn tile_forward_restarts_from_the_clipped_words_own_leading_edge() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1181,7 +1179,7 @@ mod tests {
         assert_eq!("", text);
     }
 
-    /// D5: strict-advance stop.
+    /// D5: Stop when the next start cannot advance.
     #[test]
     fn tiling_stops_when_the_next_start_does_not_advance() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1209,7 +1207,7 @@ mod tests {
         assert_eq!("ツール", text, "the hyphen after kana normalises across the join");
     }
 
-    /// I2: tile 2 clamps to 20px.
+    /// I2: Tile 2 clamps to 20px.
     #[test]
     fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1223,7 +1221,7 @@ mod tests {
         assert_eq!("ああ", text, "the clamped tile is still read, not skipped");
     }
 
-    /// I2: zero extent, no read.
+    /// I2: A zero-extent tile requires no read.
     #[test]
     fn tiling_stops_without_reading_when_the_first_tile_clamps_to_nothing() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1237,7 +1235,7 @@ mod tests {
         assert_eq!("", text);
     }
 
-    /// I2, reading downward.
+    /// I2: Clamp a vertical tile that extends downward.
     #[test]
     fn tiling_clamps_a_tile_that_would_cross_a_monitor_edge_for_vertical_text() {
         let band = PhysRect { x: 90, y: 0, w: 60, h: 40 };
@@ -1251,7 +1249,7 @@ mod tests {
         assert_eq!("上上", text);
     }
 
-    /// A tile must not prepend spillover.
+    /// A tile must not prepend words from the previous tile.
     #[test]
     fn tile_forward_drops_a_tiles_own_leading_spillover() {
         let band = PhysRect { x: 0, y: 90, w: 40, h: 60 };
@@ -1279,7 +1277,7 @@ mod tests {
         assert_eq!(PhysRect { x: 160, y: 100, w: 30, h: 40 }, r);
     }
 
-    /// "338" arrived in one box.
+    /// The OCR returned "338" in one box.
     #[test]
     fn a_match_ending_inside_a_multi_char_entry_rounds_outward() {
         let geom = vec![g(1, 100, 30), g(3, 130, 90)];
@@ -1293,7 +1291,7 @@ mod tests {
         assert!(union_chars(&[g(1, 100, 30)], 5, 1, 0).is_none());
     }
 
-    /// Must saturate, not wrap.
+    /// Saturation must prevent wraparound.
     #[test]
     fn an_absurd_match_length_covers_the_rest_rather_than_wrapping() {
         let geom = vec![g(1, 100, 30), g(1, 130, 30), g(1, 160, 30)];
@@ -1301,7 +1299,7 @@ mod tests {
         assert_eq!(PhysRect { x: 130, y: 100, w: 60, h: 40 }, r);
     }
 
-    /// Count must not change.
+    /// The character count must stay unchanged.
     #[test]
     fn normalise_preserves_character_count() {
         for s in ["ツ-ル", "ツ‐ル", "ツ–ル", "ツ—ル", "abc", "日本語", ""] {
@@ -1321,7 +1319,7 @@ mod tests {
                    r.span.geom.iter().map(|g| g.char_count).sum::<usize>());
     }
 
-    /// From the hover, not start.
+    /// Start the highlight at the hover, not at the line start.
     #[test]
     fn the_highlight_boxes_the_hovered_word_not_the_lines_start() {
         let line = OcrLine {
@@ -1337,13 +1335,13 @@ mod tests {
         assert_eq!(PhysRect { x: 160, y: 100, w: 90, h: 40 }, boxed);
     }
 
-    /// Absent, never wrong.
+    /// Absent geometry must produce no highlight, not a wrong highlight.
     #[test]
     fn no_geometry_yields_no_highlight_rather_than_a_wrong_one() {
         assert_eq!(None, union_chars(&[], 0, 3, 3));
     }
 
-    /// The runtime shape: 26px pitch.
+    /// The runtime uses a 26px pitch.
     #[test]
     fn a_spaced_run_boxes_only_the_matched_chars() {
         let line = OcrLine {
@@ -1359,7 +1357,7 @@ mod tests {
         assert_eq!(PhysRect { x: 175, y: 97, w: 55, h: 30 }, boxed);
     }
 
-    /// Gaps inside a match are covered.
+    /// Cover gaps inside a matched text span.
     #[test]
     fn a_spaced_match_is_continuous_across_its_gaps() {
         let line = OcrLine {
@@ -1373,7 +1371,7 @@ mod tests {
 
     // -- resolve with spaced text --
 
-    /// Spaced geom stays per char.
+    /// Keep geometry per character when words have spaces.
     #[test]
     fn resolve_keeps_spaced_geom_per_char() {
         let line = OcrLine {
@@ -1388,19 +1386,19 @@ mod tests {
         assert_eq!(3, got.span.geom.len());
         assert!(got.span.geom.iter().all(|g| g.char_count == 1));
 
-        // Whole match: gaps covered.
+        // The whole match covers its internal gaps.
         assert_eq!(
             PhysRect { x: 100, y: 100, w: 120, h: 20 },
             union_chars(&got.span.geom, 0, 3, 0).unwrap()
         );
-        // One char: only that char.
+        // One character covers only its own box.
         assert_eq!(
             PhysRect { x: 150, y: 100, w: 20, h: 20 },
             union_chars(&got.span.geom, 1, 1, 0).unwrap()
         );
     }
 
-    /// Cursor offset survives merge.
+    /// The cursor offset stays correct after the merge.
     #[test]
     fn resolve_spaced_cursor_offset_correct() {
         let line = OcrLine {
@@ -1415,7 +1413,7 @@ mod tests {
         assert!(got.span.text[6..].starts_with('物'));
     }
 
-    /// Vertical spaced stays per char.
+    /// Keep vertical geometry per character when words have spaces.
     #[test]
     fn resolve_keeps_spaced_vertical_geom_per_char() {
         let line = OcrLine {
@@ -1434,7 +1432,7 @@ mod tests {
         );
     }
 
-    /// Touching keeps per-char geom.
+    /// Keep geometry per character when words touch.
     #[test]
     fn resolve_touching_chars_keep_per_char_geom() {
         let line = OcrLine {
@@ -1457,7 +1455,7 @@ mod tests {
         assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
     }
 
-    /// 1.5x thickness, inclusive.
+    /// Accept a gap equal to 1.5 times the line thickness.
     #[test]
     fn wrap_gap_exactly_at_the_ceiling_is_accepted() {
         let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
@@ -1465,7 +1463,7 @@ mod tests {
         assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
     }
 
-    /// 61px: one over the ceiling.
+    /// Reject a gap one pixel above the ceiling at 61px.
     #[test]
     fn wrap_gap_one_past_the_ceiling_is_rejected() {
         let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
@@ -1480,7 +1478,7 @@ mod tests {
         assert!(!continues_on_next_line(&lower, &upper, Orientation::Horizontal));
     }
 
-    /// Half a line of slack.
+    /// Allow half a line of slack at the start.
     #[test]
     fn wrap_start_within_tolerance_of_the_margin_continues() {
         let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
@@ -1488,7 +1486,7 @@ mod tests {
         assert!(continues_on_next_line(&current, &next, Orientation::Horizontal));
     }
 
-    /// 121: one past the tolerance.
+    /// Reject a start one pixel beyond the tolerance at 121.
     #[test]
     fn wrap_start_one_past_the_margin_tolerance_is_rejected() {
         let current = OcrLine { words: vec![w("a", 100, 100, 40, 40)] };
@@ -1533,7 +1531,7 @@ mod tests {
 
     // -- resolve across a wrap --
 
-    /// The reported wrap bug.
+    /// This fixture reproduces the reported wrap bug.
     fn wrapped_lines() -> Vec<OcrLine> {
         vec![
             OcrLine {
@@ -1562,7 +1560,7 @@ mod tests {
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
-    /// 3rd char; two before it.
+    /// The hover reaches the third character after two earlier characters.
     #[test]
     fn resolve_wrap_keeps_the_hit_words_own_cursor_offset() {
         let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
@@ -1602,14 +1600,14 @@ mod tests {
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
-    /// A farther valid line, listed first, must not win.
+    /// The nearest valid line must win even when the vector lists a farther line first.
     #[test]
     fn resolve_picks_the_nearest_continuation_not_the_first_in_vec_order() {
         let lines = vec![
             OcrLine { words: vec![w("新", 100, 100, 40, 80)] },
-            // Decoy: gap 110, listed before the true wrap.
+            // Decoy: This line has a gap of 110 and appears before the true wrap.
             OcrLine { words: vec![w("夏", 100, 210, 40, 80)] },
-            // True wrap: gap 60, nearer, listed second.
+            // True wrap: This line has a gap of 60 and appears second.
             OcrLine { words: vec![w("始", 100, 160, 40, 80)] },
         ];
         let got = resolve(&lines, p(110, 130), true).unwrap();
@@ -1697,7 +1695,7 @@ mod tests {
         assert_eq!(Orientation::Vertical, ori);
     }
 
-    /// Flag reaches hit_scan.
+    /// The flag reaches `hit_scan`.
     #[test]
     fn head_and_tail_skips_latin_words_when_alnum_is_off() {
         let line = OcrLine {
@@ -1736,7 +1734,7 @@ mod tests {
         assert!(has_scannable_script("PCを使う"));
     }
 
-    /// Latin words are unhoverable.
+    /// Hit-scan ignores Latin words when alphanumeric scans are off.
     #[test]
     fn hit_scan_skips_latin_words_when_alnum_is_off() {
         let lines = vec![OcrLine {
@@ -1746,7 +1744,7 @@ mod tests {
         assert_eq!(None, hit_scan(&lines, p(110, 110), false));
     }
 
-    /// Line text is not rewritten.
+    /// Resolve keeps line text unchanged.
     #[test]
     fn a_japanese_word_still_resolves_the_whole_line() {
         let lines = vec![OcrLine {

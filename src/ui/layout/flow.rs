@@ -1,16 +1,17 @@
-//! One paragraph of inline content, as the block walk accumulates it.
+//! This module stores one paragraph of inline content while the block walk builds it.
 //!
-//! **One reason to change:** what a paragraph has to carry from the walk
-//! that builds it to the pass that measures it. That is the whole of this
-//! module: [`Flow`] is a `String`, a flat vector of styled byte ranges over
-//! it, and one side table per thing that does *not* flow.
+//! **One reason to change:** Change this module when the paragraph must carry more data.
+//! The block walk passes that data to the measure pass.
 //!
-//! Why the side tables exist at all is the seam: the measurer takes
-//! styled spans and no boxes, so anything with a position of its own - a
-//! reading, a marker, an image - cannot be a span of the paragraph. Each
-//! rides beside it and is placed by its own module
-//! ([`ruby`](super::ruby), [`marker`](super::marker),
-//! [`image`](super::image)).
+//! [`Flow`] contains one `String` and a flat vector of styled byte ranges.
+//! It also contains one side table for each item that does not flow.
+//!
+//! These side tables keep the seam clear.
+//! The measurer accepts styled spans but no boxes.
+//! A reading, marker, or image has its own position, so it cannot be a paragraph span.
+//!
+//! Each related module places its items:
+//! [`ruby`](super::ruby), [`marker`](super::marker), and [`image`](super::image).
 
 use crate::controller::HitAction;
 use crate::dict::gloss::NodePath;
@@ -21,105 +22,73 @@ use super::measure::StyledSpan;
 use super::ruby::{FlowRuby, NO_RUBY};
 use super::style::{Block, BoxStyle, Inline};
 
-/// A link's index in [`Flow::links`],
-/// or no link at all.
+/// An index in [`Flow::links`], or `NO_LINK` when no link exists.
 pub(super) const NO_LINK: u32 = u32::MAX;
 
-/// What a node inherits from the one
-/// above it.
+/// Values that a node inherits from its parent.
 ///
-/// Bundled because the descent
-/// carries four of them and a
-/// five-argument recursion is where
-/// an argument gets passed in the
-/// wrong slot. `Copy`, so a child's
-/// context is the parent's with one
-/// field replaced.
+/// The block walk passes four values when it enters a child.
+/// This struct gives the recursive call one named value for each slot.
+/// `Copy` lets each child replace one field in its parent's context.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ctx {
     pub(super) inline: Inline,
     pub(super) block: Block,
-    /// The `<a>` it sits inside, or
-    /// [`NO_LINK`].
+    /// The parent `<a>`, or [`NO_LINK`].
     pub(super) link: u32,
-    /// This node's own address, or
-    /// `None` once a step no longer
-    /// fits - past 16 levels or the
-    /// 65 536th sibling, where a
-    /// [`NodePath`] addresses nothing
-    /// rather than aliasing an
-    /// ancestor.
+    /// The node address.
+    ///
+    /// `None` means that a path goes beyond 16 levels or reaches the 65 536th sibling.
+    /// [`NodePath`] then addresses no node instead of an ancestor.
     pub(super) path: Option<NodePath>,
 }
 
 impl Ctx {
-    /// This context at the `i`th child
-    /// of the node it addresses.
+    /// Returns the context for child `i` of the addressed node.
     ///
-    /// The path is extended one step
-    /// per level on the way down, which
-    /// is why every scene element can
-    /// carry one for the price of a
-    /// `u16` write.
+    /// Each level adds one step to the path.
+    /// Each scene element therefore stores a path with one `u16` write.
     pub(super) fn at(self, i: usize) -> Ctx {
         Ctx { path: self.path.and_then(|p| p.child(i)), ..self }
     }
 }
 
-/// One span of a [`Flow`].
+/// One span in a [`Flow`].
 pub(super) struct FlowSpan {
     pub(super) at: u32,
     pub(super) len: u32,
     pub(super) style: Inline,
-    /// The `<a>` it sits inside.
+    /// The parent `<a>`.
     pub(super) link: u32,
-    /// The reading it wears, if it is
-    /// a ruby base.
+    /// Index of this ruby base's reading, or [`NO_RUBY`].
     ///
-    /// Also what keeps a base from
-    /// coalescing into the text beside
-    /// it: the `漢` of `常用漢字` must
-    /// stay addressable on its own for
-    /// its reading to centre over it,
-    /// and [`Paragraphs::push`] joins
-    /// two runs only when everything
-    /// about them matches.
+    /// This value also keeps the base separate from adjacent text.
+    /// For example, `漢` in `常用漢字` must stay separate so its reading can sit above it.
+    /// [`Paragraphs::push`] joins two runs only when each value matches.
     ///
     /// [`Paragraphs::push`]: super::gloss::Paragraphs::push
     pub(super) ruby: u32,
-    /// Is this the slot's line-height
-    /// filler rather than its base?
+    /// Does this span reserve line height instead of text space?
     ///
-    /// A [`RUBY_FILLER`] span, whose
-    /// only job is to be the tallest
-    /// span on its line so that the
-    /// measurer reserves the reading's
-    /// slot - see
-    /// [`measure_readings`]. It draws
-    /// nothing, advances nothing, and
-    /// is never a base.
+    /// A [`RUBY_FILLER`] is the tallest span on its line.
+    /// The measurer then reserves the reading slot.
+    /// See [`measure_readings`].
+    /// The filler draws no ink, advances no text, and is never a base.
     ///
-    /// An [`IMAGE_RISER`] sets it for
-    /// the same reason and reads the
-    /// same way: zero advance, no ink,
-    /// there only to be the tallest
-    /// span on its line.
+    /// An [`IMAGE_RISER`] has the same purpose.
+    /// It has zero advance and no ink.
+    /// It becomes the tallest span on its line.
     ///
     /// [`RUBY_FILLER`]: super::ruby::RUBY_FILLER
     /// [`measure_readings`]: super::ruby::measure_readings
     /// [`IMAGE_RISER`]: super::image::IMAGE_RISER
     pub(super) filler: bool,
-    /// The image whose room this span
-    /// reserves, or [`NO_IMAGE`].
+    /// The image for which this span reserves room, or [`NO_IMAGE`].
     ///
-    /// Set on both of an image's spans:
-    /// the [`IMAGE_SPACER`] that buys
-    /// its width, which is the one
-    /// [`place_images`] reads a box
-    /// back off, and the
-    /// [`IMAGE_RISER`]s that buy its
-    /// height, which carry `filler`
-    /// too.
+    /// Both image span types set this value.
+    /// [`IMAGE_SPACER`] reserves the width.
+    /// [`place_images`] gets the box from this span.
+    /// Each [`IMAGE_RISER`] reserves the height and sets `filler`.
     ///
     /// [`IMAGE_SPACER`]: super::image::IMAGE_SPACER
     /// [`place_images`]: super::image::place_images
@@ -127,110 +96,77 @@ pub(super) struct FlowSpan {
     pub(super) image: u32,
 }
 
-/// One inline box, over a run of the
-/// paragraph's spans.
+/// One inline box around a range of paragraph spans.
 ///
-/// A pill: a `span` carrying padding,
-/// a background, a border or a margin,
-/// which keeps its place on its line
-/// rather than breaking one -
-/// Jitendex draws its part-of-speech
-/// labels this way, and 11 to 14
-/// census dictionaries draw theirs.
+/// A pill is a `span` with padding, background, border, or margin.
+/// The pill keeps its position on each line and does not create a line break.
+/// Jitendex uses pills for part-of-speech labels.
+/// Between 11 and 14 census Dictionaries use the same form.
 ///
-/// A span range rather than a rect,
-/// because where the run lands is the
-/// measurer's answer: the seam reports
-/// a box per span per line, so one of
-/// these becomes one [`ElemBox`] per
-/// line the run touches.
+/// This type stores a span range instead of a rect because the measurer sets the run position.
+/// The seam reports one box for each span on each line.
+/// One range therefore becomes one [`ElemBox`] on each line that it touches.
 ///
 /// **The range is the border box.**
-/// `from` is the box's own left border
-/// and padding and `to - 1` its right
-/// ones, each a spacer span that bought
-/// that edge its advance
-/// ([`measure_pills`]); the two margins
-/// sit immediately outside the range,
-/// because a margin is outside the box
-/// a cover of this run draws. So the
-/// rect and the room agree by
-/// construction and neither can be
-/// derived without the other
-/// ([`place_pills`]).
+/// The `from` span reserves the left border and padding.
+/// The `to - 1` span reserves the right border and padding.
+/// See [`measure_pills`].
+/// The two margins stay outside this range because margins stay outside the box.
+/// [`place_pills`] uses the range to find the rect.
+/// The measure pass uses the box edges to reserve the room.
 ///
 /// [`ElemBox`]: super::scene::ElemBox
 /// [`measure_pills`]: super::pill::measure_pills
 /// [`place_pills`]: super::pill::place_pills
 pub(super) struct InlineBox {
-    /// Its left border edge: the first
-    /// span the box draws around.
+    /// The first span that the box surrounds.
     pub(super) from: u32,
-    /// One past its right border edge.
+    /// One span past the right border edge.
     pub(super) to: u32,
     pub(super) style: BoxStyle,
 }
 
 /// One paragraph of inline content.
 ///
-/// The unit this pass measures: one
-/// [`MeasureRun`] in, one
-/// [`SceneElem`] out. The text
-/// accumulates into one string so the
-/// seam gets the paragraph whole -
-/// a span boundary is not a line
-/// boundary - and each span is a byte
-/// range into it.
+/// The measure pass treats this structure as one unit.
+/// It sends one [`MeasureRun`] and receives one [`SceneElem`].
+/// The text stays in one string, so the seam receives the complete paragraph.
+/// A span boundary does not set a line boundary.
+/// Each span is a byte range in the string.
 ///
 /// [`MeasureRun`]: super::measure::MeasureRun
 /// [`SceneElem`]: super::scene::SceneElem
 #[derive(Default)]
 pub(super) struct Flow {
-    /// Gap owed above it.
+    /// The gap above this paragraph.
     pub(super) top_gap: f32,
     pub(super) text: String,
     pub(super) spans: Vec<FlowSpan>,
-    /// One per `<a>` that earned a hit
-    /// target, indexed by
-    /// [`FlowSpan::link`].
+    /// One entry for each `<a>` with a hit target.
+    /// [`FlowSpan::link`] stores its index.
     pub(super) links: Vec<HitAction>,
-    /// One per ruby base, indexed by
-    /// [`FlowSpan::ruby`].
+    /// One entry for each ruby base. [`FlowSpan::ruby`] stores its index.
     pub(super) ruby: Vec<FlowRuby>,
-    /// One per list marker owed to
-    /// this paragraph's first line,
-    /// outermost list first.
+    /// One entry for each list marker on the first line.
+    /// The outermost list appears first.
     pub(super) marker: Vec<FlowMarker>,
-    /// One per image node this
-    /// paragraph reached, indexed by
-    /// [`FlowSpan::image`].
+    /// One [`FlowImage`] for each image node in this paragraph.
+    /// [`FlowSpan::image`] stores its index.
     pub(super) images: Vec<FlowImage>,
-    /// The block this paragraph is:
-    /// its box, its alignment, and
-    /// whether it preserves newlines.
+    /// The block for this paragraph.
+    /// It holds the box, alignment, and newline rule.
     pub(super) block: Block,
-    /// The node the paragraph renders,
-    /// or `None` when it has no
-    /// address.
+    /// The node that this paragraph renders, or `None` when it has no address.
     ///
-    /// The block that opened it, so
-    /// that a hit resolves to a
-    /// subtree and
-    /// `render_html(Selection::Nodes)`
-    /// reproduces exactly that sense.
+    /// The block that opened this paragraph supplies the subtree for a hit.
+    /// `render_html(Selection::Nodes)` then reproduces that sense.
     pub(super) path: Option<NodePath>,
-    /// Boxes to draw around runs
-    /// inside it.
+    /// Boxes that the paragraph draws around its runs.
     pub(super) inline: Vec<InlineBox>,
-    /// The term-bank row this
-    /// paragraph renders.
+    /// The term-bank row that this paragraph renders.
     ///
-    /// Stamped by [`build_elements`],
-    /// which is where the ids are in
-    /// hand: the tree itself does not
-    /// know which row stored it.
-    /// Together with `path` this is the
-    /// whole of [`GlossOrigin`].
+    /// [`build_elements`] stamps these IDs because the tree does not know its row.
+    /// These IDs and `path` form all of [`GlossOrigin`].
     ///
     /// [`build_elements`]: super::chrome::build_elements
     /// [`GlossOrigin`]: super::scene::GlossOrigin
@@ -239,8 +175,10 @@ pub(super) struct Flow {
 }
 
 impl Flow {
-    /// Its spans, as the seam takes
-    /// them.
+    /// Returns the spans in the form that the seam takes.
+    ///
+    /// The iterator slices each span from the single text string.
+    /// It gives every span the same `font` and its own style values.
     pub(super) fn styled_spans<'a>(
         &'a self,
         font: &'a str,
@@ -255,26 +193,21 @@ impl Flow {
         })
     }
 
-    /// The element's own style: its
-    /// first span's, which for a gloss
-    /// that is one plain string is the
-    /// body role and nothing else.
+    /// The element's base style.
+    ///
+    /// For a gloss with one plain string, the first span has the body role and supplies this style.
+    /// An empty flow uses `Inline::body(theme)`.
     pub(super) fn base(&self, theme: &Theme) -> Inline {
         self.spans.first().map_or_else(|| Inline::body(theme), |s| s.style)
     }
 
-    /// Prefixes this paragraph with a
-    /// matched row's number.
+    /// Prefixes this paragraph with a matched row's number.
     ///
-    /// One number per matched
-    /// term-bank row, as Yomitan
-    /// numbers them, so it belongs to
-    /// the row's first paragraph and
-    /// not to every sibling block
-    /// inside it. Written in the
-    /// body's own style, so it joins
-    /// the span it precedes rather
-    /// than becoming one of its own.
+    /// Yomitan gives one number to each matched term-bank row.
+    /// The number belongs to the row's first paragraph, not to each sibling block inside it.
+    /// The method uses the body's style for the number.
+    /// It joins the number to the next span when its style, link, ruby, and image values match.
+    /// Otherwise, it creates a separate span.
     pub(super) fn number(&mut self, n: usize, style: Inline) {
         let label = format!("{n}. ");
         let shift = label.len() as u32;
@@ -308,37 +241,22 @@ impl Flow {
     }
 }
 
-/// Drops a paragraph's edge
-/// whitespace, spans and all.
+/// Removes edge whitespace and empty spans from a paragraph.
 ///
-/// The text is rebuilt rather than
-/// sliced in place, since a span is a
-/// byte range into it and every one
-/// after the cut moves. A span left
-/// with nothing goes, which is what
-/// keeps a separator node between two
-/// blocks from measuring as a span of
-/// one space.
+/// The function rebuilds the text instead of slicing it in place.
+/// Each span stores a byte range in the text, so every later span moves after a cut.
+/// The function removes spans that become empty.
+/// This keeps a separator node between two blocks from having the width of one space.
 ///
-/// A dropped span moves every index
-/// after it, and an [`InlineBox`] names
-/// its run by index - so the boxes are
-/// renumbered here rather than left to
-/// rot. Before the room an inline box
-/// buys was found from those two
-/// indices this only mis-drew a pill
-/// that had leading whitespace ahead of
-/// it in its paragraph; now a stale
-/// pair would also size someone else's
-/// span as a spacer.
+/// Removing a span moves every later index.
+/// Each [`InlineBox`] names its run by index, so the function renumbers the boxes.
+/// The measure pass uses these indices to find the room that an inline box reserves.
+/// Without the renumber, leading whitespace before a pill could place the pill incorrectly.
+/// A stale pair could also reserve room for another span.
 pub(super) fn trim(flow: &mut Flow) {
-    // `white-space: pre-line`
-    // preserves a segment break and
-    // collapses everything else, so a
-    // paragraph that declares it keeps
-    // the newline a dictionary put at
-    // its edge and loses only the
-    // spaces around it.
+    // `white-space: pre-line` keeps a segment break and collapses all other whitespace.
+    // A paragraph that declares it keeps the newline at its edge.
+    // It removes only the spaces around it.
     let edge: &[char] =
         if flow.block.pre_line { &[' ', '\t'] } else { &[' ', '\t', '\n', '\r'] };
     let start = flow.text.len() - flow.text.trim_start_matches(edge).len();
@@ -348,14 +266,10 @@ pub(super) fn trim(flow: &mut Flow) {
     }
     let (start, end) = (start as u32, end as u32);
     flow.text = flow.text[start as usize..end as usize].to_string();
-    // One new index per old span
-    // boundary - the number of spans
-    // before it that survive - so the
-    // half-open ranges above stay
-    // half-open. `to` may name one past
-    // the last span, which is why there
-    // is a boundary per span *and* one
-    // at the end.
+    // Each old span boundary gets one new index.
+    // The index counts old spans before the boundary that remain.
+    // The ranges above therefore stay half-open.
+    // `to` can name one past the last span, so add a boundary at the end.
     let mut moved = Vec::with_capacity(flow.spans.len() + 1);
     let mut kept = 0u32;
     for span in &flow.spans {

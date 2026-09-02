@@ -1,26 +1,26 @@
-//! The Linux OCR engine: meikiocr's pipeline, ported to Rust over `ort`.
+//! The Linux OCR engine runs meikiocr through `ort`.
 //!
-//! meikiocr is the only benchmarked candidate that clears every hard
-//! requirement at once - per-character geometry, ~22 ms warm, and it still
-//! reads the sparse three-glyph crop. This module is that pipeline with the
-//! Python removed: three ONNX sessions and the pre/post-processing around
-//! them, held to the harness in `tools/ocr-bench` by the fixture gate in
-//! `tests/ocr_gate.rs`.
+//! meikiocr is the only tested candidate that meets all hard requirements:
+//! per-character geometry, about 22 ms warm latency, and recognition of the
+//! sparse three-glyph crop. This module ports that pipeline to Rust without
+//! Python. It uses three ONNX sessions and the steps before and after each
+//! model call. The fixture gate in `tests/ocr_gate.rs` checks it against the
+//! `tools/ocr-bench` harness.
 //!
-//! Two contracts shape the port:
+//! Two contracts define this port:
 //!
-//! - **No upscaling.** The adapter feeds native-resolution pixels in every
-//!   orientation (ARCHITECTURE.md#ocr-engine): meiki measured 1x better
-//!   than 2x on every slice, because its fixed 960x544 detector letterbox
-//!   undoes an upscale. The letterbox itself may scale a small crop up -
-//!   that is the model's own input geometry, not a capture-side decision.
-//! - **Verticality stays in here.** meiki routes each line to a horizontal
-//!   or a vertical recogniser by its aspect ratio, and that decision never
-//!   leaves the module: core's `orientation_of` remains the sole
-//!   orientation authority for everything downstream.
+//! - **No upscale.** The adapter sends native-resolution pixels for every
+//!   orientation (ARCHITECTURE.md#ocr-engine). meiki measured better at 1x
+//!   than at 2x on every slice because its fixed 960x544 detector letterbox
+//!   reverses an upscale. The letterbox can enlarge a small crop. That scale
+//!   belongs to the model input, not to the capture decision.
+//! - **Keep verticality here.** meiki sends each line to a horizontal or
+//!   vertical recogniser from its aspect ratio. This module keeps that choice.
+//!   Core's `orientation_of` remains the only orientation authority for later
+//!   stages.
 //!
-//! The engine emits one [`OcrWord`] per *character*, which is finer than
-//! Windows' word rects and is exactly what `hit_scan` resolves against.
+//! The engine emits one [`OcrWord`] for each *character*. This unit is finer
+//! than Windows' word rects. `hit_scan` resolves against these boxes.
 
 pub mod detect;
 pub mod image;
@@ -38,29 +38,29 @@ use recognise::{CharBox, Collector};
 use std::cell::RefCell;
 use std::path::Path;
 
-/// Below this a detected line is not a line. Upstream's default.
+/// A detected line below this score is not a line. This is the upstream default.
 const DET_THRESHOLD: f32 = 0.5;
-/// Below this a proposed character is noise. Upstream's default.
+/// A proposed character below this score is noise. This is the upstream default.
 const REC_THRESHOLD: f32 = 0.1;
-/// Batch ceiling for the recogniser models, upstream's default: it bounds
-/// peak memory on a page-sized capture without costing throughput.
+/// The recogniser uses at most this many inputs in one batch. This upstream
+/// default limits peak memory for a page-sized capture without a throughput loss.
 const MAX_BATCH: usize = 8;
 
-/// One detected line and the characters read out of it.
+/// A detected line and the characters that the engine reads from it.
 pub struct Line {
     pub chars: Vec<CharBox>,
-    /// Which recogniser read it. Engine-internal; it is not part of
-    /// anything this module hands out.
+    /// The recogniser that read the line. This field stays inside the engine.
+    /// The module does not return this field.
     vertical: bool,
 }
 
-/// meikiocr over `ort`.
+/// The meikiocr engine uses `ort`.
 ///
-/// The sessions live behind [`RefCell`] because [`chibipop::text::OcrEngine`]
-/// recognises through `&self` while `ort` runs through `&mut Session`. That
-/// is sound rather than a workaround: the worker builds its backends inside
-/// its own thread and never shares them (`src/worker.rs`), so there is no
-/// second borrower to race.
+/// The sessions use [`RefCell`] because
+/// [`chibipop::text::OcrEngine`] calls recognition through `&self`, while
+/// `ort` calls `Session` methods through `&mut Session`. This is safe because
+/// the worker creates each backend inside its own thread and never shares it
+/// (`src/worker.rs`). No second borrower can race.
 pub struct MeikiOcr {
     detector: RefCell<Session>,
     recogniser: RefCell<Session>,
@@ -68,17 +68,16 @@ pub struct MeikiOcr {
 }
 
 impl MeikiOcr {
-    /// Opens the bundled models, wherever this install keeps them.
+    /// Open the bundled models from the install directory.
     pub fn new() -> Result<Self> {
         let dir = models::locate()?;
         Self::open(&dir)
     }
 
-    /// Opens a named model directory, digests checked first.
+    /// Open a named model directory after the digest check.
     ///
-    /// The check is what makes the gate's numbers mean anything: they were
-    /// measured against these exact bytes, so a different file is refused
-    /// rather than silently recognised with.
+    /// The check ties the gate values to these exact bytes. The method rejects
+    /// other bytes. It does not silently use another model.
     pub fn open(dir: &Path) -> Result<Self> {
         models::verify(dir).context("verifying the bundled OCR models")?;
         Ok(MeikiOcr {
@@ -88,7 +87,7 @@ impl MeikiOcr {
         })
     }
 
-    /// Detect, then recognise: the whole pipeline over one image.
+    /// Run the complete detection and recognition pipeline for one image.
     pub fn read(&self, img: &Bgr) -> Result<Vec<Line>> {
         if img.is_empty() {
             return Ok(Vec::new());
@@ -98,7 +97,7 @@ impl MeikiOcr {
             return Ok(Vec::new());
         }
 
-        // Degenerate boxes have no orientation and nothing to read.
+        // A box with no area has no orientation, so the engine skips it.
         let live = |vertical: bool| -> Vec<usize> {
             boxes
                 .iter()
@@ -181,9 +180,10 @@ impl MeikiOcr {
     }
 }
 
-/// One session, configured the way the benchmark configured its Python
-/// equivalent - full graph optimisation, and no spin-waiting, which is
-/// wasted heat on a machine that is idle between hovers.
+/// Create one session with the benchmark settings.
+///
+/// Use full graph optimization and disable spin waits. Spin waits waste heat
+/// because the machine stays idle between hovers.
 fn session(path: &Path) -> Result<Session> {
     let build = || -> std::result::Result<Session, String> {
         Session::builder()
@@ -200,9 +200,9 @@ fn session(path: &Path) -> Result<Session> {
     build().map_err(|e| anyhow!("loading {}: {e}", path.display()))
 }
 
-/// Reading order across lines: horizontal lines top to bottom (the
-/// detector already sorted them), then vertical columns right to left.
-/// Empty lines are dropped, so an empty result means nothing was read.
+/// Set line order across lines. The detector already sorts horizontal lines
+/// from top to bottom. Sort vertical columns from right to left. Drop empty
+/// lines. An empty result means that the engine read nothing.
 fn to_ocr_lines(lines: Vec<Line>) -> Vec<OcrLine> {
     let (vertical, horizontal): (Vec<Line>, Vec<Line>) =
         lines.into_iter().filter(|l| !l.chars.is_empty()).partition(|l| l.vertical);
@@ -225,13 +225,13 @@ fn to_ocr_lines(lines: Vec<Line>) -> Vec<OcrLine> {
         .collect()
 }
 
-/// meikiocr reads one script pair - Japanese, with the Latin and digits
-/// that sit inside Japanese text - and has no second charset to swap to.
+/// meikiocr reads one script pair: Japanese plus the Latin letters and digits
+/// that occur in Japanese text. It has no second character set.
 ///
-/// The one caller left is [`chibipop::text::OcrEngine::set_language`]: a
-/// config carrying some other `ocr.language` (the Linux settings UI hides
-/// the field, it does not clear it) gets read by meikiocr regardless, and
-/// the user is told so rather than silently handed nothing.
+/// [`chibipop::text::OcrEngine::set_language`] is the only caller. A
+/// configuration with another `ocr.language` can reach this method because the
+/// Linux settings UI hides the field but does not clear it. meikiocr still reads
+/// that language. The caller tells the user. It does not hide the lack of text.
 pub fn serves_language(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     tag == "ja" || tag.starts_with("ja-")
@@ -263,7 +263,7 @@ impl chibipop::text::OcrEngine for MeikiOcr {
         "meiki-ocr"
     }
 
-    /// Per-character boxes, finer than a word rect
+    /// Return one box for each character. This is finer than a word rect
     /// (ARCHITECTURE.md#ocr-engine).
     fn provides_geometry(&self) -> bool {
         true
@@ -317,8 +317,8 @@ mod tests {
         assert_eq!("左", got[1].words[0].text);
     }
 
-    /// The per-character boxes core's `orientation_of` sees must still read
-    /// as a column, or the whole point of routing verticals is lost.
+    /// Keep the per-character boxes that core's `orientation_of` reads as a
+    /// column. Otherwise, vertical selection loses its purpose.
     #[test]
     fn a_vertical_columns_geometry_reads_as_vertical_to_core() {
         use chibipop::text::layout::{orientation_of, Orientation};

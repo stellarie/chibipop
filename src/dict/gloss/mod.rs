@@ -1,10 +1,11 @@
-//! `GlossDoc`: an Entry's gloss content as one flat, typed tree.
+//! `GlossDoc`: gloss content of an Entry as one flat, typed tree.
 //!
-//! The shape is a **flat arena**, not an enum-with-`Vec`-children box tree,
-//! and the reason is not parse speed. `examples/gloss_arena_bench.rs`
-//! prototyped all three candidates - `serde_json::Value`, a box tree, and
-//! this arena - and asserted their walks byte-identical over 5 200 real
-//! payloads. Its numbers, recorded in `docs/research/lookup-cost.md`:
+//! The tree uses a flat arena, not a box tree of enums with `Vec` children.
+//! Parse speed did not drive this choice.
+//! `examples/gloss_arena_bench.rs` tested three candidates:
+//! `serde_json::Value`, a box tree, and this arena.
+//! It checked byte-identical walks over 5 200 real payloads.
+//! `docs/research/lookup-cost.md` records these values:
 //!
 //! | per hover, p50 | parse µs | walk µs | allocs | retained B/node | style probe µs |
 //! |---|---:|---:|---:|---:|---:|
@@ -12,34 +13,42 @@
 //! | box tree | 81.5 | 1.6 | 3 085 | 510.9 | 7.8 |
 //! | **flat arena** | **78.8** | **1.5** | **383** | **106.5** | **2.2** |
 //!
-//! The arena's parse win over a box tree is 2.7 µs - noise. What is not
-//! noise is 8.1x fewer allocations, 4.6x less retained heap, 12.1x faster to
-//! free, and a 3.6x-17.1x faster per-node `data-*` probe. The first three
-//! matter because this tree is *cached* (`SqliteDictionary`'s parsed-tree
-//! cache); the last matters because the stylesheet matcher probes every
-//! node's `data` map on every hover.
+//! The arena saves 2.7 µs over a box tree during parse.
+//! That difference is noise.
+//! The other four values matter.
+//! The arena uses 8.1x fewer allocations and retains 4.6x less heap.
+//! It frees heap 12.1x faster.
+//! Its per-node `data-*` probe runs 3.6x to 17.1x faster.
 //!
-//! Concretely, and this is the whole layout:
+//! The first three values matter because `SqliteDictionary` caches this tree.
+//! The last value matters because the stylesheet matcher probes each node's `data` map
+//! on every hover.
 //!
-//! - one `Vec<Node>` of `Copy` structs, children as a first-child /
-//!   next-sibling index pair, so a subtree costs no allocation of its own;
-//! - every byte of text - node text, attribute values, `data` values,
-//!   interned key names - in one `String`, addressed by `(u32, u32)` spans;
-//! - `data` and attribute keys interned to a `u32` id, so a probe is an
-//!   integer compare rather than a hash of a string;
-//! - a node's `data`, attribute and resolved-style entries flushed
-//!   contiguously into three flat vectors, addressed by a span.
+//! The layout has only these parts:
 //!
-//! Six vectors and one string per document. A clone is six `memcpy`s and a
-//! drop is six frees, whatever the tree's size.
+//! - One `Vec<Node>` of `Copy` structs.
+//!   Each node points to its children with a first-child index and a next-sibling index.
+//!   A subtree has no separate allocation.
+//! - One `String` stores all text bytes: node text, attribute values, `data`
+//!   values, and interned key names. `(u32, u32)` spans address this buffer.
+//! - Interned `data` and attribute keys each have a `u32` id.
+//!   A probe compares two integers. It does not hash a string.
+//! - Three flat vectors store each node's `data`, attribute, and resolved-style
+//!   entries in contiguous runs. A span addresses each run.
 //!
-//! The tree is **lossless** over the Yomitan structured-content schema. An
-//! unrecognised tag becomes [`Tag::Other`] and keeps both its name (as an
-//! attribute) and its children; an unrecognised `type` and every
-//! non-structural field are kept as attributes. Losslessness is what makes
-//! later work free: the record stores the dictionary's raw glossary JSON and
-//! this parse runs per hover, so a renderer *or parser* fix ships as a patch
-//! and never as a dictionary rebuild.
+//! Each document has six vectors and one string.
+//! A clone calls `memcpy` six times.
+//! A drop calls six frees.
+//! Tree size does not change these counts.
+//!
+//! The tree preserves the Yomitan structured-content schema.
+//! An unrecognized tag becomes [`Tag::Other`].
+//! The tree keeps its name as an attribute and keeps its children.
+//! An unrecognized `type` and every non-structural field stay as attributes.
+//! This lossless shape supports later renderer and parser changes.
+//!
+//! The record stores the Dictionary's raw glossary JSON, and the parser runs on every hover.
+//! A parser or renderer fix therefore ships as a patch, not a Dictionary rebuild.
 
 mod html;
 mod parse;
@@ -54,20 +63,24 @@ pub(crate) use parse::tag_for;
 pub use path::{NodePath, Selection};
 pub use plain::{plain_items, pos_labels, renders_text};
 
-/// An index into [`GlossDoc`]'s node vector.
+/// An index into the node vector of [`GlossDoc`].
 pub type NodeId = u32;
 
-/// An interned `data`/attribute key name.
+/// An interned key name for `data` or attributes.
 pub type KeyId = u32;
 
-/// The absent index. `u32::MAX` rather than `Option<u32>` so a [`Node`] stays
-/// 44 bytes: a niche-optimised `Option<u32>` does not exist, and a `u64`
-/// would grow every node by 20 bytes for a document that cannot hold four
-/// billion nodes anyway.
+/// The absent index.
+///
+/// This constant is `u32::MAX`, not `Option<u32>`, so a [`Node`] stays 44 bytes.
+/// Rust has no niche-optimized `Option<u32>`.
+/// A `u64` index adds 20 bytes to every node.
+/// A document cannot hold four billion nodes.
 pub const NONE: NodeId = u32::MAX;
 
-/// A byte range into [`GlossDoc`]'s text buffer, or an element range into one
-/// of its key-value vectors. Which one depends on the field that holds it.
+/// A byte range in the text buffer of [`GlossDoc`] or an element range in one of its
+/// key-value vectors.
+///
+/// The field that holds the span defines its target.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Span {
     pub at: u32,
@@ -76,12 +89,14 @@ pub struct Span {
 
 /// A stored `data`, attribute, or style value.
 ///
-/// Numbers and booleans keep their JSON type instead of being formatted into
-/// the text buffer: the schema's numbers are em multipliers and span counts,
-/// and formatting them at parse time would put an `f64` printer on the hot
-/// path for no representational gain. An array of strings is joined with a
-/// single space at parse time, which is what `textDecorationLine`'s list form
-/// means and what the HTML renderer used to do on every walk.
+/// Numbers and booleans keep their JSON types.
+/// The parser does not format them into the text buffer.
+/// The schema uses numbers as em multipliers and span counts.
+/// A format step during parse adds an `f64` printer to parse work without benefit.
+///
+/// The parser joins an array of strings with one space.
+/// That join defines the list form of `textDecorationLine`.
+/// The HTML renderer once repeated this join on every walk.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Scalar {
     Text(Span),
@@ -90,7 +105,7 @@ pub enum Scalar {
     Null,
 }
 
-/// What a node *is*, for renderers that do not care which exact tag drew it.
+/// The node class that renderers use when exact tag identity does not matter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Kind {
@@ -105,20 +120,24 @@ pub enum Kind {
     Ruby,
     Link,
     Image,
-    /// A tag this build does not know. Keeps its children, so an
-    /// unrecognised wrapper loses the wrapper and not the text.
+    /// A tag that this build does not know.
+    ///
+    /// The node keeps its children.
+    /// The renderer drops the wrapper and keeps the text.
     Unknown,
 }
 
-/// The exact tag, kept alongside [`Kind`] because a `div` and a `span` are
-/// both containers and a lossless tree may not forget which one it was.
+/// The exact tag name.
+///
+/// The tree stores this name with [`Kind`] because `div` and `span` are both containers.
+/// A lossless tree must retain the original tag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Tag {
-    /// No `tag` field: a bare glossary string, a `type: text` item, or a
-    /// wrapper object carrying only `content`.
+    /// This value represents a bare glossary string, a `type: text` item, or a wrapper object with
+    /// only `content`.
     None,
-    /// Unrecognised. The name itself is kept as the node's `tag` attribute.
+    /// An unrecognized tag. The node stores its name in the `tag` attribute.
     Other,
     A,
     B,
@@ -155,9 +174,10 @@ pub enum Tag {
 }
 
 impl Tag {
-    /// The schema's own spelling, or `""` for [`Tag::None`] and
-    /// [`Tag::Other`] - neither of which has one. Use
-    /// [`GlossDoc::tag_name`] when the unrecognised name matters.
+    /// Returns the schema tag name, or `""` for [`Tag::None`] and [`Tag::Other`].
+    ///
+    /// [`Tag::None`] and [`Tag::Other`] have no static schema name.
+    /// Call [`GlossDoc::tag_name`] when you need an unrecognized name.
     pub fn as_str(self) -> &'static str {
         match self {
             Tag::None | Tag::Other => "",
@@ -196,16 +216,18 @@ impl Tag {
         }
     }
 
-    /// Does this tag break a line?
+    /// Returns true when this tag breaks a line.
     ///
-    /// The schema's own block/inline division, which every renderer over this
-    /// tree shares: the plain-text walk turns a block into a line break and
-    /// the popup's inline pass ends a paragraph at one. Structured content has
-    /// no `display` property, so the mapping is fixed and needs no cascade.
+    /// This split defines the block and inline groups in the schema.
+    /// Every renderer over this tree shares the split.
+    /// The plain-text walk turns a block into a line break.
+    /// The popup inline pass ends a paragraph at a block.
+    /// Structured content has no `display` property, so the mapping is fixed.
+    /// The mapping needs no cascade.
     ///
-    /// `td`, `th`, `thead` and `tbody` are in neither table on purpose: a cell
-    /// is a grid problem rather than a line-break one, and the `tr` around it
-    /// already breaks the row.
+    /// `td`, `th`, `thead`, and `tbody` belong to neither group.
+    /// A cell is a grid element, not a line-break element.
+    /// The surrounding `tr` already breaks the row.
     pub fn is_block(self) -> bool {
         matches!(
             self,
@@ -214,24 +236,25 @@ impl Tag {
         )
     }
 
-    /// Does this tag never break a line?
+    /// Returns true when this tag never breaks a line.
     ///
-    /// The other half of [`is_block`](Self::is_block). Not its complement: a
-    /// cell tag is in neither, and an emphasis tag such as `b` is inline by
-    /// having nothing to say about lines at all. What this decides is where a
-    /// run of bare strings under a node becomes lines rather than one flow.
+    /// This method is not the complement of [`is_block`](Self::is_block).
+    /// A cell tag belongs to neither group.
+    /// An emphasis tag such as `b` is inline because it says nothing about lines.
+    /// This method decides when bare strings under a node become separate lines.
+    /// Otherwise they stay in one flow.
     pub fn is_inline(self) -> bool {
         matches!(self, Tag::Span | Tag::A | Tag::Ruby | Tag::Rt | Tag::Rp | Tag::Img)
     }
 }
 
-/// A glossary item's `type` field.
+/// The `type` field of a glossary item.
 ///
-/// Kept on every node, not just on the top-level items, because it is what
-/// distinguishes a bare glossary string ([`ItemType::None`]) from a
-/// `type: text` item ([`ItemType::Text`]). Both parse to one [`Kind::Text`]
-/// node, and the plain-text renderer's "an array of plain strings is a list"
-/// rule needs to tell them apart.
+/// Every node keeps this field, not only top-level items.
+/// It separates a bare glossary string ([`ItemType::None`]) from a `type: text` item
+/// ([`ItemType::Text`]).
+/// Both forms parse to one [`Kind::Text`] node.
+/// The plain-text renderer needs this distinction because an array of plain strings is a list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum ItemType {
@@ -239,17 +262,18 @@ pub enum ItemType {
     StructuredContent,
     Text,
     Image,
-    /// Unrecognised. The name itself is kept as the node's `type` attribute.
+    /// An unrecognized type. The node stores its name in the `type` attribute.
     Other,
 }
 
 /// A resolved style property.
 ///
-/// Every property `docs/research/dict-shapes.md` found in the corpus, plus
-/// the schema-permitted siblings of those it found, so that a dictionary
-/// outside the census loses nothing either. Resolving the key to an enum once
-/// at parse time is the point: the `serde_json::Value` renderer re-resolved
-/// every key on every walk, which is most of its 6.5x walk penalty.
+/// This enum holds each property that `docs/research/dict-shapes.md` found in the corpus.
+/// It also holds schema-permitted siblings, so a Dictionary outside the census keeps its
+/// properties.
+/// The parser resolves each key name to an enum variant once.
+/// The `serde_json::Value` renderer resolved each key on every walk.
+/// That repeated lookup caused most of its 6.5x walk penalty.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum StyleKey {
@@ -283,127 +307,113 @@ pub enum StyleKey {
     PaddingLeft,
 }
 
-/// A node's classified editorial purpose - what the render settings filter
-/// on.
+/// The editorial purpose that renderers use to filter a node.
 ///
-/// A closed set of six, populated by [`parse`]'s classifier on every node.
-/// There is no "unclassified": a node the classifier recognises nothing
-/// about is [`Role::Content`], which every filter keeps. That is the failure
-/// direction the evidence demands - the `data` namespace is per-dictionary
-/// and unbounded, so an unrecognised node must render, never vanish.
+/// The parser assigns one of six roles to every node.
+/// No unclassified state exists.
+/// An unknown node receives [`Role::Content`], which all filters keep.
+/// The `data` namespace is dynamic and unconstrained.
+/// Unknown nodes must therefore render, not disappear.
 ///
-/// Three of the six are droppable ([`RoleFilter`] has a knob for each) and
-/// three are not. [`Role::Reference`] and [`Role::Commentary`] are
-/// classified but never hidden: `docs/research/dict-shapes.md` counts 116 000
-/// cross-reference and 184 000 commentary nodes across eight dictionaries
-/// each, and no setting asks for them to go. Classifying them anyway makes
-/// them addressable - later work that adds a setting adds the knob and not
-/// the classifier.
+/// Three roles are optional. [`RoleFilter`] provides one control for each.
+/// Three roles are permanent.
+/// [`Role::Reference`] and [`Role::Commentary`] are classified but not hidden.
+/// [`Role::Content`] is the default and always stays.
+/// Census data shows many cross-reference and commentary nodes, and no filter hides them.
+/// A filter can add controls for these roles without a classifier change.
 ///
-/// **The declaration order is the classification precedence**, lowest first,
-/// and [`Ord`] is derived for exactly that: a node carrying two editorial
-/// hooks takes the smaller role, so the answer does not depend on the order a
-/// dictionary happened to write its `data` fields in. No node in the census
-/// corpus carries two conflicting hooks, so the order only decides input the
-/// corpus does not contain; it is chosen so the most destructive
-/// misclassification is the one that cannot happen.
-/// [`Role::PartOfSpeech`] wins because it alone *moves* content rather than
-/// merely hiding it - the label is lifted into the card's own `pos` field, so
-/// losing the lift loses the label everywhere, while misfiling a label as an
-/// example only hides it from one panel.
+/// Declaration order defines classification precedence from low to high.
+/// [`Ord`] uses this order.
+/// When a node matches two hooks, it receives the lower-value role.
+/// This makes output deterministic despite source attribute order.
+///
+/// [`Role::PartOfSpeech`] has highest precedence.
+/// It moves content into the note `pos` field.
+/// If this classification fails, the whole card loses the label.
+/// If the classifier marks a label as an example, the panel hides it but the card keeps it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[repr(u8)]
 pub enum Role {
-    /// A label surfaced as the card's own `pos` field rather than drawn
-    /// inline. Yomitan's `data.content = "part-of-speech-info"`, 27 680
-    /// census nodes, all Jitendex.
+    /// A part-of-speech label for the note `pos` field instead of inline text.
+    /// Yomitan sets `data.content = "part-of-speech-info"`.
     PartOfSpeech,
-    /// A source, licence, or footnote line.
+    /// A source, license, or footnote line.
     Attribution,
-    /// An example sentence, its translation, its keyword, or its metadata.
+    /// An example sentence, translation, keyword, or metadata.
     Example,
-    /// A cross-reference: see-also, synonym, antonym. Not droppable.
+    /// A cross-reference such as a see-also link, synonym, or antonym.
+    /// Filters always keep this role.
     Reference,
-    /// Editorial commentary: explanation, supplementary note, etymology.
-    /// Not droppable.
+    /// Editorial commentary such as an explanation, note, or etymology.
+    /// Filters always keep this role.
     Commentary,
-    /// Ordinary gloss content. The default, and the answer for every
-    /// dictionary that uses none of the known conventions.
+    /// Standard gloss content. This is the default role for unrecognized nodes.
     #[default]
     Content,
 }
 
-/// One node. `Copy`, 44 bytes, no owned allocation.
+/// A single node.
 ///
-/// The span fields are private because a span means nothing without the
-/// document that owns the buffer it indexes; go through [`GlossDoc`].
+/// The struct is `Copy`, uses 44 bytes, and owns no heap memory.
+///
+/// Span fields are private because a span needs the parent document text buffer.
+/// Access text through [`GlossDoc`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Node {
     pub kind: Kind,
     pub tag: Tag,
     pub item_type: ItemType,
-    /// The node's editorial purpose, classified at parse time from its
-    /// `data` map. Read by [`RoleFilter::allows`], which is the only gate
-    /// any renderer over this tree consults.
+    /// The node role. The parser classifies it from the `data` map.
+    /// [`RoleFilter::allows`] reads it at render time.
     pub role: Role,
-    /// Into the document's text buffer.
+    /// Byte offset and length within the document text buffer.
     text: Span,
     first_child: NodeId,
     next_sibling: NodeId,
-    /// Into the document's `data_kv`.
+    /// Range in the `data_kv` vector of the document.
     data: Span,
-    /// Into the document's `attr_kv`.
+    /// Range in the `attr_kv` vector of the document.
     attrs: Span,
-    /// Into the document's `style_kv` - the *resolved* style record.
+    /// Range in the `style_kv` vector for resolved style properties.
     ///
-    /// Two sources, merged by
-    /// [`fold_declarations`](GlossDoc::fold_declarations): the dictionary's
-    /// own `styles.css`, cascaded by `dict::sheet`, then the node's inline
-    /// `style` verbatim. The two halves never name one property, because the
-    /// fold drops every stylesheet declaration the inline record already
-    /// sets - so inline `style` has the last word by construction, and this
-    /// record reads the same whether a consumer takes the first occurrence
-    /// of a property or the last. No renderer over this tree learns that CSS
-    /// exists.
+    /// [`fold_declarations`](GlossDoc::fold_declarations) combines two style sources:
+    /// the Dictionary `styles.css` from `dict::sheet` and the node's inline `style` attribute.
+    /// The merge drops stylesheet declarations when an inline style sets the same property.
+    /// Inline styles take precedence.
+    /// Downstream renderers do not process CSS rules directly.
     style: Span,
 }
 
-/// An Entry's gloss content, flat.
+/// The gloss content of an Entry, stored as a flat tree.
 #[derive(Clone, PartialEq, Debug)]
 pub struct GlossDoc {
     nodes: Vec<Node>,
-    /// First top-level glossary item, or [`NONE`]. Items are siblings.
+    /// The first top-level glossary item, or [`NONE`]. Items are sibling nodes.
     first_item: NodeId,
     text: String,
     data_kv: Vec<(KeyId, Scalar)>,
     attr_kv: Vec<(KeyId, Scalar)>,
     style_kv: Vec<(StyleKey, Scalar)>,
-    /// Interned key text, by id.
+    /// Interned key text by identifier.
     keys: Vec<Span>,
-    /// Glossary items the parser could not read, each replaced by one text
-    /// node holding whatever readable content the row still carried.
+    /// Number of invalid glossary items that became plain-text nodes.
     degraded_items: u32,
-    /// Subtrees cut off at [`parse::MAX_DEPTH`](MAX_DEPTH).
+    /// Number of subtrees truncated at [`MAX_DEPTH`].
     truncated_subtrees: u32,
 }
 
-/// Node levels a parse will descend.
+/// Maximum node depth for parser traversal.
 ///
-/// Counted the way `tools/dict-census` counts them - one level per object
-/// whose `content` is descended, with array levels passing through, because
-/// the arena flattens arrays. The census's deepest real tree is **15**
-/// levels, so 48 is over three times the deepest content any of 97 archives
-/// emits and exists only to bound pathological input.
+/// Depth increases when the parser enters an object `content` field.
+/// Array levels do not increase depth because the arena flattens them.
+/// Census analysis found a maximum real depth of 15 levels.
+/// The limit of 48 levels bounds unusually deep input safely.
 ///
-/// It is also chosen to fire *before* `serde_json`'s own 128-level recursion
-/// limit on the shape real content uses. Structured content spends two
-/// `serde_json` levels per node level (an object and the array under its
-/// `content`), so this cap trips at about level 97 of 128. A pathological
-/// tree that nests arrays harder, or that runs hundreds of levels deep, can
-/// still exhaust `serde_json` first - inside the `IgnoredAny` that consumes
-/// the over-cap subtree, if nowhere else. Either way the parse terminates and
-/// the levels above the cap render: the depth cap truncates, and per-item
-/// isolation catches what the cap does not.
+/// This limit stops recursion before `serde_json` reaches its 128-level limit.
+/// Real structured content uses two `serde_json` levels per node level: an object and its child
+/// array.
+/// The limit activates near level 97 of 128.
+/// If input exceeds this depth, the parser truncates the subtree and renders the parent levels.
 pub const MAX_DEPTH: u32 = 48;
 
 impl Default for GlossDoc {
@@ -423,34 +433,35 @@ impl Default for GlossDoc {
 }
 
 impl GlossDoc {
-    /// No content at all.
+    /// Creates an empty document.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Are there no glossary items?
+    /// Returns true if the document contains no glossary items.
     pub fn is_empty(&self) -> bool {
         self.first_item == NONE
     }
 
-    /// Every node, in parse order. For a linear sweep - the style probe walks
-    /// this rather than the tree, which is where its 17.1x p99 win comes
-    /// from.
+    /// Returns all nodes in parse order.
+    ///
+    /// This slice supports a linear walk.
+    /// The style probe scans it instead of the tree hierarchy for better cache performance.
     pub fn all_nodes(&self) -> &[Node] {
         &self.nodes
     }
 
-    /// The top-level glossary items, in order.
+    /// Returns an iterator over top-level glossary items.
     pub fn items(&self) -> Siblings<'_> {
         Siblings { doc: self, next: self.first_item }
     }
 
-    /// One node's children, in order.
+    /// Returns an iterator over the direct children of a node.
     pub fn children(&self, id: NodeId) -> Siblings<'_> {
         Siblings { doc: self, next: self.nodes[id as usize].first_child }
     }
 
-    /// Does this node have any children?
+    /// Returns true if the node contains children.
     pub fn has_children(&self, id: NodeId) -> bool {
         self.nodes[id as usize].first_child != NONE
     }
@@ -459,29 +470,29 @@ impl GlossDoc {
         &self.nodes[id as usize]
     }
 
-    /// A node's own text. Empty for anything but a text node.
+    /// Returns the text of a node, or an empty string if the node is not text.
     pub fn text(&self, id: NodeId) -> &str {
         self.span(self.nodes[id as usize].text)
     }
 
-    /// The bytes a span addresses.
+    /// Returns the text addressed by a span.
     pub fn span(&self, s: Span) -> &str {
         &self.text[s.at as usize..(s.at + s.len) as usize]
     }
 
-    /// A node's `data` map, in source order.
+    /// Returns the `data` map entries of a node in source order.
     pub fn data(&self, id: NodeId) -> &[(KeyId, Scalar)] {
         Self::slice(&self.data_kv, self.nodes[id as usize].data)
     }
 
-    /// A node's non-structural fields: `href`, `path`, `colSpan`, an image's
-    /// `sizeUnits` and `appearance`, an unrecognised tag's own name, and
-    /// anything else the schema grows.
+    /// Returns non-structural attributes of a node.
+    ///
+    /// These include `href`, `path`, `colSpan`, image properties, and unrecognized tag names.
     pub fn attrs(&self, id: NodeId) -> &[(KeyId, Scalar)] {
         Self::slice(&self.attr_kv, self.nodes[id as usize].attrs)
     }
 
-    /// A node's resolved style record, in source order.
+    /// Returns the resolved style properties of a node in source order.
     pub fn style(&self, id: NodeId) -> &[(StyleKey, Scalar)] {
         Self::slice(&self.style_kv, self.nodes[id as usize].style)
     }
@@ -490,46 +501,43 @@ impl GlossDoc {
         &all[s.at as usize..(s.at + s.len) as usize]
     }
 
-    /// An interned key's name.
+    /// Returns the name of an interned key.
     pub fn key(&self, k: KeyId) -> &str {
         self.span(self.keys[k as usize])
     }
 
-    /// An interned key's id, or `None` when this document never saw the name.
+    /// Returns the key identifier, or `None` when the document does not contain the key.
     ///
-    /// A linear scan: a document interns tens of keys, and resolving a probe
-    /// set once per document then comparing `u32`s per node is the whole
-    /// point of interning.
+    /// This method uses a linear scan because a document interns few keys.
+    /// Callers resolve keys once per document, then compare integer identifiers.
     pub fn key_id(&self, name: &str) -> Option<KeyId> {
         (0..self.keys.len() as KeyId).find(|&k| self.key(k) == name)
     }
 
-    /// How many keys this document interned.
+    /// Returns the number of interned keys in this document.
     ///
-    /// The bound on a [`KeyId`], so a caller that resolves a whole probe set
-    /// against a document - `dict::sheet` maps every interned key to the
-    /// `data-*` attribute name it derives from, once - can size its table
-    /// without walking the nodes.
+    /// This number bounds [`KeyId`] values.
+    /// Callers such as `dict::sheet` use it to allocate tables before they handle nodes.
     pub fn key_count(&self) -> usize {
         self.keys.len()
     }
 
-    /// One `data` entry by name.
+    /// Returns a `data` entry value by key name.
     pub fn data_of(&self, id: NodeId, name: &str) -> Option<Scalar> {
         self.data(id).iter().find(|(k, _)| self.key(*k) == name).map(|(_, v)| *v)
     }
 
-    /// One attribute by name.
+    /// Returns an attribute value by key name.
     pub fn attr_of(&self, id: NodeId, name: &str) -> Option<Scalar> {
         self.attrs(id).iter().find(|(k, _)| self.key(*k) == name).map(|(_, v)| *v)
     }
 
-    /// One resolved style property.
+    /// Returns a resolved style property value.
     pub fn style_of(&self, id: NodeId, key: StyleKey) -> Option<Scalar> {
         self.style(id).iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
     }
 
-    /// A scalar's text, or `None` when it is a number, a boolean, or null.
+    /// Returns the string value of a scalar, or `None` if the scalar is not text.
     pub fn scalar_str(&self, v: Scalar) -> Option<&str> {
         match v {
             Scalar::Text(s) => Some(self.span(s)),
@@ -537,8 +545,9 @@ impl GlossDoc {
         }
     }
 
-    /// The tag's name, including an unrecognised one - which the parser kept
-    /// as the node's `tag` attribute rather than throwing away.
+    /// Returns the tag name of a node.
+    ///
+    /// For an unrecognized tag, this method returns the stored `tag` attribute.
     pub fn tag_name(&self, id: NodeId) -> &str {
         let node = &self.nodes[id as usize];
         match node.tag {
@@ -547,33 +556,25 @@ impl GlossDoc {
         }
     }
 
-    /// Did this node come from a bare glossary string, as opposed to a
-    /// `type: text` item or a tagged node?
+    /// Returns true when a bare glossary string produced this node.
     ///
-    /// All three become one [`Kind::Text`] node so that downstream code has
-    /// one shape to handle, but only the bare string counts towards the
-    /// plain-text renderer's "an array of plain strings is a list" rule, and
-    /// only it is emitted unwrapped by the HTML renderer.
+    /// Bare strings, `type: text` items, and tagged nodes all produce [`Kind::Text`] nodes.
+    /// Only bare strings make the plain-text renderer format them as a list.
+    /// The HTML renderer emits bare strings without wrapper tags.
     pub fn is_plain_string(&self, id: NodeId) -> bool {
         let n = &self.nodes[id as usize];
         n.kind == Kind::Text && n.tag == Tag::None && n.item_type == ItemType::None
     }
 
-    /// Are this node's children more than one child, every one of them a bare
-    /// glossary string?
+    /// Returns true when this node has multiple children that are all bare strings.
     ///
-    /// Yomitan's one exception to concatenating a node's children: such a run
-    /// is a list and each string gets its own `<li>`, so both renderers over
-    /// this tree that have lines - the plain-text walk and the popup's inline
-    /// pass - break between them. An array mixing strings with nodes is prose
-    /// broken up by its own inline markup ("see also", then a link, then more
-    /// text) and is not a list.
+    /// Yomitan treats a sequence of bare strings as a list.
+    /// The plain-text renderer and popup inline pass add line breaks between them.
+    /// An array that mixes strings and nodes represents continuous text with inline markup, not a
+    /// list.
     ///
-    /// The arena flattens every array level under `content` into one child
-    /// list, so the test is on the child list rather than on one JSON array.
-    /// The two agree on every shape the census contains; they differ only
-    /// when a bare string sits beside a nested string array under one
-    /// `content`, which no corpus dictionary does.
+    /// The arena flattens array levels under `content` into one child list.
+    /// This method checks the child list, not JSON array boundaries.
     pub fn is_string_list(&self, id: NodeId) -> bool {
         let mut n = 0;
         for child in self.children(id) {
@@ -585,69 +586,52 @@ impl GlossDoc {
         n > 1
     }
 
-    /// `data.content`, when it is a string. A non-string marker names no
-    /// editorial rule, but it does still mark a block - see
-    /// [`has_marker`](Self::has_marker).
+    /// Returns the string value of `data.content`, if present.
+    ///
+    /// A non-string value defines no editorial role but marks a block boundary.
+    /// See [`has_marker`](Self::has_marker).
     pub fn marker(&self, id: NodeId) -> Option<&str> {
         self.data_of(id, "content").and_then(|v| self.scalar_str(v))
     }
 
-    /// `data.content` present and not null - which is what makes a node a
-    /// block even when its tag is inline. A dictionary that tags a sense with
-    /// `data: {"content": "sense"}` on a `span` still gets its own line.
+    /// Returns true when `data.content` exists and is not null.
+    ///
+    /// A node with this marker forms a block even when its tag is inline.
+    /// For example, a `span` with `data: {"content": "sense"}` starts a new line.
     pub fn has_marker(&self, id: NodeId) -> bool {
         matches!(self.data_of(id, "content"), Some(v) if v != Scalar::Null)
     }
 
-    /// Does this node's content read as one run of prose - is any child a
-    /// bare string with visible text?
+    /// Returns true when any child is a non-empty bare string.
     ///
-    /// Half of the exemption to the marker line break, shared by the
-    /// plain-text walk and the popup's inline pass; the other half is
-    /// [`inline_prose`](Self::inline_prose). A marker separates *senses*,
-    /// and a sense list is marked nodes side by side; a marked inline node
-    /// beside bare sentence text is markup *inside* a sentence, and
-    /// breaking there cuts the sentence in two. Measured over the live
-    /// database: every mid-prose marked inline node Jitendex writes is
-    /// sentence markup (`example-keyword` 51 062, `lang-source-wasei`
-    /// 4 114, `registered-trademark` 44), and every sense-separating one
-    /// (`part-of-speech-info`, `forms-label`, `misc-info`, ...) has no
-    /// bare-text sibling.
-    ///
-    /// Asked of the *parent*, because the arena links first-child /
-    /// next-sibling and a node cannot see the text before it.
+    /// This condition exempts continuous prose from marker line breaks.
+    /// The plain-text renderer and popup inline pass use this condition.
+    /// Senses appear as adjacent marked nodes.
+    /// An inline marked node next to bare sentence text is inline markup, not a sense boundary.
+    /// A line break there breaks the sentence.
     pub fn prose(&self, id: NodeId) -> bool {
         self.children(id)
             .any(|c| self.is_plain_string(c) && !self.text(c).trim().is_empty())
     }
 
-    /// Does this node itself read as a prose fragment - no block tag, no
-    /// marker, and visible text somewhere under it?
+    /// Returns true when this node contains visible text without a block tag or marker.
     ///
-    /// The other half of the marker exemption. [`prose`](Self::prose) sees
-    /// only *bare* sentence text, and Jitendex wraps an example's
-    /// translation whole (`span lang="en"`), so the footnote mark trailing
-    /// it (`data.content = "attribution-footnote"`) broke onto a line of
-    /// its own. A marked node *after* such a fragment trails a sentence,
-    /// and both walks exempt it exactly as they exempt one amid bare text.
+    /// This method provides the other half of marker exemption.
+    /// [`prose`](Self::prose) detects only bare text siblings.
+    /// Dictionaries often wrap translations in elements such as `span lang="en"`.
+    /// A marked node after such an element belongs to the sentence.
+    /// Both renderers keep it on the same line.
     ///
-    /// Order is load-bearing where `prose` is symmetric: a sense head is
-    /// marked pills *followed* by a prose fragment (Jitendex's
-    /// forms-restriction `span`), so only prose already seen can be
-    /// evidence - counting a fragment behind the marked node would re-read
-    /// every such sense head as a sentence. Measured over the 97-archive
-    /// corpus: the marked nodes that trail a fragment are
-    /// `attribution-footnote` (9 784) and nothing else, while every sense
-    /// separator leads its parent and keeps its break
-    /// (`part-of-speech-info` 392 375, `forms-label` 146 307, `misc-info`
-    /// 67 862, `reference-label` 56 466, `field-info` 45 143, ...).
+    /// Earlier prose serves as evidence.
+    /// In sense headers, marked labels precede prose fragments.
+    /// The parser checks only earlier text to prevent false matches on sense headers.
     pub fn inline_prose(&self, id: NodeId) -> bool {
         !self.nodes[id as usize].tag.is_block()
             && !self.has_marker(id)
             && self.has_visible_text(id)
     }
 
-    /// Any visible text under this node.
+    /// Returns true when this node or any descendant contains non-whitespace text.
     fn has_visible_text(&self, id: NodeId) -> bool {
         if self.nodes[id as usize].kind == Kind::Text {
             return !self.text(id).trim().is_empty();
@@ -655,28 +639,27 @@ impl GlossDoc {
         self.children(id).any(|c| self.has_visible_text(c))
     }
 
-    /// This node's classified editorial purpose.
+    /// Returns the classified editorial purpose of this node.
     ///
-    /// The whole of what the old name-matched drop list used to answer, and
-    /// now the answer for every dictionary rather than for the one whose
-    /// six `data.content` spellings the list happened to hold.
+    /// This role replaces hardcoded attribute lists.
+    /// It gives every Dictionary the same classification.
     pub fn role(&self, id: NodeId) -> Role {
         self.nodes[id as usize].role
     }
 
-    /// Glossary items that failed to parse and were degraded to text.
+    /// Returns the count of invalid glossary items converted to plain text.
     pub fn degraded_items(&self) -> u32 {
         self.degraded_items
     }
 
-    /// Subtrees cut off at [`MAX_DEPTH`].
+    /// Returns the count of subtrees truncated at [`MAX_DEPTH`].
     pub fn truncated_subtrees(&self) -> u32 {
         self.truncated_subtrees
     }
 
-    /// Retained bytes, by the document's own accounting. Reported next to a
-    /// counting allocator's number as a cross-check; see
-    /// `examples/gloss_doc_alloc.rs`.
+    /// Returns allocated memory in bytes for this document.
+    ///
+    /// `examples/gloss_doc_alloc.rs` uses this method to check heap use.
     pub fn footprint(&self) -> usize {
         self.nodes.capacity() * std::mem::size_of::<Node>()
             + self.text.capacity()
@@ -686,20 +669,16 @@ impl GlossDoc {
             + self.keys.capacity() * std::mem::size_of::<Span>()
     }
 
-    /// Folds a dictionary's own `styles.css` into the resolved style
-    /// records.
+    /// Folds Dictionary stylesheet rules into resolved style records.
     ///
-    /// `wins` is `(node, property, value)` in ascending node order, already
-    /// cascaded by `dict::sheet`: one entry per property per node, and never
-    /// a property the node's inline `style` already sets. Each node's new
-    /// record is its stylesheet winners followed by its inline record
-    /// verbatim, which is what makes inline `style` the last word - a record
-    /// is read first-occurrence-wins, so priority runs left to right, and
-    /// the two halves cannot collide anyway.
+    /// The `wins` slice contains `(node, property, value)` tuples in ascending node order from
+    /// `dict::sheet`.
+    /// It has one winning declaration per property per node.
+    /// It excludes properties that inline styles already set.
     ///
-    /// One rebuild of the pool rather than a splice per node, because a
-    /// record is a span into one shared vector and inserting in the middle
-    /// of it would move every span after the insertion.
+    /// The method appends stylesheet properties before inline properties.
+    /// Readers use first-occurrence-wins lookup, so inline styles retain priority.
+    /// This operation rebuilds the shared vector once, so slice spans never shift.
     pub(crate) fn fold_declarations(&mut self, wins: &[(NodeId, StyleKey, &str)]) {
         let mut kv: Vec<(StyleKey, Scalar)> =
             Vec::with_capacity(self.style_kv.len() + wins.len());
@@ -722,11 +701,10 @@ impl GlossDoc {
         self.style_kv = kv;
     }
 
-    /// One string into the document's text buffer.
+    /// Appends a string to the document text buffer and returns its span.
     ///
-    /// No deduplication: a stylesheet value is a handful of bytes, the nodes
-    /// one sheet reaches are tens rather than thousands, and a scan of the
-    /// buffer would cost more than the bytes it saved.
+    /// This method does not deduplicate text.
+    /// A buffer scan costs more than the saved memory.
     fn push_text(&mut self, text: &str) -> Span {
         let at = self.text.len() as u32;
         self.text.push_str(text);
@@ -734,7 +712,7 @@ impl GlossDoc {
     }
 }
 
-/// A node and its following siblings.
+/// An iterator over a node and its next siblings.
 pub struct Siblings<'a> {
     doc: &'a GlossDoc,
     next: NodeId,

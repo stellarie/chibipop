@@ -1,39 +1,39 @@
-//! The PipeWire half of the fallback capture rung: one video stream,
-//! consumed on PipeWire's own thread, parked in [`super::frame`].
+//! Implements the PipeWire part of the fallback Capture backend.
 //!
-//! **Why dlopen and not the `pipewire` crate.** `pipewire-sys` is a
-//! `system-deps` binding: building it needs `libpipewire-0.3-dev` and
-//! a pkg-config file on the build machine, and the project's Linux CI
-//! image has neither and the CI workflow is out of scope here. More
-//! to the point, a *build-time* dependency on PipeWire would make the
-//! release tarball unbuildable on machines that will never run the
-//! portal rung. So the library is opened at runtime, exactly the
-//! bargain ARCHITECTURE.md#ocr-engine already struck for `ort`'s
-//! system path: absent `libpipewire-0.3.so.0` is a rung that is not
-//! there, named in a diagnostic, and the ladder moves on.
+//! This backend creates one video stream. PipeWire processes the stream on its own thread.
+//! [`super::frame`] stores the newest frame.
 //!
-//! **What that costs.** Every `spa_pod_builder_*` helper is a
-//! `static inline` in a header and therefore unreachable through
-//! dlopen, so the format handshake is serialised by hand in
-//! [`super::pod`]. The rest is ordinary FFI against a stable ABI: the
-//! structs mirrored below are `struct spa_buffer`, `struct spa_data`,
-//! `struct spa_chunk`, `struct spa_meta`, `struct pw_buffer` and
-//! `struct pw_stream_events` version 2, all of which PipeWire treats
-//! as ABI.
+//! **Why this module uses dlopen instead of the `pipewire` crate.**
+//! `pipewire-sys` uses `system-deps`.
+//! A build with this dependency needs `libpipewire-0.3-dev` and a pkg-config file.
+//! The Linux CI image has neither the development package nor the pkg-config file.
+//! Without the development package, a build-time PipeWire dependency stops the build.
+//! This choice affects systems that do not use the portal rung.
+//! This module opens `libpipewire-0.3.so.0` at run time.
+//! `ARCHITECTURE.md#ocr-engine` uses the same run-time choice for the `ort` system path.
+//! If the library is absent, the diagnostic names the unavailable rung.
+//! The cursor ladder then tries the next rung.
 //!
-//! **Threading.** `pw_thread_loop` *is* the dedicated thread: PipeWire
-//! starts it, dispatches on it, and calls back into
-//! `process`/`param_changed` from it with its own lock held. Nothing
-//! here touches the daemon's calloop pump, and the only value crossing
-//! back is a cursor position, handed over through the caller's sink
-//! (which the daemon backs with a calloop channel).
+//! **Cost of dlopen.**
+//! Each `spa_pod_builder_*` helper is a `static inline` function in a header.
+//! The library does not export these helpers, so dlopen cannot load them.
+//! [`super::pod`] serializes the format handshake without these helpers.
+//! The other calls use FFI with the stable PipeWire ABI.
+//! The local structs match `struct spa_buffer`, `struct spa_data`, `struct spa_chunk`,
+//! `struct spa_meta`, `struct pw_buffer`, and `struct pw_stream_events` version 2.
+//! PipeWire includes these structs in its ABI.
 //!
-//! **Power.** The stream stays active for as long as the backend
-//! lives, because the cursor ladder's rung 2 reads the cursor off it
-//! and a paused stream has no cursor. That is the portal tier's
-//! standing cost and it is why wlr-screencopy stays the primary rung
-//! wherever it exists. Our own per-frame cost is a pointer swap: see
-//! [`super::frame`].
+//! **Thread model.** `pw_thread_loop` provides the dedicated PipeWire thread.
+//! PipeWire starts this thread and calls `process` and `param_changed` while it holds the loop lock.
+//! This module does not use the daemon's calloop pump.
+//! The sink returns only a cursor position to the caller.
+//! The daemon backs this sink with a calloop channel.
+//!
+//! **Power use.** The stream stays active while the Capture backend exists.
+//! The second cursor ladder rung reads cursor data from this stream.
+//! A paused stream has no cursor data.
+//! This constant stream cost keeps wlr-screencopy as the primary rung where it exists.
+//! This module swaps one pointer for each frame. See [`super::frame`].
 
 use super::frame::{FrameStore, Shape};
 use super::pod;
@@ -42,26 +42,26 @@ use libloading::Library;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::sync::{Arc, Mutex};
 
-/// The soname to dlopen. Versioned on purpose: `libpipewire-0.3.so`
-/// is the `-dev` symlink, which is exactly the file we are avoiding
-/// needing.
+/// The versioned soname for dlopen.
+///
+/// `libpipewire-0.3.so` is the `-dev` symlink. This module does not need that symlink.
 pub const SONAME: &str = "libpipewire-0.3.so.0";
 
 /// `enum pw_direction`.
 const DIRECTION_INPUT: c_int = 0;
 
-/// `enum pw_stream_flags` bits we use.
+/// Bit values from `enum pw_stream_flags` that this module uses.
 const FLAG_AUTOCONNECT: c_int = 1 << 0;
 const FLAG_MAP_BUFFERS: c_int = 1 << 2;
 
-/// `enum pw_stream_state`.
+/// Values from `enum pw_stream_state`.
 const STATE_ERROR: c_int = -1;
 const STATE_UNCONNECTED: c_int = 0;
 const STATE_CONNECTING: c_int = 1;
 const STATE_PAUSED: c_int = 2;
 const STATE_STREAMING: c_int = 3;
 
-/// `sizeof(struct spa_meta_region)`: a point and a rectangle.
+/// The size of `struct spa_meta_region`, which stores a point and a rectangle.
 const META_REGION_SIZE: usize = 16;
 
 // ------------------------------------------------------------- C structs
@@ -134,8 +134,7 @@ struct SpaMetaCursor {
     bitmap_offset: u32,
 }
 
-/// `struct spa_meta_region`: an entry with a zero dimension ends the
-/// damage array.
+/// `struct spa_meta_region` uses a zero dimension to end the damage array.
 #[repr(C)]
 struct SpaMetaRegion {
     x: i32,
@@ -144,10 +143,9 @@ struct SpaMetaRegion {
     height: u32,
 }
 
-/// `struct pw_stream_events`, `PW_VERSION_STREAM_EVENTS == 2`.
+/// Mirrors `struct pw_stream_events` with `PW_VERSION_STREAM_EVENTS == 2`.
 ///
-/// The whole table must be present and in order even though only four
-/// entries are filled: PipeWire indexes it by field, not by name.
+/// Keep the complete table in this order. PipeWire reads each field by position, not by name.
 #[repr(C)]
 struct PwStreamEvents {
     version: u32,
@@ -181,12 +179,10 @@ static EVENTS: PwStreamEvents = PwStreamEvents {
 
 // ------------------------------------------------------------------ lib
 
-/// The symbols this backend needs, resolved once.
+/// Stores the PipeWire symbols that this Capture backend resolves once.
 ///
-/// Held as bare function pointers rather than `libloading::Symbol`s so
-/// the C callbacks - which get nothing but a `void *data` - can call
-/// them. `_library` keeps the mapping alive for exactly as long as the
-/// pointers are reachable.
+/// C callbacks receive only a `void *data` pointer, so this struct stores bare function
+/// pointers. `_library` keeps the symbols valid while the module uses these pointers.
 #[allow(clippy::type_complexity)]
 pub struct Lib {
     _library: Library,
@@ -217,8 +213,8 @@ pub struct Lib {
 
 macro_rules! symbol {
     ($lib:expr, $name:literal) => {
-        // SAFETY: the names and signatures are PipeWire's public ABI,
-        // transcribed from <pipewire/stream.h> and <pipewire/core.h>.
+        // SAFETY: The names and signatures match the public PipeWire ABI in
+        // <pipewire/stream.h> and <pipewire/core.h>.
         unsafe {
             *$lib
                 .get(concat!($name, "\0").as_bytes())
@@ -228,14 +224,13 @@ macro_rules! symbol {
 }
 
 impl Lib {
-    /// dlopen PipeWire and resolve everything up front.
+    /// Opens PipeWire with dlopen and resolves every symbol that this module needs.
     ///
-    /// Every failure here is "this rung is not installed", which the
-    /// caller turns into a named channel state rather than an exit.
+    /// Each failure means that the rung is unavailable. The caller records a named channel
+    /// state, so the daemon stays alive.
     pub fn open() -> Result<Arc<Lib>> {
-        // SAFETY: dlopen of a versioned system soname. PipeWire's
-        // library initialiser is `pw_init`, called explicitly below;
-        // loading it runs no user code.
+        // SAFETY: The versioned soname identifies the system PipeWire library.
+        // `pw_init` starts the library after dlopen. dlopen does not run user code.
         let library = unsafe { Library::new(SONAME) }
             .with_context(|| format!("loading {SONAME} (install the PipeWire runtime)"))?;
         let lib = Lib {
@@ -262,8 +257,8 @@ impl Lib {
             stream_queue_buffer: symbol!(library, "pw_stream_queue_buffer"),
             _library: library,
         };
-        // SAFETY: `pw_init(NULL, NULL)` is the documented no-argument
-        // form; it is idempotent and refcounted inside PipeWire.
+        // SAFETY: PipeWire documents `pw_init(NULL, NULL)` as the no-argument form.
+        // PipeWire makes this call idempotent and reference-counted.
         unsafe { (lib.init)(std::ptr::null_mut(), std::ptr::null_mut()) };
         Ok(Arc::new(lib))
     }
@@ -271,18 +266,19 @@ impl Lib {
 
 // ------------------------------------------------------------ the stream
 
-/// Where a cursor sample goes. Stream buffer pixels; the caller knows
-/// which monitor the stream is and does the rest (`super::metadata`).
+/// Receives a cursor position in stream buffer pixels.
+///
+/// The caller knows the monitor and completes the conversion in `super::metadata`.
 pub type CursorSink = Box<dyn Fn(i32, i32) + Send + Sync>;
 
-/// What the stream is doing, for the channel status registry.
+/// Reports the current stream state to the channel status registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Health {
-    /// `pw_stream_state_as_string`, in our own words.
+    /// The local name of `pw_stream_state_as_string`.
     pub state: &'static str,
-    /// The message the last error carried, if any.
+    /// The message from the last error, if one exists.
     pub error: Option<String>,
-    /// The format was negotiated and frames can flow.
+    /// True after format negotiation succeeds and frames can flow.
     pub negotiated: bool,
 }
 
@@ -292,36 +288,37 @@ impl Default for Health {
     }
 }
 
-/// Everything the C callbacks reach. Boxed and never moved: its
-/// address is the `void *data` PipeWire holds.
+/// Holds the values that C callbacks can access.
+///
+/// The box keeps its address stable because PipeWire stores this address as `void *data`.
 struct StreamData {
     lib: Arc<Lib>,
-    /// Set before `pw_stream_connect`, so no callback can see null.
+    /// The field is set before `pw_stream_connect`, so callbacks never see a null pointer.
     stream: *mut c_void,
     store: Arc<FrameStore>,
     health: Arc<Mutex<Health>>,
     cursor: Option<CursorSink>,
-    /// Last cursor sample forwarded, so a still cursor on a 60 Hz
-    /// stream costs one comparison rather than 60 events a second.
+    /// The last cursor position that the sink received.
+    ///
+    /// An unchanged cursor needs one comparison instead of 60 events each second.
     last_cursor: Option<(i32, i32)>,
-    /// The negotiated format, once `param_changed` has fixated one.
+    /// The format that `param_changed` fixated.
     shape: Option<Shape>,
-    /// Space for `struct spa_hook` (six pointers). Zeroed; PipeWire
-    /// owns the contents and never reallocates it.
+    /// Space for `struct spa_hook`, which has six pointers.
+    ///
+    /// PipeWire owns this zeroed space and does not reallocate it.
     hook: [u64; 8],
 }
 
-/// The portal's PipeWire connection: one thread loop, one context, one
-/// core, for as long as the grant lasts.
+/// Holds one PipeWire connection for the life of a portal grant.
 ///
-/// Deliberately separate from [`Stream`], and the reason is the file
-/// descriptor. `pw_context_connect_fd` documents that "the socket will
-/// be closed automatically on disconnect or error", so the core owns
-/// the fd `OpenPipeWireRemote` handed over - and a second core could
-/// not simply dup it, because two protocol clients multiplexing one
-/// socket is not a thing. Crossing to another monitor therefore swaps
-/// the *stream* and keeps the connection, which is also the cheaper
-/// half of the operation.
+/// The connection contains one thread loop, one context, and one core.
+/// [`Stream`] is separate because the core owns the file descriptor.
+/// `pw_context_connect_fd` transfers ownership of the `fd` to the core.
+/// A second core cannot duplicate the connection.
+/// Two protocol clients cannot share one socket.
+/// A monitor change replaces the *stream* but keeps the connection.
+/// This replacement costs less than a new connection.
 pub struct Remote {
     lib: Arc<Lib>,
     thread_loop: *mut c_void,
@@ -329,22 +326,21 @@ pub struct Remote {
     core: *mut c_void,
 }
 
-// SAFETY: every PipeWire object below is touched only under
-// `pw_thread_loop_lock`, which the methods here take and the callbacks
-// already hold.
+// SAFETY: Each method takes `pw_thread_loop_lock` before it accesses a PipeWire object.
+// Each callback already holds the lock.
 unsafe impl Send for Remote {}
-// SAFETY: as above - the loop lock is the synchronisation.
+// SAFETY: The same loop lock permits shared access.
 unsafe impl Sync for Remote {}
 
 impl Remote {
-    /// Connect to the remote `fd` names, taking ownership of it.
+    /// Connects to the PipeWire remote that `fd` identifies and takes ownership of `fd`.
     pub fn connect(lib: Arc<Lib>, fd: std::os::fd::OwnedFd) -> Result<Arc<Remote>> {
         use std::os::fd::IntoRawFd;
 
         let name = CString::new("chibipop-portal").expect("a literal with no nul");
-        // SAFETY: PipeWire's documented constructor sequence; every
-        // result is null-checked before it is used, and each failure
-        // path tears down exactly what had been built.
+        // SAFETY: PipeWire documents this constructor sequence.
+        // The code checks each result for null before use.
+        // Each failure path tears down every object that it created.
         unsafe {
             let thread_loop = (lib.thread_loop_new)(name.as_ptr(), std::ptr::null());
             anyhow::ensure!(!thread_loop.is_null(), "pw_thread_loop_new failed");
@@ -359,8 +355,7 @@ impl Remote {
             );
 
             (lib.thread_loop_lock)(thread_loop);
-            // The fd goes in and does not come back: the core closes it
-            // on disconnect, and on failure too.
+            // The core takes ownership of the fd. It closes the fd on disconnect or failure.
             let core =
                 (lib.context_connect_fd)(half.context, fd.into_raw_fd(), std::ptr::null_mut(), 0);
             (lib.thread_loop_unlock)(thread_loop);
@@ -378,10 +373,9 @@ impl Remote {
 
 impl Drop for Remote {
     fn drop(&mut self) {
-        // SAFETY: stopping the loop first means no callback can be
-        // running while the objects go away. Every stream is gone by
-        // now: a `Stream` holds an `Arc<Remote>`, so this cannot run
-        // while one is alive.
+        // SAFETY: Stop the loop before you destroy objects, so no callback can run.
+        // No stream exists here because each Stream holds an `Arc<Remote>`.
+        // Therefore, this drop call cannot run while a stream remains alive.
         unsafe {
             (self.lib.thread_loop_stop)(self.thread_loop);
             (self.lib.core_disconnect)(self.core);
@@ -391,7 +385,7 @@ impl Drop for Remote {
     }
 }
 
-/// Unwinds a half-built [`Remote`] on `connect`'s error paths.
+/// Releases a partially built [`Remote`] after `connect` fails.
 struct Half<'a> {
     lib: &'a Lib,
     thread_loop: *mut c_void,
@@ -400,9 +394,9 @@ struct Half<'a> {
 
 impl Drop for Half<'_> {
     fn drop(&mut self) {
-        // SAFETY: only ever holds objects `Remote::connect` created and
-        // has not handed over. `pw_thread_loop_stop` on a loop that was
-        // never started is a no-op inside PipeWire.
+        // SAFETY: This value holds only objects that `Remote::connect` created.
+        // The code has not transferred these objects to `Remote`.
+        // PipeWire treats `pw_thread_loop_stop` on an unstarted loop as a no-op.
         unsafe {
             (self.lib.thread_loop_stop)(self.thread_loop);
             if !self.context.is_null() {
@@ -413,23 +407,23 @@ impl Drop for Half<'_> {
     }
 }
 
-/// One connected capture stream on a [`Remote`].
+/// A connected capture stream on a [`Remote`].
 pub struct Stream {
     remote: Arc<Remote>,
     stream: *mut c_void,
-    /// Boxed so the address handed to C stays put; dropped last.
+    /// The box keeps the address given to C stable and drops after the stream.
     data: Box<StreamData>,
     store: Arc<FrameStore>,
     health: Arc<Mutex<Health>>,
     node_id: u32,
 }
 
-// SAFETY: the stream is only ever touched under the remote's loop
-// lock, which `Stream`'s own methods take and the callbacks hold.
+// SAFETY: Access the stream only under the remote's loop lock.
+// Stream methods and callbacks acquire or hold this lock.
 unsafe impl Send for Stream {}
 
 impl Stream {
-    /// Connect to `node_id` on an already-open portal remote.
+    /// Connects to `node_id` on an already open portal remote.
     pub fn connect(
         remote: &Arc<Remote>,
         node_id: u32,
@@ -440,10 +434,9 @@ impl Stream {
         let health = Arc::new(Mutex::new(Health::default()));
         let name = CString::new("chibipop-capture").expect("a literal with no nul");
 
-        // SAFETY: all of it runs under the loop lock, which is where
-        // `pw_stream_*` must be called from off the loop thread. Every
-        // pointer is null-checked before use and the failure path
-        // destroys the stream before releasing the lock.
+        // SAFETY: The code calls `pw_stream_*` off the loop thread under the loop lock.
+        // The code checks every pointer before use.
+        // On failure, it destroys the stream before it releases the lock.
         unsafe {
             (lib.thread_loop_lock)(remote.thread_loop);
             let props = capture_properties(&lib);
@@ -488,17 +481,17 @@ impl Stream {
         }
     }
 
-    /// The node this stream is reading, i.e. which monitor.
+    /// The node that this stream reads. The node identifies the monitor.
     pub fn node_id(&self) -> u32 {
         self.node_id
     }
 
-    /// The shared newest frame.
+    /// The shared frame with the newest pixels.
     pub fn store(&self) -> &Arc<FrameStore> {
         &self.store
     }
 
-    /// What the stream is doing right now.
+    /// The current stream state.
     pub fn health(&self) -> Health {
         self.health.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -506,30 +499,29 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        // SAFETY: destroying under the loop lock is what guarantees no
-        // callback is mid-flight when `data` - which owns the hook the
-        // stream points at - goes away with this struct.
+        // SAFETY: Destroy the stream under the loop lock.
+        // No callback can access `data` after the stream releases its hook.
+        // The `data` field owns the hook that the stream uses.
         unsafe {
             (self.remote.lib.thread_loop_lock)(self.remote.thread_loop);
             (self.remote.lib.stream_disconnect)(self.stream);
             (self.remote.lib.stream_destroy)(self.stream);
             (self.remote.lib.thread_loop_unlock)(self.remote.thread_loop);
         }
-        // The buffers this stream mapped are gone; forget the parked
-        // frame so nothing can crop out of a dead mapping.
+        // The stream has released its mapped buffers.
+        // Clear the parked frame so no crop uses an invalid mapping.
         self.store.clear();
         let _ = &self.data;
     }
 }
 
-/// `media.*` hints so the graph places us as a screen capture sink.
+/// The `media.*` hints tell the graph to place this stream as a screen capture sink.
 ///
 /// # Safety
-/// Calls into the loaded library; the returned properties are owned by
-/// the stream that receives them.
+/// This function calls the loaded library. The stream that receives the properties owns them.
 unsafe fn capture_properties(lib: &Lib) -> *mut c_void {
-    // Keys and values must outlive the `pw_properties_new_dict` call;
-    // PipeWire copies them.
+    // Keep keys and values alive during the `pw_properties_new_dict` call.
+    // PipeWire copies the keys and values.
     let pairs = [
         (c"media.type", c"Video"),
         (c"media.category", c"Capture"),
@@ -557,25 +549,25 @@ fn state_name(state: c_int) -> &'static str {
     }
 }
 
-/// PipeWire hands us `void *data`; it is always the `StreamData` we
-/// registered, boxed and never moved.
+/// PipeWire gives this function `void *data`. The pointer always identifies the boxed
+/// [`StreamData`] value that this module registered and never moves.
 ///
 /// # Safety
-/// Only called from the C callbacks below, with the pointer PipeWire
-/// was given in `pw_stream_add_listener`.
+/// Call this function only from the C callbacks below.
+/// PipeWire must pass the pointer registered with `pw_stream_add_listener`.
 unsafe fn data_of<'a>(data: *mut c_void) -> Option<&'a mut StreamData> {
-    // SAFETY: the caller's contract - PipeWire hands back the very
-    // pointer it was registered with, which is a live boxed StreamData.
+    // SAFETY: The caller guarantees that PipeWire returns the registered pointer.
+    // The pointer identifies a live boxed `StreamData` value.
     (!data.is_null()).then(|| unsafe { &mut *(data as *mut StreamData) })
 }
 
 extern "C" fn on_state_changed(data: *mut c_void, _old: c_int, new: c_int, error: *const c_char) {
-    // SAFETY: see `data_of`.
+    // SAFETY: `data_of` defines this pointer contract.
     let Some(sd) = (unsafe { data_of(data) }) else { return };
     let message = if error.is_null() {
         None
     } else {
-        // SAFETY: PipeWire passes a nul-terminated message it owns.
+        // SAFETY: PipeWire passes a nul-terminated message that it owns.
         Some(unsafe { std::ffi::CStr::from_ptr(error) }.to_string_lossy().into_owned())
     };
     let mut health = sd.health.lock().unwrap_or_else(|e| e.into_inner());
@@ -588,10 +580,9 @@ extern "C" fn on_state_changed(data: *mut c_void, _old: c_int, new: c_int, error
     }
 }
 
-/// The format handshake: fixate, then say what buffers and metadata
-/// that format needs.
+/// Handles the format handshake. It reads the fixated format and requests its buffers and metadata.
 extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const u8) {
-    // SAFETY: see `data_of`.
+    // SAFETY: `data_of` defines this pointer contract.
     let Some(sd) = (unsafe { data_of(data) }) else { return };
     if id != pod::PARAM_FORMAT {
         return;
@@ -601,14 +592,13 @@ extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const u8) {
         sd.health.lock().unwrap_or_else(|e| e.into_inner()).negotiated = false;
         let held = sd.store.clear();
         if !held.is_null() {
-            // SAFETY: a buffer this stream dequeued, handed straight back.
+            // SAFETY: The stream dequeued this buffer and queues it again here.
             unsafe { (sd.lib.stream_queue_buffer)(sd.stream, held as *mut PwBuffer) };
         }
         return;
     }
-    // SAFETY: a `struct spa_pod`: `u32 size` of the body, then `u32
-    // type`, then `size` bytes. Reading the header first is the only
-    // way to know how much of it there is.
+    // SAFETY: A `struct spa_pod` starts with `u32 size` for the body, then `u32 type`, and
+    // then `size` body bytes. Read the header first because its size field gives the body length.
     let bytes = unsafe {
         let size = std::ptr::read_unaligned(param as *const u32) as usize;
         std::slice::from_raw_parts(param, 8 + size)
@@ -635,29 +625,28 @@ extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const u8) {
         (META_REGION_SIZE * 16) as i32,
     );
     let params = [buffers.as_ptr(), header.as_ptr(), cursor.as_ptr(), damage.as_ptr()];
-    // SAFETY: called from the loop thread with the loop lock held,
-    // which is where `pw_stream_update_params` must be called from.
+    // SAFETY: This callback runs on the loop thread with the loop lock held.
+    // `pw_stream_update_params` needs that lock.
     unsafe { (sd.lib.stream_update_params)(sd.stream, params.as_ptr(), params.len() as u32) };
     sd.health.lock().unwrap_or_else(|e| e.into_inner()).negotiated = true;
 }
 
 extern "C" fn on_remove_buffer(data: *mut c_void, buffer: *mut PwBuffer) {
-    // SAFETY: see `data_of`.
+    // SAFETY: `data_of` defines this pointer contract.
     let Some(sd) = (unsafe { data_of(data) }) else { return };
-    // If the server is reclaiming the frame we parked, drop it before
-    // it is unmapped; nothing may crop out of it afterwards.
+    // If the server reclaims the parked frame, release it before the server unmaps it.
+    // No later crop can use the unmapped frame.
     sd.store.release(buffer as *mut c_void);
 }
 
-/// One graph cycle: take the newest buffer, park it, recycle the rest.
+/// Processes one graph cycle. It parks the newest buffer and returns the other buffers.
 extern "C" fn on_process(data: *mut c_void) {
-    // SAFETY: see `data_of`.
+    // SAFETY: `data_of` defines this pointer contract.
     let Some(sd) = (unsafe { data_of(data) }) else { return };
-    // SAFETY: dequeue/queue are RT-safe and this is the loop thread.
+    // SAFETY: The loop thread calls these RT-safe dequeue and queue operations.
     unsafe {
-        // Drain: a consumer that reads one buffer per cycle falls
-        // behind a compositor that produces several, and a hover wants
-        // the newest pixels, not the oldest.
+        // Drain the queue because a compositor can produce several buffers per cycle.
+        // The hover path needs the newest pixels, not the oldest.
         let mut newest: *mut PwBuffer = std::ptr::null_mut();
         loop {
             let next = (sd.lib.stream_dequeue_buffer)(sd.stream);
@@ -678,7 +667,7 @@ extern "C" fn on_process(data: *mut c_void) {
                     (sd.lib.stream_queue_buffer)(sd.stream, displaced as *mut PwBuffer);
                 }
             }
-            // Nothing usable in it: straight back to the pool.
+            // Return a buffer with no usable pixels to the pool.
             None => {
                 (sd.lib.stream_queue_buffer)(sd.stream, newest);
             }
@@ -686,15 +675,14 @@ extern "C" fn on_process(data: *mut c_void) {
     }
 }
 
-/// Inspect one buffer and park it. `None` when it carries no pixels.
+/// Inspects one buffer and parks it. Returns `None` when the buffer has no pixels.
 ///
 /// # Safety
-/// `buffer` must be a buffer this stream just dequeued.
+/// `buffer` must be a buffer that the stream dequeued.
 unsafe fn park(sd: &mut StreamData, buffer: *mut PwBuffer) -> Option<*mut c_void> {
     let shape = sd.shape?;
-    // SAFETY: the caller's contract - `buffer` is a live buffer this
-    // stream dequeued, so its `spa_buffer` and the data/chunk arrays it
-    // points at are PipeWire's and valid for this cycle.
+    // SAFETY: The caller passes a live buffer that this stream dequeued.
+    // Its `spa_buffer`, data, and chunk arrays belong to PipeWire and stay valid for this cycle.
     let (base, len, shape, changed, cursor) = unsafe {
         let spa = (*buffer).buffer;
         if spa.is_null() || (*spa).n_datas == 0 || (*spa).datas.is_null() {
@@ -715,7 +703,7 @@ unsafe fn park(sd: &mut StreamData, buffer: *mut PwBuffer) -> Option<*mut c_void
             return None;
         }
         let shape = Shape { stride: chunk.stride, ..shape };
-        // Every row must fit, or the crop would read past the mapping.
+        // Every row must fit so the crop never reads past the mapping.
         if i64::from(shape.h) * i64::from(shape.stride) > len as i64 {
             return None;
         }
@@ -729,25 +717,24 @@ unsafe fn park(sd: &mut StreamData, buffer: *mut PwBuffer) -> Option<*mut c_void
             sink(pos.0, pos.1);
         }
     }
-    // SAFETY: `base`/`len` describe the mapped pages of the buffer we
-    // are parking, which stay mapped until it is released or displaced.
+    // SAFETY: `base` and `len` describe mapped pages for this parked buffer.
+    // The pages stay mapped until PipeWire releases or displaces the buffer.
     Some(unsafe { sd.store.accept(buffer as *mut c_void, base, len, shape, changed) })
 }
 
-/// Read the two metadata blocks that matter: was anything damaged, and
-/// where is the cursor.
+/// Reads the two metadata blocks that matter: damage status and cursor position.
 ///
-/// A buffer with no `SPA_META_VideoDamage` reads as damaged, because
-/// "we cannot tell" must never be reported as "nothing changed".
+/// A buffer without `SPA_META_VideoDamage` counts as damaged.
+/// The code must not report "we cannot tell" as "nothing changed".
 ///
 /// # Safety
 /// `spa` must be a live `struct spa_buffer` from a dequeued buffer.
 unsafe fn inspect_metas(spa: *const SpaBuffer) -> (bool, Option<(i32, i32)>) {
     let mut changed = true;
     let mut cursor = None;
-    // SAFETY: the caller's contract - `spa` is a live `spa_buffer`, so
-    // `metas`/`n_metas` describe an array PipeWire owns for this cycle
-    // and each `meta.data` points at `meta.size` readable bytes.
+    // SAFETY: The caller passes a live `spa_buffer`.
+    // PipeWire owns the meta array, and each `meta.data` region stays readable for
+    // `meta.size` bytes during this cycle.
     unsafe {
         if (*spa).metas.is_null() {
             return (changed, cursor);
@@ -761,9 +748,8 @@ unsafe fn inspect_metas(spa: *const SpaBuffer) -> (bool, Option<(i32, i32)>) {
                 pod::META_VIDEO_DAMAGE => {
                     let n = (meta.size as usize) / META_REGION_SIZE;
                     let regions = std::slice::from_raw_parts(meta.data as *const SpaMetaRegion, n);
-                    // An entry with a zero dimension ends the array, so
-                    // a first entry that is already invalid is an
-                    // explicit "this recomposite moved nothing".
+                    // A zero dimension ends the array.
+                    // Therefore, a zero-sized first entry means "this recomposite moved nothing".
                     changed = regions.first().is_some_and(|r| r.width != 0 && r.height != 0);
                 }
                 pod::META_CURSOR => {
@@ -771,9 +757,9 @@ unsafe fn inspect_metas(spa: *const SpaBuffer) -> (bool, Option<(i32, i32)>) {
                         continue;
                     }
                     let c = &*(meta.data as *const SpaMetaCursor);
-                    // id 0 means "no new cursor data"; a stale position
-                    // is worse than none (the cursor rung must not drag
-                    // hover to wherever the pointer last was).
+                    // `id` 0 means "no new cursor data".
+                    // Ignore a stale position because the cursor rung must not move hover to
+                    // the last pointer position.
                     if c.id != 0 {
                         cursor = Some((c.x, c.y));
                     }
@@ -789,9 +775,9 @@ unsafe fn inspect_metas(spa: *const SpaBuffer) -> (bool, Option<(i32, i32)>) {
 mod tests {
     use super::*;
 
-    /// The mirrored C structs are ABI, and getting one wrong is a
-    /// silent misread of somebody else's memory. Pin the layouts that
-    /// the buffer walk indexes into.
+    /// The mirrored C structs define the ABI.
+    /// One wrong field causes the buffer walk to read the wrong memory.
+    /// Pin the layouts that the buffer walk indexes.
     #[test]
     fn the_mirrored_c_structs_have_the_abi_layout() {
         assert_eq!(16, std::mem::size_of::<SpaChunk>());
@@ -801,18 +787,18 @@ mod tests {
         assert_eq!(28, std::mem::size_of::<SpaMetaCursor>());
         assert_eq!(META_REGION_SIZE, std::mem::size_of::<SpaMetaRegion>());
         assert_eq!(pod::META_CURSOR_SIZE as usize, std::mem::size_of::<SpaMetaCursor>());
-        // `struct pw_buffer` starts with the spa buffer pointer, which
-        // is the only field `park` reads.
+        // `struct pw_buffer` starts with the spa buffer pointer.
+        // `park` reads this field only.
         assert_eq!(0, std::mem::offset_of!(PwBuffer, buffer));
     }
 
-    /// `PW_VERSION_STREAM_EVENTS` is 2 and the table is indexed by
-    /// position: a missing entry shifts every callback after it.
+    /// `PW_VERSION_STREAM_EVENTS` is 2.
+    /// PipeWire indexes this table by position, so a missing entry shifts every later callback.
     #[test]
     fn the_event_table_is_version_two_and_complete() {
         assert_eq!(2, EVENTS.version);
-        // The version word plus its padding is one pointer's worth,
-        // then eleven callbacks: 96 bytes on a 64-bit ABI.
+        // The version word and its padding use one pointer's space.
+        // Eleven callbacks then use 96 bytes on a 64-bit ABI.
         assert_eq!(
             std::mem::size_of::<usize>() * 12,
             std::mem::size_of::<PwStreamEvents>(),
@@ -822,8 +808,8 @@ mod tests {
         assert!(EVENTS.remove_buffer.is_some() && EVENTS.state_changed.is_some());
     }
 
-    /// `struct spa_hook` is six pointers; the reserved space must
-    /// cover it, or PipeWire writes past our box.
+    /// `struct spa_hook` has six pointers.
+    /// The reserved space must cover it because PipeWire can write past our box otherwise.
     #[test]
     fn the_hook_scratch_covers_a_spa_hook() {
         let hook: [u64; 8] = [0; 8];
@@ -838,13 +824,13 @@ mod tests {
         assert_eq!("unknown", state_name(42));
     }
 
-    /// An absent PipeWire is a rung that is not there, named in the
-    /// error - never a panic.
+    /// A missing PipeWire library makes the rung unavailable.
+    /// The error names the soname. The code does not panic.
     #[test]
     fn a_missing_library_is_an_error_naming_the_soname() {
-        // The real library may well be installed on a dev box, so this
-        // asserts the message shape through the same context the
-        // failure path uses rather than forcing an absence.
+        // A development machine can have the real library.
+        // Test the message shape through the same context as the failure path.
+        // Do not force the library to be absent.
         let message = format!("loading {SONAME} (install the PipeWire runtime)");
         assert!(message.contains("libpipewire-0.3.so.0"), "{message}");
     }

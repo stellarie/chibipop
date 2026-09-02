@@ -1,4 +1,4 @@
-//! Region selection overlay.
+//! The Region selector lets the user draw a rectangle on the virtual desktop.
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::input::hooks::Hooks;
@@ -14,13 +14,13 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Shortest drag that counts, px.
+/// Minimum width or height for a valid drag, in physical pixels.
 const MIN_DRAG_PX: i32 = 5;
-/// Dim fill's alpha, 0-255.
+/// Alpha value for the dim fill, from 0 through 255.
 const DIM_ALPHA: u8 = 102;
-/// Selection frame thickness, px.
+/// Border width for the selection frame, in physical pixels.
 const BORDER_PX: i32 = 2;
-/// VK_ESCAPE.
+/// Virtual-key code for `VK_ESCAPE`.
 const VK_ESCAPE: usize = 0x1B;
 
 fn class_name() -> PCWSTR {
@@ -34,7 +34,7 @@ thread_local! {
     static PAINT_CTX: RefCell<Option<PaintCtx>> = const { RefCell::new(None) };
 }
 
-/// Two drag points as a rect.
+/// Return the smallest `PhysRect` that contains both drag points.
 fn normalized_rect(a: PhysPoint, b: PhysPoint) -> PhysRect {
     PhysRect {
         x: a.x.min(b.x),
@@ -44,14 +44,14 @@ fn normalized_rect(a: PhysPoint, b: PhysPoint) -> PhysRect {
     }
 }
 
-/// Drag must clear `MIN_DRAG_PX`.
+/// Return true when either drag dimension reaches `MIN_DRAG_PX`.
 fn meets_drag_threshold(r: PhysRect) -> bool {
     r.w >= MIN_DRAG_PX || r.h >= MIN_DRAG_PX
 }
 
-/// Virtual desktop: (x, y, w, h).
+/// Return the virtual desktop as `(x, y, w, h)` coordinates and dimensions.
 fn virtual_screen() -> (i32, i32, i32, i32) {
-    // SAFETY: `GetSystemMetrics` has no preconditions.
+    // SAFETY: `GetSystemMetrics` accepts these metric indexes without other preconditions.
     unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -62,7 +62,7 @@ fn virtual_screen() -> (i32, i32, i32, i32) {
     }
 }
 
-/// Clears alpha in the selection.
+/// Clear alpha inside the selected rectangle after the function clips it to the virtual desktop.
 fn punch_through(pixels: &mut [u32], vw: i32, vh: i32, sel: PhysRect) {
     let top = sel.y.max(0);
     let bottom = (sel.y + sel.h).min(vh);
@@ -77,7 +77,7 @@ fn punch_through(pixels: &mut [u32], vw: i32, vh: i32, sel: PhysRect) {
     }
 }
 
-/// The `BORDER_PX`-thick frame.
+/// Draw the selection frame with a width of `BORDER_PX` pixels.
 fn paint_border(pixels: &mut [u32], vw: i32, vh: i32, sel: PhysRect) {
     let white = (0xFFu32 << 24) | 0x00FF_FFFF;
     let outer = sel.inflated(BORDER_PX, BORDER_PX);
@@ -107,52 +107,52 @@ fn paint_border(pixels: &mut [u32], vw: i32, vh: i32, sel: PhysRect) {
     }
 }
 
-/// Releases the screen DC.
+/// A screen device context that releases its handle when it drops.
 struct ScreenDc(HDC);
 
 impl Drop for ScreenDc {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `GetDC(None)` in
-        // `build_paint_ctx` and is released exactly once.
+        // SAFETY: `self.0` came from `GetDC(None)` in `build_paint_ctx`.
+        // This `Drop` implementation releases that handle exactly once.
         unsafe {
             ReleaseDC(None, self.0);
         }
     }
 }
 
-/// Deletes the memory DC.
+/// A memory device context that deletes its handle when it drops.
 struct MemDc(HDC);
 
 impl Drop for MemDc {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateCompatibleDC`
-        // in `build_paint_ctx`, deleted exactly once, after
-        // `PaintCtx::drop` has deselected its bitmap.
+        // SAFETY: `self.0` came from `CreateCompatibleDC` in `build_paint_ctx`.
+        // This `Drop` implementation deletes it once after `PaintCtx::drop`
+        // deselects its bitmap.
         unsafe {
             let _ = DeleteDC(self.0);
         }
     }
 }
 
-/// Deletes the DIB section.
+/// A DIB section that deletes its handle when it drops.
 struct Dib(HBITMAP);
 
 impl Drop for Dib {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateDIBSection` in
-        // `build_paint_ctx`, deleted exactly once, after
-        // `PaintCtx::drop` has deselected it.
+        // SAFETY: `self.0` came from `CreateDIBSection` in `build_paint_ctx`.
+        // This `Drop` implementation deletes it once after `PaintCtx::drop`
+        // deselects it.
         unsafe {
             let _ = DeleteObject(self.0.into());
         }
     }
 }
 
-/// The reusable paint buffer.
+/// A paint context that reuses one DIB for each overlay update.
 struct PaintCtx {
     screen: ScreenDc,
     mem: MemDc,
-    // Held for Drop, never read.
+    // Keep this value so `Dib::drop` releases the DIB.
     _dib: Dib,
     old: HGDIOBJ,
     bits: *mut u32,
@@ -164,14 +164,10 @@ struct PaintCtx {
 
 impl PaintCtx {
     fn fill(&self, selection: Option<(PhysPoint, PhysPoint)>) {
-        // SAFETY: `self.bits` was sized for `vw * vh` pixels
-        // by `CreateDIBSection` in `build_paint_ctx` and
-        // stays valid until `Dib::drop` deletes it, which
-        // outlives every call to `fill` (`PaintCtx` owns
-        // both and drops the buffer only after the last
-        // paint). Painting is single-threaded and
-        // sequential, so nothing else reads or writes this
-        // buffer while this call runs.
+        // SAFETY: `CreateDIBSection` gave `self.bits` space for `vw * vh` pixels.
+        // `PaintCtx` owns the DIB, so `Dib::drop` frees that space after the last `fill` call.
+        // The paint loop uses one thread and one call at a time, so no other code reads or
+        // writes this buffer.
         let pixels = unsafe {
             std::slice::from_raw_parts_mut(self.bits, self.vw as usize * self.vh as usize)
         };
@@ -199,11 +195,9 @@ impl PaintCtx {
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        // SAFETY: `self.screen.0` and `self.mem.0` are owned
-        // by this `PaintCtx` and live until `drop`; `mem.0`
-        // has the pixel-filled DIB selected into it for this
-        // whole call, which is what `UpdateLayeredWindow`
-        // requires of its source DC.
+        // SAFETY: `PaintCtx` owns `self.screen.0` and `self.mem.0` until `drop`.
+        // `self.mem.0` keeps the pixel-filled DIB selected for this call.
+        // `UpdateLayeredWindow` requires that DIB in its source DC.
         unsafe {
             let _ = UpdateLayeredWindow(
                 hwnd,
@@ -222,28 +216,23 @@ impl PaintCtx {
 
 impl Drop for PaintCtx {
     fn drop(&mut self) {
-        // SAFETY: `self.mem.0` is still live here - its own
-        // `Drop` runs only after this one returns. Restoring
-        // the old selection before `dib` and `mem` free
-        // themselves is what GDI requires before deleting a
-        // selected-into bitmap or its DC.
+        // SAFETY: `self.mem.0` remains valid here. Its `Drop` runs after this method returns.
+        // Restore the old object before `Dib` and `MemDc` drop. GDI requires this order before
+        // it deletes a bitmap selected into the DC.
         unsafe {
             SelectObject(self.mem.0, self.old);
         }
     }
 }
 
-/// Builds the DIB once for reuse.
+/// Build the DIB once for all overlay updates.
 fn build_paint_ctx() -> Result<PaintCtx> {
     let (vx, vy, vw, vh) = virtual_screen();
 
-    // SAFETY: `screen`/`mem`/`dib` are each a small RAII
-    // wrapper whose own `Drop` frees its handle, so an early
-    // `?` or `bail!` below cleans up whatever was already
-    // built; `CreateDIBSection`'s `bits` out-pointer is
-    // checked for null before `PaintCtx` stores it, and it
-    // stays valid for as long as `dib` does, which `PaintCtx`
-    // now owns.
+    // SAFETY: `ScreenDc`, `MemDc`, and `Dib` release their handles in `Drop`.
+    // An early `?` or `bail!` therefore releases every handle that this block creates.
+    // The code checks `CreateDIBSection`'s `bits` pointer before `PaintCtx` stores it.
+    // `PaintCtx` owns `Dib`, so the pointer stays valid until the context drops.
     unsafe {
         let screen = ScreenDc(GetDC(None));
         if screen.0.is_invalid() {
@@ -303,9 +292,8 @@ fn paint_overlay(hwnd: HWND, selection: Option<(PhysPoint, PhysPoint)>) {
 
 fn cursor_point() -> PhysPoint {
     let mut pt = POINT::default();
-    // SAFETY: `pt` is valid, writable stack storage for the
-    // duration of this call; `GetCursorPos` has no other
-    // preconditions.
+    // SAFETY: `pt` is writable stack storage that remains valid for this call.
+    // `GetCursorPos` has no other preconditions.
     unsafe {
         let _ = GetCursorPos(&mut pt);
     }
@@ -314,8 +302,8 @@ fn cursor_point() -> PhysPoint {
 
 fn on_lbuttondown(hwnd: HWND) {
     ANCHOR.set(Some(cursor_point()));
-    // SAFETY: `hwnd` is this window; `wndproc` gets it live
-    // from the OS for every message, including this one.
+    // SAFETY: `wndproc` receives `hwnd` from the OS for each message and passes it here.
+    // `hwnd` therefore identifies a live window.
     unsafe {
         SetCapture(hwnd);
     }
@@ -326,9 +314,9 @@ fn on_mousemove(hwnd: HWND) {
     paint_overlay(hwnd, Some((anchor, cursor_point())));
 }
 
-/// Commits a drag past the floor.
+/// Commit the drag when one dimension reaches the threshold.
 fn on_lbuttonup() {
-    // SAFETY: no preconditions.
+    // SAFETY: `ReleaseCapture` has no preconditions.
     let _ = unsafe { ReleaseCapture() };
     if let Some(anchor) = ANCHOR.get() {
         let r = normalized_rect(anchor, cursor_point());
@@ -345,9 +333,9 @@ fn on_cancel() {
     DONE.set(true);
 }
 
-/// Dispatches by message.
+/// Dispatch each window message to its handler.
 ///
-/// Unwinding here would be UB.
+/// A panic that crosses this system callback causes undefined behavior.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_LBUTTONDOWN => {
@@ -370,23 +358,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = catch_unwind(on_cancel);
             LRESULT(0)
         }
-        // SAFETY: `hwnd`/`msg`/`wp`/`lp` come from the OS
-        // for this callback and are valid for its duration.
+        // SAFETY: The OS supplies `hwnd`, `msg`, `wp`, and `lp` for this callback.
+        // These values stay valid for the callback duration.
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
 }
 
-/// Registers the class once.
+/// Register the window class once per process.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    // SAFETY: `wc` is fully initialised (`..Default` zeroes
-    // every field this module does not set); `lpfnWndProc`
-    // points to `wndproc`, a `'static extern "system" fn`
-    // valid for the process lifetime - what the OS requires.
+    // SAFETY: `..Default` initializes every `WNDCLASSEXW` field that this code does not set.
+    // `lpfnWndProc` points to the `'static extern "system" fn` `wndproc`.
+    // The callback remains valid for the process lifetime, as the OS requires.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -406,19 +393,18 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// The region-select overlay.
+/// A modal window that lets the user select a screen region.
 pub struct RegionSelection {
     hwnd: HWND,
 }
 
 impl RegionSelection {
-    /// Creates the window, hidden.
+    /// Create the selector window and leave it hidden.
     pub fn new() -> Result<Self> {
-        // SAFETY: mirrors `ui::window::Popup::create` -
-        // `hinstance` comes from `GetModuleHandleW(None)`,
-        // always valid for this process; `register_class`
-        // only ever registers one well-formed class;
-        // `CreateWindowExW`'s result is checked via `?`.
+        // SAFETY: This follows `ui::window::Popup::create`.
+        // `GetModuleHandleW(None)` supplies `hinstance`, which remains valid for this process.
+        // `register_class` registers one valid class.
+        // The `?` operator checks the `CreateWindowExW` result.
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
                 .context("GetModuleHandleW(None)")?
@@ -446,7 +432,7 @@ impl RegionSelection {
         }
     }
 
-    /// Shows it; blocks until done.
+    /// Show the selector and block until the user selects or cancels a region.
     pub fn run(&mut self) -> Option<PhysRect> {
         ANCHOR.set(None);
         RESULT.set(None);
@@ -463,8 +449,8 @@ impl RegionSelection {
 
         Hooks::set_selection_active(true);
         paint_overlay(self.hwnd, None);
-        // SAFETY: `self.hwnd` was created by `new` and is
-        // destroyed only in `Drop`, so it is valid here.
+        // SAFETY: `new` created `self.hwnd`, and `Drop` destroys it only after `run` returns.
+        // The handle is valid for these calls.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             let _ = SetForegroundWindow(self.hwnd);
@@ -472,20 +458,19 @@ impl RegionSelection {
 
         let mut msg = MSG::default();
         while !DONE.get() {
-            // SAFETY: `msg` is this loop's own stack storage.
+            // SAFETY: `msg` is writable stack storage owned by this loop.
             let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
             if got.0 <= 0 {
-                break; // 0 = WM_QUIT, -1 = error.
+                break; // `0` means `WM_QUIT`. `-1` means an error.
             }
-            // SAFETY: `msg` was just filled by `GetMessageW`.
+            // SAFETY: `GetMessageW` just filled `msg` before this block.
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
 
-        // SAFETY: same guarantee as above - `self.hwnd` is
-        // valid for `&self`'s lifetime.
+        // SAFETY: `Drop` destroys `self.hwnd` after this method returns, so it remains valid here.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -496,7 +481,7 @@ impl RegionSelection {
 }
 
 impl RegionSelection {
-    /// No window, just compiles.
+    /// Return a test value without a window.
     #[cfg(test)]
     pub(crate) fn dummy() -> Self {
         RegionSelection {
@@ -508,9 +493,8 @@ impl RegionSelection {
 impl Drop for RegionSelection {
     fn drop(&mut self) {
         if !self.hwnd.is_invalid() {
-            // SAFETY: `self.hwnd` was created in `new` and
-            // `drop` runs at most once, so this always frees
-            // a window this process still owns.
+            // SAFETY: `new` created `self.hwnd`, and `Drop` runs at most once.
+            // This call therefore destroys a window that this process still owns.
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
             }

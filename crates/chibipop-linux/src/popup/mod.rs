@@ -1,18 +1,21 @@
-//! The popup: one wlr-layer surface per output, painted by hand with
-//! tiny-skia and cosmic-text.
+//! The popup uses one wlr-layer surface per output.
+//! tiny-skia and cosmic-text paint the surface.
 //!
-//! Nothing here is a toolkit. SCTK drives the surface and its shm
-//! buffers ([`surface`]), core `layout` produces the measured
-//! [`PopupScene`], [`text`] measures and rasterizes the runs in it and
-//! [`paint`] fills everything else. The daemon owns one [`Popup`] and
-//! executes `Command::ShowPopup`/`HidePopup` against it; the placement
-//! it computes travels back as `Event::PopupPlaced`.
+//! This module is not a toolkit.
+//! SCTK drives the surface and its shm buffers ([`surface`]).
+//! Core `layout` creates the measured [`PopupScene`].
+//! [`text`] measures and rasterizes the runs in that scene.
+//! [`paint`] fills all other pixels.
+//! The daemon owns one [`Popup`].
+//! It applies `Command::ShowPopup` and `Command::HidePopup` to that popup.
+//! The placement result appears as `Event::PopupPlaced`.
 //!
-//! Physical pixels are authoritative all the way down: the scene is
-//! laid out at the output's *fractional* scale (`physical_theme`), the
-//! buffer is that many device pixels, and only the surface's own
-//! geometry - size, margins, `wp_viewport` destination - is derived
-//! back into logical units ([`place`]). Nothing latches the scale.
+//! Physical pixels remain authoritative throughout this path.
+//! The scene uses the output's *fractional* scale through `physical_theme`.
+//! The buffer uses that scale in device pixels.
+//! The surface converts only its own geometry to logical units through [`place`].
+//! That geometry includes size, margins, and `wp_viewport` destination.
+//! Nothing stores the scale for later use.
 
 mod demo;
 mod paint;
@@ -20,74 +23,71 @@ mod place;
 mod pointer;
 mod surface;
 mod text;
-// `media.rs` is the seventh file here and is deliberately *not* declared
-// from this module: the lib face owns it (`crate::lib.rs`, `#[path]`), so
-// its tests can link against a real built database. Reach it as
-// `chibipop_linux::media`.
+// `media.rs` is the seventh file in this module.
+// `popup/mod.rs` does not declare it.
+// The library entry point owns it (`crate::lib.rs`, `#[path]`), so its tests can
+// link against a built database.
+// Reach it as `chibipop_linux::media`.
 
 pub use demo::{canned, Demo};
 pub use place::{derive, Screen};
 pub use pointer::{frame as pointer_frame, Interaction, Step};
 pub use surface::{Placed, Popup, ShowRequest};
-/// The name half of the Japanese-font probe, for the settings font
-/// combo (ARCHITECTURE.md#settings-and-config). The popup itself asks
-/// the whole question through [`surface::Popup`]'s engine.
+/// Reexports the name half of the Japanese-font probe for the settings font
+/// combo (ARCHITECTURE.md#settings-and-config).
+/// The popup asks the full probe through [`surface::Popup`]'s engine.
 pub use text::jp_capable;
 
 use chibipop::ui::layout::StyledSpan;
 use chibipop::ui::theme::Theme;
 
-/// Panel opacity, matching Windows' `LWA_ALPHA` 230/255 exactly. The
-/// Linux panel alpha is this fixed constant. Per-pixel here, so the
-/// antialiased corners fade with it instead of being hard-clipped by a
-/// window region.
+/// The panel alpha matches Windows' `LWA_ALPHA` value of 230/255.
+/// Linux applies this fixed alpha to every pixel.
+/// Antialiased corners therefore fade instead of a window region that clips them.
 pub const PANEL_ALPHA: u8 = 230;
 
-/// One run of text to rasterize.
+/// Defines one text run for rasterization.
 ///
-/// The paint half of the text stack. Core's `TextMeasure` is the
-/// measure half; the same engine implements both, so a run is never
-/// wrapped one way and painted another.
+/// This is the paint half of the text stack.
+/// Core's `TextMeasure` is the measure half.
+/// The same engine implements both halves, so it wraps and paints a run the same way.
 ///
-/// It carries the same ordered styled spans the seam measured, not one
-/// string, so a paragraph holding bold and normal text paints in the
-/// wrap it was measured in (ARCHITECTURE.md#popup-and-measurement).
-/// Colour rides on each span, and `shifts` says how far up each one
-/// sits off its line's baseline - `verticalAlign`, already resolved by
-/// the scene.
+/// It carries the ordered styled spans that the seam measured, not one text value.
+/// A paragraph with bold and normal text therefore uses the measured wrap
+/// (ARCHITECTURE.md#popup-and-measurement).
+/// Each span carries its color.
+/// `shifts` gives the upward distance for each span from its line baseline.
+/// `verticalAlign` already resolves these offsets in the scene.
 #[derive(Debug, Clone, Copy)]
 pub struct DrawRun<'a> {
-    /// In reading order.
+    /// The spans appear in text order.
     pub spans: &'a [StyledSpan<'a>],
-    /// One per span, up positive.
-    /// Empty means every span sits on
-    /// its line's own baseline.
+    /// Stores one offset per span, with positive values above the baseline.
+    /// An empty slice means every span uses its line baseline.
     pub shifts: &'a [f32],
-    /// The wrap width the scene measured this run at.
+    /// Stores the wrap width that the scene measured for this run.
     pub max_w: f32,
-    /// Top-left of the wrap box, in buffer pixels.
+    /// Stores the wrap-box origin in buffer pixels.
     pub origin: (f32, f32),
 }
 
-/// What the painter needs from the text stack.
+/// Defines what the painter needs from the text stack.
 ///
-/// `TextMeasure` is the seam core owns; this adds the one thing a bin
-/// does with the same shaped run. It is a supertrait so the painter
-/// can measure a label it centres itself (the Anki slot) through the
-/// same borrow.
+/// `TextMeasure` is the seam that Core owns.
+/// This trait adds one operation that a bin uses with the same shaped run.
+/// It is a supertrait, so the painter can measure the Anki label that it centers
+/// through the same borrow.
 pub trait PanelText: chibipop::ui::layout::TextMeasure {
     /// Blend `run` into `target`, premultiplied.
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut tiny_skia::PixmapMut<'_>);
 }
 
-/// The theme in device pixels at `scale`.
+/// Returns the theme in device pixels at `scale`.
 ///
-/// Core layout carries one pixel space and no scale factor, so the
-/// scale enters here, once: every length the theme carries - all seven
-/// per-role font sizes, the padding, the corner radius, the rule and
-/// the border - is the theme's logical value multiplied out. Colours,
-/// weights, styles and the family are untouched: none of them is a
-/// length.
+/// Core layout uses one pixel space and no scale factor.
+/// This function applies the scale once to each theme length.
+/// It scales all seven per-role font sizes, the padding, corner radius, rule, and border.
+/// It does not change colors, weights, styles, or the family because none of them is a length.
 pub fn physical_theme(theme: &Theme, scale: f64) -> Theme {
     let s = scale as f32;
     Theme {
@@ -106,21 +106,20 @@ pub fn physical_theme(theme: &Theme, scale: f64) -> Theme {
     }
 }
 
-/// One `Dispatch` per interface and user-data pair, forwarding to the
-/// `Dispatch2` impl SCTK ships for that pair.
+/// Defines one `Dispatch` implementation for each interface and user-data pair.
+/// Each implementation forwards events to the `Dispatch2` implementation that SCTK
+/// provides for that pair.
 ///
-/// Why this instead of `delegate_dispatch2!`: SCTK 0.21's macro writes
-/// a *blanket* `Dispatch<I, U>` impl, which would collide with the
-/// hand-written impls the cursor channel already needs on this same
-/// state (`daemon::App`). One `Dispatch` per interface and user-data
-/// pair, each forwarding to SCTK's own `Dispatch2`, is the same code
-/// the macro generates - only enumerated, so the two halves of the
-/// daemon can share one Wayland queue. It lives in this module because
-/// both dispatch halves of the popup - the surface's and the
-/// pointer's - are written with it.
+/// This macro provides the form that `delegate_dispatch2!` cannot provide.
+/// SCTK 0.21's macro writes a *blanket* `Dispatch<I, U>` implementation.
+/// That implementation would collide with the hand-written implementations that
+/// the cursor channel needs on `daemon::App`.
+/// One implementation per pair matches the generated code and lets both popup
+/// dispatch paths share one Wayland queue.
+/// This module uses it for the surface path and the pointer path.
 ///
 /// The expansion site provides `App`, `Dispatch`, `Dispatch2`, `Proxy`,
-/// `Connection`, `QueueHandle` and `Arc`.
+/// `Connection`, `QueueHandle`, and `Arc`.
 macro_rules! forward {
     ($iface:ty, $udata:ty) => {
         impl Dispatch<$iface, $udata> for App {
@@ -164,16 +163,11 @@ mod tests {
         assert_eq!(base.font_name, phys.font_name);
     }
 
-    /// Every role's own size, and the
-    /// two hairlines the theme carries:
-    /// a length left logical here is a
-    /// length painted too small on a
-    /// scaled output.
+    /// Each role's font size and both theme hairlines need physical pixels.
+    /// A length that remains logical paints too small on a scaled output.
     #[test]
     fn the_physical_theme_scales_every_length_the_theme_carries() {
-        // Distinct values, so no field
-        // can pass by borrowing another
-        // role's number.
+        // Use distinct values so no field can reuse another role's number.
         let base = Theme {
             headword_size: 20.0,
             reading_size: 17.0,

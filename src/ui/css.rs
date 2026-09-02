@@ -1,17 +1,17 @@
-//! CSS ↔ Theme mapping.
+//! Convert between CSS text and Theme values.
 //!
-//! Windows-free by design.
+//! This module has no Windows dependency.
 
 use crate::ui::theme::Theme;
 
-/// One parse diagnostic.
+/// One diagnostic from the CSS parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CssError {
     pub line: usize,
     pub message: String,
 }
 
-/// Parsed property override.
+/// Parsed CSS properties that override Theme values.
 #[derive(Debug, Clone, PartialEq)]
 struct Property {
     color: Option<(u8, u8, u8)>,
@@ -43,7 +43,7 @@ impl Property {
     }
 }
 
-/// Known class selectors.
+/// CSS class selectors that this module supports.
 const SELECTORS: &[&str] = &[
     "popup",
     "headword",
@@ -56,7 +56,7 @@ const SELECTORS: &[&str] = &[
     "separator",
 ];
 
-/// Parse `#rrggbb` or `#rgb`.
+/// Parse a CSS color in `#rrggbb` or `#rgb` form.
 fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     let hex = s.strip_prefix('#')?;
     match hex.len() {
@@ -76,19 +76,19 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     }
 }
 
-/// Parse `12px` → 12.
+/// Parse a `12px` value as an `f32`.
 fn parse_px_f32(s: &str) -> Option<f32> {
     let num = s.strip_suffix("px")?;
     num.trim().parse().ok()
 }
 
-/// Parse `12px` → 12i32.
+/// Parse a `12px` value as an `i32`.
 fn parse_px_i32(s: &str) -> Option<i32> {
     let num = s.strip_suffix("px")?;
     num.trim().parse().ok()
 }
 
-/// Unquote `"Noto Sans JP"`.
+/// Parse a font family and remove quotes such as `"Noto Sans JP"`.
 fn parse_font_family(s: &str) -> Option<String> {
     let trimmed = s.trim();
     if let Some(inner) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
@@ -103,7 +103,8 @@ fn parse_font_family(s: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// "bold" → 700, "normal" → 400, or 100-900.
+/// Map "bold" to 700 and "normal" to 400.
+/// Accept integer values from 100 to 900.
 fn parse_font_weight(s: &str) -> Option<u16> {
     match s.trim() {
         "normal" => Some(400),
@@ -119,7 +120,7 @@ fn parse_font_weight(s: &str) -> Option<u16> {
     }
 }
 
-/// Parse one property value.
+/// Parse one CSS property value.
 fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), String> {
     match name {
         "color" | "background-color" | "border-color" => match parse_hex_color(value) {
@@ -168,7 +169,7 @@ fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), Str
     Ok(())
 }
 
-/// Strip `/* ... */` comments.
+/// Remove `/* ... */` comments from CSS text.
 fn strip_block_comments(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -190,9 +191,9 @@ fn strip_block_comments(input: &str) -> String {
     out
 }
 
-/// Parse CSS text into theme overrides.
+/// Parse CSS text and apply supported properties to a Theme.
 ///
-/// Returns errors per line.
+/// Return a diagnostic for each parse error.
 pub fn parse(css: &str, base: &mut Theme) -> Vec<CssError> {
     let mut errors = Vec::new();
     let cleaned = strip_block_comments(css);
@@ -277,7 +278,7 @@ pub fn parse(css: &str, base: &mut Theme) -> Vec<CssError> {
     errors
 }
 
-/// Apply text weight/style to theme.
+/// Apply text weight and italic style to a Theme.
 fn apply_text_style(prop: &Property, weight: &mut u16, italic: &mut bool) {
     if let Some(w) = prop.font_weight {
         *weight = w;
@@ -287,7 +288,7 @@ fn apply_text_style(prop: &Property, weight: &mut u16, italic: &mut bool) {
     }
 }
 
-/// Apply one parsed property.
+/// Apply one parsed CSS property to a Theme.
 fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
     match class {
         "popup" => match name {
@@ -415,7 +416,7 @@ fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
     }
 }
 
-/// Format a weight for CSS output.
+/// Format a text weight for CSS output.
 fn weight_str(w: u16) -> &'static str {
     match w {
         400 => "normal",
@@ -424,7 +425,7 @@ fn weight_str(w: u16) -> &'static str {
     }
 }
 
-/// Format a weight, with numeric fallback.
+/// Format a text weight. Use a number when no CSS name exists.
 fn weight_css(w: u16) -> String {
     let s = weight_str(w);
     if s.is_empty() {
@@ -434,7 +435,7 @@ fn weight_css(w: u16) -> String {
     }
 }
 
-/// Serialize a theme to CSS.
+/// Serialize a Theme as CSS text.
 pub fn to_css(theme: &Theme) -> String {
     let c = |rgb: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
     let style = |italic: bool| if italic { "italic" } else { "normal" };

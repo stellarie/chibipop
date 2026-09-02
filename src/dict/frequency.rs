@@ -1,47 +1,45 @@
-//! Reported frequencies, and the rule that reduces them to one rank.
+//! Reported frequencies and the rule that reduces them to one Frequency rank.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Term+reading key to rank.
+/// Maps a term and reading key to a Frequency rank.
 pub type FreqTable = HashMap<(String, Option<String>), i64>;
 
-/// One frequency dictionary's claims, under the name it goes by.
+/// One Dictionary's Reported frequencies and its name.
 ///
-/// The pair `dict::build::load_freqs` hands on: a reduction needs the tables
-/// in frequency-list order, and storing them needs to know which dictionary
-/// each one came from.
+/// `dict::build::load_freqs` returns this pair. A reduction needs tables in
+/// frequency-list order. Storage also needs the name of the Dictionary that
+/// supplied each table.
 pub struct FreqSource {
     pub name: String,
     pub table: FreqTable,
 }
 
-/// Does this archive supply the frequency role?
+/// Reports whether an archive supplies the frequency role.
 ///
-/// Its own `term_meta_bank_` rows and never its filename or its
-/// `index.json`: the heuristic this replaced asked whether the file was
-/// called something containing `Freq` and whether the index set
-/// `frequencyMode`, and neither can say what an archive contains
-/// (ARCHITECTURE.md#dictionary-and-lookup). The same shape
+/// Read `term_meta_bank_` rows. Do not read the filename or `index.json`.
+/// The old heuristic checked for `Freq` in the filename and `frequencyMode`
+/// in the index. Neither field identifies an archive role
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 /// [`crate::dict::pitch::supplies_pitch`] and
-/// [`crate::dict::archive::supplies_terms`] take.
+/// [`crate::dict::archive::supplies_terms`] use the same scan.
 ///
-/// Stops at the first `"freq"` row, so a frequency archive answers from the
-/// first row of its first bank and only one with meta banks holding no
-/// frequency at all is read whole.
+/// Stop at the first `"freq"` row. Read all meta banks only when no such row
+/// exists.
 ///
-/// `false` for an archive this build cannot open or whose banks it cannot
-/// parse - unreadable supplies no role.
+/// Return `false` when this build cannot open or parse the archive. An
+/// unreadable archive supplies no role.
 pub fn supplies_frequency(archive: &Path) -> bool {
     crate::dict::archive::any_meta_row(archive, is_freq_row).unwrap_or(false)
 }
 
-/// Is this row a frequency row?
+/// Returns true for a frequency row.
 fn is_freq_row(row: &serde_json::Value) -> bool {
     row.as_array().is_some_and(|row| row.len() >= 3 && row[1].as_str() == Some("freq"))
 }
 
-/// Rows to a rank table.
+/// Builds a `FreqTable` from rows.
 pub fn parse_freq_rows(rows: &[serde_json::Value]) -> FreqTable {
     let mut table = FreqTable::new();
     for row in rows {
@@ -50,7 +48,7 @@ pub fn parse_freq_rows(rows: &[serde_json::Value]) -> FreqTable {
     table
 }
 
-/// One row into a table.
+/// Merges one row into a `FreqTable`. The lowest rank for one key wins.
 pub fn merge_freq_row(table: &mut FreqTable, row: &serde_json::Value) {
     if !is_freq_row(row) {
         return;
@@ -70,7 +68,7 @@ pub fn merge_freq_row(table: &mut FreqTable, row: &serde_json::Value) {
     }
 }
 
-/// Rank for a term/reading.
+/// Returns the Frequency rank for a term and reading.
 pub fn lookup_freq(table: &FreqTable, term: &str, reading: Option<&str>) -> Option<i64> {
     if let Some(r) = reading.filter(|r| !r.is_empty()) {
         if let Some(&rank) = table.get(&(term.to_string(), Some(r.to_string()))) {
@@ -80,7 +78,7 @@ pub fn lookup_freq(table: &FreqTable, term: &str, reading: Option<&str>) -> Opti
     table.get(&(term.to_string(), None)).copied()
 }
 
-/// Reading and rank from a row.
+/// Gets the reading and rank from a row payload.
 fn extract_reading_and_rank(payload: &serde_json::Value) -> (Option<String>, Option<i64>) {
     if let Some(n) = payload.as_i64() {
         return (None, Some(n));
@@ -96,44 +94,41 @@ fn extract_reading_and_rank(payload: &serde_json::Value) -> (Option<String>, Opt
     (reading, rank)
 }
 
-// ---- many Reported frequencies into one Frequency rank ----
+// ---- reduce Reported frequencies to one Frequency rank ----
 
-/// The rule that reduces many Reported frequencies to one Frequency rank.
+/// Reduces the Reported frequencies for one headword to one Frequency rank.
 ///
-/// Applied over the ranks the **enabled** frequency dictionaries report for
-/// one headword, in the order the frequency list puts them in. A dictionary
-/// that does not have the headword contributes nothing at all - not a large
-/// rank, not a zero and not a vote - so a strategy is only ever handed the
-/// ranks that exist, and a headword no enabled dictionary ranks reduces to
-/// `None`. That `None` is the `NULL` in `term.freq` that leaves `score` on
-/// its `DEFAULT_FREQ` fallback (ARCHITECTURE.md#dictionary-and-lookup).
+/// The strategy uses ranks from **enabled** Dictionaries. The Dictionary list
+/// sets their order. A Dictionary without the headword contributes nothing.
+/// The strategy uses only ranks that exist. If no **enabled** Dictionary ranks
+/// the headword, the result is `None`. That `None` becomes `NULL` in
+/// `term.freq`, and `score` keeps `DEFAULT_FREQ`
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
-/// The three kebab-case names are the *one* spelling: `meta.frequency_strategy`
-/// records them through [`RankingStrategy::as_str`], `[dictionaries]` writes
-/// them through this derive, and
-/// `the_toml_spelling_is_the_one_the_database_records` pins the two together
-/// so a rename cannot part them.
+/// Use these three kebab-case names everywhere. `meta.frequency_strategy`
+/// records them through [`RankingStrategy::as_str`]. `[dictionaries]` writes
+/// them through this derive. The test
+/// `the_toml_spelling_is_the_one_the_database_records` checks both forms.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum RankingStrategy {
-    /// The lowest rank any enabled dictionary reports.
+    /// Returns the lowest rank that any enabled Dictionary reports.
     ///
-    /// The default, and the only one of the three that never reads the
-    /// order: it is [`merge_freq_row`]'s within-archive "lowest rank wins"
-    /// rule extended across archives, so installing a dictionary can make a
-    /// word look commoner and never rarer.
+    /// This is the default strategy. It is the only strategy that ignores order.
+    /// It extends the "lowest rank wins" rule from [`merge_freq_row`] across
+    /// archives. A new Dictionary can make a headword more common, never more rare.
     #[default]
     BestRank,
-    /// The rank from the highest-ordered enabled dictionary that has the word.
+    /// Returns the rank from the first enabled Dictionary that has the headword.
     Priority,
-    /// The median of the ranks the enabled dictionaries report.
+    /// Returns the median rank from enabled Dictionaries.
     Median,
 }
 
 impl RankingStrategy {
-    /// The name `meta.frequency_strategy` records.
+    /// Returns the name that `meta.frequency_strategy` records.
     pub fn as_str(self) -> &'static str {
         match self {
             RankingStrategy::BestRank => "best-rank",
@@ -142,15 +137,14 @@ impl RankingStrategy {
         }
     }
 
-    /// One headword's reported ranks as one rank.
+    /// Reduces the Reported frequencies for one headword to one rank.
     ///
-    /// `reported` holds the rank of every enabled dictionary that has this
-    /// headword, in frequency-list order, and nothing else.
+    /// `reported` contains one rank for each enabled Dictionary that has the
+    /// headword, in frequency-list order. It contains no other ranks.
     ///
-    /// Taken mutably because [`RankingStrategy::Median`] sorts in place: a
-    /// reduction runs once per headword over a whole corpus, and a `Vec` per
-    /// word would be hundreds of thousands of allocations for a slice of
-    /// three numbers.
+    /// The slice is mutable because [`RankingStrategy::Median`] sorts it in place.
+    /// The reduction handles each headword in a full corpus. A new `Vec` per
+    /// headword would create hundreds of thousands of allocations for three numbers.
     pub fn apply(self, reported: &mut [i64]) -> Option<i64> {
         match self {
             RankingStrategy::BestRank => best_rank(reported),
@@ -175,28 +169,26 @@ impl std::str::FromStr for RankingStrategy {
     }
 }
 
-/// The lowest rank any enabled dictionary reports.
+/// Returns the lowest rank in `reported`.
 fn best_rank(reported: &[i64]) -> Option<i64> {
     reported.iter().copied().min()
 }
 
-/// The rank from the highest-ordered enabled dictionary that has the word.
+/// Returns the rank from the first enabled Dictionary with the headword.
 ///
-/// The front of the slice, because the ranks arrive in frequency-list order
-/// and a dictionary without the word was never put in it: the highest-ordered
-/// dictionary that has the word is therefore the first entry, whether or not
-/// its rank is the lowest one there.
+/// The slice uses frequency-list order. A Dictionary without the headword
+/// contributes no value, so the first rank belongs to the highest-priority
+/// Dictionary that has the headword. It can differ from the lowest rank.
 fn priority(reported: &[i64]) -> Option<i64> {
     reported.first().copied()
 }
 
-/// The median of the ranks the enabled dictionaries report.
+/// Returns the median of the reported ranks.
 ///
-/// An even count has two middle ranks and nothing reported between them, so
-/// they are averaged - `low + (high - low) / 2` rather than
-/// `(low + high) / 2`, which cannot overflow and which rounds toward the
-/// commoner of the two. The direction is deliberate: a reduction may not
-/// invent a rarity its sources do not carry.
+/// An even count has two middle ranks and no rank between them. Average those
+/// two ranks with `low + (high - low) / 2`, not `(low + high) / 2`.
+/// This form cannot overflow. It rounds toward the more common rank. The
+/// direction avoids a rarer value that no source reports.
 fn median(reported: &mut [i64]) -> Option<i64> {
     if reported.is_empty() {
         return None;
@@ -210,23 +202,22 @@ fn median(reported: &mut [i64]) -> Option<i64> {
     Some(low + (high - low) / 2)
 }
 
-/// Every enabled frequency dictionary's claims, in frequency-list order,
-/// reduced to the one table `term.freq` is stamped from.
+/// Reduces the claims from enabled Dictionaries into the table that stamps
+/// `term.freq`.
 ///
-/// Reduced over the union of the sources' keys, each key answered by running
-/// [`lookup_freq`] against every source - not by merging the maps, and not
-/// row by row. It is the same answer a term row would get if the strategy
-/// ran per row, and here is why: a term row is looked up by (term, reading),
-/// and `lookup_freq` on this result reads key (term, reading) when the union
-/// holds it and key (term, `None`) otherwise. The union holds (term, reading)
-/// exactly when some source does, and what went in under that key is every
-/// source's own `lookup_freq` answer for it - which for a source that lacks
-/// it is that source's (term, `None`), the very fallback it would take row by
-/// row. So no term row can be reduced two ways, and a build pays one pass
-/// over the sources rather than one per term row.
+/// Build the union of source keys. For each key, call [`lookup_freq`] for every
+/// source and apply the strategy. Do not merge the maps or process each term row.
+///
+/// For a term row, [`lookup_freq`] reads the `(term, reading)` key when the
+/// union contains it. Otherwise, it reads the `(term, None)` key.
+/// A source without `(term, reading)` supplies its `(term, None)` value.
+/// Therefore, the reduced table gives the same result as a strategy on each
+/// term row.
+///
+/// One pass over the sources also avoids one pass for every term row.
 pub fn reduce(sources: &[FreqTable], strategy: RankingStrategy) -> FreqTable {
-    // One dictionary reduces to itself under every strategy, and one is the
-    // overwhelmingly common case.
+    // One Dictionary reduces to itself under every strategy. This path also
+    // covers the most common case.
     if let [only] = sources {
         return only.clone();
     }
@@ -373,20 +364,18 @@ mod tests {
         let t = FreqTable::new();
         assert_eq!(None, lookup_freq(&t, "猫", Some("ねこ")));
     }
+// ---- Frequency rank strategies ----
 
-    // ---- the ranking strategies ----
-
-    /// One reading-agnostic claim per term.
+    /// Builds a `FreqTable` with one reading-agnostic claim per term.
     fn table(claims: &[(&str, i64)]) -> FreqTable {
         claims.iter().map(|(term, rank)| ((term.to_string(), None), *rank)).collect()
     }
 
-    /// Three frequency dictionaries and one fixed set of claims, in
-    /// frequency-list order.
+    /// Three Dictionaries and one fixed set of claims, in frequency-list order.
     ///
-    /// 猫 is in all three, 犬 in the first and the last only, and 鼠 in none
-    /// of them. No dictionary's ranks are the lowest, so a strategy that
-    /// reads the order and one that sorts cannot agree by accident.
+    /// Every Dictionary has 猫. Only the first and last have 犬. No Dictionary
+    /// has 鼠. No Dictionary has the lowest rank for every headword. The data
+    /// makes order-based and sort-based strategies return different values.
     fn three_dictionaries() -> Vec<FreqTable> {
         vec![
             table(&[("猫", 400), ("犬", 9)]),
@@ -428,8 +417,8 @@ mod tests {
     #[test]
     fn a_word_two_of_three_dictionaries_have_is_reduced_from_those_two_alone() {
         let sources = three_dictionaries();
-        // 犬 is 9 in the first dictionary and 5 in the third; the second
-        // does not have it and must not weigh on any of the three answers.
+        // 犬 has ranks 9 and 5 in the first and third Dictionaries. The second
+        // Dictionary has no 犬, so it does not affect any strategy result.
         let dog = |strategy| lookup_freq(&reduce(&sources, strategy), "犬", None);
         assert_eq!(Some(5), dog(RankingStrategy::BestRank));
         assert_eq!(Some(9), dog(RankingStrategy::Priority));
@@ -471,9 +460,9 @@ mod tests {
         assert!(reduce(&[], RankingStrategy::BestRank).is_empty());
     }
 
-    /// The equivalence [`reduce`]'s comment claims: reducing the union of
-    /// the sources' keys answers every (term, reading) pair exactly as
-    /// running the strategy over that pair's own per-source lookups would.
+    /// Checks the equivalence described on [`reduce`]. A reduction over the
+    /// union of source keys gives each `(term, reading)` pair the same result
+    /// as a strategy over per-source [`lookup_freq`] results.
     #[test]
     fn reducing_the_key_union_answers_a_row_as_a_per_row_reduction_would() {
         let sources = vec![

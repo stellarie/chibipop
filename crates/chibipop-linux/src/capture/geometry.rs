@@ -1,56 +1,47 @@
-//! Which output a requested rect lives on, which
-//! `capture_output_region` box to ask for, and which pixels to cut out
-//! of the buffer that comes back. Pure arithmetic, no Wayland.
+//! This module maps a requested region to output boxes and buffer pixels.
+//! It uses pure arithmetic and no Wayland calls.
 //!
-//! Three coordinate spaces meet here, and confusing them is the whole
-//! risk:
+//! This helper maps regions across three coordinate spaces and keeps them distinct.
 //!
-//! - **global physical** — core's `PhysRect`: the space every region
-//!   and every word box is in (`chibipop::text`). Anchored exactly as
-//!   the cursor channel anchors it (`cursor::outputs`), so a cursor
-//!   position and a capture region agree by construction. Mixed-scale
-//!   layouts have no well-defined global physical space; agreeing with
-//!   the cursor matters more than being tidy, so the same
-//!   approximation is used here and the seams can overlap.
-//! - **output-local logical** — what `capture_output_region` takes
-//!   ("The region is given in output logical coordinates", wlr
-//!   screencopy v3) and what the compositor clips against. We clip
-//!   first, so its clip is always a no-op and the box we assume is the
-//!   box it used.
-//! - **buffer pixels** — what comes back, sized by the compositor by
-//!   scaling the logical box it was given.
+//! - **global physical** — Core uses `PhysRect` here for every region and
+//!   word box (`chibipop::text`). The cursor channel anchors this space
+//!   with `cursor::outputs`. A cursor position and capture region then
+//!   agree by construction. Mixed-scale layouts have no well-defined global
+//!   physical space. This module uses the cursor's approximation, so
+//!   output seams can overlap.
+//! - **output-local logical** — `capture_output_region` uses this space.
+//!   The wlr screencopy v3 protocol states, "The region is given in output
+//!   logical coordinates". The compositor clips this box. This module
+//!   clips first, so the compositor clip has no effect.
+//! - **buffer pixels** — The compositor returns these pixels. It sizes
+//!   the buffer from the logical box and its scale.
 //!
-//! **Fractional scales are made exact rather than guessed.** The two
-//! implementations that matter disagree on rounding: wlroots truncates
-//! the scaled box (`screencopy.c` assigns `box.x * output->scale` into
-//! an `int`), Hyprland rounds it (`CBox::scale` then `CBox::round`). A
-//! backend that assumed either would be a pixel out on the other. So
-//! the requested logical box is snapped outward to the step where
-//! `logical * scale` is exactly an integer - two logical pixels at
-//! 1.5x, four at 1.25x - and then truncation and rounding are the same
-//! number. The crop offset is integer arithmetic from there, with no
-//! float in the path at all.
+//! **Fractional scales need bounded snapping.** wlroots truncates a scaled box.
+//! `screencopy.c` assigns `box.x * output->scale` to an `int`.
+//! Hyprland rounds the scaled box with `CBox::scale` and `CBox::round`.
+//! The two rules can differ by one pixel. `Axis::new` computes a per-axis step
+//! where `logical * scale` is an integer. When that step is no greater than
+//! `MAX_SNAP`, this module snaps the logical box outward to that step. When
+//! the step exceeds `MAX_SNAP`, it uses a unit step instead, so the result is
+//! not guaranteed to match both rules. Integer arithmetic computes the crop
+//! offset. No float enters this path.
 //!
-//! A region reaching past its output (core's pass-1 box around a
-//! cursor near an edge) yields pixels only where an output actually
-//! is; the rest of the frame stays black. Off-screen has no content,
-//! and blank pixels cost one hover nothing, where failing the grab
-//! would cost every edge hover.
+//! A region can extend past an output edge. The frame then contains pixels only
+//! where an output exists. Other pixels stay black. Off-screen has no
+//! content, and blank pixels cost nothing for one hover. A failed grab
+//! costs every edge hover.
 
 use crate::cursor::outputs::OutputGeometry;
 use chibipop::geom::{PhysPoint, PhysRect};
 
-/// Widest logical step still worth snapping to.
+/// `MAX_SNAP` bounds the computed snap step for each axis.
 ///
-/// The step is `logical / gcd(physical, logical)`, which is small for
-/// every scale a compositor actually offers, because compositors pick
-/// scales whose logical size is a whole number: 2 at 1.5x, 4 at 1.25x,
-/// 3 at 1.333x. A layout past this bound gets floored offsets and may
-/// sit one pixel off on a rounding compositor - visible to nobody, and
-/// never out of bounds, because the cut is clamped.
+/// `Axis::new` computes each axis step as `logical / gcd(physical, logical)`.
+/// If that step exceeds `MAX_SNAP`, the axis uses a unit step instead.
+
 const MAX_SNAP: i64 = 64;
 
-/// Physical height after the output transform.
+/// Return the physical height after the output transform.
 fn physical_h(g: &OutputGeometry) -> i32 {
     if g.transform_swaps {
         g.mode_w
@@ -59,18 +50,18 @@ fn physical_h(g: &OutputGeometry) -> i32 {
     }
 }
 
-/// True once every size has arrived.
+/// Return true when all sizes are known.
 pub fn known(g: &OutputGeometry) -> bool {
     g.logical_w > 0 && g.logical_h > 0 && g.physical_w() > 0 && physical_h(g) > 0
 }
 
-/// One output's box in the global physical space.
+/// Return one output's box in global physical space.
 pub fn physical_box(g: &OutputGeometry) -> PhysRect {
     let (x, y) = g.physical_origin();
     PhysRect { x, y, w: g.physical_w(), h: physical_h(g) }
 }
 
-/// Overlap, or `None` when they miss.
+/// Return the overlap, or `None` when the boxes do not meet.
 pub fn intersect(a: PhysRect, b: PhysRect) -> Option<PhysRect> {
     let x = a.x.max(b.x);
     let y = a.y.max(b.y);
@@ -83,7 +74,7 @@ pub fn intersect(a: PhysRect, b: PhysRect) -> Option<PhysRect> {
     }
 }
 
-/// Smallest rect covering both.
+/// Return the smallest rect that covers both inputs.
 pub fn cover(a: PhysRect, b: PhysRect) -> PhysRect {
     let x = a.x.min(b.x);
     let y = a.y.min(b.y);
@@ -100,14 +91,14 @@ fn gcd(a: i64, b: i64) -> i64 {
     }
 }
 
-/// One axis of the physical-to-logical conversion.
+/// One axis in the physical-to-logical conversion.
 #[derive(Debug, Clone, Copy)]
 struct Axis {
-    /// Physical pixels across the whole output.
+    /// Physical pixels across the full output.
     physical: i64,
-    /// Logical units across the whole output.
+    /// Logical units across the full output.
     logical: i64,
-    /// Logical step at which `logical * scale` is a whole number.
+    /// Logical step used to snap the requested box.
     snap: i64,
 }
 
@@ -118,46 +109,44 @@ impl Axis {
         Axis { physical, logical, snap: if step <= MAX_SNAP { step.max(1) } else { 1 } }
     }
 
-    /// Largest snapped logical unit at or below `phys`.
+    /// Return the largest snapped logical unit at or below `phys`.
     fn floor_to(&self, phys: i32) -> i64 {
         let logical = i64::from(phys) * self.logical / self.physical;
         (logical / self.snap) * self.snap
     }
 
-    /// Smallest snapped logical unit at or above `phys`.
+    /// Return the smallest snapped logical unit at or above `phys`.
     fn ceil_to(&self, phys: i32) -> i64 {
         let logical =
             (i64::from(phys) * self.logical + self.physical - 1) / self.physical;
         ((logical + self.snap - 1) / self.snap) * self.snap
     }
 
-    /// The physical pixel a snapped logical unit sits on. Exact
-    /// whenever the unit is snapped, which is what makes truncating and
-    /// rounding compositors agree.
+    /// Return the physical pixel for a logical unit with integer arithmetic.
     fn to_physical(self, logical: i64) -> i32 {
         (logical * self.physical / self.logical) as i32
     }
 }
 
-/// One output's share of a requested region.
+/// One output's part of a requested region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Piece {
-    /// Index into the caller's output list.
+    /// Index in the caller's output list.
     pub output: usize,
-    /// `capture_output_region` arguments: output-local logical.
+    /// Arguments for `capture_output_region` in output-local logical space.
     pub logical: PhysRect,
-    /// The pixels wanted, output-local physical.
+    /// Requested pixels in output-local physical space.
     pub want: PhysRect,
-    /// The output-local physical pixel the buffer's (0,0) holds.
+    /// Output-local physical pixel at the buffer's (0,0) coordinate.
     pub origin: PhysPoint,
-    /// Where the wanted pixels land in the frame.
+    /// Destination of the requested pixels in the frame.
     pub dest: PhysPoint,
 }
 
-/// Split `region` over the outputs it covers, in list order.
+/// This helper splits `region` across covered outputs in list order.
 ///
-/// Empty when it touches no output at all: there is nothing to copy
-/// and nothing to invent, so the caller fails the grab.
+/// Return no pieces when the region touches no output. The caller then fails the
+/// grab because it has no pixels to copy or invent.
 pub fn split(geoms: &[OutputGeometry], region: PhysRect, out: &mut Vec<Piece>) {
     out.clear();
     if region.w <= 0 || region.h <= 0 {
@@ -171,8 +160,7 @@ pub fn split(geoms: &[OutputGeometry], region: PhysRect, out: &mut Vec<Piece>) {
         let Some(hit) = intersect(region, ob) else { continue };
         let (ax, ay) = (Axis::new(g.physical_w(), g.logical_w), Axis::new(physical_h(g), g.logical_h));
         let local = hit.translated(-ob.x, -ob.y);
-        // Outward to the snapped step, then clipped exactly as the
-        // compositor would clip - so it never has to.
+        // Expand outward to the snapped step. Clip the result as the compositor does.
         let lx = ax.floor_to(local.x).clamp(0, ax.logical);
         let ly = ay.floor_to(local.y).clamp(0, ay.logical);
         let rx = ax.ceil_to(local.x + local.w).clamp(lx, ax.logical);
@@ -195,20 +183,19 @@ pub fn split(geoms: &[OutputGeometry], region: PhysRect, out: &mut Vec<Piece>) {
     }
 }
 
-/// Where a piece's pixels sit in the buffer that came back.
+/// Where a piece's pixels sit in the returned buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cut {
-    /// Source rect, buffer pixels.
+    /// Source rect in buffer pixels.
     pub src: PhysRect,
     /// Destination origin in the frame.
     pub dest: PhysPoint,
 }
 
-/// Locate `piece.want` in the `bw x bh` buffer the compositor sent.
+/// Locate `piece.want` in the `bw x bh` buffer from the compositor.
 ///
-/// A buffer holding less than was asked for still yields the pixels it
-/// does hold; the rest of the frame stays black rather than failing a
-/// hover.
+/// Return the pixels that the buffer holds when it is smaller than requested.
+/// Leave the other frame pixels black. Do not fail the hover.
 pub fn cut(piece: &Piece, bw: i32, bh: i32) -> Option<Cut> {
     if bw <= 0 || bh <= 0 {
         return None;
@@ -233,12 +220,12 @@ pub fn cut(piece: &Piece, bw: i32, bh: i32) -> Option<Cut> {
     Some(Cut { src, dest })
 }
 
-/// The output under `p`, else the nearest one.
+/// Return the output under `p`, or the nearest output.
 ///
-/// Bounds core's tiling, so an answer always beats an error: a wrong
-/// bound costs a tile, a failure costs the hover. With no output
-/// geometry at all, a plausible box around `p` keeps tiling honest
-/// until the first roundtrip lands.
+/// Core uses this result to bound the tile layout. Return a bound instead of an
+/// error because a wrong bound costs one tile and an error costs the hover.
+/// With no output geometry, return a plausible box around `p` until the first
+/// roundtrip provides geometry.
 pub fn bounds_containing(geoms: &[OutputGeometry], p: PhysPoint) -> PhysRect {
     let mut nearest: Option<(f64, PhysRect)> = None;
     for g in geoms.iter().filter(|g| known(g)) {
@@ -260,7 +247,7 @@ pub fn bounds_containing(geoms: &[OutputGeometry], p: PhysPoint) -> PhysRect {
 mod tests {
     use super::*;
 
-    /// A 1920x1080 output at scale 1, logical origin `(x, y)`.
+    /// A 1920x1080 output at scale 1 with logical origin `(x, y)`.
     fn plain(x: i32, y: i32) -> OutputGeometry {
         OutputGeometry {
             logical_x: x,
@@ -273,7 +260,7 @@ mod tests {
         }
     }
 
-    /// A 3840x2160 panel at scale 1.5: logical 2560x1440.
+    /// A 3840x2160 panel at scale 1.5 with logical size 2560x1440.
     fn fractional(x: i32) -> OutputGeometry {
         OutputGeometry {
             logical_x: x,
@@ -286,7 +273,8 @@ mod tests {
         }
     }
 
-    /// `mode` physical over `logical`, at the origin.
+    /// A square output with physical size `mode` and logical size `logical`, at
+    /// the origin.
     fn scaled(mode: i32, logical: i32) -> OutputGeometry {
         OutputGeometry {
             logical_x: 0,
@@ -310,7 +298,7 @@ mod tests {
         out[0]
     }
 
-    /// What a truncating compositor (wlroots) makes of a logical box.
+    /// Return the box that a compositor such as wlroots truncates.
     fn wlroots_buffer(piece: &Piece, g: &OutputGeometry) -> (i32, i32, i32, i32) {
         let s = g.scale();
         (
@@ -321,7 +309,7 @@ mod tests {
         )
     }
 
-    /// What a rounding compositor (Hyprland) makes of it.
+    /// Return the box that a compositor such as Hyprland rounds.
     fn hyprland_buffer(piece: &Piece, g: &OutputGeometry) -> (i32, i32, i32, i32) {
         let s = g.scale();
         (
@@ -345,16 +333,16 @@ mod tests {
     #[test]
     fn fractional_scale_covers_the_physical_rect() {
         let piece = one(&[fractional(0)], rect(100, 50, 640, 360));
-        // 100px is 66.67 logical, snapped down to the even 66; the right
-        // edge 740 is 493.33, snapped up to 494.
+        // At 1.5x, 100 physical pixels equal 66.67 logical pixels. Snap the
+        // left edge down to 66 and the right edge up from 493.33 to 494.
         assert_eq!(piece.logical, rect(66, 32, 428, 242));
         assert_eq!(piece.origin, PhysPoint { x: 99, y: 48 });
         let cut = cut(&piece, 642, 363).unwrap();
         assert_eq!(cut.src, rect(1, 2, 640, 360));
     }
 
-    /// The point of the snapping: both rounding conventions produce the
-    /// same buffer, so one crop is right on both compositors.
+    /// The snap operation makes both compositor rules produce the same buffer.
+    /// One crop then works for both compositors.
     #[test]
     fn truncating_and_rounding_compositors_agree_on_every_offset() {
         for g in [fractional(0), scaled(2400, 1920), scaled(3840, 2880), plain(0, 0)] {
@@ -363,8 +351,7 @@ mod tests {
                 let wlr = wlroots_buffer(&piece, &g);
                 let hypr = hyprland_buffer(&piece, &g);
                 assert_eq!(wlr, hypr, "scale {} at x={x} splits the two conventions", g.scale());
-                // And the offset this module computed is that same
-                // number, from integer arithmetic alone.
+                // Integer arithmetic computes the same offset as both compositors.
                 assert_eq!((piece.origin.x, piece.origin.y), (wlr.0, wlr.1));
                 let cut = cut(&piece, wlr.2, wlr.3)
                     .unwrap_or_else(|| panic!("scale {} at x={x} lost its cut", g.scale()));
@@ -376,7 +363,7 @@ mod tests {
         }
     }
 
-    /// A scale with no small snapping step must still stay in bounds.
+    /// A scale without a small snap step must stay within buffer bounds.
     #[test]
     fn an_awkward_scale_still_crops_inside_the_buffer() {
         let g = scaled(1920, 1234);
@@ -401,8 +388,7 @@ mod tests {
     fn a_region_off_the_left_edge_lands_at_a_dest_offset() {
         let piece = one(&[plain(0, 0)], rect(-30, 100, 100, 50));
         assert_eq!(piece.want, rect(0, 100, 70, 50));
-        // The first 30 columns of the frame have no output behind them
-        // and stay black.
+        // The first 30 frame columns have no output. Leave these columns black.
         assert_eq!(piece.dest, PhysPoint { x: 30, y: 0 });
     }
 
@@ -416,15 +402,14 @@ mod tests {
         assert_eq!(out[0].logical, rect(1900, 10, 20, 20));
         assert_eq!(out[0].dest, PhysPoint { x: 0, y: 0 });
         assert_eq!(out[1].output, 1);
-        // Output-local: the second output's own origin is 0.
+        // Output-local: the second output has origin 0.
         assert_eq!(out[1].logical, rect(0, 10, 80, 20));
         assert_eq!(out[1].dest, PhysPoint { x: 20, y: 0 });
     }
 
-    /// Mixed-scale layouts have no well-defined global physical space.
-    /// The cursor channel's anchoring wins - a hover must capture where
-    /// the cursor says it is - and the documented price is that boxes
-    /// can overlap, later output last.
+    /// Mixed-scale layouts have no defined global physical space.
+    /// Use the cursor channel's anchor so a hover captures the cursor's location.
+    /// Output boxes can overlap. The later output remains last.
     #[test]
     fn mixed_scales_anchor_the_way_the_cursor_channel_anchors() {
         let geoms = [fractional(0), plain(2560, 0)];

@@ -1,7 +1,11 @@
-//! The Windows program itself. `main.rs` is a two-line entry that reaches
-//! this module on Windows and a stub everywhere else, so `cargo test
-//! --workspace` is one command on every platform
-//! (ARCHITECTURE.md#workspace-and-seams, ARCHITECTURE.md#packaging-and-ci).
+//! This module is the Windows platform bin.
+//!
+//! On Windows, `main.rs` calls this module. On other targets, `main.rs` is a
+//! two-line stub. This layout lets each platform use one `cargo test --workspace`
+//! command.
+//!
+//! See `ARCHITECTURE.md#workspace-and-seams` and
+//! `ARCHITECTURE.md#packaging-and-ci`.
 
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::Deconjugator;
@@ -15,8 +19,8 @@ use chibipop::text::SettingsSnapshot;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-/// `probe` shows no popup of its own, so there is never anything of ours
-/// in its pixels to mask out (ARCHITECTURE.md#capture-and-masking).
+/// `probe` does not show a popup. The pixels need no Capture mask.
+/// See `ARCHITECTURE.md#capture-and-masking`.
 const MASKLESS: CaptureMask = CaptureMask::NONE;
 
 #[derive(Parser)]
@@ -28,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Look up text, print hits.
+    /// Look up text and print the hits.
     Lookup {
         text: String,
         #[arg(long)]
@@ -38,13 +42,13 @@ enum Command {
     },
     /// Look up one screen point.
     Probe {
-        /// X,Y in physical pixels.
+        /// The X,Y coordinates use physical pixels.
         #[arg(long, value_name = "X,Y")]
         at: String,
-        /// Capture box W,H, centred.
+        /// Set the centered capture box as W,H.
         #[arg(long, value_name = "W,H")]
         region: Option<String>,
-        /// Total OCR passes.
+        /// Set the total number of OCR passes.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
         #[arg(long)]
@@ -57,7 +61,7 @@ enum Command {
         /// Override the OCR upscale factor.
         #[arg(long)]
         upscale: Option<i32>,
-        /// Write the OCR'd pixels to a BMP.
+        /// Write the pixels that OCR read to a BMP file.
         #[arg(long)]
         dump: Option<PathBuf>,
         /// Time N reads in this one process.
@@ -70,7 +74,7 @@ enum Command {
         dict: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
-        /// Dump the tree as JSON.
+        /// Write the tree as JSON.
         #[arg(long)]
         audit: bool,
     },
@@ -80,23 +84,23 @@ enum Command {
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Total OCR passes.
+        /// Set the total number of OCR passes.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
     },
-    /// Run the popup application.
+    /// Run the popup process.
     Run {
         #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Defaults beside the exe.
+        /// Use the configuration beside the executable by default.
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Rebuilds chibipop.sqlite.
+    /// Rebuild `chibipop.sqlite`.
     BuildDict {
-        /// Folder of .zip archives.
+        /// Specify the folder that contains the .zip archives.
         #[arg(long)]
         library: PathBuf,
         #[arg(long)]
@@ -107,13 +111,13 @@ enum Command {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
-    /// Test fixture plugin.
+    /// Run the fixture plugin.
     #[command(hide = true)]
     PluginEcho {
         #[arg(default_value = "ok")]
         mode: String,
     },
-    /// Manual action testing.
+    /// Test an action manually.
     Action {
         #[command(subcommand)]
         cmd: ActionCmd,
@@ -142,7 +146,7 @@ pub fn run() -> Result<()> {
     chibipop::update::cleanup_old();
     chibipop_windows::ui::console::hide();
     let cli = Cli::parse();
-    // A double-click passes none.
+    // A double-click provides no Command.
     let command = cli.command.unwrap_or(Command::Run {
         dict: None,
         rules: None,
@@ -222,7 +226,7 @@ pub fn run() -> Result<()> {
                 return Ok(());
             }
 
-            // One pass, so the dump is what OCR read.
+            // The single OCR pass makes the dump match the pixels that OCR read.
             let single = upscale.or(dump.as_ref().map(|_| UPSCALE));
             let (lines, resolved, source_used, dxgi_error) = match single {
                 Some(factor) => {
@@ -261,7 +265,7 @@ pub fn run() -> Result<()> {
 
             let mut highlight: Option<chibipop::geom::PhysRect> = None;
             match &resolved {
-                // Two failure stages apart.
+                // This branch reports the OCR failure before the hit-scan failure.
                 None if lines.is_empty() => {
                     println!("\nno text resolved at that point: OCR recognised no lines in the region");
                 }
@@ -284,7 +288,7 @@ pub fn run() -> Result<()> {
                     println!();
                     print_hits(&hits);
 
-                    // The app's own highlight fn.
+                    // This keeps the probe highlight equal to the popup highlight.
                     let all_dicts = dictionary.dicts()?;
                     let presentation = chibipop::present::build(
                         &hits,
@@ -306,7 +310,7 @@ pub fn run() -> Result<()> {
 
             let mut tiled_scan: Option<Vec<chibipop::geom::ScanRect>> = None;
             if region_was_default && tiles > 1 {
-                // No popup on screen in `probe`: nothing to mask.
+                // `probe` shows no popup, so it needs no Capture mask.
                 let (tiled, scan, _) =
                     source.resolve_at_tiled_scanned(cursor, show_region.is_some(), MASKLESS)?;
                 match tiled {
@@ -331,7 +335,7 @@ pub fn run() -> Result<()> {
                     scan
                 });
 
-                // Last: drawn over captures.
+                // Draw the match rect last so that it covers the capture rects.
                 if let Some(rect) = highlight {
                     scan.push(chibipop::geom::ScanRect {
                         rect,
@@ -386,7 +390,7 @@ pub fn run() -> Result<()> {
                     Err(e) => { eprintln!("cursor: {e}"); continue; }
                 };
 
-                // Only when it moved.
+                // Resolve text only after the cursor moves.
                 if let Some(prev) = last_pos {
                     if (cursor.x - prev.x).abs() <= 4 && (cursor.y - prev.y).abs() <= 4 {
                         continue;
@@ -394,14 +398,14 @@ pub fn run() -> Result<()> {
                 }
                 last_pos = Some(cursor);
 
-                // One bad frame is not fatal.
+                // Continue after one failed frame.
                 let resolved = match source.resolve_at_tiled(cursor, MASKLESS) {
                     Ok(r) => r,
                     Err(e) => { eprintln!("resolve: {e}"); continue; }
                 };
                 let Some(r) = resolved else { continue };
 
-                // Anchor+char, not line text.
+                // The anchor and character identify a result. The full line does not.
                 let ch = r.span.text[r.span.cursor_byte_offset..].chars().next();
                 let key = (r.span.anchor.x, r.span.anchor.y, ch);
                 if last_key.as_ref() == Some(&key) {
@@ -422,9 +426,8 @@ pub fn run() -> Result<()> {
             let config_path = config.unwrap_or_else(default_config_path);
             let mut cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
-            // Only for the dict names.
-            //
-            // A rebuild renames onto it.
+            // The database path supplies only the Dictionary names.
+            // A rebuild replaces the file at the same path.
             let dicts = {
                 let dictionary = SqliteDictionary::open(&dict).with_context(|| {
                     format!("opening {} - rebuild it in the settings window",
@@ -462,15 +465,14 @@ pub fn run() -> Result<()> {
                     archives.push(path);
                 }
             }
-            // Python sorts case-folded.
+            // Use the same case-folded order as Python.
             archives.sort_by_key(|p| (p.to_string_lossy().to_lowercase(), p.clone()));
 
-            // One archive is one Dictionary, so the two lists are not a
-            // partition: the first is every archive the build installs as a
-            // dictionary row and the second is the subset whose reported
-            // frequencies it also loads. An archive carrying a term bank
-            // beside its frequency data is named in both, on purpose
-            // (ARCHITECTURE.md#dictionary-and-lookup).
+            // One archive is one Dictionary, so the lists can overlap.
+            // `dict_archives` contains each archive that creates a Dictionary row.
+            // `freq_archives` contains each archive that supplies Reported frequencies.
+            // An archive with both roles occurs in both lists.
+            // See `ARCHITECTURE.md#dictionary-and-lookup`.
             let mut dict_archives = Vec::new();
             let mut freq_archives = Vec::new();
             let mut unreadable = Vec::new();
@@ -486,24 +488,23 @@ pub fn run() -> Result<()> {
                 dict_archives.push(a);
             }
 
-            // The `term dict` spelling stays because
-            // `chibipop::dict::progress::friendly` is what turns these into
-            // "Reading <file>…", and it parses exactly that word.
+            // Keep the exact `term dict` text.
+            // `chibipop::dict::progress::friendly` changes these lines to
+            // "Reading <file>…".
             for (i, t) in dict_archives.iter().enumerate() {
                 println!("term dict  [{i}] {}", file_name(t));
             }
             for f in &freq_archives {
                 println!("freq dict      {}", file_name(f));
             }
-            // Named even though nothing reads it: a file the user put in
-            // the library going unmentioned is how a half-finished download
-            // comes to look like a missing dictionary. `friendly` swallows
-            // this line, as it swallows `wrote`.
+            // Name each unreadable file, although no code reads this line.
+            // An omitted file looks like an incomplete download instead of a missing
+            // Dictionary. `friendly` hides this line as it hides `wrote`.
             for u in &unreadable {
                 println!("skipped        {} - chibipop cannot read it", file_name(u));
             }
 
-            // A typo is not a rebuild.
+            // Do not replace the database when no archive is readable.
             if dict_archives.is_empty() {
                 anyhow::bail!("no readable archives in {}", library.display());
             }
@@ -547,7 +548,7 @@ pub fn run() -> Result<()> {
     }
 }
 
-/// Debug: raw BGRA to an uncompressed BMP.
+/// Writes raw BGRA pixels to an uncompressed BMP file.
 fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
     use std::io::Write;
     let row_bytes = w as u32 * 4;
@@ -559,7 +560,7 @@ fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
     f.write_all(&(14u32 + 40u32).to_le_bytes())?;
     f.write_all(&40u32.to_le_bytes())?;
     f.write_all(&w.to_le_bytes())?;
-    f.write_all(&h.to_le_bytes())?; // positive: bottom-up
+    f.write_all(&h.to_le_bytes())?; // A positive height specifies bottom-up rows.
     f.write_all(&1u16.to_le_bytes())?;
     f.write_all(&32u16.to_le_bytes())?;
     f.write_all(&0u32.to_le_bytes())?;
@@ -568,7 +569,7 @@ fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
     f.write_all(&2835i32.to_le_bytes())?;
     f.write_all(&0u32.to_le_bytes())?;
     f.write_all(&0u32.to_le_bytes())?;
-    // buf is top-down; BMP with positive height is bottom-up.
+    // `buf` is top-down. A BMP with positive height is bottom-up.
     for row in (0..h as usize).rev() {
         let start = row * w as usize * 4;
         f.write_all(&buf[start..start + w as usize * 4])?;
@@ -576,27 +577,27 @@ fn dump_bmp(path: &Path, buf: &[u8], w: i32, h: i32) -> Result<()> {
     Ok(())
 }
 
-/// --dict, or the default.
+/// Returns `--dict` or the default path.
 fn dict_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/chibipop.sqlite"))
 }
 
-/// --rules, or the default.
+/// Returns `--rules` or the default path.
 fn rules_path(given: Option<PathBuf>) -> PathBuf {
     given.unwrap_or_else(|| chibipop::paths::data_file("data/deconjugator.json"))
 }
 
-/// A path's file name, or empty.
+/// Returns the file name, or an empty string if no file name exists.
 fn file_name(path: &Path) -> String {
     path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string()
 }
 
-/// Beside the running exe.
+/// Returns the configuration path beside the executable.
 fn default_config_path() -> PathBuf {
     chibipop::paths::beside_exe("chibipop.toml")
 }
 
-/// Probe's box, from config.
+/// Returns the probe capture box from the configuration.
 fn probe_capture_size() -> chibipop::text::layout::CaptureSize {
     match chibipop::config::load_or_create(&default_config_path()) {
         Ok(cfg) => chibipop::text::layout::CaptureSize {
@@ -610,7 +611,7 @@ fn probe_capture_size() -> chibipop::text::layout::CaptureSize {
     }
 }
 
-/// Keeps a window painted.
+/// Runs the Win32 message loop for a fixed duration.
 fn pump_messages_for(dur: std::time::Duration) {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
@@ -618,9 +619,9 @@ fn pump_messages_for(dur: std::time::Duration) {
     let deadline = std::time::Instant::now() + dur;
     let mut msg = MSG::default();
     while std::time::Instant::now() < deadline {
-        // SAFETY: `msg` is a valid, thread-local MSG; PeekMessageW with a null
-        // HWND retrieves messages for any window this thread owns, and both
-        // TranslateMessage and DispatchMessageW take it by const pointer.
+        // SAFETY: `msg` is valid thread-local storage for `MSG`.
+        // A null `HWND` lets `PeekMessageW` get messages for each window on
+        // this thread. `TranslateMessage` and `DispatchMessageW` only read `msg`.
         unsafe {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -645,9 +646,8 @@ fn print_hits(hits: &[chibipop::lookup::model::Hit]) {
         if !h.process.is_empty() {
             println!("     via: {}", h.process.join(" -> "));
         }
-        // One row per entry. A gloss carries the dictionary's own line
-        // breaks, and a listing row cannot hold one, so they fold into the
-        // same inline separator the glosses already use.
+        // The inline separator replaces each line break.
+        // This keeps one output row for each Entry.
         let glosses = h.entry.glosses();
         let lines: Vec<&str> = glosses.iter().flat_map(|g| g.split('\n')).collect();
         println!("     {}", lines.join("; "));

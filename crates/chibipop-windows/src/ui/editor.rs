@@ -1,4 +1,4 @@
-//! CSS theme editor window.
+//! This module provides the CSS theme editor window.
 
 use crate::ui::css;
 use crate::ui::theme::Theme;
@@ -25,21 +25,21 @@ const BTN_W: i32 = 110;
 const BTN_H: i32 = 28;
 const STATUS_H: i32 = 20;
 
-/// What happened in the editor.
+/// This value records the result of an editor operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorOutcome {
     Applied,
     Closed,
 }
 
-/// Shared state the wndproc reads.
+/// This state stores the data that `wndproc` reads for the editor window.
 struct EditorState {
     css_path: PathBuf,
     base_theme: String,
     outcome: Cell<Option<EditorOutcome>>,
 }
 
-/// The CSS editor window.
+/// This type owns the CSS editor window and its state.
 pub struct CssEditor {
     hwnd: HWND,
     #[allow(dead_code)]
@@ -57,7 +57,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Monospace font for the editor.
+/// Creates the monospace font for the editor.
 unsafe fn mono_font() -> Option<HFONT> {
     let name = "Consolas";
     let w: Vec<u16> = name.encode_utf16().collect();
@@ -69,7 +69,7 @@ unsafe fn mono_font() -> Option<HFONT> {
         lfFaceName: face,
         ..Default::default()
     };
-    // SAFETY: `lf` is valid stack storage.
+    // SAFETY: `lf` is valid stack storage for this call.
     let font = unsafe { CreateFontIndirectW(&lf) };
     if font.is_invalid() {
         None
@@ -93,7 +93,7 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         lpszClassName: class_name(),
         ..Default::default()
     };
-    // SAFETY: valid struct.
+    // SAFETY: `wc` is a valid `WNDCLASSEXW` structure.
     if unsafe { RegisterClassExW(&wc) } == 0 {
         return Err(windows::core::Error::from_thread()).context("RegisterClassExW for CSS editor");
     }
@@ -101,9 +101,10 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Retrieve the `EditorState` from USERDATA.
+/// Returns the `EditorState` stored in `USERDATA`.
 unsafe fn state_of(hwnd: HWND) -> Option<&'static EditorState> {
-    // SAFETY: set once in `open`, lives until `CssEditor` drops.
+    // SAFETY: `open` sets this pointer once.
+    // The returned `CssEditor` owns the state until it drops.
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
     if ptr == 0 {
         return None;
@@ -117,15 +118,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let id = (wparam.0 & 0xFFFF) as i32;
             match id {
                 ID_SAVE => {
-                    // SAFETY: delegates to safe helpers.
+                    // SAFETY: `state_of` calls `GetWindowLongPtrW` first with this live `hwnd`.
+                    // The helper checks each child handle before it uses that handle.
                     unsafe { save_and_apply(hwnd) };
                 }
                 ID_RESET => {
-                    // SAFETY: delegates to safe helpers.
+                    // SAFETY: `state_of` calls `GetWindowLongPtrW` first with this live `hwnd`.
+                    // The helper checks each child handle before it uses that handle.
                     unsafe { reset_to_default(hwnd) };
                 }
                 ID_CLOSE_BTN => {
-                    // SAFETY: standard close.
+                    // SAFETY: `hwnd` is the live window handle from this callback.
                     unsafe {
                         let _ = DestroyWindow(hwnd);
                     }
@@ -135,7 +138,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CLOSE => {
-            // SAFETY: standard close.
+            // SAFETY: `hwnd` is the live window handle from this callback.
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
@@ -151,16 +154,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Save the text and re-parse.
+/// Parses the editor text and saves it when the CSS is valid.
 unsafe fn save_and_apply(hwnd: HWND) {
     let Some(st) = (unsafe { state_of(hwnd) }) else {
         return;
     };
-    // SAFETY: `ID_EDIT` created in `build`.
+    // SAFETY: `build_controls` creates the `ID_EDIT` control for this window.
     let Ok(edit) = (unsafe { GetDlgItem(Some(hwnd), ID_EDIT) }) else {
         return;
     };
-    // SAFETY: reading the edit control text.
+    // SAFETY: `edit` is a live control handle from `GetDlgItem`.
     let text = unsafe { window_text(edit) };
 
     let mut theme = match st.base_theme.as_str() {
@@ -188,7 +191,7 @@ unsafe fn save_and_apply(hwnd: HWND) {
     st.outcome.set(Some(EditorOutcome::Applied));
 }
 
-/// Reset the editor to the base theme's CSS.
+/// Replaces the editor text with the base theme CSS.
 unsafe fn reset_to_default(hwnd: HWND) {
     let Some(st) = (unsafe { state_of(hwnd) }) else {
         return;
@@ -199,7 +202,7 @@ unsafe fn reset_to_default(hwnd: HWND) {
     };
     let css_text = css::to_css(&theme);
     if let Ok(edit) = unsafe { GetDlgItem(Some(hwnd), ID_EDIT) } {
-        // SAFETY: valid window.
+        // SAFETY: `edit` is a valid child window.
         unsafe {
             let _ = SetWindowTextW(edit, PCWSTR(wide(&css_text).as_ptr()));
         }
@@ -209,16 +212,16 @@ unsafe fn reset_to_default(hwnd: HWND) {
 
 fn set_status(hwnd: HWND, text: &str) {
     if let Ok(ctrl) = unsafe { GetDlgItem(Some(hwnd), ID_STATUS) } {
-        // SAFETY: valid window.
+        // SAFETY: `ctrl` is a valid child window from `GetDlgItem`.
         unsafe {
             let _ = SetWindowTextW(ctrl, PCWSTR(wide(text).as_ptr()));
         }
     }
 }
 
-/// Read a control's text.
+/// Returns the text from a control.
 unsafe fn window_text(ctrl: HWND) -> String {
-    // SAFETY: `ctrl` is a live handle.
+    // SAFETY: `ctrl` is a live window handle.
     unsafe {
         let len = GetWindowTextLengthW(ctrl);
         if len <= 0 {
@@ -231,10 +234,10 @@ unsafe fn window_text(ctrl: HWND) -> String {
 }
 
 impl CssEditor {
-    /// Open the CSS editor.
+    /// Opens the CSS editor window.
     pub fn open(css_path: &Path, base_theme: &str, current_font: &str) -> Result<CssEditor> {
-        // SAFETY: standard Win32 window creation; every
-        // handle is checked before use.
+        // SAFETY: This block creates a standard Win32 window.
+        // The code checks every handle before use.
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
                 .context("GetModuleHandleW(None)")?
@@ -265,8 +268,8 @@ impl CssEditor {
                 outcome: Cell::new(None),
             });
 
-            // SAFETY: `state` lives in the returned `CssEditor`
-            // which outlives the window.
+            // SAFETY: The returned `CssEditor` owns `state` and outlives the window.
+            // `GWLP_USERDATA` stays valid while the window uses it.
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*state as *const _ as isize);
 
             let editor = CssEditor {
@@ -281,24 +284,24 @@ impl CssEditor {
         }
     }
 
-    /// The window handle.
+    /// Returns the editor window handle.
     pub fn hwnd(&self) -> HWND {
         self.hwnd
     }
 
-    /// Consume the outcome flag.
+    /// Returns the stored editor outcome and clears it.
     pub fn take_outcome(&self) -> Option<EditorOutcome> {
         self.state.outcome.take()
     }
 
-    /// Is it still showing?
+    /// Reports whether the editor window is visible.
     pub fn is_visible(&self) -> bool {
-        // SAFETY: valid HWND.
+        // SAFETY: `self.hwnd` is a valid editor window handle.
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 }
 
-/// Create the child controls.
+/// Creates the editor's child controls.
 unsafe fn build_controls(
     hwnd: HWND,
     hinstance: HINSTANCE,
@@ -308,7 +311,7 @@ unsafe fn build_controls(
     current_font: &str,
 ) -> Result<()> {
     let mut rc = RECT::default();
-    // SAFETY: hwnd is valid.
+    // SAFETY: `hwnd` is a valid editor window handle.
     unsafe {
         GetClientRect(hwnd, &mut rc).ok();
     }
@@ -316,7 +319,7 @@ unsafe fn build_controls(
     let ch = rc.bottom - rc.top;
     let edit_h = ch - MARGIN * 4 - BTN_H - STATUS_H;
 
-    // SAFETY: creating standard child controls.
+    // SAFETY: This block creates standard child controls for `hwnd`.
     unsafe {
         let edit = CreateWindowExW(
             WS_EX_CLIENTEDGE,
@@ -380,7 +383,7 @@ unsafe fn build_controls(
 
     let css_text = load_or_generate(css_path, base_theme, current_font);
     if let Ok(edit) = unsafe { GetDlgItem(Some(hwnd), ID_EDIT) } {
-        // SAFETY: valid window.
+        // SAFETY: `edit` is a valid child window.
         unsafe {
             let _ = SetWindowTextW(edit, PCWSTR(wide(&css_text).as_ptr()));
         }
@@ -389,7 +392,7 @@ unsafe fn build_controls(
     Ok(())
 }
 
-/// Load CSS or generate from theme.
+/// Loads CSS from `css_path` or creates it from the selected theme.
 fn load_or_generate(css_path: &Path, base_theme: &str, current_font: &str) -> String {
     if let Ok(text) = std::fs::read_to_string(css_path) {
         if !text.trim().is_empty() {
@@ -404,7 +407,7 @@ fn load_or_generate(css_path: &Path, base_theme: &str, current_font: &str) -> St
     css::to_css(&theme)
 }
 
-/// Normalize to CRLF for the EDIT control.
+/// Converts line endings to CRLF for the `EDIT` control.
 fn to_crlf(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -424,7 +427,7 @@ unsafe fn create_button(
     x: i32,
     y: i32,
 ) -> Result<HWND> {
-    // SAFETY: standard child control.
+    // SAFETY: The call creates a standard child control for `parent`.
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),

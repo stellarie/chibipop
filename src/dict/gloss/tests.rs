@@ -1,26 +1,26 @@
-//! Parser tests: one fixture per real dictionary shape, plus the
-//! losslessness, robustness and bounding guarantees the module promises.
+//! Test the GlossDoc parser with one fixture for each real Dictionary shape.
+//! Also test the losslessness, robustness, and size limits that the module defines.
 //!
-//! The fixtures come from `docs/research/dict-shapes.md`'s census of 97
-//! archives rather than from imagination, so a fix verified on Jitendex is
-//! not assumed to work on 大辞林. Where the census prints a representative
-//! node verbatim it is used verbatim, and where it names only the hooks and
-//! counts the fixture is built from those hooks - each one says which.
+//! The fixtures come from the census of 97 archives in `docs/research/dict-shapes.md`.
+//! They do not come from assumptions. A fix that passes Jitendex does not prove
+//! that 大辞林 works. Use each representative node exactly when the census prints
+//! it. Build each other fixture from the hooks and counts that the census names.
+//! State which source each fixture uses.
 
 use super::*;
 use serde_json::{json, Value};
 
-/// A glossary as the record stores it, parsed the way a hover parses it.
+/// Parse a glossary the way a hover parses it.
 ///
-/// The stored format is the dictionary's raw glossary JSON, so serialising a
-/// `Value` is exactly what `dict::build` writes - which makes every test
-/// below a round trip through the stored format rather than a shortcut past
-/// it.
+/// The stored format is minified glossary JSON from the Dictionary. This helper
+/// serializes a `Value` to JSON before it parses the GlossDoc. Tests that call
+/// this helper cover the stored-format conversion. Tests that call `GlossDoc::parse`
+/// directly cover malformed or deeply nested input instead.
 pub(super) fn doc(glossary: &Value) -> GlossDoc {
     GlossDoc::parse(&glossary.to_string())
 }
 
-/// The first node carrying this tag, in parse order.
+/// Return the first node with this tag in parse order.
 fn find_tag(d: &GlossDoc, tag: Tag) -> Option<NodeId> {
     (0..d.all_nodes().len() as NodeId).find(|&i| d.node(i).tag == tag)
 }
@@ -29,9 +29,9 @@ fn find_tag(d: &GlossDoc, tag: Tag) -> Option<NodeId> {
 // losslessness over the census tables
 // ---------------------------------------------------------------------------
 
-/// Every tag `docs/research/dict-shapes.md` found in the corpus, with the
-/// variant it must resolve to. `tbody` is the corpus's rarest at one
-/// dictionary; `div`, `a` and `span` are its most common at 43 to 45.
+/// List every tag that `docs/research/dict-shapes.md` found in the corpus and its
+/// `Tag` variant.
+/// `tbody` occurs in one Dictionary. `div`, `a`, and `span` occur in 43 to 45.
 const CENSUS_TAGS: [(&str, Tag); 17] = [
     ("div", Tag::Div),
     ("a", Tag::A),
@@ -52,8 +52,8 @@ const CENSUS_TAGS: [(&str, Tag); 17] = [
     ("tbody", Tag::Tbody),
 ];
 
-/// Every style property the census found, with a value of the type the corpus
-/// uses for it: em multipliers as numbers, keywords and colours as strings.
+/// List every style property that the census found with the value type that the
+/// corpus uses. Use numbers for em multipliers. Use strings for keywords and colors.
 fn census_styles() -> Vec<(&'static str, StyleKey, Scalar)> {
     vec![
         ("fontWeight", StyleKey::FontWeight, Scalar::Text(Span::default())),
@@ -81,7 +81,7 @@ fn census_styles() -> Vec<(&'static str, StyleKey, Scalar)> {
     ]
 }
 
-/// The value a census style property is written with in the fixture.
+/// Return the fixture value for one census style property.
 fn style_json(want: Scalar, name: &str) -> Value {
     match want {
         Scalar::Num(n) => json!(n),
@@ -132,8 +132,8 @@ fn every_census_style_property_survives_the_stored_format() {
     }
 }
 
-/// An unrecognised property is dropped from the record on purpose - the
-/// record is a closed set - but it must not take its neighbours with it.
+/// Drop an unknown property on purpose because the record has a closed set.
+/// Keep nearby properties.
 #[test]
 fn an_unknown_style_property_drops_without_disturbing_the_rest() {
     let d = doc(&json!([{"type": "structured-content", "content": {
@@ -145,13 +145,12 @@ fn an_unknown_style_property_drops_without_disturbing_the_rest() {
     assert_eq!(Some("bold"), d.style_of(id, StyleKey::FontWeight).and_then(|v| d.scalar_str(v)));
 }
 
-/// Every image field the census counted reaches the tree, because the media
-/// store reads them off the node and a rebuild is the only way to get them
-/// back.
+/// Preserve every image field that the census counted. The Media store reads these
+/// fields from each node. A rebuild is the only way to restore them.
 #[test]
 fn an_image_node_keeps_every_field_the_census_counted() {
-    // Verbatim from dict-shapes.md's "Representative nodes", 三省堂国語辞典
-    // 第八版: a monochrome SVG with a declared em size.
+    // Taken verbatim from `docs/research/dict-shapes.md` under "Representative
+    // nodes" for 三省堂国語辞典 第八版. It is a monochrome SVG with a declared em size.
     let d = doc(&json!([{"type": "structured-content", "content": {
         "tag": "img", "path": "sankoku8/svg-intonation/短.svg", "height": 1.0,
         "width": 1.5384615384615385, "sizeUnits": "em", "appearance": "monochrome",
@@ -165,10 +164,10 @@ fn an_image_node_keeps_every_field_the_census_counted() {
         d.attr_of(id, "path").and_then(|v| d.scalar_str(v))
     );
     assert_eq!(Some(Scalar::Num(1.0)), d.attr_of(id, "height"));
-    // `serde_json`'s decimal parser is not always correctly rounded on a
-    // 17-digit mantissa, so this census value comes back one ULP off its
-    // literal. Pre-existing and invisible - the number is an em multiplier -
-    // but an exact comparison would pin a `serde_json` implementation detail.
+    // `serde_json` can round a 17-digit mantissa one ULP away from its literal value.
+    // This parser behavior predates this test. The difference is invisible because
+    // the number is an em multiplier. An exact comparison would pin an implementation
+    // detail of `serde_json`.
     let width = match d.attr_of(id, "width") {
         Some(Scalar::Num(n)) => n,
         other => panic!("width did not parse as a number: {other:?}"),
@@ -186,10 +185,9 @@ fn an_image_node_keeps_every_field_the_census_counted() {
 // one fixture per real dictionary shape
 // ---------------------------------------------------------------------------
 
-/// Jitendex. Built from the hooks the census names for it -
-/// `content=part-of-speech-info` pills, `content=sense`, `content=glossary`,
-/// `content=example-sentence*`, `content=attribution` - which are the six
-/// names the deleted drop list held plus the two it did not cover.
+/// Jitendex. The fixture exercises the census hooks `content=part-of-speech-info`,
+/// `content=sense`, `content=glossary`, `content=example-sentence*`, and
+/// `content=attribution`.
 #[test]
 fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     let g = json!([{"type": "structured-content", "content": [
@@ -218,8 +216,8 @@ fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     assert_eq!(vec!["noun".to_string(), "suru verb".to_string()], pos_labels(&d));
     assert_eq!(vec!["chatting\nidle talk".to_string()], plain_items(&d));
 
-    // The list marker Jitendex declares inline is on the node, so the popup
-    // scene can draw it and the role classifier can see the roles beside it.
+    // The list marker that Jitendex declares inline stays on the node. The PopupScene
+    // can draw it, and the role classifier can see the roles beside it.
     let list = find_tag(&d, Tag::Ul).unwrap();
     assert_eq!(
         Some("\"◍\""),
@@ -227,14 +225,14 @@ fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     );
     let attribution = d.items().next().map(|item| d.children(item).nth(4).unwrap()).unwrap();
     assert_eq!(Role::Attribution, d.role(attribution));
-    // Dropped from the *render*, kept in the tree: the popup's "show
-    // attributions" setting has nothing to switch on otherwise.
+    // The summary drops this node, but the tree keeps it. The popup needs this role
+    // for the "show attributions" control to restore it.
     assert_eq!(Tag::A, d.node(d.children(attribution).next().unwrap()).tag);
 }
 
-/// 大辞林 第四版. The census names its `name=用例`, `name=慣用例` and
-/// `name=用例注釈` hooks, and records that it draws its own `①②③` inside the
-/// tree - which is why nothing synthesises an outer number for a sense.
+/// 大辞林 第四版. The fixture exercises `name=用例` and `name=慣用例`.
+/// It also records its own `①②③` markers inside the tree. Therefore, no code
+/// creates an outer sense number.
 #[test]
 fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
     let g = json!([{"type": "structured-content", "content": {
@@ -252,11 +250,10 @@ fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
         ]}}]);
     let d = doc(&g);
 
-    // Both example hooks classify, so 大辞林's examples now behave the way
-    // Jitendex's always did: two senses as sibling blocks, each on its own
-    // line, the dictionary's own marker intact, no synthesised number, and
-    // the two `用例` blocks out of the summary. Before the role classifier
-    // the drop list named neither `用例` nor `慣用例` and both rendered.
+    // Both example hooks classify. 大辞林 now matches Jitendex: two senses form
+    // peer blocks. Each block uses its own line, and the Dictionary's marker stays.
+    // No code creates a number. Both `用例` blocks leave the summary. The old drop
+    // list named neither `用例` nor `慣用例`, so both blocks once rendered.
     assert_eq!(vec!["①走る。駆ける。\n②流れる。".to_string()], plain_items(&d));
 
     let roles: Vec<(&str, Role)> = (0..d.all_nodes().len() as NodeId)
@@ -274,10 +271,9 @@ fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
     );
 }
 
-/// 明鏡国語辞典 第三版, whose 38 892 example sentences hang off an `example=`
-/// key no fixed drop list ever named - the headline defect the role
-/// classifier closes, since Jitendex lost its examples while this dictionary
-/// kept every one.
+/// 明鏡国語辞典 第三版. Its 38 892 example sentences use an `example=` key that
+/// no fixed drop list names. This case tests the main defect that the role
+/// classifier fixes: Jitendex lost its examples, but this Dictionary kept all of them.
 #[test]
 fn meikyo_examples_classify_under_a_key_no_drop_list_ever_named() {
     let g = json!([{"type": "structured-content", "content": {
@@ -298,9 +294,9 @@ fn meikyo_examples_classify_under_a_key_no_drop_list_ever_named() {
     );
 }
 
-/// 字通: 139 138 image nodes and 278 340 gaiji markers, more than four image
-/// nodes per term row. The image node is verbatim from the census's
-/// "Representative nodes".
+/// 字通 has 139 138 image nodes and 278 340 gaiji markers. It averages more than
+/// four image nodes per term row. The image node is verbatim from the census
+/// `Representative nodes` entry.
 #[test]
 fn jitsuu_gaiji_images_keep_their_data_markers() {
     let g = json!([{"type": "structured-content", "content": [
@@ -315,13 +311,13 @@ fn jitsuu_gaiji_images_keep_their_data_markers() {
     assert_eq!(Kind::Image, d.node(img).kind);
     assert_eq!(Some("［対義語］"), d.data_of(img, "alt").and_then(|v| d.scalar_str(v)));
     assert!(d.data_of(img, "gaiji").is_some(), "the gaiji marker is what makes it a character");
-    // The plain-text renderer has no way to draw a character as an image, so
-    // it drops it; the tree keeps it for the renderer that can.
+    // The plain-text renderer cannot draw a character as an image, so it drops the
+    // image. The tree keeps the image for a renderer that can draw it.
     assert_eq!(vec!["むかう".to_string()], plain_items(&d));
 }
 
-/// 三省堂国語辞典 第八版: a monochrome SVG at a declared em size, inline in
-/// the middle of a definition, beside its `name=用例` hook.
+/// 三省堂国語辞典 第八版. A monochrome SVG uses a declared em size. It appears
+/// inline in a definition beside its `name=用例G` hook.
 #[test]
 fn sanseido_inline_monochrome_svg_sits_inside_its_sense() {
     let g = json!([{"type": "structured-content", "content": {
@@ -338,26 +334,25 @@ fn sanseido_inline_monochrome_svg_sits_inside_its_sense() {
     assert_eq!(Some("monochrome"), d.attr_of(img, "appearance").and_then(|v| d.scalar_str(v)));
     assert_eq!(Some(Scalar::Num(1.0)), d.attr_of(img, "height"));
 
-    // 三省堂's own `用例G` hook classifies, so its example leaves the summary
-    // exactly as Jitendex's always did - and no fixed drop list ever named
-    // this key.
+    // 三省堂's own `用例G` hook classifies the node. The example leaves the summary,
+    // as it does for Jitendex. No fixed drop list named this key.
     let example = (0..d.all_nodes().len() as NodeId)
         .find(|&i| d.data_of(i, "name").is_some())
         .expect("the example hook survived the parse");
     assert_eq!(Role::Example, d.role(example));
     assert_eq!(vec!["みじかい".to_string()], plain_items(&d));
 
-    // The image is a sibling of the text inside one block, not a block of
-    // its own: it must not break the line it sits in. Asserted on the card,
-    // which keeps the example, so the whole line is observable.
+    // The image shares one block with the text. It must not create a line break.
+    // Check the card because it keeps the example. The full line is then observable.
     assert_eq!(
         vec!["<div><span>みじかい</span>短<div>―スカート</div></div>".to_string()],
         render_html(&d, Selection::Whole, RoleFilter::CARD)
     );
 }
 
-/// A conjugation table: 18 dictionaries emit `tr`/`td`, 11 emit `th`, and 7
-/// emit `rowSpan`. Cells are a grid problem, so only the row breaks a line.
+/// A conjugation table. The corpus has 18 Dictionaries with `tr` and `td`, 11
+/// with `th`, and 7 with `rowSpan`. Treat cells as a grid. Only a row creates a
+/// line break.
 #[test]
 fn a_conjugation_table_parses_to_rows_of_cells_with_their_spans() {
     let g = json!([{"type": "structured-content", "content": {
@@ -387,13 +382,13 @@ fn a_conjugation_table_parses_to_rows_of_cells_with_their_spans() {
     let wide = d.children(rows[1]).next().unwrap();
     assert_eq!(Some(Scalar::Num(2.0)), d.attr_of(wide, "colSpan"));
 
-    // One line per row; the cells within a row concatenate.
+    // Create one line per row. Concatenate cells within each row.
     assert_eq!(vec!["五段未然形書か\n連用形 書き".to_string()], plain_items(&d));
 }
 
-/// One of the 20 plain-string dictionaries - 精選版 日本国語大辞典, 漢字源 and
-/// friends. They reach parity from the line-break work alone, and the point
-/// here is that they arrive as the *same* shape as everything else.
+/// One of 20 plain-string Dictionaries, such as 精選版 日本国語大辞典 and 漢字源.
+/// These Dictionaries reach render parity through line-break support. Test that
+/// they produce the same shape as other Dictionaries.
 #[test]
 fn a_plain_string_dictionary_gives_one_text_node_per_item() {
     let d = doc(&json!(["to eat", "to consume"]));
@@ -408,8 +403,8 @@ fn a_plain_string_dictionary_gives_one_text_node_per_item() {
     assert_eq!(vec!["to eat".to_string(), "to consume".to_string()], plain_items(&d));
 }
 
-/// A `type: text` item is the same one-node shape as a bare string, which is
-/// what lets every renderer handle one case instead of three.
+/// A `type: text` item has one node, like a bare string. This lets every renderer
+/// handle one shape instead of three.
 #[test]
 fn a_typed_text_item_is_the_same_single_node_shape() {
     let d = doc(&json!([{"type": "text", "text": "to eat"}]));
@@ -421,9 +416,9 @@ fn a_typed_text_item_is_the_same_single_node_shape() {
     assert_eq!(vec!["to eat".to_string()], plain_items(&d));
 }
 
-/// The four `details`/`summary` dictionaries, 31 000 nodes. Outside the HTML
-/// allow-list, so the *renderers* drop the wrapper - but the tree keeps both
-/// tags, which is what the popup scene needs to distinguish the summary.
+/// Four Dictionaries use `details` with 30 908 nodes and `summary` with 31 169.
+/// These tags sit outside the HTML allow-list, so renderers drop the wrapper.
+/// GlossDoc keeps both tags so PopupScene can distinguish the summary.
 #[test]
 fn a_details_summary_dictionary_keeps_both_tags_and_separates_them() {
     let g = json!([{"type": "structured-content", "content": {
@@ -442,8 +437,7 @@ fn a_details_summary_dictionary_keeps_both_tags_and_separates_them() {
 // editorial role classification
 // ---------------------------------------------------------------------------
 
-/// One node carrying one `data` entry, which is the shape the classifier
-/// reads.
+/// Build one node with one `data` entry for classifier input.
 fn roled(key: &str, value: &str) -> (GlossDoc, NodeId) {
     let d = doc(&json!([{"tag": "span", "data": {key: value}, "content": "x"}]));
     let id = d.items().next().expect("the node parsed");
@@ -455,20 +449,20 @@ fn role_of_hook(key: &str, value: &str) -> Role {
     d.role(id)
 }
 
-/// Every row of `docs/research/dict-shapes.md`'s bilingual role table, in the
-/// real spelling the census recorded rather than a paraphrase of it.
+/// List the bilingual role forms that this table tests from
+/// `docs/research/dict-shapes.md`, with each form in census spelling. The
+/// `用例注釈` form is tested separately below.
 ///
-/// `(data key, data value, role)`. A row with an empty value is a key-side
-/// hook - the dictionary's own field name carries the role and the value is
-/// the empty marker the census records as `用例=`. A row with a value is a
-/// value-side hook on one of the three convention keys.
+/// `(data key, data value, role)`. An empty value marks a key-side hook. The
+/// Dictionary field name supplies the role, and `用例=` records the empty marker.
+/// A non-empty value marks a value-side hook on one of three convention keys.
 ///
-/// The Japanese half is the majority by more than an order of magnitude:
-/// 755 264 example nodes across four dictionaries against roughly 62 000
-/// under the ASCII spellings, so a table that held only the ASCII rows would
-/// pass while missing twelve example nodes in thirteen.
+/// Japanese hooks dominate the census by more than one order of magnitude. Four
+/// Dictionaries have 755 242 example nodes. ASCII forms have roughly 62 000.
+/// An ASCII-only table would pass but omit twelve example nodes in thirteen
+/// Dictionaries.
 const CENSUS_ROLES: [(&str, &str, Role); 34] = [
-    // -- example, Japanese keys: 755 264 nodes, 4 dictionaries.
+    // -- example, Japanese keys: 755 242 nodes, 4 dictionaries.
     ("用例", "", Role::Example),
     ("用例G", "", Role::Example),
     ("用例訳", "", Role::Example),
@@ -518,9 +512,9 @@ fn every_row_of_the_census_role_table_classifies_to_its_named_role() {
     }
 }
 
-/// The substring rule, on the spellings that motivated it: 旺文社 全訳古語辞典
-/// writes eleven distinct `用例`-prefixed keys and 大辞林 two more, and no
-/// equality table would have named them all.
+/// Test the substring rule with the forms that motivated it. 旺文社 全訳古語辞典
+/// writes eleven distinct `用例`-prefixed keys. 大辞林 writes two more. An equality
+/// table could not name all of them.
 #[test]
 fn a_key_that_only_contains_a_needle_still_classifies() {
     for key in ["用例メタデータ", "用例囲みG", "用例訳注ロゴテキスト", "用例注釈", "注内用例G"] {
@@ -531,30 +525,30 @@ fn a_key_that_only_contains_a_needle_still_classifies() {
     assert_eq!(Role::Attribution, role_of_hook("出典G", ""));
 }
 
-/// Normalisation, one row per fold, and each row is a spelling a converter
-/// produces rather than one invented to exercise the code.
+/// Test normalization one row per fold. Each row uses a form that a converter
+/// produces, not one invented only for this test.
 #[test]
 fn classification_normalises_case_width_and_the_ideographic_space() {
-    // Case: 旺文社漢字典 writes `ExampleG` where Jitendex writes
+    // Case: 旺文社漢字典 writes `ExampleG`, while Jitendex writes
     // `example-sentence`.
     assert_eq!(Role::Example, role_of_hook("EXAMPLE", ""));
     assert_eq!(Role::Example, role_of_hook("ExAmPlE", ""));
     assert_eq!(Role::PartOfSpeech, role_of_hook("content", "Part-Of-Speech-Info"));
-    // Width: an HTML- or EPUB-sourced dictionary writes full-width Latin.
+    // Width: An HTML- or EPUB-based Dictionary uses full-width Latin.
     assert_eq!(Role::Example, role_of_hook("Ｅｘａｍｐｌｅ", ""));
     assert_eq!(Role::Example, role_of_hook("name", "ｅｘａｍｐｌｅ＿１"));
-    // A class list, as 旺文社 全訳古語辞典 writes it - and with the
-    // ideographic space a Japanese source is as likely to use.
+    // A class list, as 旺文社 全訳古語辞典 writes it. A Japanese source can also use
+    // the ideographic space.
     assert_eq!(Role::Example, role_of_hook("class", "fill 用例 FM"));
     assert_eq!(Role::Example, role_of_hook("class", "fill　用例　FM"));
     assert_eq!(Role::Example, role_of_hook("class", "用例活用 IM"));
 }
 
-/// The value side is three exact conventions, not a family of spellings.
+/// The value side has three exact conventions, not a form family.
 ///
-/// Nine census keys hold `content`, `name` or `class` without being one. A
-/// substring rule there would read a role out of their values, and every one
-/// of those reads could only ever hide content.
+/// Nine census keys contain `content`, `name`, or `class` that are not convention
+/// keys. A substring rule could read a role from their values. Every false match
+/// would hide content.
 #[test]
 fn a_key_that_merely_contains_a_convention_name_is_not_a_convention_key() {
     for key in ["contents", "Contents", "jukugoitemcontent", "CampaignName", "filename"] {
@@ -566,8 +560,8 @@ fn a_key_that_merely_contains_a_convention_name_is_not_a_convention_key() {
     }
 }
 
-/// A dictionary using none of the conventions renders in full - 78 of the
-/// census's 97 archives, and the failure direction the evidence demands.
+/// A Dictionary with no known convention renders all content. The census has 78
+/// such archives out of 97. This is the direction that the evidence requires.
 #[test]
 fn a_dictionary_using_no_known_convention_classifies_entirely_as_content() {
     let d = doc(&json!([{"type": "structured-content", "content": {
@@ -589,9 +583,8 @@ fn a_dictionary_using_no_known_convention_classifies_entirely_as_content() {
     assert_eq!(vec!["猫\ncat猫(ねこ)".to_string()], plain_items(&d));
 }
 
-/// Two hooks on one node take the smaller role whichever order the
-/// dictionary wrote them in, so the classifier does not inherit a JSON
-/// field order as a policy.
+/// Two hooks on one node use the higher-priority role in either field order. The
+/// classifier must not use JSON field order as policy.
 #[test]
 fn two_hooks_on_one_node_resolve_by_precedence_not_by_field_order() {
     let one = doc(&json!([{"tag": "span",
@@ -604,8 +597,8 @@ fn two_hooks_on_one_node_resolve_by_precedence_not_by_field_order() {
     assert_eq!(Role::PartOfSpeech, role(&other), "field order is not precedence");
 }
 
-/// A convention key whose value is not a string names no role, but still
-/// marks a block - the two questions are separate and stay separate.
+/// A convention key with a non-string value names no role. It still marks a block.
+/// Keep these questions separate.
 #[test]
 fn a_convention_key_with_a_non_string_value_is_content_and_still_a_block() {
     let d = doc(&json!([{"tag": "span", "data": {"content": 3}, "content": "x"}]));
@@ -614,12 +607,12 @@ fn a_convention_key_with_a_non_string_value_is_content_and_still_a_block() {
     assert!(d.has_marker(id), "a non-string marker still opens a block");
 }
 
-/// The equivalence the deleted drop list used to give exactly one dictionary.
+/// Match the behavior that the deleted drop list gave one Dictionary.
 ///
-/// Its six names were three example spellings and two attribution ones, and
-/// the part-of-speech marker sat beside it. Each one classifies to the role
-/// whose knob now governs it, so a summary drops what the list dropped -
-/// and every other dictionary's hooks now reach the same knobs.
+/// The list held six names. The part-of-speech marker stood beside those names.
+/// Each example or attribution name now maps to its role.
+/// The summary drops those roles as before. The card keeps them. Other Dictionaries
+/// use the same settings.
 #[test]
 fn the_deleted_drop_list_is_now_the_role_the_knobs_govern() {
     const WAS_DROPPED: [&str; 6] = [
@@ -643,8 +636,8 @@ fn the_deleted_drop_list_is_now_the_role_the_knobs_govern() {
     assert!(!RoleFilter::CARD.allows(role_of_hook("content", "part-of-speech-info")));
 }
 
-/// At the tree's own seam: one document, one parse, the example gone from the
-/// summary and present on the card.
+/// Test one parse at the tree seam. The example leaves the summary and stays on the
+/// card.
 #[test]
 fn an_example_leaves_the_summary_and_stays_on_the_card() {
     let d = doc(&json!([{"type": "structured-content", "content": [
@@ -657,8 +650,7 @@ fn an_example_leaves_the_summary_and_stays_on_the_card() {
     assert!(card[0].contains("ご飯を食べる"), "the card keeps it: {card:?}");
 }
 
-/// Attributions and examples are two knobs over one document, and all four
-/// combinations differ.
+/// Examples and attributions use two independent settings. Test all four combinations.
 #[test]
 fn examples_and_attributions_filter_independently_in_all_four_combinations() {
     let d = doc(&json!([{"type": "structured-content", "content": [
@@ -684,9 +676,8 @@ fn examples_and_attributions_filter_independently_in_all_four_combinations() {
     }
 }
 
-/// A part-of-speech label reaches the card's `pos` field and neither the
-/// gloss body nor the Anki HTML field, which is what makes it a *moved*
-/// role rather than a hidden one.
+/// Move a part-of-speech label to the card's `pos` field. Leave it out of the gloss
+/// body and Anki HTML field. This tests a moved role, not a hidden role.
 #[test]
 fn a_part_of_speech_label_is_lifted_and_never_left_inline() {
     let d = doc(&json!([{"type": "structured-content", "content": [
@@ -718,9 +709,9 @@ fn an_unknown_tag_keeps_its_children_and_its_name() {
     assert_eq!(vec!["kept".to_string()], plain_items(&d));
 }
 
-/// Every field at the wrong type at once. Valid JSON, invalid schema: the
-/// parse must not panic and must not error, because a hover has nothing
-/// useful to do with either.
+/// Give every field the wrong type. The JSON remains valid, but its schema is
+/// invalid. The parser must not panic or return an error because a hover cannot use
+/// this data.
 #[test]
 fn a_malformed_node_does_not_panic() {
     let cases = [
@@ -743,8 +734,8 @@ fn a_malformed_node_does_not_panic() {
     ];
     for case in cases {
         let d = doc(&case);
-        // The assertion is that these do not panic; running every renderer
-        // over the result is what proves the tree is walkable afterwards.
+        // These inputs must not panic. Run every renderer to prove that the tree remains
+        // walkable afterward.
         let _ = plain_items(&d);
         let _ = pos_labels(&d);
         let _ = render_html(&d, Selection::Whole, RoleFilter::CARD);
@@ -752,14 +743,12 @@ fn a_malformed_node_does_not_panic() {
     }
 }
 
-/// Per-item isolation, which is what Yomitan and Hoshi Reader both do: a
-/// depth cap does not cover a bad node, so one unreadable row must cost that
-/// row alone.
+/// Isolate malformed rows as Yomitan and Hoshi Reader do. A depth cap does not
+/// cover a bad node. One unreadable row must cost only that row.
 #[test]
 fn a_malformed_row_degrades_alone_and_the_rest_of_the_entry_renders() {
-    // The middle item is missing a comma between two members. Its brackets
-    // still balance, so the splitter isolates it, and `serde_json` rejects
-    // it after it has already read the text.
+    // The middle item lacks a comma between two members. Its brackets still balance,
+    // so the splitter isolates it. `serde_json` rejects it after it reads the text.
     let stored = r#"[
         {"type": "structured-content", "content": "first"},
         {"tag": "div", "content": "second" "extra": 1},
@@ -784,7 +773,7 @@ fn an_unreadable_row_costs_only_itself() {
     assert_eq!(vec!["first".to_string(), "third".to_string()], plain_items(&d));
 }
 
-/// An unterminated array is one broken row, not an empty entry.
+/// An unterminated array is one broken row, not an empty Entry.
 #[test]
 fn a_truncated_payload_keeps_the_rows_it_did_contain() {
     let stored = r#"["first", "second", {"tag": "div", "content": "th"#;
@@ -794,7 +783,7 @@ fn a_truncated_payload_keeps_the_rows_it_did_contain() {
     assert!(plain.starts_with(&["first".to_string(), "second".to_string()]), "{plain:?}");
 }
 
-/// One `x` per level, so the render says exactly how far the walk got.
+/// Add one `x` at each level. The render then shows how far the walk got.
 fn nested(levels: usize) -> Value {
     let mut node = json!({"tag": "span", "content": "innermost"});
     for _ in 0..levels {
@@ -805,8 +794,8 @@ fn nested(levels: usize) -> Value {
 
 #[test]
 fn a_tree_nested_past_the_cap_is_truncated_not_failed() {
-    // Modestly past the cap, which is where the cap is the mechanism: three
-    // times the census's deepest real tree is still well inside it.
+    // Use a depth just past the cap. This tests the cap itself. Three times the
+    // census's deepest real tree still fits inside the limit.
     let levels = (MAX_DEPTH + 8) as usize;
     let d = doc(&nested(levels));
 
@@ -817,8 +806,8 @@ fn a_tree_nested_past_the_cap_is_truncated_not_failed() {
     assert_eq!(1, plain.len());
     assert!(plain[0].contains('x'), "the outer levels rendered");
     assert!(!plain[0].contains("innermost"), "the subtree past the cap is not rendered");
-    // Three nodes per level - the `div`, its `span`, and the span's text -
-    // and none past the cap: the arena stopped growing.
+    // Each level adds three nodes: `div`, its `span`, and that span's text. The arena
+    // adds no nodes after the cap.
     assert!(
         (d.all_nodes().len() as u32) <= 3 * MAX_DEPTH,
         "the arena stopped growing at the cap: {} nodes",
@@ -826,11 +815,10 @@ fn a_tree_nested_past_the_cap_is_truncated_not_failed() {
     );
 }
 
-/// Hundreds of levels deep. `serde_json`'s own recursion limit may reach the
-/// over-cap subtree before the cap's `IgnoredAny` finishes consuming it, in
-/// which case per-item isolation catches it instead. Either mechanism must
-/// terminate and leave the outer levels rendering, which is the guarantee
-/// this asserts - not which one fired.
+/// Build a tree hundreds of levels deep. `serde_json` can reach the over-cap
+/// subtree before the cap's `IgnoredAny` reads it fully. Per-item isolation can
+/// catch it instead. Both mechanisms must terminate and preserve outer levels. This
+/// test checks that guarantee, not which mechanism acts.
 #[test]
 fn an_absurdly_nested_tree_terminates_and_still_renders_its_outer_levels() {
     let d = doc(&nested(400));
@@ -839,16 +827,16 @@ fn an_absurdly_nested_tree_terminates_and_still_renders_its_outer_levels() {
     assert_eq!(1, plain.len());
     assert!(plain[0].contains('x'), "the outer levels rendered");
     assert!(!plain[0].contains("innermost"));
-    // The same node count as a tree eight levels past the cap: input depth
-    // beyond the cap buys nothing at all.
+    // A tree eight levels past the cap has the same node count. Extra input depth adds
+    // no nodes.
     assert_eq!(
         doc(&nested((MAX_DEPTH + 8) as usize)).all_nodes().len(),
         d.all_nodes().len()
     );
 }
 
-/// An array-only nest adds no node level, so the cap never sees it and
-/// `serde_json`'s limit is what bounds it. It costs one glossary item.
+/// An array-only nest adds no node level. The cap cannot see it, so the
+/// `serde_json` recursion limit bounds it. It costs one glossary item.
 #[test]
 fn an_array_only_nest_terminates() {
     let deep = format!("[{}\"x\"{}]", "[".repeat(400), "]".repeat(400));
@@ -866,15 +854,14 @@ fn an_empty_document_is_empty() {
     assert_eq!(0, d.footprint());
 }
 
-/// A `Node` is 44 bytes and the arena's whole point is that it stays that
-/// way: a wider node multiplies straight into the retained heap the parsed
-/// tree cache holds, which is one of the two axes that chose this layout.
+/// Keep `Node` at 44 bytes. A larger node directly increases retained heap in the
+/// parsed tree cache. Cache size was one of two layout criteria.
 #[test]
 fn a_node_stays_pointer_free_and_small() {
     assert_eq!(44, std::mem::size_of::<Node>());
 }
 
-/// Interning is what makes the per-node style probe an integer compare.
+/// Intern data keys so a node style probe can compare integer IDs.
 #[test]
 fn a_repeated_data_key_is_interned_once() {
     let d = doc(&json!([{"type": "structured-content", "content": [

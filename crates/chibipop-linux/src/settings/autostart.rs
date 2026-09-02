@@ -1,62 +1,62 @@
-//! Autostart: the `.desktop` file *is* the state
+//! The `.desktop` file is the autostart state
 //! (ARCHITECTURE.md#platform-integration and
 //! ARCHITECTURE.md#settings-and-config).
 //!
 //! The checkbox reads and writes `$XDG_CONFIG_HOME/autostart/chibipop.desktop`
-//! directly — there is no TOML field, so nothing can desync from a user
-//! who hand-manages the file or takes the systemd/Hyprland route
-//! (`extras/`). Presence means on, absence means off; a toggle writes or
-//! removes the file and then re-reads it, so the widget never shows a
-//! state the filesystem does not have.
+//! directly. No TOML field stores this state. This keeps the file and widget
+//! state aligned when a user manages the file manually or uses the
+//! systemd/Hyprland route
+//! (`extras/`). File presence means on. File absence means off.
+//! A toggle writes or removes the file, then reads it again. The widget never
+//! shows a state that differs from the filesystem.
 //!
-//! One file covers GNOME, KDE, and uwsm-managed Hyprland (systemd's
-//! xdg-autostart generator). Portable mode does *not* move it: the
-//! autostart directory belongs to the desktop environment, which reads
-//! only XDG — only `Exec`/`TryExec` follow the running binary, so a
-//! portable or AppImage install autostarts itself rather than some other
-//! chibipop on `PATH`.
+//! One file supports GNOME, KDE, and uwsm-managed Hyprland
+//! (systemd's xdg-autostart generator). Portable mode does not move this file.
+//! The desktop environment owns the autostart directory and reads only XDG.
+//! `Exec` and `TryExec` use the current binary path. A portable or AppImage
+//! install therefore starts itself, not another chibipop on `PATH`.
 
 use crate::paths::{self, Env};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The autostart entry's file name, per
+/// Name the autostart entry file. See
 /// ARCHITECTURE.md#platform-integration.
 pub const FILE_NAME: &str = "chibipop.desktop";
 
-/// The autostart directory the spec defines, relative to the config root.
+/// Name the autostart directory relative to the config root, as the spec defines.
 const DIR_NAME: &str = "autostart";
 
-/// Where the entry goes and what it launches, resolved once at startup.
+/// Startup target that identifies the entry location and executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    /// The XDG config root (*not* chibipop's own config dir).
+    /// The XDG config root, not chibipop's own config directory.
     config_home: PathBuf,
-    /// The binary `Exec` points at.
+    /// The executable path for `Exec`.
     exec: PathBuf,
 }
 
 impl Target {
-    /// `None` when there is no config root to write into (neither
-    /// `$XDG_CONFIG_HOME` nor `$HOME`) or the exe path is unknowable —
-    /// the window then says so instead of guessing a path.
+    /// Return `None` when neither `$XDG_CONFIG_HOME` nor `$HOME` provides a
+    /// config root, or when the executable path is unknown.
+    /// The window reports this case and does not guess a path.
     pub fn resolve(env: &Env) -> Option<Target> {
         Some(Target { config_home: paths::config_home(env)?, exec: paths::exec_path().ok()? })
     }
 
-    /// The full path of the autostart entry.
+    /// Return the full path for the autostart entry.
     pub fn file(&self) -> PathBuf {
         self.config_home.join(DIR_NAME).join(FILE_NAME)
     }
 
-    /// The state, read off the filesystem every time it is asked for.
+    /// Read the enabled state from the filesystem on every call.
     pub fn is_enabled(&self) -> bool {
         self.file().is_file()
     }
 
-    /// Write the entry (`on`) or remove it (`off`). Both directions are
-    /// idempotent: writing overwrites a stale `Exec`, removing an absent
-    /// file succeeds.
+    /// Write the entry when `on` is true. Remove it when `on` is false.
+    /// Both operations are idempotent. A write replaces a stale `Exec`, and
+    /// removal of an absent file succeeds.
     pub fn set(&self, on: bool) -> io::Result<()> {
         let file = self.file();
         if !on {
@@ -72,8 +72,8 @@ impl Target {
     }
 }
 
-/// The entry text, per the desktop-entry spec: `Exec` runs the daemon
-/// verb, `TryExec` lets the desktop skip a removed install.
+/// Build entry text per the desktop-entry spec. `Exec` runs the daemon verb.
+/// `TryExec` lets the desktop skip an install that no longer exists.
 pub fn entry(exec: &Path) -> String {
     let exec = exec.to_string_lossy();
     format!(
@@ -95,22 +95,25 @@ pub fn entry(exec: &Path) -> String {
     )
 }
 
-/// A path as one quoted `Exec` argument. Quoting is unconditional so a
-/// space in the install path cannot split the command. Two unescapings
-/// run over this text — the desktop file's string rules first, then
-/// `Exec`'s own tokenizer — so every backslash the tokenizer must see
-/// has to be written twice, and `%` doubles so it is never read as a
-/// field code.
+/// Quote a path as one `Exec` argument.
+/// Always quote it, so spaces in the install path do not split the command.
+/// The desktop-entry string pass unescapes the value first.
+/// The `Exec` tokenizer unescapes each quoted argument second.
+/// Write four backslashes in the file for one literal argument backslash.
+/// The first pass changes four to two. The second pass changes two to one.
+/// For a quote, `$`, or a backtick, write two file backslashes before it.
+/// The first pass changes the pair to one. The tokenizer uses it to preserve that character.
+/// Double `%` so the tokenizer does not treat it as a field code.
 fn quote_exec_arg(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 2);
     out.push('"');
     for c in path.chars() {
         match c {
-            // One literal backslash needs four: halved to two by the
-            // string unescaping, then to one by the tokenizer.
+            // One literal backslash needs four in the file. The desktop-entry pass
+            // changes four to two, then the `Exec` tokenizer changes two to one.
             '\\' => out.push_str("\\\\\\\\"),
-            // The tokenizer's reserved characters need one preceding
-            // backslash, which two in the file unescape to.
+            // The tokenizer needs one backslash before each reserved character.
+            // The desktop-entry pass changes two file backslashes to one for the tokenizer.
             '"' | '$' | '`' => {
                 out.push_str("\\\\");
                 out.push(c);
@@ -123,10 +126,9 @@ fn quote_exec_arg(path: &str) -> String {
     out
 }
 
-/// A plain string value: only the spec's own escape sequences apply, so a
-/// literal backslash doubles. Newlines cannot occur in a path component
-/// that reached us from `current_exe`, but a `\n` in one would forge a
-/// key line, so it is escaped too.
+/// Escape a plain string value with the spec escape sequences.
+/// Double literal backslashes. Escape newline, carriage return, and tab
+/// characters so they stay inside the value.
 fn escape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -157,8 +159,8 @@ mod tests {
         Target { config_home: tmp_config_home(name), exec: PathBuf::from("/opt/chibipop/chibipop") }
     }
 
-    /// Every non-group line is `Key=` or `Key[locale]=`, per the spec's
-    /// key syntax, and no key is written twice.
+    /// Each non-group line follows `Key=` or `Key[locale]=` syntax from the spec.
+    /// No key appears twice.
     fn assert_valid_entry(text: &str) {
         let mut lines = text.lines();
         assert_eq!(Some("[Desktop Entry]"), lines.next(), "group header must come first");
@@ -193,8 +195,8 @@ mod tests {
         assert!(!target.is_enabled());
         assert!(!target.file().exists());
 
-        // Off twice is not an error: the file is the state, and it is
-        // already in the asked-for state.
+        // Two `off` writes are not errors. The file already has the requested
+        // off state.
         target.set(false).unwrap();
         assert!(!target.is_enabled());
 
@@ -212,8 +214,8 @@ mod tests {
         assert!(text.ends_with('\n'), "the file ends with a newline");
     }
 
-    /// A space in the install path must not split the command, and the
-    /// spec's reserved characters must survive unescaping.
+    /// A space in the install path must not split the command.
+    /// The spec's reserved characters must survive both escape passes.
     #[test]
     fn an_awkward_path_stays_one_quoted_argument() {
         let text = entry(Path::new("/home/u/My Apps/chibi$pop"));
@@ -222,10 +224,11 @@ mod tests {
         assert!(text.contains("\nTryExec=/home/u/My Apps/chibi$pop\n"), "{text}");
     }
 
-    /// The spec's two passes over `Exec`, in the order a launcher runs
-    /// them: the string-value unescaping every entry gets, then the
-    /// argument tokenizer. Panics on anything the spec leaves undefined,
-    /// so a wrong escape count fails here rather than at login.
+    /// A launcher applies two passes to `Exec` text.
+    /// First, the desktop-entry string pass unescapes the value.
+    /// Then, the `Exec` tokenizer applies its escape rules to the quoted argument.
+    /// The `exec_argv` helper panics when the text violates these rules.
+    /// A wrong escape count fails before login.
     fn exec_argv(entry_text: &str) -> Vec<String> {
         let value =
             entry_text.lines().find_map(|l| l.strip_prefix("Exec=")).expect("an Exec key");
@@ -273,8 +276,8 @@ mod tests {
         argv
     }
 
-    /// Every character the two unescaping passes treat specially, in one
-    /// path: a launcher must recover it byte for byte.
+    /// The path contains characters that either pass treats specially.
+    /// A launcher must recover every byte.
     #[test]
     fn exec_survives_both_unescaping_passes() {
         let exe = r#"/opt/we ird\dir/chibi$pop 50%`x"y"#;
@@ -283,8 +286,8 @@ mod tests {
         assert_eq!(vec![exe.to_string(), "run".to_string()], exec_argv(&text));
     }
 
-    /// The plain path a real install has must stay readable — quoting is
-    /// unconditional, but nothing else may creep in.
+    /// A plain install path stays readable. The path always has quotes, but
+    /// no other escape must appear.
     #[test]
     fn a_plain_path_is_quoted_and_otherwise_untouched() {
         let text = entry(Path::new("/usr/bin/chibipop"));
@@ -295,8 +298,8 @@ mod tests {
         );
     }
 
-    /// The written file is what a desktop reads, so an install that moved
-    /// must not leave the old `Exec` behind.
+    /// The desktop reads the written file. If an install moves, a new write
+    /// must replace the old `Exec`.
     #[test]
     fn writing_again_refreshes_a_stale_exec() {
         let home = tmp_config_home("stale");
@@ -312,8 +315,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The checkbox state comes from the file alone: no directory, an
-    /// empty directory, or someone else's entry all read as off.
+    /// Read the checkbox state from this file alone.
+    /// A directory that does not exist, an empty directory, or another app's
+    /// entry means off.
     #[test]
     fn the_checkbox_state_is_the_file_and_nothing_else() {
         let home = tmp_config_home("state");
@@ -327,7 +331,7 @@ mod tests {
         std::fs::write(home.join(DIR_NAME).join("other-app.desktop"), "x").unwrap();
         assert!(!target.is_enabled(), "another app's entry is not ours");
 
-        // A directory at our path is not an entry either.
+        // A directory at the target path is not an entry.
         let decoy = Target { config_home: home.join("decoy"), exec: PathBuf::from("/usr/bin/chibipop") };
         std::fs::create_dir_all(decoy.file()).unwrap();
         assert!(!decoy.is_enabled(), "a directory named like the entry is off");
@@ -335,7 +339,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A fresh account has no `autostart/` yet; the toggle creates it.
+    /// A fresh account has no `autostart/` directory.
+    /// The setting creates it.
     #[test]
     fn enabling_creates_a_missing_autostart_directory() {
         let home = tmp_config_home("nested");
@@ -349,8 +354,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The autostart file is XDG even in portable mode — the desktop
-    /// environment reads nowhere else — while `Exec` follows the exe.
+    /// Keep the autostart file in XDG in portable mode.
+    /// The desktop environment reads no other location.
+    /// `Exec` follows the executable path.
     #[test]
     fn portable_mode_keeps_the_entry_in_the_xdg_config_root() {
         let env = Env {
@@ -372,10 +378,9 @@ mod tests {
         assert_eq!(None, Target::resolve(&Env::default()));
     }
 
-    /// `extras/` is documentation that has to keep working: the shipped
-    /// files are read here so a renamed verb or a changed snippet cannot
-    /// silently leave a broken copy-paste in the tarball (packaging
-    /// ships this directory).
+    /// Keep `extras/` documentation valid. These tests read shipped files, so a
+    /// renamed verb or changed snippet cannot leave an invalid command example in the tarball.
+    /// The package ships this directory.
     fn extras(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extras").join(name);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -398,13 +403,12 @@ mod tests {
         assert!(text.contains("\nPartOf=graphical-session.target\n"), "{text}");
     }
 
-    /// The Hyprland snippet's bind lines must be the same lines the
-    /// settings window hands out for the default chords - two spellings
-    /// of one binding would be a support trap. The shipped file is for
-    /// an *installed* chibipop, so the bare command name is the right
-    /// exe there; a dev checkout gets its own path from
-    /// `paths::exec_name` at runtime. The add-card bind is commented out
-    /// in the shipped file, which still contains its line verbatim.
+    /// Hyprland bind lines must match the lines from the settings window for
+    /// default chords. Two spellings for one bind would create support problems.
+    /// The shipped file targets an *installed* chibipop, so the bare command
+    /// name is correct there. A dev checkout gets its own path from
+    /// `paths::exec_name` at runtime. The shipped file has the add-card bind
+    /// as a comment, but it keeps the line verbatim.
     #[test]
     fn the_shipped_hyprland_snippet_matches_the_window_snippet() {
         let text = extras("hyprland.conf");

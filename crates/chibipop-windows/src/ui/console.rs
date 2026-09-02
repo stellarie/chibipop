@@ -1,4 +1,4 @@
-//! The live lookup log console.
+//! This module shows the live Lookup log in the Windows console.
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
@@ -6,15 +6,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DeleteMenu, GetSystemMenu, ShowWindow, MF_BYCOMMAND, SC_CLOSE, SW_HIDE, SW_SHOW,
 };
 
-/// The console, if it is ours alone.
+/// Returns the console when this process owns it alone.
 ///
-/// A shell shares its console with us; that window belongs to the user's
-/// terminal and must never be shown, hidden, or claimed.
+/// A shell can share its console with this process. That window belongs to the
+/// user's terminal, so this module must not show, hide, or claim it.
 fn own_console() -> Option<HWND> {
-    // SAFETY: GetConsoleProcessList writes at most `pids.len()` entries and
-    // returns the true count, which may exceed it - only the comparison with
-    // 1 matters, so a truncated write cannot mislead. GetConsoleWindow
-    // returns null when there is no console, covered by is_invalid.
+    // SAFETY: GetConsoleProcessList writes at most `pids.len()` entries.
+    // It returns the true count, which can exceed that length.
+    // This code compares only the result with 1, so a truncated write cannot mislead.
+    // GetConsoleWindow returns null when no console exists.
+    // `is_invalid` handles that result.
     unsafe {
         let mut pids = [0u32; 4];
         if GetConsoleProcessList(&mut pids) != 1 {
@@ -29,15 +30,16 @@ fn own_console() -> Option<HWND> {
     }
 }
 
-/// Shows the log window.
+/// Shows the Lookup log console.
 pub fn show() {
     let Some(hwnd) = own_console() else { return };
-    // SAFETY: `hwnd` came from GetConsoleWindow and was checked valid.
-    // A CTRL_CLOSE_EVENT handler returning TRUE does not save the
-    // process - HandlerRoutine's own docs say the system terminates it
-    // regardless, no other handler called. So the close item is removed
-    // instead of handled: with SC_CLOSE gone from the system menu, the X
-    // is greyed out and there is no close event to ever answer.
+    // SAFETY: `hwnd` came from GetConsoleWindow, and this code checked it.
+    // A CTRL_CLOSE_EVENT handler that returns TRUE cannot save the process.
+    // HandlerRoutine documentation says that the system terminates the process
+    // regardless of the handler result. No other handler receives the event.
+    // The code removes the close item, so no handler answers the event.
+    // Without SC_CLOSE in the system menu, Windows grays out the X and sends
+    // no close event.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let menu = GetSystemMenu(hwnd, false);
@@ -47,12 +49,12 @@ pub fn show() {
     }
 }
 
-/// Hides it. Never frees it.
+/// Hides the console. The process keeps the console for later output.
 pub fn hide() {
     let Some(hwnd) = own_console() else { return };
-    // SAFETY: `hwnd` came from GetConsoleWindow and was checked valid.
-    // Freeing instead would invalidate stdout, and println! aborts on a
-    // failed write.
+    // SAFETY: `hwnd` came from GetConsoleWindow, and this code checked it.
+    // If this code frees the console, stdout becomes invalid.
+    // If a write fails, `println!` panics.
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }

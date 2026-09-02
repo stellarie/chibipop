@@ -1,4 +1,7 @@
-//! Dumps the settings tree.
+//! Writes the settings control tree as JSON.
+//!
+//! The audit records each control's layout and state.
+//! A diff shows changes after a tab switch or a toggle.
 
 use crate::config::Config;
 use crate::present::DictInfo;
@@ -14,13 +17,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, WS_DISABLED, WS_TABSTOP, WS_VISIBLE,
 };
 
-/// Beyond any monitor.
+/// Keeps the hidden settings window beyond all monitors.
 const OFFSCREEN: i32 = -32_000;
 
-/// A broken ring must stop.
+/// Limits the walk if the tab ring does not return to its first control.
 const RING_CAP: usize = 200;
 
-/// Build, dump, print.
+/// Creates the settings window and records each tab in JSON.
 pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
     let library = crate::app::library_dir();
     let form = crate::app::form_with_library(cfg, dicts, &library);
@@ -36,7 +39,7 @@ pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
         conceal(root);
         dumps.push(labelled(root, tab, false));
     }
-    // Leaves tab 3 showing.
+    // Tab 3 remains visible after this toggle.
     window.toggle_field_map();
     conceal(root);
     dumps.push(labelled(root, 3, true));
@@ -45,7 +48,7 @@ pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
     Ok(())
 }
 
-/// One dump, tagged.
+/// Adds `tab` and `field_map_expanded` to one audit record.
 fn labelled(root: HWND, tab: u32, expanded: bool) -> Value {
     let mut v = dump(root);
     if let Some(o) = v.as_object_mut() {
@@ -55,12 +58,12 @@ fn labelled(root: HWND, tab: u32, expanded: bool) -> Value {
     v
 }
 
-/// Every descendant of `root`.
+/// Records all descendants so the audit can compare complete control trees.
 pub fn dump(root: HWND) -> Value {
     let mut controls = Vec::new();
-    // SAFETY: `root` is a window handle owned by this process. GetDlgCtrlID
-    // validates the handle itself and returns 0 for a top-level window or a
-    // dead one, so a wrong handle yields a wrong number, never unsoundness.
+    // SAFETY: This process owns `root`. `GetDlgCtrlID` checks this handle.
+    // The function returns 0 for a top-level or invalid window.
+    // An invalid handle can change the audit value, but it cannot cause undefined behavior.
     let root_id = unsafe { GetDlgCtrlID(root) };
     walk(root, root, root_id, 0, &mut controls);
     json!({
@@ -71,29 +74,31 @@ pub fn dump(root: HWND) -> Value {
     })
 }
 
-/// Depth-first, in z-order.
+/// Records child controls in depth-first z-order.
 fn walk(root: HWND, parent: HWND, parent_id: i32, depth: u32, out: &mut Vec<Value>) {
-    // SAFETY: `parent` is a live window owned by this process for the whole
-    // walk - nothing here creates or destroys a window - so every handle
-    // GetWindow returns is live at the moment it is read. The wrapper maps a
-    // null result to `Err`, which is what ends the sibling loop.
+    // SAFETY: This process owns `parent`, and the handle stays valid in the complete walk.
+    // No call here creates or destroys a window.
+    // Each handle from `GetWindow` stays valid until this function reads it.
+    // The wrapper maps a null result to `Err`, which stops the child loop.
     let mut next = unsafe { GetWindow(parent, GW_CHILD) };
     while let Ok(cur) = next {
-        // SAFETY: `cur` came from GetWindow above and is live, as argued
-        // there; GetDlgCtrlID only reads it.
+        // SAFETY: `GetWindow` returned `cur`, and the window stays valid in this walk.
+        // `GetDlgCtrlID` only reads the handle.
         let id = unsafe { GetDlgCtrlID(cur) };
         out.push(describe(root, cur, id, parent_id, depth));
         walk(root, cur, id, depth + 1, out);
-        // SAFETY: as above - `cur` is still live and unmoved in z-order.
+        // SAFETY: `cur` stays valid in this walk and keeps its z-order position.
+        // `GetWindow` only reads it.
         next = unsafe { GetWindow(cur, GW_HWNDNEXT) };
     }
 }
 
-/// What a diff needs.
+/// Records the control fields that the audit diff compares.
 fn describe(root: HWND, ctrl: HWND, id: i32, parent_id: i32, depth: u32) -> Value {
-    // SAFETY: `ctrl` is live, from `walk`'s GetWindow chain. The style word
-    // is the control's own, so it is unaffected by a hidden ancestor - which
-    // IsWindowVisible and IsWindowEnabled would not be.
+    // SAFETY: `walk` supplies `ctrl` from its `GetWindow` chain.
+    // A hidden ancestor does not change this control's style word.
+    // `IsWindowVisible` and `IsWindowEnabled` include ancestor state.
+    // This code therefore reads the style word.
     let style = unsafe { GetWindowLongW(ctrl, GWL_STYLE) } as u32;
     json!({
         "depth": depth,
@@ -108,19 +113,18 @@ fn describe(root: HWND, ctrl: HWND, id: i32, parent_id: i32, depth: u32) -> Valu
     })
 }
 
-/// Client pixels of `root`.
+/// Converts the control rect to client pixels in `root`.
 fn client_rect(root: HWND, ctrl: HWND) -> Value {
     let mut rc = RECT::default();
-    // SAFETY: `ctrl` is live and `rc` is this call's own stack storage, which
-    // GetWindowRect only writes through.
+    // SAFETY: `ctrl` stays valid. `rc` is local storage, and `GetWindowRect` only writes to it.
     if unsafe { GetWindowRect(ctrl, &mut rc) }.is_err() {
         return Value::Null;
     }
     let mut tl = POINT { x: rc.left, y: rc.top };
     let mut br = POINT { x: rc.right, y: rc.bottom };
-    // SAFETY: `root` is live and both points are local storage the call only
-    // writes through. A failure leaves them in screen coordinates, which the
-    // dump then reports as an obviously wrong rect rather than hiding.
+    // SAFETY: `root` stays valid, and both points are local storage.
+    // `ScreenToClient` only writes to these points.
+    // A failure leaves screen coordinates in the points. This result changes only the audit.
     unsafe {
         let _ = ScreenToClient(root, &mut tl);
         let _ = ScreenToClient(root, &mut br);
@@ -128,30 +132,30 @@ fn client_rect(root: HWND, ctrl: HWND) -> Value {
     json!({ "x": tl.x, "y": tl.y, "w": br.x - tl.x, "h": br.y - tl.y })
 }
 
-/// The window's own client box.
+/// Records the client size of `root`.
 fn client_size(root: HWND) -> Value {
     let mut rc = RECT::default();
-    // SAFETY: `root` is live and `rc` is local storage the call only writes.
+    // SAFETY: `root` stays valid. `rc` is local storage, and `GetClientRect` only writes to `rc`.
     if unsafe { GetClientRect(root, &mut rc) }.is_err() {
         return Value::Null;
     }
     json!({ "w": rc.right - rc.left, "h": rc.bottom - rc.top })
 }
 
-/// The window class name.
+/// Reads the Win32 class name for a control.
 fn class_of(ctrl: HWND) -> String {
     let mut buf = [0u16; 256];
-    // SAFETY: the wrapper passes `buf.len()` as the capacity, so the call
-    // cannot write past it, and returns the count written excluding the NUL.
+    // SAFETY: The wrapper gives `buf.len()` as the capacity, so `GetClassNameW` cannot write
+    // past the buffer. `GetClassNameW` returns the character count without the NUL.
     let n = unsafe { GetClassNameW(ctrl, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-/// The control's own text.
+/// Reads the text that belongs to the control.
 fn text_of(ctrl: HWND) -> String {
-    // SAFETY: the buffer is sized to the length GetWindowTextLengthW itself
-    // reported plus the NUL, which is the contract GetWindowTextW writes
-    // against; the wrapper passes that same length as the capacity.
+    // SAFETY: The buffer length equals `GetWindowTextLengthW` plus one slot for the NUL.
+    // The wrapper gives that length to `GetWindowTextW` as its capacity.
+    // `GetWindowTextW` writes within this capacity.
     unsafe {
         let len = GetWindowTextLengthW(ctrl);
         if len <= 0 {
@@ -163,20 +167,20 @@ fn text_of(ctrl: HWND) -> String {
     }
 }
 
-/// Tab stops, in ring order.
+/// Records tab stops in the order that the tab ring returns.
 fn tab_ring(root: HWND, previous: bool) -> Vec<i32> {
     let mut ids = Vec::new();
-    // SAFETY: `root` is this process's settings window, live for the call.
-    // GetNextDlgTabItem is a tree query: it neither focuses nor shows.
-    // A null `hctl` only answers forward, so both directions seed from the
-    // same control and the reverse ring is the forward one mirrored.
+    // SAFETY: This process owns `root`, and the handle stays valid for this call.
+    // `GetNextDlgTabItem` only reads the window tree. It does not set focus or show a window.
+    // A null `hctl` selects forward order. Both directions start at the same control, so the
+    // reverse ring reverses the forward ring.
     let Ok(first) = (unsafe { GetNextDlgTabItem(root, None, false) }) else {
         return ids;
     };
     let mut cur = first;
     loop {
-        // SAFETY: `cur` came from GetNextDlgTabItem and is a live descendant
-        // of `root`; both calls only read it.
+        // SAFETY: `GetNextDlgTabItem` returned `cur`, which is a valid descendant of `root`.
+        // `GetDlgCtrlID` and the next `GetNextDlgTabItem` call only read this handle.
         ids.push(unsafe { GetDlgCtrlID(cur) });
         let Ok(next) = (unsafe { GetNextDlgTabItem(root, Some(cur), previous) }) else {
             break;
@@ -189,12 +193,12 @@ fn tab_ring(root: HWND, previous: bool) -> Vec<i32> {
     ids
 }
 
-/// Off-screen and hidden.
+/// Moves the window beyond all monitors and hides it.
 fn conceal(root: HWND) {
-    // SAFETY: `root` is the settings window this process created and owns.
-    // Both calls only move and hide it, and a failure leaves it on screen,
-    // which is cosmetic rather than unsound. The move matters because
-    // `ensure_room_for` re-shows the window whenever it resizes it.
+    // SAFETY: This process created and owns the `root` settings window.
+    // Both calls only move or hide this window.
+    // A failure can leave the window visible, but it cannot cause undefined behavior.
+    // The move is necessary because `ensure_room_for` shows the window after each resize.
     unsafe {
         let _ = SetWindowPos(
             root,

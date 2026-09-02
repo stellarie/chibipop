@@ -1,29 +1,31 @@
-//! Startup capability probe scaffold: list what the compositor
-//! advertises, and name exactly what is missing so a compositor upgrade
-//! self-heals. No capture, no surfaces yet — later work binds these
-//! globals; this module only reports.
+//! This module probes compositor capabilities at startup.
+//!
+//! It lists the globals that the compositor advertises.
+//! It names each absent global so a compositor upgrade can restore support.
+//! It reports capabilities only. Later code binds these globals.
+//! It does not capture or create surfaces.
 
 use std::collections::BTreeMap;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, QueueHandle};
 
-/// One advertised registry global.
+/// One global that the registry advertises.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advertised {
-    /// The registry name, needed to `bind` the global later.
+    /// The registry name is required to `bind` the global later.
     pub name: u32,
     pub interface: String,
     pub version: u32,
 }
 
-/// A global chibipop wants, and what its absence costs.
+/// One global that chibipop needs and the cost of its absence.
 pub struct Requirement {
     pub interface: &'static str,
     pub why: &'static str,
 }
 
-/// Non-negotiable: without these there is no Wayland client here at
-/// all, and nothing left to degrade *to*.
+/// These globals are required. Without them, this Wayland client cannot start.
+/// No lower tier can replace these globals.
 pub const REQUIRED: &[Requirement] = &[
     Requirement { interface: "wl_compositor", why: "creating surfaces" },
     Requirement { interface: "wl_shm", why: "software buffers for the popup" },
@@ -31,52 +33,51 @@ pub const REQUIRED: &[Requirement] = &[
     Requirement { interface: "wl_output", why: "monitor geometry and scale" },
 ];
 
-/// The popup's shell, on its own tier because its absence costs exactly
-/// one thing: the hover loop. Stock GNOME is this case - Mutter
-/// implements no layer shell - and the daemon deliberately stays up
-/// without it (a failed `Popup::bind` is a diagnostic and a down Popup
-/// channel row, never an exit), so the settings window, the tray, the
-/// control socket and these diagnostics all still work. Naming the
-/// global is what lets a compositor upgrade self-heal the install.
+/// The popup shell has its own tier because its absence affects only the hover loop.
+/// Stock GNOME is this case. Mutter implements no layer shell.
+/// The daemon stays alive without it.
+/// A failed `Popup::bind` creates a diagnostic and a down Popup channel row.
+/// It does not stop the daemon.
+/// The settings window, the tray, the control socket, and these diagnostics still work.
+/// This global name lets a compositor upgrade restore the install.
 pub const LAYER_SHELL: Requirement =
     Requirement { interface: "zwlr_layer_shell_v1", why: "the popup overlay surface" };
 
-/// Wanted, not needed. The popup lays out and rasters in physical
-/// pixels, so these two are what let it raster at the fractional scale
-/// and declare the logical size that stands for; without them a 1.5x
-/// desktop can only be served an integer-scaled panel that looks soft.
-/// `Popup::bind` binds them optionally and says the same thing in its
-/// own note - this tier is that posture stated at startup, before any
-/// surface exists.
+/// These globals are wanted but not required.
+/// The popup lays out and rasters in physical pixels.
+/// They let the popup raster at fractional scale and declare its logical size.
+/// Without them, a 1.5x desktop gets an integer-scaled panel that looks soft.
+/// `Popup::bind` binds them optionally and states this tier at startup.
+/// This report runs before a surface exists.
 pub const SHARPNESS: &[Requirement] = &[
     Requirement { interface: "wp_fractional_scale_manager_v1", why: "the popup's fractional scale" },
     Requirement { interface: "wp_viewporter", why: "the popup's logical size at that scale" },
 ];
 
-/// The capture ladder (ARCHITECTURE.md#input-ladders): any one rung will
-/// do; the portal rung is not a registry global, so its absence here is a
-/// note, not a verdict.
+/// The capture ladder in ARCHITECTURE.md#input-ladders accepts any one rung.
+/// The portal rung is not a registry global.
+/// Its absence here is a note, not a verdict.
 pub const CAPTURE_RUNGS: &[Requirement] = &[
     Requirement { interface: "ext_image_copy_capture_manager_v1", why: "cursor/content capture, first rung" },
     Requirement { interface: "zwlr_screencopy_manager_v1", why: "content capture, wlr fallback rung" },
 ];
 
-/// Does this session advertise the popup's shell? The daemon's real
-/// verdict is whether `Popup::bind` succeeds, but the tray is published
-/// before any surface exists and its Popup row has to be true the first
-/// time a user reads it.
+/// Return whether this session advertises the popup shell.
+/// The daemon's final verdict comes from `Popup::bind`.
+/// The tray appears before a surface exists, so its Popup row must be correct on first read.
 pub fn popup_shell_advertised(globals: &[Advertised]) -> bool {
     globals.iter().any(|g| g.interface == LAYER_SHELL.interface)
 }
 
-/// The lock/socket key. Required: without it there is no session to
-/// join, and "which compositor" must never be guessed.
+/// Return the lock and socket key.
+/// Without this value, no session exists to join.
+/// Do not guess which compositor owns the session.
 pub fn display_name() -> anyhow::Result<String> {
     std::env::var("WAYLAND_DISPLAY")
         .map_err(|_| anyhow::anyhow!("WAYLAND_DISPLAY is unset; chibipop needs a Wayland session"))
 }
 
-/// Collect the registry via one roundtrip on its own queue.
+/// Collect registry globals with one roundtrip on its own queue.
 pub fn collect_globals(conn: &Connection) -> anyhow::Result<Vec<Advertised>> {
     struct Snapshot(Vec<Advertised>);
 
@@ -102,13 +103,15 @@ pub fn collect_globals(conn: &Connection) -> anyhow::Result<Vec<Advertised>> {
     Ok(snapshot.0)
 }
 
-/// The startup report: one line per entry, and every absence priced at
-/// what it actually costs. Three tiers, because a compositor that
-/// cannot run chibipop at all, one that can run everything but the
-/// hover loop (stock GNOME), and one that only draws the popup softly
-/// are three different messages - and telling a GNOME user the app
-/// "cannot run" when its settings window is about to open is how a
-/// clear diagnostic becomes a support ticket.
+/// Build the startup report.
+/// Add one line for each registry entry.
+/// State the actual cost of each absent capability.
+/// The report has three tiers:
+/// - a compositor that cannot run chibipop.
+/// - a compositor that supports all channels except the hover loop.
+/// - a compositor that supports the popup only at an integer scale.
+/// These cases need different messages.
+/// A GNOME user must not see "cannot run" when only the hover loop lacks support.
 pub fn report(globals: &[Advertised]) -> Vec<String> {
     let advertised: BTreeMap<&str, u32> =
         globals.iter().map(|g| (g.interface.as_str(), g.version)).collect();
@@ -189,13 +192,12 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("MISSING")), "{lines:?}");
     }
 
-    /// Stock GNOME, which is the whole reason this tier exists: Mutter
-    /// advertises everything here except the layer shell. The exact
-    /// global is named (so a Mutter that grows it self-heals the
-    /// install), the cost is named as the hover loop, and the line must
-    /// NOT claim the app cannot run - the daemon stays up and the
-    /// settings window opens, which is what docs/LINUX.md § GNOME
-    /// promises.
+    /// This test models stock GNOME.
+    /// Mutter advertises every listed global except the layer shell.
+    /// The test names that global and its cost.
+    /// The report must not claim that the app cannot run.
+    /// The daemon stays up and the settings window opens.
+    /// That behavior matches docs/LINUX.md § GNOME.
     #[test]
     fn a_missing_layer_shell_costs_the_hover_loop_and_not_the_app() {
         let names: Vec<&str> = FULL.iter().copied().filter(|n| *n != LAYER_SHELL.interface).collect();
@@ -214,9 +216,9 @@ mod tests {
         assert!(popup_shell_advertised(&advertised(FULL)));
     }
 
-    /// A hard requirement is the only absence allowed to say "cannot
-    /// run", and when it does it names itself and nothing else - so the
-    /// one fatal line a user reads is the one they can act on.
+    /// A hard requirement is the only absence that can produce "cannot run".
+    /// The fatal line names that requirement and no other detail.
+    /// The user can then act on that line.
     #[test]
     fn only_a_missing_hard_requirement_is_a_fatal_verdict() {
         for req in REQUIRED {
@@ -229,11 +231,11 @@ mod tests {
         }
     }
 
-    /// The fractional-scale pair is a sharpness note, not a verdict:
-    /// `Popup::bind` really does fall back to the output's integer
-    /// scale, so a report calling it fatal contradicts the binary it
-    /// ships in. Observed on headless cage (wlroots 0.20), which
-    /// advertises `wp_viewporter` and no fractional-scale manager.
+    /// The fractional-scale pair produces a sharpness note, not a verdict.
+    /// `Popup::bind` falls back to the output's integer scale.
+    /// A fatal report would contradict the binary.
+    /// Headless cage with wlroots 0.20 showed this case.
+    /// It advertises `wp_viewporter` without a fractional-scale manager.
     #[test]
     fn a_missing_fractional_scale_is_a_softness_note_not_a_verdict() {
         let names: Vec<&str> = FULL
@@ -252,12 +254,11 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("cannot run")), "{lines:?}");
     }
 
-    /// A real degraded session, recorded rather than imagined: this is
-    /// exactly what headless `cage` (wlroots 0.20) advertises to
-    /// `chibipop probe` - no layer shell, no fractional-scale manager,
-    /// but a viewporter and wlr-screencopy. One fatal-sounding line
-    /// would be one too many: capture works, the cursor ladder still
-    /// has rungs to try, and only the popup is out.
+    /// This test records a degraded session instead of an imagined one.
+    /// Headless `cage` with wlroots 0.20 reports this result for `chibipop probe`:
+    /// no layer shell, no fractional-scale manager, a viewporter, and wlr-screencopy.
+    /// One fatal line would be incorrect.
+    /// Capture works, the cursor ladder still has rungs, and only the popup is unavailable.
     #[test]
     fn the_observed_cage_session_reads_as_hover_unsupported_and_nothing_worse() {
         let lines = report(&advertised(&[

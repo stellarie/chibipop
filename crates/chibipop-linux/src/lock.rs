@@ -1,19 +1,20 @@
-//! Single-instance lock (ARCHITECTURE.md#platform-integration):
-//! `flock(LOCK_EX | LOCK_NB)` on
+//! This module enforces one daemon for each compositor instance
+//! (ARCHITECTURE.md#platform-integration).
+//! It applies `flock(LOCK_EX | LOCK_NB)` to
 //! `$XDG_RUNTIME_DIR/chibipop/run-$WAYLAND_DISPLAY.lock`.
 //!
-//! Kernel-released on any death — no stale-lock handling, and no unlink
-//! on exit either: removing the file would let a third launch lock a
-//! fresh inode while a second one still holds the old, and two daemons
-//! is exactly what this exists to prevent. The runtime dir is a per-boot
-//! tmpfs; an idle 16-byte file is not litter.
+//! The kernel releases the lock when the process dies. Do not remove the
+//! file at exit. A third launch could then lock a new inode while a second
+//! launch still holds the old inode. Two daemons could then run, which this
+//! lock must prevent. The runtime directory is a per-boot `tmpfs`, so the
+//! unused 16-byte file has no persistent cost.
 
 use std::fs::{File, TryLockError};
 use std::io::{Read, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// Held for the daemon's whole life.
+/// The daemon holds this lock for its entire lifetime.
 pub struct InstanceLock {
     _file: File,
     path: PathBuf,
@@ -38,34 +39,35 @@ impl From<std::io::Error> for LockError {
     }
 }
 
-/// One lock per compositor instance.
+/// Use one lock file for each compositor instance.
 pub fn file_name(display: &str) -> String {
     format!("run-{}.lock", sanitize(display))
 }
 
-/// The settings window's own lock, beside the daemon's: one settings
-/// process per compositor instance, without ever contending with the
-/// daemon (ARCHITECTURE.md#settings-and-config).
+/// Use a separate lock for the settings window and the daemon.
+/// This permits one settings process for each compositor instance.
+/// The settings process does not compete with the daemon
+/// (ARCHITECTURE.md#settings-and-config).
 pub fn settings_file_name(display: &str) -> String {
     format!("settings-{}.lock", sanitize(display))
 }
 
-/// The library's own lock, keyed by the library path rather than by
-/// display: a rebuild rewrites files on disk, so what must never overlap
-/// is two writers of the *same library*, whichever session they belong
-/// to. Windows guards this with a named mutex; on Linux it is one more
-/// flock in the same per-user runtime dir
+/// Name the library lock from the library path, not from the display.
+/// A rebuild writes files on disk, so two writers of the same library must
+/// never run at the same time, even when they belong to different sessions.
+/// Windows uses a named mutex for this lock. Linux uses another `flock` in
+/// the same per-user runtime directory
 /// (ARCHITECTURE.md#settings-and-config).
 pub fn library_file_name(library: &Path) -> String {
     format!("library-{:016x}.lock", fnv1a(library))
 }
 
-/// FNV-1a over the library path's bytes.
+/// Hash the library path bytes with FNV-1a.
 ///
-/// Hand-rolled on purpose: `DefaultHasher` is explicitly not stable
-/// across releases, and a lock name that moves with the toolchain guards
-/// nothing. Trailing separators are dropped so `…/library` and
-/// `…/library/` name one lock.
+/// Use this implementation because `DefaultHasher` has no stable value
+/// across releases. A lock name that changes with the toolchain protects
+/// no process. Remove separators at the path end so `…/library` and
+/// `…/library/` use one lock.
 fn fnv1a(library: &Path) -> u64 {
     let bytes = library.as_os_str().as_bytes();
     let end = bytes.iter().rposition(|b| *b != b'/').map_or(0, |i| i + 1);
@@ -77,7 +79,7 @@ fn fnv1a(library: &Path) -> u64 {
     hash
 }
 
-/// `$WAYLAND_DISPLAY` may be an absolute path; keep it one filename.
+/// Map `$WAYLAND_DISPLAY` to one safe filename, for absolute paths too.
 pub fn sanitize(display: &str) -> String {
     display
         .chars()
@@ -85,23 +87,23 @@ pub fn sanitize(display: &str) -> String {
         .collect()
 }
 
-/// Claim `display`, or refuse naming the holder.
+/// Try to claim `display`, or report the holder.
 pub fn acquire(runtime_dir: &Path, display: &str) -> Result<InstanceLock, LockError> {
     acquire_at(runtime_dir, &file_name(display))
 }
 
-/// The same claim on any lock file name (the settings lock differs only
-/// in name; flock semantics are shared).
+/// Make the same claim with any lock file name.
+/// The settings lock differs only in its name because `flock` is shared.
 pub fn acquire_at(runtime_dir: &Path, file_name: &str) -> Result<InstanceLock, LockError> {
     std::fs::create_dir_all(runtime_dir)?;
     let path = runtime_dir.join(file_name);
-    // truncate(false) is load-bearing: truncating on open would erase the
-    // live holder's pid before we know whether we ARE the holder.
+    // Do not truncate on open. The live holder's process ID must remain
+    // available until this process knows that it owns the lock.
     let mut file =
         File::options().read(true).write(true).create(true).truncate(false).open(&path)?;
     match file.try_lock() {
         Ok(()) => {
-            // Best-effort breadcrumb for the refusal message.
+            // Write a process ID record when possible for the refusal message.
             let _ = file.set_len(0);
             let _ = file.rewind();
             let _ = write!(file, "{}", std::process::id());
@@ -120,7 +122,7 @@ pub fn acquire_at(runtime_dir: &Path, file_name: &str) -> Result<InstanceLock, L
     }
 }
 
-/// The one message a second launch prints.
+/// Return the message for a second launch.
 pub fn refusal(display: &str, path: &Path, pid: Option<u32>) -> String {
     let holder = match pid {
         Some(pid) => format!("pid {pid}"),
@@ -133,7 +135,7 @@ pub fn refusal(display: &str, path: &Path, pid: Option<u32>) -> String {
     )
 }
 
-/// The one line a refused rebuild shows in the status area.
+/// Return the status-area line for a refused rebuild.
 pub fn rebuild_refusal(library: &Path, path: &Path, pid: Option<u32>) -> String {
     let holder = match pid {
         Some(pid) => format!("pid {pid}"),
@@ -163,7 +165,8 @@ mod tests {
         assert_eq!("run-wayland-1.lock", file_name("wayland-1"));
     }
 
-    /// Refused, never queued; freed by dropping the first.
+    /// The second attempt must fail, not wait.
+    /// Release the first lock before a later attempt.
     #[test]
     fn a_second_acquire_is_refused_and_names_the_holder() {
         let dir = tmp("contend");
@@ -189,8 +192,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The settings window never contends with the daemon: two locks,
-    /// two names, one display.
+    /// The settings lock and daemon lock have separate names.
+    /// Both locks can exist for one display.
     #[test]
     fn settings_lock_is_scoped_apart_from_the_daemon_lock() {
         let dir = tmp("settings_scope");
@@ -200,7 +203,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A second `chibipop settings` on the same display is refused.
+    /// Refuse a second `chibipop settings` process for the same display.
     #[test]
     fn a_second_settings_lock_is_refused() {
         let dir = tmp("settings_contend");
@@ -225,9 +228,9 @@ mod tests {
         assert!(msg.contains("run-wayland-1.lock"), "{msg}");
     }
 
-    /// Two libraries never share a lock, and one library always names the
-    /// same lock file — a rebuild guard keyed by a hash that drifts would
-    /// guard nothing.
+    /// Two libraries must use different locks.
+    /// One library must always use the same lock file.
+    /// A hash that changes would protect no rebuild.
     #[test]
     fn the_library_lock_is_keyed_by_path_and_stable() {
         let a = library_file_name(Path::new("/home/x/.local/share/chibipop/library"));
@@ -237,8 +240,8 @@ mod tests {
         assert_eq!("library-7938d952a0e0914d.lock", a);
     }
 
-    /// One library, two settings processes: the second rebuild is
-    /// refused, not queued.
+    /// Two settings processes can rebuild one library, but only one can do so at a time.
+    /// Refuse the second rebuild. Do not place it in a queue.
     #[test]
     fn a_second_rebuild_of_one_library_is_refused() {
         let dir = tmp("library_contend");
@@ -261,7 +264,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A rebuild never blocks the daemon or the settings window itself.
+    /// A library rebuild must not block the daemon or the settings process.
     #[test]
     fn the_library_lock_is_scoped_apart_from_the_instance_locks() {
         let dir = tmp("library_scope");

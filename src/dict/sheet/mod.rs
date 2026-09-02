@@ -1,38 +1,41 @@
-//! A dictionary's own `styles.css`, as a bounded matcher.
+//! A `styles.css` file from one Dictionary, compiled as a bounded matcher.
 //!
-//! Yomitan lets a dictionary ship a stylesheet and scopes it to that
-//! dictionary's own entries. The census says ignoring it is not a small
-//! omission: 14 of 72 dictionaries ship one, carrying **908 box-model
-//! rules**, and over the 52 structured-content dictionaries box properties
-//! live inline for 29 but **only in the stylesheet for 13**
+//! Yomitan allows a Dictionary to carry a stylesheet.
+//! Yomitan applies that stylesheet only to entries from the same Dictionary.
+//! The census finds a stylesheet in 14 of 72 dictionaries.
+//! Those stylesheets contain **908 box-model rules**.
+//! The 52 structured-content dictionaries keep box properties inline in 29 dictionaries.
+//! The stylesheet contains those properties only for 13 dictionaries
 //! ([dict-shapes.md](../../../docs/research/dict-shapes.md#dictionary-stylesheets-stylescss)).
-//! So the box model, fed only by inline `style`, draws nothing at all for
-//! 明鏡国語辞典, 大辞泉, 角川新字源, 字通, 旺文社漢字典 and eight more, and
-//! misses Jitendex's `[data-sc-class="tag"]` pill over 48 776 nodes.
+//! A box model that reads only the inline `style` attribute draws nothing for
+//! 明鏡国語辞典, 大辞泉, 角川新字源, 字通, 旺文社漢字典 and eight more
+//! dictionaries. It also misses the Jitendex `[data-sc-class="tag"]` pill on
+//! 48 776 nodes.
 //!
-//! This is a matcher, not a CSS engine, and the difference is measured
-//! rather than asserted. Structured content has **no `class` attribute**, so
-//! the only surface a dictionary author can reach is a tag name or a
-//! `data-*` attribute derived from a node's `data` map, and 897 of those 908
-//! box rules select through exactly those two. [`select`] holds the grammar;
-//! everything outside it drops its rule whole and is counted, so the gap
-//! stays a number.
+//! This module matches selectors. It is not a CSS engine.
+//! It measures the difference and does not assert it.
+//! Structured content has **no `class` attribute**.
+//! A dictionary author can therefore name only a tag or a `data-*` attribute
+//! from a node's `data` map.
+//! Exactly those two surfaces select 897 of the 908 box rules.
+//! The [`select`] module holds the grammar.
+//! A selector outside that grammar drops its whole rule.
+//! The build counts each drop. The gap remains a number.
 //!
-//! # Where this sits
+//! The build step stores stylesheet text for each dictionary.
+//! This module compiles that text **once, on first use**, not at build time.
+//! This choice matches the per-hover tree parse of the gloss arena.
+//! A matcher bug then needs a patch, not a rebuild.
+//! The whole corpus contains 174 KB of CSS across 14 dictionaries.
+//! A disk cache for the compiled form uses more space than it saves.
 //!
-//! The stylesheet text is stored per dictionary at build time and compiled
-//! **once, on first use** - not at build. That keeps it consistent with
-//! the gloss arena's per-hover tree parse: a matcher bug ships as a patch
-//! and not as a rebuild. The whole corpus carries 174 KB of CSS across 14
-//! dictionaries, so the compiled form is not worth caching on disk.
-//!
-//! [`apply`] then folds the winners into [`GlossDoc`]'s own resolved style
-//! record, ahead of the inline `style` that keeps the last word. That is the
-//! whole integration: the renderer reads one style record per node exactly
-//! as it did before, and never learns that CSS exists. The
-//! "honour dictionary styling" setting governs the merged record, so off
-//! means neither inline `style` nor `styles.css` applies, with one gate
-//! rather than two.
+//! [`apply`] merges declarations that win into the resolved style record of [`GlossDoc`],
+//! **ahead of** the inline `style` attribute, which then wins.
+//! This completes the integration.
+//! The renderer reads one style record for each node and does not know about CSS.
+//! The `"honour dictionary styling"` setting controls the merged record.
+//! When the setting is off, neither the inline `style` attribute nor `styles.css` applies.
+//! One gate controls both.
 
 use crate::dict::gloss::{GlossDoc, KeyId, NodeId, Span, StyleKey, Tag};
 
@@ -44,27 +47,28 @@ mod tests;
 
 use select::{Ctx, Pool, NO_ATTR};
 
-/// The selector kinds this grammar compiles, in `tools/dict-census`'s own
-/// vocabulary.
+/// Selector kinds that this grammar compiles, in the vocabulary of
+/// `tools/dict-census`.
 ///
-/// Here, and not in the census, for the reason the gloss allow-lists are:
-/// the census parses this array out of this source, so the count of rules it
-/// reports as dropped re-scores itself as the grammar grows instead of
-/// drifting from it. A test below is what keeps the array honest against the
-/// parser beside it.
+/// This array stays in this module, not in the census, like the gloss
+/// allow-lists. The census parses this array from this source.
+/// Therefore the census recalculates dropped-rule counts as the grammar grows.
+/// A test below keeps the array aligned with the parser.
 pub const SUPPORTED_SELECTOR_KINDS: [&str; 3] = ["tag", "data-attr", "pseudo-class"];
 
-/// The pseudo-classes this grammar compiles.
+/// Pseudo-classes that this grammar compiles.
 ///
-/// The corpus's structural set, measured
-/// (`docs/research/dict-shapes.md`): `:first-child` on 36 selectors,
-/// `:nth-child` on 146, `:has` on 26, then `:first-of-type`,
-/// `:nth-last-of-type`, `:last-of-type`, `:nth-of-type` and `:not`. Plus
-/// `:last-child`, `:nth-last-child`, `:is` and `:where`, which are the same
-/// lines as the siblings beside them.
+/// This list records the corpus structure measured in
+/// (`docs/research/dict-shapes.md`). `:first-child` appears on 36 selectors.
+/// `:nth-child` appears on 146 selectors, and `:has` appears on 26.
+/// The corpus also uses `:first-of-type`, `:nth-last-of-type`, `:last-of-type`,
+/// `:nth-of-type`, and `:not`.
+/// This list also includes `:last-child`, `:nth-last-child`, `:is`, and `:where`.
+/// These forms cost the same matcher lines as the related forms.
 ///
-/// Not here: `:hover` and `:link`, which are pointer and history state that
-/// gloss content in a popup never has - 20 corpus selectors, dropped.
+/// The list rejects `:hover` and `:link`.
+/// These forms report pointer or history state, which gloss content in a popup
+/// lacks. This rejection covers 20 corpus selectors.
 pub const SUPPORTED_PSEUDO_CLASSES: [&str; 12] = [
     "first-child",
     "last-child",
@@ -80,129 +84,141 @@ pub const SUPPORTED_PSEUDO_CLASSES: [&str; 12] = [
     "has",
 ];
 
-/// A dictionary's compiled stylesheet.
+/// The compiled stylesheet for one dictionary.
 ///
-/// Flat arenas throughout, for the reason the gloss node arena is flat: a
-/// compiled rule is a pair of spans, so the largest corpus sheet is a
-/// handful of contiguous blocks rather than 315 little allocations.
+/// This type uses flat arenas for the same reason as the gloss node arena.
+/// A compiled rule is a pair of spans. Therefore the largest corpus sheet uses
+/// a few contiguous blocks instead of 315 small allocations.
 pub struct Sheet {
     pool: Pool,
-    /// One entry per surviving *selector*, not per source rule: a selector
-    /// list is expanded at compile time so each entry carries its own
-    /// specificity and the cascade is one sort.
+    /// Stores one entry for each kept *selector*, not for each source rule.
+    /// The compile step expands a selector list. Each entry then carries its own
+    /// specificity. The cascade needs one sort.
     rules: Vec<Rule>,
-    /// Declaration pool. Several rules share a slice when they came from one
-    /// selector list.
+    /// This declaration pool stores slices that several rules can share when one
+    /// selector list produces them.
     decls: Vec<Decl>,
-    /// Candidate rule ids, pooled; every index below is a slice of this.
+    /// This pool stores candidate rule IDs. Every index below refers to a slice
+    /// of this vector.
     buckets: Vec<u32>,
-    /// By the subject's `[attr="value"]` test, sorted for a binary search.
+    /// This table uses the subject test `[attr="value"]`. Its entries are sorted
+    /// for binary search.
     keyed: Vec<Keyed>,
-    /// By the subject's presence-only `[attr]` test, indexed by attribute id.
+    /// This table uses the attribute ID for the subject test `[attr]`, which
+    /// checks attribute presence.
     by_attr: Vec<Span>,
-    /// By the subject's tag, for a subject with no attribute test.
+    /// This table uses the subject tag when the subject has no attribute test.
     by_tag: Vec<Span>,
-    /// Subjects with neither - a bare `:first-child`.
+    /// This span holds subjects with neither a tag nor an attribute test, such as
+    /// a bare `:first-child`.
     any: Span,
-    /// Sorted attribute-name ids, so a document resolves its interned keys
-    /// with a binary search instead of a scan of up to 322 names.
+    /// This vector stores sorted attribute-name IDs. A document resolves its
+    /// interned keys with binary search, not a scan of up to 322 names.
     attr_order: Vec<u32>,
-    /// Does any surviving selector ask for a sibling position? 8 of the 14
-    /// corpus sheets do not, and for those the position table is never
-    /// built.
+    /// This field is true when a kept selector asks for a sibling position.
+    /// 8 of the 14 corpus sheets ask for no position. This module does not build
+    /// the position table for those sheets.
     needs_positions: bool,
     counts: SheetCounts,
 }
 
 /// One compiled selector and the declarations it carries.
 struct Rule {
-    /// Into `Pool::compounds`, subject compound last.
+    /// Points into `Pool::compounds`. The subject compound comes last.
     sel: Span,
-    /// Into [`Sheet::decls`].
+    /// Points into [`Sheet::decls`].
     decls: Span,
     /// Packed CSS specificity.
     spec: u32,
-    /// Source order, the tie-break between equal specificities.
+    /// Source order. This value breaks a tie between equal specificities.
     order: u32,
 }
 
-/// One declaration this build can act on.
+/// A declaration that this build maps to a [`StyleKey`] or counts as dropped.
 struct Decl {
     key: StyleKey,
-    /// The value text, verbatim. Read by the layout pass's own value
-    /// parsers, which are the single authority on what a value means - this
-    /// module never decides that `4px` is a length.
+    /// The value text stays verbatim. The layout pass parses this text.
+    /// Those parsers alone define each value's meaning. This module does not
+    /// decide whether `4px` is a length.
     value: Box<str>,
     important: bool,
 }
 
-/// A rule's candidate bucket, keyed by one exact attribute value.
+/// A candidate bucket for rules with one exact attribute value.
 ///
-/// Jitendex points 40 rules at `data-sc-content`, so bucketing on the
-/// attribute name alone would hand every node with a `data.content` key 40
-/// candidates to test. Keying on the value too takes that to one or two.
+/// Jitendex points 40 rules at `data-sc-content`. A bucket keyed only by
+/// attribute name would give every node with a `data.content` key 40
+/// candidates to test. A key that also stores the value reduces the
+/// candidate count to one or two.
 struct Keyed {
     attr: u32,
     value: Box<str>,
     rules: Span,
 }
 
-/// What compiling one dictionary's `styles.css` kept and dropped.
+/// Counts what the compile step of one `styles.css` file keeps and drops.
 ///
-/// The dropped counts are the point: the census scores the corpus against
-/// this build's grammar, and `dropped()` is the progress gauge the spec asks
-/// it to report. `kept + dropped_selector + dropped_at_rule + no_decls`
-/// always equals `rules`.
+/// The census uses the dropped counts to score this grammar against the corpus.
+/// The census reports `dropped()` as its progress measure.
+/// `kept + dropped_selector + dropped_at_rule + no_decls` always equals `rules`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SheetCounts {
-    /// Style rules the scanner recovered, at-rule bodies included.
+    /// The number of style rules that the scanner recovered, with at-rule bodies
+    /// included.
     pub rules: usize,
-    /// Rules compiled into the table.
+    /// The number of rules compiled into the table.
     pub kept: usize,
-    /// Rules dropped whole because a selector left the supported grammar.
+    /// Rules that the build drops because a selector leaves the supported
+    /// grammar.
     pub dropped_selector: usize,
-    /// Rules dropped whole because they sit inside an at-rule body. The
-    /// corpus loses 4 box rules here, all behind `@media (max-width: 500px)`.
+    /// Rules inside an at-rule body. The build drops these rules.
+    /// The corpus loses 4 box rules here. All 4 occur under
+    /// `@media (max-width: 500px)`.
     pub dropped_at_rule: usize,
-    /// Rules whose selector compiled but which declared nothing this build
-    /// maps - a rule of `display` and `grid-column` alone.
+    /// Rules whose selectors compile but whose declarations contain no property
+    /// that this build maps. A rule with only `display` and `grid-column` is one
+    /// such rule.
     pub no_decls: usize,
-    /// Selectors compiled, after expanding selector lists and `&` nesting.
+    /// Compiled selectors after the compile step expands selector lists and `&`
+    /// nesting.
     pub selectors: usize,
-    /// Declarations compiled, after expanding `margin` and `padding`.
+    /// Compiled declarations after the compile step expands `margin` and
+    /// `padding`.
     ///
-    /// From kept rules only, so this and `dropped_declarations` do not
-    /// partition anything: a rule whose selector left the grammar loses its
-    /// declarations uncounted, and one that declared nothing mappable is a
-    /// `no_decls` rule whose losses land below.
+    /// Only kept rules contribute to this count. Therefore this count and
+    /// `dropped_declarations` do not partition the declarations.
+    /// A rule with an unsupported selector loses its declarations without a
+    /// count. A rule with no mappable declarations is a `no_decls` rule. Its
+    /// dropped declarations appear in `dropped_declarations`.
     pub declarations: usize,
-    /// Declarations dropped: a property this build does not map, or a
-    /// `var()` value it cannot substitute.
+    /// Declarations that the build drops because it has no property map or
+    /// cannot substitute a `var()` value.
     ///
-    /// The property gap, where `dropped()` is the grammar gap.
-    /// `dict::build::StyleCounts` carries both into the build report,
-    /// because `tools/dict-census` counts a stylesheet's declarations too
-    /// and two arithmetics nobody compares are two arithmetics that drift.
+    /// The count shows the property gap. `dropped()` shows the grammar gap.
+    /// `dict::build::StyleCounts` carries both counts into the build report
+    /// because `tools/dict-census` also counts stylesheet declarations.
+    /// Two sums that no code compares can drift.
     pub dropped_declarations: usize,
-    /// The scanner's first complaint, when the text was malformed.
+    /// This field stores the first scanner complaint when the text is malformed.
     pub error: Option<&'static str>,
 }
 
 impl SheetCounts {
-    /// Rules dropped whole, which is what the census reports.
+    /// Returns the total number of rules that the build drops.
     pub fn dropped(&self) -> usize {
         self.dropped_selector + self.dropped_at_rule
     }
 }
 
 impl Sheet {
-    /// Compiles one dictionary's stylesheet text.
+    /// Compiles the stylesheet text for one dictionary.
     ///
-    /// Total. Every way a stylesheet can be malformed - an unterminated
-    /// comment or string, a stray `}`, a brace inside `url(...)`, nested
-    /// at-rules, an unreadable selector - drops the rule it is in and
-    /// records a count. There is no error return, because a dictionary with
-    /// a broken stylesheet must still render its entries.
+    /// This function accepts malformed stylesheets.
+    /// Possible faults include an unterminated comment or string, a stray `}`,
+    /// a brace inside `url(...)`, nested at-rules, or an unreadable selector.
+    /// Each fault drops the rule that contains it and records a count.
+    /// The function returns no error because a broken stylesheet must not make
+    /// dictionary entries fail to render.
     pub fn compile(css: &str) -> Sheet {
         let scanned = scan::scan(css);
         let mut sheet = Sheet {
@@ -230,12 +246,11 @@ impl Sheet {
         sheet
     }
 
-    /// One scanned rule, compiled or counted.
+    /// Compiles one scanned rule and updates its drop counts.
     fn add(&mut self, rule: &scan::Rule) {
-        // Selectors first: a rule with an unreadable selector is dropped
-        // whole, declarations included, which is what CSS does with a
-        // selector list it cannot read and the only answer that never
-        // half-applies a rule written for an arrangement we do not have.
+        // whole rule and its declarations. CSS uses this result for an
+        // unreadable selector list. This result prevents partial application
+        // of a rule for a tree arrangement that this renderer cannot represent.
         let first = self.pool.compounds.len();
         let mut compiled = Vec::with_capacity(rule.selectors.len());
         for sel in &rule.selectors {
@@ -267,12 +282,11 @@ impl Sheet {
         }
     }
 
-    /// One declaration, mapped onto a [`StyleKey`] or counted as dropped.
+    /// Maps one declaration to a [`StyleKey`] or counts it as dropped.
     fn push_decl(&mut self, decl: &scan::Decl) {
-        // `var()` is the one value form dropped rather than passed on: the
-        // custom property it names is declared on Yomitan's popup chrome,
-        // which this renderer has no equivalent of, so substituting it would
-        // mean inventing a number.
+        // The custom property that `var()` names belongs to Yomitan popup
+        // chrome. This renderer has no equivalent chrome. A substitution would
+        // invent a number.
         if decl.value.contains("var(") {
             self.counts.dropped_declarations += 1;
             return;
@@ -281,12 +295,12 @@ impl Sheet {
             self.counts.dropped_declarations += 1;
             return;
         };
-        // A `margin` or `padding` shorthand expands here, into the four
-        // longhands it sets. Not cosmetic: it is what lets the cascade run
-        // per property instead of per list position, so a shorthand in a
-        // less specific rule can no longer erase a longhand from a more
-        // specific one, and so "does the inline `style` already set this?"
-        // is an exact question.
+        // A `margin` or `padding` shorthand expands here into the four
+        // longhands that it sets. The expansion is not cosmetic.
+        // It lets the cascade run for each property, not for each list
+        // position. A shorthand in a less specific rule cannot erase a
+        // longhand from a more specific rule. The question "does the inline
+        // `style` attribute already set this property?" also becomes exact.
         match edges_of(key) {
             None => self.decls.push(Decl {
                 key,
@@ -316,13 +330,13 @@ impl Sheet {
         }
     }
 
-    /// Buckets every rule by its subject, so a node's candidate set is
-    /// small.
+    /// This function groups each rule by its subject. The group keeps the
+    /// candidate set for a node small.
     ///
-    /// The subject is the rightmost compound - the node the rule actually
-    /// styles - and it is bucketed by the most selective thing it names: an
-    /// exact attribute value, then a bare attribute, then a tag. A rule
-    /// lands in exactly one bucket, so a candidate list needs no
+    /// The subject is the rightmost compound. It is the node that the rule
+    /// styles. The bucket uses the most selective item that the subject names:
+    /// an exact attribute value first, a bare attribute second, and a tag third.
+    /// Each rule enters exactly one bucket. Therefore a candidate list needs no
     /// deduplication.
     fn index(&mut self) {
         self.needs_positions = select::needs_positions(&self.pool);
@@ -362,7 +376,8 @@ impl Sheet {
                 None => any.push(ix),
             }
         }
-        // A binary search wants sorted keys, and the key is the pair.
+        // Binary search needs sorted keys. The key is the attribute and value
+        // pair.
         keyed.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         self.keyed = keyed
             .into_iter()
@@ -373,7 +388,7 @@ impl Sheet {
         self.any = self.pour(&any);
     }
 
-    /// One candidate list into the shared pool.
+    /// Copies a candidate list into the shared pool.
     fn pour(&mut self, rules: &[u32]) -> Span {
         let at = self.buckets.len() as u32;
         self.buckets.extend_from_slice(rules);
@@ -392,7 +407,7 @@ impl Sheet {
         }
     }
 
-    /// Are there no rules at all?
+    /// Reports whether the sheet holds no rules.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
@@ -408,15 +423,16 @@ impl Pool {
     }
 }
 
-/// The CSS spelling of every property this build maps.
+/// The CSS spelling of each property that this build maps.
 ///
-/// The kebab-case half of `gloss::parse::style_key_for`'s camelCase table,
-/// and deliberately no wider: the rule here is to keep the declarations
-/// the renderer already understands and drop the rest. So the corpus's
-/// `display`, `grid-column`, `line-height`, `font-family` and its 15 logical
-/// properties (`margin-inline-start` and friends, 700-odd declarations) are
-/// dropped and counted rather than half-mapped onto a box model that has no
-/// per-edge colour and no writing mode.
+/// This table provides the kebab-case half of the camelCase table in
+/// `gloss::parse::style_key_for`. It stays narrow by design.
+/// The build keeps declarations that the renderer understands and drops the rest.
+/// Therefore the build drops and counts `display`, `grid-column`, `line-height`,
+/// and `font-family`. It also drops 15 logical properties, such as
+/// `margin-inline-start`. That group contains more than 700 declarations.
+/// The table does not map per-edge color or writing mode. The renderer drops
+/// those properties instead of assigning incomplete semantics.
 fn css_key(prop: &str) -> Option<StyleKey> {
     Some(match prop {
         "font-style" => StyleKey::FontStyle,
@@ -451,11 +467,11 @@ fn css_key(prop: &str) -> Option<StyleKey> {
     })
 }
 
-/// The four longhands a shorthand sets, top-right-bottom-left.
+/// The four longhands that a shorthand sets, in top-right-bottom-left order.
 ///
-/// `border-width` and `border-style` are shorthands too, but this build has
-/// no per-edge key for either, so there is nothing to expand them into and
-/// nothing that can conflict with them.
+/// `border-width` and `border-style` are also shorthands. This build has no
+/// per-edge key for either property, so each expands to nothing.
+/// No declaration can conflict with either property.
 fn edges_of(key: StyleKey) -> Option<[StyleKey; 4]> {
     match key {
         StyleKey::Margin => Some([
@@ -474,38 +490,41 @@ fn edges_of(key: StyleKey) -> Option<[StyleKey; 4]> {
     }
 }
 
-/// Does an inline `style` shorthand already set this longhand?
+/// Reports whether an inline `style` shorthand already sets this longhand.
 ///
-/// Inline `style` keeps its shorthands - this module does not rewrite the
-/// tree parser's output - so the fold has to ask the question in both
-/// directions before it lets a stylesheet declaration through.
+/// The inline `style` attribute keeps its shorthands because this module never
+/// rewrites parser output. Therefore the fold checks both directions before it
+/// accepts a stylesheet declaration.
 fn shadowed_by(inline: StyleKey, css: StyleKey) -> bool {
     inline == css || edges_of(inline).is_some_and(|edges| edges.contains(&css))
 }
 
-/// The attribute Yomitan derives from a structured-content `data` key.
+/// The attribute that Yomitan derives from a structured-content `data` key.
 ///
-/// Every selector in a dictionary's stylesheet depends on this exact
-/// transform, so it is ported from `tools/dict-census/census.py`, which
-/// verified it against the corpus, rather than re-derived. Yomitan writes
-/// the key into `dataset` under an `sc` prefix, and the DOM turns every
-/// ASCII capital there into `-x`: `content` becomes `data-sc-content`,
-/// `partOfSpeech` becomes `data-sc-part-of-speech`, `BM` becomes
-/// `data-sc-b-m`, and a CJK key takes **no** separating hyphen at all -
-/// `常用外マーク` becomes `data-sc常用外マーク`.
+/// Every selector in a dictionary stylesheet depends on this exact transform.
+/// This code ports `tools/dict-census/census.py`, which checked the transform
+/// against the corpus. It does not derive a new transform.
+/// Yomitan writes the key into `dataset` with an `sc` prefix.
+/// The DOM then converts each ASCII capital to `-x`.
+/// `content` becomes `data-sc-content`.
+/// `partOfSpeech` becomes `data-sc-part-of-speech`.
+/// `BM` becomes `data-sc-b-m`.
+/// A CJK key has **no** separating hyphen, so `常用外マーク` becomes
+/// `data-sc常用外マーク`.
 ///
-/// Forward, never backward. The transform is not injective - `content` and
-/// `Content` both give `data-sc-content` - so a compiled selector's
-/// attribute name is resolved against a document's interned keys by
-/// transforming the keys, once per document, not by un-transforming the
-/// name.
+/// This transform runs forward only. It never runs in reverse.
+/// It is not injective because `content` and `Content` both produce
+/// `data-sc-content`.
+/// Therefore the code resolves the attribute name of each compiled selector
+/// against the interned keys of a document.
+/// It transforms each key once per document. It never reverses the name.
 fn dataset_attr(key: &str, out: &mut String) {
     out.push_str("data-sc");
     let mut chars = key.chars();
     let Some(first) = chars.next() else { return };
-    // The `sc` prefix makes the key's own first letter an interior one, so
-    // `dataset` capitalises it; a non-ASCII-alphabetic first character is
-    // left exactly as it is.
+    // The `sc` prefix places the first key letter inside the name. Therefore
+    // `dataset` capitalizes it. A first character that is not an ASCII letter
+    // stays unchanged.
     let head = if first.is_ascii_alphabetic() { first.to_ascii_uppercase() } else { first };
     for c in std::iter::once(head).chain(chars) {
         if c.is_ascii_uppercase() {
@@ -517,27 +536,29 @@ fn dataset_attr(key: &str, out: &mut String) {
     }
 }
 
-/// Folds a dictionary's stylesheet into one parsed tree.
+/// Applies one dictionary stylesheet to one parsed tree.
 ///
-/// The whole of the integration. Each node's (tag, `data` map, ancestor
-/// chain, sibling position) selects its winners, the winners are ordered by
-/// importance then specificity then source order, and their declarations
-/// land in the node's resolved style record **ahead of** the inline `style`
-/// already there.
+/// This function completes the integration.
+/// A node's tag, `data` map, ancestor chain, and sibling position select the
+/// rules that win.
+/// The cascade orders winners by importance, specificity, and source order.
+/// Their declarations enter the node's resolved style record, **ahead of**
+/// inline `style` declarations that already exist.
 ///
-/// Ahead of, and it costs the inline half nothing: a stylesheet declaration
-/// the inline record already sets - or that an inline shorthand covers - is
-/// dropped before it is written, so the two halves never name one property
-/// and inline `style` has the last word by construction. That is what makes
-/// the record's own order stop mattering: a consumer reading the first
-/// occurrence of a property and one reading the last get the same answer,
-/// which is the invariant both `GlossDoc::style_of` and the layout pass rely
-/// on.
+/// That position leaves inline semantics unchanged.
+/// Before the fold writes a declaration, it drops declarations that the inline
+/// record already sets or that an inline shorthand covers.
+/// Therefore the two halves never name one property.
+/// The inline `style` attribute then wins.
+/// The order inside the record then does not matter.
+/// A reader that takes the first occurrence of a property and a reader that
+/// takes the last occurrence get the same answer.
+/// Both `GlossDoc::style_of` and the layout pass depend on this invariant.
 ///
-/// Application order still matters *within* the stylesheet half, and it is
-/// why a `margin` or `padding` shorthand is expanded into its four longhands
-/// at compile time: after that, no two declarations here overlap and the
-/// cascade is per property rather than per list position.
+/// Order still matters *inside* the stylesheet half.
+/// The compile step expands `margin` and `padding` into four longhands.
+/// After expansion, no two declarations overlap.
+/// The cascade then runs for each property, not for each list position.
 pub fn apply(doc: &mut GlossDoc, sheet: &Sheet) {
     if sheet.is_empty() || doc.is_empty() {
         return;
@@ -548,16 +569,17 @@ pub fn apply(doc: &mut GlossDoc, sheet: &Sheet) {
     }
 }
 
-/// Every stylesheet declaration that wins on some node, in node order.
+/// Returns each stylesheet declaration that wins on a node, in node order.
 ///
-/// Borrowed values, so a win costs no allocation: the text lives in the
-/// compiled sheet until [`GlossDoc::fold_declarations`] copies it into the
-/// document's one text buffer.
+/// The values are borrowed, so a win allocates nothing.
+/// The compiled sheet keeps the text until [`GlossDoc::fold_declarations`]
+/// copies it into the document's single text buffer.
 fn resolve<'a>(doc: &GlossDoc, sheet: &'a Sheet) -> Vec<(NodeId, StyleKey, &'a str)> {
     let attr_of_key = resolve_keys(doc, sheet);
-    // A document whose keys name none of the sheet's attributes can still be
-    // matched by a tag or by a bare `:first-child` rule, so this is not an
-    // early exit - but it is why the attribute buckets go quiet.
+    // A tag rule or a bare `:first-child` rule can match a document whose keys
+    // name none of the sheet attributes. Therefore this function must continue
+    // here and must not return early. This case also explains why the attribute
+    // buckets produce no candidates.
     let pos = if sheet.needs_positions { select::positions(doc) } else { Vec::new() };
     let ctx = Ctx { doc, attr_of_key: &attr_of_key, pos: &pos };
     let mut w = Walk {
@@ -574,12 +596,13 @@ fn resolve<'a>(doc: &GlossDoc, sheet: &'a Sheet) -> Vec<(NodeId, StyleKey, &'a s
     w.out
 }
 
-/// One document's interned keys, mapped to the sheet's attribute ids.
+/// The interned keys of one document mapped to the sheet attribute IDs.
 ///
-/// Once per document, which is why the gloss arena interns keys at all: a
-/// key's attribute name is computed here and every per-node probe after this
-/// compares `u32`s. A binary search over the sheet's names rather than a
-/// scan, because the largest corpus sheet names 322 of them.
+/// This map runs once for each document because the gloss arena interns keys.
+/// This function computes each key's attribute name.
+/// Every per-node probe then compares `u32` values.
+/// The lookup uses binary search over sheet names, not a scan.
+/// The largest corpus sheet has 322 attributes.
 fn resolve_keys(doc: &GlossDoc, sheet: &Sheet) -> Vec<u32> {
     let mut out = vec![NO_ATTR; doc.key_count()];
     let mut name = String::with_capacity(32);
@@ -596,39 +619,39 @@ fn resolve_keys(doc: &GlossDoc, sheet: &Sheet) -> Vec<u32> {
     out
 }
 
-/// The descent, and the scratch buffers it reuses.
+/// The tree descent and its reusable scratch buffers.
 ///
-/// Two lifetimes, because the walk borrows two unrelated things: `'s` is the
-/// compiled sheet, which outlives the fold and lends every value string, and
-/// `'d` is the document plus the two tables resolved against it, which live
-/// only as long as this walk.
+/// This type has two lifetimes because the walk borrows two unrelated values.
+/// `'s` is the compiled sheet. It outlives the fold and lends each value string.
+/// `'d` is the document and the two tables resolved against it.
+/// They live only during this walk.
 struct Walk<'s, 'd> {
     sheet: &'s Sheet,
     ctx: Ctx<'d>,
-    /// The chain from a glossary item down to the node being probed.
+    /// The chain from a glossary item down to the node under test.
     path: Vec<NodeId>,
     /// Candidate rule ids for one node.
     cands: Vec<u32>,
-    /// `(importance, specificity, order, rule)` for one node's matches.
+    /// Match data for one node: `(importance, specificity, order, rule)`.
     hits: Vec<(bool, u32, u32, u32)>,
     out: Vec<(NodeId, StyleKey, &'s str)>,
 }
 
 impl<'s> Walk<'s, '_> {
-    /// One node and its subtree.
+    /// Visits one node and its subtree.
     ///
-    /// `depth` is bounded by the parser's own
-    /// [`MAX_DEPTH`](crate::dict::gloss::MAX_DEPTH), so this recursion is as
-    /// deep as the tree it walks and no deeper - and the guard is repeated
-    /// here rather than assumed, because a stack overflow is not a rendering
-    /// failure this process recovers from.
+    /// The parser limits `depth` to
+    /// [`MAX_DEPTH`](crate::dict::gloss::MAX_DEPTH).
+    /// Therefore this recursion reaches the same maximum depth as the tree
+    /// and no deeper.
+    /// This function repeats the guard because a stack overflow cannot recover.
     fn descend(&mut self, id: NodeId, depth: u32) {
         if depth > crate::dict::gloss::MAX_DEPTH {
             return;
         }
-        // The document reference is copied out of `ctx` first, so the sibling
-        // iterator borrows the tree rather than `self` and the recursion
-        // needs no per-node vector of children.
+        // The code copies the document reference from `ctx` first. The sibling
+        // iterator then borrows the tree, not `self`. Recursion also avoids a
+        // per-node child vector.
         let doc = self.ctx.doc;
         self.path.push(id);
         if select::selectable(doc.node(id).kind) {
@@ -640,7 +663,7 @@ impl<'s> Walk<'s, '_> {
         self.path.pop();
     }
 
-    /// One node's winners, folded into `out`.
+    /// Finds the declarations that win for one node and adds them to `out`.
     fn probe(&mut self, id: NodeId) {
         let sheet = self.sheet;
         let doc = self.ctx.doc;
@@ -677,20 +700,22 @@ impl<'s> Walk<'s, '_> {
         if self.hits.is_empty() {
             return;
         }
-        // Descending cascade order: importance, then specificity, then the
-        // later of two equally specific rules. The record is read
-        // first-occurrence-wins, so the winner has to come first.
+        // Sorts matches in descending cascade order: importance, specificity,
+        // then source order. For equal specificities, the later rule wins.
+        // A reader takes the first occurrence of each property in the record.
+        // Therefore the winner must come first.
         self.hits.sort_unstable_by(|a, b| b.cmp(a));
 
         let inline = doc.style(id);
         let at = self.out.len();
-        // Importance is a property of a declaration and not of the rule that
-        // carries it, so an `!important` length beats every normal one
-        // whatever rule it came from - which takes a second pass over the
-        // same ordering. Only when there is one: 6 of the 14 corpus sheets
-        // carry no `!important` at all, and those pay for one pass. It never
-        // beats inline `style`, which this module's contract gives the last
-        // word unconditionally.
+        // Importance belongs to each declaration, not to its rule. Therefore
+        // an `!important` length beats every normal length, regardless of its
+        // rule. This result needs a second pass over the same order.
+        // The code uses the second pass only when a declaration is important.
+        // 6 of the 14 corpus sheets have no `!important` declaration, so those
+        // sheets use one pass. An `!important` declaration never beats the
+        // inline `style` attribute. This module makes the inline `style`
+        // attribute win without a condition.
         let passes: &[bool] =
             if self.hits.iter().any(|h| h.0) { &[true, false] } else { &[false] };
         for &important in passes {

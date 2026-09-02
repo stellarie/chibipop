@@ -1,31 +1,31 @@
-//! The rotating ScreenCast restore token (the fallback capture rung).
+//! Stores the ScreenCast restore token for the fallback capture rung.
 //!
-//! The portal asks the user for consent, and consent is the one thing a
-//! background daemon cannot re-ask for politely: a dialog on every
-//! startup would be the loudest thing chibipop does. So the first launch
-//! pays for one dialog covering every monitor, `Start` hands back a
-//! restore token, and every later launch replays that token to open the
-//! same session silently.
+//! The portal asks the user for consent.
+//! A background daemon cannot request consent at every startup without a dialog each time.
+//! The first launch shows one dialog for every monitor.
+//! `Start` returns a restore token.
+//! Later launches reuse that token to open the same session without a dialog.
 //!
-//! It *rotates* because we ask for `persist_mode=2` ("persist until
-//! revoked"). Under that mode the portal issues a **fresh** token on
-//! every successful `Start` and is free to invalidate the one we just
-//! spent, so "store it once at first consent" quietly decays into a
-//! dialog months later. The only correct discipline is to write back
-//! whatever the newest `Start` returned, replacing what we had — hence
-//! [`TokenStore::rotate`] rather than a create-once save.
+//! The portal rotates the token because this module requests `persist_mode=2` ("persist until
+//! revoked").
+//! With this mode, the portal returns a new token after each successful `Start`.
+//! The portal can invalidate the token that the call used.
+//! A token saved only after first consent can fail months later.
+//! Always save the newest token and replace the previous token.
+//! [`TokenStore::rotate`] implements this replacement instead of a create-once save.
 //!
-//! The file is `0600`. A restore token is a capability: anyone holding
-//! it can reopen a screen-capture session as this user without a dialog,
-//! so it is worth exactly as much as a session cookie and belongs to
-//! nobody else on the machine.
+//! The file mode is `0600`.
+//! A restore token is a capability.
+//! Anyone who has it can reopen a screen-capture session as this user without a dialog.
+//! Treat it like a session cookie.
+//! No other user on the machine can read it.
 //!
-//! A missing or blank token is *normal*, never an error. It is what a
-//! first launch looks like, what a launch after `clear` looks like, and
-//! what a launch after the user revokes the grant in the portal's
-//! settings looks like. All three mean the same thing — ask for consent
-//! again — so [`TokenStore::load`] answers `None` and lets the caller
-//! take the dialog path instead of surfacing a failure it cannot fix.
+//! A missing or blank token is normal, not an error.
+//! This state occurs on the first launch, after `clear`, or after the user revokes the grant in the
+//! portal settings.
+//! These cases all need consent again.
+//! [`TokenStore::load`] returns `None`.
+//! The caller takes the dialog path and avoids a failure that it cannot fix.
 
 use anyhow::{Context, Result};
 use std::fs::{OpenOptions, Permissions};
@@ -33,48 +33,45 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Only the owner: the token reopens a capture session without a
-/// dialog, so it is a secret in the same sense a session cookie is.
+/// File mode for the owner only. The token reopens a capture session without a dialog, so treat it
+/// like a session cookie.
 const OWNER_ONLY: u32 = 0o600;
 
-/// The newest restore token the portal issued, on disk in the XDG state
-/// dir.
+/// Stores the newest restore token that the portal issued in the XDG state directory.
 ///
-/// The directory is supplied by the caller (`Paths::state_dir`) rather
-/// than resolved here: path discovery has one home, `src/paths.rs`, and
-/// tests need a scratch dir without touching the environment.
+/// The caller supplies the directory with `Paths::state_dir`.
+/// Path discovery stays in `src/paths.rs`. Tests can use a scratch directory and leave the environment
+/// unchanged.
 pub struct TokenStore {
     path: PathBuf,
 }
 
 impl TokenStore {
-    /// The file name inside the state dir.
+    /// The file name within the state directory.
     pub const FILE: &'static str = "portal-restore-token";
 
-    /// Point the store at `state_dir`. Touches no filesystem — a store
-    /// for a directory that does not exist yet is exactly a first
-    /// launch, and [`TokenStore::rotate`] creates it.
+    /// Creates a store for `state_dir`.
+    /// This method does not access the file system.
+    /// A missing directory represents a first launch, and [`TokenStore::rotate`] creates it.
     pub fn new(state_dir: &Path) -> TokenStore {
         TokenStore { path: state_dir.join(Self::FILE) }
     }
 
-    /// Where the token is (or would be), for diagnostics and for the
-    /// error messages that name it.
+    /// Returns the token path for diagnostics and error messages.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// The token to hand the portal, or `None` when there is none to
-    /// hand it (absent file, unreadable file, blank contents).
+    /// Returns the token for the portal.
+    /// Returns `None` when the file does not exist, cannot be read, or contains only whitespace.
     ///
-    /// Every one of those is answered `None` rather than an error: they
-    /// all mean "no silent session is available", the caller's response
-    /// to all three is the same consent dialog, and a first launch is
-    /// not a failure. A file we cannot read is also one the next
-    /// successful `Start` will simply rotate over.
+    /// Each case means that no silent session is available.
+    /// The caller uses the same consent dialog for each case.
+    /// A first launch is not a failure.
+    /// The next successful `Start` replaces an unreadable file.
     pub fn load(&self) -> Option<String> {
-        // Trimmed because we write a trailing newline, and because a
-        // hand-edited file should not fail with an invisible difference.
+        // Remove whitespace around the token because this method writes a newline at the end.
+        // Also accept a hand-edited file with extra whitespace.
         let stored = std::fs::read_to_string(&self.path).ok()?;
         let token = stored.trim();
         if token.is_empty() {
@@ -84,18 +81,15 @@ impl TokenStore {
         }
     }
 
-    /// Rotate: persist the token the portal just issued, replacing any
-    /// previous one.
+    /// Stores the token that the portal issued and replaces the previous token.
     ///
-    /// Atomic by write-then-rename within the state dir, so a crash
-    /// mid-write leaves the previous token intact instead of a truncated
-    /// one — a half-written token is worse than an old token, because
-    /// the old one may still work.
+    /// Write the new file before the rename.
+    /// A crash in the write then leaves the previous token intact instead of a truncated token.
+    /// An old token can still work, but a partial token cannot.
     pub fn rotate(&self, token: &str) -> Result<()> {
         let token = token.trim();
-        // A blank token is never something the portal meant to give us,
-        // and writing it would destroy a working one to no purpose. Loud
-        // and unwritten beats silent and self-inflicted.
+        // Reject a blank token because it cannot come from a valid portal grant.
+        // Keep the stored token. Do not replace it with an empty value.
         anyhow::ensure!(
             !token.is_empty(),
             "the portal returned a blank restore token; keeping the one in {}",
@@ -108,9 +102,8 @@ impl TokenStore {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating the state dir {}", dir.display()))?;
 
-        // The temp file is a sibling on purpose: rename is only atomic
-        // within one filesystem, and the state dir may be a mount of its
-        // own.
+        // Keep the temporary file beside the target.
+        // Rename is atomic only within one file system, and the state directory can be its own mount.
         let tmp = dir.join(format!("{}.new", Self::FILE));
         if let Err(e) = write_private(&tmp, token) {
             let _ = std::fs::remove_file(&tmp);
@@ -125,10 +118,10 @@ impl TokenStore {
         Ok(())
     }
 
-    /// Forget the token, so the next launch prompts again.
+    /// Removes the token so the next launch asks for consent again.
     ///
-    /// Idempotent: "there is no token" is the state this asks for, so
-    /// finding it already true is success, not a race to report.
+    /// This method is idempotent.
+    /// An absent token already has the requested state, so the method reports success.
     pub fn clear(&self) -> Result<()> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -139,8 +132,8 @@ impl TokenStore {
     }
 }
 
-/// Write `token` (plus a newline) to `path` as an owner-only file, and
-/// get it onto the disk before the caller renames it into place.
+/// Writes `token` and a newline to `path` with owner-only permissions.
+/// Flushes the file before the caller renames it into place.
 fn write_private(path: &Path, token: &str) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -149,16 +142,16 @@ fn write_private(path: &Path, token: &str) -> Result<()> {
         .mode(OWNER_ONLY)
         .open(path)
         .with_context(|| format!("creating {}", path.display()))?;
-    // `mode` applies only to a file this call creates, and a killed
-    // rotate can leave a sibling behind with whatever mode it had; set
-    // it outright so the token is never briefly world-readable.
+    // The mode applies only when this call creates the file.
+    // An interrupted rotation can leave a sibling with a different mode.
+    // Set the mode again so the token never becomes readable by other users.
     file.set_permissions(Permissions::from_mode(OWNER_ONLY))
         .with_context(|| format!("restricting {} to its owner", path.display()))?;
     file.write_all(token.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .with_context(|| format!("writing {}", path.display()))?;
-    // Renaming a file whose contents are still in flight is how an
-    // atomic replace becomes an empty token after a power cut.
+    // Sync the file before the rename.
+    // Otherwise, a power loss can replace the target with an empty file.
     file.sync_all().with_context(|| format!("flushing {}", path.display()))
 }
 
@@ -166,12 +159,12 @@ fn write_private(path: &Path, token: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// One scratch dir per test, so the suite stays parallel.
+    /// Gives each test a scratch directory. The suite can then run in parallel.
     fn scratch(what: &str) -> PathBuf {
         std::env::temp_dir().join(format!("chibipop_portal_token_{}_{what}", std::process::id()))
     }
 
-    /// The dir pre-created, for the tests that are not about creating it.
+    /// Creates a ready state directory for tests that do not test its creation.
     fn ready(what: &str) -> (PathBuf, TokenStore) {
         let dir = scratch(what);
         let _ = std::fs::remove_dir_all(&dir);
@@ -193,7 +186,7 @@ mod tests {
         );
     }
 
-    /// A first launch has no token, and a first launch is not a failure.
+    /// A first launch has no token, and it is not a failure.
     #[test]
     fn an_absent_token_file_reads_as_no_token_rather_than_an_error() {
         let dir = scratch("absent");
@@ -201,8 +194,8 @@ mod tests {
         assert_eq!(None, TokenStore::new(&dir).load());
     }
 
-    /// A truncated or hand-emptied file must take the dialog path, not
-    /// hand the portal an empty string.
+    /// Use the dialog path for a truncated or empty file.
+    /// Do not send an empty string to the portal.
     #[test]
     fn a_blank_or_whitespace_only_file_reads_as_no_token() {
         let (dir, store) = ready("blank");
@@ -223,7 +216,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The whole point of `persist_mode=2`: the newest token wins.
+    /// `persist_mode=2` needs the newest token to replace the stored token.
     #[test]
     fn rotating_replaces_the_token_that_was_stored_before() {
         let (dir, store) = ready("rotate");
@@ -234,7 +227,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// First launch: the state dir may not exist yet.
+    /// A first launch can have no state directory.
     #[test]
     fn rotating_creates_the_state_dir_when_it_is_absent() {
         let dir = scratch("mkdir").join("nested");
@@ -245,20 +238,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(scratch("mkdir"));
     }
 
-    /// The token is a capability; the rest of the machine does not get it.
+    /// The token is a capability. Other users on the machine must not read it.
     #[test]
     fn a_rotated_token_is_readable_only_by_its_owner() {
         let (dir, store) = ready("mode");
         store.rotate("tok-secret").expect("rotate");
         assert_eq!(0o600, mode_of(store.path()));
-        // And a rotation over a loose-moded file tightens it.
+        // A rotation over a file with loose permissions also sets mode `0600`.
         std::fs::set_permissions(store.path(), Permissions::from_mode(0o644)).unwrap();
         store.rotate("tok-secret-2").expect("second rotate");
         assert_eq!(0o600, mode_of(store.path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Refusing loudly beats destroying a token that still works.
+    /// Reject a blank token. Do not destroy a token that still works.
     #[test]
     fn a_blank_rotation_is_refused_and_keeps_the_stored_token() {
         let (dir, store) = ready("refuse");
@@ -286,8 +279,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// After a revoke there must be nothing left to replay, and asking
-    /// twice must not turn into an error.
+    /// After revocation, no token remains to replay.
+    /// A second clear call must also succeed.
     #[test]
     fn clearing_forgets_the_token_and_is_idempotent() {
         let (dir, store) = ready("clear");
@@ -299,7 +292,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Even a state dir that was never created must clear cleanly.
+    /// The `clear` method must succeed for an absent token, even when the state directory does not exist.
     #[test]
     fn clearing_before_any_token_was_ever_written_is_not_an_error() {
         let dir = scratch("clear_absent");

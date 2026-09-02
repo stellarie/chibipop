@@ -1,17 +1,13 @@
-//! The capture backend's own Wayland connection: registry binds,
-//! output geometry, frame bookkeeping.
+//! This module owns the capture backend's Wayland connection, output geometry, and frame records.
 //!
-//! Its own connection and its own queue, on purpose. The backend lives
-//! on the core Worker's thread (`Worker::spawn`'s `open` closure builds
-//! it there), and the daemon's queue belongs to the daemon's calloop
-//! loop on the main thread. Two threads must never dispatch one queue,
-//! and a capture must never be able to stall cursor events - so this is
-//! a second client as far as the compositor is concerned.
+//! The backend uses its own connection and queue. `Worker::spawn` builds it on the core
+//! Worker's thread. The daemon uses its own queue in calloop on the main thread.
+//! Two threads must not dispatch one queue. A capture must not block cursor events.
+//! The compositor therefore sees this backend as a second client.
 //!
-//! Only what events write lives in [`State`]; the request side (proxies,
-//! buffers, caches) belongs to the backend, which keeps the borrow
-//! split that lets `dispatch` run against `&mut State` while the loop
-//! itself is borrowed.
+//! [`State`] stores only data that event handlers write. The backend stores request-side
+//! proxies, buffers, and caches. This split lets `dispatch` use `&mut State` while
+//! the loop borrows the request side.
 
 use super::crop::Order;
 use crate::cursor::outputs::OutputGeometry;
@@ -31,46 +27,46 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
 };
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
-/// The manager global this backend is. Selection is by advertised
-/// global, never by compositor identity.
+/// This backend uses this manager global. It selects the global that the
+/// compositor advertises, not the compositor identity.
 pub const MANAGER_GLOBAL: &str = "zwlr_screencopy_manager_v1";
 
-/// `copy_with_damage` arrived in version 2; without it there is no
-/// damage race, only plain copies.
+/// `copy_with_damage` starts at version 2. Older versions support plain
+/// copies only, so they have no damage race.
 const DAMAGE_SINCE: u32 = 2;
 
-/// `buffer_done` arrived in version 3; before it, the `buffer` event
-/// was the whole enumeration.
+/// `buffer_done` starts at version 3. Before version 3, the `buffer` event
+/// completes enumeration.
 const BUFFER_DONE_SINCE: u32 = 3;
 
-/// `capture_output_region`'s first argument, `overlay_cursor`: nonzero
-/// asks the compositor for an *extra* compositing pass that paints the
-/// pointer into the copy. Zero, always, on every slot - the damage-race
-/// arm ([`Slot::Watch`]) as much as the read ([`Slot::Copy`]) - because
-/// OCR must read the text, not the pointer sitting on it.
+/// `overlay_cursor` is the first argument of `capture_output_region`.
+/// A nonzero value asks the compositor to add the pointer to the copy.
+/// This backend always passes zero for every slot. It passes zero for the
+/// damage-race arm ([`Slot::Watch`]) and the read ([`Slot::Copy`]) because
+/// OCR must read text without the pointer over it.
 ///
-/// It cannot do more than that: a compositor that already painted a
-/// *software* cursor into the framebuffer screencopy copies hands that
-/// pointer over whatever this argument says, which is why
-/// [`crate::capture::software_cursor`] exists.
+/// This argument cannot remove a software cursor that the compositor
+/// already painted into the framebuffer. The screencopy protocol then
+/// copies that pointer regardless of this value. [`crate::capture::software_cursor`]
+/// handles that case.
 const WITHOUT_CURSOR: i32 = 0;
 
-/// Which frame an event belongs to: the copy a `grab` is waiting on, or
-/// the damage race left in flight between reads.
+/// The frame for an event. `Copy` serves a `grab`. `Watch` serves the
+/// damage race between reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Copy,
     Watch,
 }
 
-/// How a copy ended.
+/// The result of a copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ready,
     Failed,
 }
 
-/// The shm buffer the compositor asked for.
+/// The `shm` buffer that the compositor requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
     pub format: wl_shm::Format,
@@ -80,12 +76,12 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// The byte order of these pixels, or `None` for a format core's
-    /// `Frame` cannot describe.
+    /// The byte order of these pixels. `None` means core `Frame` cannot
+    /// describe the format.
     ///
-    /// `wl_shm` names a little-endian word, so the byte order in
-    /// memory is the reverse of the name: `Xrgb8888` is B, G, R, X and
-    /// `Rgb888` is B, G, R packed.
+    /// `wl_shm` names a little-endian word. Memory stores the bytes in the
+    /// reverse order of that name. `Xrgb8888` stores B, G, R, X. `Rgb888`
+    /// stores packed B, G, R.
     pub fn order(&self) -> Option<Order> {
         match self.format {
             wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => Some(Order::Bgrx),
@@ -97,23 +93,23 @@ impl Shape {
     }
 }
 
-/// One frame's events, as they arrive.
+/// One frame's events in arrival order.
 #[derive(Debug, Default)]
 pub struct FrameSlot {
-    /// From the `buffer` event.
+    /// The `buffer` event.
     pub shape: Option<Shape>,
-    /// The `buffer_done` event, or the `buffer` event on version < 3.
+    /// The `buffer_done` event. On versions before 3, the `buffer` event
+    /// sets this field.
     pub enumerated: bool,
-    /// `y_invert` seen in the `flags` event.
+    /// `y_invert` from the `flags` event.
     pub y_invert: bool,
     pub outcome: Option<Outcome>,
 }
 
-/// The request side: the queue every new object is created on.
+/// The request side. New objects use this queue.
 ///
-/// Split from [`State`] on purpose - `dispatch` needs `&mut State`
-/// while the loop is borrowed, so nothing the request side owns may
-/// live in there.
+/// [`State`] stores event data. This type stays separate because
+/// `dispatch` needs `&mut State` while the loop borrows the request side.
 pub struct Session {
     qh: QueueHandle<State>,
 }
@@ -127,11 +123,10 @@ impl Session {
         &self.qh
     }
 
-    /// One `capture_output_region` frame, output-local logical.
+    /// One `capture_output_region` frame in output-local logical coordinates.
     ///
-    /// The one place a screencopy frame is asked for: both slots come
-    /// through here, so [`WITHOUT_CURSOR`] is the whole of this
-    /// backend's cursor policy.
+    /// This is the only place that requests a screencopy frame. Both slots use
+    /// it. Therefore, [`WITHOUT_CURSOR`] defines this backend's cursor policy.
     pub fn capture(
         &self,
         manager: &ZwlrScreencopyManagerV1,
@@ -154,15 +149,16 @@ impl Session {
 
 /// One bound output.
 pub struct Output {
-    /// The registry name events arrive under.
+    /// The registry name that identifies the output in events.
     name: u32,
     pub output: WlOutput,
     pub geom: OutputGeometry,
-    /// zxdg_output_v1 spoke, so wl_output.geometry stops overwriting.
+    /// Whether the `zxdg_output_v1` position event arrived. After it arrives,
+    /// `wl_output.geometry` no longer overwrites the position.
     xdg_position_seen: bool,
 }
 
-/// Everything the compositor's events write.
+/// All data that events from the compositor write.
 #[derive(Default)]
 pub struct State {
     pub outputs: Vec<Output>,
@@ -192,14 +188,15 @@ impl State {
     }
 }
 
-/// What `open` bound, before the loop takes the queue.
+/// The objects that `open` bound before the loop takes the queue.
 pub struct Bound {
     pub conn: Connection,
     pub queue: EventQueue<State>,
     pub state: State,
     pub manager: ZwlrScreencopyManagerV1,
     pub shm: WlShm,
-    /// Bound manager version: what the damage race may assume.
+    /// The manager version. The damage race can use this version and later
+    /// versions.
     pub version: u32,
 }
 
@@ -215,14 +212,14 @@ impl Bound {
     }
 }
 
-/// Advertised globals enough for this backend (absence is a rung that
-/// does not exist, never a crash).
+/// The advertised globals that this backend needs. An absent global means
+/// that this rung does not exist. This condition is not a crash.
 pub fn available(globals: &[Advertised]) -> bool {
     let has = |i: &str| globals.iter().any(|g| g.interface == i);
     has(MANAGER_GLOBAL) && has("wl_shm") && has("wl_output")
 }
 
-/// Connect, bind, and settle output geometry.
+/// Connect to Wayland, bind the globals, and settle output geometry.
 pub fn bind(globals: &[Advertised]) -> Result<Bound> {
     anyhow::ensure!(available(globals), "{MANAGER_GLOBAL}, wl_shm or wl_output is not advertised");
     let conn = Connection::connect_to_env().context("connecting the capture backend's own display")?;
@@ -260,8 +257,8 @@ pub fn bind(globals: &[Advertised]) -> Result<Bound> {
         });
     }
 
-    // Two roundtrips: the first delivers wl_output, the second the
-    // xdg_output logical box created inside it.
+    // Use two roundtrips. The first delivers `wl_output` events. The second
+    // delivers the optional `xdg_output` logical box when that manager exists.
     queue.roundtrip(&mut state).context("settling output geometry")?;
     queue.roundtrip(&mut state).context("settling output geometry")?;
     Ok(Bound { conn, queue, state, manager, shm, version })
@@ -363,14 +360,14 @@ impl Dispatch<ZwlrScreencopyFrameV1, Slot> for State {
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => s.outcome = Some(Outcome::Ready),
             zwlr_screencopy_frame_v1::Event::Failed => s.outcome = Some(Outcome::Failed),
-            // Damage boxes are per-copy detail; the race only needs to
-            // know that something moved.
+            // Damage boxes describe each copy. The damage race only needs to
+            // know that a change occurred.
             _ => {}
         }
     }
 }
 
-/// Globals with no events this backend acts on.
+/// Globals whose events this backend does not use.
 macro_rules! ignore_events {
     ($($proxy:ty),+ $(,)?) => {
         $(impl Dispatch<$proxy, ()> for State {
@@ -423,12 +420,12 @@ mod tests {
     fn a_compositor_without_screencopy_is_simply_unavailable() {
         let globals = vec![advertised("wl_shm", 1), advertised("wl_compositor", 6)];
         assert!(!available(&globals));
-        // And binding says so instead of panicking.
+        // `bind` reports this state instead of a panic.
         assert!(bind(&globals).is_err());
     }
 
-    /// The mapping is memory order, not the format's name - and the
-    /// packed pair is what wlroots on GLES2 actually offers.
+    /// This maps memory order, not format names. The packed pair matches what
+    /// wlroots on GLES2 provides.
     #[test]
     fn the_supported_byte_orders_are_mapped_from_memory_order() {
         let shape = |format| Shape { format, w: 1, h: 1, stride: 4 };
@@ -441,10 +438,10 @@ mod tests {
         assert_eq!(shape(wl_shm::Format::Rgb565).order(), None);
     }
 
-    /// The cursor-overlay audit, pinned: the cursor is never requested
-    /// into a copy, on either slot. A regression here is silent - the
-    /// pixels still arrive, with a pointer in them - so it is asserted
-    /// rather than trusted to the call site's comment.
+    /// This test pins the cursor-overlay rule. The backend never requests the
+    /// cursor for either slot. A regression stays silent because pixels still
+    /// arrive with a pointer. The assertion detects that case. It does not
+    /// rely on the call-site comment.
     #[test]
     fn screencopy_never_asks_for_the_pointer_to_be_overlaid() {
         assert_eq!(0, WITHOUT_CURSOR);

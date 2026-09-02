@@ -1,14 +1,14 @@
-//! The measured scene, as plain data.
+//! The measured scene stores plain panel data.
 //!
-//! **One reason to change:** what a bin paints and what a geometry snapshot
-//! pins. Everything here is comparable data with no measurer, no document
-//! and no setting behind it, because both readers need exactly that - a bin
-//! walks it to paint, and the Windows golden capture walks it to serialise.
-//! A field added here is a field thirteen goldens change for.
+//! A bin paints the scene, and a geometry snapshot records it. Both readers
+//! need the same values, so this module stores no measurer, document, or setting.
 //!
-//! One pixel space and no scale factor: core never sees one. Windows hands
-//! in DIPs because its Direct2D target carries the DPI, Linux hands in
-//! device pixels; either way the conversion is the bin's.
+//! A bin walks the scene to paint it. The Windows golden capture walks it to
+//! serialize it. If you add a field, thirteen goldens change.
+//!
+//! Core uses one pixel space because it has no scale factor. Windows provides
+//! DIPs because its Direct2D target carries DPI. Linux provides device pixels.
+//! Each bin converts coordinates for its output.
 
 use crate::controller::HitAction;
 use crate::dict::gloss::NodePath;
@@ -16,10 +16,10 @@ use crate::dict::media::{MediaFormat, MediaKey};
 use super::measure::StyledSpan;
 use super::style::{BoxStyle, Inline};
 
-/// A colour, as `Theme` carries it.
+/// A `Theme` color in RGB form.
 pub type Rgb = (u8, u8, u8);
 
-/// A box in panel space.
+/// A rectangle in panel space.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SceneRect {
     pub x: f32,
@@ -28,33 +28,25 @@ pub struct SceneRect {
     pub h: f32,
 }
 
-/// Where a run sits in its wrap box.
+/// The horizontal position of a run in its wrap box.
 ///
-/// The panel's own chrome builds
-/// `Leading` for everything but the
-/// frequency corner; a gloss earns
-/// the other two from `textAlign`,
-/// which 7 of the census's 72
-/// dictionaries declare over 249 242
-/// nodes.
+/// Panel chrome uses `Leading` for every run except the frequency corner.
+/// A gloss gets `Center` or `Trailing` from `textAlign`. Seven of the 72 census
+/// Dictionaries declare `textAlign` on 249 242 nodes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Align {
     #[default]
     Leading,
     Center,
-    /// The frequency corner, and
-    /// `textAlign: right`/`end`.
+    /// The frequency corner, or `textAlign: right`/`end`.
     Trailing,
 }
 
 impl Align {
-    /// The fraction of a line's slack
-    /// that sits before it.
+    /// The fraction of a line's slack before its content.
     ///
-    /// One number, so a line's own
-    /// offset and the whole ink box's
-    /// are the same arithmetic over
-    /// two different widths.
+    /// The method returns one fraction for two offsets. The line offset and the
+    /// whole ink box offset use the same arithmetic with different widths.
     pub fn slack_before(self) -> f32 {
         match self {
             Align::Leading => 0.0,
@@ -64,87 +56,64 @@ impl Align {
     }
 }
 
-/// What an element came from.
+/// The kind of a scene element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElemKind {
-    /// A rule, not a run.
+    /// A rule without a text run.
     Separator,
-    /// Right-aligned, advances no y.
+    /// A right-aligned element that does not advance `y`.
     Corner,
     Text,
     /// A clickable collapsed row.
     Collapsed,
-    /// Per-character click targets.
+    /// An element with one click target for each character.
     Headword,
-    /// One accent, as marked kana.
+    /// One accent rendered as marked kana.
     ///
-    /// A reading whose high mora run carries an overline and whose fall
-    /// carries a tick, both of them [`inline_boxes`] with one border edge
-    /// each - which is what the notation *is*, and why it needs no SVG. Its
-    /// `text` is the reading and then the dictionaries that gave the accent,
-    /// so it has two spans where the panel's other chrome has one.
+    /// The high mora run of a reading has an overline. The falling mora has a
+    /// tick. Each mark uses one [`inline_boxes`] entry with one border edge.
+    /// This notation shows the accent directly, so it needs no SVG.
+    /// The `text` field contains the reading and its source Dictionary names.
+    /// The element has two spans. Other panel chrome has one span.
     ///
     /// [`inline_boxes`]: SceneElem::inline_boxes
     Pitch,
     BackButton,
-    /// One asset, composited inline.
+    /// An asset that a bin composites inline.
     ///
-    /// Its `rect` is the resolved
-    /// image box and its `image` names
-    /// the asset (see [`SceneImage`]);
-    /// its `text` and `spans` are the
-    /// `alt` fallback a bin draws when
-    /// the asset will not decode. It
-    /// advances no y, because the
-    /// paragraph it sits inside
-    /// already reserved its line.
+    /// Its `rect` is the resolved image box. Its `image` names the asset.
+    /// See [`SceneImage`]. Its `text` and `spans` contain the `alt` fallback
+    /// that a bin draws when the asset does not decode. It advances no `y`
+    /// because the paragraph around it reserves its line.
     Image,
-    /// One block's own box.
+    /// The box of one block.
     ///
-    /// Its `rect` and its `block_box`
-    /// are the block's border box, and
-    /// it is textless: the paragraphs
-    /// the block emits are the
-    /// elements that follow it, each
-    /// with its own address. So a
-    /// bordered `div` holding three
-    /// paragraphs is one border around
-    /// three runs, which is what a
-    /// browser draws. It leads them in
-    /// draw order, so a declared
-    /// background sits under every one
-    /// of them.
+    /// Its `rect` and `block_box` are the block's border box. It contains no
+    /// text. Its paragraphs follow it, and each paragraph has its own address.
+    /// A browser draws a bordered `div` with three paragraphs as one border
+    /// around all three runs. The block precedes the runs in draw order, so its
+    /// declared background lies beneath them.
     Block,
     /// A table's block container.
     ///
-    /// Its `rect` is the whole grid,
-    /// its `block_box` the `table`'s
-    /// own declared box, and it has no
-    /// text: every word in a table
-    /// belongs to a cell. It leads the
-    /// cells in draw order, so a
-    /// table's own background sits
-    /// under them.
+    /// Its `rect` covers the whole grid. Its `block_box` is the declared
+    /// `table` box. It contains no text because each table word belongs to a
+    /// cell. It precedes the cells in draw order, so the table background lies
+    /// beneath them.
     Table,
     /// One cell's box.
     ///
-    /// Its `rect` and its `block_box`
-    /// are the cell's border box, with
-    /// the collapse already resolved
-    /// into the box's edge widths
-    /// ([`collapsed`]). Also textless:
-    /// the cell's own paragraphs are
-    /// the elements that follow it,
-    /// each with its own address, so a
-    /// cell holding two blocks is two
-    /// runs inside one border.
+    /// Its `rect` and `block_box` are the cell's border box. The [`collapsed`]
+    /// function resolves the collapse into the box's edge widths. The cell
+    /// contains no text. Its paragraphs follow it, and each paragraph has its
+    /// own address. A cell with two blocks has two runs inside one border.
     ///
     /// [`collapsed`]: super::table::collapsed
     Cell,
 }
 
 impl ElemKind {
-    /// Stable name for snapshots.
+    /// The stable element name for geometry snapshots.
     pub fn as_str(self) -> &'static str {
         match self {
             ElemKind::Separator => "Separator",
@@ -164,98 +133,74 @@ impl ElemKind {
 
 /// One styled piece of an element.
 ///
-/// A byte range into
-/// [`SceneElem::text`] plus the style
-/// it draws in, so an element holding
-/// mixed styling costs one string and
-/// a flat vector of `Copy` records -
-/// and a bin rebuilds the exact
-/// [`MeasureRun`] the scene was
-/// measured from by walking it.
+/// A span identifies a byte range in [`SceneElem::text`] and the style that
+/// paints it. An element with mixed styles uses one string and a flat `Copy`
+/// vector. A bin walks that vector to rebuild the exact [`MeasureRun`] that
+/// produced the scene.
 ///
-/// No family: no structured-content
-/// property can change one, so every
-/// span in a panel draws in the
-/// theme's own.
+/// A span has no font family because structured content cannot change the
+/// family. Every span in a panel uses the theme family.
 ///
 /// [`MeasureRun`]: super::measure::MeasureRun
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElemSpan {
-    /// Byte offset into the text.
+    /// Byte offset in the text.
     pub at: u32,
     pub len: u32,
     pub color: Rgb,
     pub size: f32,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     pub weight: u16,
     pub italic: bool,
-    /// Baseline shift, up positive.
+    /// Baseline shift. A positive value moves upward.
     ///
-    /// `verticalAlign`, already
-    /// resolved against the line the
-    /// span landed on: the seam
-    /// reports the baseline and this
-    /// is the arithmetic it makes
-    /// possible. Zero for every span
-    /// that sits on its line's own
-    /// baseline, which is nearly all
-    /// of them.
+    /// Layout resolves `verticalAlign` against the span's line and stores the
+    /// result here. The seam reports the baseline. This field stores the offset
+    /// from that baseline. Most spans use their line baseline, so this shift is
+    /// zero for almost every span.
     pub shift: f32,
 }
 
-/// One reading's box, over its base.
+/// One reading box over its base.
 ///
-/// CSS Ruby's own *annotation box*,
-/// which is why the name says box: it
-/// is placed geometry, not a span of
-/// any run.
+/// CSS Ruby calls this box an *annotation box*. The name states its purpose.
+/// Layout places the box outside the run, not as a span.
 ///
-/// Out of the element's flow and out
-/// of its text: a reading takes no
-/// horizontal room from the line it
-/// sits on, so it is not a span of the
-/// run a bin re-measures. It is
-/// placed once, here, and drawn where
-/// it is told.
+/// Layout places the box outside the element's flow and text. A reading takes
+/// no horizontal space from the line below it. Layout measures the reading
+/// once. A bin does not measure the reading again as part of the run. A bin
+/// draws it at this box.
 ///
-/// `x` and `y` are run-relative, like
-/// the [`LineBox`] the reading was
-/// placed against, so a bin adds
-/// [`SceneElem::pen`] and draws. No
-/// bidi and no complex-script
-/// positioning: a reading sits
-/// centred over the horizontal extent
-/// its base measured to, and nothing
-/// else.
+/// `x` and `y` are run-relative, like the [`LineBox`] that layout placed the
+/// reading against. A bin adds [`SceneElem::pen`] and draws the box. The box
+/// has no bidi or complex-script position. The reading stays centered over the
+/// horizontal extent of its base.
 ///
 /// [`LineBox`]: super::measure::LineBox
 #[derive(Debug, Clone, PartialEq)]
 pub struct RubyBox {
     /// The reading itself.
     pub text: String,
-    /// Leading edge, run-relative.
+    /// Leading edge in run-relative space.
     pub x: f32,
-    /// Top edge, likewise.
+    /// Top edge in run-relative space.
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub size: f32,
     pub color: Rgb,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     pub weight: u16,
     pub italic: bool,
 }
 
 impl RubyBox {
-    /// The run a bin draws it from.
+    /// The run that a bin uses to draw the reading.
     ///
-    /// One span and one line, at
-    /// [`SceneElem::wrap_w`] - the
-    /// width layout measured it at -
-    /// so a reading too long for the
-    /// panel wraps the same way in
-    /// both places and its slot is as
-    /// tall as what it wrapped to.
+    /// The run has one span and one line at [`SceneElem::wrap_w`]. Layout
+    /// measures the reading at that width. If a reading exceeds the panel
+    /// width, both paths wrap it the same way. Its slot matches the wrapped
+    /// result height.
     pub fn styled_span<'a>(&'a self, font: &'a str) -> StyledSpan<'a> {
         StyledSpan {
             text: &self.text,
@@ -268,74 +213,51 @@ impl RubyBox {
     }
 }
 
-/// One list marker's box, hanging in
-/// its list's gutter.
+/// One list marker box in its list gutter.
 ///
-/// CSS's own *marker box*, which is
-/// why the name says box: what goes
-/// in it is `list-style-type`'s
-/// resolved value, and that stays
-/// private to layout.
+/// CSS calls this box the *marker box*. It holds the resolved
+/// `list-style-type` value. Layout keeps that value private.
 ///
-/// Out of the element's flow and out
-/// of its text, for the same reason a
-/// reading is, and it is the whole of
-/// what CSS calls
-/// `list-style-position: outside`: the
-/// marker box sits *beside* the item's
-/// principal box rather than inside
-/// it, so it takes no horizontal room
-/// from any line and every line of the
-/// item - the first and each
-/// continuation - starts at the item's
-/// own indent. A marker kept in the
-/// run would put the second line of a
-/// wrapped item under the bullet,
-/// because a [`SceneElem`] is one run
-/// at one wrap width painted from one
-/// origin and every line of it
-/// therefore starts at the same x.
+/// Layout places the box outside the element's flow and text, like a reading.
+/// It represents the CSS value `list-style-position: outside`. The marker box
+/// sits *beside* the item's principal box, not inside it. It takes no horizontal
+/// space from any line.
+/// Every item line starts at the item's indent. This includes the first line
+/// and each continuation. If a marker sat inside the run, a wrapped item's
+/// second line would start under the bullet. A [`SceneElem`] is one run at one
+/// wrap width, and a bin paints it from one origin. Every line in that run
+/// starts at the same x.
 ///
-/// `x` and `y` are run-relative, like
-/// the [`LineBox`] the marker was
-/// placed against, so a bin adds
-/// [`SceneElem::pen`] and draws. `x`
-/// is normally *negative*: the gutter
-/// is left of the content edge the pen
-/// sits at, and the room for it is the
-/// list's own [`LIST_INDENT_EM`],
-/// which the item already paid for.
+/// `x` and `y` are run-relative, like the [`LineBox`] that layout placed the
+/// marker against. A bin adds [`SceneElem::pen`] and draws the marker. `x` is
+/// normally *negative*. The gutter is left of the content edge where the pen
+/// sits. [`LIST_INDENT_EM`] provides the list's space, and the item reserves it.
 ///
 /// [`LineBox`]: super::measure::LineBox
 /// [`LIST_INDENT_EM`]: super::marker::LIST_INDENT_EM
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarkerBox {
-    /// The marker, its own trailing
-    /// gap included.
+    /// The marker with its trailing gap.
     pub text: String,
-    /// Leading edge, run-relative and
-    /// usually negative.
+    /// Leading edge in run-relative space, usually negative.
     pub x: f32,
-    /// Top edge, likewise.
+    /// Top edge in run-relative space.
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub size: f32,
     pub color: Rgb,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     pub weight: u16,
     pub italic: bool,
 }
 
 impl MarkerBox {
-    /// The run a bin draws it from.
+    /// The run that a bin uses to draw the marker.
     ///
-    /// One span and one line, at
-    /// [`SceneElem::wrap_w`] - the
-    /// width layout measured it at -
-    /// so a marker too long for the
-    /// panel breaks the same way in
-    /// both places.
+    /// The run has one span and one line at [`SceneElem::wrap_w`]. Layout
+    /// measures the marker at that width. If a marker exceeds the panel width,
+    /// both paths break it the same way.
     pub fn styled_span<'a>(&'a self, font: &'a str) -> StyledSpan<'a> {
         StyledSpan {
             text: &self.text,
@@ -348,133 +270,88 @@ impl MarkerBox {
     }
 }
 
-/// How an asset is meant to be
-/// painted.
+/// How a painter paints an asset.
 ///
-/// The schema's own two values. 15 of
-/// the census's 72 dictionaries
-/// declare `monochrome` over 117 687
-/// nodes, and it means the asset is a
-/// *mask*: black ink on transparency,
-/// authored for a light page. Painted
-/// as-is it is invisible on a dark
-/// panel, which is why it is a
-/// property the scene carries rather
-/// than a detail the store keeps.
+/// This enum has the schema's two values. Fifteen of the 72 census Dictionaries
+/// declare `monochrome` on 117 687 nodes. The field marks an asset as a *mask*.
+/// A mask has black ink on transparency and targets a light page. An unchanged
+/// mask stays invisible on a dark panel. The scene stores this field because a
+/// bin needs it to choose the paint path. The media store keeps no separate copy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Appearance {
-    /// Composite the asset's own
-    /// pixels. The schema's `auto`,
-    /// and the absence of the field.
+    /// This variant composites the asset's pixels. It represents the schema's
+    /// `auto` value and applies when a node omits the field.
     #[default]
     Auto,
-    /// A mask: tint it with the text
-    /// colour it stands in for.
+    /// A mask that a painter tints with the text color.
     Monochrome,
 }
 
-/// What a painter does with a
-/// monochrome asset's pixels.
+/// How a painter handles pixels from a monochrome asset.
 ///
-/// Decided here rather than in each
-/// bin, so the two cannot disagree
-/// about which assets take the
-/// expensive path - and so the bound
-/// is one table-driven test instead of
-/// two.
+/// Core selects one path for each asset, so both bins use the same path.
+/// One table-driven test enforces the bound instead of separate tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tint {
-    /// Composite them unchanged.
+    /// Composite pixels without a tint.
     None,
-    /// Multiply their alpha by the
-    /// text colour, in place.
+    /// Multiply pixel alpha by the text color in place.
     Alpha,
-    /// Rasterise the vector at this
-    /// pixel size first, then multiply.
+    /// Rasterize the vector at the given pixel size before the painter
+    /// multiplies its alpha.
     Raster(u32, u32),
 }
 
-/// One asset, as a scene element names
-/// it.
+/// One asset that a scene element names.
 ///
-/// No pixels and no bytes: core has
-/// the rect from the media row's
-/// recorded intrinsic size and the key
-/// to fetch bytes with, which is the
-/// whole reason sizes are recorded at
-/// extraction time. Decoding is the
-/// bin's, behind its own surface
-/// cache.
+/// This type stores no pixels or bytes. Core gets the `rect` from the intrinsic
+/// size in the media row and gets the key for the bytes. Extraction records the
+/// sizes for this reason. A bin decodes the bytes behind its surface cache.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneImage {
-    /// The asset to composite, or
-    /// `None` for the placeholder rung.
+    /// The asset to composite, or `None` for the placeholder rung.
     ///
-    /// `None` means the store had no
-    /// row - no bytes, or no readable
-    /// intrinsic size - *and* the node
-    /// carried no `alt` text to put in
-    /// the flow instead. The element is
-    /// then a box a bin outlines, which
-    /// is the last rung of the ladder
-    /// and never nothing: nothing is a
-    /// hole in a word.
+    /// `None` means that the media store has no row. The row can lack bytes or a
+    /// readable intrinsic size. Layout also reaches this state when the node has
+    /// no `alt` text for the flow. The element then becomes a box that a bin
+    /// outlines. This box is the last rung in the ladder. It is never empty
+    /// because an empty result leaves a hole in a word.
     pub key: Option<MediaKey>,
-    /// The format the media row
-    /// recorded, which is what decides
-    /// whether tinting has to rasterise
-    /// a vector first.
+    /// The format from the media row. It tells the tint path whether it must
+    /// rasterize a vector first.
     pub format: Option<MediaFormat>,
     pub appearance: Appearance,
-    /// The schema's `background`.
-    /// `false` paints no backing fill,
-    /// which is what every image node
-    /// in the census's samples asks
-    /// for.
+    /// This field tells the painter whether to apply the schema's `background`
+    /// fill. If it is `false`, the painter skips the backing fill. Every image
+    /// node in the census samples requests `false`.
     pub background: bool,
-    /// Read and carried, acted on by
-    /// nothing: the spec builds no
-    /// hover-to-reveal affordance, and
-    /// dropping the fields would mean
-    /// re-deriving them when it does.
+    /// The scene stores these fields, but no code uses them. The specification
+    /// has no hover-to-reveal control. The scene keeps the fields so a later
+    /// specification need not derive them again.
     pub collapsed: bool,
     pub collapsible: bool,
 }
 
 impl SceneImage {
-    /// What to do with this asset's
-    /// pixels, given the box it
-    /// resolved to and the em it sits
-    /// in.
+    /// Select the paint path for this asset, a resolved box, `em`, and device
+    /// pixel ratio.
     ///
-    /// Hoshi Reader's bound, and it
-    /// exists because rasterise-then-
-    /// tint is the expensive path: a
-    /// vector has no pixels until
-    /// something picks a size, and
-    /// picking the panel's own would
-    /// re-rasterise a 300x150 default-
-    /// object SVG on every theme
-    /// change. So the path is taken
-    /// only for a gaiji-sized box -
-    /// [`IMAGE_TINT_EM`] on both axes -
-    /// at twice the device pixel ratio
-    /// for legibility, clamped to
-    /// [`IMAGE_TINT_CLAMP`] on the
-    /// longest edge. A larger
-    /// monochrome asset composites
-    /// untinted, which is Hoshi
-    /// Reader's answer too: an
-    /// illustration is not a mask.
+    /// Hoshi Reader sets this bound because rasterize-then-tint costs more.
+    /// A vector has no pixels until code selects a size. If code used the panel
+    /// size, a default-object SVG of 300x150 pixels would rasterize again after
+    /// every theme change. This path therefore applies only to a gaiji-sized
+    /// box no larger than [`IMAGE_TINT_EM`] on either axis.
+    /// The code rasterizes at twice the device pixel ratio to keep the mark
+    /// legible. It limits the longest edge to [`IMAGE_TINT_CLAMP`]. A larger
+    /// monochrome SVG asset composites without a tint, as Hoshi Reader
+    /// specifies. An illustration is not a mask.
     pub fn tint(&self, rect: SceneRect, em: f32, dpr: f32) -> Tint {
         if self.appearance != Appearance::Monochrome {
             return Tint::None;
         }
         if self.format != Some(MediaFormat::Svg) {
-            // A raster mask already has
-            // pixels, so tinting it is
-            // one pass over the surface
-            // the cache already holds.
+            // A raster mask already has pixels. The painter needs one pass
+            // over the cached surface.
             return Tint::Alpha;
         }
         let bound = IMAGE_TINT_EM * em;
@@ -493,215 +370,142 @@ impl SceneImage {
 }
 
 /// One box to fill and stroke.
+///
+/// This is a border box in panel space. A fill covers the box. A stroke with
+/// the used width follows its inside edge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElemBox {
-    /// The border box, in panel space:
-    /// what a fill covers, and what a
-    /// stroke of the used width runs
-    /// down the inside of.
+    /// The border box in panel space. A fill covers this box. A stroke with the
+    /// used width follows its inside edge.
     pub rect: SceneRect,
     pub style: BoxStyle,
 }
 
-/// Where in its dictionary a scene
-/// element came from.
+/// The Dictionary location of a scene element.
 ///
-/// The stable identity a hit has to
-/// carry: a hit on a sense means
-/// "sense 3 of 大辞林" and not a
-/// character range. `dict_id` and
-/// `entry_id` name the term-bank row,
-/// and `path` names the subtree
-/// inside that row's parsed tree -
-/// which is exactly what
-/// [`Selection::Nodes`] consumes, so
-/// a picker built on this hands Anki
-/// formatted markup for the senses
-/// chosen rather than flattened text.
+/// A hit must carry this stable identity. A hit on a sense means "sense 3 of
+/// 大辞林", not a character range. `dict_id` and `entry_id` identify the term
+/// bank row. `path` identifies the subtree in that row's parsed tree.
+/// [`Selection::Nodes`] consumes that path. A picker that uses this type gives
+/// Anki formatted markup for the selected senses, not flattened text.
 ///
-/// Cheap because the block pass is
-/// already descending the tree: the
-/// path is extended one step per
-/// level on the way down
-/// ([`NodePath::child`]), never
-/// searched for afterwards.
+/// The block pass descends the tree and creates the origin in that pass. It
+/// extends the path once per level with [`NodePath::child`]. No later code
+/// searches for the path.
 ///
 /// [`Selection::Nodes`]: crate::dict::gloss::Selection::Nodes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlossOrigin {
     pub dict_id: i64,
     pub entry_id: i64,
-    /// The node this element renders,
-    /// or `None` when it has no
-    /// address.
+    /// The node that this element renders, or `None` when it has no address.
     ///
-    /// A [`NodePath`] reaches 16
-    /// levels and 65 536 siblings, and
-    /// past either it returns nothing
-    /// rather than a path that would
-    /// address an ancestor instead.
-    /// Unaddressable is a correct
-    /// answer for a selection;
-    /// silently aliased is not.
+    /// A [`NodePath`] reaches 16 levels and 65 536 siblings. Past either limit,
+    /// it returns nothing. It never returns a path for an ancestor. An
+    /// unaddressable node is a correct selection result. A silently aliased
+    /// node is not.
     pub path: Option<NodePath>,
 }
 
-/// One measured, positioned element.
+/// One measured element with a position.
 ///
-/// Plain data: everything a bin needs
-/// to paint it, and everything a
-/// snapshot needs to compare it.
+/// This plain data contains everything a bin needs to paint the element and
+/// everything a snapshot needs to compare it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneElem {
     pub kind: ElemKind,
-    /// Empty for `Separator`.
+    /// Empty for the `Separator` element kind.
     pub text: String,
     pub color: Rgb,
-    /// Zero for `Separator`.
+    /// Zero for the `Separator` element kind.
     pub font_size: f32,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     ///
-    /// `REGULAR_WEIGHT` for a rule,
-    /// which has no text to weight.
+    /// A rule uses `REGULAR_WEIGHT` because it has no text.
     pub weight: u16,
     pub italic: bool,
-    /// Gap added above this element.
+    /// Gap that layout adds above this element.
     pub top_gap: f32,
-    /// Wrap width the text was given.
+    /// Wrap width that layout gives to the text.
     pub wrap_w: f32,
     pub align: Align,
-    /// Where the wrap box starts: what
-    /// a bin hands its text engine.
+    /// The point where the wrap box starts. A bin gives this point to its text
+    /// engine.
     pub pen: (f32, f32),
     /// The measured ink box.
     ///
-    /// Its leading edge is the widest
-    /// line's, [`align`] already
-    /// applied, so an aligned element
-    /// has `rect.x` right of `pen.0` by
-    /// the line's own slack. Nothing
-    /// run-relative is measured from
-    /// it: a [`RubyBox`] carries that
-    /// same slack in its own `x`, and a
-    /// [`MarkerBox`] hangs in the
-    /// gutter off the content edge with
-    /// no slack at all, so both draw
-    /// from [`pen`] and adding them to
-    /// `rect.x` would count it twice.
+    /// Its leading edge is the widest line's edge after [`align`] applies. An
+    /// aligned element puts `rect.x` to the right of `pen.0` by the line's
+    /// slack. A run-relative box does not use `rect` as its origin. A
+    /// [`RubyBox`] stores the same slack in its `x`. A [`MarkerBox`] hangs in
+    /// the gutter from the content edge without slack. Both boxes draw from
+    /// [`pen`]. If a bin adds either box to `rect.x`, it counts the slack twice.
     ///
     /// [`align`]: Self::align
     /// [`pen`]: Self::pen
     pub rect: SceneRect,
-    /// Wrapped line count.
+    /// Number of wrapped lines.
     pub lines: u32,
-    /// What the walk's y advanced by.
+    /// Distance that the layout walk adds to `y`.
     pub advance: f32,
-    /// This element's styled pieces,
-    /// in reading order.
+    /// Styled pieces for this element, in reading order.
     ///
-    /// One span for every element the
-    /// panel's own chrome builds, and
-    /// one per style change for a
-    /// gloss. Empty for `Separator`,
-    /// which has no text.
+    /// Panel chrome has one span for each element. A gloss has one span for each
+    /// style change. The vector is empty for `Separator` because that element
+    /// has no text.
     pub spans: Vec<ElemSpan>,
-    /// This element's readings, each
-    /// already positioned over its
-    /// base.
+    /// Readings for this element. Each box sits over its base.
     ///
-    /// Empty for all but a gloss
-    /// paragraph holding `ruby`, which
-    /// is 14 of the census's 72
-    /// dictionaries. A reading is not
-    /// in `text` and not in `spans`,
-    /// because it does not flow - see
-    /// [`RubyBox`].
+    /// The vector is empty except for a gloss paragraph with `ruby`. Fourteen of
+    /// 72 census Dictionaries have `ruby`. A reading is not in `text` or
+    /// `spans` because it does not flow. See [`RubyBox`].
     pub ruby: Vec<RubyBox>,
-    /// This element's list markers,
-    /// each already positioned in the
-    /// gutter of the list that owed
-    /// it.
+    /// List markers for this element. Each box sits in its list gutter.
     ///
-    /// Empty for everything but the
-    /// first paragraph of a list item.
-    /// More than one only when an
-    /// item's whole content is a
-    /// nested list, in which case the
-    /// two levels' markers share the
-    /// one line they have between them
-    /// and hang in two different
-    /// gutters - which is what a
-    /// browser draws, and Jitendex's
-    /// real shape. A marker is not in
-    /// `text` and not in `spans`,
-    /// because it does not flow - see
+    /// The vector is empty except for the first paragraph of a list item. It
+    /// has more than one marker only when the item's entire content is a nested
+    /// list. Markers from the two levels share one line and hang in different
+    /// gutters. A browser draws this shape, and Jitendex uses the same shape.
+    /// A marker is not in `text` or `spans` because it does not flow. See
     /// [`MarkerBox`].
     pub marker: Vec<MarkerBox>,
-    /// The box this element *is*, or
-    /// `None` when it draws none.
+    /// The box that this element *is*, or `None` when it draws no box.
     ///
-    /// Its rect is the border box, and
-    /// the element's own `pen`,
-    /// `wrap_w` and `advance` already
-    /// account for the margin, border
-    /// and padding around it: a bin
-    /// paints this and nothing else
-    /// changes.
+    /// Its rect is the border box. The element's own `pen`, `wrap_w`, and
+    /// `advance` include the margin, border, and padding around it. A bin paints
+    /// this box. It does not change the other fields.
     pub block_box: Option<ElemBox>,
-    /// Boxes drawn around runs *inside*
-    /// this element - one per line each
-    /// run touches.
+    /// Boxes that a bin paints around runs *inside* this element. The vector has
+    /// one box for each line that a run touches.
     ///
-    /// A pill is an inline box, because
-    /// that is what a pill is: it keeps
-    /// its place on its line instead of
-    /// breaking one.
+    /// A pill is an inline box because that is its definition. A pill keeps its
+    /// place on its line and does not break a line.
     ///
-    /// Pure decoration - no geometry the
-    /// walk stacked depends on these -
-    /// and one of them is not the whole
-    /// of its box. The horizontal room
-    /// its margin, border and padding
-    /// reserve is *advance in the run*,
-    /// bought before the wrap and
-    /// therefore already in `spans`,
-    /// `rect` and `advance`; a rect here
-    /// is what draws inside that room.
-    /// So a box with no ink has no entry
-    /// and still spaces its content out.
+    /// These boxes provide decoration only. The layout walk does not use them
+    /// for stacked geometry. One box here is not the run's complete box. The
+    /// run reserves horizontal space for its margin, border, and padding before
+    /// it wraps. Therefore, `spans`, `rect`, and `advance` already contain that
+    /// space. A rect here draws inside that space. A box without ink has no entry,
+    /// but it still spaces its content.
     pub inline_boxes: Vec<ElemBox>,
-    /// Where in its dictionary this
-    /// came from, or `None` for the
-    /// panel's own chrome.
+    /// The `GlossOrigin` for this element, or `None` for the panel's own chrome.
     pub origin: Option<GlossOrigin>,
-    /// The asset an
-    /// [`ElemKind::Image`] element
-    /// composites, and `None` on every
-    /// other kind.
+    /// The asset that an [`ElemKind::Image`] element composites, or `None` for
+    /// every other kind.
     ///
-    /// Separate from the kind because
-    /// [`ElemKind`] is `Copy` and a
-    /// [`MediaKey`] owns its path: the
-    /// path is a dictionary-authored
-    /// string that has to round-trip
-    /// verbatim, so it is stored once
-    /// and not copied per element per
-    /// frame.
+    /// This field stays separate from `kind` because [`ElemKind`] is `Copy`, and
+    /// a [`MediaKey`] owns the path. The path is a dictionary-authored string
+    /// and must round-trip verbatim. The scene stores the path once instead of
+    /// copying it for every element on every frame.
     pub image: Option<SceneImage>,
 }
 
 impl SceneElem {
-    /// The run a bin re-measures and
-    /// paints this element from.
+    /// The run that a bin measures again and paints for this element.
     ///
-    /// The same spans, in the same
-    /// order, at the same width the
-    /// scene reports - so the ink
-    /// lands where the hit rects say
-    /// it does. `font` is the bin's,
-    /// because the family that is
-    /// actually installed is the
-    /// bin's own question.
+    /// The run uses the scene's spans in the same order and at the same width.
+    /// The ink then lands where the hit rects specify. The bin supplies `font`
+    /// because it knows the installed family.
     pub fn styled_spans<'a>(
         &'a self,
         font: &'a str,
@@ -716,29 +520,23 @@ impl SceneElem {
         })
     }
 
-    /// Every box to paint, outermost
-    /// first.
+    /// Every box for the painter, from outermost to innermost.
     ///
-    /// The element's own box before the
-    /// runs inside it, so a pill draws
-    /// over the block that holds it and
-    /// both draw under the text. One
-    /// iterator, so a bin has one loop
-    /// and cannot paint them in two
-    /// different orders.
+    /// The element's own box comes before its inner runs. A pill therefore draws
+    /// over the block that contains it, and both draw beneath the text. The
+    /// iterator gives a bin one loop, so both bins use one box order.
     pub fn boxes(&self) -> impl Iterator<Item = &ElemBox> {
         self.block_box.iter().chain(self.inline_boxes.iter())
     }
 
-    /// This element's box at the scroll it is being drawn at.
+    /// This element's box at the scroll position that a bin uses.
     ///
-    /// The scene's rects are in unscrolled panel space, like every other
-    /// rect it reports, and an image element's `pen` is its own top-left -
-    /// so the whole box moves by the same offset the pen did.
+    /// The scene reports all rects in unscrolled panel space. For an image
+    /// element, `pen` is its top-left corner, so the whole box moves with it.
     ///
-    /// Here rather than in each bin because both bins had the same three
-    /// lines, doc comment included, and a rect that moved in one of them
-    /// and not the other would be an image drawn at last frame's scroll.
+    /// This method stays here because both bins need the same calculation. If
+    /// one bin moves a rect and the other does not, an image can use the
+    /// previous frame's scroll.
     pub fn rect_at(&self, pen_y: f32) -> SceneRect {
         SceneRect { y: pen_y, ..self.rect }
     }
@@ -746,9 +544,8 @@ impl SceneElem {
 
 /// A clickable region in the panel.
 ///
-/// `None` in x or w spans the panel:
-/// a row is clickable across its full
-/// width, however wide the panel is.
+/// `None` for `x` or `w` makes the target span the panel. A row therefore stays
+/// clickable across the full panel width.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitTarget {
     pub x: Option<f32>,
@@ -761,13 +558,12 @@ pub struct HitTarget {
 /// One "See also" row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideRow {
-    /// `None` for the heading.
+    /// The heading has `None`.
     pub idx: Option<usize>,
     pub text: String,
     pub color: Rgb,
-    /// Column-local, like the column
-    /// itself: add `SidePanel::origin_y`
-    /// for panel space.
+    /// The row position is local to the column. Add `SidePanel::origin_y` to get
+    /// the panel-space position.
     pub y: f32,
     pub h: f32,
 }
@@ -775,20 +571,20 @@ pub struct SideRow {
 /// The "See also" column.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidePanel {
-    /// Top of the column and its rule.
+    /// The column's top edge and rule.
     pub origin_y: f32,
     /// The vertical rule's left edge.
     pub rule_x: f32,
     pub rule_w: f32,
     pub col_x: f32,
     pub col_w: f32,
-    /// The whole column's height.
+    /// The column height.
     pub height: f32,
     pub rows: Vec<SideRow>,
 }
 
 impl SidePanel {
-    /// Rows to paint, scroll applied.
+    /// Return rows that remain visible after the scroll.
     pub fn visible(&self, scroll: f32, view_h: f32) -> impl Iterator<Item = PaintedRow<'_>> {
         let origin_y = self.origin_y;
         self.rows.iter().filter_map(move |row| {
@@ -798,24 +594,20 @@ impl SidePanel {
     }
 }
 
-/// One row, ready to paint.
+/// One row that a bin can paint.
 #[derive(Debug, Clone, Copy)]
 pub struct PaintedRow<'a> {
     pub row: &'a SideRow,
-    /// Scroll-applied top.
+    /// Top edge after the scroll offset.
     pub y: f32,
 }
 
-/// The Anki affordance's slot.
+/// The Anki affordance slot.
 ///
-/// Core reserves the strip under the
-/// panel and names the label;
-/// realisation is per-bin. Windows
-/// gives the affordance its own
-/// window, sized by that window's own
-/// font, and takes only the strip; a
-/// bin painting in the panel uses
-/// `rect` whole.
+/// Core reserves the strip below the panel and provides its label. Each bin
+/// builds the affordance in its own way. Windows gives it a separate window,
+/// and that window sets its font size. Windows uses only the strip. A bin that
+/// paints in the panel uses the whole `rect`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnkiSlot {
     pub label: String,
@@ -823,42 +615,39 @@ pub struct AnkiSlot {
     pub rect: SceneRect,
 }
 
-/// One popup, laid out.
+/// One popup after layout.
 ///
-/// Heights and widths are the layout's
-/// own pixels; a bin scales them on
-/// the way out (`panel_w`, `view_h`,
-/// `content_h`).
+/// Layout uses its own pixel space for heights and widths. A bin scales them for
+/// output with `panel_w`, `view_h`, and `content_h`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PopupScene {
-    /// Inner padding: both origins.
+    /// Inner padding at both origins.
     pub origin: f32,
     /// The main column's width.
     pub content_w: f32,
-    /// In draw order.
+    /// Elements in draw order.
     pub elems: Vec<SceneElem>,
-    /// The main column's targets, in
-    /// draw order. The side column's
-    /// are in `side`; `hit_targets`
-    /// chains both, as painted.
+    /// Targets for the main column, in draw order.
+    ///
+    /// The side column keeps its rows in `side`. `hit_targets` builds targets for
+    /// both columns and returns them in paint order.
     pub hits: Vec<HitTarget>,
     pub side: Option<SidePanel>,
     pub anki: Option<AnkiSlot>,
-    /// The main column's height, before
-    /// padding: what the walk stacked.
+    /// Height of the main column before padding. Layout sets this height.
     pub used_h: f32,
-    /// Body plus padding, unclamped.
+    /// Body height plus padding before any clamp.
     pub content_h: f32,
-    /// `content_h`, clamped to the box.
+    /// `content_h` limited to the box height.
     pub view_h: f32,
-    /// The width the panel wants, or
-    /// `None` to keep the width it was
-    /// offered (no side column: the
-    /// main column already fills it).
+    /// Width that the panel requests, or `None` to keep the offered width.
+    /// `None` means the main column fills the width, so no side column exists.
     pub panel_w: Option<f32>,
 }
 
-/// One element, ready to paint.
+/// One element that a bin can paint.
+///
+/// `pen` origin after the scroll offset applies.
 #[derive(Debug, Clone, Copy)]
 pub struct Painted<'a> {
     pub elem: &'a SceneElem,
@@ -867,31 +656,25 @@ pub struct Painted<'a> {
 }
 
 impl PopupScene {
-    /// Elements to paint, in order.
+    /// Elements to paint in order.
     ///
-    /// Scroll applied and off-panel
-    /// elements dropped here, not in
-    /// the bins: a bin that clips (D2D)
-    /// and one that does not (tiny-skia)
-    /// must paint the same panel.
+    /// This method applies the scroll and removes elements outside the panel.
+    /// The bins do not apply this filter. D2D clips, but tiny-skia does not.
+    /// Both bins must therefore paint the same panel.
     pub fn visible(&self, scroll: f32, view_h: f32) -> impl Iterator<Item = Painted<'_>> {
         self.elems.iter().filter_map(move |elem| {
             let pen = (elem.pen.0, elem.pen.1 - scroll);
-            // Ink may overhang the
-            // measured box; one em of
-            // slack keeps a boundary
-            // element's ascender.
+            // Ink can extend beyond the measured box. One em of slack keeps a
+            // boundary element's ascender visible.
             on_panel(pen.1, elem.rect.h, elem.font_size, view_h)
                 .then_some(Painted { elem, pen })
         })
     }
 
-    /// Every target, as painted.
+    /// Every target in paint order.
     ///
-    /// The main column first, then the
-    /// side column: hit-testing takes
-    /// the first match, so the order is
-    /// the paint order.
+    /// The main column comes first, then the side column. A hit test takes the
+    /// first match, so this order must equal paint order.
     pub fn hit_targets(&self) -> Vec<HitTarget> {
         let side_rows = self.side.as_ref().map_or(0, |s| s.rows.len());
         let mut out = Vec::with_capacity(self.hits.len() + side_rows);
@@ -911,42 +694,35 @@ impl PopupScene {
         out
     }
 
-    /// This scene's scrollbar thumb, in a `view_h`-tall panel padded by
-    /// `pad`, as `(top, height)`.
+    /// This scene's scrollbar thumb as `(top, height)` for a panel of `view_h`.
+    /// The panel has `pad` pixels of padding.
     ///
-    /// The scene knows its own content height and both bins derive the
-    /// same two numbers from it - the track is the view less the padding
-    /// at each end, the total is the body plus that padding - so the
-    /// derivation belongs where `used_h` does. Three call sites had it
-    /// written out, and a fourth would have got it subtly wrong.
+    /// The scene knows its content height, so both bins derive these values the
+    /// same way. The track equals the view minus padding at both ends. The total
+    /// equals the body plus that padding. This arithmetic belongs with `used_h`.
+    /// Three call sites once held these lines. A fourth call site could get them
+    /// wrong.
     ///
-    /// Integral because a thumb is whole pixels: core does this
-    /// arithmetic in `i32` and each bin rounds its own view height and
-    /// scroll on the way in.
+    /// The result uses whole pixels because a thumb uses whole pixels. Core does
+    /// this arithmetic with `i32`. Each bin rounds its view height and scroll
+    /// before it calls this method.
     pub fn scrollbar_thumb(&self, pad: i32, view_h: i32, scroll: i32) -> Option<(i32, i32)> {
         let total = self.used_h.ceil() as i32 + 2 * pad;
         super::scrollbar_thumb(view_h - 2 * pad, total, view_h, scroll)
     }
 }
 
-/// Is a box worth painting?
+/// Tell whether a bin must paint this box.
 pub(super) fn on_panel(y: f32, h: f32, slack: f32, view_h: f32) -> bool {
     y + h + slack > 0.0 && y - slack < view_h
 }
 
-/// A textless element, before the
-/// grid knows where it goes.
+/// A textless element before the grid assigns its position.
 ///
-/// A table and a cell are boxes
-/// rather than runs: they carry no
-/// text and no spans, and their
-/// geometry is the grid's answer
-/// rather than the measurer's. Each
-/// is pushed as a placeholder because
-/// a container has to lead its own
-/// contents in draw order while its
-/// extent is only known once they
-/// have all been laid out.
+/// A table and a cell are boxes, not runs. They contain no text or spans. The
+/// grid defines their geometry, not the measurer. Layout adds each box as a
+/// placeholder because a container must precede its contents in draw order.
+/// Layout sets the container's extent after it places all boxes.
 pub(super) fn box_elem(
     kind: ElemKind,
     base: Inline,
@@ -977,26 +753,20 @@ pub(super) fn box_elem(
     }
 }
 
-/// The box a monochrome vector may
-/// have and still be rasterised for
-/// tinting, per axis, in ems.
+/// The largest box that lets a tint rasterize a monochrome vector on each axis,
+/// in ems.
 ///
-/// Hoshi Reader's bound. A gaiji is
-/// `height: 1em`; four ems on a side
-/// admits the largest of them and
-/// refuses an illustration, which is
-/// the distinction the bound is for.
+/// Hoshi Reader sets this bound. A gaiji has `height: 1em`. Four ems on each
+/// side admit the largest gaiji and reject an illustration. This bound keeps
+/// that distinction.
 pub(super) const IMAGE_TINT_EM: f32 = 4.0;
 
-/// Device pixels per scene pixel a
-/// tinted vector rasterises at, over
-/// the device pixel ratio.
+/// The factor for device pixels per scene pixel for a tinted vector, in addition
+/// to the device pixel ratio.
 ///
-/// Twice, so a mask standing in for a
-/// character is not the one thing on
-/// the panel that looks soft.
+/// The factor is two. A mask that replaces a character must not become the
+/// panel's only soft element.
 pub(super) const IMAGE_TINT_SCALE: f32 = 2.0;
 
-/// The longest edge a tinted raster
-/// may reach, in pixels.
+/// The maximum longest edge of a tinted raster, in pixels.
 pub(super) const IMAGE_TINT_CLAMP: f32 = 256.0;

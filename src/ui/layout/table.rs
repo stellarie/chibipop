@@ -1,15 +1,17 @@
-//! One table: built from a subtree, placed on a grid, sized, collapsed.
+//! One table: the layout builds it from a subtree, places it on a grid, and sizes
+//! and collapses it.
 //!
-//! **One reason to change:** HTML's and CSS's table rules as this build
-//! answers them - cell placement, span clamping, track sizing, and
-//! `border-collapse`.
+//! **One reason to change:** the table rules of HTML and CSS. This file implements
+//! cell placement, span clamping, track sizing, and `border-collapse`.
 //!
-//! All four steps are here, including the two that are methods on other
-//! modules' types ([`Paragraphs`] builds the [`Grid`], [`Pass`] measures
-//! it), because a table rule is never only one of them: a `colSpan` change
-//! touches the placement that reads it, the track sizing that spreads it
-//! and the collapse that decides which rules the cell swallowed. Splitting
-//! them by owning type would put one change in three files.
+//! All four steps live in this file. Two of the four steps are methods on types
+//! that other modules own. [`Paragraphs`] builds the [`Grid`]. [`Pass`] measures it.
+//!
+//! A change to one table rule never stays inside one step. A change to `colSpan`
+//! touches the placement, the track sizing, and the collapse. The placement reads
+//! the span. The track sizing spreads it across the tracks it reaches. The collapse
+//! decides which rules a cell does not draw. A split by owning type would put one
+//! change across three files.
 
 use crate::dict::gloss::{GlossDoc, NodeId, NodePath, Scalar, Tag};
 use super::chrome::LINE_GAP;
@@ -20,103 +22,80 @@ use super::pass::{BoxHeader, Pass, Piece};
 use super::scene::{box_elem, ElemBox, ElemKind, GlossOrigin, HitTarget, SceneElem, SceneRect};
 use super::style::{Block, BorderStyle, BoxStyle, Edges, Inline, YOMITAN_BASE_PX};
 
-/// Yomitan's own table cell border,
-/// as the spec's defaults table
-/// states it: `1em / 14`, one pixel
-/// at the base font size, so a cell
-/// rule scales with the panel instead
-/// of vanishing on a dense screen
-/// (`.gloss-sc-th, .gloss-sc-td {
-/// border-width: calc(1em /
-/// var(--font-size-no-units)) }`).
+/// The width of a table cell border, matched to Yomitan's own default
+/// stylesheet: `.gloss-sc-th, .gloss-sc-td { border-width: calc(1em /
+/// var(--font-size-no-units)) }`.
 ///
-/// A division rather than a
-/// reciprocal constant, so that a
-/// panel drawn at Yomitan's own base
-/// size gets exactly the one pixel
-/// the rule promises
-/// ([`YOMITAN_BASE_PX`]).
+/// The spec's defaults table states this rule as `1em / 14`. That is one
+/// pixel at the base font size. The rule scales with the panel's font
+/// size, so it stays visible on a dense screen.
+///
+/// The function divides the em by the constant. It does not multiply by
+/// a reciprocal constant instead. A panel drawn at Yomitan's own base
+/// size then gets exactly the one pixel the rule promises. See
+/// [`YOMITAN_BASE_PX`].
 pub(super) fn cell_border(em: f32) -> f32 {
     em / YOMITAN_BASE_PX
 }
 
-/// Yomitan's own table cell padding,
-/// as a fraction of the em it sits
-/// in: `padding: 0.25em`, from the
-/// same rule.
+/// The padding of a table cell, as a fraction of its own em. Yomitan's
+/// stylesheet sets `padding: 0.25em` in the same default rule as the
+/// border width.
 pub(super) const CELL_PADDING: f32 = 0.25;
 
-/// HTML's own cap on a cell's span.
+/// The limit on a cell's span, matched to the limit in the HTML spec.
 ///
-/// The schema puts no bound on
-/// `colSpan` and a grid costs memory
-/// per column, so an absurd one is a
-/// bill rather than a wide cell.
-/// 1000 is the number HTML itself
-/// clamps `colspan` to.
+/// The dictionary schema sets no limit on `colSpan`. Each column in the
+/// grid costs memory. Without a limit, an absurd `colSpan` value would
+/// cost memory rather than draw a wide cell. The HTML spec itself clamps
+/// `colspan` to 1000, so this constant uses the same number.
 pub(super) const MAX_SPAN: usize = 1000;
 
-/// One table cell, before the grid
-/// measures it.
+/// One table cell, before the grid measures it.
 pub(super) struct Cell {
-    /// Its content. A cell is a block
-    /// container, so it holds
-    /// paragraphs - and, where a
-    /// dictionary nested one, a table.
+    /// The content of the cell. A cell is a block container, so it holds
+    /// paragraphs. A cell can also hold a table, if a dictionary nested
+    /// one inside it.
     pub(super) body: Vec<Piece>,
-    /// Its box: Yomitan's own grid
-    /// defaults with the dictionary's
-    /// declarations over them. The
-    /// grid resolves the collapse into
-    /// it once the rule width is known
-    /// ([`collapsed`]).
+    /// The box of the cell. This box starts from Yomitan's own grid
+    /// defaults. The dictionary's own declarations override these
+    /// defaults. The grid resolves the border collapse into this box
+    /// once it knows the rule width. See [`collapsed`].
     pub(super) style: BoxStyle,
-    /// The style its own element
-    /// draws in. It carries no text,
-    /// so only the cull slack rides on
-    /// this.
+    /// The style of the cell's own element. The cell holds no text of
+    /// its own, so this style affects only the cull slack.
     pub(super) base: Inline,
-    /// `(row, column)`, filled in by
-    /// [`place`].
+    /// `(row, column)`, set by [`place`].
     pub(super) at: (usize, usize),
-    /// `(rowSpan, colSpan)`, at least
-    /// one each and already clipped to
-    /// the grid by [`place`].
+    /// `(rowSpan, colSpan)`. Each value is at least one. [`place`]
+    /// already clipped both values to fit inside the grid.
     pub(super) span: (usize, usize),
     pub(super) path: Option<NodePath>,
 }
 
 impl Cell {
-    /// Where in its dictionary it came
-    /// from.
+    /// The location of the cell in its dictionary.
     pub(super) fn origin(&self, grid: &Grid) -> GlossOrigin {
         GlossOrigin { dict_id: grid.dict_id, entry_id: grid.entry_id, path: self.path }
     }
 }
 
-/// One table, before it is measured.
+/// One table, before the layout measures it.
 ///
-/// Structure only: which cell sits in
-/// which slot needs no measurement,
-/// so it is decided while the tree is
-/// walked. What the grid pass adds is
-/// the column widths, the row
-/// heights, and where the whole thing
-/// lands.
+/// This struct holds structure only. The slot of each cell needs no
+/// measurement, so the tree walk decides it. The grid pass then adds the
+/// column widths, the row heights, and the position of the whole table.
 pub(super) struct Grid {
-    /// Gap owed above it.
+    /// The gap owed above the table.
     pub(super) top_gap: f32,
-    /// Every cell, in document order,
-    /// each carrying the slot it was
-    /// placed in.
+    /// Every cell, in document order. Each cell carries the slot that
+    /// [`place`] gave it.
     pub(super) cells: Vec<Cell>,
     pub(super) rows: usize,
     pub(super) cols: usize,
-    /// The `table`'s own box, indent
-    /// and alignment.
+    /// The table's own box: its indent and its alignment.
     pub(super) block: Block,
-    /// The style its own element
-    /// draws in.
+    /// The style of the table's own element.
     pub(super) base: Inline,
     pub(super) path: Option<NodePath>,
     pub(super) dict_id: i64,
@@ -124,19 +103,15 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    /// Where in its dictionary it came
-    /// from.
+    /// The location of the table in its dictionary.
     pub(super) fn origin(&self) -> GlossOrigin {
         GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
     }
 
-    /// What every block container
-    /// shares, as [`Pass::open_box`]
-    /// takes it. A table is one: it
-    /// carries a margin, a border and a
-    /// padding around its grid exactly
-    /// as a `div` does around its
-    /// paragraphs.
+    /// The fields that every block container shares, in the form that
+    /// [`Pass::open_box`] takes. A table is one such container. A table
+    /// carries a margin, a border, and a padding around its grid, in the
+    /// same way that a `div` carries them around its paragraphs.
     pub(super) fn header(&self) -> BoxHeader {
         BoxHeader {
             top_gap: self.top_gap,
@@ -149,32 +124,22 @@ impl Grid {
 
 /// Puts every cell in a slot.
 ///
-/// HTML's own placement, minus the
-/// parts a dictionary never writes: a
-/// row's cells take the leftmost
-/// column no `rowSpan` from above has
-/// already claimed, and each then
-/// claims `colSpan` columns across
-/// and `rowSpan` rows down. A span
-/// reaching past the last row ends at
-/// it, so every cell's slot is inside
-/// the grid it will be measured
-/// against.
+/// This function follows HTML's own placement rule, minus the parts
+/// that a dictionary never writes. A row's cell takes the leftmost
+/// column that no earlier `rowSpan` claimed. Each cell then claims
+/// `colSpan` columns across and `rowSpan` rows down. A span that
+/// reaches past the last row stops at that row. Every cell's slot
+/// therefore stays inside the grid that will measure it.
 ///
-/// The grid is as wide as the
-/// furthest column any row reached,
-/// so a row holding more cells than
-/// its neighbours widens the table
-/// and the short rows simply end
-/// early. That is the "renders what
-/// it can" a malformed table is owed:
-/// no cell is dropped and no index
-/// can run off the end.
+/// The grid width equals the furthest column that any row reached. A
+/// row with more cells than its neighbor rows widens the whole table.
+/// The shorter rows end early. A malformed table is owed this
+/// behavior: it always renders what it can. No cell is dropped, and no
+/// index can run past the end of the grid.
 pub(super) fn place(rows: Vec<Vec<Cell>>) -> (Vec<Cell>, usize, usize) {
     let count = rows.len();
-    // How far down each column is
-    // already claimed, as the row
-    // index one past the last claimed.
+    // For each column, the row index just past the last row that a
+    // `rowSpan` already claimed.
     let mut claimed: Vec<usize> = Vec::new();
     let mut out = Vec::new();
     for (r, row) in rows.into_iter().enumerate() {
@@ -203,15 +168,11 @@ pub(super) fn place(rows: Vec<Vec<Cell>>) -> (Vec<Cell>, usize, usize) {
 
 /// A cell's `rowSpan` or `colSpan`.
 ///
-/// The schema writes these as
-/// numbers, which is also the only
-/// form the Anki HTML renderer reads
-/// off them. Anything else, and any
-/// value below one, is one cell:
-/// HTML's own parser treats a missing
-/// or zero span that way, and a cell
-/// occupying no slot has nowhere to
-/// draw.
+/// The schema writes these values as numbers. The Anki HTML renderer
+/// also reads only this numeric form. Any other value counts as one
+/// cell, and so does any value below one. HTML's own parser treats a
+/// missing or zero span the same way. A cell that occupies no slot has
+/// nowhere to draw.
 pub(super) fn span_of(doc: &GlossDoc, id: NodeId, key: &str) -> usize {
     match doc.attr_of(id, key) {
         Some(Scalar::Num(n)) if n >= 1.0 => (n as usize).min(MAX_SPAN),
@@ -219,43 +180,35 @@ pub(super) fn span_of(doc: &GlossDoc, id: NodeId, key: &str) -> usize {
     }
 }
 
-/// The `len` tracks from `at`, plus
-/// the rules between them.
+/// The sum of `len` tracks starting at `at`, plus the rules between
+/// them.
 ///
-/// What a cell spanning several
-/// columns is offered, and what a cell
-/// spanning several rows fills. Summed
-/// from the track sizes rather than
-/// differenced from two accumulated
-/// edges, and that is load-bearing:
-/// `(x0 + w + rule) - x0 - rule` is a
-/// float ulp short of `w`, and a cell
-/// one ulp narrower than its own text
-/// wraps a line it should not.
+/// This sum is the width offered to a cell that spans several columns.
+/// It is also the height that fills a cell that spans several rows.
+///
+/// The function sums the track sizes. It does not subtract two
+/// accumulated edge positions, and this choice matters. The expression
+/// `(x0 + w + rule) - x0 - rule` is one float ulp short of `w`. A cell
+/// that is one ulp narrower than its own text wraps a line that would
+/// otherwise fit.
 pub(super) fn extent(tracks: &[f32], at: usize, len: usize, rule: f32) -> f32 {
     tracks[at..at + len].iter().sum::<f32>() + (len as f32 - 1.0) * rule
 }
 
-/// Grows `tracks` until every span
-/// fits.
+/// Grows `tracks` until every span fits.
 ///
-/// The one rule the columns and the
-/// rows share, so it is written once:
-/// a track takes the widest ask among
-/// the cells that live only in it,
-/// and a cell across several tracks
-/// then adds only its *shortfall* -
-/// what it needs beyond the tracks it
-/// already covers, the `rule` between
-/// them included - spread evenly over
-/// them.
+/// Columns and rows share one sizing rule, so the code writes it once
+/// in this function. A track takes the widest request among the cells
+/// that live in only that track. A cell that spans several tracks adds
+/// only its shortfall. The shortfall is what the cell still needs
+/// beyond the tracks it already covers, including the `rule` between
+/// them. The function spreads this shortfall evenly across the tracks
+/// the cell spans.
 ///
-/// Spanning cells are visited once,
-/// in document order, against the
-/// tracks as the cells before them
-/// left them. There is no fixpoint
-/// and no second round: two passes
-/// over the cells, and the answer.
+/// The function visits each spanning cell once, in document order,
+/// against the tracks as earlier cells left them. There is no
+/// fixpoint, and there is no second round. Two passes over the cells
+/// give the answer.
 pub(super) fn distribute(
     tracks: &mut [f32],
     spans: impl Iterator<Item = (usize, usize, f32)> + Clone,
@@ -281,27 +234,19 @@ pub(super) fn distribute(
     }
 }
 
-/// One cell's box, with the shared
-/// edges resolved.
+/// One cell's box, with its shared edges resolved.
 ///
-/// `border-collapse: collapse` draws
-/// the rule between two cells once,
-/// so each cell owns the rules on its
-/// left and its top and only the
-/// cells against the grid's right and
-/// bottom edges owe the closing ones.
-/// Two neighbours therefore abut
-/// exactly, with one `rule` between
-/// them rather than two beside each
-/// other - and a spanning cell simply
-/// does not draw the rules it
-/// swallowed.
+/// `border-collapse: collapse` draws the rule between two cells only
+/// once. Each cell owns the rules on its own left edge and its own top
+/// edge. Only the cells against the grid's right edge or bottom edge
+/// own the closing rules. Two neighbor cells therefore abut exactly,
+/// with one `rule` between them, not two rules side by side. A cell
+/// that spans several tracks does not draw the rules inside its own
+/// span.
 ///
-/// An edge whose own `border-style`
-/// is `none` still draws nothing: the
-/// grid keeps the slot it reserved
-/// and leaves it empty, exactly as a
-/// browser does.
+/// An edge with `border-style: none` still draws nothing. The grid
+/// keeps the slot it reserved for that edge, and leaves it empty, in
+/// the same way that a browser does.
 pub(super) fn collapsed(
     mut style: BoxStyle,
     rule: f32,
@@ -319,25 +264,19 @@ pub(super) fn collapsed(
     style
 }
 
-/// Moves a laid-out run of elements,
-/// and the targets they earned, down
-/// by `dy`.
+/// Moves a laid-out run of elements, and the hit targets they earned,
+/// down by `dy`.
 ///
-/// A cell is laid out before its
-/// row's height is known, because the
-/// row is as tall as its tallest
-/// cell, so the grid places every
-/// cell at the table's own top and
-/// drops it into its row afterwards.
+/// The grid lays out a cell before it knows the height of the cell's
+/// row. A row is as tall as its tallest cell. The grid places every
+/// cell at the table's own top first. This function then drops each
+/// cell into its row.
 ///
-/// Only origins move. A line box is
-/// the measurer's answer and a
-/// reading's position is
-/// run-relative, so nothing a bin
-/// re-measures changes - which is the
-/// rule [`measure_readings`] sets and
-/// the reason a row's extra height
-/// never reaches the text inside it.
+/// Only origins move. A line box is the measurer's own answer. A
+/// reading's position is relative to its run. Nothing that a bin
+/// re-measures changes when this function runs. [`measure_readings`]
+/// sets this rule. This rule is also why a row's extra height never
+/// reaches the text inside a cell.
 ///
 /// [`measure_readings`]: super::ruby::measure_readings
 pub(super) fn shift(elems: &mut [SceneElem], hits: &mut [HitTarget], dy: f32) {
@@ -356,58 +295,46 @@ pub(super) fn shift(elems: &mut [SceneElem], hits: &mut [HitTarget], dy: f32) {
     }
 }
 
-/// The table half of the gloss walk: a `table` subtree into a [`Grid`].
+/// The table half of the gloss walk: it turns a `table` subtree into a
+/// [`Grid`].
 ///
-/// Structure only - which cell sits in which slot needs no measurement -
-/// plus the Yomitan cell defaults, because a cell's box is a default
-/// before it is a declaration.
+/// This code builds structure only. The slot of each cell needs no
+/// measurement. It also applies the Yomitan cell defaults, because a
+/// cell's box starts as a default before it becomes a declaration.
 impl Paragraphs<'_> {
-    /// One `table`: its rows, as a
-    /// grid.
+    /// One `table`: its rows, as a grid.
     ///
-    /// The table is also the block
-    /// container Yomitan wraps one in
-    /// (`.gloss-sc-table-container {
-    /// display: block }`): it closes
-    /// the paragraph before it and
-    /// opens none of its own, because
-    /// every word in a table belongs
-    /// to a cell.
+    /// The table is also the block container that Yomitan wraps one in
+    /// (`.gloss-sc-table-container { display: block }`). It closes the
+    /// paragraph before it, and it opens no paragraph of its own. Every
+    /// word in a table belongs to a cell instead.
     ///
-    /// A `table` inside a cell is a
-    /// table inside a cell: a cell's
-    /// content is a list of
-    /// [`Piece`]s, and [`Pass::block`]
-    /// lays a nested grid out through
-    /// the same two methods the outer
-    /// one used.
+    /// A `table` nested inside a cell is still a table inside a cell.
+    /// A cell's content is a list of [`Piece`]s. [`Pass::block`] lays out
+    /// a nested grid through the same two methods that laid out the
+    /// outer grid.
     pub(super) fn table(&mut self, id: NodeId, ctx: Ctx) {
-        // A marker owed to an item
-        // whose only content is a table
-        // has no line inside the table
-        // to hang beside, so it takes
-        // the line above - which is
-        // where a browser puts a
-        // `::marker` beside a block too.
-        // Inline, deliberately: a
-        // hanging marker needs a line
-        // box to share a baseline with,
-        // and the paragraph this opens
-        // would have none of its own.
-        // A gutter with no line beside
-        // it would drop the bullet.
+        // A list item can owe a marker. The item's only content can
+        // be a table. The table then has no line for the marker to
+        // hang beside. The marker takes the line above the table
+        // instead. A browser does the same: it puts a `::marker`
+        // beside a block too.
+        //
+        // The code marks this case inline on purpose. A marker that
+        // hangs in the gutter needs a line box to share a baseline
+        // with. Without this call, the paragraph that opens here
+        // would have no line box of its own. A gutter with no line
+        // beside it would drop the bullet.
         self.mark_inline();
         self.flush();
         let inline = self.styled(id, ctx.inline);
         let block = self.boxed(id, ctx.block, inline);
         let inner = Ctx {
             inline,
-            // A cell pays the box and the
-            // list indent once, through
-            // the table that holds it -
-            // the same reason
-            // [`Block::inherited`] hands
-            // a child an empty box.
+            // A cell pays the box and the list indent only once,
+            // through the table that holds the cell. This is the
+            // same reason that [`Block::inherited`] hands a child an
+            // empty box.
             block: Block { indent: 0.0, ..block.inherited() },
             link: self.link_of(id, ctx.link),
             path: ctx.path,
@@ -415,9 +342,8 @@ impl Paragraphs<'_> {
         let mut rows = Vec::new();
         self.rows_of(id, inner, false, &mut rows);
         let (cells, rows, cols) = place(rows);
-        // A table of nothing draws
-        // nothing, rather than an empty
-        // rule.
+        // A table with no cells draws nothing. It does not draw an
+        // empty rule.
         if cells.is_empty() {
             return;
         }
@@ -434,96 +360,74 @@ impl Paragraphs<'_> {
         }));
     }
 
-    /// Every row under a `table` or a
-    /// row group, in document order.
+    /// Every row under a `table` or a row group, in document order.
     ///
-    /// `thead`, `tbody` and `tfoot` are
-    /// scaffolding rather than
-    /// structure, and the parser
-    /// already classes all three
-    /// `Kind::Table`, so they
-    /// contribute their rows and
-    /// nothing else. A `thead` also
-    /// carries Yomitan's header styling
-    /// to the cells inside it, which is
-    /// how a `td` in a header row comes
-    /// out bold and tinted. `tfoot` is
-    /// out of scope here and
-    /// contributes its rows plainly,
-    /// which loses no text and invents
-    /// no styling for a shape the
-    /// census counts zero of.
+    /// The tags `thead`, `tbody`, and `tfoot` group rows. They add no
+    /// grid structure of their own. The parser already classes all
+    /// three tags as `Kind::Table`, so each tag contributes only its
+    /// rows to the grid.
     ///
-    /// Content a dictionary wrote
-    /// outside any cell becomes **one**
-    /// anonymous cell in **one**
-    /// anonymous row, so a malformed
-    /// table loses none of it and gains
-    /// no structure either. That count
-    /// is CSS 2.1 section 17.2.1's own
-    /// repair and not a simplification
-    /// of it: rule 2.1 wraps a child
-    /// that is no proper table child
-    /// "and all consecutive siblings of
-    /// C that are not proper table
-    /// children" in one anonymous row,
-    /// and rule 2.3 wraps a run of
-    /// non-cell children of that row in
-    /// one anonymous cell. A `td`
-    /// written straight under a `table`
-    /// is no proper table child either,
-    /// so it joins the same anonymous
-    /// row as the runs around it and
-    /// keeps its own slot in it.
+    /// A `thead` tag also carries Yomitan's header styling to the cells
+    /// inside it. This is why a `td` in a header row renders bold and
+    /// tinted. A `tfoot` tag is out of scope for this styling. It
+    /// contributes its rows with no special styling. This choice loses
+    /// no text. It also invents no styling for a shape that the census
+    /// reports zero times.
     ///
-    /// One cell per child instead is
-    /// what turned 旺文社漢字典 第四版's
-    /// radical index 90 degrees: that
-    /// index is a `table` of 19
-    /// `span`s, one per stroke-count
-    /// group, and it came out as one
-    /// row of 19 columns about 6 px
-    /// wide each. A browser reads the
-    /// dictionary's own stylesheet
-    /// there and draws 19 rows of two
-    /// columns; chibipop resolves no
-    /// `display` at all, deliberately
-    /// (`Tag::is_block`, and
-    /// `display: grid` is the corpus's
-    /// commonest declaration), so the
-    /// anonymous-box repair is the
-    /// reading it can hold - and it is
-    /// the reading a browser falls back
-    /// to with the stylesheet gone.
-    /// Neither reading produces 19
+    /// Content that a dictionary writes outside any cell becomes one
+    /// anonymous cell inside one anonymous row. A malformed table
+    /// therefore loses none of this content, and it gains no extra
+    /// structure either.
+    ///
+    /// This repair is not a simplification. It matches CSS 2.1 section
+    /// 17.2.1 exactly. Rule 2.1 of that section wraps a child that is
+    /// not a proper table child. The spec's own words are "and all
+    /// consecutive siblings of C that are not proper table children".
+    /// This wrapped content goes in one anonymous row. Rule 2.3 then
+    /// wraps a run of non-cell children of that row in one anonymous
+    /// cell.
+    ///
+    /// A `td` written straight under a `table`, with no `tr` around
+    /// it, is also not a proper table child. This `td` therefore joins
+    /// the same anonymous row as the loose content around it. But the
+    /// `td` keeps its own slot in that row.
+    ///
+    /// A different rule, one cell for each child, once turned a real
+    /// example 90 degrees. 旺文社漢字典 第四版's radical index is a `table`
+    /// of 19 `span` tags, one for each stroke-count group. The one
+    /// cell per child rule turned this into one row of 19 columns,
+    /// each about 6 px wide.
+    ///
+    /// A browser reads the dictionary's own stylesheet for this table
+    /// and draws 19 rows of two columns. chibipop resolves no
+    /// `display` property at all. This choice is deliberate. See
+    /// `Tag::is_block`. The census also shows that `display: grid` is
+    /// the most common declaration in the corpus.
+    ///
+    /// Because chibipop ignores `display`, the anonymous-box repair is
+    /// the only reading it can produce. A browser without a stylesheet
+    /// also produces this same reading. Neither reading produces 19
     /// columns.
     ///
-    /// An anonymous cell holding only
-    /// the whitespace between two
-    /// written cells is dropped, and
-    /// with it the column it would
-    /// otherwise have invented.
+    /// An anonymous cell that holds only whitespace between two
+    /// written cells is dropped. This also drops the column that the
+    /// cell would otherwise invent.
     pub(super) fn rows_of(&mut self, id: NodeId, ctx: Ctx, head: bool, out: &mut Vec<Vec<Cell>>) {
         let doc = self.doc;
         let mut stray: Vec<Cell> = Vec::new();
-        // The run of consecutive
-        // children the next anonymous
-        // cell will hold, each with the
-        // index its own address needs.
-        // One buffer per table rather
-        // than one per cell: a run is
-        // closed at a boundary and
-        // started again empty.
+        // The run of consecutive children that the next anonymous cell
+        // will hold. Each child keeps the index that its own address
+        // needs. The code uses one buffer for each table, not one for
+        // each cell. A boundary closes a run, and a new empty run then
+        // starts.
         let mut loose: Vec<(usize, NodeId)> = Vec::new();
         for (i, child) in doc.children(id).enumerate() {
             let tag = doc.node(child).tag;
             let row_level = matches!(tag, Tag::Tr | Tag::Thead | Tag::Tbody | Tag::Tfoot);
-            // Every other tag joins the
-            // run. A boundary - a
-            // written cell, a row-level
-            // tag, or the end below -
-            // closes it into the one
-            // anonymous cell it is owed.
+            // Every other tag joins the run. A boundary closes the run
+            // into the one anonymous cell it is owed. A written cell, a
+            // row-level tag, or the end of the loop can each be that
+            // boundary.
             if !row_level && !matches!(tag, Tag::Td | Tag::Th) {
                 loose.push((i, child));
                 continue;
@@ -547,10 +451,8 @@ impl Paragraphs<'_> {
                     let inner = Ctx { inline, block: block.inherited(), ..at };
                     self.rows_of(child, inner, head || tag == Tag::Thead, out);
                 }
-                // A `td` or a `th`, and
-                // nothing else: the guard
-                // above took every other
-                // tag into the run.
+                // A `td` or a `th`, and nothing else. The guard above
+                // already sent every other tag into the run.
                 _ => stray.push(self.cell(child, at, head)),
             }
         }
@@ -562,16 +464,11 @@ impl Paragraphs<'_> {
 
     /// One `tr`: its cells, in order.
     ///
-    /// A row's own box is not drawn.
-    /// Under `border-collapse` a row's
-    /// border collapses into its
-    /// cells', which is where this grid
-    /// resolves it, and Yomitan
-    /// declares no `tr` rule at all -
-    /// so the one real dictionary that
-    /// writes a `tr` border writes a
-    /// width with no style, which draws
-    /// nothing in a browser either.
+    /// The code does not draw a row's own box. Under `border-collapse`,
+    /// a row's border collapses into its cells, and this grid resolves
+    /// the collapse there. Yomitan also declares no `tr` rule at all.
+    /// The one real dictionary that writes a `tr` border writes a width
+    /// with no style. A browser also draws nothing for that rule.
     pub(super) fn row(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Vec<Cell> {
         let doc = self.doc;
         let inline = self.styled(id, ctx.inline);
@@ -597,57 +494,37 @@ impl Paragraphs<'_> {
         out
     }
 
-    /// The one anonymous cell a run of
-    /// content written outside any cell
-    /// collapses into, if it renders
-    /// anything.
+    /// The one anonymous cell that a run of content written outside any
+    /// cell collapses into, if the run renders anything.
     ///
-    /// An explicit empty `<td>` is a
-    /// blank in a paradigm and keeps
-    /// its border; an anonymous cell
-    /// holding nothing is the
-    /// whitespace a dictionary left
-    /// between two written cells, and
-    /// a border round it would invent a
-    /// column.
+    /// An explicit empty `<td>` is a blank cell in a paradigm, and it
+    /// keeps its border. An anonymous cell that holds nothing is only
+    /// the whitespace that a dictionary left between two written cells.
+    /// A border around it would invent a column that was never there.
     ///
-    /// It draws no border and pays no
-    /// padding either, because it is no
-    /// `td`. Yomitan hangs its cell
-    /// defaults on
-    /// `.gloss-sc-th, .gloss-sc-td` and
-    /// a `span` matches neither class,
-    /// and CSS 2.1 section 17.2.1 gives
-    /// an anonymous box the initial
-    /// value of every property it does
-    /// not inherit. Charging
-    /// [`Paragraphs::cell_defaults`]
-    /// here drew 19 boxes a browser
-    /// leaves undrawn over 旺文社漢字典's
-    /// radical index, and took 0.25em
-    /// of padding per side out of
-    /// columns narrower than that -
-    /// which is what drove the wrap
-    /// width onto its own 1 px floor
-    /// and put every glyph of a group
-    /// on a line of its own.
+    /// This anonymous cell draws no border and pays no padding, because
+    /// it is not a `td`. Yomitan hangs its cell defaults on
+    /// `.gloss-sc-th, .gloss-sc-td`, and a `span` matches neither class.
+    /// CSS 2.1 section 17.2.1 also gives an anonymous box the initial
+    /// value of every property that it does not inherit.
     ///
-    /// The run's own declarations are
-    /// not read into the cell's box
-    /// either: they belong to the
-    /// nodes, which
-    /// [`Paragraphs::node`] resolves
-    /// again inside the cell, and
-    /// taking them twice would pay a
-    /// margin twice.
+    /// An earlier version charged [`Paragraphs::cell_defaults`] here.
+    /// That version drew 19 boxes that a browser leaves undrawn over
+    /// 旺文社漢字典's radical index. It also took 0.25em of padding per
+    /// side out of columns narrower than that padding. This padding
+    /// loss drove the wrap width down to its own 1 px floor, and it put
+    /// every glyph of a group on a line of its own.
+    ///
+    /// The code also does not read the run's own declarations into the
+    /// cell's box. Those declarations belong to the nodes.
+    /// [`Paragraphs::node`] resolves them again inside the cell.
+    /// Reading them twice here would charge one margin twice.
     pub(super) fn implied(&mut self, ctx: Ctx, run: &[(usize, NodeId)]) -> Option<Cell> {
         if run.is_empty() {
             return None;
         }
-        // An anonymous box has no
-        // element, so the cell is
-        // addressed by the table or the
-        // row that generated it.
+        // An anonymous box has no element of its own. The table or the
+        // row that generated it addresses the cell instead.
         let body = self.enclose(ctx.path, ctx.block.inherited(), |p| {
             for &(i, child) in run {
                 p.node(child, ctx.at(i), false);
@@ -665,29 +542,19 @@ impl Paragraphs<'_> {
 
     /// One `td` or `th`.
     ///
-    /// The cell opens a paragraph of
-    /// its own rather than joining the
-    /// one before it, which `td` and
-    /// `th` do not do anywhere else in
-    /// this walk: they are in neither
-    /// [`Tag::is_block`] nor
-    /// [`Tag::is_inline`] precisely
-    /// because a cell is a grid problem
-    /// and not a line-break one. That
-    /// paragraph carries the cell's own
-    /// address, so a hit inside a
-    /// conjugation table resolves to
-    /// that cell's subtree.
+    /// The cell opens a new paragraph of its own. It does not join the
+    /// paragraph before it. `td` and `th` do this nowhere else in this
+    /// walk: they are in neither `Tag::is_block` nor `Tag::is_inline`,
+    /// because a cell is a grid problem and not a line-break problem.
+    /// This new paragraph carries the cell's own address, so a hit
+    /// inside a conjugation table resolves to that cell's subtree.
     pub(super) fn cell(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Cell {
         let doc = self.doc;
         let inline = self.styled(id, ctx.inline);
-        // Yomitan tints a `th` and
-        // everything inside a `thead`.
-        // The bold half of the same rule
-        // is [`tag_style`]'s, so a `td`
-        // in a header row inherits its
-        // weight from the `thead` and no
-        // second rule belongs here.
+        // Yomitan tints a `th` tag and everything inside a `thead` tag.
+        // `tag_style` owns the bold half of the same rule, so a `td` in
+        // a header row inherits its weight from the `thead`. No second
+        // rule for weight belongs here.
         let tint = head || doc.node(id).tag == Tag::Th;
         let defaults = self.cell_defaults(ctx.block, inline, tint);
         let block = self.declared(id, defaults, inline.size);
@@ -708,17 +575,13 @@ impl Paragraphs<'_> {
         }
     }
 
-    /// One cell's paragraphs, collected
-    /// off to one side: the grid
-    /// measures each cell separately,
-    /// so they cannot go into the
-    /// stream the panel is stacking.
+    /// One cell's paragraphs, collected off to one side.
     ///
-    /// A cell's first paragraph starts
-    /// at the cell's own top; the ones
-    /// under it are spaced as the panel
-    /// spaces every other stacked
-    /// paragraph.
+    /// The grid measures each cell on its own, so a cell's paragraphs
+    /// cannot go into the stream that the panel is stacking. A cell's
+    /// first paragraph starts at the cell's own top. The panel spaces
+    /// the paragraphs under it the same way it spaces every other
+    /// stacked paragraph.
     fn enclose(
         &mut self,
         path: Option<NodePath>,
@@ -736,20 +599,16 @@ impl Paragraphs<'_> {
         body
     }
 
-    /// Yomitan's own cell box, before
-    /// the dictionary speaks.
+    /// Yomitan's own cell box, before the dictionary declares anything.
     ///
-    /// The spec's defaults table,
-    /// verbatim: a solid border of
-    /// [`cell_border`] on every edge in
-    /// the panel's rule colour,
-    /// [`CELL_PADDING`] of padding, and
-    /// a tinted background on a header
-    /// cell. `vertical-align: top` is
-    /// the other half of that table and
-    /// needs no field - it is what
-    /// [`Pass::table`] does by placing
-    /// a short cell at its row's top.
+    /// This box matches the spec's defaults table exactly: a solid
+    /// border of [`cell_border`] on every edge, in the panel's own rule
+    /// color, [`CELL_PADDING`] of padding, and a tinted background on a
+    /// header cell.
+    ///
+    /// `vertical-align: top` is the other half of that defaults table,
+    /// and it needs no field here. [`Pass::table`] applies it by
+    /// placing a short cell at the top of its row.
     pub(super) fn cell_defaults(&self, parent: Block, inline: Inline, tint: bool) -> Block {
         let em = inline.size;
         Block {
@@ -766,43 +625,34 @@ impl Paragraphs<'_> {
     }
 }
 
-/// The grid half of the geometry pass: a [`Grid`] into cells with rects.
+/// The grid half of the geometry pass: it turns a [`Grid`] into cells
+/// with rects.
 ///
-/// The block half is in [`pass`](super::pass), and this is a second
-/// `impl` block on its [`Pass`] rather than a type of its own for the
-/// reason that type exists: every buffer a cell's paragraph reuses is
-/// already in it.
+/// The block half lives in [`pass`](super::pass). This code is a second
+/// `impl` block on [`Pass`], not a type of its own, for the same reason
+/// that [`Pass`] exists: every buffer that a cell's paragraph reuses is
+/// already inside it.
 impl<'a> Pass<'a> {
     /// One table, as a grid.
     ///
-    /// Four steps, in order, and none
-    /// of them iterates: one rule
-    /// width for the whole grid, the
-    /// column widths from the cells'
-    /// content ([`Pass::columns`]),
-    /// every cell laid out at its
-    /// column with its y deferred, and
-    /// then the row heights, which is
-    /// the first moment a cell's own
-    /// top is known.
+    /// This function runs four steps in order, and no step repeats.
+    /// First, it finds one rule width for the whole grid. Second, it
+    /// finds the column widths from the content of the cells (see
+    /// [`Pass::columns`]). Third, it lays out every cell at its own
+    /// column, with its y position deferred. Fourth, it finds the row
+    /// heights. This fourth step is the first moment that a cell's own
+    /// top position is known.
     ///
-    /// The table element itself leads
-    /// the cells in draw order, so a
-    /// declared background sits under
-    /// them; its geometry is filled in
-    /// last, because a shrink-to-fit
-    /// table is exactly as wide as the
-    /// grid inside it.
+    /// The table element itself leads the cells in draw order, so a
+    /// declared background sits under them. The function fills in the
+    /// table element's own geometry last, because a shrink-to-fit table
+    /// is exactly as wide as the grid inside it.
     ///
-    /// The box around that grid is a
-    /// `div`'s box and is opened and
-    /// closed by the same two helpers
-    /// ([`Pass::open_box`],
-    /// [`Pass::close_box`]): a table
-    /// differs only in what goes
-    /// inside, and in taking the width
-    /// its grid wants rather than the
-    /// width it was offered.
+    /// The box around the grid is a `div`'s box. The same two helpers
+    /// open and close it ([`Pass::open_box`], [`Pass::close_box`]). A
+    /// table differs only in what goes inside the box, and in taking
+    /// the width that its grid wants rather than the width it was
+    /// offered.
     pub(super) fn table(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -813,43 +663,30 @@ impl<'a> Pass<'a> {
         let lead = self.open_box(ElemKind::Table, grid.header(), at, avail_w);
         let (x0, y0) = lead.pen;
 
-        // One rule width for the whole
-        // grid, the widest any cell
-        // asked for. That *is*
-        // `border-collapse`'s own
-        // conflict rule - the wider
-        // border wins the shared edge -
-        // and one width per grid is
-        // what makes the column
-        // arithmetic a sum instead of a
-        // negotiation.
+        // One rule width for the whole grid: the widest width that any
+        // cell asked for. This is exactly `border-collapse`'s own
+        // conflict rule, where the wider border wins the shared edge.
+        // One width for each grid also turns the column arithmetic into
+        // a sum instead of a negotiation.
         let rule = grid.cells.iter().fold(0.0f32, |w, cell| {
             let e = cell.style.border_used();
             w.max(e.top).max(e.right).max(e.bottom).max(e.left)
         });
-        // A grid of `cols` columns has
-        // `cols + 1` rules down it.
+        // A grid of `cols` columns has `cols + 1` rules down it.
         let rules = rule * (grid.cols as f32 + 1.0);
-        // Everything the columns have
-        // between them. Never negative:
-        // a table with more rules than
-        // room collapses its columns
-        // rather than reserving width
-        // it does not have.
+        // Everything that the columns have between them. This value is
+        // never negative. A table with more rules than room collapses
+        // its columns instead of reserving width that it does not
+        // have.
         let share = (lead.avail - rules).max(0.0);
         let inner = self.columns(m, grid, rule, share)?;
 
-        // Column edges: the *outside*
-        // of the rule before each
-        // column, and one past the
-        // last. Accumulated once and
-        // read twice, so two
-        // neighbours share one number
-        // and abut exactly - an edge
-        // differenced back out of a
-        // running sum does not, and
-        // `(x + rule) - rule` is not
-        // `x`.
+        // Column edges: the outside of the rule before each column,
+        // plus one edge past the last column. The code accumulates
+        // each edge once and reads it twice, so two neighbor columns
+        // share one number and abut exactly. An edge that the code
+        // differences back out of a running sum does not abut exactly,
+        // because `(x + rule) - rule` is not always `x`.
         let mut ex = Vec::with_capacity(grid.cols + 1);
         let mut x = x0;
         for w in &inner {
@@ -858,27 +695,21 @@ impl<'a> Pass<'a> {
         }
         ex.push(x);
 
-        // Every cell at its column,
-        // with its y deferred to zero:
-        // a row is as tall as its
-        // tallest cell, so no cell's
-        // own top is known until every
-        // cell in that row has been
-        // measured.
+        // The code places every cell at its own column, with its y
+        // position deferred to zero. A row is as tall as its tallest
+        // cell, so no cell's own top position is known until the code
+        // measures every cell in that row.
         let mut tall = Vec::with_capacity(grid.cells.len());
         let mut placed = Vec::with_capacity(grid.cells.len());
         for cell in &grid.cells {
             let (c, across) = (cell.at.1, cell.span.1);
             let pad = cell.style.padding;
-            // A cell spanning columns
-            // gets them and the rules it
-            // swallowed, less its own
-            // padding. Summed from the
-            // widths rather than taken
-            // off `ex`, because a wrap
-            // width one ulp short of its
-            // own text breaks a line
-            // that fits (see [`extent`]).
+            // A cell that spans several columns gets those columns and
+            // the rules inside its own span, minus its own padding.
+            // The code sums this value from the column widths. It does
+            // not take the value off `ex`, because a wrap width one
+            // ulp short of the cell's own text breaks a line that fits.
+            // See [`extent`].
             let w = (extent(&inner, c, across, rule) - pad.horizontal()).max(1.0);
             let (elems, hits) = (self.out.len(), self.hits.len());
             self.out.push(box_elem(ElemKind::Cell, cell.base, grid.block.align, cell.origin(grid)));
@@ -906,16 +737,11 @@ impl<'a> Pass<'a> {
             let (down, across) = cell.span;
             let pad = cell.style.padding;
             let (from, to, hit_from, hit_to) = placed[i];
-            // The content, dropped into
-            // the row the grid grew for
-            // it. Nothing stretches: a
-            // cell shorter than its row
-            // sits at the row's top,
-            // which is Yomitan's own
-            // `vertical-align: top`, and
-            // every line box is still
-            // the one the measurer
-            // reported.
+            // This call drops the cell's content into the row that the
+            // grid grew for it. Nothing stretches. A cell shorter than
+            // its row sits at the top of the row, which matches
+            // Yomitan's own `vertical-align: top`. Every line box stays
+            // exactly the one that the measurer reported.
             shift(
                 &mut self.out[from + 1..to],
                 &mut self.hits[hit_from..hit_to],
@@ -924,14 +750,11 @@ impl<'a> Pass<'a> {
             let style =
                 collapsed(cell.style, rule, c + across == grid.cols, r + down == grid.rows);
             let used = style.border_used();
-            // A cell that draws a rule
-            // starts on its outside and
-            // one that does not starts
-            // on its inside, so the box
-            // holds exactly the rules
-            // this cell owns and its
-            // neighbour's box begins
-            // where this one ends.
+            // A cell that draws a rule starts at the outside of that
+            // rule. A cell that does not draw a rule starts at its own
+            // inside edge instead. The box then holds exactly the
+            // rules that this cell owns, and its neighbor's box begins
+            // where this box ends.
             let edge = |at: f32, own: f32| if own > 0.0 { at } else { at + rule };
             let (left, top) = (edge(ex[c], used.left), edge(ey[r], used.top));
             let rect = SceneRect {
@@ -949,68 +772,45 @@ impl<'a> Pass<'a> {
 
         let grid_w = ex[grid.cols] + rule - x0;
         let grid_h = ey[grid.rows] + rule - y0;
-        // Shrink-to-fit, as a table
-        // with no declared width is in
-        // a browser: the box is the
-        // grid's own width and not the
-        // container's. Conditional,
-        // where a `div`'s is not: only
-        // a block that declared a box
-        // becomes a [`Boxed`], while
-        // every table is a [`Grid`]
-        // whether it declared one or
-        // not.
+        // This box is shrink-to-fit, in the same way that a browser
+        // sizes a table with no declared width. The box takes the
+        // grid's own width, not the container's width. This box is
+        // also conditional, unlike a `div`'s box: only a block that
+        // declared a box becomes a [`Boxed`], while every table is a
+        // [`Grid`] whether the dictionary declared one or not.
         let block_box = lead.style.exists().then(|| ElemBox {
             rect: lead.border_box(lead.fitted_w(grid_w), grid_h),
             style: lead.style,
         });
-        // The element's own extent is
-        // the grid and not that box: a
-        // table's margin and padding
-        // are outside the cells a hit
-        // test and a cull read.
+        // The element's own extent is the grid, not that box. A
+        // table's margin and padding sit outside the cells that a hit
+        // test or a cull check reads.
         let rect = SceneRect { x: x0, y: y0, w: grid_w, h: grid_h };
         let advance = self.close_box(&lead, rect, block_box, grid_h);
         Ok((lead.demand(grid_w), advance))
     }
 
-    /// Every column's width, from the
-    /// content of the cells in it.
+    /// Every column's width, from the content of the cells in it.
     ///
-    /// Fixed sizing in one pass, and
-    /// deliberately not CSS
-    /// auto-layout:
+    /// This function sizes the columns in one fixed pass. It does not
+    /// use CSS auto-layout, on purpose:
     ///
-    /// 1. Each cell is laid out once
-    ///    at `share` - the whole width
-    ///    the columns have between
-    ///    them - and what it measures
-    ///    to plus its own horizontal
-    ///    padding is what it asks for.
-    /// 2. A column takes the widest
-    ///    ask among the single-column
-    ///    cells in it, and a cell
-    ///    spanning several adds only
-    ///    its shortfall, spread evenly
-    ///    ([`distribute`]).
-    /// 3. If the columns together
-    ///    still want more than
-    ///    `share`, every one is
-    ///    multiplied by the single
-    ///    factor that makes them fit
-    ///    exactly.
+    /// 1. The function lays out each cell once, at `share`, the whole
+    ///    width that the columns have between them. What the cell
+    ///    measures to, plus its own horizontal padding, is what the
+    ///    cell asks for.
+    /// 2. A column takes the widest request among the single-column
+    ///    cells inside it. A cell that spans several columns adds only
+    ///    its shortfall, spread evenly (see [`distribute`]).
+    /// 3. If the columns together still want more than `share`, the
+    ///    function multiplies every column by the one factor that
+    ///    makes them fit exactly.
     ///
-    /// Step 3 is what keeps a table
-    /// inside the panel: the columns
-    /// shrink and their content
-    /// rewraps, so a wide table can
-    /// never ask the panel to widen
-    /// for it. There is no second
-    /// round and no negotiation - the
-    /// only thing measured again after
-    /// this is each cell at its final
-    /// width, which is the height
-    /// pass.
+    /// Step 3 keeps a table inside the panel. The columns shrink and
+    /// their content rewraps, so a wide table can never ask the panel
+    /// to widen for it. There is no second round and no negotiation.
+    /// The only thing that the code measures again after this step is
+    /// each cell at its final width, during the height pass.
     pub(super) fn columns(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -1021,10 +821,9 @@ impl<'a> Pass<'a> {
         let mut want = Vec::with_capacity(grid.cells.len());
         for cell in &grid.cells {
             let pad = cell.style.padding.horizontal();
-            // An empty cell asks for
-            // nothing and is not worth a
-            // measurement - which is most
-            // of a Jitendex forms table.
+            // An empty cell asks for nothing, so it is not worth a
+            // measurement. Most cells in a Jitendex forms table are
+            // empty.
             let ink = if cell.body.is_empty() {
                 0.0
             } else {

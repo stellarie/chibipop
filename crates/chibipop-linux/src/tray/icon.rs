@@ -1,17 +1,15 @@
-//! The tray icon: the app's artwork pre-rendered to PNG and decoded to
-//! the ARGB32 pixmaps StatusNotifierItem asks for
+//! This module embeds the tray artwork as PNG and decodes it into the
+//! ARGB32 pixmaps that `StatusNotifierItem` requests
 //! (ARCHITECTURE.md#platform-integration).
 //!
-//! Why embedded pixmaps rather than a freedesktop *named* icon: an
-//! unpackaged `chibipop` — release tarball, AppImage, plain
-//! `cargo build` — has installed nothing under `hicolor/`, so a named
-//! icon renders as a blank square on exactly the bare setups this port
-//! exists for. A distro package can add the named icon later without
-//! touching this module.
+//! Embedded pixmaps support an unpackaged `chibipop`.
+//! A release tarball, an AppImage, or plain `cargo build` installs no icon under
+//! `hicolor/`, so a freedesktop *named* icon is not available on these systems.
+//! A distro package can add the named icon without changes here.
 //!
-//! Why two hand-rendered PNGs rather than rasterising the SVG at
-//! startup: the daemon must not link a rasteriser to draw a 24-pixel
-//! icon. The assets are produced once, by hand, from the shipped SVG:
+//! This module uses two pre-rendered PNGs instead of SVG rasterization at startup.
+//! The daemon must not link a rasterizer for a 24-pixel icon.
+//! The shipped SVG produces the assets once by hand:
 //!
 //! ```text
 //! rsvg-convert -w 24 -h 24 crates/chibipop-windows/assets/chibipop.svg \
@@ -20,22 +18,22 @@
 //!     -o crates/chibipop-linux/assets/tray-48.png
 //! ```
 //!
-//! Hosts pick the closest size and scale; 24 and 48 cover a 1x and a 2x
-//! bar without shipping a sprite sheet.
+//! Hosts choose the closest size and scale.
+//! The 24 and 48 assets cover 1x and 2x bars without a sprite sheet.
 
 use std::sync::LazyLock;
 
-/// The rendered artwork, smallest first.
+/// Store the rendered artwork from smallest to largest.
 const ASSETS: [(&str, &[u8]); 2] = [
     ("tray-24.png", include_bytes!("../../assets/tray-24.png")),
     ("tray-48.png", include_bytes!("../../assets/tray-48.png")),
 ];
 
-/// The decoded icon set, plus whatever refused to decode.
+/// Store decoded icons and diagnostics for assets that fail to decode.
 ///
-/// A broken asset is a diagnostic, never a failure: SNI treats an empty
-/// pixmap list as "no icon", so a bad decode costs the user a blank
-/// square and nothing else.
+/// A broken asset produces a diagnostic, not a failure.
+/// SNI treats an empty pixmap list as "no icon".
+/// A blank square occurs only if all assets fail to decode.
 pub struct Icons {
     pub pixmaps: Vec<ksni::Icon>,
     pub problems: Vec<String>,
@@ -53,13 +51,14 @@ static ICONS: LazyLock<Icons> = LazyLock::new(|| {
     Icons { pixmaps, problems }
 });
 
-/// Decoded once per process; `Tray::icon_pixmap` is called on every
-/// property render, and the decode is not worth repeating.
+/// Decode the icon set once per process.
+/// `Tray::icon_pixmap` runs for each property render.
+/// A repeated decode would waste work.
 pub fn icons() -> &'static Icons {
     &ICONS
 }
 
-/// One 8-bit RGBA PNG to one ARGB32 pixmap.
+/// Decode one 8-bit RGBA PNG into one ARGB32 pixmap.
 fn decode(bytes: &[u8]) -> Result<ksni::Icon, String> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
@@ -72,10 +71,10 @@ fn decode(bytes: &[u8]) -> Result<ksni::Icon, String> {
     }
     data.truncate(info.buffer_size());
 
-    // RGBA -> ARGB32 in network byte order, which is what `ksni::Icon`
-    // documents and what the SNI spec's Pixmap carries. Getting this
-    // wrong is invisible in tests and glaring in a bar, hence the
-    // golden pixel in this module's tests.
+    // Convert RGBA to ARGB32 in network byte order.
+    // `ksni::Icon` documents this order, and the SNI `Pixmap` carries it.
+    // A wrong byte order shows a clear error in a bar.
+    // The ARGB golden test catches a wrong byte order.
     for pixel in data.as_chunks_mut::<4>().0 {
         pixel.rotate_right(1);
     }
@@ -91,8 +90,8 @@ fn decode(bytes: &[u8]) -> Result<ksni::Icon, String> {
 mod tests {
     use super::*;
 
-    /// Both committed assets decode, at the sizes their names promise,
-    /// with a pixel count the SNI Pixmap layout implies.
+    /// Decode both committed assets at the sizes in their names.
+    /// Check the pixel count that the SNI `Pixmap` layout requires.
     #[test]
     fn both_assets_decode_at_their_named_sizes() {
         let icons = icons();
@@ -105,10 +104,10 @@ mod tests {
         }
     }
 
-    /// The byte order is ARGB, not the RGBA the PNG stores. The artwork's
-    /// centre pixel is opaque cream, so a missed rotation shows up as a
-    /// different leading byte (245, the red channel, instead of 255, the
-    /// alpha).
+    /// The byte order is ARGB, not the RGBA order in the PNG.
+    /// The artwork center pixel is opaque cream.
+    /// A missed rotation then puts 245, the red channel, first
+    /// instead of 255, the alpha.
     #[test]
     fn pixels_are_argb_not_rgba() {
         for icon in &icons().pixmaps {
@@ -123,8 +122,8 @@ mod tests {
         }
     }
 
-    /// A non-PNG blob is a decode problem, not a panic — the whole point
-    /// of collecting `problems` instead of unwrapping.
+    /// Treat a non-PNG blob as a decode problem, not a panic.
+    /// The `problems` list exists so the code does not unwrap.
     #[test]
     fn a_corrupt_asset_is_a_diagnostic() {
         let e = decode(b"not a png at all").expect_err("must not decode");

@@ -1,8 +1,8 @@
-//! chibipop's own file paths.
+//! File paths that chibipop owns.
 
 use std::path::{Path, PathBuf};
 
-/// Resolved beside the exe.
+/// Return a path beside the executable.
 pub fn beside_exe(relative: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -10,11 +10,11 @@ pub fn beside_exe(relative: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(relative))
 }
 
-/// The repo root above target/.
+/// Return the repository root above `target/`.
 ///
-/// Only matches `<root>/target/debug` or `<root>/target/release`, so a
-/// shipped chibipop - which has no such ancestry - can never walk up and
-/// adopt an unrelated `data` folder sitting beside its own directory.
+/// Match only `<root>/target/debug` or `<root>/target/release`.
+/// A shipped chibipop has no such path structure. It must not traverse parent
+/// directories to use an unrelated `data` folder beside its directory.
 fn cargo_root(exe_dir: &Path) -> Option<PathBuf> {
     let profile = exe_dir.file_name()?.to_str()?;
     if profile != "debug" && profile != "release" {
@@ -27,16 +27,16 @@ fn cargo_root(exe_dir: &Path) -> Option<PathBuf> {
     target.parent().map(Path::to_path_buf)
 }
 
-/// Beside the exe or cargo root.
+/// Return the path beside the executable or at the Cargo root.
 ///
-/// Never the working directory.
+/// Do not use the working directory.
 pub fn data_file(relative: &str) -> PathBuf {
     let beside = beside_exe(relative);
     if beside.exists() {
         return beside;
     }
 
-    // Dev has data/ at repo root.
+    // Development uses `data/` at the repository root.
     match std::env::current_exe().ok().and_then(|e| e.parent().and_then(cargo_root)) {
         Some(root) => root.join(relative),
         None => beside,
@@ -62,7 +62,7 @@ mod tests {
         assert_eq!(exe.parent().unwrap(), got.parent().unwrap());
     }
 
-    /// The cwd must never decide.
+    /// The current working directory must not determine this path.
     #[test]
     fn a_data_file_that_exists_nowhere_is_still_an_absolute_path() {
         let name = "definitely-not-a-real-chibipop-file.sqlite";
@@ -84,14 +84,15 @@ mod tests {
         );
     }
 
-    /// A shipped layout must never walk up.
+    /// A shipped layout must not traverse a parent directory.
     #[test]
     fn anything_but_a_cargo_target_layout_declines() {
-        // The shipped case: exe and data in one folder, no target/ above.
+        // The shipped case puts the executable and data in one folder without
+        // `target/` above it.
         assert_eq!(None, cargo_root(Path::new("C:/Users/You/Downloads/chibipop")));
-        // Right profile name, wrong parent.
+        // The profile name is correct, but the parent directory is not.
         assert_eq!(None, cargo_root(Path::new("C:/x/notarget/release")));
-        // Right parent, wrong profile name.
+        // The parent directory is correct, but the profile name is not.
         assert_eq!(None, cargo_root(Path::new("C:/x/target/staging")));
     }
 

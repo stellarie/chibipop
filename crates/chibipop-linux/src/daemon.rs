@@ -1,9 +1,10 @@
-//! The daemon: calloop pump + instance lock + control socket + logging
-//! (ARCHITECTURE.md#workspace-and-seams: all sync, calloop as the Linux
-//! pump), the popup's layer surfaces, and the capture channel's startup
-//! half — the backend ladder and, when it picks the portal rung, the
-//! eager consent that has to finish before anything reports a channel
-//! state. OCR is the one channel still to plug into this loop.
+//! The daemon owns the calloop pump, instance lock, control socket, and log.
+//! ARCHITECTURE.md#workspace-and-seams needs synchronous code with the
+//! calloop Linux pump.
+//! The daemon owns popup layer surfaces and the first capture-channel stage.
+//! This stage selects a capture backend from the capture ladder.
+//! If it selects the portal rung, consent must finish before the daemon reports
+//! channel state. The daemon then connects the OCR channel to this pump.
 
 use crate::capture;
 use crate::capture::backend::{self as capture_backend, Backend};
@@ -62,260 +63,270 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 
-/// The controller's tick length. No dispatch timer exists on Linux
-/// (ARCHITECTURE.md#hover-cadence: event-paced, Worker-throttled); this
-/// only scales the controller's tick-derived warning arithmetic.
+/// Controller tick length. Linux has no dispatch timer.
+/// ARCHITECTURE.md#hover-cadence defines event-paced hover with Worker throttle.
+/// The Controller uses this value to derive alert arithmetic from ticks.
 const DISPATCH_TICK_MS: u32 = 20;
 
-/// The surface probe's env hook and its pick deadline. See
-/// [`App::probe_surfaces`].
+/// The environment hook for the surface probe and its pick deadline.
+/// See [`App::probe_surfaces`].
 const SURFACE_PROBE_ENV: &str = "CHIBIPOP_SURFACE_PROBE";
 const SURFACE_PROBE_DEADLINE: Duration = Duration::from_millis(400);
 
-/// A demo anchor's box when no cursor sample has arrived yet: the
-/// canned popup still has to land somewhere.
+/// The demo anchor box before the first cursor sample.
+/// The canned popup needs a position before that sample.
 const DEMO_ANCHOR: PhysRect = PhysRect { x: 200, y: 200, w: 120, h: 32 };
 
-/// The pump's shared state.
+/// Shared state for the pump.
 ///
-/// `pub(crate)` because the popup's Wayland dispatch impls are written
-/// against it (`popup::surface`): SCTK 0.21 delegates through a blanket
-/// impl this state cannot use, so the forwarding impls live beside the
-/// code they serve and reach back through the accessors below.
+/// This type is `pub(crate)` because popup Wayland dispatch targets it
+/// (`popup::surface`).
+/// SCTK 0.21 uses a blanket impl that cannot access this state.
+/// Keep the impls that pass events beside their code. They use the accessors below.
 pub(crate) struct App {
     log: Log,
     stub: StubState,
-    /// Every directory this daemon reads or writes, resolved once at
-    /// startup: the published trigger state, the config file a
-    /// reload re-reads, and the screenshots folder a mined picture
-    /// lands in (`Paths::screenshots_dir`).
+    /// Directories that this daemon reads or writes.
+    /// The daemon resolves them once at startup.
+    /// They contain published trigger state, the config file for reload, and
+    /// the folder for mined pictures (`Paths::screenshots_dir`).
     paths: Paths,
-    /// The config as loaded, so a reload can rebuild what the Worker
-    /// owns from the same source of truth the Controller reads.
+    /// Loaded Config. A reload rebuilds Worker data from the same source that
+    /// the Controller reads.
     config: chibipop::config::Config,
     signal: LoopSignal,
-    /// The protocol error that ended this session, if one did.
-    /// Unrecoverable by construction, so the Wayland source's
-    /// dispatch stops the pump the way a signal does and leaves its
-    /// verdict here; [`run`] reads it after the orderly shutdown and
-    /// turns it into a non-zero exit.
+    /// ProtocolError that ended this session, if any.
+    /// This error cannot recover. The Wayland source stops the pump like a signal
+    /// and stores the error here.
+    /// [`run`] reads it after orderly shutdown and returns a non-zero exit.
     fatal: Option<ProtocolError>,
-    /// The cursor channel's Wayland side.
+    /// The Wayland side of the cursor channel.
     cursor: CursorState,
-    /// Driven by cursor Events and the trigger verbs; its Commands are
-    /// executed below.
+    /// Cursor Events and the trigger verbs drive the Controller. The
+    /// code below runs the Controller Commands.
     controller: Controller,
-    /// CHIBIPOP_CURSOR_TRACE=1: log every sample and poll interval.
+    /// CHIBIPOP_CURSOR_TRACE=1 logs every sample and poll interval.
+    /// Last hyprctl sample in logical units. Move detection reads this value.
     trace: bool,
-    /// Last hyprctl sample (logical), for move detection.
     last_poll: Option<(i32, i32)>,
-    /// The newest cursor sample, global physical: where a press looks.
+    /// Newest cursor sample in global physical units. A press reads this point.
     last_cursor: Option<PhysPoint>,
-    /// Which cursor rung serves this session, so a press knows whether
-    /// it can ask for a fresh sample or must use the newest event.
+    /// Cursor rung for this session. A press reads the rung to decide whether it
+    /// can request a new sample. If it cannot, the press uses the newest Event.
     cursor_rung: Option<cursor::Rung>,
-    /// When the hyprctl rung last saw the cursor move.
+    /// Time when the hyprctl rung last saw cursor motion.
     last_move: Instant,
-    /// At most one settings child (ARCHITECTURE.md#settings-and-config),
-    /// spawned from the tray's Settings item; the settings-scoped flock
-    /// is the cross-process guard, this is the daemon's own.
+    /// At most one Settings child (ARCHITECTURE.md#settings-and-config).
+    /// The tray Settings item starts it. The settings-scoped flock guards
+    /// cross-process use. This field guards the daemon.
     settings: SettingsChild,
-    /// Channel health plus the SNI tray mirroring it
-    /// (ARCHITECTURE.md#platform-integration). Also the daemon's own
-    /// view: it works unchanged when there is no tray.
+    /// Channel health and the SNI tray that mirrors it
+    /// (ARCHITECTURE.md#platform-integration).
+    /// This field also stores the daemon view. It works when no tray exists.
     tray: TrayHandle,
-    /// The popup's layer surfaces. `None` only where there is no
-    /// compositor to bind against: a unit test, or a session missing the
-    /// layer shell — the daemon stays up either way.
+    /// Popup layer surfaces. This field is `None` when no compositor accepts a
+    /// bind.
+    /// A unit test and a session without layer shell use this state.
+    /// The daemon still runs in both cases.
     popup: Option<Popup>,
-    /// The region selector's layer surfaces. `None` on a
-    /// compositor with no layer shell, and for the same reason the
-    /// popup's shell is: absence is a state, not an error.
+    /// Region-selector layer surfaces. This field is `None` without layer shell.
+    /// The cause matches the popup shell cause. Absence is a state, not an error.
     selector: Option<Selector>,
-    /// One pick in flight, while [`Selector::pick`]'s nested pump has
-    /// the thread. It lives here rather than inside the `Selector`
-    /// because the SCTK handlers that drive the drag are written on
-    /// `App` and the pump dispatches `&mut App` into them.
+    /// One pick in flight while the nested pump of [`Selector::pick`] holds the
+    /// thread.
+    /// This field stays here because SCTK handlers target `App`, not `Selector`.
+    /// The pump dispatches `&mut App` into those handlers.
     pick: Option<Pick>,
-    /// The scan overlay's layer surfaces: click-through, frame-only
-    /// rects outlining what this hover captured and the word it
-    /// defined (`Command::ShowScanOverlay`). `None` for the same
-    /// reason as `selector`. The static region's border is a second
-    /// `Outline` beside this one, because the two have independent
-    /// lifetimes - a hover repainting its boxes must not rub out a
-    /// static region, and the two Windows windows this replaces
-    /// (`ui/overlay.rs`, `ui/static_overlay.rs`) are separate for the
-    /// same reason.
+    /// Click-through, frame-only layer surfaces for scan rects.
+    /// They outline the area that this hover captured and the word that it
+    /// defined (`Command::ShowScanOverlay`).
+    /// This field is `None` for the selector reason.
+    ///
+    /// The static-region border uses a second `Outline` because the two objects
+    /// have separate lifetimes.
+    /// A hover repaint must not erase a static region.
+    /// Windows uses two windows for the same reason (`ui/overlay.rs`,
+    /// `ui/static_overlay.rs`).
     scan_outline: Option<Outline>,
-    /// The static sentence region's border, the other half of that pair
-    /// (`ui/static_overlay.rs`'s counterpart). Shown and hidden by one
-    /// predicate, [`static_overlay_region`], so no call site can
-    /// disagree about when a border belongs on screen.
+    /// Border for the static sentence region. It is the other half of the pair
+    /// and matches `ui/static_overlay.rs`.
+    /// [`static_overlay_region`] decides when to show or hide it.
+    /// One predicate gives every call site the same border rule.
     static_outline: Option<Outline>,
-    /// `CHIBIPOP_POPUP_DEMO=1`: the trigger verbs show and hide the
-    /// canned popup instead of looking anything up, so the surface can
-    /// be driven without a dictionary.
+    /// `CHIBIPOP_POPUP_DEMO=1` makes trigger verbs show and hide the canned
+    /// popup without a lookup.
+    /// A developer can inspect the surface without a Dictionary.
     demo: Demo,
-    /// A scripted pointer pass is running (`CHIBIPOP_POINTER_SCRIPT`),
-    /// so the repaints its own steps cause do not start another.
+    /// A scripted pointer pass runs now (`CHIBIPOP_POINTER_SCRIPT`).
+    /// Repaints from its steps must not start a second pass.
     scripting: bool,
-    /// The core pipeline: capture + OCR + dictionary on their own
-    /// thread (ARCHITECTURE.md#workspace-and-seams). `None` when it
-    /// could not be built - no capture protocol, no OCR models, a
-    /// refused portal - and the daemon stays up saying so.
+    /// Core pipeline. It runs capture, OCR, and Dictionary on its own thread
+    /// (ARCHITECTURE.md#workspace-and-seams).
+    /// This field is `None` if the build fails.
+    /// The state covers an absent capture protocol, OCR models, or portal consent.
+    /// The daemon still runs and reports the cause.
     worker: Option<Worker>,
-    /// What a spawn needs, kept so a granted portal retry can hand the
-    /// new session to a fresh pipeline.
+    /// Data that a spawn needs. A granted portal retry gives a new session to a
+    /// new pipeline from this data.
     worker_setup: worker::Setup,
-    /// The wake the worker thread pings when a result is queued.
+    /// Wake that the Worker thread pings after it queues a result.
     worker_ping: calloop::ping::Ping,
-    /// Where an AnkiConnect call's answer comes back. The calls are
-    /// blocking HTTP on their own threads, so the pump hears about
-    /// them the way it hears about the Worker: as an event
+    /// Channel for an AnkiConnect answer.
+    /// Each call sends an HTTP request and waits on its own thread.
+    /// The pump receives the answer as an Event, like a Worker result
     /// (ARCHITECTURE.md#workspace-and-seams).
     anki_tx: calloop::channel::Sender<AnkiOutcome>,
-    /// Where a mined region's pixels come back. Same shape and same
-    /// reason as `anki_tx`: opening a capture backend and grabbing a
-    /// frame blocks, so it happens on a thread and arrives as an
-    /// event.
+    /// Channel for pixels from a mined region.
+    /// Its shape and rationale match `anki_tx`.
+    /// A capture backend open and a frame grab both block.
+    /// A thread does both tasks, then sends an Event.
     shot_tx: calloop::channel::Sender<Result<Frame, String>>,
-    /// The one screenshot in flight, if any (see [`Shot`]).
+    /// The one screenshot in flight, if one exists (see [`Shot`]).
     shot: Option<Shot>,
-    /// The one-off OCR queue into the Worker's thread-affine engine,
-    /// plus the wake that makes it arrive. Rebuilt on every respawn,
-    /// because the nudge belongs to a particular Worker; while there is
-    /// no pipeline it is [`worker::OcrJobs::disconnected`], so a copy
-    /// fails loudly instead of parking forever.
+    /// One-off OCR queue for the Worker's thread-affine engine and its wake.
+    /// Each respawn rebuilds this field because each wake belongs to one Worker.
+    /// When no pipeline exists, this field is
+    /// [`worker::OcrJobs::disconnected`].
+    /// A copy then fails at once instead of a long delay.
     ocr_jobs: worker::OcrJobs,
-    /// Where a one-off OCR job's lines come back. Cloned into each
-    /// request, so the answer is an event on this pump and the Worker
-    /// thread never waits for us (ARCHITECTURE.md#workspace-and-seams).
+    /// Channel for lines from a one-off OCR job.
+    /// Each request keeps a clone, and the answer arrives as an Event on this
+    /// pump.
+    /// The Worker thread never waits for this pump
+    /// (ARCHITECTURE.md#workspace-and-seams).
     ocr_tx: calloop::channel::Sender<Result<Vec<OcrLine>, String>>,
-    /// The region a queued OCR job was read out of, while one is in
-    /// flight: what the answer's diagnostic names, and the guard that
-    /// keeps one key press from queueing two.
+    /// Region that a queued OCR job reads while the job runs.
+    /// The answer diagnostic names this region.
+    /// This field also limits each key press to one queued job.
     ocr_job: Option<PhysRect>,
-    /// The writable selection. `None` on a compositor that advertises
-    /// no data-control protocol - stock GNOME - which is a state
-    /// discovered at bind time, exactly like a missing layer shell,
-    /// and costs this one action and nothing else.
+    /// Writable selection. This field is `None` when a compositor advertises no
+    /// data-control protocol.
+    /// Stock GNOME has this state. The bind discovers an absent layer shell.
+    /// This absence affects only this action.
     clipboard: Option<clipboard::Clipboard>,
-    /// Dictionary identities the pipeline last reported.
+    /// Dictionary identities last reported by the pipeline.
     dicts: Vec<DictInfo>,
-    /// Trigger mode's hold, while one is held
+    /// Trigger-mode hold while the user holds one
     /// (ARCHITECTURE.md#hover-cadence).
     hold: Option<Hold>,
-    /// The last lookup failure logged, so a moving cursor cannot repeat
-    /// one line hundreds of times.
+    /// Last lookup failure that the daemon logged.
+    /// This record limits each repeated line to one log entry as the cursor
+    /// moves.
     last_warning: Option<String>,
-    /// Whether a portal session is already serving pixels. The backend
-    /// itself lives on the worker thread, so this is what the retry
-    /// checks instead of holding it.
+    /// True when a portal session serves pixels.
+    /// The backend lives on the Worker thread, so retry reads this flag and
+    /// does not access the backend.
     portal_serving: bool,
-    /// What the ladder picked, so `reload` knows whether a retry is
-    /// even meaningful.
+    /// Rung that the ladder chose. `reload` reads it to decide if retry has
+    /// purpose.
     capture_selection: capture_backend::Selection,
-    /// What the Capture row must say *besides* which backend serves it,
-    /// when this compositor paints the pointer into the frames we OCR.
-    /// Probed once at startup - the option cannot change without a
-    /// compositor reload - and folded into every later Capture
-    /// transition, so a portal retry cannot quietly drop the defect
-    /// from the row.
+    /// Extra text for the Capture row beside the backend name.
+    /// The daemon sets this text when the compositor paints the pointer into
+    /// OCR frames.
+    /// The daemon probes this option once at startup because only a compositor
+    /// reload can change it.
+    /// Later Capture transitions keep the text, so a portal retry cannot remove
+    /// the defect from the row.
     pointer_defect: Option<String>,
-    /// Everything the portal retry needs to run again from here.
+    /// Every value that the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
-    /// Where a new source goes. The dwell watch is the one source this
-    /// daemon adds and drops at runtime, so the pump's own handle has
-    /// to be reachable from the state that decides to.
+    /// Handle that receives new sources.
+    /// The dwell watch is the only source that this daemon adds or removes at
+    /// runtime.
+    /// The decision state must therefore reach the pump handle.
     pump: LoopHandle<'static, App>,
-    /// The dwell re-check's timer while one is armed
+    /// Dwell re-check timer while it is armed
     /// (ARCHITECTURE.md#hover-cadence).
     dwell: Option<RegistrationToken>,
 }
 
-/// One blocking job for the popup's sake, as handed to the thread that
-/// will run it.
+/// One popup job. It blocks the thread that runs it.
 enum AnkiCall {
     Dupes { generation: u64, exprs: Vec<String> },
     Add { expr: String, fields: HashMap<String, String> },
-    /// A mined region's pixels: encode, write the PNG, and file the
-    /// card that points at it. Here rather than on the grabbing thread
-    /// because filing it *is* an AnkiConnect call and reads the same
-    /// `[anki]` snapshot every other one does; the encode rides along
-    /// because deflating a 4K region is not pump work either.
+    /// Pixels of a mined region. The job encodes pixels, writes the PNG, and
+    /// files the card that points to it.
+    /// It runs here instead of on the grab thread because file work calls
+    /// AnkiConnect.
+    /// It reads the same `[anki]` snapshot as other calls.
+    /// It also encodes here because deflate for a 4K region is not pump work.
     Shot { plan: chibipop::shot::ShotPlan, bgra: Vec<u8>, w: i32, h: i32, files_a_card: bool },
 }
 
-/// One answer, as it comes back to the pump.
+/// One answer that the pump receives.
 ///
-/// Failures travel as text rather than being printed where they
-/// happen: the log lives on the pump thread.
+/// Failures travel as text. The pump thread owns the log, so no code prints a
+/// failure at its source.
 enum AnkiOutcome {
-    /// `Err` = AnkiConnect refused, or is not running at all.
+    /// `Err` means that AnkiConnect refused the request or does not run.
     Dupes { generation: u64, dupes: Result<HashSet<String>, String> },
     Added { expr: String, note: Result<i64, String> },
-    /// A mined picture's whole answer. `Ok(Some(note))` is saved and
-    /// filed, `Ok(None)` saved with no card to file it on, `Err` a step
-    /// that did not get there. `dir` is the folder it went to and never
-    /// the file: the filename carries the word, which is screen content
-    /// and does not belong in diagnostics
-    /// (ARCHITECTURE.md#platform-integration).
+    /// Complete answer for a mined picture.
+    /// `Ok(Some(note))` means that the picture was saved and filed.
+    /// `Ok(None)` means that it was saved without a card.
+    /// `Err` means that a step failed.
+    /// `dir` is the folder that received the file, not the file itself.
+    /// The filename carries the word. The word is screen content, so
+    /// diagnostics must not hold it (ARCHITECTURE.md#platform-integration).
     Shot { expr: String, dir: PathBuf, filed: Result<Option<i64>, String> },
 }
 
-/// One screenshot's whole life on this side of the seam.
+/// Complete life of one screenshot on this side of the seam.
 ///
-/// The two states are the two things a shot waits for, and they are
-/// exclusive by construction: [`App::drain_shot`] takes the parked plan,
-/// picks a region with the pump's own thread, and hands the same plan
-/// straight to the grabbing state - so `Option<Shot>` also *is* the
-/// "one pick at a time" rule (see [`App::park_shot`]).
+/// These two states represent the two waits for a shot. They are exclusive.
+/// [`App::drain_shot`] takes the parked plan, picks a region on the pump thread,
+/// and gives the plan to the grab state.
+/// Therefore `Option<Shot>` also enforces one pick at a time
+/// (see [`App::park_shot`]).
 enum Shot {
-    /// Authorised, waiting for the region the user has yet to drag.
+    /// The user approved this shot. The shot waits for a region that the user
+    /// must drag.
     ///
-    /// Parked by [`App::execute`]'s `AddNote` arm or by
-    /// `Verb::Screenshot`, drained at the top level of the pump, for the
-    /// reason the Windows bin parks it at the bottom of its message loop
-    /// (`crates/chibipop-windows/src/app.rs`): picking a region runs a
-    /// nested pump, and entering one half-way through a command batch
-    /// would re-enter the Controller's own dispatch.
+    /// The `AddNote` arm of [`App::execute`] or `Verb::Screenshot` parks this
+    /// state.
+    /// The pump's top level drains it.
+    /// The Windows bin uses the same rule at the bottom of its message loop
+    /// (`crates/chibipop-windows/src/app.rs`).
+    /// A region pick uses a nested pump. A nested pump inside a command batch
+    /// re-enters Controller dispatch before the batch ends.
     Parked(Pending),
-    /// Region picked; a thread of its own is grabbing the pixels and
-    /// the popup is off screen until they arrive, because a popup put
-    /// back sooner would be *in* them.
+    /// The region is picked. A separate thread grabs its pixels.
+    /// The popup stays off screen until the pixels arrive because an earlier
+    /// popup could appear in them.
     Grabbing(Pending),
 }
 
-/// One screenshot's plan, and which feature asked for it.
+/// Plan for one screenshot and the feature that requested it.
 struct Pending {
-    /// Every rule about the file and the note is core's
-    /// (`chibipop::shot`); this bin only picks a region and grabs pixels.
+    /// Core owns every file and note rule (`chibipop::shot`).
+    /// This bin picks a region and grabs pixels.
     plan: chibipop::shot::ShotPlan,
     kind: ShotKind,
 }
 
-/// Which of the two screenshot features owns a plan.
+/// Screenshot feature that owns a plan. Two features exist.
 ///
-/// It decides exactly two things: what a shot with no picture falls back
-/// to, and whether AnkiConnect is asked for a card at all.
+/// This enum chooses the no-picture result and whether the daemon asks
+/// AnkiConnect for a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShotKind {
-    /// `actions.screenshot.include_on_add`: the Controller has already
-    /// marked the popup adding, so the card is owed either way and a
-    /// pick that answers nothing still files it - without a picture.
+    /// `actions.screenshot.include_on_add`. The Controller put the popup in the
+    /// add state.
+    /// The daemon must file the card in both cases. A pick that returns nothing
+    /// still files the card without a picture.
     Add,
-    /// The mining screenshot (`actions.screenshot`, Windows'
-    /// `MiningContextScreenshot`). Nothing is waiting on it, and
-    /// `files_a_card` is the popup's own view of AnkiConnect at the
-    /// moment the verb arrived: false still writes the PNG, it just has
-    /// no card to ride on.
+    /// The mining screenshot (`actions.screenshot` and
+    /// `MiningContextScreenshot` on Windows). No code waits for it.
+    /// `files_a_card` records the popup's AnkiConnect state when the verb
+    /// arrives.
+    /// A false value still writes the PNG without a card.
     Mining { files_a_card: bool },
 }
 
 impl ShotKind {
-    /// Whether this shot's pixels are on their way to AnkiConnect. An
-    /// add always is: `plan_add` only answers for a popup with a card
-    /// on it, and the plain add it replaced would have gone out too.
+    /// True when this shot sends pixels to AnkiConnect.
+    /// An add always sends them. `plan_add` answers only for a popup with a
+    /// card. The old plain add also sent them.
     fn files_a_card(self) -> bool {
         match self {
             ShotKind::Add => true,
@@ -325,7 +336,7 @@ impl ShotKind {
 }
 
 impl AnkiCall {
-    /// The blocking half, off the pump.
+    /// Network part of the call. It runs outside the pump.
     fn run(self, anki: &chibipop::config::AnkiConfig) -> AnkiOutcome {
         match self {
             AnkiCall::Dupes { generation, exprs } => {
@@ -349,18 +360,17 @@ impl AnkiCall {
                 );
                 AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
             }
-            // Every rule here is core's: the filename, the
-            // `source = "screenshot"` field lookup, the base64 payload
-            // and the AnkiConnect call all live in `chibipop::shot`, so
-            // this arm is three of its functions and no decisions.
+            // Core owns the filename, the `source = "screenshot"` field lookup,
+            // the base64 payload, and the AnkiConnect call.
+            // This arm calls three core functions and makes no decisions.
             AnkiCall::Shot { plan, bgra, w, h, files_a_card } => {
                 let filed = (|| -> Result<Option<i64>> {
                     let png = chibipop::image::encode_bgra_to_png(&bgra, w, h)?;
                     if files_a_card {
                         return chibipop::shot::save_and_add(&png, &plan, anki).map(Some);
                     }
-                    // Anki cannot take a card: the picture is still
-                    // worth writing, it just has nothing to ride on.
+                    // Anki cannot take a card. The daemon still writes the
+                    // picture without a card.
                     chibipop::shot::save(&png, &plan)?;
                     Ok(None)
                 })();
@@ -374,28 +384,28 @@ impl AnkiCall {
     }
 }
 
-/// What a second consent attempt needs, kept so the retry is the same
-/// code path as the startup one.
+/// Values that a second consent request needs. Retry uses the startup path.
 struct PortalRetry {
     state_dir: PathBuf,
     globals: Vec<wayland::Advertised>,
-    /// `Some` only when the cursor ladder actually selected rung 2;
-    /// a rung that was never chosen must not be resurrected by a retry.
+    /// `Some` only when the cursor ladder chose rung 2.
+    /// A retry must not restore a rung that the ladder did not choose.
     cursor: Option<portal::CursorSink>,
 }
 
-/// The portal's eager consent, start to finish.
+/// Eager portal consent from start to finish.
 ///
-/// Answers the backend when the portal said yes, and the capture
-/// channel's row either way: a refusal is a status with a retry in it,
-/// never an exit and never a panic.
+/// This function returns the backend when the portal accepts consent.
+/// It returns the Capture channel row in both outcomes.
+/// A refusal stores a retry state. A refusal never exits or panics.
 fn open_portal(retry: &PortalRetry, log: &mut Log) -> (Option<PortalCapture>, ChannelState) {
-    // The monitors have to be anchorable before the tray is published,
-    // and the pump does not exist yet - hence the throwaway probe.
+    // Monitors must accept an anchor before the daemon publishes the tray.
+    // The pump does not exist yet, so this code uses a temporary probe.
     let outputs = image_copy::probe_geometry(&retry.globals);
-    // The layout origin, until the first grab moves us: the connected
-    // stream follows the region being read (`PortalCapture::grab`), so
-    // the startup guess only decides which monitor warms up first.
+    // The layout origin stays until the first grab moves the point.
+    // The connected stream tracks the region that the code reads
+    // (`PortalCapture::grab`).
+    // The startup guess selects only the initial monitor.
     let at = PhysPoint { x: 0, y: 0 };
     let opened = PortalSession::open(
         &retry.state_dir,
@@ -436,45 +446,41 @@ impl App {
         self.apply_verb(verb);
     }
 
-    /// One verb's effect, whichever channel delivered it: the control
-    /// socket (rung 2, always bound) or the GlobalShortcuts portal
-    /// (rung 1). Both land here on purpose — a portal press and a
-    /// `chibipop ctl trigger-down` that could drift apart would be two
-    /// trigger semantics, and the product has one. The same holds for
-    /// the add: `Verb::AnkiAdd` is the *only* place the keyboard path to
-    /// AnkiConnect exists, so `anki-add` over the socket and the portal
-    /// `anki-add` shortcut cannot diverge.
+    /// Apply one Verb from either channel.
+    /// The control socket is rung 2 and the GlobalShortcuts portal is rung 1.
+    /// Both channels call this method. A Portal press and
+    /// `chibipop ctl trigger-down` produce the same result.
+    /// `Verb::AnkiAdd` is the only keyboard path to AnkiConnect.
+    /// The socket `anki-add` and Portal `anki-add` shortcut therefore match.
     fn apply_verb(&mut self, verb: Verb) {
         match verb {
             Verb::Reload => self.reload_config(),
-            // The canned popup stands in for a lookup, so the surface
-            // can be driven on a machine with no dictionary at all.
+            // The canned popup replaces a lookup, so a machine without a
+            // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
             Verb::TriggerUp if self.demo.armed => self.hide_popup(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
-            // The same Event the in-panel Anki slot raises, so every
-            // route to a card is one AnkiConnect flow.
+            // The in-panel Anki slot raises the same Event, so every card path
+            // uses one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
-            // Native-channel only, like `static-region` below.
+            // Native channel only, like `static-region` below.
             Verb::Screenshot => self.mining_screenshot(),
-            // Native-channel only too.
+            // Native channel only.
             Verb::OcrClipboard => self.ocr_to_clipboard(),
-            // Native-channel only: there is no portal id for this, so
-            // the socket is the whole global channel and this arm is
-            // the whole action.
+            // Native channel only. No portal id exists for this action, so the
+            // socket provides the complete global channel.
             Verb::StaticRegion => self.pick_static_region(),
         }
     }
 
-    /// One event from the GlobalShortcuts session's thread.
+    /// One Event from the GlobalShortcuts session thread.
     ///
-    /// The portal is an *additional* source of the same presses the
-    /// socket carries, never a replacement, so a press goes through
-    /// [`App::apply_verb`] and everything else here is observability:
-    /// which channel owns the binding, what key it reports, and what
-    /// the settings window is allowed to claim about it.
+    /// The Portal adds a source for socket presses. It does not replace the
+    /// socket.
+    /// Every press therefore uses [`App::apply_verb`].
+    /// This method records the binding owner, reported key, and settings state.
     fn handle_shortcut(&mut self, event: shortcuts::Event) {
         match event {
             shortcuts::Event::Bound(bindings) => self.trigger_bound("bound", bindings),
@@ -490,14 +496,13 @@ impl App {
                     shortcuts::Action::Nothing => {}
                 }
             }
-            // The rung is not serving. The socket is, so this is a
-            // status with a reason in it, never an exit.
+            // This rung does not serve requests. The socket does.
+            // This state has a reason and never ends the daemon.
             shortcuts::Event::Unavailable { reason, advice } => {
                 self.log.diag(&format!("trigger: portal rung unavailable - {reason}"));
-                // The row gets the short clause
-                // (ARCHITECTURE.md#platform-integration: one line); the
-                // way out belongs in the log, where there is room for
-                // it.
+                // The row gets one short clause
+                // (ARCHITECTURE.md#platform-integration: one line).
+                // The log stores advice, where it has room.
                 if let Some(advice) = advice {
                     self.log.diag(&format!("trigger: {advice}"));
                 }
@@ -511,10 +516,10 @@ impl App {
         }
     }
 
-    /// The portal answered `BindShortcuts`, or the user re-bound a key
-    /// in the desktop's own UI (`ShortcutsChanged`). Same three effects
-    /// either way: a log line, the trigger row, and the file the
-    /// settings window reads.
+    /// The portal answered `BindShortcuts`, or the user changed a key in the
+    /// desktop UI (`ShortcutsChanged`).
+    /// Both cases log a line, update the trigger row, and update the file that
+    /// the settings window reads.
     fn trigger_bound(&mut self, what: &str, bindings: Vec<shortcuts::Binding>) {
         let detail = shortcuts::portal_detail(&bindings);
         self.log.diag(&format!("trigger: portal {what} - {detail}"));
@@ -522,23 +527,22 @@ impl App {
         self.publish_trigger(&shortcuts::state::Published::portal(bindings));
     }
 
-    /// Tell the settings window who owns the binding
-    /// (ARCHITECTURE.md#settings-and-config: the UI never lies about
-    /// that). A file it cannot write is a diagnostic, not a failure —
-    /// the trigger keeps working either way.
+    /// Tell the settings window which channel owns the binding
+    /// (ARCHITECTURE.md#settings-and-config).
+    /// A write error logs a diagnostic. The trigger still works.
     fn publish_trigger(&mut self, published: &shortcuts::state::Published) {
         if let Err(e) = shortcuts::state::publish(&self.paths.state_dir, published) {
             self.log.diag(&format!("trigger: could not publish the channel state - {e}"));
         }
     }
 
-    /// One trigger verb's effect (ARCHITECTURE.md#hover-cadence).
+    /// One trigger Verb effect (ARCHITECTURE.md#hover-cadence).
     ///
-    /// A press freezes the output under the cursor and looks up what is
-    /// there; a release drops the frame and retracts the popup. The
-    /// grab is sent to the Worker *before* the lookup that follows it
-    /// and the Worker serves its queue in order, so "the grab predates
-    /// the popup" is a property of the ordering rather than a hope.
+    /// A press freezes the output under the cursor and looks up text there.
+    /// A release drops the frame and retracts the popup.
+    /// Code sends the grab to the Worker before the lookup.
+    /// The Worker serves its queue in order, so the grab predates the popup by
+    /// rule, not by assumption.
     fn trigger(&mut self, step: trigger::Step) {
         match step {
             trigger::Step::Freeze { latched } => {
@@ -550,8 +554,8 @@ impl App {
                 self.freeze_at(at, output);
                 self.hold = Some(Hold { output, latched });
                 self.feed(Event::TriggerDown);
-                // The press is its own first cursor sample: nothing has
-                // to move for the first lookup to run.
+                // The press supplies the first cursor sample. The first lookup
+                // needs no cursor motion.
                 self.feed(Event::CursorMoved { pos: at });
             }
             trigger::Step::Release => {
@@ -563,7 +567,7 @@ impl App {
         }
     }
 
-    /// Take the press-time grab of `output`, on the Worker's thread.
+    /// Take the press-time grab of `output` on the Worker's thread.
     fn freeze_at(&mut self, at: PhysPoint, output: PhysRect) {
         let Some(worker) = self.worker.as_ref() else {
             self.log.diag(
@@ -571,8 +575,8 @@ impl App {
             );
             return;
         };
-        // Freezes answer nothing, so the id is never matched against a
-        // result; a failed grab is reported by the lookups behind it.
+        // Freeze has no answer, so no result uses its id.
+        // A failed grab appears in later lookup results.
         let sent = worker
             .trigger()
             .send(Trigger { kind: TriggerKind::Freeze(at), id: RequestId(0) })
@@ -588,19 +592,20 @@ impl App {
         ));
     }
 
-    /// Drop the hold's frozen frame; grabs go live again.
+    /// Drop the frozen frame for a hold. Grabs use live pixels again.
     fn thaw(&mut self) {
         let Some(worker) = self.worker.as_ref() else { return };
         let _ = worker.trigger().send(Trigger { kind: TriggerKind::Thaw, id: RequestId(0) });
         self.log.diag("trigger: hold released, frozen grab dropped");
     }
 
-    /// Where the cursor is *now*, for a press.
+    /// Get the cursor position now for a press.
     ///
-    /// The polling rung is asked directly: a press is exactly when its
-    /// adaptive interval may be at its slowest
-    /// (ARCHITECTURE.md#hover-cadence), and reading the position is
-    /// free. The event rungs have already delivered their newest sample.
+    /// The Hyprctl-poll rung receives a direct request.
+    /// A press can arrive at the slowest adaptive interval
+    /// (ARCHITECTURE.md#hover-cadence).
+    /// A position read costs little. Event rungs already sent their newest
+    /// sample.
     fn cursor_now(&mut self) -> Option<PhysPoint> {
         if self.cursor_rung == Some(cursor::Rung::HyprctlPoll) {
             if let Some((lx, ly)) = hyprctl::sample() {
@@ -613,53 +618,52 @@ impl App {
         self.last_cursor
     }
 
-    /// The output box holding `at`, by the same arithmetic the capture
-    /// backend uses - so the box the daemon records for a hold is the
-    /// box the Worker actually froze.
+    /// Output box that contains `at`.
+    /// The daemon uses capture backend arithmetic, so both records use the same
+    /// box.
     fn output_containing(&self, at: PhysPoint) -> PhysRect {
         crate::capture::geometry::bounds_containing(&self.cursor.geometries(), at)
     }
 
-    /// The popup, from a Wayland dispatch. `run` always builds one -
-    /// a compositor with no layer shell still gets a popup, it just has
-    /// no shell to draw on, and a popup that cannot bind
-    /// `wl_compositor`/`wl_shm` at all ends startup before any handler
-    /// can run. The `Option` is what lets the daemon's own tests build
-    /// an `App` with no compositor behind it.
+    /// Popup used by Wayland dispatch. `run` always builds it.
+    /// A compositor without layer shell still gets a Popup without a shell that
+    /// can paint.
+    /// A bind failure for `wl_compositor` or `wl_shm` stops startup before
+    /// handlers run.
+    /// Tests use `Option` to build App without compositor state.
     pub(crate) fn popup_mut(&mut self) -> &mut Popup {
         self.popup.as_mut().expect("a popup dispatch arrived with no popup bound")
     }
 
-    /// Is there a popup that can actually put a panel on screen? False
-    /// on stock GNOME, and the reason every draw path is gated rather
-    /// than assumed.
+    /// Return true when a popup can put a panel on screen.
+    /// Stock GNOME returns false. Draw paths use this result instead of
+    /// assumptions.
     pub(crate) fn popup_can_draw(&self) -> bool {
         self.popup.as_ref().is_some_and(Popup::available)
     }
 
-    /// Move the popup's diagnostics into the log. The popup owns no
-    /// log: this thread does.
+    /// Move popup diagnostics into the log. The popup owns no log, so this
+    /// thread does.
     pub(crate) fn flush_popup_notes(&mut self) {
         let Some(popup) = self.popup.as_mut() else { return };
         for line in popup.drain_notes() {
             self.log.diag(&line);
         }
     }
-
-    // ---- the surfaces beside the popup ----
+    // ---- surfaces beside the popup ----
     //
-    // Three kinds of layer surface answer into this one state, so every
-    // shared SCTK handler routes by surface identity here rather than
-    // forwarding to the popup and hoping. The popup's own behaviour is
-    // unchanged: it still gets every event that names one of its
-    // panels, and nothing else ever did.
+    // Three layer-surface kinds use this state. Shared SCTK handlers route each
+    // event by surface identity.
+    // They do not send events to the popup and hope for a match.
+    // The popup still receives every event for one of its panels and no other
+    // event.
 
     pub(crate) fn selector_mut(&mut self) -> Option<&mut Selector> {
         self.selector.as_mut()
     }
 
-    /// The connection a pick makes its own queue on, and the daemon's
-    /// queue handle for the wake it fires on the way out.
+    /// Connection that a pick uses for its own queue, plus the daemon queue
+    /// handle for its wake.
     pub(crate) fn selector_handles(&self) -> Result<(Connection, QueueHandle<App>)> {
         let selector = self
             .selector
@@ -668,18 +672,17 @@ impl App {
         Ok(selector.handles())
     }
 
-    /// One selector diagnostic, from the pick's own code.
+    /// One diagnostic from the pick code.
     pub(crate) fn selector_note(&mut self, line: String) {
         match self.selector.as_mut() {
             Some(selector) => selector.note(line),
-            // No selector to hang it on, but the line is still true.
+            // No selector exists, but the line remains true.
             None => self.log.diag(&line),
         }
     }
 
-    /// Move the selector's, the pick's and both outlines' diagnostics
-    /// into the log. Same seam as `flush_popup_notes`: none of the four
-    /// owns a log.
+    /// Move selector, pick, and outline diagnostics into the log.
+    /// This matches `flush_popup_notes`. None of these objects owns the log.
     pub(crate) fn flush_surface_notes(&mut self) {
         let mut lines = Vec::new();
         if let Some(selector) = self.selector.as_mut() {
@@ -699,19 +702,19 @@ impl App {
         }
     }
 
-    /// The outputs, as the selector and the outline need them. Read off
-    /// the popup so all three surfaces share one `OutputState` and one
-    /// idea of the global physical space.
+    /// Outputs that the selector and outline need.
+    /// Read them from the popup so all three surfaces share one `OutputState`
+    /// and one global physical pixel space.
     pub(crate) fn screens(&self) -> Vec<popup::Screen> {
         self.popup.as_ref().map(Popup::screens).unwrap_or_default()
     }
 
-    /// The seat, for the pointer and keyboard a pick creates of its own.
+    /// Seat for the pointer and keyboard that a pick creates.
     pub(crate) fn seat(&mut self) -> Option<WlSeat> {
         self.popup.as_mut()?.seats().seats().next()
     }
 
-    // ---- one pick's lifecycle, driven by `select::Selector::pick` ----
+    // ---- lifecycle of one pick, driven by `select::Selector::pick` ----
 
     pub(crate) fn pick_start(&mut self, pick: Pick) {
         self.pick = Some(pick);
@@ -723,10 +726,9 @@ impl App {
         }
     }
 
-    /// One pump iteration: a drag delivers a motion per compositor
-    /// frame, and one commit per frame is the pacing the popup gets from
-    /// its frame callbacks. Also the place a decided pick leaves the
-    /// loop from - see [`Pick::tick`].
+    /// One pump iteration handles one drag motion per compositor frame.
+    /// One commit per frame matches popup cadence from frame callbacks.
+    /// A decided pick leaves the loop here (see [`Pick::tick`]).
     pub(crate) fn pick_tick(&mut self) {
         let (Some(pick), Some(selector)) = (self.pick.as_mut(), self.selector.as_mut()) else {
             return;
@@ -750,20 +752,20 @@ impl App {
         }
     }
 
-    /// Take the selector down and answer how many surfaces went.
+    /// Remove the selector and return the number of surfaces removed.
     pub(crate) fn pick_finish(&mut self) -> usize {
         self.flush_surface_notes();
         self.pick.take().map_or(0, Pick::destroy)
     }
 
-    /// Drag a region on the dimmed screen, blocking until the user
-    /// decides. `None` is cancelled, under the threshold, or no
-    /// selector on this compositor - all of them states, none an
-    /// error.
+    /// Drag a region on the dimmed screen. This function blocks until the user
+    /// decides.
+    /// `None` means cancel, a drag below threshold, or no selector.
+    /// Each outcome is a state, not an error.
     ///
-    /// The popup is hidden for the duration: it must not be in the
-    /// pixels a caller grabs afterwards, and the selector is modal
-    /// anyway.
+    /// The popup stays hidden while the pick runs.
+    /// It must not enter the pixels that a caller grabs after the pick.
+    /// The selector remains modal.
     pub(crate) fn pick_region(&mut self, deadline: Option<Duration>) -> Option<PhysRect> {
         let was_shown = self.popup.as_ref().and_then(Popup::shown).is_some();
         if was_shown {
@@ -784,42 +786,38 @@ impl App {
         picked
     }
 
-    // ---- the static sentence region ----
+    // ---- static sentence region ----
 
-    /// `static-region`: draw the box
-    /// [`chibipop::config::SentenceMode::Static`] reads the Anki
-    /// sentence from.
+    /// `static-region`: draw the box that
+    /// [`chibipop::config::SentenceMode::Static`] uses for the Anki sentence.
     ///
-    /// Works in **any** sentence mode, which is deliberate and matches
-    /// Windows (`crates/chibipop-windows/src/app.rs`'s slot-1 hotkey):
-    /// drawing the box is how a user decides to switch to Static, so
-    /// refusing until the mode is already Static would be a chicken and
-    /// egg. Setting one shows the border immediately, if the predicate
-    /// wants it there.
+    /// This action works in every sentence mode by design and matches Windows
+    /// (`crates/chibipop-windows/src/app.rs`'s slot-1 hotkey).
+    /// The box lets a user switch to Static.
+    /// A check for Static first would block that switch.
+    /// The box appears at once when the predicate allows it.
     ///
-    /// The border comes down first: it sits on `Layer::Overlay` like the
-    /// selector, so leaving it up would draw last frame's box over the
-    /// one being dragged.
+    /// The method hides the old border first.
+    /// It shares `Layer::Overlay` with the selector.
+    /// Without this step, the old box could cover the new drag.
     fn pick_static_region(&mut self) {
         if let Some(outline) = self.static_outline.as_mut() {
             outline.hide();
         }
-        // `None` is the product's own deadline (`select::PICK_TIMEOUT`);
-        // a second constant here would be a second answer to "how long
-        // may a pick hold the pump".
+        // `None` uses the product deadline (`select::PICK_TIMEOUT`).
+        // A second constant would conflict with the product pick duration.
         let picked = self.pick_region(None);
         self.took_static_region(picked);
     }
 
-    /// What a finished pick means. `None` - cancelled, under the drag
-    /// threshold, expired, or no layer shell to drag on - leaves
-    /// everything exactly as it was, which is the whole contract of a
-    /// cancel: nothing saved, no reload, and the border back where the
-    /// predicate says it belongs.
+    /// Interpret a finished pick.
+    /// `None` means cancel, a drag below threshold, expiry, or no layer shell.
+    /// It leaves memory and file state unchanged.
+    /// It also leaves the border where the predicate places it.
     ///
-    /// Split from [`App::pick_static_region`] because the pick is a
-    /// nested pump that needs a compositor and this half is pure state:
-    /// it is the seam the daemon tests drive.
+    /// This split keeps nested pump work in [`App::pick_static_region`] and
+    /// keeps pure state here.
+    /// Tests drive this state seam.
     fn took_static_region(&mut self, picked: Option<PhysRect>) {
         let Some(rect) = picked else {
             self.log.diag("static region: pick cancelled - nothing changed");
@@ -828,13 +826,11 @@ impl App {
         };
         self.config.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
         // The config file is the sole source of truth
-        // (ARCHITECTURE.md#settings-and-config), so the region has to be
-        // *in* it before anything is re-derived from it. Synchronous:
-        // this is a few KB of TOML on local disk at the end of an
-        // interaction that just held the thread for as long as the user
-        // took to drag, so a thread for it would buy nothing and cost an
-        // ordering question. A failed write is a diagnostic and a region
-        // that lasts until the next reload, not an exit.
+        // (ARCHITECTURE.md#settings-and-config).
+        // Save the region before the daemon derives any other state.
+        // TOML is small, and this call already blocks on the user drag.
+        // A write error logs a diagnostic. The current region stays until the
+        // next reload.
         match self.config.save(&self.paths.config_file) {
             Ok(()) => self.log.diag(&format!(
                 "static region: set to {}x{} at {},{} and saved to {}",
@@ -853,28 +849,28 @@ impl App {
                 self.paths.config_file.display()
             )),
         }
-        // The Controller answers this with `RequestReload`, which is
-        // what carries fresh `WorkerSettings` - and therefore the new
-        // region - into the pipeline. Same push `reload_config` makes,
-        // without re-reading a file we just wrote.
+        // The Controller handles this with `RequestReload`.
+        // It carries fresh `WorkerSettings` and the new region into the
+        // pipeline.
+        // This matches `reload_config` without another file read.
         let cfg = controller_config(&self.config);
         self.feed(Event::ConfigReloaded(Box::new(cfg)));
         self.sync_static_outline();
     }
 
-    /// Put the static region's border where [`static_overlay_region`]
-    /// says it belongs, or take it down.
+    /// Place the static-region border where [`static_overlay_region`] needs
+    /// it, or hide it.
     ///
-    /// One function for all three call sites - startup, every config
-    /// reload, and a region set - so the three-way condition is asked
-    /// once and cannot drift between them (the Windows bin's rule, whose
-    /// `LiveSettings::static_overlay_region` this predicate is).
+    /// One function serves startup, config reload, and region updates.
+    /// It evaluates the three conditions once, so call sites cannot diverge.
+    /// This matches the Windows bin rule in
+    /// `LiveSettings::static_overlay_region`.
     fn sync_static_outline(&mut self) {
         let wanted = static_overlay_region(&self.config);
         let screens = self.screens();
         let Some(outline) = self.static_outline.as_mut() else {
-            // No layer shell, so no border - an honest degradation, said
-            // once and only when something actually wanted one.
+            // No layer shell means no border.
+            // Report this reduced state once when the config asks for a border.
             if wanted.is_some() {
                 self.log.diag(
                     "static region: no outline on this compositor (no zwlr_layer_shell_v1), \
@@ -884,11 +880,11 @@ impl App {
             return;
         };
         let was = outline.marks().first().map(|m| m.rect);
-        // Told every time rather than only on a change: a compositor that
-        // closed a pane leaves the desired state intact but the surface
-        // gone, so re-asserting is what puts it back. The *log* is what
-        // is gated below, because a reload in Line mode has nothing to
-        // report.
+        // Send the desired state every time, not only after a change.
+        // A closed pane can remove a surface while the desired state stays the
+        // same.
+        // Reassert the state to restore it. Gate only the log because Line
+        // mode has nothing to report.
         match wanted {
             Some(rect) => outline.show(&[overlay::Mark { rect, colour: overlay::BORDER }], &screens),
             None => outline.hide(),
@@ -907,22 +903,22 @@ impl App {
         });
     }
 
-    // ---- the mining screenshot and the picture that rides an add ----
+    // ---- Mining screenshot and picture for an add ----
 
-    /// Where `actions.screenshot.save_dir` resolves to: absolute as
-    /// typed, otherwise beside the exe in portable mode and under the
-    /// XDG data dir everywhere else.
+    /// Resolve `actions.screenshot.save_dir`.
+    /// Absolute values stay absolute. Relative values use the executable
+    /// directory in Portable mode and the XDG data directory otherwise.
     fn screenshots_dir(&self) -> PathBuf {
         self.paths.screenshots_dir(&self.config.actions.screenshot.save_dir)
     }
 
-    /// The picture that rides along with the add the Controller just
-    /// authorised, or `None` when none does.
+    /// Return the picture for the add that the Controller approved, or `None`
+    /// if no picture applies.
     ///
-    /// Every part of that decision is core's (`chibipop::shot::plan_add`):
-    /// the `include_on_add` gate, the blank-expression and already-added
-    /// guards, the filename and the picture field. This only hands it the
-    /// popup, the config and the clock.
+    /// Core owns this decision (`chibipop::shot::plan_add`).
+    /// It checks `include_on_add`, the blank-expression and already-added
+    /// guards, the filename, and the picture field.
+    /// This function supplies the popup, config, and clock.
     fn plan_shot_for_add(&self) -> Option<chibipop::shot::ShotPlan> {
         let view = self.controller.popup()?;
         chibipop::shot::plan_add(
@@ -933,33 +929,31 @@ impl App {
         )
     }
 
-    /// `screenshot`: grab a region and file it as the mining context for
-    /// the lookup on screen - Windows' `MiningContextScreenshot`.
+    /// `screenshot`: grab a region and save it as the Mining context for the
+    /// on-screen lookup (`MiningContextScreenshot` on Windows).
     ///
-    /// Windows gates the action on `popup_visible` and a top card
-    /// (`action/screenshot.rs::is_available`) and does *nothing at all*
-    /// when either is missing. The same gate holds here, because the
-    /// picture is filed against the word on screen and there is no word
-    /// without one - but the silence does not: a key the user bound and
-    /// pressed gets a line saying why nothing happened, which is the
-    /// only diagnosis available on a compositor bind (no dialog, no
-    /// return code the user sees).
+    /// Windows uses `popup_visible` and a top card as its gate
+    /// (`action/screenshot.rs::is_available`).
+    /// If either is absent, Windows does nothing.
+    /// This method uses the same gate because the picture belongs to the
+    /// on-screen word.
+    /// It logs the reason because a compositor bind has no dialog or visible
+    /// return code.
     fn mining_screenshot(&mut self) {
         let planned = self.controller.popup().map(|view| {
             (
                 view.presentation.top.is_some(),
-                // The ungated plan: the mining screenshot files a
-                // picture whatever the popup's add state is, so it takes
-                // none of `plan_add`'s guards and does not read
-                // `include_on_add`.
+                // This plan has no add gate. The Mining screenshot saves a
+                // picture regardless of the popup add state.
+                // It therefore skips `plan_add` guards and `include_on_add`.
                 chibipop::shot::plan(
                     &view,
                     &self.config,
                     &self.screenshots_dir(),
                     chibipop::shot::epoch_secs(),
                 ),
-                // The popup's own view of AnkiConnect. False still
-                // writes the PNG; it just has no card to ride on.
+                // Popup AnkiConnect state. False still writes the PNG without
+                // a card.
                 view.anki.enabled && view.anki.connected,
             )
         });
@@ -982,19 +976,18 @@ impl App {
         }
     }
 
-    /// Park a plan and ask the pump to drain it once this batch is over.
+    /// Park a plan and ask the pump to drain it after this batch.
     ///
-    /// The idle callback is calloop's own "the loop finished dispatching
-    /// and has nothing left to do", which is exactly the seam the
-    /// Windows bin gets from the bottom of its message loop: the pick
-    /// below runs a nested pump, and running one inside a command batch
-    /// would re-enter the Controller's dispatch half-way through one.
+    /// The idle callback runs after calloop finishes dispatch.
+    /// This matches the Windows message-loop seam.
+    /// A pick uses a nested pump. A nested pump inside a command batch would
+    /// re-enter Controller dispatch before the batch ends.
     fn park_shot(&mut self, shot: Pending) {
         if self.shot.is_some() {
-            // Two picks cannot share the screen, and the second would be
-            // dragged over a dim the first put there. Reachable: the
-            // control socket drains every waiting connection in one
-            // callback, so two `chibipop ctl` presses can land together.
+            // Two picks cannot share the screen. The second would use the dim
+            // from the first.
+            // The control socket drains all queued connections in one callback,
+            // so two `chibipop ctl` presses can arrive together.
             self.log
                 .diag("screenshot: a region pick is already owed, so this one is refused");
             self.shot_without_picture(shot, "another pick is in flight");
@@ -1004,25 +997,24 @@ impl App {
         self.pump.insert_idle(|app: &mut App| app.drain_shot());
     }
 
-    /// The OS half of a parked shot: hide, drag, grab.
+    /// OS part of a parked shot: hide, drag, and grab.
     ///
-    /// The hide is [`App::pick_region`]'s; the popup stays down until the
-    /// pixels are in, because the whole point of the sequence is that it
-    /// is not in them.
+    /// [`App::pick_region`] hides the popup.
+    /// The popup stays down until pixels arrive, so it does not enter them.
     fn drain_shot(&mut self) {
         let Some(Shot::Parked(shot)) = self.shot.take() else { return };
-        // `None` is the product's own deadline (`select::PICK_TIMEOUT`),
-        // the same one `static-region` takes: a second constant here
-        // would be a second answer to "how long may a pick hold the
-        // pump".
+        // `None` uses the product deadline (`select::PICK_TIMEOUT`), the same
+        // as `static-region`.
+        // A second constant would create a second pick duration.
         let picked = self.pick_region(None);
         self.took_shot_region(picked, shot);
     }
 
-    /// What a finished pick means. Split from [`App::drain_shot`] for the
-    /// reason `took_static_region` is split from `pick_static_region`:
-    /// the pick is a nested pump that needs a compositor and this half
-    /// is pure state, so this is the seam the daemon tests drive.
+    /// Interpret a completed pick.
+    /// Split from [`App::drain_shot`] for the same reason as
+    /// `took_static_region` and `pick_static_region`.
+    /// The pick uses a nested pump and needs a compositor.
+    /// This part holds pure state for daemon tests.
     fn took_shot_region(&mut self, picked: Option<PhysRect>, shot: Pending) {
         match picked {
             Some(region) => self.spawn_shot(region, shot),
@@ -1033,11 +1025,11 @@ impl App {
         }
     }
 
-    /// One arbitrary-rect grab, on a thread of its own.
+    /// Grab an arbitrary rect on its own thread.
     ///
-    /// The plan stays here rather than riding into the closure: a
-    /// `Builder::spawn` that fails drops its closure, and a plan lost
-    /// that way would leave the popup at "Adding…" for good.
+    /// Keep the plan here.
+    /// A failed `Builder::spawn` drops its closure and could leave the popup
+    /// at "Adding…" forever.
     fn spawn_shot(&mut self, region: PhysRect, shot: Pending) {
         self.shot = Some(Shot::Grabbing(shot));
         let setup = self.capture_setup();
@@ -1057,10 +1049,10 @@ impl App {
         }
     }
 
-    /// What a one-shot grab needs to open a backend of its own: the
-    /// startup capability probe, the rung the capture ladder picked, and
-    /// the state dir the portal rung keeps its restore token in - so a
-    /// second session on rung 2 is silent instead of prompting again.
+    /// Data for a one-shot grab to open its own backend.
+    /// It includes the startup capability probe, the selected capture rung,
+    /// and the state dir for the portal restore token.
+    /// A second rung-2 session can stay silent without a new prompt.
     fn capture_setup(&self) -> capture::Setup {
         capture::Setup {
             globals: self.worker_setup.globals.clone(),
@@ -1069,9 +1061,8 @@ impl App {
         }
     }
 
-    /// The grabbing thread answered. The popup goes back up here and
-    /// nowhere earlier, and the pixels go on to the call that writes and
-    /// files them - off this thread again
+    /// The grab thread returned. Restore the popup here.
+    /// Send pixels to the file-and-card call on another thread
     /// (ARCHITECTURE.md#workspace-and-seams).
     fn handle_shot(&mut self, grabbed: Result<Frame, String>) {
         let Some(Shot::Grabbing(shot)) = self.shot.take() else {
@@ -1093,8 +1084,8 @@ impl App {
                     files_a_card: shot.kind.files_a_card(),
                 });
             }
-            // Windows' rule exactly: a grab that failed is a card
-            // without a picture, not a card that never happens.
+            // Windows uses the same rule: a failed grab yields a card without
+            // a picture.
             Err(e) => {
                 self.log.diag(&format!("screenshot: the grab failed - {e}"));
                 self.shot_without_picture(shot, "the grab failed");
@@ -1102,13 +1093,12 @@ impl App {
         }
     }
 
-    /// A shot that will carry no picture - cancelled, expired, or a grab
-    /// that did not come back.
+    /// Shot with no picture: cancel, expiry, or failed grab.
     ///
-    /// An add still files its card: `start_add` marked the popup adding
-    /// before it authorised the picture, so this dispatch is the only
-    /// thing that ever clears "Adding…". A mining screenshot has nobody
-    /// waiting on it and stops here.
+    /// An add still files its card. `start_add` marked the popup in the add
+    /// state before it approved the picture.
+    /// This dispatch alone clears "Adding…". A Mining screenshot has no caller
+    /// and ends here.
     fn shot_without_picture(&mut self, shot: Pending, why: &str) {
         match shot.kind {
             ShotKind::Add => {
@@ -1124,15 +1114,12 @@ impl App {
         }
     }
 
-    /// Put the popup back after a pick and a grab took it off screen.
+    /// Restore the popup after a pick or grab hides it.
     ///
-    /// Two guards, because the pump ran while the grab did: something
-    /// already on screen is newer than what we took down, and a
-    /// Controller with no popup retracted it (`HidePopup`) while we were
-    /// away - re-showing then would resurrect a popup the state machine
-    /// has finished with. The Anki state comes from the Controller for
-    /// the reason [`App::sync_anki_slot`] exists: the slot is painted
-    /// into the panel, so a re-raster carries whatever it says now.
+    /// The pump can receive a newer popup while the grab runs.
+    /// If a popup exists, keep it. If the Controller hides it, do not restore it.
+    /// The Controller owns Anki state because the slot is part of the panel.
+    /// A new raster therefore uses the current state.
     fn restore_popup(&mut self) {
         if self.popup.as_ref().and_then(Popup::shown).is_some() || !self.controller.is_shown() {
             return;
@@ -1143,15 +1130,14 @@ impl App {
         self.show_popup(&ShowRequest { anki: self.controller.anki().cloned(), ..req });
     }
 
-    // ---- OCR to the clipboard ----
+    // ---- OCR to clipboard ----
 
-    /// `ocr-clipboard`: pick a region, read it, and take the selection.
+    /// `ocr-clipboard`: pick a region, read it, and copy the selection.
     ///
-    /// Both refusals happen *before* the pick, because dragging a box
-    /// that can go nowhere is worse than being told so up front: a
-    /// compositor with no data-control protocol has no clipboard
-    /// chibipop can write, and a region still waiting on the
-    /// recogniser owns the answer channel this one would arrive on.
+    /// Check both refusal cases before the pick.
+    /// A compositor without data-control has no clipboard that chibipop can
+    /// write.
+    /// A region that still waits for the recognizer owns the answer channel.
     fn ocr_to_clipboard(&mut self) {
         if self.clipboard.is_none() {
             self.log.diag(&clipboard::unavailable_line());
@@ -1165,19 +1151,18 @@ impl App {
             ));
             return;
         }
-        // `None` is the product's own deadline (`select::PICK_TIMEOUT`);
-        // a second constant here would be a second answer to "how long
-        // may a pick hold the pump".
+        // `None` uses the product deadline (`select::PICK_TIMEOUT`).
+        // A second constant would conflict with the product pick duration.
         let picked = self.pick_region(None);
         self.took_ocr_region(picked);
     }
 
-    /// What a finished pick means.
+    /// Interpret a completed pick.
     ///
-    /// Split from [`App::ocr_to_clipboard`] for the reason
-    /// [`App::took_static_region`] is: the pick is a nested pump that
-    /// needs a compositor and this half is state, so this is the seam
-    /// the daemon tests drive.
+    /// Split from [`App::ocr_to_clipboard`] for the same reason as
+    /// [`App::took_static_region`] and `pick_static_region`.
+    /// The pick uses a nested pump and needs a compositor.
+    /// This part holds state for daemon tests.
     fn took_ocr_region(&mut self, picked: Option<PhysRect>) {
         let Some(region) = picked else {
             self.log.diag("ocr-clipboard: pick cancelled - the clipboard is untouched");
@@ -1188,15 +1173,15 @@ impl App {
         self.spawn_ocr_read(region);
     }
 
-    /// Grab the region and hand its pixels to the Worker's engine.
+    /// Grab the region and send its pixels to the Worker engine.
     ///
-    /// Two off-pump stages, one thread each and neither of them this
-    /// one: the grab opens a capture backend of its own, and the
-    /// recogniser is thread-affine to the Worker
-    /// (ARCHITECTURE.md#ocr-engine), so the grab thread forwards
-    /// straight into [`worker::OcrJobs`] rather than bouncing a whole
-    /// frame off the pump that has no use for it. Only the text comes
-    /// back here, as an event (ARCHITECTURE.md#workspace-and-seams).
+    /// Two stages run off the pump, one thread each.
+    /// The grab opens its own backend. The thread-affine recognizer stays on
+    /// the Worker (ARCHITECTURE.md#ocr-engine).
+    /// The grab thread sends the frame to [`worker::OcrJobs`].
+    /// The pump does not copy the frame.
+    /// Only text returns here as an Event
+    /// (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_ocr_read(&mut self, region: PhysRect) {
         let setup = self.capture_setup();
         let jobs = self.ocr_jobs.clone();
@@ -1204,11 +1189,10 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("chibipop-ocr-clip".to_string())
             .spawn(move || {
-                // Native resolution: this adapter never upscales, and
-                // meikiocr is strictly worse on 2x crops on every
-                // benchmark slice (ARCHITECTURE.md#ocr-engine). The
-                // Windows twin's 2x is its engine's fact, not this
-                // one's.
+                // Use native resolution. This adapter never upscales.
+                // meikiocr runs worse on 2x crops in every benchmark slice
+                // (ARCHITECTURE.md#ocr-engine).
+                // The Windows twin uses 2x because its engine needs it.
                 match capture::oneshot(&setup, region) {
                     Ok(frame) => {
                         let request = worker::OcrRequest {
@@ -1217,8 +1201,8 @@ impl App {
                             h: frame.h,
                             answer: answer.clone(),
                         };
-                        // A queue with no pipeline behind it answers
-                        // here rather than parking the job forever.
+                        // A queue without a pipeline returns an error here.
+                        // No job can remain in the queue forever.
                         if let Err(e) = jobs.send(request) {
                             let _ = answer.send(Err(format!("{e:#}")));
                         }
@@ -1235,11 +1219,10 @@ impl App {
         }
     }
 
-    /// The recogniser answered: join the lines and take the selection.
+    /// The recognizer returned. Join lines and copy the selection.
     ///
-    /// The joining rule is core's ([`chibipop::text::layout::join_lines`]),
-    /// shared with the Windows action so one region read on either
-    /// platform copies the same text.
+    /// Core owns this rule for line joins (`chibipop::text::layout::join_lines`).
+    /// The Windows action uses it too, so both platforms copy the same text.
     fn handle_ocr_text(&mut self, read: Result<Vec<OcrLine>, String>) {
         let Some(region) = self.ocr_job.take() else {
             self.log.diag("ocr-clipboard: text arrived with no region waiting for it");
@@ -1261,9 +1244,8 @@ impl App {
             ));
             return;
         }
-        // Counts, never the text: what the user read is screen content
-        // and diagnostics are not opted in to
-        // (ARCHITECTURE.md#platform-integration).
+        // Log counts, not text. The text is screen content, and diagnostics do
+        // not use lookup opt-in (ARCHITECTURE.md#platform-integration).
         let chars = text.chars().count();
         let Some(board) = self.clipboard.as_ref() else {
             self.log.diag(&clipboard::unavailable_line());
@@ -1282,17 +1264,15 @@ impl App {
         }
     }
 
-    /// `CHIBIPOP_SURFACE_PROBE=1`: drive the outline and the region
-    /// selector once at startup and say what they did.
+    /// `CHIBIPOP_SURFACE_PROBE=1`: show the outline and region selector once at
+    /// startup, then report their results.
     ///
-    /// The role `CHIBIPOP_POPUP_DEMO` plays for the popup and
-    /// `capture-dump` plays for the capture ladder. These two surfaces
-    /// are otherwise only reachable from features that do not exist yet,
-    /// and a surface nobody can put on screen is a surface nobody can
-    /// check - so this maps them both against a real compositor, paints
-    /// them, and takes them down. It synthesizes no seat input: the pick
-    /// is left to hit its deadline, which is also how the wedge guard
-    /// gets exercised.
+    /// This has the same role as `CHIBIPOP_POPUP_DEMO` for the popup and
+    /// `capture-dump` for the capture ladder.
+    /// These surfaces need a compositor, so this probe maps, paints, and removes
+    /// them against a real compositor.
+    /// It creates no seat input. The pick reaches its deadline and exercises the
+    /// timeout guard.
     fn probe_surfaces(&mut self, queue: &mut wayland_client::EventQueue<App>) {
         let screens = self.screens();
         let Some(screen) = screens.first().cloned() else {
@@ -1304,13 +1284,11 @@ impl App {
             screen.name, screen.rect.w, screen.rect.h, screen.scale
         ));
 
-        // Two boxes well inside the output, so the run is reproducible
-        // on any monitor: one wide, one square, far enough apart that
-        // their bounding box is bigger than either. They go in through
-        // the shipped consumer rather than straight at `Outline::show`,
-        // so what the probe puts on screen is exactly what a hover puts
-        // on screen - two kinds, two theme colours, both outset by the
-        // border (`Command::ShowScanOverlay`).
+        // Place two boxes inside the output for repeatable runs.
+        // Use one wide box and one square box with separate positions.
+        // Send them through the shipped consumer, not directly to `Outline::show`.
+        // This matches hover behavior with two kinds and theme colors, each
+        // outside the border (`Command::ShowScanOverlay`).
         let scan = vec![
             ScanRect {
                 rect: PhysRect { x: screen.rect.x + 100, y: screen.rect.y + 100, w: 240, h: 60 },
@@ -1324,10 +1302,9 @@ impl App {
         self.execute(Command::ShowScanOverlay { rects: scan });
         match self.scan_outline.as_ref().map(Outline::surface_count) {
             Some(count) => {
-                // The outline's surfaces live on the daemon's queue, so
-                // the round trip is what carries their configures back
-                // and puts the strips on screen; without it the probe
-                // would prove only that the requests were sent.
+                // Outline surfaces use the daemon queue.
+                // A round trip returns configures and puts the strips on screen.
+                // Without it, the probe would only show sent requests.
                 if let Err(e) = queue.roundtrip(self) {
                     self.log.diag(&format!("probe: outline round trip failed: {e}"));
                 }
@@ -1337,15 +1314,14 @@ impl App {
             None => self.log.diag("probe: no outline on this compositor"),
         }
 
-        // One pick, left to expire: no input is synthesized, so this
-        // proves map, configure, paint, nested pump, deadline and
-        // teardown without touching the user's pointer.
+        // Leave one pick to expire without seat input.
+        // This tests map, configure, paint, nested pump, deadline, and teardown
+        // without input from the user's pointer.
         let picked = self.pick_region(Some(SURFACE_PROBE_DEADLINE));
         self.log.diag(&format!("probe: pick answered {}", picked.is_some()));
 
-        // The empty vector is the hide, on both platforms
-        // (`controller.rs`), so the probe takes the outline down the way
-        // a retracted popup does.
+        // An empty vector hides on both platforms (`controller.rs`).
+        // The probe uses the same path as popup retraction.
         self.execute(Command::ShowScanOverlay { rects: Vec::new() });
         if let Some(left) = self.scan_outline.as_ref().map(|o| o.marks().len()) {
             if let Err(e) = queue.roundtrip(self) {
@@ -1356,18 +1332,18 @@ impl App {
         }
     }
 
-    // ---- routing ----
+    // ---- routes ----
 
-    /// A layer surface was configured. Whose it is decides everything:
-    /// the pick paints its dim, either outline its strips, the popup its
-    /// panel.
+    /// A layer surface was configured. Surface identity selects the owner.
+    /// The pick paints the dim, an outline paints strips, and the popup paints
+    /// the panel.
     pub(crate) fn layer_configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
                 pick.configured(layer, size);
             }
-            // The dim has to be on screen before the drag starts, and
-            // the pump's own repaint is one iteration away.
+            // The dim must appear before the drag starts.
+            // The pump repaint takes one iteration.
             self.pick_tick();
             self.flush_surface_notes();
             return;
@@ -1389,15 +1365,15 @@ impl App {
         if self.popup.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             self.popup_mut().configured(layer, size);
             self.flush_popup_notes();
-            // A resize painted here rather than in `show`, so this is
-            // where a scripted pointer pass finds its frame.
+            // A resize paints here instead of in `show`, so a scripted pointer
+            // pass finds its frame here.
             self.run_pointer_script();
         }
     }
 
-    /// The compositor closed a layer surface. For the popup that is
-    /// routine recreation; for a pick it is a cancel; for an outline it
-    /// is one surface fewer until the next show.
+    /// The compositor closed a layer surface.
+    /// The popup recreates it, the pick cancels, and the outline loses one
+    /// surface until the next show.
     pub(crate) fn layer_closed(&mut self, layer: &LayerSurface) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1426,9 +1402,8 @@ impl App {
         }
     }
 
-    /// A `wl_surface.frame` callback. Only the popup asks for one - it
-    /// is the only surface here whose commits are paced by the refresh
-    /// rate - so anything else naming one is not ours to act on.
+    /// A `wl_surface.frame` callback. Only the popup requests one.
+    /// Popup commits use the refresh rate, so ignore other owners.
     pub(crate) fn surface_frame(&mut self, surface: &WlSurface) {
         if !self.popup.as_ref().is_some_and(|p| p.owns(surface)) {
             return;
@@ -1438,9 +1413,9 @@ impl App {
         self.run_pointer_script();
     }
 
-    /// One `wl_pointer` frame. A pick owns the pointer while it is up -
-    /// its surfaces cover the whole output, so nothing else can be under
-    /// the cursor - and the popup gets every frame that is not a pick's.
+    /// One `wl_pointer` frame. The pick owns the pointer while active because
+    /// its surfaces cover the output.
+    /// The popup receives frames that do not belong to the pick.
     pub(crate) fn pointer_frame(&mut self, events: &[PointerEvent]) {
         if let Some(pick) = self.pick.as_mut() {
             if select::pointer_frame(pick, events) {
@@ -1456,10 +1431,10 @@ impl App {
         self.pointer_interactions(interactions);
     }
 
-    /// A `preferred_scale` arrived. The scale is never latched: Hyprland
-    /// may send 1.0 first and correct it later, so a change to the
-    /// surface currently showing is re-rastered and re-placed, and the
-    /// Controller hears the new rect.
+    /// A `preferred_scale` Event arrived. The daemon does not latch scale.
+    /// Hyprland can send 1.0 and then correct it.
+    /// A change on the shown surface triggers re-raster and re-place.
+    /// The Controller receives the new rect.
     pub(crate) fn popup_rescaled(&mut self, idx: usize, scale_120ths: u32) {
         let moved = self.popup.as_mut().is_some_and(|p| p.preferred_scale(idx, scale_120ths));
         self.flush_popup_notes();
@@ -1479,11 +1454,10 @@ impl App {
         }
     }
 
-    /// Popup-local pointer input -> Controller Events.
+    /// Popup-local pointer input becomes Controller Events.
     ///
-    /// The other half of the contextual-interaction bargain: there is no
-    /// global wheel or click channel on Wayland, so these arrive from
-    /// the popup's own input region and nowhere else.
+    /// Wayland has no global wheel or click channel.
+    /// These Events come only from the popup input region.
     pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
         for interaction in interactions {
             match interaction {
@@ -1503,9 +1477,8 @@ impl App {
                     ));
                     self.feed(Event::Clicked { local, hit });
                 }
-                // Core reserves the slot and the painter fills it; the
-                // Controller decides whether a click on it is an add at
-                // all.
+                // Core reserves the slot and the painter fills it.
+                // The Controller decides whether the click becomes an add.
                 popup::Interaction::Anki { local } => {
                     self.log.diag(&format!(
                         "pointer: click at panel {},{} -> the Anki slot",
@@ -1517,17 +1490,15 @@ impl App {
         }
     }
 
-    /// The scripted pointer passes (`CHIBIPOP_POINTER_SCRIPT`), driven
-    /// from here rather than inside the popup.
+    /// Scripted pointer passes (`CHIBIPOP_POINTER_SCRIPT`) start here, not
+    /// inside the popup.
     ///
-    /// Why here: each step's effect has to reach the Controller and
-    /// come back as a repaint *before* the next step resolves, or a
-    /// scripted scroll would be followed by a click against the frame
-    /// it just replaced. Called after every path that may have painted
-    /// (a synchronous show, a configure, a frame callback), because
-    /// which of the three actually rasters depends on whether the
-    /// surface had to be resized first. Re-entrant calls return at once
-    /// and the loop below picks up the pass they armed.
+    /// Each step must reach the Controller and return as a repaint before the
+    /// next step resolves.
+    /// Otherwise a scroll followed by a click would use the replaced frame.
+    /// This method runs after a show, configure, or frame callback because any
+    /// path can raster.
+    /// Re-entrant calls return at once. The loop then takes the pass they arm.
     pub(crate) fn run_pointer_script(&mut self) {
         if self.scripting {
             return;
@@ -1544,8 +1515,8 @@ impl App {
         self.scripting = false;
     }
 
-    /// One scripted step, through the same entry points a real
-    /// `wl_pointer` frame drives.
+    /// One scripted step through the same entry points as a real
+    /// `wl_pointer` frame.
     fn pointer_step(&mut self, panel: usize, step: popup::Step) {
         if self.popup.is_none() {
             return;
@@ -1583,9 +1554,9 @@ impl App {
         self.pointer_interactions(interaction.into_iter().collect());
     }
 
-    /// One Event through the Controller, and every Command it answers
-    /// with executed - then the dwell watch brought in line with what
-    /// is now on screen (ARCHITECTURE.md#hover-cadence).
+    /// Send one Event through the Controller and run each Command it returns.
+    /// Then sync the dwell watch with the current screen
+    /// (ARCHITECTURE.md#hover-cadence).
     fn feed(&mut self, event: Event) {
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
@@ -1593,18 +1564,17 @@ impl App {
         self.sync_dwell();
     }
 
-    /// Whether the dwell re-check has anything to watch here and now.
+    /// Return whether the dwell re-check has something to watch now.
     fn dwell_wanted(&self) -> bool {
         dwell_wanted(self.hold, self.controller.dwell_armed())
     }
 
-    /// Arm the dwell watch when there is something to watch.
+    /// Arm the dwell watch when a target exists.
     ///
-    /// Disarming is the timer's own job (see [`App::dwell_tick`]): a
-    /// source must not be removed from inside its own dispatch, and a
-    /// watch that retires on its next deadline still leaves an idle
-    /// daemon holding no timed source at all - which is what zero idle
-    /// wakeups means on an event-driven cursor rung.
+    /// [`App::dwell_tick`] removes the timer.
+    /// A source cannot remove itself while dispatch runs.
+    /// When the watch expires, the idle daemon has no timed source. Event
+    /// cursor rungs then cause no idle wakeups.
     fn sync_dwell(&mut self) {
         if self.dwell.is_some() || !self.dwell_wanted() {
             return;
@@ -1612,9 +1582,9 @@ impl App {
         self.arm_dwell();
     }
 
-    /// One dwell watch, from now. Unconditional: `sync_dwell` owns the
-    /// decision, and the tests arm one by hand because a popup with a
-    /// rect needs a compositor.
+    /// Create one dwell watch from now.
+    /// `sync_dwell` owns the decision. Tests arm one by hand because a popup
+    /// with a rect needs a compositor.
     fn arm_dwell(&mut self) {
         let timer = Timer::from_duration(budget::DWELL);
         match self.pump.insert_source(timer, |_, _, app: &mut App| app.dwell_tick()) {
@@ -1628,13 +1598,13 @@ impl App {
         }
     }
 
-    /// One dwell deadline: re-ask the shown popup's own question, then
-    /// decide whether this watch is still wanted
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// At each dwell deadline, ask the shown popup's question, then decide
+    /// whether the watch remains (ARCHITECTURE.md#hover-cadence).
     ///
-    /// The re-grab races damage on the same deadline below the seams, so
-    /// an unchanged screen costs no copy and no OCR pass, and the
-    /// Controller re-presents nothing; only a change reaches the popup.
+    /// The re-grab races damage at this deadline below the seams.
+    /// An unchanged screen needs no copy or OCR. The Controller returns no new
+    /// presentation.
+    /// Only a change reaches the popup.
     fn dwell_tick(&mut self) -> TimeoutAction {
         if self.trace {
             self.log.diag("dwell: deadline");
@@ -1652,11 +1622,10 @@ impl App {
 
     fn execute(&mut self, cmd: Command) {
         match cmd {
-            // What OCR must not read is our own popup, and only on a
-            // live grab: a frozen hold's pixels predate it
-            // (ARCHITECTURE.md#capture-and-masking). Wayland has no
-            // protocol-level surface exclusion, so this rect is the
-            // whole mechanism.
+            // OCR must not read our popup while a live grab runs.
+            // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).
+            // Wayland lacks surface exclusion, so this mask is the complete
+            // mechanism.
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
                 self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
@@ -1668,10 +1637,9 @@ impl App {
                 let settings = worker::settings(&self.config, &self.dicts);
                 self.send_trigger(TriggerKind::Reload(Box::new(settings)), id);
             }
-            // New content, so a scripted pass is owed one frame from
-            // now. A `RepaintPopup` below is deliberately *not* armed:
-            // a pass that re-ran on its own scroll repaint would drive
-            // itself in a circle.
+            // New content needs one scripted pass from this frame.
+            // Do not arm a pass for `RepaintPopup`. A scroll repaint would
+            // otherwise call itself.
             Command::ShowPopup { presentation, anchor, scroll, show_back } => {
                 if let Some(popup) = self.popup.as_mut() {
                     popup.arm_script();
@@ -1681,9 +1649,8 @@ impl App {
                     anchor,
                     scroll,
                     show_back,
-                    // The slot is painted into the panel here, not
-                    // hung beside it as on Windows, so every raster
-                    // carries the affordance's own state.
+                    // The slot is part of the panel, not a separate Windows
+                    // window. Every raster carries its state.
                     anki: self.controller.anki().cloned(),
                 });
             }
@@ -1699,35 +1666,34 @@ impl App {
                     self.show_popup(&req);
                 }
             }
-            // A glossary citation: `xdg-open` is the desktop's own
-            // answer to "which browser", and the scheme was
-            // allow-listed to `http`/`https` by `layout::link_action`
-            // because the URL comes out of a dictionary file. Detached
-            // and unmasked, like the settings child: the daemon blocks
-            // SIGINT/SIGTERM for every thread it owns and a mask
-            // outlives `exec`.
+            // A glossary citation uses desktop `xdg-open` to choose a browser.
+            // `layout::link_action` allow-lists `http` and `https` because the
+            // URL comes from a dictionary file.
+            // Run it detached and unmasked like the settings child.
+            // The daemon blocks SIGINT/SIGTERM in its threads. A mask would
+            // outlive `exec`.
             Command::OpenUrl(url) => self.open_url(&url),
             Command::HidePopup => self.hide_popup(),
-            // Two shipped settings draw through here and nowhere else:
-            // `debug.show_scan_region` (the capture boxes) and
-            // `popup.highlight_match` (the word being defined, which
-            // core's `matched` field otherwise only feeds hold-region
-            // arithmetic). An empty vector is the hide.
+            // Two settings use this path:
+            // `debug.show_scan_region` shows capture boxes.
+            // `popup.highlight_match` shows the matched word.
+            // The `matched` field otherwise only feeds hold-region arithmetic.
+            // An empty vector hides the overlay.
             Command::ShowScanOverlay { rects } => self.show_scan_overlay(&rects),
-            // A fresh popup replaces the old one: the sub-notch delta
-            // banked against the entry that just went away must not
-            // nudge the new one.
+            // A fresh popup replaces the old one.
+            // The sub-notch delta belongs to the old entry and must not move
+            // the new popup.
             Command::DiscardScroll => {
                 if let Some(popup) = self.popup.as_mut() {
                     popup.discard_scroll();
                 }
             }
-            // Screen content: written only where the user opted in.
+            // Screen content is written only after user opt-in.
             Command::LogLookup { headword, match_len } => {
                 self.log.lookup(&format!("{headword}  match={match_len}"));
             }
-            // A cursor crossing text the dictionary cannot serve would
-            // otherwise repeat one line per sample.
+            // When the cursor crosses unsupported text, one line could repeat
+            // for each sample.
             Command::WarnLookupFailed(msg) => {
                 if self.last_warning.as_deref() != Some(msg.as_str()) {
                     self.log.diag(&format!("lookup failed: {msg}"));
@@ -1738,23 +1704,23 @@ impl App {
             Command::CheckDupes { generation, exprs } => {
                 self.spawn_anki(AnkiCall::Dupes { generation, exprs });
             }
-            // The screenshot-on-add seam. A plan means a picture
-            // rides along, so the plain add is *not* dispatched: the
-            // call that carries the picture files the card. The OS
-            // half cannot happen here - see [`App::park_shot`].
+            // Screenshot-on-add seam. A plan carries a picture, so do not
+            // dispatch the plain add.
+            // The picture call files the card. OS work stays in
+            // [`App::park_shot`].
             Command::AddNote { expr, fields } => match self.plan_shot_for_add() {
                 Some(plan) => self.park_shot(Pending { plan, kind: ShotKind::Add }),
                 None => self.spawn_anki(AnkiCall::Add { expr, fields }),
             },
-            // The arming rows (`Set*Armed`, `SetCursorShape`) come off
-            // the Windows dispatch tick, which this daemon does not
-            // have: nothing here is armed per tick, because nothing
-            // here hooks the seat.
+            // Rows that arm (`Set*Armed`, `SetCursorShape`) come from the Windows
+            // dispatch tick.
+            // This daemon has no such tick or seat hook, so no row is armed per
+            // tick.
             other => self.log.diag(&format!("controller: {other:?} (no-op)")),
         }
     }
 
-    /// One trigger into the pipeline, or one line saying there is none.
+    /// Send one Trigger to the pipeline, or log that none exists.
     fn send_trigger(&mut self, kind: TriggerKind, id: RequestId) {
         let Some(worker) = self.worker.as_ref() else {
             self.log.diag("lookup: no pipeline - nothing to ask");
@@ -1766,8 +1732,8 @@ impl App {
         }
     }
 
-    /// How this lookup's pixels relate to the popup, in time: a hold
-    /// reads the press-time frame, everything else reads the screen.
+    /// Relate lookup pixels to the popup in time.
+    /// A hold reads the press-time frame. Other modes read the current screen.
     fn capture_mode(&self) -> CaptureMode {
         match self.hold {
             Some(_) => CaptureMode::Frozen,
@@ -1790,12 +1756,12 @@ impl App {
         }
     }
 
-    /// One AnkiConnect call, off the pump.
+    /// One AnkiConnect call outside the pump.
     ///
-    /// Every one of them is a blocking `ureq` request to a server that
-    /// may not be running at all, so none may happen on this thread: a
-    /// two-second connect timeout here would be two seconds of frozen
-    /// popup. The answer comes back as an event, like the Worker's
+    /// Each request blocks in `ureq` while it waits for a server.
+    /// The server can be absent, so this call must stay off the pump.
+    /// A two-second connect timeout would freeze the popup for two seconds.
+    /// The answer returns as an Event, like the Worker's path
     /// (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_anki(&mut self, call: AnkiCall) {
         let anki = self.config.anki.clone();
@@ -1810,11 +1776,11 @@ impl App {
         }
     }
 
-    /// One AnkiConnect answer, back on the pump thread.
+    /// One AnkiConnect answer on the pump thread.
     ///
-    /// The lines carry counts and note ids and never the expression
-    /// itself: what the user read is screen content, and diagnostics
-    /// are not opted in to (ARCHITECTURE.md#platform-integration).
+    /// Lines carry counts and note IDs, not the expression.
+    /// Screen content stays private because the user did not opt in to
+    /// diagnostics (ARCHITECTURE.md#platform-integration).
     fn handle_anki(&mut self, outcome: AnkiOutcome) {
         match outcome {
             AnkiOutcome::Dupes { generation, dupes } => {
@@ -1847,11 +1813,11 @@ impl App {
                 self.feed(Event::NoteAdded { expr, failed });
             }
             AnkiOutcome::Shot { expr, dir, filed } => {
-                // `None` is a picture with no card behind it, so there
-                // is no add lifecycle to close and nothing may claim
-                // the word was filed - the other two both answer the
-                // popup, which `start_add` marked adding before it
-                // authorised the picture.
+                // `None` means a picture without a card.
+                // No add lifecycle closes, and no code can claim that it filed
+                // the word.
+                // Other outcomes answer the popup because `start_add` marked
+                // it in the add state before it allowed the picture.
                 let failed = match filed {
                     Ok(Some(id)) => {
                         self.log.diag(&format!(
@@ -1879,16 +1845,16 @@ impl App {
         }
     }
 
-    /// The Anki affordance's state moved.
+    /// The Anki slot state changed.
     ///
-    /// Windows has a button window of its own to place, hide and
-    /// repaint; here the slot is part of the panel, so every paint above
-    /// already carries the current state and this only has to catch a
-    /// state that moved after the last raster.
+    /// Windows uses a separate button window for place, hide, and repaint.
+    /// Here the slot belongs to the panel.
+    /// Each paint already carries the current state.
+    /// This method catches a state change after the last raster.
     fn sync_anki_slot(&mut self) {
-        // Nothing shown is nothing to reconcile: retracting is
-        // `HidePopup`'s job, and the request left on the surface must
-        // never be re-shown from here.
+        // If no popup is shown, no state needs sync.
+        // `HidePopup` retracts it. Never show the request still on the surface
+        // from here.
         let Some(want) = self.controller.anki().cloned() else { return };
         let req = self.popup.as_ref().and_then(Popup::request);
         let Some(req) = req.filter(|req| req.anki.as_ref() != Some(&want)).cloned() else {
@@ -1897,9 +1863,10 @@ impl App {
         self.show_popup(&ShowRequest { anki: Some(want), ..req });
     }
 
-    /// Measure, place, raster, commit — then tell the Controller where
-    /// it landed. The bin owns the measurer, so this round-trip is how
-    /// the Controller learns a rect it cannot compute.
+    /// Measure, place, raster, and commit. Then tell the Controller where the
+    /// surface landed.
+    /// The bin owns the measurer, so this round trip gives the Controller a
+    /// rect it cannot compute.
     fn show_popup(&mut self, req: &ShowRequest) {
         let started = Instant::now();
         let shown = match self.popup.as_mut() {
@@ -1922,8 +1889,8 @@ impl App {
                     started.elapsed().as_micros(),
                 ));
                 self.placed(placed);
-                // A same-size show rasters synchronously, so the frame
-                // a scripted pass needs already exists.
+                // A same-size show rasters at once, so the scripted pass
+                // already has its frame.
                 self.run_pointer_script();
             }
             Err(e) => {
@@ -1941,15 +1908,15 @@ impl App {
         });
     }
 
-    /// Hide: a transparent buffer, never an unmap, so Hyprland's layer
-    /// animation never fires and this stays instant.
+    /// Hide with a transparent buffer, not an unmap.
+    /// Hyprland then does not fire a layer animation, so hide stays instant.
     ///
-    /// The scan outline goes with it. A lookup's boxes belong to the
-    /// popup that is showing its answer; leaving them up would outline
-    /// a word nothing is defining any more. This is where Windows hides
-    /// its overlay too (`app.rs`'s `Command::HidePopup`), and it also
-    /// covers the one Linux-only caller, [`App::pick_region`], which
-    /// must not leave a stale frame under the region selector.
+    /// Hide the scan outline too. Its boxes belong to the popup that shows the
+    /// answer.
+    /// The boxes would outline a word that no longer has a definition.
+    /// Windows uses the same overlay path (`app.rs`'s `Command::HidePopup`).
+    /// This also covers the Linux-only caller, [`App::pick_region`], which must
+    /// not leave an old frame under the region selector.
     fn hide_popup(&mut self) {
         let started = Instant::now();
         let was = self.popup.as_ref().and_then(Popup::shown).is_some();
@@ -1966,14 +1933,15 @@ impl App {
         }
     }
 
-    /// Outline what this hover captured and box the word it defined.
+    /// Show what this hover captured and box the word it defined.
     ///
-    /// `Command::ShowScanOverlay`'s Linux half: core decides *which*
-    /// rects to send (`debug.show_scan_region` gives the capture boxes,
-    /// `popup.highlight_match` the `Match` one, both off means an empty
-    /// vector), and this decides what they look like. The colours are
-    /// the popup's own theme, so the outline follows a theme change with
-    /// the panel and there is no second palette to keep in step.
+    /// Linux half of `Command::ShowScanOverlay`: core selects the rects.
+    /// `debug.show_scan_region` supplies capture boxes.
+    /// `popup.highlight_match` supplies the `Match` rect.
+    /// If both settings are off, the vector is empty.
+    /// This method selects the appearance.
+    /// The popup theme supplies colors, so the outline follows the panel theme
+    /// without a second palette.
     fn show_scan_overlay(&mut self, rects: &[ScanRect]) {
         let screens = self.screens();
         // The outline borrows the popup's `wl_shm`, `wl_compositor`,
@@ -1992,16 +1960,16 @@ impl App {
         self.flush_surface_notes();
     }
 
-    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`). It goes through the
-    /// exact path a lookup will: measure, place, commit, `PopupPlaced`.
+    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the lookup path:
+    /// measure, place, commit, and `PopupPlaced`.
     fn demo_show(&mut self) {
         let anchor = self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR);
         self.log.diag(&format!(
             "popup: demo show at anchor {},{} {}x{}",
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
-        // The demo bypasses the Controller, so it arms the scripted
-        // pointer pass itself.
+        // The demo bypasses the Controller. It arms the scripted pointer pass
+        // itself.
         if let Some(popup) = self.popup.as_mut() {
             popup.arm_script();
         }
@@ -2010,9 +1978,9 @@ impl App {
             anchor,
             scroll: 0,
             show_back: false,
-            // The demo asks for the slot so the in-panel Anki
-            // affordance is painted and can be inspected; production
-            // asks for it only when AnkiConnect answered.
+            // The demo requests the slot so the panel paints the Anki slot for
+            // inspection.
+            // Production requests it only after an AnkiConnect answer.
             anki: Some(chibipop::present::AnkiPopupState {
                 enabled: true,
                 connected: true,
@@ -2021,17 +1989,17 @@ impl App {
         });
     }
 
-    /// The last cursor sample as an anchor box, so a demo popup lands
-    /// where a lookup would have.
+    /// Return the last cursor sample as an anchor box, so the demo popup lands
+    /// where a lookup would land.
     fn cursor_anchor(&mut self) -> Option<PhysRect> {
         let (lx, ly) = self.last_poll?;
         let pos = self.cursor.logical_to_global(f64::from(lx), f64::from(ly))?;
         Some(PhysRect { x: pos.x, y: pos.y, w: DEMO_ANCHOR.w, h: DEMO_ANCHOR.h })
     }
 
-    /// One message from the tray thread, executed here on the daemon
-    /// thread where the log, the settings guard and the loop signal
-    /// live (ARCHITECTURE.md#platform-integration).
+    /// One tray message, handled on the daemon thread.
+    /// The log, settings guard, and loop signal live there
+    /// (ARCHITECTURE.md#platform-integration).
     fn handle_tray(&mut self, request: TrayRequest) {
         match request {
             TrayRequest::OpenSettings => self.spawn_settings(),
@@ -2043,23 +2011,23 @@ impl App {
         }
     }
 
-    /// The compositor's verdict on this connection: one diagnostic, then
-    /// the same stop the tray's Quit and the signal source use.
+    /// The compositor reports a verdict for this connection.
+    /// Log once, then stop as the tray Quit and signal source do.
     ///
-    /// A protocol error is unrecoverable by construction - the object it
-    /// names is already destroyed server-side and every later request on
-    /// this connection is invalid - so there is nothing to retry and
-    /// nothing to degrade: the pump ends and the exit status says so.
-    /// Guarded because the error is sticky: it is visible on every wakeup
-    /// after the first, and the log must not repeat itself (the spin this
-    /// replaces wrote ~8 MB of stderr in 300 s).
+    /// A protocol error cannot recover.
+    /// The server already destroyed the named object, so later requests on this
+    /// connection are invalid.
+    /// Do not retry or degrade. End the pump and set the exit status.
+    /// Guard this path because the error stays visible at every wakeup.
+    /// The log must not repeat. The old loop wrote ~8 MB of stderr in 300 s.
     fn end_on_protocol_error(&mut self, err: &ProtocolError) {
         if self.fatal.is_some() {
             return;
         }
-        // The message is the compositor's own sentence, and only the pure
-        // Rust backend hands it over: libwayland keeps it for its own log
-        // line and leaves this empty, so name it only when there is one.
+        // The compositor supplies the message. Only the pure Rust backend gives
+        // it here.
+        // libwayland keeps its own log line and leaves this field empty.
+        // Name it only when the message exists.
         self.log.diag(&format!(
             "wayland: protocol error on {}#{} - code {}{}{} - the connection is dead, shutting down",
             err.object_interface,
@@ -2072,11 +2040,11 @@ impl App {
         self.signal.stop();
     }
 
-    /// Record a channel transition: the registry, the tray's rows and
-    /// SNI status, and one log line — only when something moved.
+    /// Record a channel change in the registry, tray rows, and SNI status.
+    /// Write one log line only after a change.
     ///
-    /// A known software cursor rides along on the Capture row: the
-    /// backend serving pixels does not stop the pointer being in them.
+    /// A known software cursor stays on the Capture row.
+    /// The pixel backend can serve pixels while the pointer remains there.
     fn note_channel(&mut self, id: ChannelId, state: ChannelState) {
         let state = match (id, &self.pointer_defect) {
             (ChannelId::Capture, Some(defect)) => state.degraded_by(defect),
@@ -2088,9 +2056,10 @@ impl App {
         }
     }
 
-    /// Spawn the settings window unless one child already runs. The
-    /// tray's Settings item calls this; the guard is daemon-side
-    /// discipline, the settings-scoped flock the cross-process one.
+    /// Start the settings window unless a child already exists.
+    /// The tray Settings item calls this.
+    /// The daemon guard covers this process, and the settings-scoped flock
+    /// covers other processes.
     fn spawn_settings(&mut self) {
         let outcome = child::settings_command().and_then(|mut c| self.settings.spawn_if_absent(&mut c));
         match outcome {
@@ -2102,13 +2071,12 @@ impl App {
         }
     }
 
-    /// Hands a glossary citation to the desktop's own browser.
+    /// Give a glossary citation to the desktop browser.
     ///
-    /// Fire and forget: nothing here waits on `xdg-open`, and its
-    /// stdio is dropped so a browser's chatter never lands in the
-    /// daemon's own output. The child is reaped by `wait` on the next
-    /// citation rather than by SIGCHLD plumbing, the same trade the
-    /// settings guard makes for its one transient child.
+    /// Do not wait for `xdg-open`.
+    /// Drop its stdio so browser output does not reach daemon output.
+    /// Reap the child with `wait` at the next citation, not with SIGCHLD setup.
+    /// The settings guard makes the same choice for its one short-lived child.
     fn open_url(&mut self, url: &str) {
         let mut command = std::process::Command::new("xdg-open");
         command
@@ -2120,23 +2088,24 @@ impl App {
         match command.spawn() {
             Ok(mut child) => {
                 self.log.diag(&format!("link: opened {url} as pid {}", child.id()));
-                // A browser that is already running exits at once;
-                // one that is not outlives this call and is left to
-                // the session.
+                // A browser that is already active exits at once.
+                // Another browser can outlive this call and stays with the
+                // session.
                 let _ = child.try_wait();
             }
             Err(e) => self.log.diag(&format!("link: xdg-open failed: {e}")),
         }
     }
 
-    /// `reload` re-reads the file and re-applies everything the daemon
-    /// honors: the lookup-log gate, the popup's own settings -
-    /// `popup.layer` needs no surface recreation, which is exactly why
-    /// it is a runtime toggle - and, because a denial never exits and
-    /// hover shows one actionable error state with in-app retry, a
-    /// second go at the portal consent. The config file is the sole
-    /// source of truth (ARCHITECTURE.md#settings-and-config); nothing
-    /// structured crosses the socket.
+    /// `reload` reads the file again and applies daemon settings.
+    /// It updates the lookup-log gate and the popup settings.
+    /// `popup.layer` needs no surface recreation, so it acts as a runtime
+    /// toggle.
+    /// A denied portal does not exit. Hover shows one error state with in-app
+    /// retry, so reload tries portal consent again.
+    /// The config file is the only source of truth
+    /// (ARCHITECTURE.md#settings-and-config). Nothing structured crosses the
+    /// socket.
     fn reload_config(&mut self) {
         self.retry_portal_capture();
         match chibipop::config::load_or_create(&self.paths.config_file) {
@@ -2154,43 +2123,43 @@ impl App {
                     popup.reconfigure(&config);
                 }
                 self.flush_popup_notes();
-                // The Controller answers this with `RequestReload`,
-                // which is what pushes the new settings into the Worker
-                // and reopens the dictionary a rebuild renamed over.
+                // The Controller answers with `RequestReload`.
+                // This sends new settings to the Worker and reopens the
+                // dictionary after a rebuild rename.
                 self.config = config;
                 let cfg = controller_config(&self.config);
                 self.feed(Event::ConfigReloaded(Box::new(cfg)));
-                // The mode, the checkbox and the region are all editable
-                // in the settings window, so a reload is the second of
-                // the predicate's three call sites: switching away from
-                // Static is what takes the border down.
+                // The mode, checkbox, and region are editable in the settings
+                // window.
+                // Reload is the second of the predicate's three call sites.
+                // A switch from Static removes the border.
                 self.sync_static_outline();
             }
             Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
         }
     }
 
-    /// Build (or rebuild) the core pipeline on its own thread.
+    /// Build or rebuild the core pipeline on its own thread.
     ///
-    /// Dropping the old handle first ends the old thread: its trigger
-    /// channel closes and it returns from `recv`. A pipeline that
-    /// cannot be built is a log line and a daemon that still runs -
-    /// cursor, tray, settings and the popup are all unaffected.
+    /// Drop the old handle first to close the old thread.
+    /// Its trigger channel then closes, and `recv` returns.
+    /// If the pipeline build fails, log it and keep the daemon alive.
+    /// The cursor, tray, settings, and popup remain available.
     fn spawn_worker(&mut self, portal: Option<PortalCapture>) {
         self.worker = None;
-        // A queue with no pipeline behind it, from here until a spawn
-        // succeeds: an `ocr-clipboard` press in that window is refused
-        // with a reason rather than parked on a thread that no longer
-        // exists. The old queue's sender goes with it, so a job the dead
-        // Worker never drained cannot resurface on the new one.
+        // Until spawn succeeds, the queue has no pipeline.
+        // An `ocr-clipboard` press while the pipeline is absent fails with a reason,
+        // rather than wait on a dead thread.
+        // The old queue sender goes away with it.
+        // A job that the dead Worker never read cannot reach the new one.
         self.ocr_jobs = worker::OcrJobs::disconnected();
         let settings = worker::settings(&self.config, &self.dicts);
-        // Resolved against whatever identities we already hold, which on
-        // the first spawn of a session is nothing - see `rescope_lookups`.
+        // Resolve settings against the identities already held.
+        // The first spawn has none. See `rescope_lookups`.
         let sent_scope = settings.present_cfg.clone();
         let started = Instant::now();
-        // A fresh queue per spawn, because the nudge that wakes the hook
-        // belongs to a particular Worker's trigger channel.
+        // Create a fresh queue for each spawn.
+        // The wake nudge belongs to one Worker's trigger channel.
         let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<worker::OcrRequest>();
         match worker::spawn(&self.worker_setup, settings, portal, self.worker_ping.clone(), jobs_rx)
         {
@@ -2210,17 +2179,19 @@ impl App {
         }
     }
 
-    /// The terms list, once the identities are known.
+    /// The terms list after the dictionary identities become known.
     ///
-    /// `Config::present_config` resolves the terms list against the
-    /// installed dictionary names - the enabled ones the config names,
-    /// plus every installed one it names in neither array - and the
-    /// pipeline's own first read is where those names come from. So the
-    /// settings `spawn_worker` handed over were resolved against an empty
-    /// library and named nothing to search. Push the real answer now that
-    /// it can be computed: a fresh daemon must honour the setting from its
-    /// first lookup, not from the first reload. Nothing to say when it did
-    /// not change, which is every respawn.
+    /// `Config::present_config` resolves terms against installed dictionary
+    /// names.
+    /// The config names enabled dictionaries and includes each installed
+    /// dictionary that appears in neither array.
+    /// The pipeline's first read supplies those names.
+    /// Settings sent to `spawn_worker` use an empty library, so they select no
+    /// dictionary.
+    /// Send the real answer now.
+    /// A fresh daemon must honor the config value from its first lookup, not its
+    /// first reload.
+    /// A respawn normally leaves the answer unchanged, so it needs no log.
     fn rescope_lookups(&mut self, sent: &chibipop::present::PresentConfig) {
         let settings = worker::settings(&self.config, &self.dicts);
         if settings.present_cfg == *sent {
@@ -2235,29 +2206,29 @@ impl App {
         self.send_trigger(TriggerKind::Reload(Box::new(settings)), RequestId(0));
     }
 
-    /// One lookup at the cursor's present position, if it is known.
+    /// Ask for one lookup at the cursor's current position, if known.
     ///
-    /// The event rungs deliver a position when their session opens and
-    /// then only on movement (ARCHITECTURE.md#input-ladders), so a
-    /// daemon that came up with the cursor already resting on a word has
-    /// exactly one sample and no pipeline to spend it on. Asking here is
-    /// what makes live mode true the moment it can be - the same reason
-    /// a trigger press is its own first cursor sample
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// Event rungs provide a position when their session opens and on movement
+    /// (ARCHITECTURE.md#input-ladders).
+    /// If the daemon starts with the cursor on a word, it has one sample but no
+    /// pipeline.
+    /// This method asks when the pipeline becomes available.
+    /// It makes live mode true at once, like the trigger press's first cursor
+    /// sample (ARCHITECTURE.md#hover-cadence).
     fn look_where_the_cursor_is(&mut self) {
         let Some(pos) = self.last_cursor else { return };
         self.log.diag(&format!("lookup: asking where the cursor already is ({}, {})", pos.x, pos.y));
         self.feed(Event::CursorMoved { pos });
     }
 
-    /// The in-app retry a denial requires: ask the portal again.
+    /// Retry portal consent when in-app retry requests it.
     ///
-    /// Only when the ladder picked the portal rung and the backend is
-    /// not already serving - a granted session must not be torn down
-    /// and re-prompted just because someone edited the config file.
-    /// The verb is `reload` on purpose: the tray's Settings window and
-    /// a shell one-liner reach the same hook, and the trigger channel
-    /// stays the minimal verb set.
+    /// Do this only when the ladder picks the Portal and the backend does not
+    /// serve pixels.
+    /// Do not tear down or prompt a granted session after a config
+    /// edit.
+    /// Both the Settings window and a shell command use `reload`.
+    /// Keep `reload` as the minimal verb set.
     fn retry_portal_capture(&mut self) {
         if self.portal_serving || self.capture_selection.backend() != Some(Backend::Portal) {
             return;
@@ -2267,23 +2238,22 @@ impl App {
         let (capture, state) = open_portal(&retry, &mut self.log);
         self.portal_retry = Some(retry);
         self.note_channel(ChannelId::Capture, state);
-        // The Worker thread is what reads through the session, so a
-        // granted retry hands it to a fresh pipeline.
+        // The Worker reads through the session.
+        // A granted retry therefore goes to a fresh pipeline.
         if capture.is_some() {
             self.portal_serving = true;
             self.spawn_worker(capture);
         }
     }
 
-    /// One `hyprctl cursorpos` poll tick: sample, feed the seam on
-    /// change, re-arm at the adaptive cadence
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// One `hyprctl cursorpos` poll tick: sample, send a change through the
+    /// seam, and arm the next interval (ARCHITECTURE.md#hover-cadence).
     ///
-    /// A sample that stops answering is the one channel failure this
-    /// daemon can observe live (the compositor went away, or `hyprctl`
-    /// did), so it is reported to the status registry either way — this
-    /// is what the tray's Cursor row and NeedsAttention track at
-    /// runtime.
+    /// If the sample fails, the daemon can observe channel failure
+    /// live.
+    /// The compositor or `hyprctl` can stop.
+    /// Report either result to the status registry.
+    /// The tray Cursor row and NeedsAttention then track it at runtime.
     fn poll_hyprctl(&mut self) -> TimeoutAction {
         match hyprctl::sample() {
             Some((lx, ly)) => {
@@ -2312,8 +2282,8 @@ impl App {
     }
 }
 
-/// The one seam: channel -> `Event::CursorMoved` -> Controller.
-/// Both rungs land here with global physical pixels.
+/// The only seam: channel -> `Event::CursorMoved` -> Controller.
+/// Both rungs arrive here with global physical pixels.
 impl CursorHandler for App {
     fn cursor(&mut self) -> &mut CursorState {
         &mut self.cursor
@@ -2324,10 +2294,10 @@ impl CursorHandler for App {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
         self.last_cursor = Some(pos);
-        // Crossing outputs mid-hold takes one fresh full grab of the
-        // entered output (ARCHITECTURE.md#hover-cadence), and it has to
-        // be taken before the lookup that noticed the crossing - so it
-        // happens here, not behind the Controller.
+        // When a hold crosses outputs, it needs a fresh full grab on the entered
+        // output (ARCHITECTURE.md#hover-cadence).
+        // Take it before the lookup that sees the output change.
+        // Do it here, not behind the Controller.
         if let Some(hold) = self.hold {
             if let Some(output) = trigger::regrab(hold, &self.cursor.geometries(), pos) {
                 self.log.diag("trigger: the cursor crossed onto another output");
@@ -2335,11 +2305,11 @@ impl CursorHandler for App {
                 self.hold = Some(Hold { output, ..hold });
             }
         }
-        // A sample with no pipeline behind it would spend the
-        // Controller's movement gate on a lookup nobody can answer -
-        // and say so once per sample. The newest position is kept
-        // instead, and `look_where_the_cursor_is` spends it the moment
-        // a pipeline exists.
+        // A sample without a pipeline would use the Controller movement gate
+        // for a lookup that nobody can answer.
+        // It would report one error for each sample.
+        // Keep the newest position. `look_where_the_cursor_is` uses it when a
+        // pipeline exists.
         if self.worker.is_none() {
             return;
         }
@@ -2371,16 +2341,15 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
     }
 }
 
-/// Where the static-region border belongs, when it belongs anywhere:
-/// Static sentence mode, the outline switched on, and a region the user
-/// has actually drawn.
+/// Return the static-region border when it belongs on screen.
 ///
-/// The Windows bin's `LiveSettings::static_overlay_region`, and here for
-/// the same reason it is one function there: startup, every config
-/// reload and a fresh region all ask this, so a three-way condition
-/// written out three times would eventually be three conditions. A mode
-/// switched away from Static answers `None`, which is what takes the
-/// border down.
+/// Conditions are Static sentence mode, an enabled outline, and a region that
+/// the user drew.
+///
+/// Windows uses `LiveSettings::static_overlay_region` for the same reason.
+/// Startup, config reload, and a fresh region all call this method.
+/// Keep the condition in one place.
+/// A mode other than Static returns `None`, which removes the border.
 fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> {
     if config.anki.sentence_mode != chibipop::config::SentenceMode::Static
         || !config.anki.show_static_overlay
@@ -2390,13 +2359,15 @@ fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> 
     worker::static_region(&config.anki)
 }
 
-/// Whether the dwell re-check has anything to watch
-/// (ARCHITECTURE.md#hover-cadence), in two halves.
+/// Return whether the dwell re-check has a target
+/// (ARCHITECTURE.md#hover-cadence).
 ///
-/// `armed` is the Controller's: live mode, a popup with a rect and no
-/// drill-down over it. `hold` is this daemon's own, because only it
-/// knows about the frozen grab - a hold's pixels predate the popup and
-/// cannot change, so trigger mode has no re-check by construction.
+/// The method uses two conditions.
+/// `armed` belongs to the Controller: live mode, a popup rect, and no
+/// drill-down.
+/// `hold` belongs to the daemon because only it knows the frozen grab.
+/// Hold pixels predate the popup and cannot change, so trigger mode needs no
+/// re-check.
 fn dwell_wanted(hold: Option<Hold>, armed: bool) -> bool {
     hold.is_none() && armed
 }
@@ -2405,8 +2376,8 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-/// Registry events on the long-lived queue. The startup report already
-/// printed the full table; only later changes are worth a line.
+/// Registry events use a long-lived queue.
+/// The startup report prints the full table, so log later changes only.
 impl Dispatch<wl_registry::WlRegistry, ()> for App {
     fn event(
         app: &mut App,
@@ -2422,19 +2393,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
     }
 }
 
-/// The daemon's own queue on the pump, dispatched by the daemon rather
-/// than by `WaylandSource::insert`'s callback.
+/// The daemon queue runs on the pump.
+/// The daemon dispatches it instead of the callback from
+/// `WaylandSource::insert`.
 ///
-/// `insert` hands the queue `EventQueue::dispatch_pending` and stops
-/// there, and that call cannot report a protocol error: wayland-client's
-/// `dispatching_impl` reads the backend with
-/// `dispatch_inner_queue().unwrap_or_default()` and says it drops the
-/// error on purpose. So a compositor that kills the connection leaves a
-/// permanently readable socket, `Ok(0)` on every wakeup and a pegged
-/// core. Asking the connection for its sticky error here is the whole
-/// fix, and it is smaller than dispatching the queue by hand: the source
-/// keeps its read guard, its flush and its `before_sleep`, all of which
-/// are load-bearing on a connection with more than one queue on it.
+/// `insert` gives the queue `EventQueue::dispatch_pending` and stops there.
+/// This call cannot report a protocol error because `wayland-client` hides it.
+/// Its `dispatching_impl` reads the backend with
+/// `dispatch_inner_queue().unwrap_or_default()` and drops the error on purpose.
+/// A compositor that kills the connection leaves a readable socket, `Ok(0)` on
+/// each wakeup, and a full CPU.
+/// Ask the connection for its sticky error here.
+/// This fixes the issue with less code than manual queue dispatch.
+/// The source keeps its read guard, flush, and `before_sleep`.
+/// These remain necessary when a connection has more than one queue.
 fn insert_wayland_source(
     pump: &LoopHandle<'static, App>,
     conn: &Connection,
@@ -2444,19 +2416,19 @@ fn insert_wayland_source(
     pump.insert_source(WaylandSource::new(conn.clone(), queue), move |_, queue, app: &mut App| {
         let dispatched = queue.dispatch_pending(app);
         let fatal = match &dispatched {
-            // Nothing left to hand the handlers - how every drain ends,
-            // and all a wakeup after a protocol error ever looks like.
-            // One `last_error` check per wakeup, on a mutex the dispatch
-            // above has just taken repeatedly.
+            // No work remains for handlers.
+            // This is every drain end and every wakeup after a protocol error.
+            // Check `last_error` once per wakeup.
+            // The dispatch above has just taken the mutex repeatedly.
             Ok(0) => watch.protocol_error(),
             Ok(_) => None,
             Err(e) => fatal_protocol_error(e).cloned(),
         };
         match fatal {
-            // The daemon has taken the failure over: `Ok(0)` so the
-            // source neither logs its own copy of the error nor turns it
-            // into calloop's opaque `Protocol error`. The pump is already
-            // stopped, so this is the last dispatch either way.
+            // The daemon owns the failure.
+            // Return `Ok(0)` so the source does not log another error or turn it
+            // into calloop's opaque `Protocol error`.
+            // The pump already stopped, so this is the final dispatch.
             Some(err) => {
                 app.end_on_protocol_error(&err);
                 Ok(0)
@@ -2468,14 +2440,12 @@ fn insert_wayland_source(
     Ok(())
 }
 
-/// Which dispatch failures the daemon ends on: protocol errors, and only
-/// those.
+/// End only on protocol errors.
 ///
-/// A protocol error is a verdict on the whole connection. Everything else
-/// stays the source's business, which is what keeps a `WouldBlock` flush
-/// or a slow compositor from being mistaken for a dead one - and a
-/// malformed message, which the source already treats as fatal, from
-/// being reported twice.
+/// Other dispatch failures stay the source's business.
+/// This keeps a `WouldBlock` flush or a slow compositor nonfatal.
+/// It also prevents duplicate output when the source already treats a malformed
+/// message as fatal.
 fn fatal_protocol_error(err: &DispatchError) -> Option<&ProtocolError> {
     match err {
         DispatchError::Backend(WaylandError::Protocol(err)) => Some(err),
@@ -2483,7 +2453,7 @@ fn fatal_protocol_error(err: &DispatchError) -> Option<&ProtocolError> {
     }
 }
 
-/// `AsFd` so the socket registers straight into calloop.
+/// Implement `AsFd` so the socket registers with calloop.
 struct Listening(ControlSocket);
 
 impl AsFd for Listening {
@@ -2492,11 +2462,11 @@ impl AsFd for Listening {
     }
 }
 
-/// The AnkiConnect answer channel, registered on the pump.
+/// The AnkiConnect answer channel on the pump.
 ///
-/// One helper rather than two call sites: the tests build an `App`
-/// too, and an answer that reached no `Event` would make the whole add
-/// lifecycle - adding, added, failed - untestable.
+/// Use one helper for both call sites. Tests build an `App` too.
+/// An answer that reaches no `Event` would make the add lifecycle
+/// (add, added, failed) impossible to test.
 fn anki_channel(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<AnkiOutcome>> {
     let (tx, rx) = calloop::channel::channel::<AnkiOutcome>();
     pump.insert_source(rx, |event, _, app: &mut App| {
@@ -2508,12 +2478,12 @@ fn anki_channel(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sen
     Ok(tx)
 }
 
-/// The mined region's pixel channel, registered on the pump.
+/// The selected region's pixel channel on the pump.
 ///
-/// `anki_channel`'s twin, for the same reason: the grab happens on a
-/// thread of its own and the tests build an `App` too, so a grab that
-/// reached no `App` method would make the whole screenshot flow
-/// untestable.
+/// This is the twin of `anki_channel`.
+/// The grab runs on its own thread, and tests build an `App` too.
+/// A grab that reaches no `App` method would make the screenshot flow
+/// impossible to test.
 fn shot_channel(
     pump: &LoopHandle<'static, App>,
 ) -> Result<calloop::channel::Sender<Result<Frame, String>>> {
@@ -2527,12 +2497,12 @@ fn shot_channel(
     Ok(tx)
 }
 
-/// The one-off OCR job's answer channel, registered on the pump.
+/// The one-off OCR job's answer channel on the pump.
 ///
-/// `shot_channel`'s twin one stage further along: the recogniser runs on
-/// the Worker's thread (ARCHITECTURE.md#ocr-engine - the engine is
-/// thread-affine), so its lines arrive here as an event and never as a
-/// blocked pump.
+/// This is the twin of `shot_channel`, one stage later.
+/// The recognizer runs on the Worker's thread
+/// (ARCHITECTURE.md#ocr-engine). The engine is thread-affine.
+/// Its lines arrive as an Event, not as a blocked pump.
 fn ocr_text_channel(
     pump: &LoopHandle<'static, App>,
 ) -> Result<calloop::channel::Sender<Result<Vec<OcrLine>, String>>> {
@@ -2546,12 +2516,11 @@ fn ocr_text_channel(
     Ok(tx)
 }
 
-/// The clipboard thread's diagnostic channel, registered on the pump.
+/// The clipboard thread's diagnostic channel on the pump.
 ///
-/// The offer lives on a connection and a thread of its own
-/// (`clipboard`), and the log lives here
-/// (ARCHITECTURE.md#platform-integration), so its lines travel as
-/// lines - exactly as an AnkiConnect failure does.
+/// The offer lives on a connection and its own thread (`clipboard`).
+/// The log lives here (ARCHITECTURE.md#platform-integration).
+/// Its messages travel as text, like an AnkiConnect failure.
 fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<String>> {
     let (tx, rx) = calloop::channel::channel::<String>();
     pump.insert_source(rx, |event, _, app: &mut App| {
@@ -2564,18 +2533,19 @@ fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::
 }
 
 pub fn run(paths: Paths) -> Result<()> {
-    // Before anything else in this process, because "anything else"
-    // eventually spawns a thread and the mask is only inherited at spawn
-    // (`signals::block_shutdown`). The source itself joins the pump far
-    // below, next to the other event sources; the signals are blocked
-    // from this line on either way.
+    // Block shutdown signals before any other process work.
+    // Later work can spawn threads, and the mask inherits at spawn
+    // (`signals::block_shutdown`).
+    // Register the source near the other event sources.
+    // The signal mask starts at this line.
     let signals = signals::block_shutdown()?;
 
     let display = wayland::display_name()?;
     let runtime_dir = paths.runtime_dir()?;
 
-    // Lock FIRST: a second launch must exit before it can touch the
-    // running daemon's logfile (Log::open truncates).
+    // Acquire the lock first.
+    // A second launch must stop before it touches the current log.
+    // `Log::open` truncates the file.
     let lock = match lock::acquire(runtime_dir, &display) {
         Ok(lock) => lock,
         Err(LockError::AlreadyRunning { path, pid }) => bail!("{}", lock::refusal(&display, &path, pid)),
@@ -2614,9 +2584,9 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(&line);
     }
 
-    // The capture backend ladder. Decided first, because the cursor
-    // ladder's rung 2 only exists when the portal rung is the one
-    // serving pixels - it rides that same stream.
+    // Choose the capture backend first.
+    // Cursor ladder rung 2 exists only when Portal serves pixels, and it uses
+    // the same stream.
     let (capture_override, capture_warning) = capture_backend::BackendOverride::from_env();
     if let Some(w) = &capture_warning {
         log.diag(w);
@@ -2630,11 +2600,11 @@ pub fn run(paths: Paths) -> Result<()> {
     let capture_caps = capture_backend::Capabilities::scan(&globals, portal::available());
     let capture_selection = capture_backend::select(&capture_caps, capture_override);
     log.diag(&capture_selection.startup_line());
-    // Neither rung's pixels can exclude a pointer the compositor
-    // already painted into its own framebuffer, so say so here rather
-    // than letting OCR read arrows as glyphs. Backend-independent on
-    // purpose - the portal's own backend on a wlr desk copies through
-    // the same framebuffer.
+    // Neither backend can exclude the pointer that the compositor painted into
+    // its framebuffer.
+    // State this before OCR can read arrows as glyphs.
+    // This applies to both backends. The Portal copies through the same
+    // framebuffer.
     let pointer_in_frames = software_cursor::probe();
     if let Some(line) = pointer_in_frames.startup_line() {
         log.diag(&line);
@@ -2643,9 +2613,10 @@ pub fn run(paths: Paths) -> Result<()> {
     let portal_metadata = capture_selection.backend() == Some(Backend::Portal)
         && portal::cursor_metadata_available();
 
-    // The cursor channel: one rung by advertised capability
-    // (ARCHITECTURE.md#input-ladders), or a diagnostic naming exactly
-    // what is missing — and the daemon stays up either way.
+    // The cursor channel uses one rung by advertised capability
+    // (ARCHITECTURE.md#input-ladders).
+    // Otherwise log a diagnostic with the absent capability.
+    // Keep the daemon up either way.
     let (ladder_override, override_warning) = cursor::LadderOverride::from_env();
     if let Some(w) = &override_warning {
         log.diag(w);
@@ -2661,27 +2632,27 @@ pub fn run(paths: Paths) -> Result<()> {
     log.diag(&selection.startup_line());
     let trace = std::env::var("CHIBIPOP_CURSOR_TRACE").is_ok_and(|v| v == "1");
 
-    // Rung 2's samples arrive on PipeWire's thread and must reach the
-    // pump like every other event: a bounded calloop channel, so a
-    // burst of cursor metadata can never grow without limit and the
-    // daemon stays sync (ARCHITECTURE.md#workspace-and-seams).
+    // Rung 2 samples arrive on the PipeWire thread and must reach the pump like
+    // all Events.
+    // Use a bounded calloop channel.
+    // A metadata burst cannot grow the queue without limit, and the daemon
+    // stays synchronous (ARCHITECTURE.md#workspace-and-seams).
     let (cursor_tx, cursor_rx) = calloop::channel::sync_channel::<PhysPoint>(64);
     let cursor_sink: Option<portal::CursorSink> =
         if selection == cursor::Selection::Rung(cursor::Rung::PortalMetadata) {
             let tx = cursor_tx.clone();
             Some(std::sync::Arc::new(move |p: PhysPoint| {
-                // A full queue means the pump is already behind on
-                // cursor news; dropping the sample is right, blocking
-                // the stream thread is not.
+                // A full queue means the pump is behind on cursor Events.
+                // Drop the sample. Do not block the stream thread.
                 let _ = tx.send(p);
             }))
         } else {
             None
         };
 
-    // The portal's eager consent: the dialog belongs in the launch
-    // context, not in the middle of a hover, and the channel row has to
-    // be true before the tray is ever published.
+    // Ask for portal consent early.
+    // The dialog belongs to the launch context, not a hover.
+    // Publish the channel row before the tray exists.
     let portal_retry = (capture_selection.backend() == Some(Backend::Portal)).then(|| PortalRetry {
         state_dir: paths.state_dir.clone(),
         globals: globals.clone(),
@@ -2696,25 +2667,23 @@ pub fn run(paths: Paths) -> Result<()> {
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
-    // The trigger channel's ladder
-    // (ARCHITECTURE.md#input-ladders). The socket above is
-    // rung 2 and is now listening, so this decides only one thing:
-    // whether the GlobalShortcuts portal is *also* asked to carry the
-    // two shortcuts. Its session runs on its own thread and its news
-    // arrives here as events, so the pump stays sync
-    // (ARCHITECTURE.md#workspace-and-seams).
+    // Trigger channel ladder (ARCHITECTURE.md#input-ladders).
+    // The socket listens as rung 2, so decide only whether to ask the
+    // GlobalShortcuts portal to carry the two shortcuts too.
+    // Its session uses its own thread. Events arrive here, so the pump stays
+    // synchronous (ARCHITECTURE.md#workspace-and-seams).
     let (trigger_override, trigger_warning) = shortcuts::ChannelOverride::from_env();
     if let Some(w) = &trigger_warning {
         log.diag(w);
     }
     let trigger_selection = shortcuts::select(shortcuts::portal::probe(), trigger_override);
-    // The advice half of this line is a bind the user pastes, so it
-    // names this binary rather than a bare `chibipop` PATH may lack.
+    // The advice text gives a bind command for the user.
+    // Name this binary because PATH can lack bare `chibipop`.
     log.diag(&trigger_selection.startup_line(&crate::paths::exec_name()));
-    // Until the portal answers, the honest published state is "the
-    // compositor owns the key": that is what the settings window must
-    // show, and a stale portal binding from a previous run must not
-    // outlive it.
+    // Until the portal answers, publish the native state: the compositor owns
+    // the key.
+    // The settings window must show this.
+    // Do not let a stale portal binding survive a previous run.
     let published = shortcuts::state::Published::native();
     if let Err(e) = shortcuts::state::publish(&paths.state_dir, &published) {
         log.diag(&format!("trigger: could not publish the channel state - {e}"));
@@ -2736,13 +2705,13 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     };
 
-    // The SNI tray (ARCHITECTURE.md#platform-integration). It runs its
-    // own D-Bus thread and its activations arrive here as
-    // `TrayRequest`s, so the pump stays sync. Non-fatal by construction:
-    // `spawn` hands back diagnostics instead of an error, because a
-    // trayless session is normal (stock GNOME, bare Hyprland) and must
-    // cost nothing. The registry it carries is the daemon's own view of
-    // channel health, tray or no tray.
+    // The SNI tray (ARCHITECTURE.md#platform-integration) uses its own
+    // D-Bus thread. Its activations arrive here as `TrayRequest`s, so the
+    // pump stays sync.
+    // `spawn` reports diagnostics instead of errors, so a trayless session is
+    // normal (stock GNOME, bare Hyprland) and costs nothing.
+    // The registry is the daemon's view of channel health, with or without a
+    // tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
     let mut statuses = ChannelStatuses::startup(
         match &pointer_defect {
@@ -2752,9 +2721,9 @@ pub fn run(paths: Paths) -> Result<()> {
         &selection,
         tray::status::popup_state(wayland::popup_shell_advertised(&globals)),
     );
-    // The trigger row's default is the always-bound socket; the ladder
-    // above knows which rung actually owns the binding, and the tray
-    // must be right the first time it is published.
+    // The trigger row starts with the always-bound socket.
+    // The ladder above identifies the owner.
+    // Publish the row with that owner from the first update.
     statuses.set(ChannelId::Trigger, trigger_state);
     let (mut tray_handle, tray_diagnostics) = tray::spawn(statuses, tray_tx);
     for line in tray_diagnostics {
@@ -2766,26 +2735,24 @@ pub fn run(paths: Paths) -> Result<()> {
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new().context("creating the event loop")?;
 
-    // The long-lived Wayland queue. `registry_queue_init` is what SCTK
-    // needs to bind the popup's globals from; the second, hand-made
-    // registry beside it is the cursor channel's, and it is also how
-    // this daemon sees dynamic global changes.
+    // The long-lived Wayland queue. `registry_queue_init` lets SCTK bind the
+    // popup globals.
+    // The second hand-made registry serves the cursor channel and reports
+    // dynamic global changes.
     let (globals_list, mut queue) =
         registry_queue_init::<App>(&conn).context("initialising the Wayland registry")?;
     let registry = conn.display().get_registry(&queue.handle(), ());
 
-    // The popup. A compositor without the layer shell keeps the daemon
-    // up: everything else - capture, cursor, trigger, tray, settings -
-    // still works, the capability report already named the missing
-    // global, and the Popup channel row says so where a user looks. What
-    // it must NOT do is drop the popup's other Wayland objects on the
-    // floor: their events keep arriving, and a handler with nothing
-    // behind it is a panic (exactly that happened on a layer-shell-less
-    // session). So the popup is always built, and a bind error here is
-    // the fatal kind the report already called fatal. The database path
-    // is the painter's too: it opens its own read-only connection onto
-    // the media store, because the worker owns the dictionary on another
-    // thread.
+    // The popup. A compositor without layer shell keeps the daemon up.
+    // Capture, cursor, trigger, tray, and settings still work.
+    // The capability report names the absent global, and the Popup row
+    // reports it.
+    // Do not drop the popup's other Wayland objects. Their Events still arrive.
+    // A handler without its state would panic. The popup always exists.
+    // A bind error here is fatal, as the report states.
+    // The database path also serves the painter.
+    // It opens a read-only connection to the media store because the Worker
+    // owns the dictionary on another thread.
     let db = paths.data_dir.join("chibipop.sqlite");
     let mut popup = Popup::bind(&globals_list, &queue.handle(), &config, &db)
         .context("binding the popup's Wayland globals")?;
@@ -2802,13 +2769,13 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     }
 
-    // The three surfaces beside the popup. All borrow the popup's
-    // process-wide handles - one `wl_compositor`, one `wl_shm`, one
-    // `wl_viewporter`, one `OutputState` - and all answer `None` on the
-    // same missing global the popup already reported, so a
-    // layer-shell-less session says it once and keeps every other
-    // channel. Two outlines, because the scan rects and the static
-    // region's border have independent lifetimes.
+    // Three surfaces sit beside the popup.
+    // Each borrows the popup's process handles: one `wl_compositor`, one
+    // `wl_shm`, one `wl_viewporter`, and one `OutputState`.
+    // Each returns `None` when the same global is absent, so a
+    // layer-shell-less session reports it once and keeps other channels.
+    // Two outlines have separate lifetimes for scan rects and the static
+    // border.
     let selector = Selector::bind(&conn, &globals_list, &queue.handle(), &popup);
     let scan_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
     let static_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
@@ -2842,27 +2809,26 @@ pub fn run(paths: Paths) -> Result<()> {
         ));
     }
 
-    // The Worker's wake: a result queued on its thread becomes one
-    // event-loop wakeup here (ARCHITECTURE.md#workspace-and-seams - the
-    // pump stays sync).
+    // The Worker's wake. A result queued on its thread becomes one event-loop
+    // wake here (ARCHITECTURE.md#workspace-and-seams).
+    // The pump stays sync.
     let (worker_ping, worker_pings) =
         calloop::ping::make_ping().context("creating the worker wake")?;
 
-    // AnkiConnect's answers, from the threads that made the calls; the
-    // mined region's pixels, from the thread that grabbed them; and the
-    // one-off OCR job's lines, from the Worker's own thread.
+    // AnkiConnect answers come from the call threads.
+    // Selected-region pixels come from the grab thread.
+    // One-off OCR lines come from the Worker's thread.
     let anki_tx = anki_channel(&event_loop.handle())?;
     let shot_tx = shot_channel(&event_loop.handle())?;
     let ocr_tx = ocr_text_channel(&event_loop.handle())?;
 
-    // The writable selection, on its own connection and its own
-    // thread. A compositor with no data-control protocol - stock
-    // GNOME - is a state named once here, exactly like a missing layer
-    // shell above: it costs `ocr-clipboard` and nothing else, and
-    // naming both globals is what lets a compositor upgrade self-heal
-    // the install (ARCHITECTURE.md#capture-and-masking). A *failure* to
-    // open one is also not fatal: the daemon says so and keeps every
-    // other channel.
+    // The writable selection uses its own connection and thread.
+    // A compositor without the data-control protocol (stock GNOME) reports one
+    // state, like the absent layer shell above.
+    // It affects only `ocr-clipboard`.
+    // Both globals let a compositor add support and let the install self-heal
+    // (ARCHITECTURE.md#capture-and-masking).
+    // A bind failure is not fatal. Log it and keep the other channels.
     let clipboard = match clipboard::Clipboard::bind(&globals, clipboard_notes(&event_loop.handle())?)
     {
         Ok(Some(board)) => {
@@ -2933,19 +2899,19 @@ pub fn run(paths: Paths) -> Result<()> {
         config,
     };
 
-    // Bind what the selected rung needs and settle it before the pump
-    // starts: output geometry (both rungs), and for rung 1 the seat's
-    // pointer plus the per-output cursor sessions, created inside
-    // these dispatches.
+    // Bind the selected rung and settle it before the pump starts.
+    // Both rungs need output geometry.
+    // Rung 1 also needs the seat pointer and per-output cursor sessions.
+    // Dispatches create those objects.
     let qh = queue.handle();
     match &selection {
         cursor::Selection::Rung(cursor::Rung::ImageCopyCapture) => {
             app.cursor.bind_outputs(&registry, &globals, &qh);
             app.cursor.bind_capture(&registry, &globals, &qh);
         }
-        // Rung 2 needs the same layout facts and nothing Wayland-side
-        // beyond them: its samples come off the PipeWire stream the
-        // portal backend already opened.
+        // Rung 2 needs the same layout facts and no more Wayland state.
+        // Samples come from the PipeWire stream that the Portal backend
+        // opened.
         cursor::Selection::Rung(cursor::Rung::PortalMetadata) => {
             app.cursor.bind_outputs(&registry, &globals, &qh);
         }
@@ -2963,11 +2929,10 @@ pub fn run(paths: Paths) -> Result<()> {
             .diag(&format!("cursor: {} output cursor session(s) live", app.cursor.session_count()));
     }
 
-    // The popup's surfaces: one per output, mapped now and never
-    // unmapped. The output roundtrip above has already run, so every
-    // surface is created against known geometry; the second roundtrip
-    // lets the initial configures arrive and each surface map itself
-    // hidden before the pump starts.
+    // Popup surfaces: one per output. Map them now and never unmap.
+    // The output round trip already ran, so each surface uses known geometry.
+    // The second round trip delivers configures and maps each surface hidden
+    // before the pump starts.
     if app.popup_can_draw() {
         app.popup_mut().map_all();
         app.flush_popup_notes();
@@ -2977,29 +2942,28 @@ pub fn run(paths: Paths) -> Result<()> {
         app.log.diag(&format!("popup: {mapped} layer surface(s) mapped hidden"));
     }
 
-    // The static region's border, if this config wants one: the first of
-    // the predicate's three call sites, so a daemon started in Static
-    // mode comes up with the box already outlined (the Windows bin does
-    // the same at startup). The round trip is what carries the outline's
-    // configures back and puts the strips on screen - without it the
-    // border would appear only when calloop next woke.
+    // Static-region border if the config requests it.
+    // This is the first predicate call site.
+    // A daemon in Static mode starts with an outlined box, like the Windows
+    // bin.
+    // The round trip delivers outline configures and puts strips on screen.
+    // Without it, the border appears only after the next calloop wake.
     app.sync_static_outline();
     queue.roundtrip(&mut app).context("mapping the static region's outline")?;
     app.flush_surface_notes();
 
-    // The surface probe, if it was asked for: here, because the outline
-    // and the selector are mapped against the geometry the popup's
-    // surfaces were just mapped against, and because this is the last
-    // point at which the daemon's own queue can still be round-tripped
-    // by hand - a moment later it belongs to calloop.
+    // Run the surface probe if requested.
+    // The outline and selector use the geometry just used for popup surfaces.
+    // This is the last point where the daemon queue can receive a manual round
+    // trip. Calloop owns the queue after this point.
     if std::env::var(SURFACE_PROBE_ENV).is_ok_and(|v| v == "1") {
         app.probe_surfaces(&mut queue);
     }
 
     insert_wayland_source(&event_loop.handle(), &conn, queue)?;
 
-    // Rung 3 is the only timed source; event rungs cost zero idle
-    // wakeups (ARCHITECTURE.md#hover-cadence).
+    // Rung 3 is the only timed source. Event rungs cause zero idle wakeups
+    // (ARCHITECTURE.md#hover-cadence).
     if matches!(selection, cursor::Selection::Rung(cursor::Rung::HyprctlPoll)) {
         event_loop
             .handle()
@@ -3019,8 +2983,8 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the control socket: {e}"))?;
 
-    // Rung 2's samples, already in global physical pixels, arriving
-    // from the portal stream's thread.
+    // Rung 2 samples already use global physical pixels.
+    // They come from the portal stream thread.
     if selection == cursor::Selection::Rung(cursor::Rung::PortalMetadata) {
         event_loop
             .handle()
@@ -3035,16 +2999,16 @@ pub fn run(paths: Paths) -> Result<()> {
             })
             .map_err(|e| anyhow::anyhow!("registering the portal cursor channel: {e}"))?;
     } else {
-        // Nothing will ever send; dropping the receiver keeps a stray
-        // sample a cheap error instead of an unbounded queue.
+        // Nothing sends on this path.
+        // Drop the receiver so a stray sample yields a cheap error instead of
+        // an unbounded queue.
         drop(cursor_rx);
     }
 
-    // The portal session's news: the bound set, every press and
-    // release, and its own diagnostics. Registered whichever rung was
-    // picked, because the receiver has to outlive the sender either
-    // way: on the native rung nothing was spawned to send, and an idle
-    // channel costs no wakeups.
+    // Portal session events include the bound set, each press and release, and
+    // diagnostics.
+    // Register the receiver for every rung so it outlives the sender.
+    // The native rung starts no sender. An idle channel causes no wakeups.
     event_loop
         .handle()
         .insert_source(shortcut_rx, |event, _, app: &mut App| {
@@ -3054,9 +3018,9 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the shortcut channel: {e}"))?;
 
-    // Menu activations and the tray thread's own diagnostics, executed
-    // on this thread. `Event::Closed` needs no handling: the tray
-    // thread going away is exactly the trayless case, which is fine.
+    // Menu activations and tray diagnostics run on this thread.
+    // `Event::Closed` needs no action. The tray thread exit means a trayless
+    // session.
     event_loop
         .handle()
         .insert_source(tray_rx, |event, _, app: &mut App| {
@@ -3066,9 +3030,9 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the tray channel: {e}"))?;
 
-    // The signalfd blocked at the top of `run`, now that there is a pump
-    // to read it: every thread this daemon has was spawned under that
-    // mask, so a process-directed SIGINT/SIGTERM has nowhere else to go.
+    // `signalfd` was blocked at the top of `run`. Now the pump reads it.
+    // Every daemon thread inherited that mask, so process SIGINT/SIGTERM has
+    // no other destination.
     event_loop
         .handle()
         .insert_source(signals, |event, _, app: &mut App| {
@@ -3077,16 +3041,17 @@ pub fn run(paths: Paths) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("registering the signal source: {e}"))?;
 
-    // The Worker's results, drained on its wake.
+    // Drain the Worker's results after its wake.
     event_loop
         .handle()
         .insert_source(worker_pings, |_, _, app: &mut App| app.drain_results())
         .map_err(|e| anyhow::anyhow!("registering the worker wake: {e}"))?;
 
-    // The pipeline itself, last: opening the OCR models and the
-    // dictionary blocks, and everything above must already be true
-    // before a lookup can be asked for. On the portal rung the
-    // consented session moves onto the worker thread here.
+    // Start the pipeline last.
+    // OCR model and dictionary open operations block.
+    // All earlier channels must exist before a lookup request.
+    // On the Portal rung, the consented session moves to the Worker thread
+    // here.
     app.spawn_worker(capture);
 
     app.log.diag(&format!(
@@ -3106,19 +3071,20 @@ pub fn run(paths: Paths) -> Result<()> {
 
     event_loop.run(None, &mut app, |_| {}).context("running the event loop")?;
 
-    // Dropping the loop drops the control source, which unlinks the
-    // socket file; the lock file stays (see lock.rs) and the kernel
-    // releases the flock when `lock` drops.
+    // When the loop drops, the control source drops and unlinks the socket
+    // file.
+    // The lock file remains (see lock.rs), and the kernel releases the flock
+    // when `lock` drops.
     drop(event_loop);
     app.log.diag("shutdown: control socket unlinked, instance lock released");
     drop(lock);
 
-    // A protocol error stopped the pump the way a signal does, so the
-    // shutdown above is the orderly one - but a session the compositor
-    // killed is not a session the user quit, and the exit status has to
-    // tell a supervisor apart from the two. The diagnostic naming the
-    // object, the code and the compositor's message is already in the
-    // log and on stderr; this only carries the verdict.
+    // A protocol error stops the pump like a signal.
+    // The shutdown above remains orderly, but a compositor-killed session
+    // differs from a user quit.
+    // The exit status must tell a supervisor the difference.
+    // The log already contains the object, code, and compositor message.
+    // This status carries the verdict only.
     match &app.fatal {
         Some(err) => bail!("shut down on a Wayland protocol error on {}", err.object_interface),
         None => Ok(()),
@@ -3131,8 +3097,8 @@ mod tests {
     use crate::shortcuts::ShortcutId;
     use wayland_client::backend::ObjectId;
 
-    /// The concrete hot-reload contract: `reload` re-reads the file,
-    /// so the lookup-log gate follows the config without a restart.
+    /// Test hot reload. `reload` reads the file again, so the lookup-log gate
+    /// follows the config without a restart.
     #[test]
     fn reload_rereads_the_config_and_flips_the_lookup_gate() {
         let dir = std::env::temp_dir()
@@ -3158,9 +3124,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The tray thread owns no log, so its diagnostics travel as
-    /// requests and are written here. A trayless run relies on this
-    /// path for its one "no tray host" line.
+    /// The tray thread has no log. It sends diagnostics as requests, and this
+    /// method writes them.
+    /// A trayless run uses this path for its "no tray host" line.
     #[test]
     fn a_tray_diagnostic_reaches_the_daemon_log() {
         let dir =
@@ -3178,10 +3144,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Quit stops the pump, through the same calloop channel the tray
-    /// thread uses. `run` resets and then watches the loop signal, so
-    /// "the pump made no further pass" is the observable contract; the
-    /// escape hatch keeps a regression a failure instead of a hang.
+    /// Quit stops the pump through the tray's calloop channel.
+    /// `run` resets and watches the loop signal.
+    /// The test checks that the pump makes no later pass.
+    /// A timeout turns a regression into a failure, not a hang.
     #[test]
     fn tray_quit_stops_the_pump() {
         let dir =
@@ -3219,8 +3185,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A channel transition is logged once and only once, so a failing
-    /// poll cannot flood the log at the poll cadence.
+    /// Log each channel change once.
+    /// A failed poll then cannot fill the log at the poll cadence.
     #[test]
     fn a_channel_transition_is_logged_once() {
         let dir =
@@ -3241,9 +3207,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A screencopy session with no pipeline, which is what every test
-    /// here wants: the promptless rung, so no test can wander into a
-    /// portal dialog, and no OCR models are opened for a log assertion.
+    /// Use a screencopy session without a pipeline.
+    /// Tests then use the promptless rung, avoid a portal dialog, and open no
+    /// OCR models for log assertions.
     fn test_app(
         dir: &std::path::Path,
         log_file: &std::path::Path,
@@ -3255,9 +3221,10 @@ mod tests {
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
-            // Every directory under the scratch dir, in the XDG shape:
-            // a relative `save_dir` resolves under `data_dir`, so a
-            // screenshot test's PNG lands inside its own scratch.
+            // Keep every test directory under the scratch directory in XDG
+            // shape.
+            // Relative `save_dir` resolves under `data_dir`, so each screenshot
+            // test writes its PNG inside its scratch directory.
             paths: Paths {
                 mode: crate::paths::Mode::Xdg,
                 config_file: dir.join("chibipop.toml"),
@@ -3294,22 +3261,22 @@ mod tests {
             anki_tx: anki_channel(&event_loop.handle()).expect("the anki answer channel"),
             shot_tx: shot_channel(&event_loop.handle()).expect("the screenshot pixel channel"),
             shot: None,
-            // No pipeline, so no engine to serve a job: a test that
-            // wants one installs it (`fake_worker`).
+            // No pipeline means no engine can serve a job.
+            // A test that needs one installs it (`fake_worker`).
             ocr_jobs: worker::OcrJobs::disconnected(),
             ocr_tx: ocr_text_channel(&event_loop.handle()).expect("the OCR text channel"),
             ocr_job: None,
-            // No compositor here, so no data-control connection either -
-            // which is also the GNOME state these tests can therefore
-            // assert without one.
+            // No compositor means no data-control connection.
+            // This also matches the GNOME state that these tests can assert
+            // without one.
             clipboard: None,
             dicts: Vec::new(),
             hold: None,
             last_warning: None,
             portal_serving: false,
             capture_selection: capture,
-            // The software-cursor probe is a startup fact; the harness
-            // asserts the folding, not the compositor's option.
+            // The software-cursor probe is a startup fact.
+            // The harness tests the combination, not the compositor option.
             pointer_defect: None,
             portal_retry: None,
             popup: None,
@@ -3322,10 +3289,11 @@ mod tests {
         }
     }
 
-    /// The retry hook is portal-only and one-shot-guarded: `reload` on
-    /// a screencopy session must never reach the portal, and must never
-    /// touch the capture row (ARCHITECTURE.md#capture-and-masking - the
-    /// promptless rung is exactly the one that has nothing to ask for).
+    /// `reload` retries only portal capture and only when the one-shot guard
+    /// allows it.
+    /// A screencopy session must not reach the Portal or change the Capture row
+    /// (ARCHITECTURE.md#capture-and-masking).
+    /// The promptless rung has nothing to ask for.
     #[test]
     fn reload_does_not_prompt_a_screencopy_session() {
         let dir =
@@ -3345,17 +3313,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The static-region action, all the way through: the rect lands in
-    /// the config *file* (ARCHITECTURE.md#settings-and-config - that
-    /// file is the sole source of truth, so a restarted daemon has to
-    /// find the box there) and the same rect reaches the pipeline,
-    /// proved the one way that cannot lie: the next hover reads the
-    /// user's box instead of a cursor-centred tile.
+    /// Test the static-region action end to end.
+    /// The rect reaches the config file (ARCHITECTURE.md#settings-and-config).
+    /// The file is the sole source, so a restart finds the box there.
+    /// The same rect reaches the pipeline.
+    /// The next hover reads the user's box, not a cursor-centered tile.
     ///
-    /// The pick is stubbed at its seam. `took_static_region` takes the
-    /// `Option<PhysRect>` a pick answers with, and that is the whole
-    /// input to everything interesting here; `pick_region` above it is a
-    /// nested Wayland pump, and there is no compositor in a unit test.
+    /// The pick uses a stub at its seam.
+    /// `took_static_region` returns `Option<PhysRect>`, which supplies all
+    /// needed input.
+    /// `pick_region` is a nested Wayland pump. A unit test has no compositor.
     #[test]
     fn the_static_region_verb_saves_the_rect_and_the_pipeline_reads_it() {
         let dir = scratch("static_region_set");
@@ -3364,16 +3331,16 @@ mod tests {
         let mut app = test_app(&dir, &log_file, &event_loop);
         let (worker, _log) = fake_worker(None, None);
         app.worker = Some(worker);
-        // The save below pushes a reload, and a reload rebuilds
-        // `WorkerSettings` from `self.dicts` - so the finished spawn this
-        // stands in for has to have left the identity behind.
+        // Save pushes a reload. Reload rebuilds `WorkerSettings` from
+        // `self.dicts`.
+        // The fake Worker represents a finished spawn. It must leave the
+        // identity.
         app.dicts = fake_dicts();
-        // The user already picked Static in the settings window; the box
-        // is what is still missing.
+        // The user chose Static in the settings. Only the box is absent.
         app.config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
 
-        // Around `AT` (600,300) but nothing like the tile a live lookup
-        // would otherwise read, so the anchor below tells the two apart.
+        // Place `AT` near (600,300), but outside the cursor-centered tile.
+        // The anchor then distinguishes the two regions.
         let region = PhysRect { x: 500, y: 250, w: 200, h: 100 };
         app.took_static_region(Some(region));
 
@@ -3386,9 +3353,9 @@ mod tests {
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(written.contains("static region: set to 200x100 at 500,250"), "log was: {written}");
 
-        // The reload the save pushed rode the same channel the hover
-        // now takes, and the worker settles settings before hovers - so
-        // this read is through the region or the region never arrived.
+        // Save sends reload through the same channel that hover uses.
+        // The Worker settles settings before hover, so this read proves that
+        // the region arrived.
         app.on_cursor_position(AT);
         match answer(&app).outcome {
             chibipop::controller::LookupOutcome::Ready { anchor, matched, scan, .. } => {
@@ -3409,12 +3376,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A cancelled pick changes nothing at all: no file written, no
-    /// region in memory, no reload pushed. `Esc`, a right-click, a drag
-    /// under the threshold and a compositor with no layer shell are all
-    /// the same `None`, and this enters through the socket verb so the
-    /// whole path - `handle_request`, `apply_verb`, `pick_region` with
-    /// nothing to drag on - is what produces it.
+    /// A canceled pick changes nothing: no file, memory region, or reload.
+    /// Esc, a right click, a short drag, and no layer shell all return `None`.
+    /// The socket verb enters this path through `handle_request`, `apply_verb`,
+    /// and `pick_region`.
+    /// No drag then produces `None`.
     #[test]
     fn a_cancelled_static_region_pick_writes_nothing() {
         let dir = scratch("static_region_cancel");
@@ -3440,10 +3406,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The one predicate every show and hide asks (the Windows bin's
-    /// `LiveSettings::static_overlay_region`). All three conditions have
-    /// to hold at once, and the mode is the one a user flips: switching
-    /// away from Static is what takes the border down.
+    /// Every show and hide checks this predicate
+    /// (the Windows bin's `LiveSettings::static_overlay_region`).
+    /// Static mode, an enabled outline, and a drawn region must all hold.
+    /// The user can change the mode. A switch away from Static removes the
+    /// border.
     #[test]
     fn the_outline_wants_a_drawn_region_in_static_mode_with_the_box_ticked() {
         use chibipop::config::SentenceMode;
@@ -3451,7 +3418,7 @@ mod tests {
         let rect = PhysRect { x: 10, y: 20, w: 300, h: 40 };
         cfg.anki.static_region = Some([10, 20, 300, 40]);
 
-        // Mode x checkbox, all four, with a region drawn throughout.
+        // Test each mode and checkbox with a drawn region.
         cfg.anki.sentence_mode = SentenceMode::Static;
         cfg.anki.show_static_overlay = true;
         assert_eq!(Some(rect), static_overlay_region(&cfg), "static, ticked, drawn");
@@ -3465,18 +3432,16 @@ mod tests {
         cfg.anki.show_static_overlay = true;
         assert_eq!(None, static_overlay_region(&cfg), "ticked, but the mode left Static");
 
-        // The third axis on its own: both switches on, nothing drawn.
+        // Test both switches with no region.
         cfg.anki.sentence_mode = SentenceMode::Static;
         cfg.anki.static_region = None;
         assert_eq!(None, static_overlay_region(&cfg), "no box has been drawn yet");
     }
 
-    /// A session with no layer shell: the region still serves lookups,
-    /// the border cannot be drawn, and the daemon says which is which
-    /// instead of pretending. Also the proof that a reload is one of the
-    /// predicate's three call sites - the line exists only because the
-    /// reload re-asked - and that a mode moved away from Static stops
-    /// wanting one.
+    /// A session without a layer shell still serves lookups.
+    /// It cannot draw the border, and the daemon reports that fact.
+    /// Reload is one of the predicate's call sites because it asks again.
+    /// A mode away from Static then removes the border request.
     #[test]
     fn a_static_region_with_no_layer_shell_says_so_and_still_serves_lookups() {
         let dir = scratch("static_region_noshell");
@@ -3517,11 +3482,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The other half of the same guard, and the one that protects a
-    /// user who already said yes: a portal session that IS serving must
-    /// not be torn down and re-prompted just because something sent
-    /// `reload` (a settings Apply does, on every save). One consent per
-    /// grant is the whole bargain.
+    /// Protect a Portal session with a grant.
+    /// When it serves, reload must not tear it down or prompt again.
+    /// Settings Apply sends reload after every save.
+    /// One consent covers one grant.
     #[test]
     fn reload_does_not_reprompt_a_serving_portal_session() {
         let dir = scratch("noreprompt");
@@ -3531,8 +3495,7 @@ mod tests {
         let mut app = test_app(&dir, &log_file, &event_loop);
         app.capture_selection = capture_backend::Selection::Backend(Backend::Portal);
         app.portal_serving = true;
-        // A retry is armed, so nothing but `portal_serving` can be what
-        // holds the dialog back.
+        // A retry is armed. Only `portal_serving` can prevent the dialog.
         app.portal_retry =
             Some(PortalRetry { state_dir: dir.clone(), globals: Vec::new(), cursor: None });
         app.note_channel(ChannelId::Capture, ChannelState::up("portal ScreenCast + PipeWire"));
@@ -3549,7 +3512,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A scratch dir per test, named after it.
+    /// Create a scratch directory for each test.
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir()
             .join(format!("chibipop_daemon_{name}_{}", std::process::id()));
@@ -3560,11 +3523,11 @@ mod tests {
 
     // ---- ocr-clipboard ----
 
-    /// Stock GNOME, reached through the socket exactly as a compositor
-    /// bind reaches it: the refusal happens *before* any pick, names both
-    /// globals so a compositor upgrade self-heals the install, and leaves
-    /// nothing in flight. `test_app` has no compositor and therefore no
-    /// data-control connection, which is the same state.
+    /// Stock GNOME reaches this path through the socket, like a compositor
+    /// bind.
+    /// Refuse before the pick, report both globals, and leave no job in flight.
+    /// `test_app` has no compositor or data-control connection, which is the
+    /// same state.
     #[test]
     fn ocr_to_clipboard_with_no_data_control_protocol_refuses_before_it_picks() {
         let dir = scratch("ocrclip_none");
@@ -3590,9 +3553,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A cancelled pick - Esc, a right click, a sub-threshold drag, or a
-    /// compositor with no layer shell to drag on - copies nothing and
-    /// queues nothing.
+    /// A canceled pick returns no text and queues no job.
+    /// Esc, a right click, a short drag, and no layer shell all cancel.
     #[test]
     fn a_cancelled_ocr_pick_copies_nothing_and_queues_nothing() {
         let dir = scratch("ocrclip_cancel");
@@ -3611,10 +3573,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A region the recogniser found nothing in must not *clear* the
-    /// clipboard: whatever the user already had is theirs, and an empty
-    /// selection would be this feature destroying data on a bad drag.
-    /// The in-flight slot is released either way, so the next press works.
+    /// If the recognizer finds no text, do not clear the clipboard.
+    /// Keep the user's current selection.
+    /// An empty result must not destroy data after a bad drag.
+    /// Release the OCR job in either case, so the next press works.
     #[test]
     fn a_region_with_no_readable_text_leaves_the_selection_alone() {
         let dir = scratch("ocrclip_empty");
@@ -3634,8 +3596,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A grab or a read that failed is reported rather than swallowed,
-    /// and it releases the in-flight region too.
+    /// Report a failed grab or read, and release the OCR job.
     #[test]
     fn a_failed_read_is_reported_and_releases_the_in_flight_region() {
         let dir = scratch("ocrclip_failed");
@@ -3652,9 +3613,8 @@ mod tests {
             "log was: {written}"
         );
         assert_eq!(None, app.ocr_job);
-
-        // And text arriving with nothing waiting for it says so instead
-        // of copying a stale answer onto the clipboard.
+        // Text without a queued region must report an error, not copy a stale
+        // answer to the clipboard.
         app.handle_ocr_text(Ok(vec![OcrLine {
             words: vec![OcrWord {
                 text: WORD.to_string(),
@@ -3669,15 +3629,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The verbs' effect on the hold. There is no pipeline here, which
-    /// is exactly the point: the hold is the daemon's own state and the
-    /// verb table must be right whether or not a lookup can run.
+    /// Test verb effects on the hold.
+    /// No pipeline exists, so this checks daemon state independent of lookup.
+    /// The verb table must stay correct when lookup cannot run.
     #[test]
     fn a_press_holds_and_a_release_ends_it() {
         let dir = scratch("hold");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-        // An event rung, so no test ever shells out to hyprctl.
+        // Use an event rung. The test must not call `hyprctl`.
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
 
@@ -3691,8 +3651,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `toggle` outlives the key: a release while latched changes
-    /// nothing, and only a second toggle ends it
+    /// `toggle` lasts beyond key release.
+    /// Release while latched changes nothing. A second toggle ends the hold
     /// (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn a_toggle_holds_the_freeze_until_it_is_toggled_off() {
@@ -3714,8 +3674,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Trigger mode reads where the cursor is, so a press before the
-    /// cursor channel has said anything is a line, not a lookup.
+    /// Trigger mode reads the current cursor position.
+    /// A press before the first cursor sample logs a line, not a lookup.
     #[test]
     fn a_press_before_the_first_cursor_sample_looks_nothing_up() {
         let dir = scratch("nocursor");
@@ -3731,11 +3691,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Crossing outputs mid-hold re-grabs, and the hold follows the
-    /// cursor onto the output it entered
-    /// (ARCHITECTURE.md#hover-cadence). This box has one monitor, so the
-    /// geometry is injected; `trigger::regrab` carries the decision and
-    /// this pins that the daemon acts on it.
+    /// When a hold crosses outputs, it triggers a new grab.
+    /// The hold follows the cursor onto the entered output
+    /// (ARCHITECTURE.md#hover-cadence).
+    /// This test injects geometry for one monitor.
+    /// `trigger::regrab` gives the decision, and the test checks the daemon
+    /// action.
     #[test]
     fn a_hold_follows_the_cursor_onto_another_output() {
         let dir = scratch("crossing");
@@ -3744,9 +3705,9 @@ mod tests {
         let left = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
         app.hold = Some(Hold { output: left, latched: false });
 
-        // No output geometry has arrived, so `bounds_containing`
-        // answers with a plausible box around the point - which is a
-        // different box than the one held, i.e. a crossing.
+        // Output geometry has not arrived, so `bounds_containing` returns a
+        // plausible box.
+        // It differs from the held box, which indicates an output change.
         app.on_cursor_position(PhysPoint { x: 5000, y: 500 });
 
         let now = app.hold.expect("the hold survives the crossing");
@@ -3757,9 +3718,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One failing lookup must not become one log line per cursor
-    /// sample: a cursor crossing text no dictionary can serve would
-    /// otherwise flood the file at the sample rate.
+    /// Log a failed lookup once, not once per cursor sample.
+    /// Unsupported text would otherwise fill the file at the sample rate.
     #[test]
     fn a_repeated_lookup_failure_is_logged_once() {
         let dir = scratch("warnonce");
@@ -3776,10 +3736,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- the scan overlay (`Command::ShowScanOverlay`) --
+    // ---- scan overlay (`Command::ShowScanOverlay`) ----
 
-    /// One hover's worth of scan rects, in the order core sends them:
-    /// the pass-1 capture box first, the word being defined last.
+    /// One hover's scan rects in core order:
+    /// the pass-1 capture box first, and the Match box last.
     fn one_hovers_rects() -> Vec<ScanRect> {
         vec![
             ScanRect { rect: PhysRect { x: 100, y: 200, w: 240, h: 60 }, kind: ScanKind::Pass1 },
@@ -3787,11 +3747,11 @@ mod tests {
         ]
     }
 
-    /// Two shipped Linux settings are drawn by this Command and by
-    /// nothing else - `debug.show_scan_region` and, by default *on*,
-    /// `popup.highlight_match`. Until it was wired it fell into
-    /// `execute`'s catch-all, so both checkboxes drew nothing at all;
-    /// the catch-all is the regression to keep out.
+    /// Two Linux settings use this Command:
+    /// `debug.show_scan_region` and `popup.highlight_match`, which is on by
+    /// default.
+    /// Before this path existed, the `execute` catch-all ignored both settings.
+    /// Keep the catch-all as the regression target.
     #[test]
     fn a_scan_overlay_command_never_falls_into_the_no_op_arm_again() {
         let dir = scratch("scanoverlay");
@@ -3806,9 +3766,9 @@ mod tests {
             !written.contains("ShowScanOverlay"),
             "the command must be handled, not described as a no-op: {written}"
         );
-        // No compositor in a unit test, so the honest answer is the
-        // degradation, with the count - never silence, and never a
-        // pretence that something was drawn.
+        // The unit test has no compositor. Report the honest degradation with
+        // its count.
+        // Do not stay silent or claim that a surface was drawn.
         assert!(
             written.contains("overlay: 2 scan rect(s) and no outline on this compositor"),
             "log was: {written}"
@@ -3816,10 +3776,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The empty vector is the hide - core sends one on every fresh
-    /// placement whose two settings are both off (`controller.rs`), so
-    /// it is the common case and must cost nothing, not a log line per
-    /// hover.
+    /// Core sends an empty vector when both settings are off (`controller.rs`).
+    /// It hides the overlay and is common.
+    /// It must cost no log line per hover.
     #[test]
     fn an_empty_scan_overlay_command_clears_without_a_word() {
         let dir = scratch("scanclear");
@@ -3835,11 +3794,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What reaches the outline, for the one hover above: each box
-    /// framed just outside itself so the next grab reads no border
-    /// (ARCHITECTURE.md#capture-and-masking), and the match in its own
-    /// theme colour so it does not look like the capture box it was
-    /// found in.
+    /// Each box reaches the outline with a two-pixel frame outside itself.
+    /// The next grab then reads no border (ARCHITECTURE.md#capture-and-masking).
+    /// Match uses its own theme color, so it differs from its capture box.
     #[test]
     fn a_hovers_scan_rects_reach_the_outline_outset_and_coloured_by_kind() {
         let theme = chibipop::ui::theme::Theme::dark();
@@ -3861,15 +3818,15 @@ mod tests {
         );
     }
 
-    // -- the trigger channel's portal rung --
+    // ---- trigger channel Portal rung ----
 
     fn binding(id: shortcuts::ShortcutId, trigger: Option<&str>) -> shortcuts::Binding {
         shortcuts::Binding { id, trigger: trigger.map(str::to_string) }
     }
 
-    /// The whole point of the rung: a portal press does exactly what
-    /// `ctl trigger-down` does, and its release exactly what
-    /// `trigger-up` does — one trigger semantics, two sources.
+    /// Portal press and release use the same trigger semantics as
+    /// `ctl trigger-down` and `trigger-up`.
+    /// Two sources feed one trigger.
     #[test]
     fn a_portal_press_takes_the_same_frozen_grab_as_the_socket_verb() {
         let dir = scratch("portalhold");
@@ -3898,8 +3855,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The add shortcut is not a trigger: it must reach the Controller
-    /// without freezing anything, and its release must do nothing at all.
+    /// The add shortcut is not a trigger.
+    /// Press reaches the Controller without a grab. Release does nothing.
     #[test]
     fn the_add_shortcut_never_takes_a_grab() {
         let dir = scratch("portaladd");
@@ -3925,9 +3882,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What the portal bound is what the tray row and the settings
-    /// window say — the observability half of a visible channel
-    /// selection.
+    /// The tray row and settings window report the Portal binding.
+    /// This test checks channel visibility.
     #[test]
     fn a_bind_names_the_owner_in_the_row_and_publishes_it() {
         let dir = scratch("portalbound");
@@ -3943,8 +3899,8 @@ mod tests {
         assert!(row.contains("GlobalShortcuts portal"), "{row}");
         assert!(row.contains("trigger Alt+F"), "{row}");
         assert!(row.contains("anki-add (key not reported)"), "{row}");
-        // A working trigger never raises the tray's attention icon: the
-        // socket is up and so is the portal.
+        // A trigger that works never raises the tray's attention icon: the
+        // socket and the portal both work.
         assert_eq!(ksni::Status::Active, app.tray.statuses().sni_status());
 
         let published = shortcuts::state::read(&dir).expect("the daemon publishes the channel");
@@ -3953,8 +3909,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The user re-bound the key in their desktop's own UI: the row and
-    /// the published state follow, without a restart.
+    /// A user can change the key in the desktop UI.
+    /// The row and published state update without a restart.
     #[test]
     fn shortcuts_changed_updates_the_row_and_the_published_key() {
         let dir = scratch("portalchanged");
@@ -3982,9 +3938,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A portal that cannot serve is a status with a reason in it, and
-    /// the socket is still the trigger: no attention icon, and the
-    /// settings window stops claiming a portal binding.
+    /// If Portal cannot serve, the status includes a reason.
+    /// The socket remains the trigger.
+    /// The tray shows no attention icon, and the settings window no longer
+    /// reports a Portal binding.
     #[test]
     fn an_unavailable_portal_leaves_the_socket_serving() {
         let dir = scratch("portalgone");
@@ -4017,8 +3974,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The portal thread owns no log, so its diagnostics travel as
-    /// events and are written here.
+    /// The Portal thread has no log.
+    /// It sends diagnostics as Events, and this method writes them.
     #[test]
     fn a_shortcut_note_reaches_the_daemon_log() {
         let dir = scratch("portalnote");
@@ -4041,21 +3998,23 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// Generous: never reached on a healthy run.
+    /// Test deadline for fake operations. A healthy path does not reach it.
     const TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// Where the fakes' hovers land, and the word they read.
+    /// Cursor point and word for fake hovers.
     const AT: PhysPoint = PhysPoint { x: 600, y: 300 };
     const WORD: &str = "\u{98DF}";
 
-    /// One fake output: big enough to hold a read region, small enough
-    /// that a press-time full grab is a cheap allocation.
+    /// Fake output can hold a read region.
+    /// It stays small enough for a press-time full grab to use one cheap
+    /// allocation.
     const FAKE_OUTPUT: i32 = 1000;
 
-    /// What the fake seams did, in order. One Vec rather than a channel
-    /// per seam: both run on the worker thread, so appending under one
-    /// lock is the order the pipeline actually took, and a received
-    /// result is the barrier that makes it complete.
+    /// Fake seam log in order.
+    /// One `Vec` replaces per-seam channels.
+    /// All seams run on the Worker thread, so one lock preserves pipeline
+    /// order.
+    /// A received result marks completion.
     type Seams = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
     fn seams() -> Seams {
@@ -4070,8 +4029,8 @@ mod tests {
         log.lock().expect("the seam log").clone()
     }
 
-    /// Canned pixels; every grab is logged and can be held open, so an
-    /// in-flight read is something a test can stand on.
+    /// Fake pixels log each grab and can pause it.
+    /// A test can then inspect an active read.
     struct FakeCapture {
         log: Seams,
         gate: Option<mpsc::Receiver<()>>,
@@ -4115,11 +4074,11 @@ mod tests {
         }
     }
 
-    /// One word over the whole grab, plus whether the pixels handed to
-    /// it had been masked: the capture's own are black and a mask fills
-    /// white (ARCHITECTURE.md#capture-and-masking), so this is the mask
-    /// itself, observed. Alpha is not evidence - the upscale sets it
-    /// opaque either way.
+    /// Fake OCR reports one word and whether its input had a mask.
+    /// Capture pixels are black. A mask fills white
+    /// (ARCHITECTURE.md#capture-and-masking).
+    /// White pixels therefore prove the mask.
+    /// Alpha does not prove it because the upscale makes it opaque.
     struct FakeOcr {
         log: Seams,
     }
@@ -4151,8 +4110,9 @@ mod tests {
         }
     }
 
-    /// The real core pipeline over those fakes: no screen, no OCR
-    /// models, no database, and every pass countable.
+    /// Real core pipeline over fakes.
+    /// It opens no screen, OCR models, or database.
+    /// Tests can count each pass.
     fn fake_worker(
         gate: Option<mpsc::Receiver<()>>,
         entered: Option<mpsc::Sender<()>>,
@@ -4160,9 +4120,8 @@ mod tests {
         fake_worker_serving(gate, entered, None)
     }
 
-    /// The same pipeline with the shipped `serve` hook installed over the
-    /// fake engine, so the one-off OCR seam can be driven with no
-    /// compositor and no ONNX models.
+    /// The same pipeline with the shipped `serve` hook over the fake engine.
+    /// The one-off OCR seam then runs without a compositor or ONNX models.
     fn fake_worker_serving(
         gate: Option<mpsc::Receiver<()>>,
         entered: Option<mpsc::Sender<()>>,
@@ -4171,10 +4130,11 @@ mod tests {
         let log = seams();
         let capture_log = log.clone();
         let ocr_log = log.clone();
-        // Named, not `&[]`: an empty terms list searches nothing
-        // (ARCHITECTURE.md#dictionary-and-lookup), so a pipeline built
-        // without its own identity would read every lookup and present
-        // none of it.
+                // Use a named dictionary, not `&[]`.
+                // An empty terms list searches nothing
+                // (ARCHITECTURE.md#dictionary-and-lookup).
+                // A pipeline without its identity would read every lookup and
+                // present none.
         let settings = worker::settings(&chibipop::config::Config::default(), &fake_dicts());
         let (worker, _dicts) = Worker::spawn(
             settings,
@@ -4189,7 +4149,7 @@ mod tests {
                     dict: Box::new(dict),
                     reopen_dict: None,
                     engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-                    // The shipped hook, not a stand-in written here.
+                    // Use the shipped hook, not a local stand-in.
                     serve: jobs.map(worker::serve_jobs),
                 })
             },
@@ -4199,19 +4159,20 @@ mod tests {
         (worker, log)
     }
 
-    /// The identity `fake_worker`'s dictionary reports, which is what the
-    /// real `spawn_worker` learns from the pipeline's first read and puts
-    /// in `App::dicts`. A test that installs a fake Worker is standing in
-    /// for a finished spawn, so it stands in for this too.
+    /// Return the identity that the `fake_worker` dictionary reports.
+    /// Real `spawn_worker` gets it from the first pipeline read and stores it
+    /// in `App::dicts`.
+    /// The fake Worker represents a finished spawn, so it represents this
+    /// identity too.
     fn fake_dicts() -> Vec<DictInfo> {
         vec![DictInfo { dict_id: 1, name: "FakeDict".to_string() }]
     }
 
-    /// One answer off a calloop channel, or a test failure.
+    /// Receive one answer from the calloop channel, or report a test failure.
     ///
-    /// `calloop::channel::Channel` has no `recv_timeout`, and a blocking
-    /// `recv` on a hook that never ran would hang the suite instead of
-    /// failing it.
+    /// `calloop::channel::Channel` has no `recv_timeout`.
+    /// A `recv` call on a hook that never runs would hang the suite and hide the
+    /// failure.
     fn ocr_answer(
         answers: &calloop::channel::Channel<Result<Vec<OcrLine>, String>>,
     ) -> Result<Vec<OcrLine>, String> {
@@ -4227,17 +4188,18 @@ mod tests {
         }
     }
 
-    /// The one-off OCR seam end to end with no compositor: a queued job
-    /// wakes a Worker that is blocked on its trigger channel, runs on the
-    /// thread that owns the engine, and its lines come back over the
-    /// pump's own channel. Core pins the same shape in
-    /// `tests/worker.rs::a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade`;
-    /// this is that against this crate's fakes and the shipped hook.
+    /// Test the one-off OCR path end to end without a compositor.
+    /// A queued job wakes the Worker from its trigger channel.
+    /// The Worker runs the job on the thread that owns the engine.
+    /// It then sends lines to the pump channel.
+    /// Core tests the same shape in
+    /// `tests/worker.rs::a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade`.
+    /// This test uses this crate's fakes and the shipped hook.
     ///
-    /// The pixels are white, which `FakeOcr` reports as `masked=true`:
-    /// that is how the assertion knows the engine was shown *this job's*
-    /// bytes and not a capture grab's black ones - and the seam log
-    /// containing no `grab` at all is the other half of it.
+    /// Pixels are white, so `FakeOcr` reports `masked=true`.
+    /// The assertion proves that the engine received this job's bytes, not
+    /// black capture bytes.
+    /// No `grab` in the seam log proves the second half.
     #[test]
     fn a_queued_ocr_job_wakes_the_worker_and_answers_through_the_serve_hook() {
         let (jobs_tx, jobs_rx) = mpsc::channel::<worker::OcrRequest>();
@@ -4260,14 +4222,13 @@ mod tests {
             "the job's own dimensions reached the engine"
         );
         assert_eq!(WORD, chibipop::text::layout::join_lines(&lines), "and its text came back");
-        // The nudge is the only thing that could have woken it: no
-        // trigger was ever sent, so there is no lookup to receive.
+        // The nudge alone woke it. No trigger was sent, so no lookup exists.
         assert!(worker.results().try_recv().is_err(), "a serve wake answers no lookup");
     }
 
-    /// A queue with no pipeline behind it refuses instead of parking the
-    /// job for ever: `ocr-clipboard` on a daemon whose Worker never came
-    /// up must say so rather than take a region and go quiet.
+    /// A queue without a pipeline refuses a job.
+    /// `ocr-clipboard` on a daemon whose Worker never starts must report a
+    /// reason instead of a region pick and stop.
     #[test]
     fn an_ocr_job_queued_with_no_pipeline_is_refused_rather_than_parked() {
         let jobs = worker::OcrJobs::disconnected();
@@ -4283,8 +4244,8 @@ mod tests {
         );
     }
 
-    /// The pipeline's answer, or a test failure. Receiving it is what
-    /// makes the seam log complete.
+    /// Return the pipeline answer, or report a test failure.
+    /// The answer completes the seam log.
     fn answer(app: &App) -> chibipop::worker::WorkerResult {
         app.worker
             .as_ref()
@@ -4294,9 +4255,9 @@ mod tests {
             .expect("the pipeline must answer")
     }
 
-    /// The non-negotiable core: a cursor sample becomes a lookup on the
-    /// sample. Nothing timed sits in between - no settle delay, no
-    /// velocity gate, no dispatch tick (ARCHITECTURE.md#hover-cadence).
+    /// Core guarantee: a cursor sample becomes a lookup at once.
+    /// No timed delay, velocity gate, or dispatch tick sits between
+    /// (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn a_cursor_sample_dispatches_a_live_lookup_at_once() {
         let dir = scratch("live");
@@ -4318,13 +4279,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An event rung delivers a position when its session opens and
-    /// then only on movement (ARCHITECTURE.md#input-ladders), so a
-    /// daemon that came up with the cursor already resting on a word has
-    /// exactly one sample - and the pipeline is the last thing to exist.
-    /// Spending that sample on nothing would leave live mode silent
-    /// until the mouse moved, and would spend the Controller's movement
-    /// gate too: the same position asked twice is not a move.
+    /// An event rung gives a position when its session opens and on movement
+    /// (ARCHITECTURE.md#input-ladders).
+    /// The daemon can start with the cursor on a word before the pipeline
+    /// exists.
+    /// If the daemon consumes the sample too early, live mode stays silent
+    /// until the mouse moves.
+    /// The second sample does not pass the Controller movement gate because the
+    /// position did not change.
     #[test]
     fn a_sample_that_arrives_before_the_pipeline_is_spent_once_it_is_up() {
         let dir = scratch("earlysample");
@@ -4333,14 +4295,14 @@ mod tests {
         assert!(app.worker.is_none(), "no pipeline yet, as at startup");
 
         app.on_cursor_position(AT);
-        // A rung may re-deliver the resting position (a session that
-        // reopens, an output that re-enters); none of those samples may
-        // reach the Controller while there is nothing to ask.
+        // A rung can send the idle position again after a session reopen or
+        // output re-entry.
+        // Do not send these samples to the Controller without a pipeline.
         app.on_cursor_position(AT);
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(!written.contains("lookup:"), "nothing to ask yet: {written}");
 
-        // What `spawn_worker` does the moment a pipeline exists.
+        // This matches `spawn_worker` after the pipeline exists.
         let (worker, log) = fake_worker(None, None);
         app.worker = Some(worker);
         app.look_where_the_cursor_is();
@@ -4354,11 +4316,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The names the terms list is resolved against are the pipeline's
-    /// own first read, so `spawn_worker` cannot resolve the list before
-    /// the pipeline exists - it re-resolves after. Without that, a fresh
-    /// daemon searched an empty list until something sent `reload`, which
-    /// is the same empty-list defect one step further in.
+    /// The pipeline's first read provides names for the terms list.
+    /// `spawn_worker` cannot resolve the list before the pipeline exists, so it
+    /// resolves it again.
+    /// Without this step, a fresh daemon uses an empty list until reload.
+    /// This is the same empty-list defect one step later.
     #[test]
     fn a_fresh_pipeline_is_told_the_split_once_the_names_are_known() {
         let dir = scratch("rescope");
@@ -4366,13 +4328,12 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
         app.config.ocr.language = "ja".to_string();
-        // An unchecked row in the settings window's Terms section, as the
-        // config stores it: one exact name in the disabled twin. The other
-        // installed dictionary is named nowhere, so it is new and searched.
+        // The settings Terms section can contain an unchecked name.
+        // The config stores the exact name in the disabled list.
+        // An installed dictionary absent from both lists is new and searchable.
         app.config.dictionaries.terms_disabled =
             vec!["Jitendex.org [2026-07-09]".to_string()];
-        // What `spawn_worker` handed over: no identities, so nothing was
-        // new and the list came out empty.
+        // `spawn_worker` sent no identities, so no new names and an empty list.
         let sent = worker::settings(&app.config, &[]).present_cfg;
         assert!(sent.terms.is_empty(), "an empty library names nothing to search");
 
@@ -4390,8 +4351,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// And costs nothing when there is nothing to say: every respawn
-    /// already holds the names, so re-resolving answers what was sent.
+    /// If the scope has no change, do nothing.
+    /// Every respawn already has names, so re-resolve matches the sent scope.
     #[test]
     fn a_pipeline_whose_scope_did_not_change_is_left_alone() {
         let dir = scratch("norescope");
@@ -4401,8 +4362,8 @@ mod tests {
         let (worker, _seams) = fake_worker(None, None);
         app.worker = Some(worker);
         app.dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
-        // A respawn: the identities were known when `spawn_worker`
-        // resolved the list, so re-resolving has nothing new to say.
+        // The respawn has known identities. `spawn_worker` therefore resolves
+        // the same list.
         let sent = worker::settings(&app.config, &app.dicts).present_cfg;
 
         app.rescope_lookups(&sent);
@@ -4412,10 +4373,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A live grab must not read our own popup; a hold's frozen grab
-    /// reads straight through it (ARCHITECTURE.md#capture-and-masking).
-    /// The fake recogniser reports the fill it was handed, so both
-    /// halves are observed rather than argued.
+    /// A live grab must mask the popup. A frozen hold reads through it
+    /// (ARCHITECTURE.md#capture-and-masking).
+    /// The fake recognizer reports whether input has a mask, so both cases are
+    /// observed.
     #[test]
     fn a_live_lookup_masks_the_popup_and_a_hold_reads_through_it() {
         let dir = scratch("livemask");
@@ -4423,7 +4384,7 @@ mod tests {
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
         let (worker, log) = fake_worker(None, None);
         app.worker = Some(worker);
-        // Over the hovered point, as a placed popup can be.
+        // Put the popup over the hovered point, as a shown popup can be.
         let popup = PhysRect { x: AT.x - 40, y: AT.y - 40, w: 200, h: 120 };
 
         app.execute(Command::RequestLookup { id: RequestId(1), point: AT, popup: Some(popup) });
@@ -4439,9 +4400,9 @@ mod tests {
         app.handle_request("trigger-down", Some(Verb::TriggerDown));
         assert_eq!(CaptureMode::Frozen, app.capture_mode());
         answer(&app);
-        // The press's own full grab, bracketed like any other read -
-        // then the hold's lookup, which touches no backend at all and
-        // masks nothing, because those pixels predate the popup.
+        // The press takes a full grab and brackets it like every read.
+        // The hold lookup uses no backend and no mask because its pixels
+        // predate the popup.
         assert_eq!(
             done(&log)[4..],
             ["begin_read", "grab", "end_read", "ocr masked=false"],
@@ -4451,9 +4412,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Backpressure is the pacer: samples arriving behind an in-flight
-    /// read coalesce to the newest, and the daemon queues nothing of its
-    /// own (ARCHITECTURE.md#hover-cadence - one in flight, latest-wins).
+    /// Backpressure paces input.
+    /// Samples while an active read run coalesce to the newest.
+    /// The daemon queues no extra sample
+    /// (ARCHITECTURE.md#hover-cadence: one in flight, latest-wins).
     #[test]
     fn samples_behind_an_in_flight_lookup_coalesce_to_the_newest() {
         let dir = scratch("coalesce");
@@ -4466,7 +4428,7 @@ mod tests {
 
         app.on_cursor_position(AT);
         entered_rx.recv_timeout(TIMEOUT).expect("the first read must start");
-        // Both land while that read is held open.
+        // Both samples arrive while the active read runs.
         app.on_cursor_position(PhysPoint { x: AT.x + 100, y: AT.y });
         app.on_cursor_position(PhysPoint { x: AT.x + 200, y: AT.y });
         gate_tx.send(()).unwrap();
@@ -4489,8 +4451,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The daemon's own half of the arming rule. A hold reads pixels
-    /// that cannot change, so trigger mode is never dwell-watched.
+    /// Test the daemon half of the arm rule.
+    /// A hold reads immutable pixels, so trigger mode never uses a dwell watch.
     #[test]
     fn a_frozen_hold_is_never_dwell_watched() {
         let output = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
@@ -4500,13 +4462,12 @@ mod tests {
         assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
     }
 
-    /// A watch with nothing on screen asks the pipeline for nothing and
-    /// retires on its own deadline - which is what leaves an idle daemon
-    /// holding no timed source at all (ARCHITECTURE.md#hover-cadence -
-    /// zero idle wakeups).
+    /// A watch with no popup asks the pipeline for nothing.
+    /// It expires at its deadline, so the idle daemon keeps no timed source
+    /// (ARCHITECTURE.md#hover-cadence: zero idle wakeups).
     ///
-    /// Armed by hand: a popup with a rect needs a compositor, and the
-    /// Controller's half of the decision is core's own test.
+    /// Arm it by hand. A popup with a rect needs a compositor.
+    /// The Controller supplies the other half in core tests.
     #[test]
     fn a_dwell_watch_with_nothing_shown_asks_nothing_and_retires() {
         let dir = scratch("dwellidle");
@@ -4541,21 +4502,20 @@ mod tests {
 
     use std::io::{Read, Write};
 
-    /// A fake AnkiConnect.
+    /// Fake AnkiConnect server.
     ///
-    /// The seam under test is a socket, not a trait: `chibipop::anki`
-    /// speaks plain HTTP through `ureq`, and mirroring the Windows bin
-    /// exactly means the daemon's calls really do leave the process.
-    /// So this is the far end of the wire, and it remembers every
-    /// request body - which is how a test can assert on the deck, the
-    /// model and the fields that were actually sent.
+    /// The test seam is a socket, not a trait.
+    /// `chibipop::anki` sends plain HTTP with `ureq`.
+    /// This matches the Windows bin, so daemon calls leave the process.
+    /// The fake server is the far end of the wire and stores each request body.
+    /// Tests then inspect the sent deck, model, and fields.
     struct FakeAnki {
         url: String,
         seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     }
 
     impl FakeAnki {
-        /// Answers `replies` requests, then closes.
+        /// Answer `replies` requests, then close.
         fn start(replies: usize) -> FakeAnki {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
             let url = format!("http://{}", listener.local_addr().expect("the bound address"));
@@ -4584,12 +4544,12 @@ mod tests {
         }
     }
 
-    /// One HTTP request's body, by its `Content-Length`.
+    /// Read one HTTP request body from its `Content-Length`.
     fn read_body(stream: &mut std::net::TcpStream) -> String {
         let mut raw = Vec::new();
         let mut byte = [0u8; 1];
-        // Headers first: read one byte at a time so the body is not
-        // swallowed into a buffer this function cannot give back.
+        // Read headers one byte at a time.
+        // Do not consume the body into a buffer that this method cannot return.
         while !raw.ends_with(b"\r\n\r\n") {
             match stream.read(&mut byte) {
                 Ok(1) => raw.push(byte[0]),
@@ -4609,10 +4569,10 @@ mod tests {
         String::from_utf8_lossy(&body).to_string()
     }
 
-    /// AnkiConnect v6's answer to the two actions the popup makes.
+    /// Return the AnkiConnect v6 answer for the two popup actions.
     ///
-    /// `canAddNotes` refuses the first note and accepts the rest, so a
-    /// test has exactly one known duplicate to assert on.
+    /// `canAddNotes` rejects the first note and accepts the rest.
+    /// The test can then assert one known duplicate.
     fn canned_reply(request: &serde_json::Value) -> String {
         match request.get("action").and_then(|a| a.as_str()) {
             Some("canAddNotes") => {
@@ -4630,7 +4590,7 @@ mod tests {
         }
     }
 
-    /// Point the daemon at the fake and turn the feature on.
+    /// Point the daemon at the fake server and enable the feature.
     fn anki_at(app: &mut App, url: &str) {
         app.config.anki.enabled = true;
         app.config.anki.url = url.to_string();
@@ -4639,13 +4599,12 @@ mod tests {
         app.controller = Controller::new(controller_config(&app.config));
     }
 
-    /// Pump until `wanted` is in the log or `budget` passes are spent,
-    /// then hand the log back.
+    /// Run the pump until `wanted` appears or `budget` passes pass.
+    /// Then return the log.
     ///
-    /// An AnkiConnect answer crosses a thread and a calloop channel, so
-    /// there is nothing to assert on until the pump has dispatched it -
-    /// and a test that expects *no* answer has to spend a budget to be
-    /// worth anything.
+    /// The answer crosses a thread and a calloop channel.
+    /// The pump must dispatch it before assertions.
+    /// A no-answer test still needs a pass budget.
     fn pump_until(
         event_loop: &mut EventLoop<'static, App>,
         app: &mut App,
@@ -4668,9 +4627,10 @@ mod tests {
         written
     }
 
-    /// The dupe check the Controller orders when a popup lands: it must
-    /// reach the real AnkiConnect action, carrying the configured deck
-    /// and model, and its answer must come back to the pump.
+    /// The Controller requests a dupe check after popup placement.
+    /// This test sends the real AnkiConnect action with the configured deck and
+    /// model.
+    /// The answer returns to the pump.
     #[test]
     fn a_dupe_check_goes_out_over_http_and_its_answer_comes_back() {
         let dir = scratch("ankidupes");
@@ -4700,9 +4660,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The add itself: the Anki button and the `anki-add` shortcut both
-    /// end here, and this is the call that creates the card. The fields
-    /// must arrive mapped by `anki.field_map`, exactly as on Windows.
+    /// The add action uses the same path as the Anki button and `anki-add`
+    /// shortcut.
+    /// This HTTP call creates the card.
+    /// Fields use `anki.field_map`, like Windows.
     #[test]
     fn an_add_creates_the_note_through_the_configured_field_map() {
         let dir = scratch("ankiadd");
@@ -4733,15 +4694,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Anki not running is the common case, and it must cost one line
-    /// and nothing else: no panic, no pump stalled on a dead socket.
+    /// Anki can be down. It must produce one line and no other result.
+    /// It must not panic or stop the pump on a dead socket.
     #[test]
     fn an_ankiconnect_that_is_not_listening_is_one_line() {
         let dir = scratch("ankidown");
         let log_file = dir.join("chibipop.log");
         let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
-        // A port that was bound and let go: nothing is listening on it.
+        // Bind a port, then release it. No process listens on it.
         let dead = {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
             probe.local_addr().expect("the bound address")
@@ -4755,11 +4716,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Both entry points are the same guarded Event: with nothing on
-    /// screen there is nothing to add, and neither the shortcut nor a
-    /// click on the slot may reach the network. This is the Windows
-    /// enable rule - the button is not there, and the hotkey is not
-    /// armed - arrived at through the Controller instead of a hook.
+    /// Both entry points use the same guarded Event.
+    /// With no popup, there is no card to add.
+    /// Neither shortcut nor slot click can reach the network.
+    /// This matches the Windows enable rule: no button and no armed hotkey.
+    /// The Controller supplies this path instead of a hook.
     #[test]
     fn an_add_with_nothing_shown_asks_ankiconnect_for_nothing() {
         let dir = scratch("ankiunarmed");
@@ -4776,7 +4737,7 @@ mod tests {
         app.pointer_interactions(vec![popup::Interaction::Anki {
             local: PhysPoint { x: 10, y: 10 },
         }]);
-        // Long enough for a request to have been made, had one been.
+        // Allow enough passes for a request if one existed.
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
 
         assert!(anki.seen().is_empty(), "no popup, no card: {:?}", anki.seen());
@@ -4784,20 +4745,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A popup the Controller believes is on screen, and the generation
-    /// of the dupe check its presentation ordered.
+    /// Represent a popup that the Controller considers visible and the
+    /// dupe-check generation that it orders.
     ///
-    /// Driven straight into the Controller because the real placement
-    /// round-trip needs a compositor to answer `PopupPlaced`, and what
-    /// is under test below is the path from a shortcut press to the
-    /// AnkiConnect call - not the layer surface.
+    /// Call the Controller directly because the real placement round trip
+    /// needs a compositor for `PopupPlaced`.
+    /// Test the path from a shortcut press to the AnkiConnect call, not the
+    /// layer surface.
     ///
-    /// The generation is answered because it is the only way a test can
-    /// answer that dupe check: `Controller::dupes_checked` refuses a
-    /// stale one, and the popup's `connected` flag - which decides
-    /// whether a mining screenshot has a card to file - is exactly what
-    /// the answer sets. `None` where Anki is off and no check was
-    /// ordered; callers that do not care ignore the whole thing.
+    /// The generation is needed to answer the dupe check.
+    /// The Controller rejects a stale generation.
+    /// The popup `connected` flag decides whether a screenshot add has a card
+    /// to file.
+    /// The answer sets this flag.
+    /// `None` means Anki is off and no check was ordered.
+    /// Callers can ignore the result.
     fn place_a_popup(app: &mut App) -> Option<u64> {
         use chibipop::present::{Card, Presentation};
         use chibipop::text::layout::Orientation;
@@ -4834,8 +4796,9 @@ mod tests {
                 scan: Vec::new(),
             },
         });
-        // The dupe check is ordered when the rect lands, not when the
-        // presentation does: `begin_place` finishes at `PopupPlaced`.
+        // The dupe check starts when the rect arrives, not when the
+        // presentation arrives.
+        // `begin_place` ends at `PopupPlaced`.
         let ordered = app.controller.handle(Event::PopupPlaced {
             rect: PhysRect { x: 100, y: 150, w: 300, h: 200 },
             content_h: 200,
@@ -4848,11 +4811,11 @@ mod tests {
         })
     }
 
-    /// The `anki-add` portal shortcut creates a card for the current
-    /// lookup. The press cannot be synthesized here - the portal rung
-    /// needs an app id and a real key - so it enters where the portal
-    /// thread's events enter, and the card it produces is asserted on
-    /// the wire.
+    /// The `anki-add` Portal shortcut creates a card for the current lookup.
+    /// This test cannot synthesize a Portal press because it needs an app ID and
+    /// a real key.
+    /// Enter at the same point as the Portal thread's Events.
+    /// Assert the card on the wire.
     #[test]
     fn the_anki_add_shortcut_creates_a_card_for_the_shown_lookup() {
         let dir = scratch("ankishortcut");
@@ -4879,8 +4842,8 @@ mod tests {
         );
         assert!(written.contains("anki: card added as note 1729"), "log was: {written}");
 
-        // The release is not a second add (`Action::Nothing`), and the
-        // Controller refuses a repeat of one it already added.
+        // Release does not add again (`Action::Nothing`).
+        // The Controller rejects a repeat after the first add.
         app.handle_shortcut(shortcuts::Event::Fired {
             id: shortcuts::ShortcutId::AnkiAdd,
             activated: false,
@@ -4894,11 +4857,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The same card, asked for over the control socket instead of the
-    /// portal - rung 2, the only rung a sway user has. It enters through
-    /// `handle_request` with the verb parsed off the wire word, so what
-    /// is driven here is `chibipop ctl anki-add` end to end minus the
-    /// socket bytes (those are `control`'s own round-trip test).
+    /// The control-socket `anki-add` path creates the same card as the Portal
+    /// shortcut.
+    /// It uses rung 2, the only rung for a sway user.
+    /// The test enters through `handle_request` with the verb from the wire
+    /// word.
+    /// This covers `chibipop ctl anki-add` except the socket bytes.
+    /// `control` owns the socket round-trip test.
     #[test]
     fn the_anki_add_verb_creates_the_same_card_the_portal_shortcut_does() {
         let dir = scratch("ankiverb");
@@ -4926,9 +4891,9 @@ mod tests {
             "the socket logs what it was asked for: {written}"
         );
 
-        // And the two rungs are one path, not two: a portal press after
-        // the verb's card adds nothing, because the Controller already
-        // knows this lookup was added.
+        // Both rungs use one path, not two.
+        // A Portal press after the socket add creates nothing because the
+        // Controller knows that the lookup was added.
         app.handle_shortcut(shortcuts::Event::Fired {
             id: shortcuts::ShortcutId::AnkiAdd,
             activated: true,
@@ -4938,9 +4903,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Anki off is the affordance gone: no dupe check when the popup
-    /// lands, and a press that reaches nothing - the same rule the
-    /// Windows button and its hotkey follow.
+    /// Anki off removes the slot and the check.
+    /// Popup placement sends no dupe check, and a press sends no request.
+    /// The Windows button and hotkey use the same rule.
     #[test]
     fn anki_disabled_never_reaches_ankiconnect() {
         let dir = scratch("ankioff");
@@ -4968,24 +4933,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- the mining screenshot and the picture that rides an add ----
+    // ---- mining screenshot and picture carried by an add ----
     //
-    // **How the region pick is stubbed.** None of these drives a
-    // compositor. Two seams stand in for one, and both are the exact
-    // entry points the real flow uses:
+    // **Stub for region pick.** These tests use no compositor.
+    // Two seams represent the real flow:
     //
-    // - `App::took_shot_region(picked, shot)` is the pick's answer,
-    //   the same split `static-region` uses. `None` is a cancel.
-    // - `App::handle_shot(grabbed)` is what the grabbing thread's
-    //   `calloop::channel` calls, so a fabricated `Frame` is
-    //   indistinguishable here from real pixels.
+    // - `App::took_shot_region(picked, shot)` receives the pick answer, as
+    //   `static-region` does. `None` means cancel.
+    // - `App::handle_shot(grabbed)` receives the `calloop::channel` message from
+    //   the grab thread. A fabricated `Frame` matches real pixels at this seam.
     //
-    // Only the drag itself and `capture::oneshot` are left out, and both
-    // are covered against a real compositor by `tests/surfaces_live.rs`
-    // and `capture-dump`.
+    // Only the drag and `capture::oneshot` remain outside these tests.
+    // `tests/surfaces_live.rs` and `capture-dump` cover them with a compositor.
 
-    /// Two by two of solid blue, which is the smallest thing
-    /// `encode_bgra_to_png` will take: BGRA8, top-down, `w * h * 4`.
+    /// Two by two solid blue pixels.
+    /// This is the smallest input `encode_bgra_to_png` accepts: BGRA8,
+    /// top-down, `w * h * 4`.
     fn test_frame() -> Frame {
         Frame {
             buf: [255, 0, 0, 255].repeat(4),
@@ -4997,11 +4960,11 @@ mod tests {
         }
     }
 
-    /// Turn the screenshot gate on and route the picture somewhere.
+    /// Enable the screenshot gate and set the picture path.
     ///
     /// `save_dir` is relative, so it resolves under `test_app`'s XDG
-    /// `data_dir` - which is the scratch dir - through the same
-    /// `Paths::screenshots_dir` the daemon uses.
+    /// `data_dir`, the scratch directory.
+    /// This uses the same `Paths::screenshots_dir` as the daemon.
     fn screenshots_on(app: &mut App) {
         app.config.actions.screenshot.include_on_add = true;
         app.config.actions.screenshot.save_dir = "shots".to_string();
@@ -5011,7 +4974,7 @@ mod tests {
         });
     }
 
-    /// The parked plan, or a failure that says what was there instead.
+    /// Return the parked plan, or panic with its current state.
     fn parked(app: &mut App) -> Pending {
         match app.shot.take() {
             Some(Shot::Parked(shot)) => shot,
@@ -5020,10 +4983,10 @@ mod tests {
         }
     }
 
-    /// The whole feature, end to end minus the compositor: the add the
-    /// `anki-add` verb authorises is *not* dispatched as a plain add, and
-    /// the card that does go out carries a picture whose filename, target
-    /// field and folder all came from `chibipop::shot`.
+    /// Test screenshot add end to end without a compositor.
+    /// `anki-add` does not dispatch a plain add.
+    /// The card call carries a picture.
+    /// `chibipop::shot` supplies its filename, target field, and folder.
     #[test]
     fn an_add_that_carries_a_screenshot_files_the_picture_core_planned() {
         let dir = scratch("shotadd");
@@ -5037,8 +5000,9 @@ mod tests {
 
         app.handle_request("anki-add", Verb::parse("anki-add"));
 
-        // The plan is parked and the plain add was suppressed: core owns
-        // the filename and the picture field, and this is where they show.
+        // The plan is parked and the plain add is suppressed.
+        // Core owns the filename and picture field, so the assertions check
+        // them here.
         let shot = parked(&mut app);
         assert_eq!(dir.join("shots"), shot.plan.path.parent().expect("a folder"));
         let stem =
@@ -5047,8 +5011,8 @@ mod tests {
         assert_eq!(Some("Screenshot".to_string()), shot.plan.picture_field);
         assert!(anki.seen().is_empty(), "the plain add must not have gone out too");
 
-        // The grabbing thread's answer, with pixels standing in for a
-        // real region (see the note above).
+        // The grab thread returns the answer.
+        // Pixels stand in for a real region (see the note above).
         let png = shot.plan.path.clone();
         app.shot = Some(Shot::Grabbing(shot));
         app.handle_shot(Ok(test_frame()));
@@ -5088,9 +5052,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The gate is core's and it is off by default: an add with
-    /// `include_on_add = false` is byte for byte the add that shipped
-    /// before this feature - no plan, no pick, no picture on the wire.
+    /// Core owns the gate, and the default is off.
+    /// With `include_on_add = false`, add matches the old path byte for byte:
+    /// no plan, pick, or picture on the wire.
     #[test]
     fn an_add_with_the_screenshot_gate_off_is_the_plain_add_it_always_was() {
         let dir = scratch("shotoff");
@@ -5120,11 +5084,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The deferral itself, plus the documented cancel: the plan is
-    /// parked *inside* the socket's callback and drained by the pump
-    /// afterwards, and a pick that answers nothing files the card
-    /// exactly once - without a picture. There is no layer shell here,
-    /// so the pick really does answer nothing.
+    /// Test deferral and cancel.
+    /// The plan parks inside the socket callback. The pump handles it later.
+    /// A pick that returns no region files the card once without a picture.
+    /// No layer shell makes the pick return no region.
     #[test]
     fn a_cancelled_screenshot_pick_files_the_card_once_without_a_picture() {
         let dir = scratch("shotcancel");
@@ -5164,8 +5127,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A grab that never came back is Windows' rule exactly: a card
-    /// without a picture, not a card that never happens.
+    /// A failed grab follows the Windows rule: file the card without a
+    /// picture, not skip the card.
     #[test]
     fn a_screenshot_grab_that_failed_still_files_the_card_without_a_picture() {
         let dir = scratch("shotnograb");
@@ -5191,12 +5154,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A save that cannot land must still answer the popup: `start_add`
-    /// marked it adding before the picture was authorised, so a silent
-    /// failure here would leave "Adding…" on screen for good.
+    /// If picture save fails, the popup still receives an answer.
+    /// `start_add` marks the add state before picture authorization.
+    /// A silent failure would leave "Adding…" on screen forever.
     ///
-    /// The folder is blocked by a *file* of the same name, which is the
-    /// one way to make `create_dir_all` fail without root.
+    /// A file with the folder name makes `create_dir_all` fail without root.
     #[test]
     fn a_screenshot_that_cannot_be_saved_still_clears_the_popup() {
         let dir = scratch("shotnosave");
@@ -5228,10 +5190,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The `screenshot` verb: the mining context for the lookup on
-    /// screen, filed on a card of its own. Ungated - `include_on_add` is
-    /// off here and irrelevant, which is why core has a second entry
-    /// point (`shot::plan`).
+    /// The screenshot verb saves the lookup's mining context as its own card.
+    /// It ignores `include_on_add`. Core has a separate entry point
+    /// (`shot::plan`).
     #[test]
     fn the_screenshot_verb_files_the_mining_context_for_the_lookup_on_screen() {
         let dir = scratch("shotverb");
@@ -5243,8 +5204,8 @@ mod tests {
         screenshots_on(&mut app);
         app.config.actions.screenshot.include_on_add = false;
         let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
-        // What a served dupe check leaves behind: the popup's own view
-        // of AnkiConnect, which is what decides whether a card is filed.
+        // A served dupe check leaves the popup's AnkiConnect state.
+        // This state decides whether a card exists.
         app.feed(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
         assert!(app.controller.anki().expect("shown").connected);
 
@@ -5273,9 +5234,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// AnkiConnect not serving this popup is not a reason to lose the
-    /// picture: it goes to disk with no card to ride on, and nothing
-    /// claims the word was added.
+    /// If AnkiConnect does not serve the popup, still save the picture.
+    /// Save it to disk without a card. Do not claim that the word was added.
     #[test]
     fn a_mining_screenshot_with_no_card_to_file_still_saves_the_picture() {
         let dir = scratch("shotnocard");
@@ -5286,10 +5246,10 @@ mod tests {
         anki_at(&mut app, &anki.url);
         screenshots_on(&mut app);
         let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
-        // A fresh popup is optimistically `connected` while Anki is
-        // enabled (`AnkiPopupState::fresh`), so what makes it *not*
-        // serving is a dupe check that came back with nothing - which is
-        // exactly what AnkiConnect being down looks like from here.
+        // A fresh popup sets `connected` true when Anki is enabled
+        // (`AnkiPopupState::fresh`).
+        // A dupe check with no result makes the state inactive.
+        // This matches the AnkiConnect-down state.
         app.feed(Event::DupesChecked { generation, dupes: None });
         assert!(!app.controller.anki().expect("shown").connected);
 
@@ -5315,12 +5275,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A verb pressed with nothing on screen does something honest.
+    /// A screenshot verb with no popup reports a clear reason.
     ///
-    /// Windows' `is_available` gate is the same (a visible popup with a
-    /// card), but it fails silently; on a compositor bind there is no
-    /// dialog and no return code a user ever sees, so the line in the log
-    /// is the whole diagnosis.
+    /// Windows `is_available` uses the same gate: a visible popup with a card.
+    /// Windows fails silently, but a compositor bind has no dialog or return
+    /// code.
+    /// The log line is the only diagnosis.
     #[test]
     fn the_screenshot_verb_with_nothing_on_screen_says_why() {
         let dir = scratch("shotnopopup");
@@ -5343,9 +5303,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One pick at a time, which the `Option<Shot>` slot is: two verbs
-    /// can arrive in one socket callback, and the second must not drag a
-    /// box over the dim the first put up. The add still files its card.
+    /// Allow one pick at a time. `Option<Shot>` is this slot.
+    /// Two verbs can arrive in one socket callback.
+    /// The second must not put a box over the dim from the first.
+    /// The add still files the card.
     #[test]
     fn a_second_shot_is_refused_while_one_is_already_owed() {
         let dir = scratch("shotbusy");
@@ -5358,8 +5319,8 @@ mod tests {
         let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
         app.feed(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
 
-        // The add parks first; the mining verb arrives before the pump
-        // has had its idle pass.
+        // The add parks first. The mining verb arrives before the pump idle
+        // pass.
         app.handle_request("anki-add", Verb::parse("anki-add"));
         app.handle_request("screenshot", Verb::parse("screenshot"));
 
@@ -5375,8 +5336,8 @@ mod tests {
 
     // ---- a protocol error ends the daemon ----
 
-    /// A `ProtocolError` shaped like the one a compositor sends when a
-    /// client binds a global that does not exist.
+    /// A `ProtocolError` like the error that a compositor sends when a client
+    /// binds an unknown global.
     fn a_protocol_error() -> ProtocolError {
         ProtocolError {
             code: 0,
@@ -5386,9 +5347,10 @@ mod tests {
         }
     }
 
-    /// The fatal decision itself. A protocol error is a verdict on the
-    /// whole connection; a slow compositor and a lost socket are not, and
-    /// promoting either would turn a hiccup into a dead daemon.
+    /// Test the fatal decision.
+    /// A protocol error applies to the whole connection.
+    /// A slow compositor or a lost socket does not.
+    /// A fatal response to either one would stop a healthy daemon.
     #[test]
     fn only_a_protocol_error_is_fatal_to_the_daemon() {
         let fatal = DispatchError::Backend(WaylandError::Protocol(a_protocol_error()));
@@ -5410,12 +5372,14 @@ mod tests {
         assert!(fatal_protocol_error(&bad).is_none(), "already fatal one layer down");
     }
 
-    /// The wiring, without a compositor: the verdict ends the pump the way
-    /// a signal does, is recorded for the exit status, and is said once.
+    /// Test the connections without a compositor.
+    /// The verdict ends the pump like a signal, records the exit status, and
+    /// logs once.
     ///
-    /// Fed from inside the loop on purpose - `EventLoop::run` clears the
-    /// stop flag as it starts, so a stop from outside would prove nothing
-    /// (the note in `select.rs` found that the hard way).
+    /// Send the error from inside the loop.
+    /// `EventLoop::run` clears the stop flag at start, so an outside stop proves
+    /// nothing.
+    /// The `select.rs` note explains this.
     #[test]
     fn a_protocol_error_ends_the_pump_and_is_diagnosed_once() {
         let dir = scratch("protoend");
@@ -5425,8 +5389,8 @@ mod tests {
         event_loop
             .handle()
             .insert_source(Timer::immediate(), |_, _, app: &mut App| {
-                // Twice, because the backend's error is sticky: every
-                // wakeup after the first would see it again.
+                // Call twice because the backend error stays set.
+                // Each later wakeup sees it again.
                 app.end_on_protocol_error(&a_protocol_error());
                 app.end_on_protocol_error(&a_protocol_error());
                 TimeoutAction::Drop
@@ -5448,15 +5412,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The real thing, when there is a compositor to say it: a throwaway
-    /// registry binds a global that cannot exist, and the pump ends.
+    /// Test the real compositor case.
+    /// A temporary registry binds an impossible global. The pump then ends.
     ///
-    /// This is the case the protocol-error path was written for, so it is
-    /// worth a live test - but CI is headless
-    /// (ARCHITECTURE.md#packaging-and-ci), which is why the wiring above
-    /// is pinned without one too. Nothing here is compositor-specific:
-    /// refusing a bind for an unknown global name belongs to the wayland
-    /// library the compositor links, not to the compositor.
+    /// This is the target of the protocol-error path.
+    /// CI is headless (ARCHITECTURE.md#packaging-and-ci), so the earlier test
+    /// checks the connections without a compositor.
+    /// Unknown-global refusal belongs to the Wayland library linked by the
+    /// compositor, not to the compositor itself.
     #[test]
     fn a_real_protocol_error_ends_the_pump() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -5475,9 +5438,9 @@ mod tests {
         let qh = queue.handle();
         insert_wayland_source(&event_loop.handle(), &conn, queue).unwrap();
 
-        // The throwaway object: a registry of this test's own, asked for a
-        // global name no compositor can have advertised. The compositor
-        // answers `wl_display.error` on it and drops the connection.
+        // Create a temporary registry.
+        // Ask for a global name that no compositor advertises.
+        // The compositor answers `wl_display.error` and drops the connection.
         let registry = conn.display().get_registry(&qh, ());
         registry.bind::<WlSeat, (), App>(u32::MAX, 1, &qh, ());
 
@@ -5502,15 +5465,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// How many passes a pump that does not end is allowed before the test
-    /// takes the loop away from it. Generous: a live compositor's answer
-    /// costs a round trip, and the spin this guards against needs no sleep
-    /// at all, so it burns the whole budget in microseconds.
+    /// Set the maximum passes before a test stops a pump that does not end.
+    /// A live compositor answer needs a round trip.
+    /// This guard uses no sleep, so it can consume the budget in microseconds.
     const RUNAWAY: u32 = 50;
 
-    /// Run until something stops the pump or [`RUNAWAY`] passes are spent,
-    /// and answer with the passes spent. The escape is what keeps a
-    /// regression a failure rather than a hung test.
+    /// Run until the pump stops or `RUNAWAY` passes pass.
+    /// Return the pass count.
+    /// The escape turns a regression into a failed test, not a hang.
     fn run_bounded(event_loop: &mut EventLoop<'static, App>, app: &mut App) -> u32 {
         let escape = event_loop.get_signal();
         let mut passes = 0;

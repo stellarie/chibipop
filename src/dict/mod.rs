@@ -1,4 +1,4 @@
-//! The dictionary builder.
+//! Read archives and build Dictionary data.
 
 pub mod archive;
 pub mod build;

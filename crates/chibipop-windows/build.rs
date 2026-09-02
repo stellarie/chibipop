@@ -1,12 +1,14 @@
-//! Links the checked-in Windows resource: the executable's icon, and the
-//! application manifest that asks for Common Controls v6.
+//! This script links the committed Windows resource.
+//! The resource supplies the executable icon and the application manifest.
+//! The manifest requests Common Controls v6.
 //!
-//! **The `.res` is committed rather than compiled here, on purpose.** Invoking
-//! `rc.exe` from a build script would make every build depend on locating a
-//! Windows SDK, and this project has taken no build dependencies since it
-//! started. Regenerate it whenever `assets/chibipop.ico` or
-//! `assets/chibipop.manifest` changes — from **PowerShell**, because MSYS2
-//! mangles `rc.exe`'s `/flag` arguments under git-bash:
+//! **The project keeps the `.res` file in the repository.** This script does not
+//! compile the resource. A build script that invokes `rc.exe` would require every
+//! build to locate a Windows SDK. The project has no build dependencies.
+//! Regenerate the file when `assets/chibipop.ico` or
+//! `assets/chibipop.manifest` changes. Use **PowerShell** for this task.
+//! MSYS2 changes the `/flag` arguments for `rc.exe` when you run the command from
+//! git-bash:
 //!
 //! ```powershell
 //! $rc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter rc.exe |
@@ -14,13 +16,13 @@
 //! Push-Location assets; & $rc.FullName /nologo /fo chibipop.res chibipop.rc; Pop-Location
 //! ```
 //!
-//! No `build = "build.rs"` key is needed in `Cargo.toml`: Cargo compiles and
-//! runs a `build.rs` in the package root by convention.
+//! Cargo does not need a `build = "build.rs"` key in `Cargo.toml`.
+//! Cargo compiles and runs `build.rs` in the package root by convention.
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo always sets this");
     println!("cargo:rerun-if-changed={dir}/assets/chibipop.res");
     println!("cargo:rerun-if-changed={dir}/assets/chibipop.manifest");
-    // `-bins`, not the plain form: the plain one also applies to test and
-    // doctest link steps, where a resource file has no business.
+    // Select `-bins`, not the plain form. The plain form also applies to test and
+    // doctest link steps. Those steps must not link this resource.
     println!("cargo:rustc-link-arg-bins={dir}/assets/chibipop.res");
 }

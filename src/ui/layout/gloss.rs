@@ -1,23 +1,23 @@
-//! One term-bank row's parsed tree, walked into paragraphs.
+//! A term-bank row supplies a [`GlossDoc`] tree. This module walks that tree into paragraphs.
 //!
-//! **One reason to change:** what a `GlossDoc` subtree becomes. A tag this
-//! build does not yet render, a role rule, a Yomitan default - each is one
-//! arm of the descent in this file.
+//! **One reason to change:** this module defines how each [`GlossDoc`] subtree becomes layout output.
+//! It covers unsupported tags, role rules, and Yomitan defaults.
 //!
-//! The block half of the inline pass, and deliberately the same rules the
-//! plain-text renderer uses (`dict::gloss::plain`): a block tag or a `data`
-//! marker opens a paragraph, an inline tag adds spans to the one already
-//! open, and a paragraph with no text is dropped. Two renderers over one
-//! tree must not disagree about where the lines are - that disagreement is
-//! the bug class this pass exists to close.
+//! The block walk follows the rules of the plain-text renderer (`dict::gloss::plain`).
+//! A block tag or a `data` marker opens a paragraph. An inline tag adds spans to that
+//! paragraph. The walk drops empty paragraphs. The plain-text renderer and this renderer
+//! must agree on line positions.
 //!
-//! [`Paragraphs`] is the walk's whole state, and four of its arms live
-//! beside the thing they build rather than here: a list's in
-//! [`marker`](super::marker), a table's in [`table`](super::table), an
-//! image's in [`image`](super::image), a reading's in
-//! [`ruby`](super::ruby), and the style resolution in
-//! [`style`](super::style). One topic, one file - so "how does this
-//! renderer do tables" has one answer and not two.
+//! The [`Paragraphs`] struct stores the state for the gloss walk. These modules handle
+//! the listed subtrees:
+//!
+//! - a list in [`marker`](super::marker)
+//! - a table in [`table`](super::table)
+//! - an image in [`image`](super::image)
+//! - a reading in [`ruby`](super::ruby)
+//! - style resolution in [`style`](super::style)
+//!
+//! Each file keeps one topic, so the table code has one implementation.
 
 use crate::controller::HitAction;
 use crate::dict::gloss::{GlossDoc, ItemType, Kind, NodeId, NodePath, RoleFilter, Tag};
@@ -34,42 +34,22 @@ use super::ruby::{FlowRuby, NO_RUBY};
 use super::scene::Rgb;
 use super::style::{Block, BoxStyle, Inline};
 
-/// What separates two top-level
-/// glossary items.
+/// Separates top-level glossary items.
 ///
-/// A dictionary row's `glossary`
-/// array holds exactly one item for
-/// 64 of the census's 72
-/// dictionaries, so this is a no-op
-/// on nearly every entry - and on the
-/// ones that hold more it is what the
-/// panel has always drawn. The list
-/// layout mode is what lets a reader
-/// stack them instead.
+/// A dictionary row's `glossary` array has one item in 64 of 72 dictionaries in the
+/// census. The panel uses this separator only when an entry has more than one item.
+/// List layout stacks these items instead.
 pub(super) const ITEM_SEPARATOR: &str = "; ";
 
-/// What one term-bank row's images can
-/// be sized from.
+/// Stores media data for one term-bank row.
 ///
-/// The dictionary that shipped them -
-/// half of a [`MediaKey`], the other
-/// half being the node's own `path` -
-/// and the intrinsic sizes the build
-/// recorded for the ones it could
-/// store. Resolved before layout runs
-/// and carried on the presentation
-/// (`present::GlossEntry::media`),
-/// because `scene` is a measure pass
-/// with no database behind it and an
-/// image must not put a query on the
-/// paint path.
+/// The dictionary ID and node's `path` form each [`MediaKey`]. This field also stores
+/// intrinsic sizes from the build. The presentation step resolves this data before layout.
+/// It passes the data in `present::GlossEntry::media`. `scene` measures without a database.
+/// An image must not query the database on the paint path.
 ///
-/// An empty table is a real state and
-/// not a missing input: a tree parsed
-/// from a string - a demo, a geometry
-/// fixture, an Anki round trip - has
-/// no store behind it, and its images
-/// take the `alt`-text rung.
+/// An empty table is valid. A tree from a string has no media store. A demo, a geometry
+/// fixture, and an Anki round trip use `alt` text for images.
 ///
 /// [`MediaKey`]: crate::dict::media::MediaKey
 #[derive(Clone, Copy)]
@@ -79,278 +59,151 @@ pub(super) struct Assets<'a> {
 }
 
 impl Assets<'_> {
-    /// One asset's recorded size.
-    ///
-    /// A linear scan, because a row
-    /// names a handful of assets - 字通
-    /// averages more than four - and a
-    /// map would cost more to build
-    /// than these comparisons cost to
-    /// run.
+    /// The `size` function scans `sizes` because a row names few assets. 字通 averages more
+    /// than four assets. A map costs more to build than these comparisons cost to run.
     pub(super) fn size(&self, path: &str) -> Option<Intrinsic> {
         self.sizes.iter().find(|(p, _)| p == path).map(|(_, size)| *size)
     }
 }
 
-/// What the render settings leave for
-/// the gloss walk to spend.
+/// Stores settings for the gloss walk.
 ///
-/// The decision table's own record,
-/// minus the one knob that was
-/// already a parameter: compact mode
-/// is [`Paragraphs::stack_items`],
-/// which the list pass built and
-/// which the settings only flip.
-/// Bundled because three more
-/// arguments on [`paragraphs`] is
-/// where an argument gets passed in
-/// the wrong slot, and `Copy` because
-/// a table cell's paragraph pass is
-/// handed the same one the panel's
-/// stream got.
+/// The struct stores the decision table except the compact mode parameter,
+/// [`Paragraphs::stack_items`]. The list pass sets that field. These fields stay together
+/// because more arguments to [`paragraphs`] can cause argument errors. The type implements
+/// `Copy`, so a table-cell pass and the panel stream share one record.
 ///
-/// Resolved once, in
-/// [`build_elements`]. Nothing here
-/// reads a config type and nothing
-/// below here reads a setting.
+/// [`build_elements`] resolves this record once. This type reads no config type, and code
+/// below reads no setting.
 ///
 /// [`build_elements`]: super::chrome::build_elements
 #[derive(Clone, Copy)]
 pub(super) struct Render {
-    /// Which editorial roles reach the
-    /// panel.
+    /// Selects editorial roles that reach the panel.
     ///
-    /// The card renderer's own
-    /// vocabulary and a separate
-    /// *value* of it: hiding examples
-    /// on screen must not strip them
-    /// from a mined card, which takes
-    /// [`RoleFilter::CARD`] and no
-    /// setting at all.
+    /// The panel uses this filter. The card renderer uses its own filter and always keeps
+    /// examples on a mined card. A user can hide examples on screen, but a mined card
+    /// always uses [`RoleFilter::CARD`].
     pub(super) roles: RoleFilter,
-    /// Do a dictionary's own
-    /// declarations apply?
+    /// This flag controls whether dictionary declarations apply.
     ///
-    /// Spent by
-    /// [`Paragraphs::declarations`]
-    /// and [`styled_marker`], which
-    /// are the only three places a
-    /// resolved style record is read.
+    /// [`Paragraphs::declarations`] and [`styled_marker`] are the only functions that read
+    /// this resolved style record.
     ///
     /// [`styled_marker`]: super::marker::styled_marker
     pub(super) styling: bool,
-    /// Do image assets reach the
-    /// panel?
+    /// Controls whether image assets reach the panel.
     pub(super) images: bool,
 }
 
-/// Turns one term-bank row's parsed
-/// tree into paragraphs.
+/// Walks one term-bank row's [`GlossDoc`] tree into paragraphs.
 ///
-/// The block half of the pass, and
-/// deliberately the same rules the
-/// plain-text renderer uses
-/// (`dict::gloss::plain`): a block tag
-/// or a `data` marker opens a
-/// paragraph, an inline tag adds spans
-/// to the one already open, and a
-/// paragraph with no text is dropped.
-/// Two renderers over one tree must
-/// not disagree about where the lines
-/// are - that disagreement is the bug
-/// class this spec exists to close.
+/// The block walk follows the rules of the plain-text renderer (`dict::gloss::plain`).
+/// A block tag or a `data` marker opens a paragraph. An inline tag adds spans to that
+/// paragraph. The walk drops empty paragraphs. The plain-text renderer and this renderer
+/// must agree on line positions.
 pub(super) struct Paragraphs<'a> {
     pub(super) doc: &'a GlossDoc,
-    /// Finished, in order.
+    /// Stores completed pieces in order.
     pub(super) out: Vec<Piece>,
-    /// The one still filling.
+    /// Stores the paragraph that remains open.
     pub(super) cur: Flow,
-    /// Every link seen so far;
-    /// [`Flow`] gets the ones it
-    /// reached, renumbered.
+    /// This list stores links found so far.
+    /// [`Flow`] receives these links with local indexes.
     pub(super) links: Vec<HitAction>,
-    /// A separator owed to the next
-    /// text this paragraph takes.
+    /// This flag marks an item separator owed to the next text in this paragraph.
     pub(super) pending_sep: bool,
-    /// Every reading seen so far;
-    /// [`Flow`] gets the ones its own
-    /// bases wear, renumbered.
+    /// This list stores readings found so far.
+    /// [`Flow`] receives the readings for their bases with local indexes.
+    /// This slot names the current text's reading. It is [`NO_RUBY`] outside a `ruby`.
     pub(super) rubies: Vec<FlowRuby>,
-    /// The slot the text being read
-    /// right now belongs to, or
-    /// [`NO_RUBY`] outside a `ruby`.
     pub(super) open_ruby: u32,
-    /// A span break owed before the
-    /// next run.
+    /// This flag keeps the next span separate from its neighbor.
     ///
-    /// What keeps an inline box's spans
-    /// its own: its first run must not
-    /// coalesce into the text before it
-    /// and the run after it must not
-    /// coalesce into its last, or the
-    /// box would be drawn around its
-    /// neighbours too.
+    /// The first run inside an inline box must not join earlier text. The run after the box
+    /// must not join its final text. Without this barrier, the pass draws the box around
+    /// adjacent text.
     pub(super) barrier: bool,
-    /// How many paragraphs have been
-    /// closed.
+    /// Stores the number of paragraphs that this walk closed.
     ///
-    /// Read by [`Paragraphs::pill`] and
-    /// nothing else, to answer one
-    /// question no index can: did the
-    /// node whose children were just
-    /// walked hold a block, and so send
-    /// the paragraph the box was being
-    /// measured against out from under
-    /// it? Every span index the box
-    /// recorded then names a paragraph
-    /// that has left, and a box drawn
-    /// over them would be drawn around
-    /// whatever replaced them.
+    /// Only [`Paragraphs::pill`] reads this counter. It shows whether child nodes
+    /// contained a block and closed the paragraph that the box measured against. The box
+    /// records span indexes, and each index then names a closed paragraph. Without this
+    /// counter, a box encloses the wrong replacement content.
     pub(super) flushes: u32,
-    /// List markers owed to the next
-    /// run of text worth marking,
-    /// outermost list first.
+    /// Stores markers that the next marked text run needs, from outermost to innermost list.
     ///
-    /// Owed rather than pushed, because
-    /// the paragraph an item's marker
-    /// belongs to is the one the item's
-    /// first text lands in - for
-    /// `<li><div>x</div></li>` the
-    /// `div`'s, not the `li`'s. A
-    /// marker pushed where it is
-    /// resolved would be flushed out as
-    /// a paragraph of its own holding
-    /// nothing but a bullet.
+    /// This pass delays markers because an item marker belongs to the paragraph's first
+    /// text. For `<li><div>x</div></li>`, the marker belongs to the `div`, not the `li`.
+    /// When this pass pushes a marker at resolution, it becomes a paragraph with only a
+    /// bullet.
     ///
-    /// More than one is owed when an
-    /// item's whole content is a nested
-    /// list: both levels' markers then
-    /// share the one line they have
-    /// between them, at their own two
-    /// gutters, as a browser draws
-    /// them.
+    /// Nested list content can need multiple markers. Markers for both levels share one
+    /// line at their gutters, as a browser does.
     pub(super) pending_marker: Vec<FlowMarker>,
-    /// Does a list stack its items?
+    /// Indicates whether a list gives each item a separate paragraph.
     ///
-    /// The one thing compact mode
-    /// changes about a list, and the
-    /// only field in this pass that may
-    /// know a layout mode exists:
-    /// `true` gives every item its own
-    /// paragraph and the indent,
-    /// `false` joins the items into the
-    /// paragraph already open with
-    /// [`ITEM_SEPARATOR`] between them.
+    /// Compact mode sets this field for lists. A `true` value gives each item its own
+    /// paragraph and indent. A `false` value joins items to the open paragraph with
+    /// [`ITEM_SEPARATOR`].
     ///
-    /// Marker *resolution* sits above
-    /// it and is shared by both:
-    /// [`marker_of`] reads the list's
-    /// own `listStyleType` and
-    /// [`Marker::label`] writes the
-    /// `n`th label, neither of them
-    /// aware of this flag. Marker
-    /// *placement* is the one thing
-    /// that cannot be: `true` hangs the
-    /// marker in the gutter the indent
-    /// made ([`MarkerBox`]), and
-    /// `false` has neither a gutter nor
-    /// a line of its own to hang it
-    /// beside, so a compact item writes
-    /// its marker inline as its
-    /// paragraph's first span. See
-    /// [`Paragraphs::mark`].
+    /// Both modes resolve markers in the same way. [`marker_of`] reads `listStyleType`,
+    /// and [`Marker::label`] writes the `n`th label. This flag changes marker placement.
+    /// A `true` value hangs the marker in the gutter from the indent ([`MarkerBox`]).
+    /// A `false` value has no gutter or separate line, so the compact item writes its
+    /// marker as the first paragraph span. See [`Paragraphs::mark`].
     ///
-    /// Wired from `popup.layout_mode`
-    /// by [`build_elements`]:
-    /// `LayoutMode::Roomy` stacks and
-    /// `LayoutMode::Compact` joins.
+    /// [`build_elements`] sets this flag from `popup.layout_mode`. `LayoutMode::Roomy`
+    /// stacks items. `LayoutMode::Compact` joins them.
     ///
     /// [`marker_of`]: super::marker::marker_of
     /// [`Marker::label`]: super::marker::Marker::label
     /// [`MarkerBox`]: super::scene::MarkerBox
     /// [`build_elements`]: super::chrome::build_elements
     pub(super) stack_items: bool,
-    /// What else the render settings
-    /// leave for this walk to spend.
+    /// Stores other render settings for the gloss walk.
     pub(super) render: Render,
-    /// The media store's answers for
-    /// the row being walked.
+    /// This field stores media data for the active row.
     pub(super) assets: Assets<'a>,
-    /// Every image seen so far;
-    /// [`Flow`] gets the ones that
-    /// landed in it, renumbered.
+    /// This list stores images found so far.
+    /// [`Flow`] receives images that enter it with local indexes.
     pub(super) images: Vec<FlowImage>,
-    /// What a table cell's border
-    /// draws in, where the dictionary
-    /// declares none.
+    /// Stores the border color for a table cell when the dictionary declares no border color.
     ///
-    /// Yomitan gives a cell
-    /// `border-color:
-    /// var(--text-color-light2)`
-    /// rather than the `currentColor`
-    /// CSS would otherwise use - the
-    /// middle rung of its three-step
-    /// text ladder, so a grid reads as
-    /// a grid without shouting. This
-    /// panel's ladder is `body_text`,
-    /// `collapsed_text`,
-    /// `dimmed_text`, and its middle
-    /// rung carries `#969aa0` dark and
-    /// `#64666e` light against
-    /// Yomitan's own `#999999` and
-    /// `#666666`: the same rung, and
-    /// very nearly the same colour.
+    /// Yomitan sets `border-color: var(--text-color-light2)` on a cell instead of
+    /// `currentColor`. That value is the middle step in its three-step text ladder, so the
+    /// grid stays visible without high contrast. This panel uses `body_text`,
+    /// `collapsed_text`, and `dimmed_text`. The middle step uses `#969aa0` for dark themes
+    /// and `#64666e` for light themes.
+    /// Yomitan uses `#999999` and `#666666`. Both designs use the same ladder step and
+    /// similar colors.
     pub(super) rule: Rgb,
-    /// What a header cell's background
-    /// draws in.
+    /// Stores the background color for a header cell.
     ///
-    /// Yomitan gives `thead` and `th`
-    /// `background-color:
-    /// var(--background-color-dark1)`,
-    /// which is its palette's one step
-    /// off the panel fill. This
-    /// theme's one step off the panel
-    /// fill is `separator`, the colour
-    /// every other hairline and tint
-    /// in the panel already uses -
-    /// `#323238` against Yomitan's own
-    /// `#333333` on a near-identical
-    /// dark background.
+    /// Yomitan gives `thead` and `th` `background-color: var(--background-color-dark1)`.
+    /// That color sits one step from the panel fill. This theme uses `separator` for that
+    /// step. The `separator` color matches other hairlines and tints in the panel. It is
+    /// `#323238`, close to Yomitan's `#333333` on dark backgrounds.
     pub(super) tint: Rgb,
-    /// The popup's root font size: what
-    /// a `rem` in a dictionary's own
-    /// declarations is a fraction of
-    /// ([`Ems`]).
+    /// Stores the popup's root font size. A `rem` in dictionary declarations uses a fraction
+    /// of this size ([`Ems`]).
     ///
-    /// The theme's body size, taken
-    /// once here rather than re-derived
-    /// per node, because a node's own
-    /// em changes as the walk descends
-    /// and the root's does not.
+    /// This field stores the theme body size. A node's em changes during the descent, but
+    /// the root em stays constant.
     ///
     /// [`Ems`]: super::style::Ems
     pub(super) root_em: f32,
 }
 
-/// One row's gloss tree, laid out as
-/// paragraphs and tables at `top_gap`
-/// apart.
+/// Lays out one row's gloss tree as paragraphs and tables with `top_gap` spacing.
 ///
-/// `stack_items` is
-/// [`Paragraphs::stack_items`], the
-/// compact-layout knob, and `render`
-/// is the rest of the render
-/// settings' decision table
-/// ([`Render`]). Both are resolved by
-/// [`build_elements`] and neither is
-/// re-read below this point.
+/// `stack_items` is [`Paragraphs::stack_items`], the compact-layout setting. `render`
+/// holds the other render settings ([`Render`]). [`build_elements`] resolves both values.
+/// Code below this point reads neither value again.
 ///
-/// The theme rather than a resolved
-/// [`Inline`], because a table cell's
-/// Yomitan defaults need two colours
-/// the body role does not carry - the
-/// cell rule and the header tint (see
-/// [`Paragraphs::cell_defaults`]).
+/// This function takes the theme instead of a resolved [`Inline`]. Yomitan table-cell
+/// defaults need two colors that the body role lacks: the cell rule and header tint.
+/// See [`Paragraphs::cell_defaults`].
 ///
 /// [`build_elements`]: super::chrome::build_elements
 pub(super) fn paragraphs(
@@ -398,94 +251,54 @@ pub(super) fn paragraphs(
     p.out
 }
 
-/// The block walk itself: one node, its children, and the paragraph they
-/// open, close or add spans to.
+/// Walks one node and its children. It opens, closes, or expands the paragraph with spans.
 ///
-/// Four subtrees are answered elsewhere, each beside the thing it builds:
-/// a list in [`marker`](super::marker), a table in
-/// [`table`](super::table), an image in [`image`](super::image), a
-/// reading in [`ruby`](super::ruby). The style resolution these arms all
-/// call is in [`style`](super::style).
+/// Other modules handle four subtrees: a list in [`marker`](super::marker), a table in
+/// [`table`](super::table), an image in [`image`](super::image), and a reading in
+/// [`ruby`](super::ruby). These modules call style resolution in [`style`](super::style).
 impl Paragraphs<'_> {
-    /// One top-level glossary item.
+    /// Processes one top-level glossary item.
     pub(super) fn item(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
-        // An item opens no block of its
-        // own, so the paragraph it
-        // lands in is attributed to the
-        // item - which for the 20
-        // census dictionaries that emit
-        // one plain string per item is
-        // the only address a scene
-        // element can have. A block
-        // inside it takes the address
-        // back.
+        // An item opens no block. It receives the path of the paragraph that it enters.
+        // In 20 census dictionaries that emit one plain string per item, this path is the
+        // only scene-element path. A nested block takes the path.
         if self.cur.text.is_empty() {
             self.cur.path = ctx.path;
         }
         match doc.node(id).item_type {
-            // A `type: image` item is an
-            // image node with no tag, and
-            // the same replaced element:
-            // it takes room on the line
-            // the item lands on rather
-            // than opening one.
+            // A `type: image` item has no tag and acts as a replaced element.
+            // It takes space on the current line. It does not open a new line.
             ItemType::Image => self.image(id, ctx),
             ItemType::Text => self.text(doc.text(id), ctx.inline, ctx.link),
-            // Yomitan drops a
-            // `structured-content`
-            // item's children straight
-            // into a block container,
-            // so the item itself
-            // neither opens a paragraph
-            // nor takes part in the
-            // drop rules.
+            // Yomitan places children of a `structured-content` item in a block container.
+            // The item itself does not open a paragraph or take part in drop rules.
             ItemType::StructuredContent => self.children(id, ctx),
             _ if doc.is_plain_string(id) => self.text(doc.text(id), ctx.inline, ctx.link),
             _ => self.node(id, ctx, false),
         }
     }
 
-    /// Does this node's editorial role
-    /// reach the panel?
+    /// Returns whether a node's editorial role reaches the panel.
     ///
-    /// The render settings' role half,
-    /// filtered on the same [`Role`]
-    /// the card renderer filters on -
-    /// with the popup's own answer and
-    /// not the card's, which is what
-    /// lets a user hide examples on
-    /// screen and keep them on a mined
-    /// card.
+    /// The render settings use [`Role`] as the filter type. The card renderer uses the same
+    /// filter. The popup has its own filter. A user can hide examples on screen, but a mined
+    /// card keeps them.
     ///
-    /// One clause, over the role the
-    /// parser classified. The
-    /// name-matched part-of-speech
-    /// marker and the six-name drop
-    /// list that used to stand beside
-    /// this call are gone: the role is
-    /// now on the node for every
-    /// dictionary, so
-    /// `RoleFilter::allows` is the
-    /// whole gate here, in
-    /// `gloss::html`, and in
-    /// `gloss::plain`.
+    /// The parser supplies the role. This call does not match names for part-of-speech
+    /// markers or the six-name drop list. Every dictionary sets the node role, so
+    /// `RoleFilter::allows` is the only check here, in `gloss::html`, and in `gloss::plain`.
     ///
     /// [`Role`]: crate::dict::gloss::Role
     pub(super) fn shows(&self, id: NodeId) -> bool {
         self.render.roles.allows(self.doc.role(id))
     }
 
-    /// One node.
+    /// Processes one node.
     ///
-    /// `prose` says whether a bare
-    /// string with visible text stands
-    /// beside this node, or a prose
-    /// fragment stands before it -
-    /// either is what exempts a marked
-    /// inline node from the marker
-    /// line break ([`GlossDoc::prose`],
-    /// [`GlossDoc::inline_prose`]).
+    /// `prose` is true when visible bare-string text sits beside this node or a prose
+    /// fragment precedes it. Either condition exempts an inline node from the marker line
+    /// break ([`GlossDoc::prose`], [`GlossDoc::inline_prose`]).
     pub(super) fn node(&mut self, id: NodeId, ctx: Ctx, prose: bool) {
         let doc = self.doc;
         let node = *doc.node(id);
@@ -493,30 +306,16 @@ impl Paragraphs<'_> {
             return;
         }
         match node.tag {
-            // A reading is drawn above
-            // its base rather than in
-            // the line beside it, so
-            // the whole subtree is
-            // handled at once: dropped
-            // into the flow it would
-            // read as 漢かん字じ.
+            // A reading appears above its base, not in the adjacent line.
+            // This branch handles the whole subtree at once. The main flow would render
+            // 漢かん字じ.
             Tag::Ruby => return self.ruby(id, ctx),
-            // Both engines break hard on
-            // a newline, so a dictionary's
-            // own break reaches the panel
-            // inside the paragraph rather
-            // than splitting it.
+            // Both engines break on a newline.
+            // A dictionary break stays inside the paragraph and does not split it.
             Tag::Br => return self.text("\n", ctx.inline, ctx.link),
-            // A table is a grid rather
-            // than a run of lines, and
-            // every word in one belongs
-            // to a cell, so the whole
-            // subtree is taken over at
-            // once - down to the `tr`,
-            // which is a block here only
-            // because a row breaks a
-            // line for the plain-text
-            // walk.
+            // A table forms a grid of lines, and each word belongs to a cell.
+            // This branch handles the whole subtree through `tr`.
+            // The plain-text walk treats `tr` as a block because a row breaks a line.
             Tag::Table => return self.table(id, ctx),
             _ => {}
         }
@@ -528,94 +327,42 @@ impl Paragraphs<'_> {
         }
         let inline = self.styled(id, ctx.inline);
         let block = self.boxed(id, ctx.block, inline);
-        // **Where a block's box goes**,
-        // and it is not "the first line
-        // the block opens". A box wraps
-        // all of its block's content, as
-        // a browser draws it: a bordered
-        // `div` holding three paragraphs
-        // draws one border around all
-        // three. So a block that
-        // declares one takes its whole
-        // subtree off to one side and
-        // hands the pieces back inside a
-        // container ([`Boxed`],
-        // [`Paragraphs::wrap`]), which
-        // is the only shape that can
-        // carry a box over more than one
-        // paragraph.
+        // **Block box placement:**
+        // A box wraps all content in its block, not only the first line.
+        // A bordered `div` with three paragraphs therefore draws one border around all three.
+        // A block with a box moves its whole subtree into a [`Boxed`] container
+        // ([`Paragraphs::wrap`]). Only that container can carry a box across multiple
+        // paragraphs.
         //
-        // Hanging the box on the
-        // paragraph the block opened
-        // instead lost it outright
-        // whenever the block's *first*
-        // child opened a line of its
-        // own: the paragraph the block
-        // opened was still empty when
-        // that child's `open` flushed
-        // it, and [`Paragraphs::flush`]
-        // drops an empty paragraph and
-        // its box with it, so a
-        // bordered, filled `div` drew
-        // nothing at all. Jitendex's
-        // `div[data-sc-class="extra-box"]`
-        // over `data.content` children
-        // is exactly that shape.
+        // The old code attached the box to the block's first paragraph.
+        // The first child then opened its own line and caused `open` to flush the empty
+        // paragraph.
+        // [`Paragraphs::flush`] drops that paragraph with its box, so a bordered, filled
+        // `div` drew nothing.
+        // In Jitendex, `div[data-sc-class="extra-box"]` wraps `data.content` children in
+        // this way.
+        // The line break follows the tag or marker. The box follows only the tag.
+        // `has_marker` is a line-break rule from the plain-text walk.
+        // That walk marked a `data.content` node as a block to separate senses before this
+        // tree existed.
+        // The schema's block and inline division decides box placement.
+        // `span` is inline, so a `span` with `data.content` opens its line without a box.
+        // The code below draws its box once as a pill.
+        // One test checked both conditions and assigned the same resolved `BoxStyle` twice:
+        // once to `block_box` and once to `inline_boxes`.
+        // A renderer over `SceneElem::boxes()` then painted Jitendex's
+        // `span[data-sc-class="tag"]` twice.
         if node.tag.is_block() && block.style.exists() {
             return self.wrap(id, ctx, block, inline);
         }
-        // A block carrying no box
-        // *opens* a line and never
-        // closes one, exactly as the
-        // plain-text walk's mark does:
-        // text after such a block joins
-        // the block's own paragraph. A
-        // boxed one closes its line, for
-        // the reason [`Paragraphs::wrap`]
-        // gives.
-        //
-        // The line break follows the
-        // **tag** or the marker; the box
-        // follows the tag alone.
-        // `has_marker` is a line-break
-        // rule inherited from the
-        // plain-text walk. That walk gave
-        // a `data.content` node a block
-        // mark because that mark is what
-        // separated senses before a tree
-        // existed. What decides where a
-        // box goes is the schema's own
-        // block/inline division, by tag,
-        // and `span` is inline - so a
-        // `span` carrying `data.content`
-        // opens its line with no box of
-        // its own and draws its box once,
-        // below, as the pill it is.
-        // Answering both questions with
-        // one test gave such a node the
-        // *same* resolved `BoxStyle`
-        // twice, once as `block_box` and
-        // once in `inline_boxes`, and a
-        // bin looping over
-        // `SceneElem::boxes()` painted
-        // Jitendex's
-        // `span[data-sc-class="tag"]`
-        // twice.
         if node.tag.is_block() {
             self.open(ctx.path, block);
         } else if doc.has_marker(id) && !prose {
-            // The marker separates
-            // senses only where senses
-            // stand side by side: beside
-            // bare sentence text, or
-            // trailing a wrapped run of
-            // it, it is markup inside a
-            // sentence - Jitendex's
-            // `example-keyword` and
-            // `attribution-footnote` -
-            // and a break there cuts the
-            // sentence in two
-            // ([`GlossDoc::prose`],
+            // The marker separates senses only when the senses are adjacent.
+            // When sentence text appears beside the marker or wrapped text precedes it, the
+            // marker is markup inside a sentence.
+            // Jitendex uses this form for `example-keyword` and `attribution-footnote`.
+            // A break there splits the sentence ([`GlossDoc::prose`],
             // [`GlossDoc::inline_prose`]).
             self.open(ctx.path, block.inherited());
         }
@@ -625,99 +372,62 @@ impl Paragraphs<'_> {
             link: self.link_of(id, ctx.link),
             path: ctx.path,
         };
-        // An inline node carrying ink or
-        // horizontal room is a pill, and
-        // a pill is drawn as an inline
-        // box: it keeps its place on its
-        // line instead of breaking one.
+        // An inline node with ink or horizontal room is a pill.
+        // This pass draws the pill as an inline box. It keeps its place on the line and does
+        // not break the line.
         //
-        // Ink used to be the whole of the
-        // gate, because an inline box
-        // could not push its neighbours
-        // aside and a margin with nothing
-        // to draw therefore resolved to
-        // nothing. It can now
-        // ([`measure_pills`]), so a
-        // dictionary spacing two inline
-        // labels apart with margins alone
-        // gets the gaps it asked for and
-        // no box is drawn around them.
+        // Ink was once the only gate. An inline box could not move its neighbors, so a margin
+        // with no ink resolved to nothing.
+        // [`measure_pills`] now lets a margin move its neighbors. A dictionary that spaces
+        // two inline labels with margins alone therefore gets its declared gaps.
+        // This pass draws no box around those labels.
         //
         // [`measure_pills`]: super::pill::measure_pills
         if !node.tag.is_block() && (block.style.paints() || reserves(block.style)) {
             return self.pill(id, next, block.style);
         }
-        // A list marks and indents its
-        // own children, so it takes
-        // them over from `children`.
+        // A list marks and indents its own children. The list therefore handles them
+        // instead of `children`.
         if node.kind == Kind::List {
             return self.list(id, next, node.tag == Tag::Ol, block.style.padding.left);
         }
         self.children(id, next);
     }
 
-    /// One block that declared a box:
-    /// its own pieces, inside it.
+    /// Wraps the pieces from one block that declares a box.
     ///
-    /// The box wraps all of them
-    /// ([`Boxed`]), so the block's
-    /// subtree is collected off to one
-    /// side - exactly as a table cell's
-    /// is ([`Paragraphs::cell`]) - and
-    /// handed back as one piece.
+    /// [`Boxed`] stores all pieces from the block. This function collects the subtree
+    /// separately, as [`Paragraphs::cell`] collects a table-cell subtree, then returns one
+    /// piece.
     ///
-    /// **A boxed block closes its own
-    /// line**, and it is the second tag
-    /// shape that does; `summary` is the
-    /// other. Everywhere else a block
-    /// only *opens* a line, the rule the
-    /// plain-text walk shares, and text
-    /// written after one joins the
-    /// block's paragraph. A box has to
-    /// end somewhere: text after the
-    /// `div` is not the `div`'s content
-    /// and a browser draws it outside
-    /// the border, so the paragraph a
-    /// box closes with cannot stay open
-    /// to collect it. The divergence
-    /// from `gloss::plain` is bounded to
-    /// a *boxed* block followed by
-    /// inline text at the same level,
-    /// and there a browser agrees with
-    /// this walk rather than with the
-    /// mark.
+    /// **A boxed block closes its own line.** `summary` also closes a line. Every other
+    /// block only *opens* a line, as the plain-text walk does, so text after it joins that
+    /// block's paragraph.
+    /// A box must end at its boundary. A browser draws text after the `div` outside its
+    /// border, so that text is not the `div` content. The paragraph that the box closes
+    /// cannot remain open for that text.
+    /// This walk differs from `gloss::plain` only for a *boxed* block with inline text at the
+    /// same level. A browser agrees with this walk for that case.
     pub(super) fn wrap(&mut self, id: NodeId, ctx: Ctx, block: Block, inline: Inline) {
         let doc = self.doc;
         let node = *doc.node(id);
-        // The line above the box ends
-        // above it.
+        // The paragraph above the box ends before the box.
         self.flush();
         let inner = Ctx {
             inline,
-            // The box and the list indent
-            // are paid once, by the box:
-            // its body sits inside a
-            // coordinate system the box
-            // established, exactly as a
-            // table cell's body does
-            // ([`Paragraphs::table`]).
+            // The box includes its edges and list indent once.
+            // Its body uses the coordinate system that the box establishes, as a table cell
+            // body does ([`Paragraphs::table`]).
             block: Block { indent: 0.0, ..block.inherited() },
             link: self.link_of(id, ctx.link),
             path: ctx.path,
         };
-        // A marker owed from outside is
-        // owed to a line *inside* this
-        // box - `<li style="paddingLeft">`
-        // is real and Jitendex writes it
-        // - and a marker's indent is
-        // measured from the content edge
-        // of whatever the paragraph it
-        // lands in sits in. That edge has
-        // just moved in by this box's own
-        // lead, so the debt moves with
-        // it: the bullet still hangs off
-        // the *list's* content edge and
-        // not off the item's padding
+        // This box carries a marker from outside to a line *inside* the box.
+        // `<li style="paddingLeft">` is valid, and Jitendex writes it.
+        // This walk measures the marker indent from the content edge of the box that holds
+        // its paragraph. The box lead already moves that edge inward, so the debt moves
+        // with the edge.
+        // The bullet still hangs from the *list's* content edge, not the item padding
         // ([`place_markers`]).
         let lead_left = block.indent
             + block.style.margin.left
@@ -726,17 +436,12 @@ impl Paragraphs<'_> {
         for mark in &mut self.pending_marker {
             mark.indent -= lead_left;
         }
-        // Off to one side, because these
-        // pieces belong to the box and
-        // not to the stream the panel is
-        // stacking.
+        // Store these pieces separately. They belong to the box, not to the stream that the
+        // panel stacks.
         let outer = std::mem::take(&mut self.out);
         self.open(ctx.path, inner.block);
-        // The two things `node` would
-        // have done next, done here
-        // instead: a list marks and
-        // indents its own children, so it
-        // takes them over from
+        // Apply the same child dispatch as `node`.
+        // A list marks and indents its own children, so the list handles them instead of
         // `children`.
         if node.kind == Kind::List {
             self.list(id, inner, node.tag == Tag::Ol, block.style.padding.left);
@@ -745,35 +450,21 @@ impl Paragraphs<'_> {
         }
         self.flush();
         let mut body = std::mem::replace(&mut self.out, outer);
-        // A debt the box did not spend
-        // goes back to the coordinate
-        // system it was owed in: the
-        // paragraph reopened below
-        // belongs to the block *around*
-        // this box.
+        // Return unused marker debt to the coordinate system that owed it.
+        // The paragraph that this function reopens belongs to the block *around* this box.
         for mark in &mut self.pending_marker {
             mark.indent += lead_left;
         }
         for (i, piece) in body.iter_mut().enumerate() {
-            // The box's first paragraph
-            // starts at the box's own
-            // padding; the ones under it
-            // are spaced as the panel
-            // spaces every other stacked
-            // paragraph. Charging the
-            // panel's gap above the first
-            // one as well would pay it
-            // twice - once outside the
-            // border and once inside it.
+            // The box's first paragraph starts at its own padding.
+            // The panel spaces child paragraphs as it spaces other stacked paragraphs.
+            // A panel gap above the first child would apply twice: outside the border and
+            // inside it.
             piece.top_gap(if i == 0 { 0.0 } else { LINE_GAP });
         }
-        // A box around nothing draws
-        // nothing, which is what
-        // [`Paragraphs::flush`] already
-        // did with a `div` holding only
-        // whitespace: it pays no margin
-        // and its address belongs to no
-        // element.
+        // An empty box draws nothing.
+        // [`Paragraphs::flush`] already drops a `div` that contains only whitespace.
+        // That `div` pays no margin, and its address belongs to no element.
         if !body.is_empty() {
             self.out.push(Piece::Boxed(Boxed {
                 top_gap: 0.0,
@@ -785,66 +476,36 @@ impl Paragraphs<'_> {
                 entry_id: 0,
             }));
         }
-        // The box closed its line, so a
-        // run written after it opens a
-        // fresh paragraph belonging to
-        // the block *around* the box -
-        // the same restoration
-        // [`Paragraphs::children`] does
-        // after a `summary`. Without it
-        // the next run would inherit the
-        // box's own inner context, which
-        // has no list indent and no
-        // alignment: a box establishes a
-        // coordinate system for its body
-        // and for nothing else.
+        // The box closes its line. A run after it opens a new paragraph in the block around
+        // the box.
+        // [`Paragraphs::children`] restores the outer context after `summary` in the same
+        // way. Without this call, the next run would inherit the box's inner context, which
+        // has no list indent or alignment.
+        // A box establishes a coordinate system for its body only.
         //
-        // `ctx.path` addresses that
-        // paragraph to this block, which
-        // is the address it already had:
-        // before a box was a container,
-        // the run after a block joined
-        // the block's own paragraph.
+        // `ctx.path` gives this paragraph the same address that the block already had.
+        // Before the box became a container, a run after a block joined the block paragraph.
         self.open(ctx.path, ctx.block);
     }
 
-    /// One inline box's own run, kept
-    /// out of its neighbours' spans and
-    /// given the room its edges declared.
+    /// Adds one inline box's own run, keeps it separate from neighbors, and gives it the
+    /// space that its edges declare.
     ///
-    /// The box is drawn around exactly
-    /// the spans this node produced, so
-    /// a barrier goes in at each end:
-    /// coalescing is what would
-    /// otherwise hand the box a
-    /// neighbour's text as well - and
-    /// would fold a spacer span into the
-    /// text beside it, which would leave
-    /// the two sharing one size when the
-    /// whole point is that they do not.
+    /// This pass draws a box around exactly the spans that this node produces. It therefore
+    /// places a barrier at both ends. Without the barriers, the box would include neighbor
+    /// text. It would also join a spacer span to adjacent text, and both would share one
+    /// size. A spacer must keep its own size.
     ///
-    /// Four spacers, in CSS's own order
-    /// across the line: the left margin,
-    /// then the left border and padding,
-    /// then the run, then the right
-    /// padding and border, then the right
-    /// margin. The two margins are
-    /// outside `from..to` because a
-    /// margin is outside the box drawn
-    /// around that range
-    /// ([`InlineBox`]), and each is
-    /// written only where there is room
-    /// to buy - so a box declaring
-    /// nothing horizontal measures
-    /// byte-for-byte as it did before
-    /// this pass existed.
+    /// CSS places four spacer runs around the content: the left margin, the left border and
+    /// padding, the right padding and border, and the right margin. The content run sits
+    /// between the inner spacer runs. Margins sit outside `from..to` because a margin sits
+    /// outside the box that this pass draws around that range ([`InlineBox`]).
+    /// This function writes each spacer only when room exists. A box with no horizontal
+    /// declaration then measures byte-for-byte as before.
     pub(super) fn pill(&mut self, id: NodeId, ctx: Ctx, style: BoxStyle) {
         let room = rooms(style);
-        // Where to roll back to if the
-        // node turns out to hold no
-        // inline content: room nothing
-        // occupies is a gap a reader can
-        // see and no box is drawn in.
+        // If the node has no inline content, return to this point.
+        // Unused room remains visible as a gap, but this pass draws no box there.
         let mark = (self.cur.text.len(), self.cur.spans.len());
         let flushes = self.flushes;
         self.barrier = true;
@@ -854,17 +515,13 @@ impl Paragraphs<'_> {
         let opened = self.cur.spans.len() as u32;
         self.children(id, ctx);
         self.barrier = true;
-        // The node held a block after all
-        // and flushed the paragraph out
-        // from under itself. Every index
-        // above names a paragraph that has
-        // already left, so there is
-        // nothing here to draw a box
-        // around and nothing to roll back.
+        // A block child flushed the paragraph that held these indexes.
+        // The indexes name paragraphs that already left the stream, so this function has no
+        // box to draw and no state to restore.
+        // A box with no span draws no box.
         if self.flushes != flushes {
             return;
         }
-        // A box over no span is no box.
         if self.cur.spans.len() as u32 == opened {
             self.cur.spans.truncate(mark.1);
             self.cur.text.truncate(mark.0);
@@ -876,29 +533,17 @@ impl Paragraphs<'_> {
         self.cur.inline.push(InlineBox { from, to, style });
     }
 
-    /// Buys one of an inline box's edges
-    /// the advance it declared.
+    /// Adds the declared advance for one edge of an inline box.
     ///
-    /// A run of [`PILL_SPACER`]s, its own
-    /// span, in the style the box
-    /// resolved - so [`measure_pills`]
-    /// can size it against the em it sits
-    /// in without touching the text
-    /// beside it. Pushed rather than
-    /// coalesced for exactly that reason,
-    /// which is also why it does not go
-    /// through [`Paragraphs::raw`]: the
-    /// count is written straight into the
-    /// paragraph's own string instead of
-    /// through a temporary.
+    /// This function writes a run of [`PILL_SPACER`]s in the box's resolved style.
+    /// [`measure_pills`] sizes the run against its em and keeps it separate from adjacent
+    /// text. This function pushes the run and does not coalesce it for that reason.
+    /// It writes the count directly into the paragraph string, so [`Paragraphs::raw`] needs
+    /// no temporary.
     ///
-    /// It takes the box's link, so a
-    /// clickable pill is clickable over
-    /// its own padding rather than only
-    /// over its glyphs. It claims no ruby
-    /// slot: a reading centred over a
-    /// margin would be centred over
-    /// nothing.
+    /// The run receives the box's link. A clickable pill therefore responds across its
+    /// padding, not only its glyphs. The run receives no ruby slot. A reading centered over
+    /// a margin would cover nothing.
     ///
     /// [`PILL_SPACER`]: super::pill::PILL_SPACER
     /// [`measure_pills`]: super::pill::measure_pills
@@ -922,34 +567,21 @@ impl Paragraphs<'_> {
         });
     }
 
-    /// Ends the paragraph being built
-    /// and starts one that belongs to
-    /// `path`, carrying `block`'s box.
+    /// Closes the open paragraph and starts one for `path` with `block`'s box.
     pub(super) fn open(&mut self, path: Option<NodePath>, block: Block) {
         self.flush();
         self.cur.path = path;
         self.cur.block = block;
     }
 
-    /// A node's children.
+    /// Processes a node's children.
     ///
-    /// A glossary array of bare strings
-    /// is a list, one paragraph per
-    /// string - Yomitan gives each its
-    /// own `<li>`. An array mixing
-    /// strings with nodes is prose
-    /// broken up by its own markup, so
-    /// only a run that is *entirely*
-    /// bare strings, and holds more
-    /// than one, becomes paragraphs.
+    /// A glossary array of bare strings is a list. Yomitan gives each string its own `<li>`
+    /// and paragraph. An array that mixes strings with nodes is prose that its markup divides.
+    /// An array with more than one *entirely* bare string becomes separate paragraphs.
     ///
-    /// `ctx` is what the children
-    /// inherit, so its box is already
-    /// the empty one
-    /// [`Block::inherited`] hands down:
-    /// a bare string declares no box
-    /// and each of these paragraphs
-    /// carries none.
+    /// Children inherit `ctx`. Its box is already empty because [`Block::inherited`] provides
+    /// no box. A bare string declares no box, so each paragraph carries no box.
     pub(super) fn children(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         if !doc.node(id).tag.is_inline() && doc.is_string_list(id) {
@@ -963,66 +595,34 @@ impl Paragraphs<'_> {
         for (i, child) in doc.children(id).enumerate() {
             self.node(child, ctx.at(i), prose);
             prose = prose || doc.inline_prose(child);
-            // A `summary` closes its line
-            // as well as opening one, and
-            // it is the only tag that
-            // does. What a block
-            // otherwise does is *open* a
-            // line - the rule the
-            // plain-text walk shares - so
-            // text after one joins it.
-            // For a `details` that text
-            // is the disclosure's body,
-            // which a browser draws under
-            // the summary and not as one
-            // sentence with it. The
-            // paragraph reopened here
-            // belongs to the `details`,
-            // whose path is this walk's
-            // own.
+            // A `summary` opens and closes its line. It is the only tag that closes a line.
+            // Every other block only opens a line, as the plain-text walk does, so text after
+            // it joins that line.
+            // For `details`, that text is the disclosure body. A browser draws it below the
+            // summary, not in one sentence with it.
+            // This code reopens a paragraph for `details` and gives it this walk's path.
             if doc.node(child).tag == Tag::Summary {
                 self.open(ctx.path, ctx.block);
             }
         }
     }
 
-    /// One of an image's own spans,
-    /// joined to nothing.
+    /// Adds one image run and keeps it separate from other runs.
     ///
-    /// `link` rides along so an image
-    /// inside a cross-reference is part
-    /// of that link's hit target - a
-    /// gaiji in a "see also" is as
-    /// clickable as the word beside it.
+    /// `link` travels with the span. An image inside a cross-reference therefore belongs to
+    /// that link's hit target. A gaiji in a "see also" link is as clickable as adjacent text.
     ///
-    /// So does `ruby`, and only on the
-    /// [`IMAGE_SPACER`] run. An image
-    /// *is* a legal ruby base: eight
-    /// dictionaries write a reading or
-    /// a 表外字 mark over a gaiji, and a
-    /// browser lays it over the base
-    /// box whether that box is text or
-    /// replaced content. The spacer run
-    /// is the image's own horizontal
-    /// box, which is exactly what the
-    /// reading centres over
+    /// `ruby` travels only on the [`IMAGE_SPACER`] run. An image *is* a legal ruby base.
+    /// Eight dictionaries place a reading or a 表外字 mark over a gaiji.
+    /// A browser places the reading over the base box. It does so whether the box holds
+    /// text or replaced content.
+    /// The spacer run is the image's horizontal box, so the reading centers over it
     /// ([`place_ruby`]).
     ///
-    /// The [`IMAGE_RISER`] is left out
-    /// of the slot. It is the image's
-    /// own filler, already sized to the
-    /// rise the asset needs above the
-    /// baseline ([`measure_images`]),
-    /// and a span that was both an
-    /// image's filler and a reading's
-    /// would have that size overwritten
-    /// by [`measure_readings`].
-    ///
-    /// [`IMAGE_SPACER`]: super::image::IMAGE_SPACER
-    /// [`IMAGE_RISER`]: super::image::IMAGE_RISER
-    /// [`measure_images`]: super::image::measure_images
-    /// [`measure_readings`]: super::ruby::measure_readings
-    /// [`place_ruby`]: super::ruby::place_ruby
+    /// This function keeps [`IMAGE_RISER`] out of the slot. The riser is the image filler.
+    /// [`measure_images`] already sizes it for the asset's rise above the baseline.
+    /// [`measure_readings`] would overwrite that size if a span served as both image filler
+    /// and reading.
     pub(super) fn raw(&mut self, text: &str, style: Inline, link: u32, image: u32, filler: bool) {
         let at = self.cur.text.len() as u32;
         self.cur.text.push_str(text);
@@ -1037,9 +637,7 @@ impl Paragraphs<'_> {
         });
     }
 
-    /// Appends text, paying any owed
-    /// item separator and list marker
-    /// first.
+    /// Appends text after it pays any owed item separator and list marker.
     pub(super) fn text(&mut self, text: &str, style: Inline, link: u32) {
         if text.is_empty() {
             return;
@@ -1047,31 +645,20 @@ impl Paragraphs<'_> {
         if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
             self.push(ITEM_SEPARATOR, style, link);
         }
-        // A marker waits for text worth
-        // marking: `<li><br>a</li>` puts
-        // it on the `a` rather than on
-        // the break, and an item holding
-        // only the whitespace a
-        // dictionary left between two
-        // nodes draws none at all.
+        // A marker waits for text that deserves a mark.
+        // `<li><br>a</li>` puts it on `a`, not on the break.
+        // An item with only dictionary whitespace between nodes draws no marker.
         if !text.trim().is_empty() {
             self.mark();
         }
         self.push(text, style, link);
     }
 
-    /// Appends one run, joining it to
-    /// the span before it when nothing
-    /// about it differs.
+    /// Appends one run and joins it to the previous span when all properties match.
     ///
-    /// Coalescing is not only economy.
-    /// It is what keeps a gloss that is
-    /// one plain string measuring as
-    /// exactly one span - byte for byte
-    /// the request the panel made
-    /// before this pass existed, which
-    /// is why the geometry goldens do
-    /// not move.
+    /// When this function joins spans, it saves more than memory. A gloss from one plain
+    /// string then measures as one span, byte for byte like the panel request before this
+    /// pass existed. Geometry goldens therefore do not move.
     pub(super) fn push(&mut self, text: &str, style: Inline, link: u32) {
         let at = self.cur.text.len() as u32;
         let len = text.len() as u32;
@@ -1102,58 +689,38 @@ impl Paragraphs<'_> {
         }
     }
 
-    /// Ends the open paragraph.
+    /// Closes the open paragraph.
     ///
-    /// A paragraph with no text is
-    /// dropped rather than drawn, so
-    /// nested blocks give one paragraph
-    /// per innermost block instead of a
-    /// run of blank ones. What survives
-    /// is trimmed at both ends, because
-    /// Yomitan draws this in a browser
-    /// and a browser does not indent a
-    /// paragraph by the space a
-    /// dictionary happened to leave
-    /// between two nodes.
+    /// This function drops paragraphs with no text and does not draw them. Nested blocks
+    /// then produce one paragraph for each innermost block instead of blank paragraphs.
+    /// It trims remaining text at both ends because Yomitan draws the result in a browser.
+    /// A browser does not indent a paragraph by whitespace that a dictionary leaves
+    /// between nodes.
     pub(super) fn flush(&mut self) {
-        // Both arms below invalidate every
-        // span index taken over the
-        // paragraph that was open, so the
-        // count moves before either of
-        // them and not only when one
-        // reaches the stream.
+        // Both branches below invalidate every span index for the open paragraph.
+        // Increment `flushes` before either branch, not only when a branch reaches the
+        // output stream.
         self.flushes += 1;
         if self.cur.text.trim().is_empty() {
             self.cur.text.clear();
             self.cur.spans.clear();
             self.cur.inline.clear();
-            // A marker needs a line to
-            // hang beside, and a dropped
-            // paragraph has none. Only
-            // reachable through a
-            // paragraph an item opened
-            // and never filled, which
-            // draws no marker either way.
+            // A marker needs a line beside it, and a dropped paragraph has none.
+            // Only a paragraph that an item opened and never filled reaches this line.
+            // That paragraph draws no marker in either case.
             self.cur.marker.clear();
-            // The dropped paragraph's
-            // block goes with it: a
-            // `div` holding only
-            // whitespace pays no margin,
-            // and its address belongs to
-            // no element.
+            // The dropped paragraph's block leaves with it.
+            // A `div` that contains only whitespace pays no margin, and its address belongs
+            // to no element.
             self.cur.block = Block::default();
             self.cur.path = None;
             return;
         }
         let mut flow = std::mem::take(&mut self.cur);
         trim(&mut flow);
-        // Renumber onto this paragraph's
-        // own lists: an `<a>` holding a
-        // block spans two paragraphs,
-        // and neither may name an index
-        // the other owns. A reading is
-        // renumbered the same way, for
-        // the same reason.
+        // Renumber links within this paragraph's list.
+        // An `<a>` that holds a block spans two paragraphs, and neither paragraph can use
+        // an index that the other owns. This code renumbers readings for the same reason.
         let mut seen: Vec<(u32, u32)> = Vec::new();
         for span in &mut flow.spans {
             if span.link == NO_LINK {
@@ -1202,9 +769,10 @@ impl Paragraphs<'_> {
         self.out.push(Piece::Flow(flow));
     }
 
-    /// The link a node's content sits
-    /// inside, its own or its
-    /// parent's.
+    /// Returns the link that contains a node's content.
+    ///
+    /// The node's link takes precedence over the inherited link. If the node has no usable
+    /// link, this function returns the inherited link.
     pub(super) fn link_of(&mut self, id: NodeId, inherited: u32) -> u32 {
         let doc = self.doc;
         if doc.node(id).kind != Kind::Link {
@@ -1223,17 +791,12 @@ impl Paragraphs<'_> {
     }
 }
 
-/// Every text descendant of a node,
-/// concatenated.
+/// Joins every text descendant of a node into one string.
 ///
-/// What a reading and an `rp` fallback
-/// are: one run of text, however many
-/// wrappers a dictionary put around
-/// it. The same "a text node is
-/// `Kind::Text` with no tag" rule
-/// [`Paragraphs::node`] uses, so the
-/// two walks cannot disagree about
-/// what text a subtree holds.
+/// A reading and an `rp` fallback each form one text run, even when a dictionary wraps
+/// the text in many nodes. This function uses the same rule as [`Paragraphs::node`]: a
+/// text node has `Kind::Text` and no tag. The two walks therefore agree on the text in a
+/// subtree.
 pub(super) fn text_of(doc: &GlossDoc, id: NodeId) -> String {
     let mut out = String::new();
     push_text_of(doc, id, &mut out);

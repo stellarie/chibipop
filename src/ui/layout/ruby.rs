@@ -1,16 +1,19 @@
-//! One reading, over the base it annotates.
+//! One reading annotation sits over its ruby base text.
 //!
-//! **One reason to change:** how a reading buys the room above its base,
-//! and where in that room it sits.
+//! **One reason to change:** Change how a reading reserves vertical space
+//! above its ruby base and where the reading sits in that space.
 //!
-//! Both halves are here because they are one decision made twice. A
-//! reading is not in the paragraph's text, so the measurer would give its
-//! line the height the base alone needs - and growing the line boxes
-//! afterwards would fool nobody, because a bin re-measures the same spans
-//! to paint them and would get the ungrown lines back. So the run itself
-//! asks for the taller line, through a zero-advance filler span
-//! ([`RUBY_FILLER`]), and the placement then reads back where the base
-//! landed. Change either and the other is wrong.
+//! Measurement and placement make one decision.
+//! The reading text is not part of the paragraph text run.
+//! Therefore, the measurer gives the line only the height that the ruby base
+//! needs.
+//! A later measurement cannot see a change to line boxes after the wrap.
+//! A platform bin measures the same spans again to paint them.
+//! That measurement returns the original lines.
+//! Therefore, the text run itself must produce the taller line.
+//! The text run uses a zero-advance filler span ([`RUBY_FILLER`]).
+//! Placement reads the final position of the ruby base.
+//! Change both parts together.
 
 use crate::dict::gloss::{NodeId, Tag};
 use super::flow::{Ctx, Flow, FlowSpan, NO_LINK};
@@ -20,65 +23,45 @@ use super::measure::{MeasureError, MeasureRun, Measured, SpanBox, StyledSpan, Te
 use super::scene::RubyBox;
 use super::style::Inline;
 
-/// One reading, measured.
+/// This structure stores one measured reading.
 ///
-/// What [`measure_readings`] learns
-/// and [`place_ruby`] spends.
+/// [`measure_readings`] calculates these metrics, and [`place_ruby`] uses them.
 #[derive(Clone, Copy, Default)]
 pub(super) struct RubyMetrics {
     pub(super) w: f32,
     pub(super) h: f32,
-    /// The fraction of a line that
-    /// sits above its baseline.
+    /// The fraction of the line height above the baseline.
     ///
-    /// A face metric, and the seam
-    /// reports it rather than the
-    /// face's tables: `baseline / h`
-    /// on any line of any run in this
-    /// font. Noto Sans CJK answers
-    /// 0.81; the layout tests' fake
-    /// answers 0.5. Nothing here may
-    /// assume either.
+    /// The measurement seam provides this font metric as `baseline / h`.
+    /// Noto Sans CJK returns 0.81.
+    /// The fake measurer in tests returns 0.5.
+    /// Do not assume fixed values for this metric.
     pub(super) ascent: f32,
 }
 
-/// Every reading of a paragraph,
-/// measured, and its filler span
-/// sized.
+/// Measures all readings in a paragraph and sizes their filler spans.
 ///
-/// Called *before* the paragraph is
-/// measured, and it is what buys the
-/// reading its slot. A reading is not
-/// in the paragraph's text, so the
-/// measurer would give its line the
-/// height the base alone needs - and
-/// growing the line boxes afterwards
-/// would fool nobody, because a bin
-/// re-measures the same spans to
-/// paint them and would get the
-/// ungrown lines back.
+/// Layout calls this function before it measures the paragraph.
+/// This call reserves vertical space for each reading.
+/// The reading text is not in the paragraph text run.
+/// Therefore, the measurer gives the line only the height that the ruby base
+/// needs.
+/// A later measurement cannot see a change to line boxes after the wrap.
+/// A platform bin measures the same spans again to paint them.
+/// That measurement returns the original lines.
 ///
-/// So the run itself asks for the
-/// taller line, through the one rule
-/// both engines already answer to and
-/// the seam already reports: a line
-/// is as tall as its tallest span. A
-/// [`RUBY_FILLER`] beside each base
-/// carries no ink and no advance and
-/// exists only to be that span. Both
-/// the scene and the bin's re-measure
-/// therefore see one set of line
-/// boxes, and `metrics.h` counts the
-/// readings without anything after
-/// the fact touching it.
+/// Therefore, the text run itself must produce the taller line.
+/// Both engines and the measurement seam obey one rule.
+/// A line is as tall as its tallest span.
+/// A [`RUBY_FILLER`] span beside each ruby base has no ink or advance.
+/// The filler exists only to become that tallest span.
+/// The scene and the second platform measurement see one set of line boxes.
+/// Therefore, `metrics.h` counts the readings, and no later pass edits it.
 ///
-/// Its size is decided here rather
-/// than while the paragraph is built,
-/// because the growth a line hands to
-/// the space *above* its baseline is
-/// the face's ascent share
-/// ([`RubyMetrics::ascent`]) and only a
-/// measurer knows it.
+/// Layout sets the filler size here, not while it builds the paragraph.
+/// Space above the baseline of a line equals the ascent share of the font.
+/// See [`RubyMetrics::ascent`].
+/// Only a measurer can provide that share.
 pub(super) fn measure_readings(
     m: &mut dyn TextMeasure,
     font: &str,
@@ -89,9 +72,8 @@ pub(super) fn measure_readings(
     if flow.ruby.is_empty() {
         return Ok(Vec::new());
     }
-    // Only a paragraph that holds ruby
-    // pays for this buffer, which is
-    // why it is not one of the walk's.
+    // Allocate scratch only for a paragraph with ruby.
+    // The paragraph walk does not share this buffer.
     let mut scratch = Measured::default();
     let mut out = vec![RubyMetrics::default(); flow.ruby.len()];
     for (slot, ruby) in flow.ruby.iter().enumerate() {
@@ -110,17 +92,10 @@ pub(super) fn measure_readings(
         };
     }
     let gaiji = gaiji_bases(flow, run);
-    // What each stack of bands asks
-    // for, charged to the base slot
-    // they all share. Every band of one
-    // stack asks its line for the
-    // *whole* stack, so the tallest
-    // span on the line reserves all of
-    // it however many bands reached it
-    // - and the bands cannot land on
-    // different lines, because each
-    // filler is a word joiner beside
-    // the one before it.
+    // Reserve space for each stack of bands at the shared ruby base slot.
+    // Each band adds its own height to the stack total.
+    // The tallest span on the line reserves space for all bands.
+    // Word joiner characters keep every band in a stack on one line.
     let base_of = base_slots(flow);
     let mut stack = vec![0.0f32; flow.ruby.len()];
     for (slot, ruby) in flow.ruby.iter().enumerate() {
@@ -128,18 +103,10 @@ pub(super) fn measure_readings(
             stack[base_of[slot] as usize] += ruby.style.size;
         }
     }
-    // A line of height `h` gives
-    // `ascent * h` to the space above
-    // its baseline, and a base of its
-    // own size already claims its own
-    // ascent of that. So a line has to
-    // grow by `reading / ascent` for
-    // the reading to fit above the
-    // base - and a line's height is
-    // proportional to its tallest
-    // span's size in both engines,
-    // which turns the growth into a
-    // size.
+    // A line with height `h` has `ascent * h` space above the baseline.
+    // Ruby base text uses its own ascent within that space.
+    // The line must grow by `reading / ascent` to fit the reading text.
+    // Both text engines set line height in proportion to the largest span size.
     for (span, asked) in flow.spans.iter().zip(run.iter_mut()) {
         if !span.filler || span.ruby as usize >= flow.ruby.len() {
             continue;
@@ -152,26 +119,21 @@ pub(super) fn measure_readings(
     Ok(out)
 }
 
-/// What a slot's *gaiji* base already
-/// asks its line for, as a span size,
-/// and zero for a slot no image base
-/// reached.
+/// Returns the span size that the gaiji base of a slot already reserves on its
+/// line.
 ///
-/// A text base needs nothing here: it
-/// asks its line for its own size, and
-/// the filler beside it carries that
-/// size already. An image asks through
-/// its [`IMAGE_RISER`] instead - the
-/// span it bought its rise above the
-/// baseline with, solved by
-/// [`measure_images`], which is why the
-/// image pass runs first. Take the
-/// base's *text* size for a gaiji and
-/// the slot comes out short by the
-/// difference between the asset's
-/// height and its line's text ascent,
-/// and [`place_ruby`] clamps the
-/// reading down onto the picture.
+/// The function returns zero for a slot that no image base reaches.
+/// A text base needs nothing here.
+/// A text base already reserves its own size on its line.
+/// The filler span beside it already carries that size.
+/// An image base reserves its size through its [`IMAGE_RISER`] instead.
+/// That span reserves the image rise above the baseline.
+/// [`measure_images`] calculates that rise, so the image pass runs first.
+///
+/// Do not use the text size of the base for a gaiji.
+/// The slot then becomes too small by one exact amount.
+/// That amount is the asset height minus the text ascent of its line.
+/// [`place_ruby`] then clamps the reading down onto the picture.
 ///
 /// [`IMAGE_RISER`]: super::image::IMAGE_RISER
 /// [`measure_images`]: super::image::measure_images
@@ -197,23 +159,14 @@ fn gaiji_bases(flow: &Flow, run: &[StyledSpan<'_>]) -> Vec<f32> {
     out
 }
 
-/// The base each slot's reading
-/// annotates: its own slot, or - for a
-/// band past the first - the slot whose
-/// base the whole stack shares.
+/// Returns the ruby base slot for each reading slot.
 ///
-/// A band names its base by counting
-/// outwards rather than by index
-/// ([`FlowRuby::band`]), so this is the
-/// one place the count is turned back
-/// into a slot. One forward scan is
-/// enough because a stack is
-/// contiguous: [`Paragraphs::ruby`]
-/// pushes each band's filler straight
-/// after the one before it, and a
-/// paragraph's renumbering
-/// ([`Paragraphs::flush`]) keeps spans
-/// in the order it found them.
+/// For outer bands in a stack, this is the shared base slot.
+/// [`FlowRuby::band`] counts outward from the ruby base text.
+/// Stacks are contiguous in memory.
+/// [`Paragraphs::ruby`] appends filler spans in order.
+/// [`Paragraphs::flush`] keeps the span order.
+/// Therefore, one forward scan resolves all base slots.
 ///
 /// [`Paragraphs::ruby`]: super::gloss::Paragraphs
 /// [`Paragraphs::flush`]: super::gloss::Paragraphs
@@ -229,12 +182,10 @@ fn base_slots(flow: &Flow) -> Vec<u32> {
     out
 }
 
-/// The paragraph's readings, placed.
+/// Places all readings in a paragraph.
 ///
-/// Pure: the lines already carry the
-/// slot [`measure_readings`] bought,
-/// so this only decides where in it
-/// each reading sits.
+/// This pure function positions readings in the space that [`measure_readings`]
+/// reserves.
 pub(super) fn place_ruby(
     flow: &Flow,
     read: &[RubyMetrics],
@@ -249,55 +200,34 @@ pub(super) fn place_ruby(
         if ruby.text.is_empty() || box_.h <= 0.0 {
             continue;
         }
-        // The slot whose base this
-        // reading annotates: its own,
-        // or - past the first band -
-        // the one the stack shares.
+        // The base slot is this reading's slot or the stack's root slot.
         let anchor = base_of[slot];
-        // Which of the slot's spans the
-        // reading is placed against.
-        // Its base, normally. A `<ruby>`
-        // that reached no base at all
-        // still draws its reading and
-        // its line still grew for it;
-        // what it has no claim to is a
-        // position over a base, because
-        // there is none - so it is placed
-        // against its own filler, which
-        // stands at the pen where a base
-        // would have begun and measures
-        // nothing.
+        // Select the span that anchors the reading.
+        // A `<ruby>` without a ruby base still renders its reading.
+        // The line height increases for this reading.
+        // In this case, layout anchors the reading to its filler span.
+        // The filler span starts at the pen and has zero width.
         let based = flow.spans.iter().any(|s| s.ruby == anchor && !s.filler);
         let base = |b: &&SpanBox| {
             flow.spans
                 .get(b.span as usize)
                 .is_some_and(|s| s.ruby == anchor && s.filler != based)
         };
-        // The first line the base
-        // landed on, and its extent
-        // there: a base that wrapped
-        // keeps its reading over its
-        // head rather than over its
-        // tail. A base is a character
-        // or two, so it practically
-        // never wraps.
+        // Find the first line that contains the ruby base and its horizontal
+        // range.
+        // If the ruby base wraps across lines, keep the reading on the first
+        // line.
+        // A ruby base usually has one or two characters and rarely wraps.
         let Some(line) = measured.spans.iter().filter(base).map(|b| b.line).min() else {
             continue;
         };
         let Some(geom) = measured.lines.get(line as usize) else {
             continue;
         };
-        // How far above the line's
-        // baseline each base's own ink
-        // reaches. A text base gives its
-        // ascent share of its line box; a
-        // gaiji base gives the rise
-        // `place_images` puts the picture
-        // at, which is what lands the
-        // reading on the image's own top
-        // edge and not on the ascent of
-        // the no-break spaces reserving
-        // it.
+        // Measure the distance from the baseline to the top of the base ink.
+        // For text bases, this equals the ascent share of the line box.
+        // For gaiji bases, this equals the image rise from `place_images`.
+        // This places the reading on the top edge of the image.
         let rise = |b: &SpanBox| match flow
             .spans
             .get(b.span as usize)
@@ -311,81 +241,57 @@ pub(super) fn place_ruby(
             .iter()
             .filter(base)
             .filter(|b| b.line == line)
-            // `f32::MIN` and not zero:
-            // a `verticalAlign` that
-            // lowers a gaiji puts its
-            // top *below* the baseline,
-            // and the reading belongs
-            // over the picture there
-            // too.
+            // Use `f32::MIN`.
+            // A `verticalAlign` rule can place the top of a gaiji below the
+            // baseline.
+            // Keep the reading above the image.
             .fold((f32::MAX, 0.0f32, f32::MIN), |(l, r, up), b| {
                 (l.min(b.x), r.max(b.x + b.w), up.max(rise(b)))
             });
-        // Its bottom against that ink
-        // top, or against the band below
-        // it: the stack's own height is
-        // what stands between the base
-        // and this band's floor.
-        // Clamped into the line, so a
-        // measurer that gave the line no
-        // extra room draws the reading
-        // small and high rather than off
-        // the paragraph.
+        // Align the bottom of the reading with the top of the base ink or lower
+        // band.
+        // The stack height separates the base from this band floor.
+        // Clamp the vertical position into the line.
+        // If the line did not expand, the reading renders inside the line.
         let stacked: f32 =
             (anchor as usize..=slot).map(|j| read[j].h).sum();
         let floor = geom.baseline - top;
         let y = geom.y + (floor - stacked).max(0.0);
-        // Centred over the base, and
-        // inside the content column on
-        // both sides. A reading wider
-        // than its base overhangs it,
-        // which is what a browser does
-        // too - but only *within* a
-        // line. At a line's own edge
-        // CSS Ruby Level 1 §5.2 lets a
-        // user agent pull the annotation
-        // back to that edge, and
-        // Chromium 151 was measured
-        // doing it: with the ruby
-        // mid-line its `rt` box stands
-        // 4.00 px left of the `ruby` box
-        // and 4.02 px right of it, and
-        // at a line end the `rt` runs
-        // 371.28 to 393.78 against a
-        // `ruby` box of 375.02 to
-        // 393.77 - hung left of its base
-        // and stopped at the line's
-        // edge. Without the right-hand
-        // pull, 岩波's `しゅくすい・ふつ
-        // かよい` over a split `宿酔`
-        // put 2.38 px of kana outside
-        // the *panel*, which one bin
-        // clips away and the other
-        // paints off the rounded rect.
+        // Center the reading over the ruby base and keep it inside the content
+        // column.
+        // A reading wider than its base overhangs the base.
+        // A browser does the same, but only inside a line.
+        // CSS Ruby Level 1 section 5.2 differs at a line edge.
+        // The specification lets a user agent pull the annotation back to that
+        // edge.
+        // A measurement of Chromium 151 records that pull.
+        // With the ruby mid-line, the `rt` box stands 4.00 px left of the
+        // `ruby` box.
+        // It also stands 4.02 px right of the `ruby` box.
+        // At a line end, the `rt` box runs 371.28 to 393.78.
+        // The `ruby` box there runs 375.02 to 393.77.
+        // The `rt` box extends left of its base and stops at the line edge.
         //
-        // The line's own alignment slack
-        // comes first, because the base
-        // it sits over moved by it.
+        // Without the right-hand pull, a wide reading can leave the panel.
+        // The 岩波 reading `しゅくすい・ふつかよい` over the split `宿酔` shows this.
+        // That reading put 2.38 px of kana outside the panel.
+        // One bin clips those pixels away.
+        // The other bin paints them outside the rounded rectangle.
         //
-        // Flush with the pen instead when
-        // no base reached the slot: CSS
-        // gives the annotation an
-        // anonymous *empty* base, so the
-        // ruby box is the annotation's
-        // own width and the annotation
-        // starts at its left edge.
-        // Centring on a zero-width point
-        // would draw the reading half its
-        // width back over the text before
-        // it.
+        // Apply the alignment slack of the line first, because it moves the base.
+        //
+        // If no ruby base reaches the slot, align the reading with the pen.
+        // CSS gives such an annotation an anonymous empty ruby base.
+        // The ruby box then has the annotation width.
+        // The annotation starts at the left edge of that box.
+        // A center at a zero-width point moves the reading half its width too
+        // far left.
+        // The reading then covers the preceding text.
         let indent = (wrap_w - geom.w).max(0.0) * slack;
         let over = if based { (right - left - box_.w) / 2.0 } else { 0.0 };
-        // The right pull before the left
-        // clamp: a reading wider than the
-        // whole column has no place that
-        // holds it, and starting it at
-        // the column's own left edge is
-        // the most of it a reader gets.
+        // Apply the right pull before the left clamp.
+        // No position can hold a reading wider than the whole column.
+        // The left column edge shows as much of the reading as possible.
         let x = (indent + left + over).min(wrap_w - box_.w).max(0.0);
         out.push(RubyBox {
             text: ruby.text.clone(),
@@ -402,7 +308,7 @@ pub(super) fn place_ruby(
     out
 }
 
-/// One reading, as the seam takes it.
+/// Makes one reading span for the measurement seam.
 pub(super) fn ruby_span<'a>(font: &'a str, ruby: &'a FlowRuby) -> StyledSpan<'a> {
     StyledSpan {
         text: &ruby.text,
@@ -414,155 +320,116 @@ pub(super) fn ruby_span<'a>(font: &'a str, ruby: &'a FlowRuby) -> StyledSpan<'a>
     }
 }
 
-/// A reading's size, as a fraction of
-/// the base it sits over.
+/// This constant sets the reading size as a fraction of the ruby base that it
+/// sits over.
 ///
-/// Yomitan's own
-/// `ext/css/structured-content.css` -
-/// the spec's stated source of
-/// defaults - declares no `ruby`,
-/// `rt` or `rp` rule at all, so what
-/// a reader sees in Yomitan is the
-/// browser's own default, and both
-/// engines Yomitan runs in give `rt`
-/// `font-size: 50%`. This is
-/// therefore Yomitan's drawn default
-/// by exactly the route
-/// [`tag_style`] already takes for
-/// `b` and `sup`: HTML's own
-/// stylesheet, and not a number
-/// invented here.
+/// The specification names `ext/css/structured-content.css` as the source of
+/// defaults.
+/// That Yomitan stylesheet declares no `ruby`, `rt`, or `rp` rule at all.
+/// Therefore, a Yomitan reader sees the browser default.
+/// Both engines that Yomitan runs in give `rt` a `font-size` of 50%.
+/// Therefore, this constant gives the drawn default of Yomitan.
+/// [`tag_style`] reaches the defaults for `b` and `sup` through the same route.
+/// That route is the stylesheet of HTML, not a number invented here.
 ///
-/// Not [`FONT_STEP`]: `smaller` is a
-/// 1.2 step and a reading is a half,
-/// which is the point - furigana is
-/// meant to read as an annotation
-/// rather than as small text.
+/// This constant is not [`FONT_STEP`].
+/// The `smaller` step is 1.2, but a reading is one-half.
+/// That difference is deliberate.
+/// Furigana must appear as an annotation, not as small text.
 ///
 /// [`tag_style`]: super::style::tag_style
 /// [`FONT_STEP`]: super::style::FONT_STEP
 pub(super) const RUBY_RATIO: f32 = 0.5;
 
-/// A base's index in [`Flow::ruby`],
-/// or no reading at all.
+/// An index in [`Flow::ruby`], or a sentinel for no reading.
 pub(super) const NO_RUBY: u32 = u32::MAX;
 
-/// What a ruby base's slot is bought
-/// with: U+2060 WORD JOINER.
+/// This character reserves the slot of a ruby base: U+2060 WORD JOINER.
 ///
-/// A reading has to have room above
-/// its base that the line above must
-/// not overlap, and the only thing
-/// that grows a line is a taller span
-/// on it. This character is that
-/// span. Two properties earn it the
-/// job, and both were probed against
-/// the real shaper rather than
-/// assumed: it shapes to a glyph of
-/// zero advance, so it costs the line
-/// no width, and it is a *word
-/// joiner*, so no wrap can separate
-/// it from the base whose line it
-/// grows.
+/// A reading needs space above its ruby base, and the line above must not
+/// overlap it.
+/// Only a taller span on a line grows that line.
+/// This character supplies that span.
+/// The choice depends on two properties.
+/// A probe against the real shaper confirmed both properties.
+/// The code did not assume them.
+/// 1. The character shapes to a glyph of zero advance, so it adds no width to
+///    the line.
+/// 2. The character is a word joiner, so no wrap separates it from its base.
 ///
-/// Not U+200B ZERO WIDTH SPACE, which
-/// measures the same and is a break
-/// *opportunity*: it would let a line
-/// break between a base and its own
-/// filler.
+/// Do not use U+200B ZERO WIDTH SPACE.
+/// That character measures the same, but it creates a break opportunity.
+/// It lets a line break come between a ruby base and its filler.
 ///
-/// It does mean an element's `text`
-/// holds one invisible character per
-/// reading. That is the honest
-/// record: the text is what the bin
-/// re-measures and shapes, and the
-/// alternative - line boxes grown
-/// after the wrap - is geometry the
-/// paint would not reproduce.
+/// This choice puts one invisible character in the `text` of an element for
+/// each reading.
+/// Every later pass sees this cost.
+/// The platform bin measures and shapes exactly that text.
+/// The alternative grows line boxes after the wrap.
+/// The paint pass does not reproduce that geometry.
 pub(super) const RUBY_FILLER: &str = "\u{2060}";
 
-/// One reading, before it is placed.
+/// This structure stores one reading annotation before placement.
 ///
-/// Held beside the paragraph rather
-/// than in it: a reading takes no
-/// horizontal room from the line it
-/// sits on, so putting it in the run
-/// would advance the pen past it and
-/// let the wrap break it away from
-/// the base it belongs to.
+/// Layout stores readings outside the paragraph text run.
+/// A reading does not take horizontal space on its line.
+/// If layout stores it in the text run, the pen advances, and a line break can
+/// separate it.
 #[derive(Clone)]
 pub(super) struct FlowRuby {
     pub(super) text: String,
     pub(super) style: Inline,
-    /// Which annotation band this
-    /// reading is, counted outwards
-    /// from the base: `0` for the one
-    /// nearest it.
-    ///
-    /// The HTML ruby model reads a run
-    /// of `rt` after one base as one
-    /// independent annotation level
-    /// each
-    /// (<https://www.w3.org/TR/html-ruby-extensions/>),
-    /// and 岩波国語辞典　第八版 writes
-    /// 17 of them - `<ruby>七色<rt>なな
-    /// いろ</rt><rt>しちしょく</rt>
-    /// </ruby>` states both readings of
-    /// a cross-referenced headword. A
-    /// band past the first has no base
-    /// span of its own and shares the
-    /// one belonging to the nearest
-    /// band `0` before it
+    /// This field stores the annotation band for this reading.
+    /// It counts bands outward from the ruby base.
+    /// The HTML ruby model treats each `rt` after one base as a separate band.
+    /// Band `0` is nearest to the ruby base.
+    /// Each band is an independent annotation level.
+    /// See <https://www.w3.org/TR/html-ruby-extensions/>.
+    /// 岩波国語辞典　第八版 writes 17 of these stacks.
+    /// The markup `<ruby>七色<rt>なないろ</rt><rt>しちしょく</rt></ruby>` is one
+    /// stack.
+    /// It states both readings of a cross-referenced headword.
+    /// A band after the first has no base span of its own.
+    /// It shares the base span of the nearest band `0` before it
     /// ([`base_slots`]).
     ///
-    /// A count and not an index,
-    /// deliberately: a paragraph
-    /// renumbers its slots onto its own
-    /// list ([`Paragraphs::flush`]), and
-    /// a slot index stored here would
-    /// have to be renumbered with them.
-    /// Order survives that renumbering
-    /// because a band's filler is
-    /// pushed straight after the one
-    /// before it, so a stack stays
-    /// contiguous and in order.
+    /// This field stores a count, not an index, by design.
+    /// A paragraph renumbers its slots in its own list ([`Paragraphs::flush`]).
+    /// A slot index stored here changes with the list.
+    /// A count stays unchanged because a stack stays contiguous.
+    /// Layout pushes the filler of each band directly after the previous
+    /// filler.
     ///
     /// [`Paragraphs::flush`]: super::gloss::Paragraphs::flush
     pub(super) band: u32,
 }
 
-/// The ruby half of the gloss walk: a `ruby` subtree, its base's slot,
-/// and the reading that fills it.
+/// Walks ruby content in the gloss.
+/// It handles a `ruby` subtree, its base slot, and the reading that fills
+/// that slot.
 impl Paragraphs<'_> {
-    /// Buys the open slot's reading its
-    /// room.
+    /// Reserves vertical space for the reading in the open slot.
     ///
-    /// A [`RUBY_FILLER`] span of its
-    /// own, appended straight after the
-    /// base: the character is a word
-    /// joiner, so no wrap can put it on
-    /// a different line from the base
-    /// whose line it is there to grow.
-    /// Its size is left as the base's
-    /// and raised by
-    /// [`measure_readings`], which is
-    /// the first point at which the
-    /// reading's height is known.
+    /// The function appends a [`RUBY_FILLER`] span directly after its ruby
+    /// base.
+    /// The character is a word joiner.
+    /// Therefore, no wrap puts the filler on a different line from its ruby
+    /// base.
+    /// The filler grows the base line.
+    /// The function leaves the filler size equal to the base size.
+    /// [`measure_readings`] raises that size later.
+    /// That call sets the reading height for the first time.
     ///
-    /// A slot no base reached gets one
-    /// too. A reading with no base still
-    /// has to be drawn, so its line
-    /// still has to be tall enough for
-    /// it - CSS gives such an annotation
-    /// an anonymous empty ruby base and
-    /// a browser draws it. What it has
-    /// no claim to is a *position over a
-    /// base*, and that is
-    /// [`place_ruby`]'s to withhold: the
-    /// filler stands at the pen the base
-    /// would have begun at, and the
-    /// reading is placed flush with it
-    /// rather than centred on nothing.
+    /// The function also adds a filler span to a slot that no ruby base reaches.
+    /// A reading with no ruby base still needs paint, so its line still needs
+    /// height.
+    /// CSS gives such an annotation an anonymous empty ruby base, and a browser
+    /// draws it.
+    /// The annotation has no position over a ruby base.
+    /// [`place_ruby`] withholds that position.
+    /// The filler starts at the pen where a ruby base starts.
+    /// [`place_ruby`] aligns the reading flush with the filler, not centered on
+    /// a zero-width point.
     pub(super) fn push_filler(&mut self, style: Inline) {
         let slot = self.open_ruby;
         let at = self.cur.text.len() as u32;
@@ -576,59 +443,42 @@ impl Paragraphs<'_> {
             filler: true,
             image: NO_IMAGE,
         });
-        // The run after it is its own
-        // span: joining it would give a
-        // whole word the filler's size.
+        // The next text must start in a new span.
+        // If the next span merges with the filler, regular words take the
+        // filler size.
         self.barrier = true;
     }
 
-    /// One `ruby` node: bases in the
-    /// flow, readings above them.
+    /// Walks one `ruby` node and puts bases in the flow with readings above
+    /// them.
     ///
-    /// One slot per `rt` and not per
-    /// `ruby`, because
-    /// `<ruby>漢<rt>かん</rt>字<rt>じ
-    /// </rt></ruby>` is two pairings in
-    /// one node - which is how a
-    /// dictionary writes per-character
-    /// furigana. Each slot is opened
-    /// before the base text that will
-    /// wear it and closed by the `rt`
-    /// that follows, so a base is
-    /// stamped with its own reading and
-    /// not with its neighbour's.
+    /// Layout creates one slot for each `rt`, not one slot for each `ruby`.
+    /// The node `<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>` holds two pairings.
+    /// A dictionary writes per-character furigana in exactly this shape.
+    /// Layout opens each slot before the base text that carries it.
+    /// Layout closes each slot at the next `rt`.
+    /// Therefore, each base carries its own reading, not a neighbor's reading.
     ///
-    /// An `rt` whose slot no base text
-    /// reached is the *next band* over
-    /// the base the `rt` before it
-    /// found, which is the tabular form
-    /// of double-sided ruby: one base,
-    /// then every annotation that
-    /// belongs to it
-    /// ([`FlowRuby::band`]). The two
-    /// cases are told apart by the one
-    /// fact that distinguishes them - a
-    /// base span carrying the open slot
-    /// - so `<ruby>漢<rt>かん</rt>字
-    ///   <rt>じ</rt></ruby>` still pairs
-    ///   each reading with its own
-    ///   character, and a `<ruby>` that
-    ///   reached no base at all still
-    ///   opens at band zero.
+    /// An `rt` whose slot has no ruby base is the next band above the earlier
+    /// base.
+    /// That shape is the tabular form of double-sided ruby.
+    /// It states one base, then every annotation for that base.
+    /// See [`FlowRuby::band`].
+    /// A base span that carries the open slot separates the two cases.
+    /// Therefore, `<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>` still pairs each
+    /// reading with its own character.
+    /// A `<ruby>` that reached no base still opens at band zero.
     pub(super) fn ruby(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let style = self.styled(id, ctx.inline);
         let link = self.link_of(id, ctx.link);
         let slot = self.open_slot(style);
         let outer = std::mem::replace(&mut self.open_ruby, slot);
-        // `rp` holds the parentheses
-        // HTML wrote for a renderer
-        // that cannot draw ruby. This
-        // one can, so they are held
-        // back and spent only if no
-        // reading ever arrives, which
-        // is the whole of the fallback
-        // this tag exists for.
+        // The `rp` element holds parentheses that HTML provides for a renderer
+        // that cannot draw ruby.
+        // This renderer can draw ruby, so layout does not add `rp` text yet.
+        // Layout adds that text only when no reading arrives.
+        // That case is the fallback that this tag provides.
         let mut fallback: Vec<(String, Inline)> = Vec::new();
         let mut read = false;
         let mut band = 0u32;
@@ -637,9 +487,8 @@ impl Paragraphs<'_> {
         for (i, child) in doc.children(id).enumerate() {
             match doc.node(child).tag {
                 Tag::Rt => {
-                    // Its own base resets the
-                    // stack; an `rt` following
-                    // an `rt` climbs it.
+                    // A ruby base in the current slot resets the stack.
+                    // An `rt` after another `rt` climbs the stack.
                     let slot = self.open_ruby;
                     let based = self.cur.spans.iter().any(|s| s.ruby == slot && !s.filler);
                     if self.reading(child) {
@@ -665,16 +514,12 @@ impl Paragraphs<'_> {
         }
     }
 
-    /// A fresh slot, for the base text
-    /// that follows it.
+    /// Creates a fresh slot for the base text that follows it.
     ///
-    /// Carries the style the reading
-    /// will inherit, already stepped
-    /// down to [`RUBY_RATIO`], so that
-    /// a `fontSize` on the `rt` itself
-    /// is relative to the reading's
-    /// size as CSS says and not to the
-    /// base's.
+    /// The slot carries the style that the reading inherits.
+    /// Layout already reduces that style by [`RUBY_RATIO`].
+    /// Therefore, a `fontSize` on `rt` is relative to the size of the reading.
+    /// CSS states that rule, and the base size does not apply.
     pub(super) fn open_slot(&mut self, base: Inline) -> u32 {
         self.rubies.push(FlowRuby {
             text: String::new(),
@@ -684,22 +529,17 @@ impl Paragraphs<'_> {
         self.rubies.len() as u32 - 1
     }
 
-    /// One `rt`, into the slot its base
-    /// was stamped with.
+    /// Records one `rt` in the slot that its ruby base carries.
     ///
-    /// One run, however many wrappers a
-    /// dictionary put inside the `rt`:
-    /// a reading is one to four kana
-    /// over a single base, so a style
-    /// change part-way through it has
-    /// nowhere to go. The `rt`'s own
-    /// resolved style is kept, so a
-    /// dictionary that colours its
-    /// readings is honoured.
+    /// The function makes one run, regardless of wrappers inside `rt`.
+    /// A reading has one to four kana over one ruby base.
+    /// Therefore, the function cannot represent a style change inside a
+    /// reading.
+    /// The function keeps the resolved style of `rt` itself.
+    /// Therefore, the engine obeys a dictionary that colors its readings.
     ///
-    /// `false` for an `rt` that renders
-    /// nothing, which leaves the `rp`
-    /// fallback still owed.
+    /// Returns `false` for an `rt` that paints nothing.
+    /// That result leaves the `rp` fallback pending.
     pub(super) fn reading(&mut self, id: NodeId) -> bool {
         let text = text_of(self.doc, id);
         if text.trim().is_empty() {

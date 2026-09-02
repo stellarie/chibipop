@@ -1,28 +1,25 @@
-//! The canned popup: a real surface, real layout, real glyphs, with no
-//! capture and no OCR behind it.
+//! This demo checks the popup surface, layout, and glyph selection on a live compositor.
+//! It does not use capture or OCR.
 //!
-//! The pipeline that produces a `Presentation` from the screen is not
-//! built yet; this exists so the surface, the placement round-trip and
-//! the JP text stack can be driven - and smoke-tested on a live
-//! compositor - before it lands. It is env-gated
-//! (`CHIBIPOP_POPUP_DEMO=1`) and drives off the existing trigger verbs,
-//! so the forever verb set on the control socket stays untouched.
+//! It bypasses the screen pipeline that creates a `Presentation`.
+//! Developers can use it to test popup placement and the Japanese text stack.
+//! Set `CHIBIPOP_POPUP_DEMO=1` to enable the demo.
+//! Current trigger verbs control the demo, so it does not add a control socket verb.
 //!
-//! The content is chosen for the one thing a screenshot can prove:
-//! every kanji on the "variants" line is drawn differently by Noto Sans
-//! CJK JP and by CJK SC, so a wrong `FontSystem` locale is visible
-//! rather than silent.
+//! A screenshot shows whether the text stack selects the required glyph variants.
+//! Noto Sans CJK JP and Noto Sans CJK SC select different glyphs for each
+//! kanji on the "variants" line.
+//! An incorrect `FontSystem` locale therefore produces a visible error.
 
 use chibipop::geom::PhysRect;
 use chibipop::present::{Card, CollapsedRow, GlossBlock, Presentation};
 
-/// The env gate and its optional fixed anchor.
+/// Stores whether the demo is active and its optional fixed anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Demo {
     pub armed: bool,
-    /// `CHIBIPOP_POPUP_DEMO_ANCHOR=x,y,w,h`, global physical pixels.
-    /// A fixed anchor is what makes a smoke test reproducible without
-    /// synthesizing any seat input.
+    /// `CHIBIPOP_POPUP_DEMO_ANCHOR=x,y,w,h` sets an anchor in global physical pixels.
+    /// A fixed anchor makes the smoke test repeatable without seat input.
     pub anchor: Option<PhysRect>,
 }
 
@@ -37,7 +34,7 @@ impl Demo {
     }
 }
 
-/// `x,y,w,h` in global physical pixels.
+/// Parses `x,y,w,h` as a rectangle in global physical pixels.
 pub fn parse_anchor(text: &str) -> Option<PhysRect> {
     let mut it = text.split(',').map(str::trim).map(str::parse::<i32>);
     let x = it.next()?.ok()?;
@@ -50,11 +47,12 @@ pub fn parse_anchor(text: &str) -> Option<PhysRect> {
     Some(PhysRect { x, y, w, h })
 }
 
-/// One popup's worth of view model.
+/// Creates a view model for one popup.
 ///
-/// Deliberately shaped like a real hover: a top card with a reading, a
-/// frequency corner, two dictionaries, and collapsed rows below - so
-/// the scene exercises every element kind the painter can draw.
+/// The model matches a real hover.
+/// It has a top card, a kana form, a frequency corner, two Dictionaries,
+/// and collapsed rows.
+/// The scene therefore covers each element kind that the paint code supports.
 pub fn canned() -> Presentation {
     Presentation {
         top: Some(Card {
@@ -67,8 +65,8 @@ pub fn canned() -> Presentation {
                     "JMdict",
                     r#"["Chinese character; Chinese characters","kanji"]"#,
                 ),
-                // Every one of these is drawn differently by the JP and the
-                // SC faces of Noto Sans CJK: 骨 直 今 雪 兵 令 具 単 説 対
+                // Noto Sans CJK JP and Noto Sans CJK SC select different glyphs
+                // for each character:
                 GlossBlock::parse(
                     "variants",
                     "[\"\u{9aa8} \u{76f4} \u{4eca} \u{96ea} \u{5175} \u{4ee4} \u{5177} \
@@ -112,9 +110,9 @@ mod tests {
         }
     }
 
-    /// The demo exists to prove JP glyph variants on screen, so the
-    /// scene must actually contain kanji that differ between the JP and
-    /// SC faces.
+    /// The demo must include kanji that differ between the Noto Sans CJK JP
+    /// and Noto Sans CJK SC faces.
+    /// This difference makes locale errors visible.
     #[test]
     fn the_canned_presentation_carries_variant_kanji() {
         let p = canned();

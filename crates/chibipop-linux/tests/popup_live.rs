@@ -1,18 +1,16 @@
-//! The popup against a real compositor, when there is one.
+//! Tests the popup against a real compositor, when a compositor exists.
 //!
-//! CI is headless (ARCHITECTURE.md#packaging-and-ci), so this skips
-//! without `WAYLAND_DISPLAY` - and skips again on a compositor
-//! advertising no layer shell, fractional scale or viewporter, because
-//! those three globals are mandatory and their absence is a compositor
-//! verdict, not a test failure.
+//! CI runs headless (ARCHITECTURE.md#packaging-and-ci). This file skips when
+//! `WAYLAND_DISPLAY` is unset. It skips again when the compositor advertises no layer
+//! shell, no fractional scale, or no viewporter. These three globals are mandatory.
+//! Their absence is a compositor verdict, not a test failure.
 //!
-//! One test, deliberately: it drives a whole daemon through the canned
-//! popup (`CHIBIPOP_POPUP_DEMO=1`) and two of these racing over one
-//! compositor would prove nothing new. Everything it asserts is read
-//! back out of the daemon's own log and out of `hyprctl`; it synthesizes
-//! no input and never touches the seat. The popup it shows is visible
-//! for a few hundred milliseconds and takes no focus - which is one of
-//! the properties under test.
+//! This file holds one test on purpose. It drives a whole daemon through the canned
+//! popup (`CHIBIPOP_POPUP_DEMO=1`). Two of these tests would race over one compositor
+//! and prove nothing new. The test reads everything it asserts back from the daemon's
+//! own log and from `hyprctl`. The test synthesizes no input and never touches the
+//! seat. The popup it shows stays visible for a few hundred milliseconds and takes no
+//! focus. That lack of focus is one of the properties under test.
 
 #![cfg(target_os = "linux")]
 
@@ -23,18 +21,17 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The globals a crisp popup requires.
+/// The globals that a crisp popup requires.
 const NEEDED: [&str; 3] =
     ["zwlr_layer_shell_v1", "wp_fractional_scale_manager_v1", "wp_viewporter"];
 
-/// A fixed anchor keeps the run reproducible without moving the
-/// pointer: global physical pixels, near the top-left so it lands on
-/// any output.
+/// A fixed anchor keeps the run reproducible and needs no pointer move. It uses global
+/// physical pixels near the top-left, so it lands on any output.
 const ANCHOR: &str = "400,300,140,40";
 const ANCHOR_X: i32 = 400;
 const ANCHOR_Y: i32 = 300;
 
-/// A private XDG environment plus the daemon running inside it.
+/// A private XDG environment plus the daemon that runs inside it.
 struct Session {
     dir: PathBuf,
     log: PathBuf,
@@ -42,12 +39,12 @@ struct Session {
 }
 
 impl Session {
-    /// A private XDG tree with the compositor's socket linked in, and a
-    /// daemon started in it with the demo popup armed.
+    /// Builds a private XDG tree with the compositor's socket linked in, and starts a
+    /// daemon in it with the demo popup armed.
     ///
-    /// `XDG_RUNTIME_DIR` is ours, so the instance lock and the control
-    /// socket cannot collide with a real daemon's - which is also why
-    /// the compositor socket has to be linked into it.
+    /// `XDG_RUNTIME_DIR` belongs to this test alone. The instance lock and the control
+    /// socket can then never collide with a real daemon's. That is also why this code links
+    /// the compositor socket into the tree.
     fn start() -> Session {
         let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
         let dir = std::env::temp_dir().join(format!("chibipop-popup-live-{}", std::process::id()));
@@ -89,7 +86,7 @@ impl Session {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Wait for a line containing `needle`, and answer it.
+    /// Wait for a line that contains `needle`, and answer it.
     fn wait_for(&self, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -105,9 +102,9 @@ impl Session {
         let _ = Command::new("kill").arg("-TERM").arg(self.daemon.id().to_string()).status();
     }
 
-    /// Reap the daemon, for up to two seconds. Reaping is the honest
-    /// test for "it exited": an unwaited child stays a zombie, and
-    /// `kill -0` cannot tell a zombie from a running process.
+    /// Reap the daemon for up to two seconds. This reap is the honest way to test whether
+    /// the daemon exited. An unwaited child stays a zombie, and `kill -0` cannot tell a
+    /// zombie from a process that runs.
     fn wait_exit(&mut self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -123,8 +120,8 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // SIGTERM, not a kill: the daemon's own handler unlinks the
-        // socket and releases the lock, and the test asserts it did.
+        // This is a SIGTERM, not a kill. The daemon's own handler unlinks the socket and
+        // releases the lock, and the test asserts that it did.
         self.terminate();
         let _ = self.daemon.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -186,9 +183,9 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
     }
     let mut session = Session::start();
 
-    // Startup: one surface per output, mapped hidden, on the layer the
-    // config asks for and with keyboard interactivity off - three of
-    // the popup's inviolable properties.
+    // At startup, the daemon maps one surface for each output. Each surface starts hidden,
+    // sits on the layer that the config asks for, and has keyboard interactivity off. These
+    // are three of the popup's inviolable properties.
     let mapped = session.wait_for("layer surface(s) mapped hidden");
     let created = session.wait_for("popup: layer surface 0 on ");
     assert!(created.contains("overlay layer"), "{created}");
@@ -198,14 +195,15 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
         mapped.split_whitespace().find_map(|w| w.parse().ok()).expect("a surface count");
     assert!(count >= 1, "{mapped}");
 
-    // The pump serves `ctl` only once startup - including the worker
-    // pipeline's model load, ~1-2 s cold - is done; the ready line is
-    // the daemon's own mark for it. Asking earlier races that load
-    // (the connect queues, the reply times out on a slow runner).
+    // The pump serves `ctl` requests only after startup finishes. Startup includes the
+    // worker pipeline's model load, which takes about 1 to 2 seconds cold. The ready line
+    // is the daemon's own mark for that finish. A `ctl` call sent before the ready line
+    // races that load. The connect call queues, and the reply can time out on a slow
+    // runner.
     session.wait_for("ready: pump running");
 
-    // A show measures, places, commits and reports the rect back to the
-    // Controller (`Event::PopupPlaced`).
+    // A show measures the popup, places it, commits the surface, and reports the rect back
+    // to the Controller as `Event::PopupPlaced`.
     let focus_before = hyprctl("activewindow");
     session.ctl("trigger-down");
     let shown = session.wait_for("popup: shown on surface");
@@ -215,21 +213,20 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
     assert_eq!(ANCHOR_X, x, "the panel's left edge is the anchor's: {shown}");
     assert!(y > ANCHOR_Y, "the panel sits below the anchor: {shown}");
 
-    // The compositor's own view of the surface, in logical units: the
-    // placement arithmetic checked against the other side of the
-    // protocol instead of against itself.
+    // This is the compositor's own view of the surface, in logical units. That view checks
+    // the placement arithmetic against the other side of the protocol, not against itself.
     if let Some(layers) = hyprctl("layers") {
-        // By pid, not by namespace alone: a developer running a real
-        // chibipop in the same session has a `namespace: chibipop`
-        // layer of their own, and comparing this daemon's placement
-        // against that one fails for no reason.
+        // This code matches by pid, not by namespace alone. A developer who runs a real
+        // chibipop in the same session has a `namespace: chibipop` layer of their own. A
+        // comparison of this daemon's placement against that layer would fail for no
+        // reason.
         let pid = format!("pid: {}", session.daemon.id());
         let line = layers
             .lines()
             .find(|l| l.contains("namespace: chibipop,") && l.contains(&pid))
             .unwrap_or_else(|| panic!("no chibipop layer for {pid} in:\n{layers}"))
             .to_string();
-        // `hyprctl` prints `xywh: X Y W H`, every number logical.
+        // `hyprctl` prints `xywh: X Y W H`. Every number in that line is logical.
         let logical = format!(
             "xywh: {} {} {} {}",
             (f64::from(x) / scale).round() as i32,
@@ -243,12 +240,12 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
         );
     }
 
-    // Focus never moves: `keyboard_interactivity: none` makes it
-    // impossible, and this is the assertion that would catch a change.
+    // Focus never moves. The setting `keyboard_interactivity: none` makes a focus change
+    // impossible. This assertion would catch a change if the setting broke.
     assert_eq!(focus_before, hyprctl("activewindow"), "showing the popup moved the focus");
 
-    // Hide attaches a transparent buffer; it never unmaps, which is what
-    // keeps the next show free of Hyprland's layer animation.
+    // A hide attaches a transparent buffer. It never unmaps the surface. That choice keeps
+    // the next show free of Hyprland's layer animation.
     session.ctl("trigger-up");
     session.wait_for("popup: hidden in");
     let pid = format!("pid: {}", session.daemon.id());
@@ -259,7 +256,7 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
         );
     }
 
-    // And nothing is left behind: the surfaces go with the process.
+    // Nothing remains afterward. The surfaces end when the process ends.
     session.terminate();
     assert!(session.wait_exit(), "the daemon ignored SIGTERM");
     if let Some(layers) = hyprctl("layers") {

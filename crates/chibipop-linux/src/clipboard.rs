@@ -1,52 +1,41 @@
-//! The selection, on the one Wayland protocol family a daemon can use
-//! (no `wl-copy` process dependency).
+//! This module owns the selection through the only Wayland protocol family that a daemon can use.
+//! It does not start a `wl-copy` process.
 //!
-//! An ordinary clipboard write goes through `wl_data_device`, which the
-//! compositor only honours for a client holding keyboard focus on a
-//! surface. chibipop has neither half: the popup is
-//! `keyboard_interactivity: none` for good, and OCR-to-clipboard is
-//! invoked from a global key while the *user's* window has focus. Data
-//! control is the protocol written for exactly this case — managing the
-//! selection with no focus and no surface — which is why it, and not a
-//! `wl-copy` subprocess, is the rung here.
+//! A normal clipboard write uses `wl_data_device`. The compositor honors it only for a client
+//! that has keyboard focus on a surface. chibipop has neither condition. The popup sets
+//! `keyboard_interactivity: none`, and OCR-to-clipboard starts from a global key while the
+//! user's window has focus. Data control manages the selection without focus or a surface.
+//! Therefore, this module uses data control instead of a `wl-copy` subprocess.
 //!
-//! Two rungs, first advertised wins:
+//! Two rungs exist. The first advertised rung wins:
 //!
-//! 1. `ext_data_control_manager_v1` — the staged, non-deprecated
-//!    protocol (Hyprland ≥ 0.48, sway ≥ 1.11, KWin ≥ 6.3, niri).
-//! 2. `zwlr_data_control_manager_v1` — the wlr original, advertised by
-//!    every compositor that implements rung 1 and by every one that
-//!    predates it. Its own XML calls it deprecated, which is why it is
-//!    rung 2 rather than the only rung: a session that eventually drops
-//!    it and keeps `ext` must not be told it has no clipboard, because
-//!    that diagnostic would be a lie.
+//! 1. `ext_data_control_manager_v1` is the staged, non-deprecated protocol. It exists on
+//!    Hyprland ≥ 0.48, sway ≥ 1.11, KWin ≥ 6.3, and niri.
+//! 2. `zwlr_data_control_manager_v1` is the original wlr protocol. Every compositor that
+//!    implements rung 1 also advertises it. Older compositors advertise it as well. Its XML
+//!    marks it deprecated. This protocol remains the second rung. A session that drops it
+//!    but keeps `ext` still has clipboard support.
 //!
-//! Neither advertised — stock GNOME, where Mutter implements no data
-//! control at all — is a **state**, discovered by [`Clipboard::bind`]
-//! the way a missing layer shell is discovered by `Popup::bind`: one
-//! diagnostic naming both globals, an honest line in the settings row,
-//! and every other channel untouched.
+//! If the compositor advertises neither global, this module reports a **state**.
+//! [`Clipboard::bind`] finds this state as [`Popup::bind`] finds an absent layer shell.
+//! It emits one diagnostic with both globals, shows an honest line in the settings row,
+//! and leaves every other channel unchanged.
 //!
-//! **Its own connection, on a thread of its own.** Owning a selection is
-//! not a call that returns: the compositor asks for the bytes with a
-//! `send` event every time some client pastes, for as long as we hold
-//! the offer, and a client that stops answering loses it. The daemon's
-//! queue lives inside calloop's `WaylandSource` and cannot be dispatched
-//! from within a source callback (the constraint `select::Selector`
-//! documents), so this is a second client as far as the compositor is
-//! concerned: one connection, one calloop loop, one thread, alive for
-//! the daemon's lifetime. The pump only ever hands it bytes and reads
-//! its notes back, both over `calloop::channel` — the `spawn_anki`
-//! bargain: nothing blocking on the pump
+//! **Its own connection and thread.** A selection owner must answer a `send` event whenever
+//! another client pastes. The owner must answer while it holds the offer. A client that does not
+//! answer loses the selection. The daemon's queue lives inside calloop's `WaylandSource`.
+//! A source callback cannot dispatch that queue because of the constraint that `select::Selector`
+//! documents. Therefore, this module uses a second client for the compositor: one connection,
+//! one calloop loop, and one thread for the daemon's lifetime. The pump gives this thread bytes
+//! and receives its notes through `calloop::channel`. This arrangement follows the `spawn_anki`
+//! bargain. The pump never blocks
 //! (ARCHITECTURE.md#workspace-and-seams).
 //!
-//! **What this client is told, and does not read.** Data control makes
-//! its holder a clipboard *manager*: the compositor announces every
-//! selection any client sets, ours included. That is inherent to the
-//! protocol and cannot be opted out of. Every announced offer is
-//! destroyed on arrival and `receive` is never sent, so no other
-//! application's clipboard content is ever read, let alone logged — the
-//! same posture the lookup log takes towards screen content
+//! **What this client receives and does not read.** Data control makes its holder a clipboard
+//! *manager*. The compositor announces every selection that any client sets, ours included.
+//! The protocol requires this behavior, and the client cannot disable it. This module destroys
+//! every announced offer on arrival and never sends `receive`. It never reads or logs another
+//! application's clipboard content. The lookup log uses the same rule for screen content
 //! (ARCHITECTURE.md#platform-integration).
 
 use crate::wayland::Advertised;
@@ -83,27 +72,26 @@ use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_source_v1
 pub const EXT_MANAGER: &str = "ext_data_control_manager_v1";
 pub const WLR_MANAGER: &str = "zwlr_data_control_manager_v1";
 
-/// The MIME types a UTF-8 text selection is offered as.
+/// MIME types for a UTF-8 text selection.
 ///
-/// The first is what a Wayland reader asks for; the four legacy names
-/// are the X11 selection targets an XWayland bridge and older toolkits
-/// still ask by, and offering them costs one request each. Same set
-/// `wl-clipboard` offers, so a paste behaves identically whichever of
-/// the two took the selection.
+/// A Wayland reader asks for the first type. An XWayland bridge and older
+/// toolkits ask for the four legacy names. This module offers all five.
+/// Each extra name costs one request. `wl-clipboard` offers the same set,
+/// so a paste behaves the same with either protocol.
 pub const TEXT_MIMES: [&str; 5] =
     ["text/plain;charset=utf-8", "text/plain", "TEXT", "STRING", "UTF8_STRING"];
 
-/// Which data-control protocol serves this session.
+/// The data-control protocol that serves this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     /// Rung 1: `ext-data-control-v1`, the staged protocol.
     Ext,
-    /// Rung 2: `wlr-data-control-unstable-v1`, deprecated but universal.
+    /// Rung 2: `wlr-data-control-unstable-v1`, the deprecated but universal protocol.
     Wlr,
 }
 
 impl Rung {
-    /// The manager global this rung binds.
+    /// The manager global that this rung binds.
     pub fn global(self) -> &'static str {
         match self {
             Rung::Ext => EXT_MANAGER,
@@ -112,11 +100,10 @@ impl Rung {
     }
 }
 
-/// Which rung this session advertises, highest first.
+/// The highest advertised rung for this session.
 ///
-/// Pure, and the only place the ladder's order lives: `bind` walks it
-/// and the settings window asks it the same question without opening a
-/// selection.
+/// This pure function is the only place that defines ladder order. `bind` and
+/// the settings window use it without a selection request.
 pub fn rung(globals: &[Advertised]) -> Option<Rung> {
     let has = |interface: &str| globals.iter().any(|g| g.interface == interface);
     if has(EXT_MANAGER) {
@@ -128,8 +115,8 @@ pub fn rung(globals: &[Advertised]) -> Option<Rung> {
     }
 }
 
-/// The line a session with no rung earns, naming both globals so a
-/// compositor upgrade self-heals the install
+/// The line for a session with no rung. It names both globals so a compositor
+/// upgrade can make the clipboard available
 /// (ARCHITECTURE.md#capture-and-masking).
 pub fn unavailable_line() -> String {
     format!(
@@ -139,51 +126,52 @@ pub fn unavailable_line() -> String {
     )
 }
 
-/// Where the clipboard thread's diagnostics go.
+/// The destination for clipboard-thread diagnostics.
 ///
-/// The pump owns the log (ARCHITECTURE.md#platform-integration) and this
-/// thread is not the pump, so a line travels as a line, exactly as an
-/// AnkiConnect failure does.
+/// The pump owns the log (ARCHITECTURE.md#platform-integration). This thread
+/// does not own the log, so it sends each line to the pump. This matches
+/// AnkiConnect failures.
 #[derive(Clone)]
 struct Notes(calloop::channel::Sender<String>);
 
 impl Notes {
     fn note(&self, line: String) {
-        // A pump that has gone away is not this thread's error to
-        // report: it is about to be torn down with the process.
+        // If the pump has gone away, this thread does not report the error.
+        // The process will end this thread at shutdown.
         let _ = self.0.send(line);
     }
 }
 
-/// One copy on its way to the offer thread: the bytes, and the receipt
-/// the caller asked for.
+/// One copy for the offer thread. It contains the bytes and an optional
+/// receipt for the caller.
 struct Take {
     payload: Arc<[u8]>,
-    /// `Some` for [`Clipboard::set_and_settle`] only. The thread answers
-    /// it once the compositor has the offer, and drops it instead if the
-    /// roundtrip failed — so a caller that waits either learns the
-    /// selection is live or learns it never became live.
+    /// `Some` applies only to [`Clipboard::set_and_settle`]. The thread sends
+    /// the receipt after the compositor receives the offer. It drops the
+    /// receipt if the roundtrip fails. A caller that waits then learns whether
+    /// the selection became active.
     settled: Option<mpsc::SyncSender<()>>,
 }
 
-/// The daemon's writable selection: bytes in, an offer held open.
+/// The daemon's writable selection. It sends bytes to a thread that holds
+/// the offer open.
 pub struct Clipboard {
     rung: Rung,
-    /// The offer thread's inbox. Its receiver lives in that thread's
-    /// loop, so a send is also the wake.
+    /// The offer thread's inbox. Its receiver lives in that thread's loop, so
+    /// each send also wakes the loop.
     text: calloop::channel::Sender<Take>,
 }
 
 impl Clipboard {
-    /// Open a data-control connection and hand it a thread.
+    /// Open a data-control connection and start its thread.
     ///
-    /// `Ok(None)` is the honest absence: this session advertises no
-    /// data-control global, which is a state and not a failure — the
-    /// same distinction `Popup::bind` draws for a missing layer shell.
-    /// `Err` is a real failure to set one up (no display, a global that
-    /// vanished between the probe and the bind, no thread).
+    /// `Ok(None)` reports an honest absence. The session advertises no
+    /// data-control global. This is a state, not a failure, like the absent
+    /// layer shell that `Popup::bind` handles.
+    /// `Err` reports a real setup failure. Examples include no display, a
+    /// global that vanished between the probe and bind, and no thread.
     ///
-    /// `notes` is where the thread's diagnostics land, on the pump.
+    /// `notes` receives diagnostics from the thread and sends them to the pump.
     pub fn bind(
         globals: &[Advertised],
         notes: calloop::channel::Sender<String>,
@@ -191,7 +179,8 @@ impl Clipboard {
         let Some(rung) = rung(globals) else { return Ok(None) };
         let notes = Notes(notes);
 
-        // Its own connection, for the reason the module doc gives.
+        // This connection belongs to this thread for the reason in the module
+        // documentation.
         let conn = Connection::connect_to_env()
             .context("connecting the clipboard's own Wayland display")?;
         let mut queue = conn.new_event_queue::<Owner>();
@@ -204,16 +193,15 @@ impl Clipboard {
             .with_context(|| {
                 format!("{} vanished between the probe and the bind", rung.global())
             })?;
-        // Version 1 deliberately: `set_selection` is all this daemon
-        // wants, and version 2 of the wlr rung adds the *primary*
-        // selection - an announcement stream we would only be
-        // destroying offers out of.
+        // Use version 1 deliberately. `set_selection` is all this daemon needs.
+        // Version 2 of the wlr rung adds the *primary* selection. It adds an
+        // announcement stream whose offers this client would only destroy.
         let manager = Manager::bind(rung, &registry, manager_global.name, &qh);
 
-        // The selection is per-seat, and this daemon takes the first
-        // seat the session advertises - the same seat a pick's pointer
-        // and keyboard come off (`App::seat`). A multi-seat session is
-        // outside every channel's model here.
+        // The selection belongs to a seat. This daemon takes the first seat that
+        // the session advertises. This is the same seat that supplies the pointer
+        // and keyboard for a pick (`App::seat`). A multi-seat session is outside
+        // every channel's model here.
         let seat_global = globals
             .iter()
             .find(|g| g.interface == "wl_seat")
@@ -223,11 +211,10 @@ impl Clipboard {
 
         let mut owner =
             Owner { conn: conn.clone(), manager, device, source: None, notes, finished: false };
-        // One round trip before the thread exists, so a refused bind is
-        // an `Err` here rather than a silent thread. It also delivers
-        // the device's opening `selection` event, whose offer the
-        // handler destroys - the read-nothing posture, exercised at
-        // startup.
+        // Use one roundtrip before the thread starts. A refused bind returns
+        // `Err` here instead of a silent thread. The roundtrip also
+        // delivers the device's first `selection` event. Its offer handler
+        // destroys that offer, so startup exercises the no-read rule.
         queue
             .roundtrip(&mut owner)
             .with_context(|| format!("binding {} on its own connection", rung.global()))?;
@@ -241,35 +228,33 @@ impl Clipboard {
         Ok(Some(Clipboard { rung, text }))
     }
 
-    /// Which rung serves this session, for a diagnostic to name.
+    /// The rung that serves this session, for diagnostics.
     pub fn rung(&self) -> Rung {
         self.rung
     }
 
     /// Take the selection with `text`.
     ///
-    /// Returns as soon as the bytes are queued: the offer itself is
-    /// serviced on the clipboard thread for as long as the daemon owns
-    /// it, so this never blocks the pump and the selection does not die
-    /// when the call returns. An `Err` means the thread is gone — the
-    /// compositor retired our device, or the process is coming down —
-    /// which the caller reports rather than retries.
+    /// This returns when the thread queues the bytes. The offer thread serves the
+    /// offer while the daemon owns it.
+    /// This call does not block the pump. The selection survives after this call
+    /// returns. An `Err` means that the offer thread has stopped receiving commands.
+    /// The caller reports this error and does not retry.
     pub fn set(&self, text: &str) -> Result<()> {
         self.copy(text, None)
     }
 
-    /// Take the selection with `text` and return once the compositor
-    /// has the offer.
+    /// Take the selection with `text` and return after the compositor receives
+    /// the offer.
     ///
-    /// [`Clipboard::set`]'s promise — the bytes are queued — is all the
-    /// pump may wait for, and it is not enough for a caller whose next
-    /// act is to tell a reader the selection is ready: the thread has
-    /// still to be scheduled, build the source and put `set_selection`
-    /// on the wire. `clipboard-check` is that caller, and this is why
-    /// it can say "selection taken" and mean it.
+    /// [`Clipboard::set`] only promises that the thread queues the bytes. It
+    /// provides no waitable event for the caller. The thread still must build the
+    /// source and put `set_selection` on the wire. `clipboard-check` is the caller
+    /// that needs to tell a reader that the selection is ready. This method lets it
+    /// report "selection taken" only after the compositor processes the request.
     pub fn set_and_settle(&self, text: &str) -> Result<()> {
-        // Depth one: the thread sends the receipt and moves on, and
-        // nothing else is ever waiting on this channel.
+        // Use a channel with depth one. The thread sends the receipt and continues.
+        // No other code waits on this channel.
         let (settled, taken) = mpsc::sync_channel::<()>(1);
         self.copy(text, Some(settled))?;
         taken.recv().map_err(|_| {
@@ -285,53 +270,53 @@ impl Clipboard {
     }
 }
 
-/// The clipboard thread's whole world: the manager, the device, and the
+/// The clipboard thread's complete state: the manager, the device, and the
 /// source that currently owns the selection.
 struct Owner {
-    /// This thread's own connection, for the one thing the event queue
-    /// inside calloop's source cannot be asked from a callback: a
-    /// roundtrip. [`Connection::roundtrip`] dispatches nothing, so the
-    /// events it reads wait for calloop to hand them over as usual.
+    /// This thread's own connection supports the one operation that the event
+    /// queue inside calloop's source cannot call from a callback. That operation is
+    /// a roundtrip. [`Connection::roundtrip`] dispatches no events, so its
+    /// events wait for calloop to pass them on as usual.
     conn: Connection,
     manager: Manager,
     device: Device,
-    /// `None` before the first copy and after the compositor cancelled
-    /// ours: another client owns the selection, which is normal.
+    /// `None` before the first copy and after the compositor cancels ours.
+    /// Another client owns the selection in that normal state.
     source: Option<Source>,
     notes: Notes,
-    /// The compositor retired the device (`finished`). Nothing can be
-    /// taken any more, so the loop stops and the next `set` fails.
+    /// The compositor retired the device (`finished`). No copy can succeed,
+    /// so the loop stops and the next `set` fails.
     finished: bool,
 }
 
 impl Owner {
     /// Offer a copy's bytes and take the selection with them.
     fn take(&mut self, copy: Take, qh: &QueueHandle<Owner>) {
-        // The payload rides as the source's own user data rather than in
-        // a field here: a source may not be reused after
-        // `set_selection` (it is a protocol error), so every copy makes
-        // a new one, and each answers with the bytes it was created for
-        // even if a `send` for a replaced source is still in flight.
+        // Store the payload in the source's user data, not in this struct.
+        // The protocol forbids source reuse after `set_selection`.
+        // Each copy therefore needs a new source.
+        // Each source answers a `send` with its own bytes.
+        // A replaced source can still have a `send` event in flight.
         let source = self.manager.source(copy.payload, qh);
         for mime in TEXT_MIMES {
             source.offer(mime);
         }
         self.device.set_selection(&source);
-        // After `set_selection`, never before: the requests are ordered
-        // on the wire, so the compositor has already moved the selection
-        // onto the new source by the time it reads this destroy.
+        // Call `destroy` only after `set_selection`. Requests keep wire order.
+        // The compositor moves the selection to the new source before it reads
+        // this destroy request.
         if let Some(old) = self.source.replace(source) {
             old.destroy();
         }
         let Some(settled) = copy.settled else {
-            // Nobody is waiting, so the flush calloop does on its way
-            // back to sleep is soon enough.
+            // No caller waits for this receipt. The event loop flushes the request
+            // before it sleeps.
             return;
         };
-        // Somebody is: for them, "taken" has to mean the compositor has
-        // processed the request, not that it is still in this process's
-        // write buffer. The sync is what turns one into the other, and a
-        // dropped receipt is the honest answer when it never came back.
+        // A caller waits for this receipt. It needs the compositor to process the
+        // request, not only this process to write it. The roundtrip provides that
+        // point. If the compositor does not answer, the dropped receipt tells the
+        // caller the selection never became active.
         match self.conn.roundtrip() {
             Ok(_) => {
                 let _ = settled.send(());
@@ -342,23 +327,21 @@ impl Owner {
         }
     }
 
-    /// One `send`: the compositor is relaying a paste.
+    /// Answer one `send` event. The compositor sends this event when a client
+    /// pastes.
     ///
-    /// Answered on a thread of its own, and not because the write is
-    /// slow — a reader that opens the pipe and never drains it would
-    /// otherwise hold the clipboard thread and with it every later copy.
-    /// One throwaway thread per paste is the `spawn_anki` bargain at a
-    /// far lower rate: pastes are hand-driven.
+    /// This method uses a separate thread because a reader can open the pipe
+    /// and never drain it. Such a reader would block this thread and delay every
+    /// later copy. One temporary thread per paste matches the `spawn_anki`
+    /// bargain at a lower rate. Users start pastes by hand.
     fn answer(&self, payload: &Arc<[u8]>, mime: &str, fd: OwnedFd) {
         let payload = Arc::clone(payload);
         let spawned = std::thread::Builder::new()
             .name("chibipop-clip-send".to_string())
             .spawn(move || {
                 let mut pipe = std::fs::File::from(fd);
-                // A short write is the reader's problem to notice: it
-                // sees a truncated paste, which is the honest outcome of
-                // a pipe it closed early. Dropping the file closes the
-                // write end, which is its EOF.
+                // If the reader closes the pipe early, it can receive only a prefix of the
+                // payload. Dropping the file closes the write end and sends EOF.
                 let _ = pipe.write_all(&payload);
             });
         if let Err(e) = spawned {
@@ -366,8 +349,8 @@ impl Owner {
         }
     }
 
-    /// The compositor cancelled a source of ours: someone else owns the
-    /// selection now, which is a state and not a failure.
+    /// The compositor cancelled one of this client's sources. Another client
+    /// owns the selection now. This is a state, not a failure.
     fn cancelled(&mut self, source: &Source) {
         if self.source.as_ref().is_some_and(|s| s.is(source)) {
             if let Some(ours) = self.source.take() {
@@ -376,9 +359,9 @@ impl Owner {
         }
     }
 
-    /// The compositor retired the device. Nothing can be taken any more,
-    /// so say so once and let the loop end; a later `set` then fails
-    /// with the honest reason rather than queueing into nothing.
+    /// The compositor retired the device. No further copy can succeed.
+    /// Report this state once, then end the loop. A later `set` fails with the
+    /// real reason instead of a send when no thread exists.
     fn retired(&mut self) {
         self.notes.note(
             "clipboard: the compositor retired this data-control device; copies will be \
@@ -389,9 +372,9 @@ impl Owner {
     }
 }
 
-/// The manager, per rung. Three enums rather than a trait object: the
-/// two protocols are one protocol twice, `bind` picks a rung once, and a
-/// `Dispatch` impl is written against a concrete interface anyway.
+/// The manager for each rung. The three protocol enums avoid a trait object.
+/// Both protocols provide the same operations, `bind` chooses one rung once,
+/// and each `Dispatch` implementation uses a concrete interface.
 enum Manager {
     Ext(ExtDataControlManagerV1),
     Wlr(ZwlrDataControlManagerV1),
@@ -439,8 +422,8 @@ impl Device {
         match (self, source) {
             (Device::Ext(d), Source::Ext(s)) => d.set_selection(Some(s)),
             (Device::Wlr(d), Source::Wlr(s)) => d.set_selection(Some(s)),
-            // Unreachable by construction: one rung binds both. Nothing
-            // to do rather than a panic on the daemon's clipboard.
+            // One rung always pairs with one protocol. This arm cannot occur.
+            // Do nothing instead of a panic in the daemon's clipboard path.
             _ => {}
         }
     }
@@ -461,7 +444,7 @@ impl Source {
         }
     }
 
-    /// Same protocol object?
+    /// Whether both values refer to the same protocol object.
     fn is(&self, other: &Source) -> bool {
         match (self, other) {
             (Source::Ext(a), Source::Ext(b)) => a.id() == b.id(),
@@ -471,13 +454,12 @@ impl Source {
     }
 }
 
-/// The clipboard thread: dispatch this connection until the compositor
-/// retires the device or the daemon drops its end.
+/// Run the clipboard thread until the compositor retires the device or the
+/// daemon drops its sender.
 ///
-/// A calloop loop rather than a bare `blocking_dispatch`, for one
-/// reason: the thread has to wait on the compositor *and* on the pump's
-/// bytes at the same time, and this crate already owns that shape
-/// (`capture/mod.rs`).
+/// Use a calloop loop instead of bare `blocking_dispatch`. This thread must
+/// wait for compositor events and pump bytes at the same time. This crate
+/// already uses this shape in `capture/mod.rs`.
 fn serve(
     conn: Connection,
     queue: EventQueue<Owner>,
@@ -499,7 +481,7 @@ fn serve(
     }
     let inserted = handle.insert_source(inbox, move |event, _, owner: &mut Owner| match event {
         calloop::channel::Event::Msg(copy) => owner.take(copy, &qh),
-        // The daemon dropped its sender: the process is coming down.
+        // The daemon dropped its sender. The process will stop.
         calloop::channel::Event::Closed => owner.finished = true,
     });
     if let Err(e) = inserted {
@@ -509,8 +491,8 @@ fn serve(
 
     let signal = events.get_signal();
     let mut events = events;
-    // No timeout: this thread is asleep until the compositor or the pump
-    // says something (the idle budget, ARCHITECTURE.md#hover-cadence).
+    // No timeout. This thread sleeps until the compositor or pump sends an
+    // event (the idle budget, ARCHITECTURE.md#hover-cadence).
     let ran = events.run(None, &mut owner, |owner| {
         if owner.finished {
             signal.stop();
@@ -523,8 +505,8 @@ fn serve(
 
 // ---- dispatch ----
 
-/// The registry: this connection binds by name out of the daemon's probe
-/// and never watches for changes, so there is nothing to hear.
+/// The registry. This connection binds globals by name from the daemon's
+/// probe and does not watch for changes, so no event needs a handler.
 impl Dispatch<WlRegistry, ()> for Owner {
     fn event(
         _: &mut Owner,
@@ -537,8 +519,8 @@ impl Dispatch<WlRegistry, ()> for Owner {
     }
 }
 
-/// The seat: bound at version 1 for `get_data_device` alone, so its
-/// capabilities and name are not this client's business.
+/// The seat. This client uses it only to request `get_data_device`. It ignores
+/// the seat capabilities and other seat events.
 impl Dispatch<WlSeat, ()> for Owner {
     fn event(
         _: &mut Owner,
@@ -576,7 +558,7 @@ impl Dispatch<ZwlrDataControlManagerV1, ()> for Owner {
 }
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for Owner {
-    // Opcode 0 is `data_offer`, the only event that creates a child.
+    // Opcode 0 is `data_offer`. It is the only event that creates a child.
     wayland_client::event_created_child!(Owner, ExtDataControlDeviceV1, [
         0 => (ExtDataControlOfferV1, ()),
     ]);
@@ -590,11 +572,11 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for Owner {
         _: &QueueHandle<Owner>,
     ) {
         match event {
-            // Announced, never read: see the module doc.
+            // The device announces this offer, but this client never reads it. See the
+            // module documentation.
             ext_device::Event::DataOffer { id } => id.destroy(),
-            // The offer object still has to be destroyed even though we
-            // never `receive` from it; `None` is the compositor telling
-            // us the selection was cleared, and carries no object.
+            // Destroy the offer even though this client never sends `receive`. `None`
+            // means that the compositor cleared the selection and provided no object.
             ext_device::Event::Selection { id: Some(offer) }
             | ext_device::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
             ext_device::Event::Finished => owner.retired(),
@@ -626,7 +608,8 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for Owner {
     }
 }
 
-/// An announced offer, destroyed on arrival — so this never fires.
+/// An announced offer. The device destroys it on arrival, so this handler
+/// receives no event.
 impl Dispatch<ExtDataControlOfferV1, ()> for Owner {
     fn event(
         _: &mut Owner,
@@ -651,8 +634,8 @@ impl Dispatch<ZwlrDataControlOfferV1, ()> for Owner {
     }
 }
 
-/// The source we own the selection with. Its user data *is* the payload,
-/// so a `send` answers with the bytes that source was created for.
+/// The source that owns the selection. Its user data is the payload, so a
+/// `send` event answers with the bytes that created the source.
 impl Dispatch<ExtDataControlSourceV1, Arc<[u8]>> for Owner {
     fn event(
         owner: &mut Owner,
@@ -707,9 +690,8 @@ mod tests {
             .collect()
     }
 
-    /// The staged protocol wins where both exist, which is every current
-    /// wlroots compositor: the wlr XML declares itself deprecated, so
-    /// the ladder must not pin new sessions to it.
+    /// The staged protocol wins when both globals exist. The wlr protocol XML
+    /// marks that protocol as deprecated, so this code uses it only as a fallback.
     #[test]
     fn the_staged_protocol_outranks_the_deprecated_wlr_one_where_both_are_advertised() {
         assert_eq!(
@@ -718,8 +700,8 @@ mod tests {
         );
     }
 
-    /// And a session that only has the wlr rung still copies: today that
-    /// is most of them.
+    /// A session with only the wlr rung still copies. Most compositors use this
+    /// path today.
     #[test]
     fn the_wlr_rung_serves_a_session_that_advertises_only_it() {
         assert_eq!(Some(Rung::Wlr), rung(&advertised(&["wl_seat", WLR_MANAGER])));
@@ -727,8 +709,8 @@ mod tests {
         assert_eq!(EXT_MANAGER, Rung::Ext.global());
     }
 
-    /// Stock GNOME: no rung, which is a state - `bind` answers
-    /// `Ok(None)` and opens no connection at all.
+    /// Stock GNOME advertises no rung, which is a state. `bind` returns
+    /// `Ok(None)` and opens no connection.
     #[test]
     fn a_session_with_neither_global_has_no_rung_and_binds_to_nothing() {
         let globals = advertised(&["wl_seat", "wl_shm", "zwlr_layer_shell_v1"]);
@@ -740,8 +722,8 @@ mod tests {
         );
     }
 
-    /// The refusal names both globals, because that is what lets a
-    /// compositor upgrade self-heal the install
+    /// The refusal names both globals. A compositor upgrade can make the
+    /// clipboard available without a code change
     /// (ARCHITECTURE.md#capture-and-masking).
     #[test]
     fn the_unavailable_line_names_both_globals_it_looked_for() {
@@ -750,8 +732,8 @@ mod tests {
         assert!(line.contains(WLR_MANAGER), "{line}");
     }
 
-    /// A reader asks for `text/plain;charset=utf-8` first, so it must be
-    /// offered first; the legacy X11 targets ride behind it.
+    /// A reader asks for `text/plain;charset=utf-8` first. This array must offer
+    /// it first, followed by the legacy X11 targets.
     #[test]
     fn the_offered_mime_types_lead_with_utf8_text_and_carry_the_x11_targets() {
         assert_eq!("text/plain;charset=utf-8", TEXT_MIMES[0]);

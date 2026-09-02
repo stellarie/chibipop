@@ -1,11 +1,11 @@
-//! OCR selected pixels into the clipboard.
+//! This module captures OCR text from a selected region.
 
 use crate::action::{Action, ActionContext, ActionOutcome, AppState, OcrRequest};
 use crate::text::capture;
 use anyhow::{anyhow, Context, Result};
 use std::sync::mpsc;
 
-/// Copies OCR text from a selected region.
+/// Capture OCR text from a selected region for the clipboard.
 pub struct OcrClipboardAction;
 
 impl Action for OcrClipboardAction {
@@ -34,10 +34,10 @@ impl Action for OcrClipboardAction {
             .recv()
             .context("OCR worker ended before returning text")?
             .map_err(|error| anyhow!(error))?;
-        // The joining rule is core's (`chibipop::text::layout`, reached
-        // through this crate's re-export): the Linux daemon copies the
-        // same text out of the same seam, and two implementations would
-        // be two answers.
+        // Core owns the line-join rule in `chibipop::text::layout`.
+        // This crate re-exports that module.
+        // Both platform bins use that seam. Keep one implementation so both bins
+        // return the same text.
         let text = crate::text::layout::join_lines(&lines);
         if text.is_empty() {
             return Ok(ActionOutcome::Cancelled);

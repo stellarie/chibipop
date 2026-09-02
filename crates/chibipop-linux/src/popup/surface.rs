@@ -1,18 +1,24 @@
-//! The layer surfaces: one per output, all mapped at startup, hidden
-//! by a transparent buffer and never unmapped.
+//! This module owns one layer surface for each output. The code maps
+//! every surface at startup. A transparent buffer hides each surface.
+//! The code never unmaps a surface.
 //!
-//! Why one per output: a layer surface's output is fixed at creation
-//! and its margins are relative to that output, so `output = NULL`
-//! would hand us an origin we did not choose while the cursor roams.
-//! Why never unmapped: Hyprland animates layer surfaces by default, so
-//! a map per lookup would visibly fly the popup in on every hover - a
-//! regression against Windows, where show and hide are instant. Making
-//! that the default beats telling users to add a `layerrule no_anim`.
+//! One surface must exist for each output because a layer surface's
+//! output is fixed at creation, and its margins are relative to that
+//! output. `output = NULL` would give an origin that the code does
+//! not choose. The cursor moves across many outputs while the popup
+//! runs.
 //!
-//! Pointer input is the sibling module ([`super::pointer`]): the input
-//! region committed here is what makes the panel reachable at all, and
-//! the hit targets a click resolves against are taken from every frame
-//! this file paints.
+//! The code never unmaps a surface to hide it, because Hyprland
+//! animates layer surfaces by default. A map on each lookup would
+//! animate the popup visibly on every hover. That behavior is a
+//! regression against Windows, where show and hide are instant. This
+//! default is better than a rule that tells the user to add
+//! `layerrule no_anim`.
+//!
+//! The sibling module [`super::pointer`] handles pointer input. The
+//! input region that this file commits makes the panel reachable.
+//! Every frame that this file paints supplies the hit targets that a
+//! click resolves against.
 
 use super::place::{self, Placement, Screen, Shown, Visibility};
 use super::pointer::{self, HitScene, InputRegion, Interaction, Pointer, Step};
@@ -65,26 +71,28 @@ use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
 
-/// The layer surface's namespace, which is what `hyprctl layers` and
-/// `layerrule` see.
+/// The namespace of the layer surface.
+/// `hyprctl layers` and `layerrule` read this namespace.
 const NAMESPACE: &str = "chibipop";
 
-/// How long a commit waits for the frame callback that should have
-/// paced it before painting anyway.
+/// How long a commit waits for the frame callback before it paints
+/// anyway.
 ///
-/// Frame gating bounds work by the refresh rate instead of the cursor
-/// event rate, but callbacks stop arriving entirely for an occluded
-/// surface - a fullscreen client above an `overlay` popup that is
-/// currently hidden - and a gate that waits forever would wedge the
-/// popup shut. Six frames at 60 Hz: long enough that a real cadence is
-/// never broken, short enough that no user sees the popup stall.
+/// The frame gate must not wait forever. The frame gate bounds paint
+/// work by the refresh rate instead of the cursor-event rate. But
+/// callbacks stop completely when a surface is occluded. For example,
+/// a fullscreen client can cover a hidden `overlay` popup. A gate
+/// that waits forever would leave the popup stuck and unable to
+/// redraw. Six frames at 60 Hz is long enough that a real cadence
+/// never breaks. It is short enough that no user sees the popup
+/// stall.
 const FRAME_GRACE: Duration = Duration::from_millis(100);
 
 /// One popup to show.
 ///
-/// The bin measures, so the Controller hands over the view model and
-/// gets a rect back (`Event::PopupPlaced`); everything measured lives
-/// on this side of the seam.
+/// The platform bin measures the popup. The Controller sends the view
+/// model to the bin. The bin returns a rect as `Event::PopupPlaced`.
+/// Every measured value lives on this side of the seam.
 #[derive(Debug, Clone)]
 pub struct ShowRequest {
     pub presentation: Presentation,
@@ -92,30 +100,37 @@ pub struct ShowRequest {
     /// Physical pixels, as the Controller counts them.
     pub scroll: i32,
     pub show_back: bool,
-    /// `Some` reserves the Anki slot; Linux paints it in the panel.
+    /// `Some` reserves the Anki slot. Linux paints the slot in the
+    /// panel.
     pub anki: Option<AnkiPopupState>,
 }
 
-/// What one show landed on: exactly `Event::PopupPlaced`'s payload,
-/// plus what the log wants.
+/// What one show produced.
+///
+/// This struct holds the exact payload of `Event::PopupPlaced`. It
+/// also holds the fields that the log needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placed {
     pub rect: PhysRect,
     pub content_h: i32,
     pub view_h: i32,
-    /// The scale it was rastered at.
+    /// The scale used to raster this frame.
     pub scale: f64,
     pub output: usize,
 }
 
 /// A frame that is waiting for the compositor.
 ///
-/// Every commit is frame-gated, and commits coalesce to one pending
-/// state: work is bounded by the refresh rate rather than the
-/// cursor-event rate, at the cost of up to one frame of positional
-/// latency. Show and hide are the two exceptions and must never be
-/// gated - a hidden or occluded surface receives no frame callbacks,
-/// so gating them would deadlock the popup shut.
+/// Every commit is frame-gated. The frame gate bounds paint work by
+/// the refresh rate, not by the cursor-event rate, at the cost of up
+/// to one frame of positional lag. When several commits arrive before
+/// the callback fires, they coalesce into one pending state, so only
+/// the latest commit wins.
+///
+/// Show and hide are the two exceptions. The code must never
+/// frame-gate them. A hidden or occluded surface receives no frame
+/// callbacks, so a gate on show or hide would leave the popup unable
+/// to hide or show again.
 struct Pending {
     placement: Placement,
     scale: f64,
@@ -126,10 +141,11 @@ struct Pending {
 
 /// One output's surface.
 struct Panel {
-    /// Stable across removals, unlike a position in `panels`: the
-    /// `wp_fractional_scale_v1` object created with a surface carries
-    /// this in its user data for the surface's whole life, and an
-    /// unplugged monitor must not silently re-point it at a neighbour.
+    /// A stable value across removals, unlike a position in `panels`.
+    /// The `wp_fractional_scale_v1` object that the code creates with
+    /// a surface carries this id in its user data for the whole life
+    /// of the surface. When a monitor unplugs, the code must not let
+    /// this id silently point at a neighbor surface.
     id: usize,
     output: WlOutput,
     /// The output's layout facts, in the cursor channel's convention.
@@ -137,15 +153,18 @@ struct Panel {
     layer: LayerSurface,
     /// `wp_viewport`: buffer pixels in, logical size out.
     viewport: Option<WpViewport>,
-    /// Kept alive so `preferred_scale` keeps arriving.
+    /// The code keeps this object alive so `preferred_scale`
+    /// continues to arrive.
     _scale: Option<WpFractionalScaleV1>,
-    /// Last `preferred_scale`, in 120ths. Never latched: the value is
-    /// re-read on every render.
+    /// The last `preferred_scale` value, in 120ths. The code never
+    /// latches this value. The code re-reads the value on every
+    /// render.
     preferred: Option<u32>,
     /// The logical size the compositor last configured.
     configured: Option<(i32, i32)>,
-    /// When the outstanding `wl_surface.frame` callback was asked for,
-    /// or `None` when none is.
+    /// The time when the code asked for the outstanding
+    /// `wl_surface.frame` callback. This field is `None` when no
+    /// callback is outstanding.
     awaiting_frame: Option<Instant>,
     /// The one coalesced pending frame.
     pending: Option<Pending>,
@@ -153,66 +172,73 @@ struct Panel {
 
 /// Everything the popup owns.
 pub struct Popup {
-    /// The queue every popup object was created on. Stored so the
-    /// popup's own API needs no `QueueHandle` argument: the daemon
-    /// reaches it from a control-socket callback and from a cursor
-    /// sample, neither of which is a Wayland dispatch.
+    /// The queue that created every popup object. The code stores
+    /// this queue so the popup's own API needs no `QueueHandle`
+    /// argument. The daemon reaches the popup from a control-socket
+    /// callback and from a cursor sample. Neither callback is a
+    /// Wayland dispatch.
     qh: QueueHandle<App>,
     compositor: CompositorState,
     outputs: OutputState,
     registry: RegistryState,
     shm: Shm,
-    /// `None` on a compositor that advertises no `zwlr_layer_shell_v1`
-    /// (stock GNOME): the popup then maps no surface and every show is
-    /// a named error, while the rest of it keeps answering SCTK.
+    /// `None` on a compositor that advertises no `zwlr_layer_shell_v1`,
+    /// for example stock GNOME. The popup then maps no surface, and
+    /// every show attempt returns a named error. The rest of the
+    /// popup still answers SCTK.
     shell: Option<LayerShell>,
     fractional: Option<WpFractionalScaleManagerV1>,
     viewporter: Option<WpViewporter>,
     pool: SlotPool,
     panels: Vec<Panel>,
-    /// Hands out `Panel::id`; never reused.
+    /// This field assigns each `Panel::id`. The code never reuses a
+    /// value.
     next_id: usize,
     text: TextEngine,
-    /// The painter's decoded-asset cache, or `None` when this build cannot
-    /// open the dictionary database.
+    /// The painter's decoded-asset cache. This field is `None` when
+    /// this build cannot open the dictionary database.
     ///
-    /// Its own `MediaStore` connection, on this thread, because the worker
-    /// owns the dictionary on another and a `rusqlite::Connection` is not
-    /// `Sync`. `None` is a real state and not a failure: the popup still
-    /// paints, with every image on the `alt`-text rung of its ladder.
+    /// This cache uses its own `MediaStore` connection on this thread.
+    /// The worker owns the dictionary on a different thread, and a
+    /// `rusqlite::Connection` is not `Sync`. `None` is a real state,
+    /// not a failure. The popup still paints, and every image falls
+    /// back to its `alt` text.
     media: Option<chibipop_linux::media::MediaSurfaces>,
-    /// Where the dictionary lives, kept so `reconfigure` can reopen
-    /// `media` after a rebuild.
+    /// Where the dictionary lives. The code stores this path so that
+    /// `reconfigure` can reopen `media` after a rebuild.
     ///
-    /// This is the popup's half of the reload contract and it is easy to
-    /// miss: a rebuild renames a **new file** over this path, so a
-    /// connection opened before it keeps reading the replaced inode for as
-    /// long as it is held. The worker reopens the dictionary on
-    /// `Event::ConfigReloaded` (`worker::ReopenDict`); this process once
-    /// held no second handle, and now it holds this one. A reload that
-    /// reopened only the worker's would leave the popup drawing the old
-    /// dictionary's gaiji at the new dictionary's ids.
+    /// This field is the popup's half of the reload contract, and it
+    /// is easy to miss. A rebuild renames a new file over this path.
+    /// Therefore, a connection opened before the rename keeps reading
+    /// the replaced inode for as long as the code holds it open. The
+    /// worker reopens the dictionary on `Event::ConfigReloaded`
+    /// (`worker::ReopenDict`). This process once held only that one
+    /// handle, and now it holds a second handle here. If a reload
+    /// reopened only the worker's handle, the popup would still draw
+    /// gaiji from the old dictionary, but against the new
+    /// dictionary's ids.
     db: std::path::PathBuf,
-    /// The logical theme; every render scales a copy of it.
+    /// The logical theme. Every render scales a copy of this theme.
     theme: Theme,
     layer: Layer,
     /// Width and height caps, percent of the output.
     caps: (u8, u8),
     side_panel: bool,
-    /// How much of an entry the panel draws, re-read on every reload
-    /// (`reconfigure`) so a settings change lands on the popup already
-    /// on screen.
+    /// How much of an entry the panel draws. The code re-reads this
+    /// value on every reload (`reconfigure`), so a settings change
+    /// reaches the popup that is already on screen.
     render: chibipop::ui::layout::RenderSettings,
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
-    /// The seat's pointer and where it is: the popup's whole input
-    /// story, since Wayland has no machine-wide mouse hook
-    /// (ARCHITECTURE.md#input-ladders).
+    /// The seat's pointer, and where the pointer is. Wayland has no
+    /// machine-wide mouse hook, so this field holds the whole input
+    /// state of the popup (ARCHITECTURE.md#input-ladders).
     pointer: Pointer,
-    /// The frame on screen, as the pointer resolves against it. Taken
-    /// from every repaint and dropped by every hide, so a hit can never
-    /// answer with geometry that is no longer painted.
+    /// The frame on screen, as the pointer resolves against it. Every
+    /// repaint takes a fresh copy of this frame, and every hide drops
+    /// it. Therefore, a hit test never answers with geometry that the
+    /// code no longer paints.
     hits: Option<HitScene>,
     notes: Vec<String>,
 }
@@ -221,19 +247,21 @@ impl Popup {
     /// Bind the popup's globals. Surfaces come later, once the output
     /// roundtrip has geometry to place them against.
     ///
-    /// The layer shell is the one global whose absence is a *state*
-    /// rather than an error: stock GNOME advertises none, and the popup
-    /// then exists with no shell to draw on - it maps nothing, shows
-    /// nothing, and says so - while the seat, the outputs and the shm
-    /// pool it also owns keep serving the handlers SCTK dispatches into
-    /// `App`. Returning `Err` here instead would leave those live
-    /// proxies behind with nothing to answer their events, which is
-    /// exactly how a layer-shell-less session used to panic on its
-    /// first `wl_shm::format`.
+    /// The layer shell is the one global whose absence is a state,
+    /// not an error. Stock GNOME advertises no layer shell, so the
+    /// popup then exists with no shell to draw on. It maps no
+    /// surface, shows nothing, and reports this state. Meanwhile the
+    /// seat, the outputs, and the shm pool, which the popup also
+    /// owns, keep serving the handlers that SCTK dispatches into
+    /// `App`. If this function returned `Err` here instead, it would
+    /// leave those live proxies with nothing to answer their events.
+    /// That gap is exactly how a session with no layer shell used to
+    /// panic on its first `wl_shm::format`.
     ///
-    /// An `Err` from this function therefore means something no session
-    /// can work without (no `wl_compositor`, no `wl_shm`, no shared
-    /// memory), which the capability report has already named as fatal.
+    /// Therefore, an `Err` from this function means something that no
+    /// session can work without: no `wl_compositor`, no `wl_shm`, or
+    /// no shared memory. The capability report already names each of
+    /// these as fatal.
     pub fn bind(
         globals: &GlobalList,
         qh: &QueueHandle<App>,
@@ -243,8 +271,9 @@ impl Popup {
         let compositor = CompositorState::bind(globals, qh)
             .map_err(|e| anyhow!("binding wl_compositor: {e}"))?;
         let shm = Shm::bind(globals, qh).map_err(|e| anyhow!("binding wl_shm: {e}"))?;
-        // A screenful at 4K is 33 MB; the pool grows on demand, so
-        // start at one modest popup and let it stretch.
+        // A full 4K screen is 33 MB. The pool grows on demand.
+        // Therefore, the code starts at one modest popup size and
+        // lets the pool grow from there.
         let pool = SlotPool::new(640 * 480 * 4, &shm).context("creating the popup's shm pool")?;
 
         let mut notes = Vec::new();
@@ -268,9 +297,11 @@ impl Popup {
             );
         }
 
-        // The font: resolved against the engine's own db, so a config
-        // carried over from Windows (`Yu Gothic UI`) degrades to the
-        // Linux default *visibly* instead of silently drawing tofu.
+        // The code resolves the font against the engine's own font
+        // database. Therefore, a config value carried over from
+        // Windows, such as `Yu Gothic UI`, degrades to the Linux
+        // default font with a visible notice. It does not silently
+        // draw tofu glyphs.
         let mut theme = theme_from_config(config);
         let mut text = TextEngine::new(&theme.font_name);
         let choice = chibipop::config::resolve_font(
@@ -288,12 +319,13 @@ impl Popup {
             notes.push(warning);
         }
 
-        // The pointer (ARCHITECTURE.md#input-ladders). The seat is
-        // bound now and the pointer itself arrives with the seat's
-        // `capabilities` event, which is also where a pointer plugged
-        // in later shows up. No `wp_cursor_shape_v1` means the cursor
-        // is simply left as it was over the panel: this popup never
-        // loads XCursor themes itself.
+        // The pointer (ARCHITECTURE.md#input-ladders). The code binds
+        // the seat now. The pointer itself arrives later with the
+        // seat's `capabilities` event. The same event reports a
+        // pointer that a user plugs in later. Without
+        // `wp_cursor_shape_v1`, the code leaves the cursor as it was
+        // over the panel. This popup never loads XCursor themes
+        // itself.
         let shapes = CursorShapeManager::bind(globals, qh).ok();
         if shapes.is_none() {
             notes.push(
@@ -307,10 +339,10 @@ impl Popup {
         notes.extend(script_notes);
 
         // The painter's own decoded-asset cache, on its own read-only
-        // connection onto the media store. A database this build cannot
-        // open is one diagnostic and no images, never a popup that will
-        // not draw: an image node then renders its `alt` text, which is
-        // the character it stood for.
+        // connection to the media store. A database that this build
+        // cannot open produces one diagnostic and no images. It never
+        // stops the popup from drawing. An image node then renders
+        // its `alt` text, the character that the image stood for.
         let media = open_media(db, &mut notes);
 
         Ok(Popup {
@@ -341,21 +373,23 @@ impl Popup {
         })
     }
 
-    /// Can this popup ever draw? False on a compositor with no layer
-    /// shell, which is a supported state and not an error: the daemon
-    /// reports the Popup channel down and keeps every other channel.
+    /// Can this popup ever draw? This function returns false on a
+    /// compositor with no layer shell. That case is a supported
+    /// state, not an error. The daemon reports the popup channel
+    /// down and keeps every other channel running.
     pub fn available(&self) -> bool {
         self.shell.is_some()
     }
 
-    /// Diagnostics accumulated since the last drain. The popup owns no
-    /// log: the daemon thread does.
+    /// Diagnostics accumulated since the last drain. The popup owns
+    /// no log. The daemon thread owns the log.
     pub fn drain_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
     }
 
     /// One diagnostic, for the handlers that live in the sibling
-    /// module. The popup owns no log; the daemon drains these.
+    /// module. The popup owns no log. The daemon drains these
+    /// diagnostics.
     pub fn note(&mut self, line: String) {
         self.notes.push(line);
     }
@@ -366,11 +400,13 @@ impl Popup {
 
     /// The outputs, as the surfaces beside the popup need them.
     ///
-    /// One `OutputState` serves the whole daemon (`registry_handlers!`
-    /// names exactly one), so the selector and the outline read the
-    /// monitor list here instead of binding a second one. They get the
-    /// popup's own surface ids with it, which is what makes "surface 1"
-    /// mean one monitor across every diagnostic this daemon writes.
+    /// Only one `OutputState` serves the whole daemon.
+    /// `registry_handlers!` names exactly one `OutputState`.
+    /// Therefore, the selector and the outline read the monitor list
+    /// here instead of binding a second `OutputState`. They also get
+    /// the popup's own surface ids with the list. This is why
+    /// "surface 1" means the same monitor in every diagnostic that
+    /// this daemon writes.
     pub fn screens(&self) -> Vec<Screen> {
         self.panels
             .iter()
@@ -388,13 +424,15 @@ impl Popup {
             .collect()
     }
 
-    /// The one `wl_shm` and the one `wl_compositor` this process bound.
+    /// The one `wl_shm` and the one `wl_compositor` that this process
+    /// bound.
     ///
-    /// Shared with the selector and the outline so neither binds a
-    /// second: a `wl_shm`'s format list is per-process knowledge, and a
-    /// `wl_compositor` is a factory handle worth having exactly one of.
-    /// A `SlotPool` is *not* shared - it is an mmap, and one per
-    /// surface set is the point.
+    /// The selector and the outline share these two globals, so
+    /// neither binds a second copy. A `wl_shm`'s format list is
+    /// per-process knowledge. A `wl_compositor` is a factory handle
+    /// that is worth holding exactly once. A `SlotPool` is different:
+    /// the code never shares a `SlotPool`. Each `SlotPool` is an
+    /// mmap, and one per surface set is the goal.
     pub fn shm(&self) -> &Shm {
         &self.shm
     }
@@ -403,40 +441,43 @@ impl Popup {
         &self.compositor
     }
 
-    /// The one `wp_viewporter`, and no fractional-scale object beside
-    /// it: the popup already has a surface on every output, so its
-    /// `preferred_scale` is this daemon's single source of scale truth
-    /// and the other two surfaces read it back through
-    /// [`Popup::screens`]. Nothing latches it there either.
+    /// The one `wp_viewporter`. This function returns no
+    /// fractional-scale object beside it. The popup already has a
+    /// surface on every output, so its `preferred_scale` is this
+    /// daemon's single source of scale truth. The other two surfaces
+    /// read this scale back through [`Popup::screens`]. Nothing
+    /// latches the scale there either.
     pub fn viewporter(&self) -> Option<&WpViewporter> {
         self.viewporter.as_ref()
     }
 
-    /// The logical theme this popup resolved from the config, and
-    /// re-resolves on every reload.
+    /// The logical theme that this popup resolved from the config.
+    /// The popup re-resolves this theme on every reload.
     ///
-    /// The scan outline reads its four `scan_*` colours off it rather
-    /// than resolving a second theme of its own: the outline is drawn
-    /// beside the popup, for the same lookup, and there is exactly one
-    /// answer to "what does this session look like". Lengths here are
-    /// logical - the outline's are physical constants, so it never
-    /// wants the scaled copy [`physical_theme`] makes for a render.
+    /// The scan outline reads its four `scan_*` colors from this
+    /// theme instead of resolving a second theme of its own. The
+    /// outline draws beside the popup, for the same lookup, so there
+    /// is exactly one correct answer for what this session looks
+    /// like. Lengths in this theme are logical values. The outline's
+    /// own lengths are physical constants, so the outline never wants
+    /// the scaled copy that [`physical_theme`] makes for a render.
     pub fn theme(&self) -> &Theme {
         &self.theme
     }
 
     /// Does one `wl_surface` belong to the popup?
     ///
-    /// The routing question every shared SCTK handler now asks: three
-    /// kinds of layer surface answer into one `App`, so a `configure` or
-    /// a `frame` has to be sorted by identity rather than assumed to be
-    /// the popup's.
+    /// Every shared SCTK handler now asks this routing question.
+    /// Three kinds of layer surface answer into one `App`. Therefore,
+    /// the code must sort a `configure` or a `frame` event by
+    /// identity. The code must never assume that such an event
+    /// belongs to the popup.
     pub fn owns(&self, surface: &WlSurface) -> bool {
         self.panels.iter().any(|p| p.layer.wl_surface() == surface)
     }
 
-    /// The same question for a `closed`/`configure`, which name a layer
-    /// surface rather than a `wl_surface`.
+    /// The same question for a `closed` or `configure` event. These
+    /// events name a layer surface, not a `wl_surface`.
     pub fn owns_layer(&self, layer: &LayerSurface) -> bool {
         self.panels.iter().any(|p| &p.layer == layer)
     }
@@ -457,8 +498,9 @@ impl Popup {
         self.pointer.seats()
     }
 
-    /// The seat grew a pointer: take it, and a cursor-shape device to
-    /// go with it. Both are dropped again by [`Popup::pointer_gone`].
+    /// The seat gained a pointer. The code takes the pointer and a
+    /// matching cursor-shape device. [`Popup::pointer_gone`] drops
+    /// both again.
     pub fn pointer_arrived(&mut self, pointer: WlPointer) {
         self.pointer.set_pointer(Some(pointer));
         let device = self
@@ -480,17 +522,19 @@ impl Popup {
         self.notes.push("pointer: the seat no longer has a pointer".to_string());
     }
 
-    /// Which surface a pointer event names, if it is one of ours.
+    /// Which surface a pointer event names, if the surface belongs to
+    /// the popup.
     pub fn panel_of(&self, surface: &WlSurface) -> Option<usize> {
         self.panels.iter().find(|p| p.layer.wl_surface() == surface).map(|p| p.id)
     }
 
     /// The pointer crossed onto a panel.
     ///
-    /// Reachable only while the popup is shown: a hidden surface's
-    /// input region is empty, so the compositor never sends this - one
-    /// crossing logged is the region working. `serial` is `None` for a
-    /// scripted pass, which has no enter event to quote.
+    /// The code can reach this function only while the popup is
+    /// shown. A hidden surface's input region is empty, so the
+    /// compositor never sends this event. Each logged crossing proves
+    /// that the region works. `serial` is `None` for a scripted pass,
+    /// because a scripted pass has no real enter event to quote.
     pub fn pointer_enter(&mut self, panel: usize, pos: (f64, f64), serial: Option<u32>) {
         self.pointer.enter(panel, pos, serial);
         self.notes.push(format!(
@@ -529,14 +573,16 @@ impl Popup {
         self.pointer.wheel(axis)
     }
 
-    /// The same wheel path, from a raw `axis_value120`: what a scripted
-    /// pass has, since it holds no `wl_pointer` frame.
+    /// The same wheel path, driven from a raw `axis_value120`. A
+    /// scripted pass needs this path because it holds no real
+    /// `wl_pointer` frame.
     pub fn pointer_wheel_120(&mut self, value120: i32) -> Option<Interaction> {
         self.pointer_wheel(&AxisScroll { value120, ..AxisScroll::default() })
     }
 
-    /// Drop the banked sub-notch delta: `Command::DiscardScroll`, which
-    /// the Controller sends when a fresh popup replaces the old one.
+    /// Drop the banked sub-notch delta. The Controller sends
+    /// `Command::DiscardScroll` when a fresh popup replaces the old
+    /// one.
     pub fn discard_scroll(&mut self) {
         self.pointer.discard_scroll();
     }
@@ -552,18 +598,20 @@ impl Popup {
         self.pointer.set_shape(over);
     }
 
-    /// A fresh frame is coming: arm the next scripted pass.
+    /// The code calls this function before a fresh frame arrives. It
+    /// arms the next scripted pass.
     pub fn arm_script(&mut self) {
         self.pointer.arm_script();
     }
 
-    /// The next scripted pass (`CHIBIPOP_POINTER_SCRIPT`), if one is
-    /// armed and a frame is actually up.
+    /// The next scripted pass (`CHIBIPOP_POINTER_SCRIPT`), when one is
+    /// armed and a frame is on screen.
     ///
-    /// The daemon drives the steps, not this module: each step's effect
-    /// has to reach the Controller and come back as a repaint before
-    /// the next step resolves, or a scripted scroll would be followed
-    /// by a click against the frame it just replaced.
+    /// The daemon drives the steps, not this module. Each step's
+    /// effect must reach the Controller and return as a repaint
+    /// before the next step resolves. Otherwise, a scripted click
+    /// could resolve against the old frame that a scripted scroll
+    /// had just replaced.
     pub fn take_pass(&mut self) -> Option<Vec<Step>> {
         if self.hits.is_none() || self.vis.shown().is_none() {
             return None;
@@ -582,8 +630,9 @@ impl Popup {
         }
     }
 
-    /// The frame's hit targets, in the logical coordinates a pointer
-    /// arrives in: what a scripted pass needs to aim at anything.
+    /// The frame's hit targets, in the logical coordinates that a
+    /// pointer event carries. A scripted pass needs these coordinates
+    /// to aim at anything.
     pub fn dump_hits(&mut self) {
         let Some(hits) = self.hits.clone() else {
             self.notes.push("pointer: no frame to dump".to_string());
@@ -622,9 +671,9 @@ impl Popup {
         }
     }
 
-    /// Map one hidden surface per known output. Every surface is mapped
-    /// now and stays mapped; only the active one ever holds a
-    /// popup-sized buffer.
+    /// Map one hidden surface for each known output. The code maps
+    /// every surface now, and each surface stays mapped. Only the
+    /// active surface ever holds a popup-sized buffer.
     pub fn map_all(&mut self) {
         let outputs: Vec<WlOutput> = self.outputs.outputs().collect();
         for output in outputs {
@@ -632,12 +681,14 @@ impl Popup {
         }
     }
 
-    /// Map the surface for one output, if it has none yet.
+    /// Map the surface for one output, if the output has no surface
+    /// yet.
     ///
-    /// Idempotent on purpose: SCTK announces an output twice over a
-    /// startup roundtrip - once from the initial global list, once when
-    /// `new_output` fires as its xdg-output info completes - and two
-    /// surfaces on one output would show two popups.
+    /// This function is idempotent on purpose. SCTK announces an
+    /// output twice over a startup roundtrip: once from the initial
+    /// global list, and once when `new_output` fires as the output's
+    /// xdg-output info completes. Two surfaces on one output would
+    /// show two popups.
     pub fn map_one(&mut self, output: &WlOutput) {
         if self.panels.iter().any(|p| &p.output == output) {
             return;
@@ -648,25 +699,27 @@ impl Popup {
         let geo = place::geometry_of(&info);
         let id = self.next_id;
 
-        // No shell, no surface: nothing is created and nothing is
-        // spent. The daemon has already said so once at startup, so
-        // this is silent rather than one note per output.
+        // With no shell, there is no surface. The code creates
+        // nothing and spends nothing. The daemon already reported
+        // this state once at startup, so this path stays silent
+        // instead of adding one note for each output.
         let Some(shell) = self.shell.as_ref() else { return };
         let surface = self.compositor.create_surface(qh);
         let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, ()));
         let scale = self.fractional.as_ref().map(|f| f.get_fractional_scale(&surface, qh, id));
         let layer = shell.create_layer_surface(qh, surface, self.layer, Some(NAMESPACE), Some(output));
         self.next_id += 1;
-        // Inviolable: the popup must never reserve space, never take
-        // keyboard focus, and must be positioned by margins from the
-        // top-left corner of *this* output.
+        // Fixed rules: the popup must never reserve space, the popup
+        // must never take keyboard focus, and the popup's position
+        // must use margins from the top-left corner of this output.
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_margin(0, 0, 0, 0);
         layer.set_size(1, 1);
-        // The initial commit carries no buffer: the compositor answers
-        // with a configure, and the hidden 1x1 buffer follows.
+        // The initial commit carries no buffer. The compositor
+        // answers with a configure, and the hidden 1x1 buffer follows
+        // it.
         layer.commit();
 
         let name = info.name.clone().unwrap_or_else(|| format!("output-{}", info.id));
@@ -691,8 +744,8 @@ impl Popup {
         });
     }
 
-    /// An output went away, or its surface was closed by the
-    /// compositor: routine recreation, not an error.
+    /// An output went away, or the compositor closed its surface.
+    /// This event leads to routine recreation, not an error.
     pub fn drop_output(&mut self, output: &WlOutput) {
         let Some(slot) = self.panels.iter().position(|p| &p.output == output) else { return };
         let id = self.panels[slot].id;
@@ -709,27 +762,32 @@ impl Popup {
         let Some(slot) = self.panels.iter().position(|p| &p.layer == layer) else { return };
         let output = self.panels[slot].output.clone();
         self.drop_output(&output);
-        // The output is still there, so the surface comes back: this is
-        // how a compositor asks for recreation.
+        // The output is still there, so the surface comes back. This
+        // is how a compositor asks for recreation.
         if self.outputs.info(&output).is_some() {
             self.map_one(&output);
         }
     }
 
-    /// Re-read the settings a reload can change, and reopen the dictionary
-    /// a rebuild replaced. `set_layer` needs no recreation, which is exactly
-    /// why `popup.layer` is a runtime toggle and not a restart.
+    /// Re-read the settings that a reload can change, and reopen the
+    /// dictionary that a rebuild replaced. `set_layer` needs no
+    /// recreation. This is exactly why `popup.layer` is a runtime
+    /// toggle, not a restart setting.
     pub fn reconfigure(&mut self, config: &Config) {
-        // The popup's half of the reload. `reload` arrives here for two
-        // reasons at once: the settings window applied a config, and the
-        // settings window finished a rebuild - the socket carries no way to
-        // tell them apart (ARCHITECTURE.md#settings-and-config: the config
-        // file is the only truth), and nothing here needs to. Reopening on
-        // a plain config reload costs one `sqlite3_open` and an emptied
-        // cache; not reopening after a rebuild costs the popup every gaiji
-        // it draws, because a rebuild renames a new file over this path and
-        // re-numbers the `dict_id` this cache is keyed on. The worker
-        // reopens its own handle off the same event.
+        // This is the popup's half of the reload. `reload` arrives
+        // here for two different reasons at once. Either the
+        // settings window applied a config change, or the settings
+        // window finished a rebuild. The control socket carries no
+        // way to tell these two reasons apart
+        // (ARCHITECTURE.md#settings-and-config: the config file is
+        // the only truth), and this code does not need to tell them
+        // apart. Reopening on a plain config reload costs one
+        // `sqlite3_open` call and an emptied cache. Skipping the
+        // reopen after a real rebuild costs the popup every gaiji
+        // that it draws, because a rebuild renames a new file over
+        // this path and renumbers the `dict_id` that this cache uses
+        // as a key. The worker reopens its own handle in response to
+        // the same event.
         self.media = open_media(&self.db, &mut self.notes);
         let layer = layer_of(config.popup_layer());
         if layer != self.layer {
@@ -743,9 +801,9 @@ impl Popup {
         self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
         self.side_panel = config.popup.side_panel;
         self.render = config.popup.render_settings();
-        // Windows arms its wheel hook per dispatch tick from the same
-        // setting; the popup's own region has nothing to arm, so the
-        // gate lives on the pointer.
+        // Windows arms its wheel hook on each dispatch tick from the
+        // same setting. The popup's own region has nothing to arm, so
+        // the gate lives on the pointer instead.
         self.pointer.set_wheel_enabled(config.popup.scroll_popup);
 
         let theme = theme_from_config(config);
@@ -767,7 +825,7 @@ impl Popup {
                 self.notes.push(warning);
             }
         }
-        // A shown popup is re-measured at the new settings.
+        // The code re-measures a shown popup at the new settings.
         if self.vis.shown().is_some() {
             if let Some(req) = self.current.clone() {
                 let _ = self.show(&req);
@@ -775,8 +833,9 @@ impl Popup {
         }
     }
 
-    /// Measure, place, raster, commit. The returned [`Placed`] is what
-    /// the daemon feeds back as `Event::PopupPlaced`.
+    /// Measure, place, raster, and commit. The daemon feeds the
+    /// returned [`Placed`] back to the Controller as
+    /// `Event::PopupPlaced`.
     pub fn show(&mut self, req: &ShowRequest) -> Result<Placed> {
         if self.panels.is_empty() {
             return Err(anyhow!("no layer surface exists yet"));
@@ -791,9 +850,9 @@ impl Popup {
         let max_w = (i64::from(monitor.w) * i64::from(self.caps.0) / 100).max(1) as i32;
         let max_h = (i64::from(monitor.h) * i64::from(self.caps.1) / 100).max(1) as i32;
 
-        // Whether the Anki slot is reserved is the caller's call: the
-        // Controller knows whether AnkiConnect answered, the surface
-        // does not.
+        // The caller decides whether the popup reserves the Anki
+        // slot. The Controller knows whether AnkiConnect answered.
+        // The surface does not know.
         let anki = req.anki.as_ref();
         let scene = layout::scene(
             &SceneRequest {
@@ -810,9 +869,10 @@ impl Popup {
         )
         .with_context(|| "laying out the popup".to_string())?;
 
-        // Width: the panel's own when a side column widened it,
-        // otherwise exactly the box it was offered - the same rule the
-        // Windows bin follows, so the two platforms wrap identically.
+        // Width: the panel's own width when a side column widened it.
+        // Otherwise the width is exactly the box that core offered.
+        // The Windows bin follows the same rule, so the two platforms
+        // wrap text identically.
         let w = scene.panel_w.map_or(max_w, |w| w.ceil() as i32).max(1);
         let h = paint::surface_height(&scene).ceil().max(1.0) as i32;
         let placement = place::place(req.anchor, (w, h), monitor, scale);
@@ -839,7 +899,8 @@ impl Popup {
         Ok(Placed { rect: placement.rect, content_h, view_h, scale, output: id })
     }
 
-    /// Re-render what is on screen. `Ok(None)` means nothing was up.
+    /// Re-render what is on screen. `Ok(None)` means nothing was on
+    /// screen.
     pub fn reshow(&mut self) -> Result<Option<Placed>> {
         let Some(req) = self.current.clone() else { return Ok(None) };
         if self.vis.shown().is_none() {
@@ -848,12 +909,14 @@ impl Popup {
         self.show(&req).map(Some)
     }
 
-    /// Hide: a transparent buffer and an empty input region, never an
-    /// unmap. Cheap and instant, and a hide while hidden costs nothing.
+    /// Hide the popup: a transparent buffer and an empty input
+    /// region, never an unmap. This action is cheap and instant. A
+    /// hide while the popup is already hidden costs nothing.
     ///
-    /// The pointer loses its frame here too - an empty input region
-    /// means no `leave` may ever arrive, so the popup forgets what was
-    /// under the cursor rather than waiting to be told.
+    /// The pointer also loses its frame here. An empty input region
+    /// means that no `leave` event may ever arrive. Therefore, the
+    /// popup forgets what was under the cursor instead of waiting for
+    /// a `leave` event that may never come.
     pub fn hide(&mut self) {
         if let Some(slot) = self.vis.hide().and_then(|id| self.slot(id)) {
             self.clear(slot);
@@ -861,9 +924,11 @@ impl Popup {
         self.current = None;
     }
 
-    /// A `preferred_scale`: record it, and re-render when it is the
-    /// surface currently showing (the scale is never latched, so this
-    /// is the only place a 1.0-then-1.5 compositor is corrected).
+    /// Handle one `preferred_scale` event. The code records the
+    /// value, and re-renders when this surface is the one currently
+    /// shown. The scale is never latched, so this is the only place
+    /// that corrects a compositor that first sends 1.0 and then sends
+    /// 1.5.
     pub fn preferred_scale(&mut self, id: usize, scale_120ths: u32) -> bool {
         let Some(slot) = self.slot(id) else { return false };
         let panel = &mut self.panels[slot];
@@ -877,7 +942,8 @@ impl Popup {
         self.panels.iter().position(|p| p.id == id)
     }
 
-    /// A configure landed: draw the frame it was asked for.
+    /// A configure event landed. Draw the frame that the configure
+    /// requested.
     pub fn configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         let Some(idx) = self.panels.iter().position(|p| &p.layer == layer) else { return };
         let logical = (size.0 as i32, size.1 as i32);
@@ -892,7 +958,8 @@ impl Popup {
         }
     }
 
-    /// The compositor consumed our last frame: commit the coalesced one.
+    /// The compositor consumed the last frame. Commit the coalesced
+    /// frame.
     pub fn frame_done(&mut self, surface: &WlSurface) {
         let Some(idx) = self.panels.iter().position(|p| p.layer.wl_surface() == surface) else {
             return;
@@ -905,10 +972,10 @@ impl Popup {
         }
     }
 
-    /// A show either resizes - which costs a configure round-trip, once
-    /// per new entry and never per cursor move - or draws straight away.
-    /// The intermediate commit attaches no buffer, so there is no
-    /// visible jump.
+    /// A show either resizes or draws right away. A resize costs a
+    /// configure round trip, once for each new entry and never for a
+    /// cursor move. The intermediate commit attaches no buffer, so
+    /// there is no visible jump.
     fn commit_show(&mut self, idx: usize, pending: Pending) -> Result<()> {
         let panel = &mut self.panels[idx];
         let logical = pending.placement.logical;
@@ -955,10 +1022,11 @@ impl Popup {
             to_argb(pixmap.data_mut());
         }
 
-        // The targets a click resolves against come from the frame
-        // being painted, never from a remembered one: that is what
-        // keeps a hit honest across a scroll (the offset moved) and a
-        // scale change (every rect did).
+        // The targets that a click resolves against come from the
+        // frame that the code paints right now, never from a
+        // remembered frame. This rule keeps a hit honest across a
+        // scroll, where the offset moves, and across a scale change,
+        // where every rect changes too.
         let panel_id = self.panels[idx].id;
         let region = InputRegion::of(self.vis, panel_id, pending.placement.logical);
         self.hits = match region {
@@ -975,10 +1043,11 @@ impl Popup {
         if let Some(viewport) = &panel.viewport {
             viewport.set_destination(pending.placement.logical.0.max(1), pending.placement.logical.1.max(1));
         }
-        // The whole panel accepts input while it is shown: wheel and
-        // click live on the popup's own region, and Wayland has no
-        // machine-wide mouse hook to synthesize them from. Region
-        // coordinates are surface-local, i.e. logical.
+        // The whole panel accepts input while the popup is shown.
+        // Wheel and click events live on the popup's own region,
+        // because Wayland has no machine-wide mouse hook to
+        // synthesize them from. Region coordinates are surface-local,
+        // that is, logical units.
         if let Ok(wl) = Region::new(&self.compositor) {
             if let Some((x, y, w, h)) = region.rect() {
                 wl.add(x, y, w, h);
@@ -993,13 +1062,14 @@ impl Popup {
         Ok(())
     }
 
-    /// Hand one surface a fully transparent buffer at its current size
-    /// and take its input region away.
+    /// Give one surface a fully transparent buffer at its current
+    /// size, and take away its input region.
     ///
-    /// A coalesced frame queued before the hide is dropped with it:
-    /// letting a frame callback repaint it afterwards would put a
-    /// clickable panel back on a screen the Controller believes is
-    /// clear. The pointer's frame goes too - it is the same fact.
+    /// This function also drops any coalesced frame that was queued
+    /// before the hide. If a later frame callback repainted that
+    /// frame, a clickable panel would return to a screen that the
+    /// Controller believes is clear. The pointer's frame goes too,
+    /// for the same reason.
     fn clear(&mut self, idx: usize) {
         let logical = self.panels[idx].configured.unwrap_or((1, 1));
         self.panels[idx].pending = None;
@@ -1010,8 +1080,9 @@ impl Popup {
         self.hidden_frame(idx, logical);
     }
 
-    /// The hidden frame. Not frame-gated: a hidden surface receives no
-    /// frame callbacks, so waiting for one would never let it hide.
+    /// The hidden frame. The code never frame-gates this commit. A
+    /// hidden surface receives no frame callbacks, so a wait for one
+    /// would leave the popup unable to hide.
     fn hidden_frame(&mut self, idx: usize, logical: (i32, i32)) {
         let panel = &mut self.panels[idx];
         let surface = panel.layer.wl_surface().clone();
@@ -1037,7 +1108,8 @@ impl Popup {
         }
         if let Ok(region) = Region::new(&self.compositor) {
             // Empty region: the pointer falls through to whatever is
-            // underneath, which is the whole point of hiding.
+            // underneath. This behavior is exactly the goal of a
+            // hide.
             surface.set_input_region(Some(region.wl_region()));
         }
         surface.damage_buffer(0, 0, bw, bh);
@@ -1046,10 +1118,12 @@ impl Popup {
     }
 }
 
-/// Premultiplied RGBA (tiny-skia's byte order) to `Argb8888` (wl_shm's:
-/// a little-endian 0xAARRGGBB word, i.e. B,G,R,A in memory). One pass
-/// over the buffer we just painted, in place - the alternative is
-/// painting into a second pixmap and copying.
+/// Convert premultiplied RGBA, which is tiny-skia's byte order, to
+/// `Argb8888`, which is `wl_shm`'s byte order: a little-endian
+/// 0xAARRGGBB word, that is, B, G, R, A in memory. This function
+/// makes one pass over the buffer that the code just painted, in
+/// place. The alternative would paint into a second pixmap and then
+/// copy it.
 fn to_argb(data: &mut [u8]) {
     let (pixels, _) = data.as_chunks_mut::<4>();
     for px in pixels {
@@ -1057,14 +1131,15 @@ fn to_argb(data: &mut [u8]) {
     }
 }
 
-/// The painter's decoded-asset cache on a fresh connection, or `None` and a
-/// note.
+/// Open the painter's decoded-asset cache on a fresh connection.
+/// Returns `None` and a note when the open fails.
 ///
-/// One function for both call sites, because opening the store at bind time
-/// and reopening it after a rebuild have to answer a failure the same way:
-/// a database this build cannot open is one diagnostic and no images, never
-/// a popup that will not draw. An image node then renders its `alt` text,
-/// which is the character it stood for.
+/// One function serves both call sites. The store can fail to open
+/// at bind time, or fail to reopen after a rebuild. Both failures
+/// must answer the same way. A database that this build cannot open
+/// produces one diagnostic and no images. It never stops the popup
+/// from drawing. An image node then renders its `alt` text, the
+/// character that the image stood for.
 fn open_media(
     db: &std::path::Path,
     notes: &mut Vec<String>,
@@ -1080,10 +1155,11 @@ fn open_media(
     }
 }
 
-/// The theme a config asks for. Not the same as the Windows bin's
-/// `theme_from_config`: that one also reads and parses `popup.css`,
-/// which Linux never does, so a CSS override lands on Windows and is
-/// silently ignored here (issue #53).
+/// The theme that a config asks for. This function is not the same
+/// as the Windows bin's `theme_from_config`. The Windows function
+/// also reads and parses `popup.css`, which Linux never does. A CSS
+/// override therefore works on Windows and is silently ignored here
+/// (issue #53).
 fn theme_from_config(config: &Config) -> Theme {
     let mut theme = match config.popup.theme.as_str() {
         "light" => Theme::light(),
@@ -1112,9 +1188,10 @@ fn layer_name(layer: Layer) -> &'static str {
 
 // ---- the dispatch plumbing ----
 
-/// One `Dispatch` per interface and user-data pair, forwarding to the
-/// `Dispatch2` impl SCTK ships for that pair. See the module doc for
-/// why this is not `delegate_dispatch2!`.
+/// This macro defines one `Dispatch` impl for each interface and
+/// user-data pair. Each impl forwards to the `Dispatch2` impl that
+/// SCTK ships for that pair. See the module doc for why this macro
+/// exists instead of `delegate_dispatch2!`.
 macro_rules! forward {
     ($iface:ty, $udata:ty) => {
         impl Dispatch<$iface, $udata> for App {
@@ -1151,9 +1228,9 @@ forward!(ZxdgOutputV1, OutputData);
 
 wayland_client::delegate_dispatch!(App: [WlRegistry: GlobalListContents] => RegistryState);
 
-/// `wl_buffer` events (only `release`) are handled by the slot pool's
-/// own object data, but the pool's *fallback* path still needs the
-/// impl to exist.
+/// The slot pool's own object data handles `wl_buffer` events. The
+/// only such event is `release`. But the pool's fallback path still
+/// needs this impl to exist.
 impl Dispatch<WlBuffer, GlobalData> for App {
     fn event(
         _: &mut App,
@@ -1166,9 +1243,9 @@ impl Dispatch<WlBuffer, GlobalData> for App {
     }
 }
 
-/// The fractional-scale manager and the viewporter have no events;
-/// `wp_fractional_scale_v1` has exactly one, and it is the reason the
-/// popup never latches a scale.
+/// The fractional-scale manager and the viewporter have no events.
+/// `wp_fractional_scale_v1` has exactly one event, and this event is
+/// the reason that the popup never latches a scale.
 impl Dispatch<WpFractionalScaleManagerV1, ()> for App {
     fn event(
         _: &mut App,
@@ -1221,9 +1298,10 @@ impl Dispatch<WpFractionalScaleV1, usize> for App {
 }
 
 impl CompositorHandler for App {
-    /// The integer `wl_surface` scale. Irrelevant here: the popup keeps
-    /// `buffer_scale` at 1 and sizes its buffer from the *fractional*
-    /// scale instead, which is never latched.
+    /// The integer `wl_surface` scale. This value is not relevant
+    /// here. The popup keeps `buffer_scale` at 1, and sizes its
+    /// buffer from the fractional scale instead. The code never
+    /// latches that scale.
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<App>, _: &WlSurface, _: i32) {}
 
     fn transform_changed(
@@ -1235,9 +1313,10 @@ impl CompositorHandler for App {
     ) {
     }
 
-    /// Only the popup asks for frame callbacks, and `App` checks that
-    /// before acting: three kinds of layer surface now dispatch into one
-    /// state, so nothing here may assume a surface is a panel.
+    /// Only the popup asks for frame callbacks, and `App` checks this
+    /// fact before it acts. Three kinds of layer surface now dispatch
+    /// into one state, so this code must never assume that a surface
+    /// is a panel.
     fn frame(&mut self, _: &Connection, _: &QueueHandle<App>, surface: &WlSurface, _: u32) {
         self.surface_frame(surface);
     }
@@ -1279,11 +1358,11 @@ impl ShmHandler for App {
     }
 }
 
-/// Configures and closes for every layer surface in the daemon arrive
-/// here - the popup's panels, the selector's full-output dim, the
-/// outline's frames - because SCTK has one handler per state. `App`
-/// sorts them by surface identity; this impl deliberately knows nothing
-/// about which is which.
+/// Every layer surface in the daemon sends its configure and close
+/// events here: the popup's panels, the selector's full-output dim,
+/// and the outline's frames. SCTK has one handler for each state.
+/// `App` sorts the events by surface identity. This impl deliberately
+/// does not know which surface is which.
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<App>, layer: &LayerSurface) {
         self.layer_closed(layer);

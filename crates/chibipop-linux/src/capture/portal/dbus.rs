@@ -1,53 +1,46 @@
-//! The `org.freedesktop.portal.ScreenCast` handshake: the fallback
-//! capture rung (ARCHITECTURE.md#capture-and-masking), from first
-//! dialog to a PipeWire remote fd.
+//! This module implements the `org.freedesktop.portal.ScreenCast` handshake
+//! for the fallback capture rung (ARCHITECTURE.md#capture-and-masking).
+//! The handshake starts the consent dialog and returns a PipeWire remote file descriptor.
 //!
-//! **Why eager.** The portal is the one rung that asks a human for
-//! permission, and a background daemon cannot ask politely twice. So
-//! consent is taken *once, at startup*, in a single dialog covering
-//! every monitor (`multiple = true`), rather than lazily on the first
-//! hover — a permission dialog appearing the instant a tooltip should
-//! have appeared is the worst moment chibipop could pick. `Start` hands
-//! back a restore token, [`super::token`] persists it, and every later
-//! launch replays it and sees no dialog at all.
+//! **Why consent starts early.** The portal is the only component that asks
+//! for capture permission. The daemon asks once at startup for all monitors
+//! (`multiple = true`). This avoids a dialog when the first hover occurs.
+//! `Start` returns a restore token. [`super::token`] stores this token, and
+//! later launches use it without a dialog.
 //!
-//! **Why blocking zbus and not `ashpd`.** `ashpd` is the ergonomic
-//! choice and it is async-first: using it would drag a second async
-//! runtime into the daemon, which the design forbids — the calloop pump is
-//! sync and stays sync. zbus is already in this tree (ksni pulls it, and
-//! ksni's `async-io` feature resolves the very same version), so its
-//! blocking API costs nothing new and rides the one `async-io` executor
-//! ksni already starts. Everything here therefore runs on whatever
-//! thread the caller provides; the lead gives it a dedicated portal
-//! thread, and the daemon's loop never blocks on a dialog.
+//! **Why this module uses `zbus::blocking` instead of `ashpd`.** `ashpd` needs
+//! an asynchronous runtime. The design rejects a second asynchronous runtime
+//! because the calloop pump is synchronous. The tree already uses zbus because
+//! ksni depends on the same version. The `zbus::blocking` API uses the
+//! `async-io` executor that ksni starts. The caller chooses the thread for
+//! these operations. The daemon uses a portal thread, so its loop does not
+//! wait for a dialog.
 //!
-//! **The Request race, and how it is avoided.** Every portal method
-//! answers twice: the method reply carries an `o` request handle, and
-//! the real answer arrives later as `Response` (`(ua{sv})`) on that
-//! object. Subscribing after the method returns can miss a fast reply
-//! outright — a portal that restores a session from a token answers
-//! without ever drawing a dialog. xdg-desktop-portal fixed this by
-//! making the handle *predictable*:
-//! `/org/freedesktop/portal/desktop/request/<SENDER>/<handle_token>`,
-//! where `<SENDER>` is our unique bus name minus the leading `:` with
-//! every `.` turned into `_`. So each call here registers its match rule
-//! at the predicted path *before* issuing the call, then checks that the
-//! handle it got back is the path it guessed, and re-subscribes at the
-//! returned path if some older portal disagreed.
+//! **How this module prevents the Request race.** Each portal method has two
+//! replies. The method reply contains an `o` Request handle. A later `Response`
+//! (`(ua{sv})`) signal on that object contains the result. Code that subscribes
+//! after the method reply can miss a fast `Response`. A restored session can
+//! send this signal without a dialog. xdg-desktop-portal gives each handle
+//! this path:
+//! `/org/freedesktop/portal/desktop/request/<SENDER>/<handle_token>`.
+//! The portal derives `<SENDER>` from the unique D-Bus name. It removes the
+//! first `:` and replaces each `.` with `_`. Each call adds its match rule at
+//! the predicted path before it sends the method. The call checks the returned
+//! handle against that path. If an older portal returns another path, the call
+//! subscribes to the returned path.
 //!
-//! **Why a waiter thread.** zbus's blocking signal iterator has no
-//! bounded wait, and the timeout here is a *total* budget across the
-//! whole handshake (an unanswered dialog must not wedge a startup
-//! forever). So each wait hands its iterator to a short-lived thread
-//! that pushes the first `Response` down an `mpsc` channel, and the
-//! caller uses `recv_timeout`. Abandoning the handshake closes the
-//! shared connection, which ends those iterators and reaps the threads —
-//! and is also the honest way to drop a half-open session.
+//! **Why this module uses a waiter thread.** The zbus signal iterator has no
+//! wait limit. One deadline covers the full handshake, so an unanswered dialog
+//! cannot block startup. Each wait gives its iterator to a new thread. The
+//! thread sends the first `Response` through an `mpsc` channel. The caller uses
+//! `recv_timeout`. If the handshake stops, the caller closes the shared
+//! connection. This stops the iterators and their threads. It also discards the
+//! incomplete session.
 //!
-//! Signatures here were verified against
+//! Developers compared the D-Bus signatures with
 //! `/usr/share/dbus-1/interfaces/org.freedesktop.portal.ScreenCast.xml`
-//! (interface version 6) and `org.freedesktop.portal.Request.xml` on
-//! this machine, not from memory.
+//! and `org.freedesktop.portal.Request.xml` on this machine. The ScreenCast
+//! interface file has version 6.
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -60,94 +53,85 @@ use zbus::message::Type as MessageType;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::MatchRule;
 
-/// The portal's well-known bus name.
+/// The well-known D-Bus name for the portal.
 pub const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
-/// The portal's single object path; every portal interface lives here.
+/// The object path that contains all portal interfaces.
 pub const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-/// The screen-cast interface this module speaks.
+/// The ScreenCast interface that this module uses.
 pub const SCREENCAST_INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 
-/// Source types the portal offers (`SelectSources` `types`).
+/// The monitor source type for `SelectSources`.
 pub const SOURCE_MONITOR: u32 = 1;
-/// Cursor modes (`AvailableCursorModes` / `SelectSources` `cursor_mode`).
-/// `SPA`'s third mode, EMBEDDED (2), is deliberately absent: it
-/// composites a pointer into the pixels we are about to OCR, and
-/// the cursor rung wants coordinates instead.
+/// Cursor modes for `AvailableCursorModes` and `SelectSources.cursor_mode`.
+/// This module does not use SPA mode EMBEDDED (2). EMBEDDED adds the cursor
+/// to OCR pixels, but the cursor rung needs cursor coordinates.
 pub const CURSOR_MODE_HIDDEN: u32 = 1;
-/// The cursor rides beside the pixels as stream metadata - the rung-2
-/// cursor source.
+/// The portal sends the cursor as PipeWire metadata next to the pixels. This
+/// mode supplies cursor rung 2.
 pub const CURSOR_MODE_METADATA: u32 = 4;
-/// `persist_mode`: 2 = persist until explicitly revoked.
+/// The `persist_mode` value 2 keeps consent until the user revokes it.
 pub const PERSIST_UNTIL_REVOKED: u32 = 2;
-/// `persist_mode` and `restore_token` arrived in ScreenCast version 4.
+/// `persist_mode` and `restore_token` need ScreenCast version 4.
 ///
-/// A version-3 portal - xdg-desktop-portal-hyprland, at the time of
-/// writing - cannot remember a grant at all, so "silent launches
-/// after" is unreachable there and every launch shows the dialog.
-/// Sending the keys anyway would be harmless, because a portal
-/// ignores options it does not know, but it would leave the missing
-/// token unexplained; and the difference between "we asked and it
-/// refused" and "it cannot" is the difference between a bug report and
-/// a fact.
+/// xdg-desktop-portal-hyprland reports version 3. It cannot store a grant,
+/// so each launch shows the dialog. The portal ignores unknown options, but
+/// these keys would hide why the portal returned no token. The code must
+/// distinguish unsupported persistence from a refused grant.
 pub const PERSIST_MIN_VERSION: u32 = 4;
 
-/// Shared across all portal interfaces: where a method's deferred answer
-/// arrives.
+/// The interface that sends the deferred response for each portal method.
 const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
-/// Shared across all portal interfaces: how a session is torn down.
+/// The interface that closes a portal session.
 const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
-/// `Response` code 0: the request was carried out.
+/// `Response` code 0 means that the portal completed the request.
 const RESPONSE_SUCCESS: u32 = 0;
-/// `Response` code 1: the user cancelled the interaction.
+/// `Response` code 1 means that the user canceled the request.
 const RESPONSE_CANCELLED: u32 = 1;
-/// `Response` code 2: the interaction ended some other way - which is
-/// also what a stale restore token looks like from out here.
+/// `Response` code 2 means that the portal ended the request. A stale
+/// restore token also produces this code.
 const RESPONSE_ENDED: u32 = 2;
 
-/// One monitor stream the portal handed back from `Start`.
+/// A monitor stream that `Start` returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamInfo {
-    /// The PipeWire node to connect to.
+    /// The PipeWire node for this stream.
     pub node_id: u32,
-    /// The `position` property (logical layout coords), when sent.
+    /// The `position` property in logical layout coordinates, if present.
     pub position: Option<(i32, i32)>,
-    /// The `size` property (logical), when sent.
+    /// The `size` property in logical units, if present.
     pub size: Option<(i32, i32)>,
-    /// The `source_type` property, when sent.
+    /// The `source_type` property, if present.
     pub source_type: Option<u32>,
 }
 
-/// Why the portal rung is not serving.
+/// The reason that the portal rung cannot serve requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortalError {
-    /// No portal on the bus, or no ScreenCast interface on it.
+    /// The session bus has no portal, or the portal has no ScreenCast interface.
     Absent(String),
-    /// The user said no (Request response code 1).
+    /// The user refused the request with Request response code 1.
     Denied,
-    /// The portal ended the interaction itself (response code 2), or a
-    /// stale restore token was rejected.
+    /// The portal ended the request with response code 2. It can also reject a
+    /// stale restore token with this code.
     Ended(String),
-    /// The handshake did not finish inside the deadline.
+    /// The handshake did not finish before the deadline.
     TimedOut(String),
-    /// Anything the portal did that the spec does not describe.
+    /// The portal returned a result that the specification does not define.
     Protocol(String),
 }
 
 impl PortalError {
-    /// The tray/settings row text: short, honest, and naming a way back
-    /// that exists (e.g. "screen-capture permission denied - retry with
-    /// Apply in the settings window or `chibipop ctl reload`").
+    /// Returns text for a tray or settings row. The text names the fault and
+    /// gives the user a retry action.
     pub fn detail(&self) -> String {
         match self {
             PortalError::Absent(what) => format!(
                 "no screen-capture portal on the session bus ({what}) - install xdg-desktop-portal \
                  and its compositor backend, then retry with `chibipop ctl reload`"
             ),
-            // "From the tray" would be a lie: the tray's rows are
-            // status, not buttons, and the retry hook is the `reload`
-            // verb - which is exactly what the settings window's Apply
-            // sends. Both routes are named because a stock-GNOME
-            // session has no tray to reach either from.
+            // Tray rows show status and accept no input. The `reload` verb supplies the
+            // retry action. The settings window sends this verb when the user selects
+            // Apply. The text names both paths because a GNOME session can have no tray.
             PortalError::Denied => "screen-capture permission denied - retry with Apply in the \
                                     settings window or `chibipop ctl reload`"
                 .to_string(),
@@ -166,18 +150,15 @@ impl PortalError {
         }
     }
 
-    /// Whether retrying with the SAME stored restore token can help.
-    /// A denial cannot; a timeout can; a rejected token means the
-    /// caller must drop the token and prompt again.
+    /// Returns whether the caller must remove the stored restore token before
+    /// a retry. A denial or a rejected token needs fresh consent.
     pub fn retry_needs_fresh_consent(&self) -> bool {
         match self {
-            // The user's answer was "no", and a token cannot argue.
+            // A restore token cannot change the user's refusal.
             PortalError::Denied => true,
-            // Code 2 is also how a stale or revoked token reads: the
-            // portal closed the interaction rather than restoring.
+            // Code 2 can mean that the token is stale or revoked.
             PortalError::Ended(_) => true,
-            // A portal that is not there yet, a dialog nobody got to in
-            // time, and a portal bug all leave the grant untouched.
+            // The other errors do not invalidate the grant.
             PortalError::Absent(_) | PortalError::TimedOut(_) | PortalError::Protocol(_) => false,
         }
     }
@@ -191,51 +172,48 @@ impl std::fmt::Display for PortalError {
 
 impl std::error::Error for PortalError {}
 
-/// A live ScreenCast session plus everything `Start` produced.
+/// A live ScreenCast session and the results from `Start`.
 pub struct Consent {
-    /// One entry per monitor the user shared, in the portal's order.
+    /// One entry for each shared monitor, in portal order.
     pub streams: Vec<StreamInfo>,
-    /// The token to persist for the next launch. `None` when the
-    /// portal declined to issue one - or could not, see
-    /// [`Consent::persists`].
+    /// The restore token for the next launch. `None` means that the portal
+    /// did not return a token. See [`Consent::persists`] for support details.
     pub restore_token: Option<String>,
-    /// This portal's ScreenCast interface version.
+    /// The ScreenCast interface version that the portal reports.
     pub version: u32,
-    /// The portal is new enough to remember a grant
-    /// ([`PERSIST_MIN_VERSION`]), so a missing `restore_token` means
-    /// it declined rather than that it never could.
+    /// Whether this ScreenCast version can store a grant. If true, a
+    /// `restore_token` value of `None` means that the portal chose not to return one.
     pub persists: bool,
-    /// The PipeWire remote from `OpenPipeWireRemote`.
+    /// The PipeWire remote file descriptor from `OpenPipeWireRemote`.
     pub pipewire_fd: OwnedFd,
-    /// Kept alive: closing it revokes the session, so the caller holds
-    /// it for as long as it wants frames.
+    /// Keep this value while the caller needs frames. `Drop` closes the
+    /// session and revokes the grant.
     pub session: Session,
 }
 
-/// The portal session object. Dropping it calls `Close`.
+/// The portal session object. Its `Drop` implementation calls `Close`.
 pub struct Session {
-    /// The same connection the handshake ran on: `Close` must come from
-    /// the peer that owns the session.
+    /// The D-Bus connection that created the session. `Close` must use this
+    /// same connection.
     conn: Connection,
-    /// The session's object path, from `CreateSession`'s results.
+    /// The session object path from the `CreateSession` results.
     path: String,
 }
 
 impl Session {
-    /// The session's object path, as the portal reported it.
+    /// Returns the session object path that the portal reported.
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// Explicitly close; `Drop` does this too, and ignores errors.
+    /// Closes the session now. `Drop` also calls this method and ignores errors.
     pub fn close(&self) {
         let Ok(proxy) = Proxy::new(&self.conn, PORTAL_BUS, self.path.as_str(), SESSION_INTERFACE)
         else {
             return;
         };
-        // A portal that already tore the session down, a bus that went
-        // away, a second `close` - all of it is fine. There is nothing
-        // to recover here and nothing worth logging at exit.
+        // The portal can already have closed the session. A lost bus or a second
+        // `close` needs no recovery. The daemon does not need a log for these states.
         let _: zbus::Result<()> = proxy.call("Close", &());
     }
 }
@@ -246,8 +224,8 @@ impl Drop for Session {
     }
 }
 
-/// Is `org.freedesktop.portal.ScreenCast` answering on the session bus?
-/// Never an error: no bus and no portal are the same answer here.
+/// Returns whether `org.freedesktop.portal.ScreenCast` responds on the
+/// session bus. An absent bus or portal returns `false`.
 pub fn probe() -> bool {
     let Ok(conn) = Connection::session() else {
         return false;
@@ -255,24 +233,23 @@ pub fn probe() -> bool {
     let Ok(proxy) = screencast_proxy(&conn) else {
         return false;
     };
-    // The cheapest question that proves the *interface* is there, not
-    // merely the bus name: an activatable name owner with no ScreenCast
-    // implementation fails this.
+    // The `version` property confirms that the interface exists. A D-Bus name
+    // without ScreenCast fails this check.
     proxy.get_property::<u32>("version").is_ok()
 }
 
-/// The portal's advertised cursor modes, for the rung-2 capability
-/// check. `None` when the property cannot be read.
+/// Returns the portal cursor modes. Returns `None` when the property cannot
+/// be read.
 pub fn available_cursor_modes() -> Option<u32> {
     let conn = Connection::session().ok()?;
     screencast_proxy(&conn).ok()?.get_property::<u32>("AvailableCursorModes").ok()
 }
 
-/// The eager startup consent, start to finish: CreateSession,
-/// SelectSources (all monitors in ONE dialog), Start, and
-/// OpenPipeWireRemote. Blocks the calling thread up to `timeout` in
-/// total. `restore_token` is the previous run's token, which is what
-/// makes the second launch silent.
+/// Starts the complete consent flow at startup. It calls `CreateSession`,
+/// `SelectSources`, `Start`, and `OpenPipeWireRemote` in this order.
+/// `SelectSources` requests all monitors in one dialog. The call blocks
+/// the current thread for at most `timeout` in total. The previous
+/// `restore_token` can prevent a later dialog.
 pub fn open(
     restore_token: Option<&str>,
     cursor_metadata: bool,
@@ -285,16 +262,15 @@ pub fn open(
     match handshake(&conn, restore_token, cursor_metadata, deadline) {
         Ok(consent) => Ok(consent),
         Err(err) => {
-            // Abandoning the handshake: close the connection rather than
-            // leave a half-consented session up. It also ends any waiter
-            // thread still parked on a signal iterator (see module docs).
+            // The code closes the connection after a handshake error. This removes the
+            // incomplete session and stops each `Response` waiter thread.
             let _ = conn.close();
             Err(err)
         }
     }
 }
 
-/// The four calls, in the only order the portal accepts.
+/// Calls the four portal methods in the only valid order.
 fn handshake(
     conn: &Connection,
     restore_token: Option<&str>,
@@ -306,8 +282,8 @@ fn handshake(
         .map(|name| mangle_sender(name.as_str()))
         .ok_or_else(|| PortalError::Absent("the session bus issued no unique name".to_string()))?;
     let screencast = screencast_proxy(conn).map_err(|err| classify("ScreenCast", err))?;
-    // Prove the interface exists before opening a dialog-shaped hole in
-    // the startup budget: absence is a rung the ladder walks past.
+    // This check confirms that the interface exists before a dialog uses the
+    // startup deadline. The capture ladder can skip an absent portal.
     let version = screencast
         .get_property::<u32>("version")
         .map_err(|err| classify("ScreenCast.version", err))?;
@@ -329,13 +305,13 @@ fn handshake(
         .ok_or_else(|| {
             PortalError::Protocol("CreateSession returned no session_handle".to_string())
         })?;
-    // The spec types `session_handle` as `s` by historical accident, so
-    // it has to be re-parsed as a path before it can be passed back.
+    // The specification declares `session_handle` as `s`, but the value is a
+    // path. The code parses it as a path before it sends the value back.
     let session_object = ObjectPath::try_from(session_path.clone()).map_err(|err| {
         PortalError::Protocol(format!("session_handle {session_path:?} is not a path: {err}"))
     })?;
-    // From here on a failure owes the portal a `Close`; the caller's
-    // connection teardown in `open` is what delivers it.
+    // Every failure after `CreateSession` needs `Close`. `open` closes the
+    // connection to provide this cleanup.
 
     // -- SelectSources: one dialog, every monitor --
     request(conn, &sender, "SelectSources", deadline, |token| {
@@ -343,11 +319,11 @@ fn handshake(
         screencast.call("SelectSources", &(session_object.clone(), options))
     })?;
 
-    // -- Start: the dialog, or nothing at all if the token restored --
+    // -- Start: show a dialog unless the restore token works --
     let started = request(conn, &sender, "Start", deadline, |token| {
         let mut options: HashMap<&str, Value<'_>> = HashMap::new();
         options.insert("handle_token", Value::from(token));
-        // No parent window: the daemon has no surface to be modal over.
+        // The daemon has no parent surface for a modal dialog.
         screencast.call("Start", &(session_object.clone(), "", options))
     })?;
     let streams = started
@@ -356,13 +332,12 @@ fn handshake(
         .ok_or_else(|| PortalError::Protocol("Start returned no streams".to_string()))?;
     let restore_token = started.get("restore_token").and_then(|value| string_of(value));
 
-    // -- OpenPipeWireRemote: no Request object, the fd comes straight back --
+    // -- OpenPipeWireRemote returns its file descriptor directly --
     let fd: zbus::zvariant::OwnedFd = screencast
         .call("OpenPipeWireRemote", &(session_object.clone(), HashMap::<&str, Value<'_>>::new()))
         .map_err(|err| classify("OpenPipeWireRemote", err))?;
-    // Deserialising an `h` always yields the owned variant, so this
-    // conversion moves the descriptor rather than duplicating it: one
-    // owner, one close, on `Consent`'s drop.
+    // zbus deserializes an `h` value as an owned variant. This conversion moves
+    // the descriptor without a copy. `Consent` owns and closes it.
     let pipewire_fd = OwnedFd::from(fd);
 
     Ok(Consent {
@@ -375,20 +350,18 @@ fn handshake(
     })
 }
 
-/// Whether this portal understands `persist_mode` and `restore_token`.
+/// Returns whether this portal supports `persist_mode` and `restore_token`.
 ///
-/// The `version` property is the *negotiated* one - the frontend
-/// reports the lower of its own and the desktop implementation's - so
-/// it answers the only question that matters: will these two keys mean
-/// anything to whoever handles the call.
+/// The portal front end reports the lower version from itself and the desktop
+/// implementation. Therefore, `version` shows whether the handler supports
+/// both keys.
 fn persists(version: u32) -> bool {
     version >= PERSIST_MIN_VERSION
 }
 
-/// The best cursor mode this portal will actually accept. Setting a mode
-/// the portal does not advertise *closes the session*, so an unadvertised
-/// METADATA silently becomes HIDDEN, and a portal too old to have the
-/// property at all gets no `cursor_mode` key (its default is Hidden).
+/// Selects a cursor mode that the portal accepts. An unsupported mode closes
+/// the session. If METADATA is unavailable, this function selects HIDDEN. If
+/// the property is absent, it returns `None` and the portal uses Hidden.
 fn cursor_mode(available: Option<u32>, want_metadata: bool) -> Option<u32> {
     let modes = available?;
     let wanted = if want_metadata { CURSOR_MODE_METADATA } else { CURSOR_MODE_HIDDEN };
@@ -401,19 +374,15 @@ fn cursor_mode(available: Option<u32>, want_metadata: bool) -> Option<u32> {
     }
 }
 
-/// Every `SelectSources` option, in one pure place so tests can assert
-/// what a session is actually negotiated with.
+/// Builds every `SelectSources` option in one function. Tests can inspect
+/// the exact options.
 ///
-/// The cursor mode and the restore token travel in the *same* dict, and
-/// that is the whole answer to "can a restored session predate the
-/// cursor_mode fix?": it cannot. Per the ScreenCast spec (interface
-/// version 6, `org.freedesktop.portal.ScreenCast.xml` on this machine),
-/// `restore_token` is itself a `SelectSources` option and "an
-/// application may only attempt to select sources once per session" -
-/// so every launch, restored or not, selects sources afresh and this
-/// dict is what the portal is told. A token restores *which monitors*
-/// were shared and the permission to share them, never a cursor mode,
-/// so there is no stale negotiation to drop the token over.
+/// The cursor mode and restore token use one option map. The ScreenCast
+/// version 6 specification permits one source selection per session. It
+/// defines `restore_token` as a `SelectSources` option. Each launch selects
+/// sources again after a restore. A token restores shared monitors and
+/// permission, but it does not restore a cursor mode. Therefore, a restored
+/// grant cannot keep an earlier cursor mode.
 fn select_sources_options<'a>(
     handle_token: &'a str,
     cursor: Option<u32>,
@@ -424,7 +393,7 @@ fn select_sources_options<'a>(
     options.insert("handle_token", Value::from(handle_token));
     options.insert("types", Value::U32(SOURCE_MONITOR));
     options.insert("multiple", Value::Bool(true));
-    // v4-only keys, sent only to a portal that has them.
+    // Send version 4 keys only to a portal that supports them.
     if persists {
         options.insert("persist_mode", Value::U32(PERSIST_UNTIL_REVOKED));
         if let Some(token) = restore_token.filter(|token| !token.is_empty()) {
@@ -437,11 +406,11 @@ fn select_sources_options<'a>(
     options
 }
 
-/// One portal method call, subscription first: predict the Request path,
-/// register the match rule, *then* call, then wait for `Response`.
+/// Calls one portal method after it registers the `Response` subscription.
+/// The code predicts the Request path and registers the match rule before
+/// the method call.
 ///
-/// `call` receives the `handle_token` to put in its options and returns
-/// the handle the portal replied with.
+/// `call` receives the `handle_token` and returns the portal Request handle.
 fn request(
     conn: &Connection,
     sender: &str,
@@ -451,18 +420,17 @@ fn request(
 ) -> Result<HashMap<String, OwnedValue>, PortalError> {
     let token = handle_token();
     let predicted = request_path(sender, &token);
-    // Before the call, always: a restored session answers instantly.
+    // Register the watch before the call. A restored session can answer instantly.
     let watch = watch_response(conn, &predicted, step)?;
 
     let handle = call(&token).map_err(|err| classify(step, err))?;
     let watch = if handle.as_str() == predicted {
         watch
     } else {
-        // A portal older than xdg-desktop-portal 0.9, or one that
-        // ignored `handle_token`. Listen where the handle actually is
-        // and accept that a very fast reply may already be lost - the
-        // deadline is what keeps that from hanging. The abandoned
-        // iterator's thread ends when `open` closes the connection.
+        // A portal older than xdg-desktop-portal 0.9 can ignore `handle_token`.
+        // Listen at the returned handle path in that case. A fast reply can already
+        // be lost. The deadline prevents an indefinite wait. The abandoned iterator
+        // thread ends when `open` closes the connection.
         drop(watch);
         watch_response(conn, handle.as_str(), step)?
     };
@@ -473,15 +441,15 @@ fn request(
 /// A `Request.Response` payload: the spec's `(ua{sv})`.
 type Answer = Result<(u32, HashMap<String, OwnedValue>), PortalError>;
 
-/// A registered subscription to one Request's `Response`, already being
-/// pumped by its own thread.
+/// A registered subscription to one Request's `Response`. A separate thread
+/// reads its messages.
 struct ResponseWatch {
     rx: Receiver<Answer>,
 }
 
-/// Register the match rule for `Response` at `path` and start pumping
-/// it. Returns once the bus has the rule, which is the whole point:
-/// the caller may only issue its method after this.
+/// Registers the match rule for `Response` at `path` and starts the reader
+/// thread. The function returns after the bus adds the rule. The caller can
+/// issue the method only after this point.
 fn watch_response(
     conn: &Connection,
     path: &str,
@@ -495,8 +463,8 @@ fn watch_response(
         .and_then(|builder| builder.member("Response"))
         .map_err(|err| PortalError::Protocol(format!("{step}: bad match rule for {path}: {err}")))?
         .build();
-    // One Response per Request, so the queue only needs to outlive the
-    // gap between registering and reading.
+    // One Response exists for each Request. The queue only needs to outlive the
+    // interval between registration and the first read.
     let iterator = MessageIterator::for_match_rule(rule, conn, Some(2))
         .map_err(|err| classify(step, err))?;
 
@@ -504,8 +472,8 @@ fn watch_response(
     std::thread::Builder::new()
         .name("chibipop-portal-req".to_string())
         .spawn(move || {
-            // Exactly one Response per Request: take the first message
-            // and let the thread end.
+            // Each Request has one Response. The thread reads the first message and then
+            // stops.
             let answer = match iterator.into_iter().next() {
                 Some(Ok(message)) => message
                     .body()
@@ -516,8 +484,8 @@ fn watch_response(
                 Some(Err(err)) => {
                     Err(PortalError::Protocol(format!("{step}: bus error waiting: {err}")))
                 }
-                // The iterator ended: the connection closed under us,
-                // which is how an abandoned wait is reaped.
+                // The iterator ended because the connection closed. This ends an abandoned
+                // wait.
                 None => Err(PortalError::Protocol(format!(
                     "{step}: the session bus closed before the portal answered"
                 ))),
@@ -530,8 +498,8 @@ fn watch_response(
 }
 
 impl ResponseWatch {
-    /// Block until the portal answers or `deadline` passes, mapping the
-    /// spec's three response codes onto [`PortalError`].
+    /// Waits until the portal answers or `deadline` passes. It maps the
+    /// specification's three response codes to [`PortalError`].
     fn wait(
         self,
         step: &'static str,
@@ -566,21 +534,22 @@ fn screencast_proxy(conn: &Connection) -> zbus::Result<Proxy<'static>> {
     )
 }
 
-/// Our unique bus name as an object-path element: leading `:` dropped,
-/// every `.` an `_`, exactly as the Request documentation specifies.
+/// Converts the unique bus name to an object-path element. It drops the
+/// first `:` and replaces every `.` with `_`, as the Request documentation
+/// specifies.
 fn mangle_sender(unique_name: &str) -> String {
     unique_name.trim_start_matches(':').replace('.', "_")
 }
 
-/// Where the portal will put the Request object for `token`.
+/// Returns the path where the portal places the Request object for `token`.
 fn request_path(sender: &str, token: &str) -> String {
     format!("{PORTAL_PATH}/request/{sender}/{token}")
 }
 
-/// A fresh `handle_token`: a valid object-path element, unique within
-/// this process by the counter and unguessable enough by the clock. No
-/// `rand` dependency for this - the token is a collision guard against
-/// other libraries on the same connection, not a secret.
+/// Creates a fresh `handle_token`. The token is a valid object-path element.
+/// The counter and clock make it unique within this process. The code needs
+/// no `rand` dependency. The token prevents collisions with other libraries
+/// on the same connection. It is not a secret.
 fn handle_token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -591,9 +560,8 @@ fn handle_token() -> String {
     format!("chibipop_{}_{seq}_{nanos}", std::process::id())
 }
 
-/// Every stream in a `Start` result's `streams` (`a(ua{sv})`). An entry
-/// that is not shaped like a stream is dropped, not fatal: the rest of
-/// the monitors are still usable.
+/// Reads every stream in a `Start` result's `streams` (`a(ua{sv})`). It drops
+/// entries with another shape, but it keeps all valid monitor entries.
 fn streams_from(value: &Value<'_>) -> Vec<StreamInfo> {
     let Value::Array(items) = peel(value) else {
         return Vec::new();
@@ -623,10 +591,9 @@ fn streams_from(value: &Value<'_>) -> Vec<StreamInfo> {
     streams
 }
 
-/// One stream's optional properties, defensively. Every property here
-/// arrived in a later interface version than the last, so a missing key
-/// is ordinary and a wrongly-typed one is a portal bug we survive: both
-/// answer `None` rather than sink the whole handshake.
+/// Reads optional properties for one stream. Each property arrived in a later
+/// interface version, so an absent key is normal. A wrong type means a portal
+/// bug, but the code returns `None` for that property and keeps the handshake.
 fn stream_info_from(node_id: u32, props: &HashMap<String, OwnedValue>) -> StreamInfo {
     StreamInfo {
         node_id,
@@ -636,8 +603,8 @@ fn stream_info_from(node_id: u32, props: &HashMap<String, OwnedValue>) -> Stream
     }
 }
 
-/// A variant may itself hold a variant; look through those wrappers so a
-/// property is read by its type, not by how it was boxed.
+/// Looks through nested variants. This lets the code read a property by type
+/// instead of by its wrapper depth.
 fn peel<'a, 'v>(value: &'a Value<'v>) -> &'a Value<'v> {
     match value {
         Value::Value(inner) => peel(inner),
@@ -668,8 +635,8 @@ fn u32_of(value: &Value<'_>) -> Option<u32> {
     }
 }
 
-/// An `s` property. Object paths are accepted too: `session_handle` is
-/// specified as `s` but reads as a path, and portals have shipped both.
+/// Reads an `s` property. It also accepts an object path because the
+/// specification defines `session_handle` as `s`, but portals can send a path.
 fn string_of(value: &Value<'_>) -> Option<String> {
     match peel(value) {
         Value::Str(text) => Some(text.as_str().to_string()),
@@ -678,9 +645,8 @@ fn string_of(value: &Value<'_>) -> Option<String> {
     }
 }
 
-/// A zbus failure, sorted into "this rung is not here" versus "this
-/// rung misbehaved". The distinction is what the ladder needs: absence
-/// is skipped quietly, misbehaviour is reported.
+/// Classifies a zbus failure as an absent rung or a faulty rung. The capture
+/// ladder skips absence and reports a fault.
 fn classify(step: &str, err: zbus::Error) -> PortalError {
     match &err {
         zbus::Error::MethodError(name, _, _) => {
@@ -711,7 +677,7 @@ fn classify(step: &str, err: zbus::Error) -> PortalError {
 mod tests {
     use super::*;
 
-    /// A property dict the way `Start` sends one, without a bus.
+    /// Creates a property dict in the form that `Start` sends, without a bus.
     fn props(entries: Vec<(&str, Value<'static>)>) -> HashMap<String, OwnedValue> {
         entries
             .into_iter()
@@ -722,10 +688,10 @@ mod tests {
             .collect()
     }
 
-    // -- the predicted Request path (the race avoidance) --
+    // -- predicted Request path --
 
-    /// The mangling the Request documentation specifies, and the only
-    /// reason a subscription can precede its call.
+    /// Tests the name conversion that the Request documentation specifies. The
+    /// result lets the code register a subscription before the call.
     #[test]
     fn a_unique_bus_name_becomes_a_path_element() {
         assert_eq!(mangle_sender(":1.234"), "1_234");
@@ -741,8 +707,8 @@ mod tests {
         );
     }
 
-    /// A token that is not a valid object-path element makes the portal
-    /// reject the call outright, so the alphabet is part of the contract.
+    /// The portal rejects an invalid object-path element before the call. The
+    /// token alphabet is therefore part of the contract.
     #[test]
     fn a_handle_token_is_a_valid_path_element() {
         let token = handle_token();
@@ -760,9 +726,9 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    // -- what the tray and the log get to say --
+    // -- tray and log text --
 
-    /// A status row names the way back, on one line.
+    /// A status row gives one retry action on one line.
     #[test]
     fn every_failure_names_a_way_back() {
         let failures = [
@@ -780,14 +746,14 @@ mod tests {
         }
     }
 
-    /// The timeout must name the dialog nobody answered, or the log
-    /// cannot say which step went quiet.
+    /// The timeout must name the unanswered dialog. Otherwise, the log cannot
+    /// identify the step that received no response.
     #[test]
     fn a_timeout_names_the_step_that_went_unanswered() {
         assert!(PortalError::TimedOut("SelectSources".to_string()).detail().contains("SelectSources"));
     }
 
-    /// The token is only worthless when consent itself was refused.
+    /// Fresh consent is needed when the portal refuses consent or rejects a token.
     #[test]
     fn only_a_refused_session_needs_fresh_consent() {
         assert!(PortalError::Denied.retry_needs_fresh_consent());
@@ -820,8 +786,8 @@ mod tests {
         );
     }
 
-    /// Every one of these properties arrived in a later interface
-    /// version than the last, so absence is ordinary.
+    /// These properties came with later interface versions. An absent property
+    /// is therefore normal.
     #[test]
     fn a_stream_without_properties_is_still_a_stream() {
         let info = stream_info_from(7, &props(vec![]));
@@ -831,8 +797,8 @@ mod tests {
         );
     }
 
-    /// A portal sending the wrong type must cost that one property, not
-    /// the whole handshake.
+    /// A wrong property type affects that property only. It must not fail the
+    /// whole handshake.
     #[test]
     fn wrongly_typed_stream_properties_are_ignored() {
         let info = stream_info_from(
@@ -849,14 +815,14 @@ mod tests {
         );
     }
 
-    /// An `(iii)` where `(ii)` was promised is still the wrong type.
+    /// The property requires `(ii)`. An `(iii)` value has the wrong type.
     #[test]
     fn a_position_of_the_wrong_arity_is_ignored() {
         let info = stream_info_from(1, &props(vec![("position", Value::from((1i32, 2i32, 3i32)))]));
         assert_eq!(info.position, None);
     }
 
-    /// A variant nested inside a variant reads as the value it holds.
+    /// A variant can contain another variant. The code must read the inner value.
     #[test]
     fn a_doubly_boxed_property_still_reads() {
         let boxed = Value::Value(Box::new(Value::U32(SOURCE_MONITOR)));
@@ -864,13 +830,12 @@ mod tests {
         assert_eq!(info.source_type, Some(SOURCE_MONITOR));
     }
 
-    // -- the persist gate (the silent relaunch) --
+    // -- persist gate --
 
-    /// `persist_mode`/`restore_token` are ScreenCast v4 keys. Sending
-    /// them to an older portal is not an error, but the daemon has to
-    /// know it happened so it can say *why* no token came back:
-    /// xdg-desktop-portal-hyprland reports v3 today, so this is the
-    /// live case on a wlr desk, not a hypothetical.
+    /// `persist_mode` and `restore_token` are ScreenCast v4 keys. The code does
+    /// not send them to an older portal. The daemon must know this case so it
+    /// can explain why the portal returned no token. xdg-desktop-portal-hyprland
+    /// reports v3, so this case occurs on a wlr desk.
     #[test]
     fn only_a_v4_portal_is_sent_the_persist_keys() {
         assert_eq!(4, PERSIST_MIN_VERSION);
@@ -882,8 +847,8 @@ mod tests {
 
     // -- the cursor rung's capability check --
 
-    /// EMBEDDED (2) has no constant of its own: this backend never
-    /// asks for it, and a portal advertising it changes nothing.
+    /// EMBEDDED (2) has no constant here. This backend never requests it, and a
+    /// portal that advertises it does not change the result.
     const EMBEDDED: u32 = 2;
 
     #[test]
@@ -893,29 +858,27 @@ mod tests {
         assert_eq!(cursor_mode(Some(modes), false), Some(CURSOR_MODE_HIDDEN));
     }
 
-    /// Asking for an unadvertised mode closes the session, so it must
-    /// degrade instead.
+    /// The portal closes the session for an unadvertised mode. The code must
+    /// select a supported mode instead.
     #[test]
     fn a_portal_without_metadata_cursors_degrades_to_hidden() {
         let modes = CURSOR_MODE_HIDDEN | EMBEDDED;
         assert_eq!(cursor_mode(Some(modes), true), Some(CURSOR_MODE_HIDDEN));
     }
 
-    /// A portal too old for `AvailableCursorModes` predates
-    /// `cursor_mode` itself: send no key and take its Hidden default.
+    /// A portal without `AvailableCursorModes` also predates `cursor_mode`. The
+    /// code sends no key, so the portal uses its Hidden default.
     #[test]
     fn a_portal_without_the_property_is_sent_no_cursor_mode() {
         assert_eq!(cursor_mode(None, true), None);
         assert_eq!(cursor_mode(Some(0), true), None);
     }
 
-    // -- no path embeds the pointer --
+    // -- embedded cursor exclusion --
 
-    /// Exhaustive over every advertisable combination of the four
-    /// defined modes: whatever a portal offers, and whichever rung
-    /// wants it, EMBEDDED is never the mode asked for. A portal that
-    /// only offers EMBEDDED gets no key at all and keeps its Hidden
-    /// default rather than being asked to paint into our pixels.
+    /// This test covers every combination of the four defined modes. The result
+    /// never requests EMBEDDED. An EMBEDDED-only portal receives no key and keeps
+    /// its Hidden default. The portal does not paint the cursor into OCR pixels.
     #[test]
     fn no_advertised_mode_set_ever_asks_for_an_embedded_cursor() {
         for modes in 0u32..16 {
@@ -927,10 +890,10 @@ mod tests {
         assert_eq!(None, cursor_mode(Some(EMBEDDED), false), "embedded-only offers nothing");
     }
 
-    /// The hypothesis this kills: a restored session negotiated before
-    /// the cursor_mode fix. `restore_token` is a `SelectSources` option,
-    /// so it rides the very dict that carries `cursor_mode` - a replayed
-    /// grant cannot carry an older cursor mode with it.
+    /// A restored session can use a cursor mode from an earlier negotiation if
+    /// the code sends no new mode. `restore_token` is a `SelectSources` option,
+    /// so it uses the same dict as `cursor_mode`. A restored grant cannot carry
+    /// an earlier cursor mode.
     #[test]
     fn a_restored_session_selects_sources_with_the_cursor_mode_too() {
         let options =
@@ -941,9 +904,8 @@ mod tests {
         assert_eq!(Some(&Value::Bool(true)), options.get("multiple"));
     }
 
-    /// A first launch differs only in the token, and a v3 portal is
-    /// sent neither persist key - but both are still told the cursor
-    /// mode.
+    /// A first launch differs only by its token. A v3 portal receives neither
+    /// persist key, but both launch types still receive the cursor mode.
     #[test]
     fn a_fresh_or_unpersistable_session_still_sends_the_cursor_mode() {
         let fresh = select_sources_options("tok", Some(CURSOR_MODE_METADATA), true, None);

@@ -1,16 +1,15 @@
-//! Character recognition: the two RT-DETR recognisers and the geometry
-//! that puts their output back on the source image.
+//! Recognise characters with the two RT-DETR recognisers and map their boxes
+//! back to source-image geometry.
 //!
-//! Both recognisers detect *characters* inside a line crop rather than
-//! emitting a sequence, so there is no CTC decode here: each model answers
-//! with `(char_codes, boxes, scores)` in its own input space, and the work
-//! is mapping those boxes back through the crop transform and resolving the
-//! overlaps a detector inevitably produces. Horizontal lines resolve
-//! overlaps along x, vertical columns along y.
+//! Each recogniser detects *characters* inside a line crop, not a sequence.
+//! Each model returns `(char_codes, boxes, scores)` in its input space. This module
+//! maps those boxes through the crop transform and resolves overlaps from the
+//! recogniser outputs. Horizontal lines resolve overlaps along x. Vertical
+//! columns resolve overlaps along y.
 //!
-//! A tall column does not fit the 480-pixel vertical input, so it is cut
-//! into overlapping segments and every segment's characters land in the
-//! same candidate pool - which is the other reason the overlap pass exists.
+//! A tall column exceeds the 480-pixel vertical input. The module cuts it into
+//! segments that share part of the column. All segment characters enter one
+//! candidate pool. The overlap pass also resolves duplicates from these segments.
 
 use super::detect::DetBox;
 use super::image::{py_round, Bgr};
@@ -19,20 +18,19 @@ pub const REC_W: usize = 960;
 pub const REC_H: usize = 32;
 pub const VREC_W: usize = 32;
 pub const VREC_H: usize = 480;
-/// Segment height once a column has to be split, in scaled pixels. Smaller
-/// than the input so every segment carries padding.
+/// Content height for a split column, in scaled pixels. It is smaller than the
+/// input height, so every segment has padding.
 const VREC_MAX_CONTENT_H: i32 = 420;
-/// How much consecutive segments share, in scaled pixels.
+/// Shared height between consecutive segments, in scaled pixels.
 const VREC_OVERLAP: i32 = 64;
-/// Fraction of the shorter interval two characters may share before the
-/// lower-confidence one is dropped.
+/// Maximum fraction of the shorter interval that two characters can share before
+/// the engine drops the character with lower confidence.
 const OVERLAP_THRESHOLD: f64 = 0.3;
-/// Keeps a zero-length interval from dividing by zero.
+/// Prevent division by zero for a zero-length interval.
 const EPSILON: f64 = 1e-6;
 
-/// Upstream ships these eight reversed compounds as a known model quirk and
-/// corrects them by name; the harness inherits the correction, so the gate
-/// numbers include it.
+/// Upstream's model returns these eight compounds in reverse order. Correct them
+/// by name. The harness includes this correction, so the gate values include it.
 const SWAPPED_PAIRS: [(&str, &str); 8] = [
     ("儡傀", "傀儡"),
     ("談冗", "冗談"),
@@ -44,7 +42,7 @@ const SWAPPED_PAIRS: [(&str, &str); 8] = [
     ("哭慟", "慟哭"),
 ];
 
-/// One recognised character with its box in source-image pixels.
+/// A recognised character and its box in source-image pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharBox {
     pub ch: char,
@@ -55,23 +53,23 @@ pub struct CharBox {
     pub conf: f32,
 }
 
-/// One line crop, ready for the recogniser.
+/// A line crop that is ready for the recogniser.
 pub struct Crop {
-    /// `3 x H x W` for the relevant recogniser, normalised to 0..1.
+    /// A `3 x H x W` tensor for the selected recogniser, normalised to 0..1.
     pub tensor: Vec<f32>,
-    /// Which detected line this belongs to. Several segments of one tall
-    /// column share it.
+    /// Index of the detected line. Several segments of one tall column use this
+    /// index.
     pub line: usize,
     bbox: [i32; 4],
     eff_w: i32,
     eff_h: i32,
 }
 
-/// Crops, resized and padded into the recogniser's fixed input.
+/// Resize and pad crops for the recogniser's fixed input.
 ///
-/// `indices` names which of `boxes` to take - the caller has already split
-/// them by orientation, because the two recognisers are separate models
-/// and each wants its own batch.
+/// `indices` selects entries from `boxes`. The caller already separates entries
+/// by orientation. The two recognisers are separate models, and each model needs
+/// its own batch.
 pub fn preprocess(img: &Bgr, boxes: &[DetBox], indices: &[usize], vertical: bool) -> Vec<Crop> {
     let mut out = Vec::with_capacity(indices.len());
     for &i in indices {
@@ -113,8 +111,8 @@ fn push_vertical(out: &mut Vec<Crop>, img: &Bgr, b: DetBox, crop: &Bgr, line: us
     let scale = VREC_W as f64 / crop.w as f64;
     let full = crop.h as f64 * scale;
 
-    // Only split when the column genuinely overruns the input; a 478-pixel
-    // column is processed whole rather than cut in two.
+    // Split a column only when it exceeds the input. Process a 478-pixel column
+    // as one crop instead of two.
     let (max_content, segment_h, starts) = if full > VREC_H as f64 {
         let segment_h = f64::from(VREC_MAX_CONTENT_H) / scale;
         let stride = f64::from(VREC_MAX_CONTENT_H - VREC_OVERLAP) / scale;
@@ -124,8 +122,7 @@ fn push_vertical(out: &mut Vec<Crop>, img: &Bgr, b: DetBox, crop: &Bgr, line: us
             starts.push(y);
             y += stride;
         }
-        // The tail segment is pinned to the bottom edge rather than left
-        // hanging, unless the walk already ended there.
+        // Pin the final segment to the bottom edge unless the last start reaches it.
         let last = f64::from(b.y2) - segment_h;
         if starts.last().is_none_or(|&prev| last > prev + 1.0) {
             starts.push(last);
@@ -154,8 +151,8 @@ fn push_vertical(out: &mut Vec<Crop>, img: &Bgr, b: DetBox, crop: &Bgr, line: us
     }
 }
 
-/// Pins the image to the top-left of a `3 x h x w` tensor; the rest is
-/// black, which is what the recognisers were trained to ignore.
+/// Copy the image into the top-left of a `3 x h x w` tensor. Fill the rest with
+/// black because the recognisers ignore that region.
 fn pad_into(img: &Bgr, w: usize, h: usize) -> Vec<f32> {
     let plane = w * h;
     let mut tensor = vec![0.0f32; 3 * plane];
@@ -170,20 +167,20 @@ fn pad_into(img: &Bgr, w: usize, h: usize) -> Vec<f32> {
     tensor
 }
 
-/// A character the recogniser proposed, before overlaps are resolved.
+/// A character proposed by the recogniser before overlap resolution.
 struct Candidate {
     ch: char,
     bbox: [i32; 4],
     conf: f32,
-    /// Extent along the reading axis: x for a line, y for a column.
+    /// Extent along the axis: x for a line, y for a column.
     i1: i32,
     i2: i32,
 }
 
-/// One recogniser batch's raw output, as the model hands it over.
+/// Raw output from one recogniser batch.
 ///
-/// `queries` is the model's fixed query count, so row `r` of the batch owns
-/// `codes[r*queries..]`, `boxes[r*queries*4..]` and `scores[r*queries..]`.
+/// `queries` is the model's fixed query count. Row `r` owns
+/// `codes[r*queries..]`, `boxes[r*queries*4..]`, and `scores[r*queries..]`.
 pub struct Batch<'a> {
     pub codes: &'a [i32],
     pub boxes: &'a [f32],
@@ -191,11 +188,10 @@ pub struct Batch<'a> {
     pub queries: usize,
 }
 
-/// Collects a recogniser's characters per detected line.
+/// Collect recogniser characters for each detected line.
 ///
-/// Several batches feed one collector: a tall column arrives as separate
-/// segments, and the two recognisers run as two passes over the same set
-/// of lines.
+/// Several batches feed one collector. A tall column arrives as separate
+/// segments. The two recognisers also run as two passes over the same lines.
 pub struct Collector {
     per_line: Vec<Vec<Candidate>>,
 }
@@ -205,7 +201,7 @@ impl Collector {
         Collector { per_line: (0..lines).map(|_| Vec::new()).collect() }
     }
 
-    /// Maps one batch back onto the source image.
+    /// Map one batch back onto source-image pixels.
     pub fn add(&mut self, crops: &[Crop], batch: Batch<'_>, vertical: bool, threshold: f32) {
         let Batch { codes, boxes, scores, queries: k } = batch;
         for (r, crop) in crops.iter().enumerate() {
@@ -222,8 +218,8 @@ impl Collector {
                 let b = &boxes[(r * k + q) * 4..(r * k + q) * 4 + 4];
                 let (rx1, ry1, rx2, ry2) = (b[0], b[1], b[2], b[3]);
 
-                // Everything past the padding boundary is the model
-                // reading black, so it is dropped rather than clamped in.
+                // The model reads black past the padding boundary. Drop that box.
+                // Do not move it to the boundary.
                 let (cx1, cy1, cx2, cy2) = if vertical {
                     let eff_h = crop.eff_h as f32;
                     if ry1 >= eff_h {
@@ -258,15 +254,15 @@ impl Collector {
         }
     }
 
-    /// Resolves overlaps and hands back each line's characters in reading
-    /// order. Lines nobody proposed a character for come back empty.
+    /// Resolve overlaps and return each line's characters in axis order.
+    /// Return an empty vector for a line without a proposed character.
     pub fn finish(self) -> Vec<Vec<CharBox>> {
         self.per_line.into_iter().map(resolve_line).collect()
     }
 }
 
 fn resolve_line(mut candidates: Vec<Candidate>) -> Vec<CharBox> {
-    // Confidence first, and stably: equal scores keep the model's order.
+    // Sort by confidence first. Keep the model order for equal scores.
     candidates.sort_by(|a, b| b.conf.total_cmp(&a.conf));
 
     let mut accepted: Vec<Candidate> = Vec::new();
@@ -301,9 +297,9 @@ fn resolve_line(mut candidates: Vec<Candidate>) -> Vec<CharBox> {
     chars
 }
 
-/// Un-reverses the known compounds, in place and boxes untouched: the
-/// characters were read in the right places, only their identities were
-/// exchanged.
+/// Restore the known compounds in place. Keep their boxes unchanged because
+/// the model read the characters at the correct positions and exchanged only
+/// their identities.
 fn fix_swapped_pairs(chars: &mut [CharBox]) {
     for (wrong, _) in SWAPPED_PAIRS {
         let mut w = wrong.chars();
@@ -334,21 +330,22 @@ mod tests {
         let crops = preprocess(&img, &[b], &[0], false);
         assert_eq!(1, crops.len());
         assert_eq!(3 * REC_W * REC_H, crops[0].tensor.len());
-        // 200 * (32/50) = 128.
+        // Scale 200 by 32/50 to get 128.
         assert_eq!(128, crops[0].eff_w);
         assert_eq!(32, crops[0].eff_h);
-        // Past the content width the tensor is black.
+        // The tensor is black beyond the content width.
         assert_eq!(0.0, crops[0].tensor[130]);
     }
 
-    /// An extremely wide line hits the 960 ceiling and loses height for it.
+    /// Cap an extremely wide line at the 960-pixel input width. The line loses
+    /// height.
     #[test]
     fn an_overlong_line_is_capped_at_the_input_width() {
         let img = solid(4000, 32);
         let b = DetBox { x1: 0, y1: 0, x2: 4000, y2: 32 };
         let crops = preprocess(&img, &[b], &[0], false);
         assert_eq!(960, crops[0].eff_w);
-        // 32 * (960/4000) = 7.68 -> 8.
+        // Scale 32 by 960/4000 and round to 8.
         assert_eq!(8, crops[0].eff_h);
     }
 
@@ -359,12 +356,12 @@ mod tests {
         let crops = preprocess(&img, &[b], &[0], true);
         assert_eq!(1, crops.len());
         assert_eq!(3 * VREC_W * VREC_H, crops[0].tensor.len());
-        // 400 * (32/30) = 426.67 -> 427, under the 480 input.
+        // Scale 400 by 32/30 and round to 427. This stays below the 480-pixel input.
         assert_eq!(427, crops[0].eff_h);
     }
 
-    /// The boundary case the harness calls out: 478 scaled pixels is
-    /// processed whole, not cut into two padded halves.
+    /// Process the boundary case from the harness. A 478-pixel column stays
+    /// whole and does not become two padded halves.
     #[test]
     fn a_column_just_under_the_input_is_processed_whole() {
         let img = solid(32, 478);
@@ -382,9 +379,9 @@ mod tests {
         assert!(crops.len() > 1, "1200px at 1x scale must split");
         assert!(crops.iter().all(|c| c.line == 0), "every segment stays on its line");
         assert!(crops.iter().all(|c| c.eff_h <= VREC_MAX_CONTENT_H));
-        // Consecutive segments share ground.
+        // Consecutive segments share part of the source column.
         assert!(crops[1].bbox[1] < crops[0].bbox[3]);
-        // The last one is pinned to the bottom edge.
+        // Pin the last segment to the bottom edge.
         assert_eq!(1200, crops.last().unwrap().bbox[3]);
     }
 
@@ -408,8 +405,8 @@ mod tests {
         assert_eq!(vec!['A', 'B'], got.iter().map(|c| c.ch).collect::<Vec<_>>());
     }
 
-    /// Under the threshold the pair is a genuine neighbour pair, not a
-    /// duplicate: 30 % of the shorter interval is the line.
+    /// Tolerate a small overlap. The pair is a true neighbor pair, not a duplicate.
+    /// The overlap covers 5/20 = 25 % of the shorter interval, below 30 %.
     #[test]
     fn a_small_overlap_is_tolerated() {
         let got = resolve_line(vec![cb('A', 0, 20, 0.9), cb('B', 15, 40, 0.8)]);
@@ -426,7 +423,7 @@ mod tests {
     fn a_known_reversed_compound_is_put_back_in_order() {
         let got = resolve_line(vec![cb('談', 0, 20, 0.9), cb('冗', 20, 40, 0.9)]);
         assert_eq!("冗談", got.iter().map(|c| c.ch).collect::<String>());
-        // Boxes stay where they were read.
+        // Keep the boxes at their read positions.
         assert_eq!(0, got[0].x1);
     }
 

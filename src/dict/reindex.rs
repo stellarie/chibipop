@@ -1,57 +1,57 @@
-//! The Reindex: Frequency ranks recomputed from stored Reported frequencies.
+//! Recomputes Frequency ranks from stored Reported frequencies.
 //!
-//! One in-place transaction over rows that are already here. Nothing in this
-//! module reads an archive, builds a file beside the live one, or renames
-//! anything - that is [`crate::dict::build::build`], and it exists for
-//! archive reads only (ARCHITECTURE.md#settings-and-config). The promoted
-//! database is already stamped `PRAGMA journal_mode = WAL` precisely
-//! because it is read while being written, so a reader keeps seeing the
-//! old ranking until the commit and the new one afterwards, and the
-//! daemon picks it up through the existing `reload` control-socket verb.
+//! A Reindex updates local rows in one SQL transaction. It never reads an
+//! archive, creates a second database file, or renames a file. The full
+//! archive build does that work through
+//! [`crate::dict::build::build`] (ARCHITECTURE.md#settings-and-config).
+//!
+//! The promoted database has `PRAGMA journal_mode = WAL`. A reader can use the
+//! old rank while the transaction is open, then use the new rank after commit.
+//! The daemon receives the new rank after the `reload` verb reaches the control
+//! socket.
 
 use crate::dict::frequency::{lookup_freq, reduce, FreqSource, FreqTable, RankingStrategy};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeSet;
 
-/// The `meta` key holding the enabled frequency dictionaries, in order.
+/// The `meta` key for enabled frequency Dictionaries, in order.
 const ORDER_KEY: &str = "frequency_order";
 
-/// The `meta` key holding the strategy the Frequency ranks were reduced under.
+/// The `meta` key for the Ranking strategy that produced Frequency ranks.
 const STRATEGY_KEY: &str = "frequency_strategy";
 
-/// What this database's Frequency ranks were reduced from.
+/// Inputs that produced this database's Frequency ranks.
 ///
-/// Recorded in `meta` rather than re-derived from config, because `term.freq`
-/// is derived state and the popup has to agree with the inputs it was
-/// *actually* derived from: a reader that took the order out of config would
-/// print the Reported frequency of a dictionary the ranking in the file never
-/// consulted.
+/// The database records these inputs in `meta`. It does not derive them from
+/// config because `term.freq` is derived state. The popup must use the inputs
+/// that produced the stored ranks. A reader that uses config order could show a
+/// Reported frequency from a Dictionary that the stored Frequency ranks did not use.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Reduction {
-    /// The enabled frequency dictionaries' `dict_id`s, highest priority
-    /// first. A dictionary absent from this list is disabled: it contributes
-    /// nothing to any rank, and its stored claims stay exactly where they
-    /// are, so re-enabling it costs a reindex and never a re-import.
+    /// `dict_id` values for enabled frequency Dictionaries, highest priority first.
+    /// A Dictionary absent from this list is disabled. A disabled Dictionary
+    /// contributes no rank, but its claims stay stored. One Reindex enables it
+    /// again. Do not import it again.
     pub order: Vec<i64>,
     pub strategy: RankingStrategy,
 }
 
-/// Recomputes every Frequency rank from the Reported frequencies already
-/// stored, in place, inside one transaction.
+/// Recomputes every Frequency rank from stored Reported frequencies in one
+/// transaction.
 ///
-/// `enabled` names the frequency dictionaries the user has switched on, in
-/// the order the frequency list puts them in - position is priority within
-/// that role and nothing else. A name no installed dictionary answers to is
-/// ignored, so a config that still names an unplugged dictionary is not an
-/// error. `strategy` is the rule that reduces the claims of the dictionaries
-/// that have a word into the one rank `term.freq` carries; a word none of
-/// them has ends as `NULL`, which is what leaves `score` on its
-/// `DEFAULT_FREQ` fallback.
+/// `enabled` lists the frequency Dictionaries that the user enabled, in
+/// frequency-list order. Position sets priority inside the frequency role.
+/// The pass ignores a name that does not match an installed Dictionary. A
+/// config can retain a removed Dictionary name without an error.
 ///
-/// Returns the number of `term` rows restamped. A failure part way through
-/// leaves every rank at its previous value: the transaction is the whole
-/// guarantee, and nothing here is written outside it.
+/// `strategy` reduces claims from Dictionaries that have a headword to the
+/// `term.freq` rank. When none has the headword, the pass stores `NULL`.
+/// `score` then keeps its `DEFAULT_FREQ` value.
+///
+/// Returns the number of `term` rows that the pass restamped. If the pass
+/// fails, the transaction leaves every rank unchanged. This code writes no
+/// data outside the transaction.
 pub fn reindex(
     conn: &mut Connection,
     enabled: &[String],
@@ -62,20 +62,22 @@ pub fn reindex(
     let reduction = Reduction { order: ids_for(&tx, enabled)?, strategy };
     let restamped = restamp_from_stored(&tx, &reduction, on_progress)?;
     record(&tx, &reduction)?;
-    // No `ANALYZE`: a reindex rewrites the values in one unindexed column
-    // and moves no row, so nothing the planner samples has changed.
+    // Do not run `ANALYZE` here. A Reindex changes values in one unindexed
+    // column and moves no row. The planner samples no changed data.
     tx.commit().context("committing the reindex")?;
     Ok(restamped)
 }
 
-/// The reduction this database's Frequency ranks were computed under.
+/// Returns the Reduction that produced this database's Frequency ranks.
 ///
-/// Both keys absent is an empty order under the default strategy, and that
-/// is the truth rather than a fallback: every build writes both, so absence
-/// means this database has no frequency dictionary enabled and therefore
-/// nothing to report. A value that cannot be read *is* an error - it is a
-/// hand-edited or corrupt record, and ranking by something else without
-/// saying so would be worse than refusing.
+/// If both keys are absent, return an empty order and the default strategy.
+/// These values are the stored truth. Do not substitute config values. Every
+/// build writes both keys.
+/// The two absent keys mean no enabled frequency Dictionary and no ranks.
+///
+/// Return an error when this function cannot read a value. A hand-edited or
+/// corrupt record supplies invalid input. Do not rank from another input
+/// without a user message.
 pub fn recorded(conn: &Connection) -> Result<Reduction> {
     let order = match meta(conn, ORDER_KEY)? {
         None => Vec::new(),
@@ -89,7 +91,7 @@ pub fn recorded(conn: &Connection) -> Result<Reduction> {
     Ok(Reduction { order, strategy })
 }
 
-/// Records the reduction the rows now in `term` were stamped under.
+/// Records the Reduction that stamped the current `term` rows.
 pub(crate) fn record(conn: &Connection, reduction: &Reduction) -> Result<()> {
     let order = serde_json::to_string(&reduction.order)
         .with_context(|| format!("writing meta.{ORDER_KEY}"))?;
@@ -101,11 +103,12 @@ pub(crate) fn record(conn: &Connection, reduction: &Reduction) -> Result<()> {
     Ok(())
 }
 
-/// Stores one frequency dictionary's own claims.
+/// Stores one Dictionary's Reported frequencies.
 ///
-/// The keys are `FreqTable`'s keys, spelled out: term plus optional reading,
-/// so `lookup_freq`'s reading-scoped-then-reading-agnostic rule reads back
-/// off these rows exactly as it reads off the table they came from.
+/// The keys of a `FreqTable` become a term and an optional reading.
+/// [`lookup_freq`] checks the reading-specific key first, then the
+/// reading-agnostic key. These rows therefore produce the same values as the
+/// source `FreqTable`.
 pub(crate) fn store_reported(
     tx: &Transaction,
     dict_id: i64,
@@ -122,15 +125,16 @@ pub(crate) fn store_reported(
     Ok(table.len())
 }
 
-/// Brings the stored Reported frequencies in line with the frequency
-/// archives the library holds, and records the reduction that follows.
+/// Synchronizes stored Reported frequencies with the active frequency archives
+/// and records the resulting Reduction.
 ///
-/// The archive-driven half of the story, for an import or a removal rather
-/// than a settings change: `sources` is every frequency archive in effect, so
-/// a dictionary it names gets a `dict` row and its claims stored, and one it
-/// no longer names loses them. The strategy the database already records is
-/// preserved - only the archives changed - and a newly named dictionary lands
-/// at the bottom of the order, which is where an import belongs.
+/// This is the archive path for an import or removal. It does not serve a
+/// settings change. `sources` lists every active frequency archive. A named
+/// Dictionary gets a `dict` row and its claims. A name that leaves the list
+/// loses its claims.
+///
+/// Keep the recorded strategy because only archives changed. Append a new
+/// Dictionary at the end of the order.
 pub(crate) fn sync_reported(tx: &Transaction, sources: &[FreqSource]) -> Result<Reduction> {
     let strategy = recorded(tx)?.strategy;
     let mut held = frequency_dictionaries(tx)?;
@@ -139,12 +143,9 @@ pub(crate) fn sync_reported(tx: &Transaction, sources: &[FreqSource]) -> Result<
     for source in sources {
         let dict_id = match held.iter().position(|(_, name)| *name == source.name) {
             Some(found) => held.remove(found).0,
-            // An archive supplying terms as well as frequency already has
-            // its `dict` row, made when its definitions were inserted, and
-            // holds no claims yet - so it is not among the frequency
-            // dictionaries and must not be given a second row wearing the
-            // same name. Only a name the database has never heard of gets
-            // one.
+            // A combined archive already has a `dict` row from its term definitions.
+            // Store its frequency claims under that row. Do not create a second row
+            // with the same name. Create a row only when the database has no match.
             None => match unclaimed_dict_row(tx, &source.name, &order)? {
                 Some(existing) => existing,
                 None => new_dict_row(tx, &source.name)?,
@@ -155,10 +156,9 @@ pub(crate) fn sync_reported(tx: &Transaction, sources: &[FreqSource]) -> Result<
         order.push(dict_id);
     }
 
-    // Whatever is left held claims from an archive the library no longer
-    // lists. A dictionary that also supplies terms keeps its row and its
-    // entries and loses only its claims; one that supplied nothing else is
-    // gone entirely.
+    // A Dictionary left in `held` belongs to an archive no longer in the list.
+    // A Dictionary that also supplies terms keeps its row and entries, but loses
+    // only its claims. A Dictionary with no other data loses its row.
     for (dict_id, _) in held {
         drop_reported(tx, dict_id)?;
         let entries: i64 = tx
@@ -177,8 +177,8 @@ pub(crate) fn sync_reported(tx: &Transaction, sources: &[FreqSource]) -> Result<
     Ok(reduction)
 }
 
-/// Restamps every Frequency rank from what one reduction says this database
-/// holds - the half a settings change and an archive change share.
+/// Restamps every Frequency rank from the inputs named by a Reduction. Settings
+/// changes and archive changes share this pass.
 pub(crate) fn restamp_from_stored(
     tx: &Transaction,
     reduction: &Reduction,
@@ -188,12 +188,12 @@ pub(crate) fn restamp_from_stored(
     restamp(tx, &ranks, on_progress)
 }
 
-/// Restamps `term.freq` from one reduced table, and reports how many rows it
-/// wrote.
+/// Restamps `term.freq` from one reduced table and returns the count of rows
+/// that it writes.
 ///
-/// Every row, not just the ones that change: the strategy, the order and the
-/// enabled set are all inputs, so a row whose rank is unchanged under the new
-/// reduction is a row this pass has confirmed rather than one it may skip.
+/// Write every row, not only rows whose rank changes. The strategy, order, and
+/// enabled set are inputs. An unchanged rank confirms that the pass handled
+/// the row. Do not skip it.
 fn restamp(
     tx: &Transaction,
     ranks: &FreqTable,
@@ -214,8 +214,8 @@ fn restamp(
     let mut processed = 0_u64;
 
     for (rowid, surface, written, reading) in rows {
-        // The headword a frequency archive names is the written form when
-        // there is one, and the reading when the headword is kana-only.
+        // A frequency archive uses the written form when present. For a kana-only
+        // headword, it uses the reading.
         let term = written.as_deref().unwrap_or(&surface);
         let rank = lookup_freq(ranks, term, reading.as_deref());
         update
@@ -229,12 +229,11 @@ fn restamp(
     Ok(processed)
 }
 
-/// Each dictionary's stored claims, in the order it was named.
+/// Returns each Dictionary's stored claims in the given order.
 ///
-/// One scan of `reported_freq` rather than one query per dictionary, and the
-/// disabled dictionaries' rows are dropped as they go past: a corpus holds a
-/// handful of frequency dictionaries and there is nothing an index adds to
-/// reading all of one of them.
+/// Scan `reported_freq` once instead of querying each Dictionary. Skip disabled
+/// claims as the scan reads rows. Frequency Dictionaries are few, and an index
+/// does not improve a full scan of one Dictionary.
 fn stored_tables(conn: &Connection, order: &[i64]) -> Result<Vec<FreqTable>> {
     let mut tables = vec![FreqTable::new(); order.len()];
     if order.is_empty() {
@@ -252,12 +251,12 @@ fn stored_tables(conn: &Connection, order: &[i64]) -> Result<Vec<FreqTable>> {
     Ok(tables)
 }
 
-/// The `dict` rows the frequency list names, in the order it names them.
+/// Returns `dict` rows that the frequency list names, in list order.
 ///
-/// A name no installed dictionary answers to is dropped, because a config may
-/// go on naming a dictionary the user has unplugged and an absent dictionary
-/// reports nothing. A name two installed dictionaries share contributes both,
-/// in `dict_id` order: `dict.name` is a title and two editions can share one.
+/// Ignore a name with no installed Dictionary. A config can retain a removed
+/// name, and an absent Dictionary reports nothing. If two Dictionaries share
+/// a name, include both in `dict_id` order. `dict.name` is a title, so two
+/// editions can share it.
 fn ids_for(conn: &Connection, names: &[String]) -> Result<Vec<i64>> {
     let mut stmt = conn
         .prepare("SELECT dict_id FROM dict WHERE name = ?1 ORDER BY dict_id")
@@ -277,12 +276,11 @@ fn ids_for(conn: &Connection, names: &[String]) -> Result<Vec<i64>> {
     Ok(order)
 }
 
-/// Every dictionary this database holds Reported frequencies for, by name.
+/// Returns every Dictionary with stored Reported frequencies, by name.
 ///
-/// The union of what `reported_freq` names and what the recorded order names,
-/// because either alone misses a case: an archive whose banks carry no `freq`
-/// row at all stores nothing and would look uninstalled, and a dictionary the
-/// user has disabled is not in the order but still holds its claims.
+/// Use the union of `reported_freq` and the recorded order. Either source alone
+/// misses a case. An archive with no `"freq"` row stores no claim. A disabled
+/// Dictionary stays out of the order but keeps its claims.
 fn frequency_dictionaries(conn: &Connection) -> Result<Vec<(i64, String)>> {
     let mut ids: BTreeSet<i64> = recorded(conn)?.order.into_iter().collect();
     {
@@ -312,13 +310,11 @@ fn frequency_dictionaries(conn: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(named)
 }
 
-/// The `dict` row this name already has and no earlier source has taken.
+/// Returns an unused `dict` row for this name.
 ///
-/// A Dictionary supplying terms and frequency data is inserted once, by the
-/// pass that reads its definitions, and its claims belong under that row.
-/// `taken` holds the ids the sources before this one resolved to, so two
-/// editions sharing a title still get one row each rather than both landing
-/// on the first.
+/// The pass that reads definitions inserts a Dictionary with terms and
+/// frequency data once. Its claims use that row. `taken` lists ids already
+/// chosen for earlier sources, so two editions with one title get separate rows.
 fn unclaimed_dict_row(tx: &Transaction, name: &str, taken: &[i64]) -> Result<Option<i64>> {
     let mut stmt = tx
         .prepare("SELECT dict_id FROM dict WHERE name = ?1 ORDER BY dict_id")
@@ -335,14 +331,13 @@ fn unclaimed_dict_row(tx: &Transaction, name: &str, taken: &[i64]) -> Result<Opt
     Ok(None)
 }
 
-/// A `dict` row for a dictionary this database has not seen before.
+/// Creates a `dict` row for a new Dictionary.
 ///
-/// A frequency dictionary is a dictionary: it is what the user orders and
-/// enables, its claims are stored under its own `dict_id`, and removing it
-/// drops them through the same [`crate::dict::build::DICT_KEYED`] walk every
-/// other dictionary-keyed table takes. `priority` continues the builder's own
-/// relation - one below `dict_id` - and orders nothing here, because priority
-/// within the frequency role is the recorded order and not this column.
+/// A frequency Dictionary is a Dictionary. The user orders and enables it, and
+/// its claims use its own `dict_id`. Removal deletes those claims through the
+/// same [`crate::dict::build::DICT_KEYED`] walk as other Dictionary-keyed tables.
+/// Keep the builder's `priority` relation, one below `dict_id`. Frequency
+/// priority uses the recorded order, not this column.
 fn new_dict_row(tx: &Transaction, name: &str) -> Result<i64> {
     let dict_id = crate::dict::edit::next_dict_id(tx)?;
     tx.execute(
@@ -376,7 +371,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
-    /// `freq.zip`'s own title, and the one the second archive gets.
+    /// The title of `freq.zip` and the title of the second archive.
     const FREQ_A: &str = "FixtureFreq";
     const FREQ_B: &str = "FixtureFreqB";
 
@@ -400,14 +395,11 @@ mod tests {
         path
     }
 
-    /// A second frequency archive, so that "per dictionary" has two
-    /// dictionaries to be per.
+    /// A second frequency archive gives tests two Dictionaries.
     ///
-    /// Written here rather than committed because the numbers *are* the
-    /// fixture, and all three of the facts they carry have to be readable at
-    /// a glance: it disagrees with `freq.zip` about both headwords they
-    /// share, its 猫 is the commoner of the two claims while its 食べる is
-    /// the rarer, and it ranks a headword `freq.zip` does not have at all.
+    /// Keep this archive in the test because its values define the fixture. It
+    /// differs from `freq.zip` for both shared headwords. Its 猫 rank is lower,
+    /// its 食べる rank is higher, and it adds a headword that `freq.zip` lacks.
     fn second_freq_archive(test: &str) -> (PathBuf, TempFileGuard) {
         let path = scratch(test, "freq_b.zip");
         let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
@@ -429,8 +421,7 @@ mod tests {
         (path.clone(), TempFileGuard(path))
     }
 
-    /// A real built database, so a reindex is exercised against the rows the
-    /// builder actually writes.
+    /// Builds a real database so Reindex uses rows from the builder.
     fn built(test: &str, freqs: &[PathBuf]) -> (PathBuf, TempFileGuard) {
         let out = scratch(test, "chibipop.sqlite");
         let guard = TempFileGuard(out.clone());
@@ -438,11 +429,10 @@ mod tests {
         (out, guard)
     }
 
-    /// The Frequency rank each of the fixture's three headwords carries.
+    /// The Frequency rank for each of the fixture's three headwords.
     ///
-    /// Named by the surface that reaches exactly one `term` row: `食べる`
-    /// and `猫` are the written forms, and the kana-only `ねこ` entry is the
-    /// one whose row has no written form at all.
+    /// Each field uses a surface with one `term` row. `食べる` and `猫` use
+    /// written forms. The kana-only `ねこ` entry has no written form.
     #[derive(Debug, PartialEq, Eq)]
     struct Ranks {
         taberu: Option<i64>,
@@ -459,7 +449,7 @@ mod tests {
         }
     }
 
-    /// Every dictionary's stored claim about one headword, by `dict_id`.
+    /// Stored claim for one headword from each Dictionary, by `dict_id`.
     fn claims_for(conn: &Connection, term: &str, reading: Option<&str>) -> Vec<(i64, i64)> {
         let mut stmt = conn
             .prepare(
@@ -480,22 +470,22 @@ mod tests {
         .unwrap()
     }
 
-    /// A lookup against the built database, through the real engine.
+    /// Looks up text in a built database through the real engine.
     ///
-    /// No deconjugation rules: every input here is already a plain form, and
-    /// the deconjugator seeds that form on its own.
+    /// The inputs are plain forms. No deconjugation rules apply, and the
+    /// Deconjugator seeds each form directly.
     fn hits(db: &Path, text: &str) -> Vec<Hit> {
         let dict = SqliteDictionary::open(db).expect("the built database opens");
         LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap()
     }
 
-    /// The card one headword gets in the popup, as `present::build` makes it.
+    /// Builds the popup Card for one headword with `present::build`.
     fn card_for(db: &Path, text: &str, written: Option<&str>) -> Card {
         let dict = SqliteDictionary::open(db).expect("the built database opens");
         let found = LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap();
         let installed = dict.dicts().unwrap();
-        // A config naming nothing enables every dictionary it finds, which
-        // is the state a fresh install resolves to.
+        // An empty config enables every Dictionary that the database finds. This is the
+        // state after a new install.
         let shown = present::build(
             &found,
             &installed,
@@ -551,11 +541,10 @@ mod tests {
         let (db, _guard) = built("per_strategy", &[fixture("freq.zip"), second]);
         let mut conn = Connection::open(&db).unwrap();
 
-        // `freq.zip` says 食べる 7 and 猫/ねこ 42 and has no ねこ at all; the
-        // second says 500, 3 and 12. So best rank takes the lower of each
-        // pair, priority takes `freq.zip`'s, and the median of two ranks is
-        // the midpoint - except for ねこ, which only one dictionary has and
-        // which every rule therefore answers the same way.
+        // `freq.zip` reports 7 for 食べる and 42 for 猫 with reading ねこ. It has no
+        // claim for the kana-only ねこ term. The second archive reports 500, 3, and 12.
+        // BestRank picks lower values, Priority picks `freq.zip`, and Median averages
+        // each pair. The kana-only ねこ term has one claim, so every strategy returns 12.
         for (strategy, expected) in [
             (RankingStrategy::BestRank, Ranks { taberu: Some(7), neko: Some(12), cat: Some(3) }),
             (RankingStrategy::Priority, Ranks { taberu: Some(7), neko: Some(12), cat: Some(42) }),
@@ -566,18 +555,17 @@ mod tests {
         }
     }
 
-    /// Asserted through a lookup rather than by reading the column, because
-    /// the order a reader sees is what a strategy is for.
+    /// Checks this through lookup instead of the column. The reader's order is the
+    /// purpose of a strategy.
     #[test]
     fn changing_the_strategy_changes_result_order_without_a_rebuild() {
         let (second, _sguard) = second_freq_archive("order_flips");
         let (db, _guard) = built("order_flips", &[fixture("freq.zip"), second]);
         let mut conn = Connection::open(&db).unwrap();
 
-        // Best rank makes 猫 the commonest thing ねこ can be, at the second
-        // dictionary's 3. Priority takes `freq.zip`'s 42 for 猫 instead, and
-        // that puts the kana-only ねこ - which only the second dictionary
-        // ranks, at 12 - ahead of it.
+        // BestRank makes 猫 lead for ねこ with rank 3 from the second Dictionary.
+        // Priority uses `freq.zip` rank 42 for 猫, so the kana-only ねこ entry with
+        // rank 12 leads.
         reindex(&mut conn, &both_dictionaries(), RankingStrategy::BestRank, &|_| {}).unwrap();
         assert_eq!(Some("猫".to_string()), hits(&db, "ねこ")[0].written);
 
@@ -640,9 +628,9 @@ mod tests {
         assert_eq!(Some(7), ranks(&conn).taberu, "the installed one still ranks");
     }
 
-    /// The transaction is the whole atomicity guarantee, so it is worth an
-    /// aborted pass to prove it: `猫` is the last `term` row the restamp
-    /// reaches, so four rows have already been rewritten when this fires.
+    /// The transaction provides the atomicity guarantee. This test aborts after
+    /// `猫`, the last `term` row in the restamp. Four rows have changed when the
+    /// trigger fires.
     #[test]
     fn a_failure_part_way_through_a_reindex_leaves_every_rank_where_it_was() {
         let (second, _sguard) = second_freq_archive("atomic");
@@ -667,8 +655,8 @@ mod tests {
         );
     }
 
-    /// The popup reports, it does not compute: the number on screen is what
-    /// the leading enabled dictionary published, whichever rule ordered the
+    /// The popup reports a value. It does not compute one. The leading enabled
+    /// Dictionary supplies the value, regardless of the strategy that orders
     /// results.
     #[test]
     fn the_popup_reports_the_leading_dictionarys_own_number_under_every_strategy() {

@@ -1,27 +1,28 @@
-//! The StatusNotifierItem tray (ARCHITECTURE.md#platform-integration):
-//! Settings, Quit, and a disabled row per input channel so a user can
-//! see at a glance why something is not working.
+//! This module provides the StatusNotifierItem tray
+//! (ARCHITECTURE.md#platform-integration).
+//! It shows Settings, Quit, and one disabled row for each input channel.
+//! The rows show why a channel does not work.
 //!
 //! Three rules shape this module.
 //!
-//! **The daemon stays sync.** ksni runs its own D-Bus thread; we take it
-//! with `default-features = false, features = ["async-io", "blocking"]`
-//! so no tokio reaches this binary (ARCHITECTURE.md#workspace-and-seams,
-//! and ksni's documented feature-unification footgun). `blocking` is a
-//! thin wrapper over that same async-io runtime, not a second one.
+//! **The daemon stays synchronous.** `ksni` owns its D-Bus thread.
+//! Use `default-features = false, features = ["async-io", "blocking"]`
+//! so this binary has no `tokio` runtime
+//! (ARCHITECTURE.md#workspace-and-seams and ksni's documented
+//! feature-unification hazard).
+//! `blocking` wraps the same async-io runtime. It does not add another runtime.
 //!
-//! **Nothing about the tray is fatal.** No D-Bus, no watcher, no host,
-//! a wedged bar, a dead tray thread: every one of those degrades to
-//! "trayless" — one diagnostic line and an app that works. Windows'
-//! "failing to create the tray is fatal" deliberately flips here,
-//! because stock GNOME has no tray host and bare Hyprland has no bar.
+//! **The tray never causes a fatal error.**
+//! If D-Bus, the watcher, or the host is absent, the app works without a tray.
+//! `spawn`, `watcher_online`, and `watcher_offline` send diagnostics for the
+//! states they report.
+//! Windows treats tray creation failure as fatal, but this binary does not.
+//! Stock GNOME has no tray host, and bare Hyprland has no bar.
 //!
-//! **The tray thread never touches daemon state.** Menu activations and
-//! the tray's own diagnostics travel as [`TrayRequest`] over a calloop
-//! channel, so they land on the daemon thread where the log, the
-//! settings-child guard and the loop signal live. The reverse direction
-//! is [`TrayHandle::set_channel`], which pushes a registry snapshot into
-//! the tray.
+//! **The tray thread never touches daemon state.**
+//! Menu activations and tray diagnostics travel as [`TrayRequest`] over a calloop channel.
+//! The daemon thread handles them with the log, settings-child guard, and loop signal.
+//! [`TrayHandle::set_channel`] sends a registry snapshot in the reverse direction.
 
 pub mod icon;
 pub mod status;
@@ -31,37 +32,39 @@ use ksni::menu::StandardItem;
 use ksni::{MenuItem, Status};
 use status::{ChannelState, ChannelStatuses, ChannelId};
 
-/// What the tray thread asks the daemon thread to do or say.
+/// Requests that the tray thread sends to the daemon thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrayRequest {
-    /// The Settings menu item was activated.
+    /// The user activated the Settings menu item.
     OpenSettings,
-    /// The Quit menu item was activated.
+    /// The user activated the Quit menu item.
     Quit,
-    /// The tray has something for the log; the daemon owns the `Log`.
+    /// A tray diagnostic. The daemon writes it to the `Log`.
     Diagnostic(String),
 }
 
-/// The `ksni::Tray` implementation. Lives on the tray thread; the daemon
-/// only ever reaches it through [`TrayHandle`].
+/// The `ksni::Tray` implementation on the tray thread.
+/// The daemon reaches it only through [`TrayHandle`].
 struct ChibipopTray {
     statuses: ChannelStatuses,
     requests: calloop::channel::Sender<TrayRequest>,
 }
 
 impl ChibipopTray {
-    /// Hand a request to the daemon thread. Unbounded and non-blocking,
-    /// as ksni's activation contract requires; a closed channel means
-    /// the daemon is already shutting down, so dropping is correct.
+    /// Send a request to the daemon thread.
+    /// The channel is unbounded and non-blocking because the `ksni` activation
+    /// contract requires it.
+    /// A closed channel means that the daemon has begun shutdown.
+    /// The method can then drop the request.
     fn ask(&self, request: TrayRequest) {
         let _ = self.requests.send(request);
     }
 }
 
 impl ksni::Tray for ChibipopTray {
-    /// Left-click opens the menu instead of firing `activate`. A status
-    /// tray's whole purpose is the menu, and a click that does nothing
-    /// visible reads as a broken icon.
+    /// A left click opens the menu. It does not call `activate`.
+    /// The menu is the status tray's main purpose.
+    /// A click with no visible result makes the icon seem broken.
     const MENU_ON_ACTIVATE: bool = true;
 
     fn id(&self) -> String {
@@ -80,9 +83,9 @@ impl ksni::Tray for ChibipopTray {
         icon::icons().pixmaps.clone()
     }
 
-    /// Hosts read *this* pixmap while the status is NeedsAttention;
-    /// leaving it empty makes the icon vanish exactly when it matters.
-    /// Same artwork — the status itself is what the bar emphasises.
+    /// Hosts read *this* pixmap when the status is `NeedsAttention`.
+    /// Keep the list non-empty so the icon remains visible when the user needs it.
+    /// The artwork stays the same. The bar emphasizes the status.
     fn attention_icon_pixmap(&self) -> Vec<ksni::Icon> {
         icon::icons().pixmaps.clone()
     }
@@ -105,9 +108,9 @@ impl ksni::Tray for ChibipopTray {
             .into(),
             MenuItem::Separator,
         ];
-        // The status rows: informational, never clickable. A user reads
-        // them to find out why a channel is dead; there is nothing to
-        // press, and the settings window is where fixes live.
+        // The status rows provide information and accept no clicks.
+        // The user reads them to learn why a channel is down.
+        // The settings window provides the fixes.
         items.extend(self.statuses.rows().into_iter().map(|label| {
             StandardItem { label, enabled: false, ..Default::default() }.into()
         }));
@@ -127,9 +130,10 @@ impl ksni::Tray for ChibipopTray {
         self.ask(TrayRequest::Diagnostic("tray: StatusNotifier host online - item shown".into()));
     }
 
-    /// Return `true`: keep the item published so a bar that starts later
-    /// (or a shell that restarts) picks it up without restarting the
-    /// daemon. This is the trayless path, and it is not an error.
+    /// Return `true` so a bar that starts later or a shell that restarts can find
+    /// the item.
+    /// Keep the item published. Do not restart the daemon.
+    /// This is the trayless path, not an error.
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
         self.ask(TrayRequest::Diagnostic(format!(
             "tray: no StatusNotifier host ({reason:?}); running trayless - every feature still works, \
@@ -139,26 +143,26 @@ impl ksni::Tray for ChibipopTray {
     }
 }
 
-/// The daemon's end of the tray: the authoritative channel registry plus
-/// an optional live tray to mirror it into.
+/// The daemon-side tray handle.
+/// It owns the authoritative channel registry and an optional tray mirror.
 ///
-/// The registry is here rather than only inside the tray thread so the
-/// daemon's view of channel health does not depend on a tray existing.
-/// Trayless, every method below still works; only the D-Bus push is
-/// skipped.
+/// The registry stays here, not only in the tray thread.
+/// The daemon can then track channel health without a tray.
+/// In trayless mode, every method still works. Only the D-Bus push stops.
 pub struct TrayHandle {
     statuses: ChannelStatuses,
     handle: Option<ksni::blocking::Handle<ChibipopTray>>,
 }
 
 impl TrayHandle {
-    /// A registry with no tray behind it — what `spawn` returns when
-    /// D-Bus is unavailable, and what the daemon uses unchanged.
+    /// Create a registry with no tray.
+    /// `spawn` returns this value when D-Bus is unavailable.
+    /// The daemon uses the registry without changes.
     pub fn trayless(statuses: ChannelStatuses) -> TrayHandle {
         TrayHandle { statuses, handle: None }
     }
 
-    /// Whether a tray service is still running behind this handle.
+    /// Return whether a tray service remains active behind this handle.
     pub fn is_connected(&self) -> bool {
         self.handle.as_ref().is_some_and(|h| !h.is_closed())
     }
@@ -167,13 +171,13 @@ impl TrayHandle {
         &self.statuses
     }
 
-    /// Record a channel's new state and re-render the tray. Returns
-    /// whether anything actually changed, so callers log transitions
-    /// instead of every poll tick.
+    /// Set a channel state and re-render the tray.
+    /// Return `true` only when the state changes.
+    /// Callers can then log transitions instead of each poll tick.
     ///
-    /// A dead tray service is detected here and forgotten: the handle
-    /// degrades to trayless rather than retrying a corpse on every
-    /// update.
+    /// Detect a dead tray service here and forget it.
+    /// The handle then becomes trayless.
+    /// It does not retry a dead service on each update.
     pub fn set_channel(&mut self, id: ChannelId, state: ChannelState) -> bool {
         if !self.statuses.set(id, state) {
             return false;
@@ -188,14 +192,15 @@ impl TrayHandle {
     }
 }
 
-/// Publish the tray. Never fails: the second element is the diagnostics
-/// the daemon should log, and the handle works either way.
+/// Publish a tray and return its handle and diagnostics.
+/// This function does not fail. The daemon logs the second result.
+/// The handle works with or without a tray.
 ///
 /// `assume_sni_available(true)` (ARCHITECTURE.md#platform-integration)
-/// turns "no watcher on the bus" and "nothing will show this" into soft
-/// errors routed to `watcher_offline`, so a daemon that starts before
-/// the bar — the normal case under a session manager — still gets its
-/// item shown when the bar arrives.
+/// converts "no watcher on the bus" and "nothing will show this" into soft errors.
+/// It routes those errors to `watcher_offline`.
+/// A daemon can start before the bar, which is normal with a session manager.
+/// The bar then shows the item when it arrives.
 pub fn spawn(
     statuses: ChannelStatuses,
     requests: calloop::channel::Sender<TrayRequest>,
@@ -227,9 +232,9 @@ mod tests {
     use crate::cursor::{Rung, Selection};
     use ksni::Tray;
 
-    /// The startup registry a wlr session produces: the promptless
-    /// capture backend, whichever cursor rung was selected, and a layer
-    /// shell to draw on.
+    /// Build the startup registry for a wlr session.
+    /// It has the promptless capture backend, the selected cursor rung, and a layer shell.
+    /// The layer shell provides the draw surface.
     fn tray(selection: &Selection) -> (ChibipopTray, calloop::channel::Channel<TrayRequest>) {
         let (tx, rx) = calloop::channel::channel();
         let statuses = ChannelStatuses::startup(
@@ -240,8 +245,8 @@ mod tests {
         (ChibipopTray { statuses, requests: tx }, rx)
     }
 
-    /// Every menu label in order, paired with whether it is clickable.
-    /// Separators read as `("-", false)`.
+    /// Return each menu label in order with its clickable state.
+    /// Separators return as `("-", false)`.
     fn labels(tray: &ChibipopTray) -> Vec<(String, bool)> {
         tray.menu()
             .into_iter()
@@ -253,7 +258,7 @@ mod tests {
             .collect()
     }
 
-    /// Activate the first menu item with this label.
+    /// Activate the first menu item with the given label.
     fn activate(tray: &mut ChibipopTray, label: &str) {
         let found = tray
             .menu()
@@ -266,8 +271,8 @@ mod tests {
         found(tray);
     }
 
-    /// The menu shape: Settings, one status row per channel, Quit — and
-    /// the status rows are disabled while the two actions are not.
+    /// The menu has Settings, one disabled status row per channel, and Quit.
+    /// The two actions remain enabled.
     #[test]
     fn menu_is_settings_then_disabled_status_rows_then_quit() {
         let (tray, _rx) = tray(&Selection::Rung(Rung::ImageCopyCapture));
@@ -286,8 +291,9 @@ mod tests {
         );
     }
 
-    /// Activation hands work to the daemon thread rather than doing it,
-    /// which is what keeps the menu responsive and the daemon sync.
+    /// Menu activation sends each request to the daemon thread.
+    /// The tray thread does not execute the request.
+    /// This keeps the menu responsive and the daemon synchronous.
     #[test]
     fn activating_settings_and_quit_asks_the_daemon() {
         let (mut tray, rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
@@ -299,8 +305,8 @@ mod tests {
         assert_eq!(Ok(TrayRequest::Quit), rx.try_recv());
     }
 
-    /// A down channel is visible twice over: in its row and in the SNI
-    /// status the bar emphasises.
+    /// A down channel appears in its row and in the SNI status.
+    /// The bar emphasizes the SNI status.
     #[test]
     fn a_down_channel_shows_in_the_row_and_the_sni_status() {
         let unsupported = Selection::Unsupported {
@@ -318,9 +324,9 @@ mod tests {
         );
     }
 
-    /// NeedsAttention must still have an icon; hosts switch to the
-    /// attention pixmap and an empty list would blank the tray exactly
-    /// when the user needs to notice it.
+    /// `NeedsAttention` must still have an icon.
+    /// Hosts switch to the attention pixmap for this status.
+    /// An empty list would blank the tray when the user needs to see it.
     #[test]
     fn the_attention_icon_is_not_empty() {
         let (tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
@@ -328,8 +334,8 @@ mod tests {
         assert!(!tray.attention_icon_pixmap().is_empty());
     }
 
-    /// The tooltip carries the same rows, so hovering answers "what is
-    /// broken?" without opening the menu.
+    /// The tooltip carries the same rows.
+    /// It answers "what is broken?" without a menu open.
     #[test]
     fn the_tooltip_lists_every_channel() {
         let (tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));
@@ -338,9 +344,9 @@ mod tests {
         assert_eq!(tray.statuses.rows().join("\n"), tip.description);
     }
 
-    /// Traylessness is the normal case on stock GNOME and bare Hyprland:
-    /// the registry keeps working, reports itself disconnected, and
-    /// never panics on a push that has nowhere to go.
+    /// Trayless mode is normal on stock GNOME and bare Hyprland.
+    /// The registry remains usable and reports a disconnected tray.
+    /// A push with no destination does not panic.
     #[test]
     fn a_trayless_handle_still_tracks_channels() {
         let mut handle = TrayHandle::trayless(ChannelStatuses::startup(
@@ -366,8 +372,8 @@ mod tests {
         assert_eq!(Status::Active, handle.statuses().sni_status());
     }
 
-    /// The tray renders from whatever the daemon pushed, so a mirrored
-    /// snapshot produces the same menu the daemon's registry implies.
+    /// The tray renders the state that the daemon sends.
+    /// A mirrored snapshot must produce the menu that the daemon registry describes.
     #[test]
     fn a_pushed_snapshot_renders_the_new_rows() {
         let (mut tray, _rx) = tray(&Selection::Rung(Rung::HyprctlPoll));

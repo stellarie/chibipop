@@ -1,52 +1,50 @@
-//! Addressing one node, or a set of them, inside a [`GlossDoc`].
+//! A node-path addresses one node or a set of nodes in a [`GlossDoc`].
 //!
-//! A [`NodeId`] addresses a node in *one parse of one document*: it is an
-//! index into the arena, so a parser fix that inserts a wrapper renumbers
-//! every node after it. That is fine for a walk and wrong for an identity.
-//! A [`NodePath`] is the identity - "the third child of the first glossary
-//! item" - which is what the spec means by "a selection means *sense 3 of
-//! 大辞林* rather than a character range".
+//! A [`NodeId`] addresses a node in one parsed document. It is an index into
+//! the arena. A parser change that adds a wrapper can renumber later nodes.
+//! Use a [`NodeId`] only in one tree walk. Do not use it as an identity.
 //!
-//! Two consumers, and they set the whole design:
+//! A [`NodePath`] identifies a node with child indexes from the document-tree
+//! root. For example, it can identify the third child of the first glossary
+//! item. This form lets a selection identify a Sense instead of a character
+//! range.
 //!
-//! - **The popup scene's block pass** puts one on every `SceneElem` while it
-//!   is already descending the tree. So the type is [`Copy`] with inline
-//!   storage - a `Vec` per element per frame is an allocation the scene walk
-//!   cannot afford - and extending a path by one step ([`NodePath::child`])
-//!   is the operation that walk performs.
-//! - **The Anki HTML renderer** takes a [`Selection`] of them and emits the
-//!   markup for exactly those subtrees, so a later sense picker hands Anki
-//!   formatted markup rather than a flattened text range.
+//! Two consumers depend on this design:
 //!
-//! The path is also the safe handle of the two: resolving one walks down from
-//! the root and returns `None` at the first step that does not exist, so a
-//! path paired with the wrong document yields nothing rather than the wrong
-//! node.
+//! - **The popup scene block pass** stores one path on each `SceneElem` in a
+//!   tree walk. The path uses inline storage and implements [`Copy`]. A `Vec`
+//!   for each element in each frame would allocate too much memory.
+//! - **The Anki HTML renderer** takes a [`Selection`] and emits HTML for the
+//!   exact subtrees. A later Sense picker can give Anki formatted HTML instead
+//!   of a plain-text range.
+//!
+//! A [`NodePath`] is also a safe handle. Resolution starts at the root and
+//! returns `None` at the first step that does not exist. A path from another
+//! document cannot address an unrelated node.
 
 use super::{GlossDoc, NodeId};
 
-/// Steps a [`NodePath`] holds.
+/// The maximum number of steps that a [`NodePath`] can hold.
 ///
-/// `docs/research/dict-shapes.md` measures the deepest real tree in a
-/// 97-archive corpus at **15** levels, and a path spends one step per level,
-/// so 16 clears the corpus with a step to spare while keeping the whole path
-/// at 34 bytes - cheap enough to sit on every scene element. Going to
-/// [`MAX_DEPTH`](super::MAX_DEPTH) would triple that for content no
-/// dictionary emits.
+/// `docs/research/dict-shapes.md` reports a maximum real tree depth of 15 in
+/// 97 archives. Sixteen steps cover that corpus and leave one spare step. This
+/// capacity keeps each scene element's path at 34 bytes.
+/// [`MAX_DEPTH`](super::MAX_DEPTH) would triple that size for content that no
+/// measured Dictionary has.
 const MAX_STEPS: usize = 16;
 
-/// A route from a [`GlossDoc`]'s root to one node: the child index taken at
-/// each level, top-level glossary item first.
+/// A node-path from a [`GlossDoc`] root to one node.
 ///
-/// Ordering is document (preorder) order, which the derive gets right
-/// because the unused steps are zero and a prefix therefore compares equal up
-/// to its length and shorter after it: an ancestor sorts before its
-/// descendants, and a left sibling's subtree before a right one's.
+/// Each step stores a child index. The first step selects a top-level glossary
+/// item.
 ///
-/// A node deeper than [`MAX_STEPS`] levels, or past the 65 536th child of its
-/// parent, has **no path**: [`child`](Self::child) returns `None` rather than
-/// a path that would address some ancestor instead. Unaddressable is a
-/// correct answer for a selection; silently aliased is not.
+/// The derived order is document preorder because unused steps contain zero.
+/// An ancestor sorts before its descendants. A left sibling subtree sorts
+/// before a right sibling subtree.
+///
+/// A node has no path when it exceeds [`MAX_STEPS`] levels. A child after the
+/// 65,536th child also has no path. [`child`](Self::child) returns `None` in
+/// both cases. It never returns a path for an ancestor.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct NodePath {
     steps: [u16; MAX_STEPS],
@@ -54,16 +52,18 @@ pub struct NodePath {
 }
 
 impl NodePath {
-    /// Steps a path can hold. See [`MAX_STEPS`].
+    /// The maximum number of steps that a path can hold. See [`MAX_STEPS`].
     pub const MAX_STEPS: usize = MAX_STEPS;
 
-    /// The document itself. Addresses no node - a glossary is a forest of
-    /// top-level items, not a tree with one root - and is where a walk
-    /// starts: `NodePath::ROOT.child(i)` is the `i`th glossary item.
+    /// The document root, which does not address a node.
+    ///
+    /// A glossary is a forest of top-level items. A tree walk starts at this
+    /// root. `NodePath::ROOT.child(i)` addresses glossary item `i`.
     pub const ROOT: NodePath = NodePath { steps: [0; MAX_STEPS], len: 0 };
 
-    /// This path extended by one child index, or `None` when the step does
-    /// not fit.
+    /// Appends one child index to this path.
+    ///
+    /// Returns `None` when the new step does not fit.
     pub fn child(self, index: usize) -> Option<NodePath> {
         let step = u16::try_from(index).ok()?;
         let at = self.len as usize;
@@ -76,23 +76,25 @@ impl NodePath {
         Some(next)
     }
 
-    /// The child indices, outermost first.
+    /// Returns child indexes from the outermost level.
     pub fn steps(&self) -> &[u16] {
         &self.steps[..self.len as usize]
     }
 
-    /// How many levels down this path reaches.
+    /// Returns the number of levels in this path.
     pub fn len(&self) -> usize {
         self.len as usize
     }
 
-    /// Is this [`ROOT`](Self::ROOT) - the document rather than a node?
+    /// Tests if this path is [`ROOT`](Self::ROOT).
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// The node this path addresses in `doc`, or `None` when `doc` has no
-    /// such node - including for [`ROOT`](Self::ROOT), which is the document.
+    /// Returns the node that this path addresses in `doc`.
+    ///
+    /// Returns `None` when `doc` has no such node. [`ROOT`](Self::ROOT) also
+    /// returns `None` because it addresses the document root, not a node.
     pub fn resolve(&self, doc: &GlossDoc) -> Option<NodeId> {
         let mut steps = self.steps().iter();
         let mut id = doc.items().nth(*steps.next()? as usize)?;
@@ -102,12 +104,14 @@ impl NodePath {
         Some(id)
     }
 
-    /// The path to `target` in `doc`, or `None` when the node is not in the
-    /// document or sits deeper than a path reaches.
+    /// Finds the path to `target` in `doc`.
     ///
-    /// A preorder search, because the arena keeps first-child and
-    /// next-sibling links and no parent link - walking up is not available.
-    /// One search per selected node at mining time, which is once per card.
+    /// Returns `None` when the node is not in the document or exceeds the path
+    /// capacity.
+    ///
+    /// The arena has `first_child` and `next_sibling` links but no parent link.
+    /// This function therefore uses a preorder search. It searches once for
+    /// each selected node when it makes an Anki card.
     pub fn of(doc: &GlossDoc, target: NodeId) -> Option<NodePath> {
         doc.items()
             .enumerate()
@@ -115,7 +119,7 @@ impl NodePath {
     }
 }
 
-/// `path` addresses `id`; find `target` at or under it.
+/// Finds `target` at or below `id`, which `path` addresses.
 fn descend(doc: &GlossDoc, id: NodeId, path: NodePath, target: NodeId) -> Option<NodePath> {
     if id == target {
         return Some(path);
@@ -125,22 +129,22 @@ fn descend(doc: &GlossDoc, id: NodeId, path: NodePath, target: NodeId) -> Option
         .find_map(|(i, child)| descend(doc, child, path.child(i)?, target))
 }
 
-/// The nodes one render covers.
+/// The nodes that a render includes.
 ///
-/// Borrowed rather than owned so that passing a selection costs nothing: a
-/// picker holds the paths, the renderer only reads them.
+/// A [`Selection`] borrows paths from the picker. The renderer reads the paths
+/// and does not allocate an owned path list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Selection<'a> {
-    /// Every top-level glossary item, in order. What mining a whole entry
-    /// asks for, and the default.
+    /// All top-level glossary items in document order.
+    ///
+    /// This is the default selection for a complete Entry.
     #[default]
     Whole,
-    /// These nodes and no others.
+    /// Only these nodes.
     ///
-    /// Rendered in document order however the slice is ordered, deduplicated,
-    /// and a selected node subsumes any of its own descendants that are also
-    /// listed - so a picker may hand over whatever the user clicked without
-    /// normalising it first.
+    /// The renderer sorts these nodes into document order and removes duplicate
+    /// nodes. A selected node includes its selected descendants. A picker
+    /// therefore does not need to sort paths or remove duplicate paths.
     Nodes(&'a [NodePath]),
 }
 
@@ -150,8 +154,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Two senses under one glossary item, each with a nested child, so a
-    /// path has somewhere to go in both directions.
+    /// Builds two Senses. Each Sense has one nested child.
+    ///
+    /// This shape tests paths in both directions.
     fn two_senses() -> GlossDoc {
         doc(&json!([{"type": "structured-content", "content": [
             {"tag": "div", "content": [{"tag": "span", "content": "to run"}]},
@@ -166,8 +171,9 @@ mod tests {
             .expect("a path within capacity")
     }
 
-    /// The property everything else rests on: a path found for a node
-    /// resolves back to that node.
+    /// Confirms the main node-path property.
+    ///
+    /// Every path found for a node must resolve to that node.
     #[test]
     fn every_node_round_trips_through_its_path() {
         let d = two_senses();
@@ -186,7 +192,7 @@ mod tests {
         assert_eq!(&[0, 1, 0], flow.steps());
     }
 
-    /// A glossary is a forest of items, so the document itself is not a node.
+    /// A glossary is a forest, so the document root is not a node.
     #[test]
     fn the_root_addresses_the_document_and_no_node() {
         let d = two_senses();
@@ -201,17 +207,17 @@ mod tests {
         assert_eq!(None, path(&[4]).resolve(&d));
     }
 
-    /// The same path against a different entry's tree must miss rather than
-    /// silently address whatever sits at that index - the failure mode a raw
-    /// arena index would have.
+    /// A path from another Entry must not address a node by accident.
+    ///
+    /// A raw arena index could cause this alias.
     #[test]
     fn a_path_from_another_document_does_not_alias_a_node() {
         let other = doc(&json!(["cat"]));
         assert_eq!(None, path(&[0, 1, 0]).resolve(&other));
     }
 
-    /// What a selection set needs: an ancestor before its descendants, and a
-    /// left subtree before a right one.
+    /// A Selection needs ancestors before descendants. It also needs a left
+    /// sibling subtree before a right sibling subtree.
     #[test]
     fn paths_sort_in_document_order() {
         let mut sorted = [path(&[1]), path(&[0, 1, 0]), path(&[0]), path(&[0, 0]), NodePath::ROOT];
@@ -222,17 +228,18 @@ mod tests {
         );
     }
 
-    /// Two paths that differ only in a step past their shared length are
-    /// different paths - the zero fill must not make a prefix equal its
-    /// extension.
+    /// A path prefix and its extension must not be equal.
+    ///
+    /// The zero fill must not make these paths equal.
     #[test]
     fn a_prefix_is_not_equal_to_the_path_that_extends_it() {
         assert_ne!(path(&[0]), path(&[0, 0]));
         assert_ne!(path(&[0, 0]), path(&[0, 0, 0]));
     }
 
-    /// Unaddressable, not aliased onto an ancestor: a selection that cannot
-    /// name a node must say so.
+    /// A node beyond the path capacity must have no path.
+    ///
+    /// The path must not address an ancestor instead.
     #[test]
     fn a_node_past_the_capacity_has_no_path() {
         let deep = (0..NodePath::MAX_STEPS).try_fold(NodePath::ROOT, |p, _| p.child(0));

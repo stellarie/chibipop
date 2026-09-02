@@ -1,24 +1,26 @@
-//! The CPU crop (ARCHITECTURE.md#capture-and-masking: shm buffers and
-//! CPU cropping everywhere, no GPU plumbing inside a capture backend).
-//! Pure pixel arithmetic: a strided compositor buffer in, core's tight
-//! top-down BGRA out.
+//! This module holds the CPU crop
+//! (ARCHITECTURE.md#capture-and-masking: shm buffers and CPU cropping
+//! everywhere, no GPU plumbing inside a capture backend). The module
+//! does pixel arithmetic only. It takes a strided compositor buffer,
+//! and it writes the tight top-down BGRA buffer of core.
 //!
-//! `wl_shm` formats name a little-endian *word*, so `Xrgb8888`'s bytes
-//! in memory are B, G, R, X - already core's `Frame` layout, which is
-//! why the common path is one `copy_from_slice` per row.
+//! A `wl_shm` format names a little-endian *word*. Therefore the
+//! bytes of `Xrgb8888` in memory are B, G, R, X. That order is
+//! already the `Frame` layout of core. For this reason the common
+//! path is one `copy_from_slice` for each row.
 //!
-//! The other three layouts are not hypothetical. A compositor offers
-//! whatever its renderer reads back fastest, and wlroots on GLES2
-//! answers `Bgr888` - twenty-four bits, three bytes a pixel, red
-//! first. That is what sway hands over on a lot of hardware, so the
-//! packed formats are a supported path here, not a courtesy.
+//! The other three layouts are real. A compositor offers the format
+//! that its renderer can read fastest. wlroots on GLES2 answers
+//! `Bgr888`: twenty-four bits, three bytes for each pixel, red first.
+//! sway gives that format on much hardware. Therefore the packed
+//! formats are a supported path here, not a courtesy.
 
 use chibipop::geom::{PhysPoint, PhysRect};
 
-/// Byte order of a source pixel, as it sits in memory.
+/// The byte order of a source pixel in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Order {
-    /// B, G, R, X - core's own layout.
+    /// B, G, R, X. This is the layout of core.
     Bgrx,
     /// R, G, B, X.
     Rgbx,
@@ -29,7 +31,7 @@ pub enum Order {
 }
 
 impl Order {
-    /// Bytes one source pixel occupies.
+    /// The number of bytes that one source pixel occupies.
     pub fn bpp(&self) -> i32 {
         match self {
             Order::Bgrx | Order::Rgbx => 4,
@@ -37,7 +39,7 @@ impl Order {
         }
     }
 
-    /// Byte offsets of blue, green and red within a pixel.
+    /// The byte offsets of blue, green and red in a pixel.
     fn channels(&self) -> (usize, usize, usize) {
         match self {
             Order::Bgrx | Order::Bgr => (0, 1, 2),
@@ -46,25 +48,25 @@ impl Order {
     }
 }
 
-/// A compositor buffer, exactly as its events described it.
+/// A compositor buffer, exactly as its events describe it.
 #[derive(Debug, Clone, Copy)]
 pub struct Buffer {
     pub w: i32,
     pub h: i32,
-    /// Bytes per row, which is not always `w * bpp`.
+    /// The bytes in each row. This value is not always `w * bpp`.
     pub stride: i32,
     pub order: Order,
-    /// The `y_invert` flag: rows arrive bottom-up.
+    /// The `y_invert` flag. The rows arrive bottom-up.
     pub y_invert: bool,
 }
 
-/// Copy `src` out of the buffer into `dst` at `dest`.
+/// Copies `src` from the buffer into `dst` at `dest`.
 ///
-/// `dst` is `dw x dh` BGRA and is left alone wherever the source does
-/// not reach - the caller starts it black, so a region hanging off an
-/// output reads as blank rather than as garbage. Out-of-range geometry
-/// copies nothing instead of panicking: a bad frame must cost one
-/// hover, not the process.
+/// `dst` is a `dw x dh` BGRA buffer. This function does not write the
+/// parts of `dst` that the source does not reach. The caller starts
+/// `dst` black. Therefore a region outside an output reads as blank,
+/// and not as garbage. Geometry outside the range copies nothing, and
+/// does not panic. A bad frame must cost one hover, not the process.
 pub fn blit(
     bytes: &[u8],
     buf: &Buffer,
@@ -106,7 +108,7 @@ pub fn blit(
             px_out[0] = px_in[b];
             px_out[1] = px_in[g];
             px_out[2] = px_in[r];
-            // Alpha is junk by contract; opaque is the honest junk.
+            // The contract makes alpha junk. Opaque is the honest junk.
             px_out[3] = 0xff;
         }
     }
@@ -116,7 +118,8 @@ pub fn blit(
 mod tests {
     use super::*;
 
-    /// `w x h` pixels whose blue channel encodes `x` and green `y`.
+    /// Makes `w x h` pixels. The blue channel holds `x`, and the
+    /// green channel holds `y`.
     fn ramp(w: i32, h: i32, stride: i32) -> Vec<u8> {
         let mut v = vec![0u8; (stride * h) as usize];
         for y in 0..h {
@@ -157,11 +160,11 @@ mod tests {
         assert_eq!(px(&dst, 3, 2, 1), [4, 4, 0x40, 0xff]);
     }
 
-    /// Stride padding must never leak into the output.
+    /// The output must never contain stride padding.
     #[test]
     fn padding_between_rows_is_skipped() {
         let mut bytes = ramp(4, 3, 64);
-        // Poison the padding.
+        // Write poison bytes into the padding.
         for y in 0..3 {
             for b in 16..64 {
                 bytes[(y * 64 + b) as usize] = 0xee;
@@ -211,7 +214,7 @@ mod tests {
             4,
             2,
         );
-        // Top output row is the buffer's last row.
+        // The top output row is the last row of the buffer.
         assert_eq!(px(&dst, 4, 0, 0)[1], 3);
         assert_eq!(px(&dst, 4, 0, 1)[1], 2);
     }
@@ -266,7 +269,7 @@ mod tests {
         assert_eq!(dst, vec![0x33, 0x22, 0x11, 0xff]);
     }
 
-    /// A packed pixel offset by x must not read a 4-byte stride.
+    /// A packed pixel at an x offset must not use a 4-byte pixel stride.
     #[test]
     fn a_packed_subrect_uses_the_right_pixel_stride() {
         let bytes: Vec<u8> = (0..4u8 * 3).collect();

@@ -1,11 +1,13 @@
-//! Integration test against the real Windows OCR engine, using a raw BGRA
-//! fixture in exactly the format `capture.rs` produces.
+//! This integration test uses the real Windows OCR engine.
 //!
-//! Skips when the engine is unavailable, so a fresh clone still passes
-//! `cargo test` — the same approved pattern the M1 golden corpus uses.
+//! It reads a raw BGRA fixture in the format that `capture.rs` produces.
 //!
-//! Windows-only: it drives WinRT OCR. Elsewhere this file compiles to
-//! zero tests.
+//! The test skips when the engine is unavailable.
+//! This lets a fresh clone pass `cargo test`.
+//! This is the approved pattern that the M1 golden corpus uses.
+//!
+//! Windows-only: this test calls WinRT OCR.
+//! Elsewhere, this file compiles to zero tests.
 #![cfg(windows)]
 
 use chibipop::text::layout::resolve;
@@ -47,15 +49,15 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
         "expected 昨日 in the recognised text, got {assembled:?}"
     );
 
-    // Every word must carry a non-degenerate box - that is what hit-scan needs.
+    // Every word must have a non-degenerate box. Hit-scan needs this box.
     for line in &lines {
         for word in &line.words {
             assert!(word.rect.w > 0 && word.rect.h > 0, "degenerate box: {:?}", word.rect);
         }
     }
 
-    // Pointing at the centre of the first recognised character must resolve to
-    // that same character.
+    // The center of the first recognized word must resolve to
+    // that same word.
     let first = &lines[0].words[0];
     let hit = resolve(&lines, first.rect.center(), true).expect("centre of a word must resolve");
     assert!(

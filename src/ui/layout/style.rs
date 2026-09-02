@@ -1,22 +1,21 @@
-//! What one CSS declaration means to this renderer.
+//! This module interprets CSS declarations for internal dictionary content.
 //!
-//! **One reason to change:** a property, a unit or a notation real
-//! dictionaries write that this build does not yet read. The census in
-//! `docs/research/dict-shapes.md` is what decides that, and it decides
-//! every item in this file at once - a new property needs an arm in
-//! [`apply_style`] or [`apply_box`] *and* a grammar to read its value with,
-//! so splitting the two apart would put one change in two files.
+//! **One reason to change:** Add a property, unit, or notation only when a
+//! real dictionary uses it. Use the census in
+//! `docs/research/dict-shapes.md` to identify such values. When you add a
+//! property, update [`apply_style`] or [`apply_box`]. Add a parser for the
+//! property's value.
 //!
-//! Not `crate::ui::css`, which maps a *user's* theme file onto [`Theme`].
-//! This is the dictionary's own styling, and the two never meet: a theme
-//! decides what the panel looks like, a declaration here decides what one
-//! gloss node looks like inside it.
+//! This module does not replace `crate::ui::css`. That module maps a user
+//! theme to [`Theme`]. This module interprets dictionary style declarations.
+//! The theme defines the panel appearance. A declaration here defines one
+//! gloss node's appearance.
 //!
-//! Two records come out: [`Inline`], which is everything a
-//! [`StyledSpan`](super::measure::StyledSpan) carries bar the family, and
-//! [`Block`], which is the box and the two properties CSS inherits. The
-//! split is CSS's own: `style` is not inherited, so a nested block never
-//! pays its parent's margin twice.
+//! This module produces two records: [`Inline`] and [`Block`].
+//! [`Inline`] holds every property of [`StyledSpan`](super::measure::StyledSpan)
+//! except font family. [`Block`] holds box properties and inherited CSS
+//! properties. CSS does not inherit box style. Therefore, a nested block
+//! does not repeat its parent's margin.
 
 use crate::dict::gloss::{GlossDoc, NodeId, Scalar, StyleKey, Tag};
 use crate::ui::theme::Theme;
@@ -24,20 +23,14 @@ use super::gloss::Paragraphs;
 use super::measure::LineBox;
 use super::scene::{Align, Rgb};
 
-/// One value per edge of a box, in
-/// CSS's own order.
+/// One value for each box edge, in CSS order.
 ///
-/// Generic because the box model
-/// needs two of them - lengths for
-/// margin, padding and border width,
-/// and a [`BorderStyle`] per edge -
-/// and because one shorthand parser
-/// then serves both: `padding:
-/// 0.2em 0.3em` and `border-style:
-/// none none none solid` are the same
-/// one-to-four-value grammar, and
-/// both are written by real
-/// dictionaries.
+/// This generic struct supports two box model types.
+/// It stores numbers for margin, padding, and border width.
+/// It stores [`BorderStyle`] values for edge styles.
+/// One shorthand parser handles both types. For example, `padding:
+/// 0.2em 0.3em` and `border-style: none none none solid` use the
+/// same four-value grammar. Dictionaries use both formats.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Edges<T> {
     pub top: T,
@@ -47,32 +40,33 @@ pub struct Edges<T> {
 }
 
 impl<T: Copy> Edges<T> {
-    /// All four edges alike, which is
-    /// what a one-value shorthand
-    /// means.
+    /// Set all four edges to the same value.
+    ///
+    /// This method matches a one-value CSS shorthand declaration.
     pub fn all(v: T) -> Edges<T> {
         Edges { top: v, right: v, bottom: v, left: v }
     }
 }
 
 impl Edges<f32> {
-    /// Top plus bottom: what a box
-    /// adds to its content's height.
+    /// Add top and bottom edges.
+    ///
+    /// This sum is the vertical space that a box adds to its content.
     pub fn vertical(self) -> f32 {
         self.top + self.bottom
     }
 
-    /// Left plus right: what a box
-    /// takes from its content's width.
+    /// Add left and right edges.
+    ///
+    /// This sum is the horizontal space that a box adds to its content.
     pub fn horizontal(self) -> f32 {
         self.left + self.right
     }
 
-    /// Negative edges dropped, which
-    /// is what CSS does to a padding
-    /// or a border width and what it
-    /// deliberately does not do to a
-    /// margin.
+    /// Set negative edge values to zero.
+    ///
+    /// CSS sets negative padding and border width to zero.
+    /// CSS permits negative margin values.
     pub fn non_negative(self) -> Edges<f32> {
         Edges {
             top: self.top.max(0.0),
@@ -83,22 +77,16 @@ impl Edges<f32> {
     }
 }
 
-/// How one border edge draws.
+/// The border style for one edge.
 ///
-/// CSS's `none` is the initial value
-/// and forces that edge's used width
-/// to zero however wide it was
-/// declared, which is why it is the
-/// default here too: a dictionary
-/// asking for a width and no style
-/// gets what a browser gives it,
-/// nothing.
+/// CSS uses `none` as the initial value. This value sets the used width
+/// of the edge to zero. This enum also uses `none` as its default.
+/// A dictionary that declares a border width without a style draws no
+/// border.
 ///
-/// `groove`, `ridge`, `inset` and
-/// `outset` resolve to [`Solid`], as
-/// a browser draws them at the
-/// hairline widths dictionaries use;
-/// `hidden` resolves to [`None`].
+/// The styles `groove`, `ridge`, `inset`, and `outset` map to
+/// [`Solid`]. Browsers draw these styles as solid lines at small
+/// widths. The style `hidden` maps to [`None`].
 ///
 /// [`Solid`]: BorderStyle::Solid
 /// [`None`]: BorderStyle::None
@@ -113,7 +101,7 @@ pub enum BorderStyle {
 }
 
 impl BorderStyle {
-    /// Stable name for snapshots.
+    /// Return a stable name for snapshots.
     pub fn as_str(self) -> &'static str {
         match self {
             BorderStyle::None => "none",
@@ -125,71 +113,48 @@ impl BorderStyle {
     }
 }
 
-/// One box's margin, padding, border
-/// and fill - the box record the
-/// scene had no concept of.
+/// Margin, padding, border, and background fill for one box.
 ///
-/// The census's unsupported block is
-/// dominated by these
-/// (`docs/research/dict-shapes.md`):
-/// margin, padding, border style,
-/// border width and border radius,
-/// each in 11 to 14 of 72
-/// dictionaries, and that is how
-/// **those** dictionaries draw
-/// part-of-speech and label pills.
+/// The census in `docs/research/dict-shapes.md` lists these properties
+/// among common dictionary styles. Dictionaries use margin, padding,
+/// border style, border width, and border radius for badges and pills.
 ///
-/// Not inherited, and deliberately:
-/// CSS inherits none of these, and a
-/// nested block that inherited its
-/// parent's margin would pay it
-/// twice.
+/// CSS does not inherit box model properties. A nested block that
+/// inherited a margin would apply that margin twice.
 ///
-/// Fed today by a node's inline
-/// `style` only. A dictionary's own
-/// `styles.css` folds in underneath
-/// that, in `GlossDoc`'s resolved
-/// style record, so nothing here
-/// learns that CSS exists.
+/// Only inline `style` attributes currently populate this struct.
+/// A dictionary's `styles.css` file resolves into `GlossDoc`.
+/// Therefore, this struct does not process external CSS files directly.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BoxStyle {
     pub margin: Edges<f32>,
     pub padding: Edges<f32>,
-    /// Declared border width, per
-    /// edge. See
-    /// [`border_used`](Self::border_used)
-    /// for the width that draws.
+    /// Declared border width for each edge.
+    ///
+    /// See [`border_used`](Self::border_used) for the rendered width.
     pub border: Edges<f32>,
     pub border_style: Edges<BorderStyle>,
-    /// One colour for all four edges.
+    /// One color for all four edges.
     ///
-    /// CSS's initial value is
-    /// `currentColor`, so this is
-    /// seeded from the text colour the
-    /// node resolved to and a border
-    /// declaring only a width and a
-    /// style still draws.
+    /// The initial CSS value is `currentColor`. This struct seeds
+    /// the color from the resolved text color of the node. If a
+    /// border specifies only width and style, it still renders.
     pub border_color: Rgb,
-    /// One radius for all four
-    /// corners.
+    /// One corner radius for all four corners.
     pub radius: f32,
-    /// `None` is transparent, which is
-    /// CSS's initial value and not the
-    /// same as black.
+    /// Background color.
+    ///
+    /// `None` indicates a transparent background.
+    /// In CSS, transparency is the initial value.
     pub background: Option<Rgb>,
 }
 
 impl BoxStyle {
-    /// The border widths that actually
-    /// draw.
+    /// Return the border widths that appear on screen.
     ///
-    /// `border-style: none` forces an
-    /// edge's used width to zero
-    /// however wide it was declared,
-    /// which is what makes
-    /// `border-style: none none none
-    /// solid` a left rule rather than
-    /// a full frame.
+    /// The style `border-style: none` sets the edge width to zero.
+    /// For example, `border-style: none none none solid` draws
+    /// only a left border line.
     pub fn border_used(self) -> Edges<f32> {
         let used = |style: BorderStyle, w: f32| match style {
             BorderStyle::None => 0.0,
@@ -203,28 +168,19 @@ impl BoxStyle {
         }
     }
 
-    /// Is there any ink in this box?
+    /// Check whether the box draws a background or a border.
     ///
-    /// What a painter asks before
-    /// building a path: a box that only
-    /// spaces its content out is
-    /// geometry, not paint.
+    /// A painter calls this method before it builds a path.
+    /// A box that adds only empty space draws nothing.
     pub fn paints(self) -> bool {
         self.background.is_some() || self.border_used() != Edges::default()
     }
 
-    /// Does this box occupy space its
-    /// content does not?
+    /// Check whether this box adds margins, padding, or borders.
     ///
-    /// True exactly when the walk's
-    /// advance, the pen or the wrap
-    /// width differ from what the same
-    /// content would produce with no
-    /// box at all - which is why a
-    /// gloss carrying no box style
-    /// still measures and stacks
-    /// byte-for-byte as it did before
-    /// this pass existed.
+    /// Return `true` when box geometry changes the layout advance, pen
+    /// position, or wrap width. A gloss node without box properties gains
+    /// no extra space when it measures or stacks.
     pub fn spaces(self) -> bool {
         let b = self.border_used();
         self.margin != Edges::default()
@@ -232,42 +188,25 @@ impl BoxStyle {
             || b != Edges::default()
     }
 
-    /// Is this box anything at all?
+    /// Check whether this box occupies space or paints content.
     ///
-    /// Every gloss paragraph resolves
-    /// one, because a border colour
-    /// defaults to the text colour and
-    /// a radius alone paints nothing;
-    /// only a box that takes space or
-    /// carries ink reaches the scene.
+    /// Every gloss paragraph resolves a box style. The border color
+    /// defaults to the text color, but an empty box paints nothing.
+    /// The renderer keeps boxes that occupy space or draw ink.
     pub fn exists(self) -> bool {
         self.spaces() || self.paints()
     }
 
-    /// One stroke around the whole
-    /// box, or a fill per edge?
+    /// Return one border width when all edges match and render.
     ///
-    /// `Some(width)` when all four
-    /// used widths are equal and
-    /// non-zero, which is the only
-    /// case a single rounded path can
-    /// draw: a corner between two
-    /// different widths has no one
-    /// path, and an edge whose style
-    /// is `none` has no width at all.
-    /// `None` means "fill each edge as
-    /// a plain rect", which is exactly
-    /// right for the one asymmetric
-    /// border the census corpus draws
-    /// - a one-sided rule.
+    /// Return `Some(width)` when all four edges have the same non-zero
+    /// width. A single rounded path requires equal border widths.
+    /// If edge widths differ, or an edge uses style `none`, this method
+    /// returns `None`. When this method returns `None`, the painter draws
+    /// each edge as an individual rectangle.
     ///
-    /// Asked here rather than in each
-    /// painter so that two bins with
-    /// two different drawing APIs
-    /// cannot answer it two different
-    /// ways. Neither bin has a test
-    /// that can see Direct2D; this
-    /// does.
+    /// This method uses one border rule for all platform renderers.
+    /// It prevents behavior differences between Direct2D and tiny-skia.
     pub fn even_border(self) -> Option<f32> {
         let e = self.border_used();
         let even = e.top == e.right && e.right == e.bottom && e.bottom == e.left;
@@ -275,156 +214,105 @@ impl BoxStyle {
     }
 }
 
-/// Yomitan's own base font size, in
-/// CSS pixels.
+/// The Yomitan base font size in CSS pixels.
 ///
-/// Not a size the popup draws at -
-/// the theme owns that - but the
-/// divisor Yomitan's stylesheet
-/// writes its lengths against: the
-/// spec's defaults table states a
-/// cell border as `1em / 14`, "one
-/// pixel at base size, so it scales
-/// with the panel". So a dictionary
-/// asking for `12px` is asking for
-/// twelve fourteenths of the em it
-/// sits in, and its absolute pixel
-/// scales with the panel instead of
-/// shrinking on a dense screen.
+/// The popup does not use this fixed size. The user theme controls the
+/// font size. Yomitan stylesheets calculate lengths from this base value.
+/// The Yomitan specification defines cell borders as `1em / 14`.
+/// Thus, a declared `12px` size corresponds to twelve-fourteenths of an em.
+/// Pixel lengths scale with the popup on a screen with high pixel density.
 pub(super) const YOMITAN_BASE_PX: f32 = 14.0;
 
-/// The two font sizes a CSS length
-/// can be a fraction of.
+/// The two font sizes for relative CSS lengths.
 ///
-/// `em` and `%` are the element's own
-/// and `rem` is the document root's -
-/// two different numbers on any node
-/// that changed its size, so one
-/// `f32` cannot answer both.
+/// The units `em` and `%` use the element font size.
+/// The unit `rem` uses the document root font size.
+/// A child element can change its font size, so this struct stores both values.
 ///
-/// The popup's root is the theme's
-/// body size, because that is what
-/// Yomitan's root font size is.
-/// `ext/css/display.css` only
-/// *declares* `--font-size: calc(1px
-/// * 14)` and applies it to no
-/// element; the size that reaches the
-/// document comes from
-/// `ext/js/display/display.js`'s
-/// `setFontOptions`, which writes the
-/// reader's own font-size setting onto
-/// `documentElement.style.fontSize`.
-/// So `0.4rem` is four tenths of the
-/// body text a Yomitan reader chose,
-/// and it scales when they scale the
-/// popup. Pinning it to
-/// [`YOMITAN_BASE_PX`] would freeze it
-/// at Yomitan's default instead -
-/// right for a reader who never
-/// touched the setting, wrong for
-/// everyone else, and the same
-/// mistake the `px` arm of
-/// [`css_len`] exists to avoid.
+/// The root font size is the theme body size for the panel. Yomitan sets
+/// this size from the user font setting. Specifically, `setFontOptions` in
+/// `ext/js/display/display.js` writes the user setting to
+/// `documentElement.style.fontSize`. Therefore, `0.4rem` scales with the
+/// user's popup size. If code set `rem` to [`YOMITAN_BASE_PX`], the size
+/// would not scale when the user changes settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Ems {
-    /// The element's own resolved font
-    /// size, which `em` and `%` are a
-    /// fraction of.
+    /// The resolved font size of the element.
+    ///
+    /// The units `em` and `%` use this value as a base.
     pub(super) own: f32,
-    /// The panel's body size: the
-    /// popup's root font size, which
-    /// `rem` is a fraction of.
+    /// The root font size of the popup, which is the panel body size.
+    ///
+    /// The unit `rem` uses this value as a base.
     pub(super) root: f32,
 }
 
-/// The ratio CSS's absolute-size
-/// keywords step by, which is also
-/// what `smaller` and `larger` step
-/// by. HTML's own stylesheet gives
-/// `small`, `sub` and `sup` a
-/// `smaller` size and `big` a
-/// `larger` one.
+/// The ratio between adjacent CSS absolute-size keywords.
 ///
-/// One constant, divided and
-/// multiplied rather than two
-/// reciprocals, so that stepping a
-/// whole-pixel size down and back up
-/// returns to it.
+/// The keywords `smaller` and `larger` use this ratio.
+/// HTML user agent styles assign `smaller` to `small`, `sub`, and `sup`.
+/// They assign `larger` to `big`.
+///
+/// Code multiplies or divides by this constant. One constant prevents
+/// roundoff errors when code changes a size by one step.
 pub(super) const FONT_STEP: f32 = 1.2;
 
-/// `font-weight: normal`, likewise,
-/// and CSS's own initial value.
+/// The numeric weight for `font-weight: normal`.
 ///
-/// Also what a rule carries: a
-/// separator has no text to weight,
-/// and zero is no weight.
+/// This value is the initial CSS font weight.
+/// Horizontal rules also use this weight because separators have no text.
 pub(super) const REGULAR_WEIGHT: u16 = 400;
 
-/// `font-weight: bold`, on
-/// DirectWrite's scale. HTML's
-/// default for `b` and `strong`, and
-/// the spec's default for a table
-/// header cell.
+/// The numeric weight for `font-weight: bold`.
+///
+/// This value matches the DirectWrite weight scale. HTML assigns this
+/// weight to `b` and `strong`. The spec assigns it to a table header cell.
 pub(super) const BOLD_WEIGHT: u16 = 700;
 
-/// One step of CSS's relative-weight
-/// table, which over the 400-to-900
-/// range dictionaries use is exactly
-/// what `bolder` and `lighter` mean.
+/// One step in the CSS relative font-weight table.
+///
+/// In the 400 to 900 range used by dictionaries, `bolder` and `lighter`
+/// change the weight by exactly this amount.
 pub(super) const WEIGHT_STEP: u16 = 300;
 
-/// `vertical-align: super`, as a
-/// fraction of the em it is raised
-/// inside.
+/// The vertical shift for `vertical-align: super` as a fraction of em.
 ///
-/// CSS defines it as "the appropriate
-/// superscript position", which is a
-/// face metric, and the seam reports
-/// line and span geometry rather than
-/// a face's tables. A third of an em
-/// up and a fifth down are the
-/// fallbacks a text engine uses for a
-/// face that declares neither.
+/// CSS defines this position from font metrics. The measurement seam
+/// reports line and span geometry instead of font tables.
+/// Text engines use one third of an em upward as the standard default
+/// when a font has no such metric.
 pub(super) const SUPER_RISE: f32 = 1.0 / 3.0;
 
-/// `vertical-align: sub`, likewise.
+/// The vertical shift for `vertical-align: sub` as a fraction of em.
+///
+/// Text engines use one fifth of an em downward as the standard default.
 pub(super) const SUB_DROP: f32 = 1.0 / 5.0;
 
-/// What a span's `verticalAlign`
-/// still needs from its line.
+/// The vertical alignment modes for a span relative to its line.
 ///
-/// `baseline`, `sub` and `super` are
-/// answered from the em alone, so the
-/// walk resolves them into
-/// [`Inline::shift`] as it descends.
-/// The rest are defined against the
-/// line's own extent, which only the
-/// measurer knows, so they ride along
-/// and are answered afterwards.
+/// The values `baseline`, `sub`, and `super` depend only on font size.
+/// The tree walk resolves them directly into [`Inline::shift`].
+/// Other alignments depend on line dimensions. The layout resolves them
+/// after measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VAlign {
-    /// Already in [`Inline::shift`].
+    /// Shift is already calculated in [`Inline::shift`].
     Fixed,
-    /// Its top meets the line's.
+    /// Top edge aligns with the top edge of the line.
     TextTop,
-    /// Its bottom meets the line's.
+    /// Bottom edge aligns with the bottom edge of the line.
     TextBottom,
-    /// Its middle meets half an
-    /// x-height above the baseline.
+    /// Vertical center aligns half an x-height above the baseline.
     Middle,
 }
 
-/// One span's resolved inline style,
-/// while a paragraph is being built.
+/// The resolved inline style for one text span in a paragraph.
 ///
-/// Everything a [`StyledSpan`]
-/// carries bar the family, which no
-/// structured-content property can
-/// change, plus what decides where
-/// the span sits on its line. Two
-/// adjacent runs of text with equal
-/// styles are one span, which is what
-/// `PartialEq` is here for.
+/// This struct holds every property of [`StyledSpan`] except font family.
+/// Structured content cannot change the font family.
+/// This struct also records vertical alignment within a line.
+/// The layout combines adjacent text segments with identical styles into
+/// one span.
 ///
 /// [`StyledSpan`]: super::measure::StyledSpan
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -433,15 +321,15 @@ pub(super) struct Inline {
     pub(super) weight: u16,
     pub(super) italic: bool,
     pub(super) color: Rgb,
-    /// Baseline shift, up positive.
+    /// Vertical baseline shift. Positive values move upward.
     pub(super) shift: f32,
     pub(super) align: VAlign,
 }
 
 impl Inline {
-    /// The body role: what a gloss
-    /// inherits before any node of it
-    /// has spoken.
+    /// Create default inline style from theme settings.
+    ///
+    /// A gloss node inherits these values before local styles apply.
     pub(super) fn body(theme: &Theme) -> Inline {
         Inline {
             size: theme.body_size,
@@ -454,88 +342,60 @@ impl Inline {
     }
 }
 
-/// One node's resolved block-level
-/// style, while a paragraph is being
-/// built.
+/// The resolved block-level style for one node in a paragraph.
 ///
-/// What [`Inline`] is to a span. Its
-/// two halves behave differently
-/// because CSS says so: `style` is
-/// not inherited, so every node
-/// starts with an empty box and a
-/// nested block never pays its
-/// parent's margin twice, while
-/// `align` and `pre_line` are, so a
-/// centred block centres the blocks
-/// inside it.
+/// This struct gives a block the properties that [`Inline`] gives a span.
+/// CSS defines different inheritance rules for the two parts.
+/// CSS does not inherit `style`. Therefore, each node starts with an empty
+/// box, and a nested block does not repeat its parent's margin.
+/// CSS inherits `align` and `pre_line`. Therefore, a centered block centers
+/// the blocks inside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Block {
-    /// This node's own box.
+    /// The box that this node declares.
     pub(super) style: BoxStyle,
     pub(super) align: Align,
-    /// `whiteSpace: pre-line`.
+    /// True when the node sets `whiteSpace: pre-line`.
     pub(super) pre_line: bool,
-    /// Every list level above it,
-    /// added up.
+    /// The total indent from every list level above this node.
     ///
-    /// Inherited rather than part of
-    /// `style`, and that is the whole
-    /// of the difference: a box
-    /// property belongs to the node
-    /// that declared it, and a
-    /// paragraph carries only the box
-    /// of the block that *opened* it,
-    /// so an indent kept there would
-    /// lose every level but the
-    /// innermost - `ul > li > ul > li`
-    /// would indent once.
-    /// [`Block::inherited`] resets the
-    /// box and keeps this, so the
-    /// levels add up for the price of
-    /// one `+=` per list.
+    /// This field is inherited, but it is not part of `style`.
+    /// A box property belongs to the node that declares it.
+    /// A paragraph carries only the box of the block that opened it.
     ///
-    /// A separate term from
-    /// `style.padding.left` rather
-    /// than folded into it, because a
-    /// dictionary declaring
-    /// `paddingLeft` on an `li` gets
-    /// both - Jitendex writes exactly
-    /// that - and because this indent
-    /// is the *list's* padding and so
-    /// shifts an item's border box
-    /// rather than insetting the text
-    /// inside it.
+    /// An indent in `style` would keep only the innermost level.
+    /// The path `ul > li > ul > li` would then indent once.
+    /// [`Block::inherited`] clears the box and keeps this field.
+    /// Each list level adds to the total with one `+=` operation.
+    ///
+    /// This field stays separate from `style.padding.left`.
+    /// A dictionary can declare `paddingLeft` on an `li`, and that node
+    /// gets both values. Jitendex writes exactly that style.
+    /// This indent is the list padding. It moves an item's border box.
+    /// It does not inset the text inside that box.
     pub(super) indent: f32,
 }
 
 impl Block {
-    /// What a child inherits: the
-    /// inherited half, and an empty
-    /// box.
+    /// Return the style that a child inherits: inherited properties and
+    /// an empty box.
     ///
-    /// Also what an *inline* node's own
-    /// line carries. A box belongs to
-    /// the node that declared it, and
-    /// an inline node's box is drawn
-    /// around its own run rather than
-    /// around the paragraph
-    /// ([`Paragraphs::node`]), so the
-    /// line a `data.content` marker
-    /// opens on a `span` takes the
-    /// inherited half and no box.
+    /// An inline node carries this style on its line. A box belongs to the
+    /// node that declares it. The renderer draws an inline node's box around
+    /// its own content, not around the paragraph. See [`Paragraphs::node`].
+    /// Therefore, a `data.content` marker that opens a `span` gets the
+    /// inherited properties and no box.
     pub(super) fn inherited(self) -> Block {
         Block { style: BoxStyle::default(), ..self }
     }
 }
 
-/// A CSS `<string>`, unquoted.
+/// Strip quote characters from a CSS `<string>`.
 ///
-/// Either quote character, because CSS
-/// takes either and a dictionary
-/// writing its style into JSON reaches
-/// for whichever its own escaping
-/// makes easy: the census holds both
-/// `"'①'"` and `"\"◍\""`.
+/// This function accepts both quote characters because CSS accepts both.
+/// A dictionary writes its style into JSON. The dictionary selects the
+/// quote character that needs fewer escape characters.
+/// The census contains both `"'①'"` and `"\"◍\""`.
 pub(super) fn quoted(text: &str) -> Option<&str> {
     let quote = text.chars().next()?;
     if quote != '\'' && quote != '"' {
@@ -544,38 +404,24 @@ pub(super) fn quoted(text: &str) -> Option<&str> {
     text.strip_prefix(quote)?.strip_suffix(quote)
 }
 
-/// HTML's own stylesheet, for the tags
-/// structured content admits.
+/// Apply the HTML user agent style for tags that structured content permits.
 ///
-/// `verticalAlign` is not inherited -
-/// CSS says so - so every node starts
-/// back on its line's baseline and a
-/// `sup` inside a `sup` is raised
-/// once.
+/// CSS does not inherit `verticalAlign`. Therefore, each node starts on
+/// its line baseline. A `sup` inside a `sup` rises once.
 pub(super) fn tag_style(tag: Tag, parent: Inline) -> Inline {
     let mut style = Inline { shift: 0.0, align: VAlign::Fixed, ..parent };
     match tag {
-        // A header cell is bold by the
-        // spec's own defaults table; its
-        // tinted background is a box
-        // property, resolved as one.
-        // Yomitan writes the weight on
-        // `thead` as well as on `th`, so
-        // a plain `td` in a header row
-        // inherits it - which is the
-        // whole of why `thead` is here,
-        // since a `thead` has no text of
-        // its own.
+        // The defaults table in the spec makes a header cell bold.
+        // Its colored background is a box property. The renderer resolves it
+        // separately. Yomitan sets the weight on `thead` and `th`. Therefore,
+        // a plain `td` in a header row inherits the weight. This is the only
+        // reason to include `thead` here, because `thead` has no text of its
+        // own.
         //
-        // A `summary` is its `details`'
-        // heading and takes the same
-        // weight from the same table.
-        // The panel renders the pair
-        // expanded with no disclosure
-        // affordance (see the spec's Out
-        // of Scope), so the weight is
-        // what tells a reader which of
-        // the two blocks is the label.
+        // A `summary` is the heading of its `details` element. The same table
+        // gives it the same weight. The panel expands the pair and shows no
+        // disclosure control. See Out of Scope in the spec. The weight
+        // therefore tells the reader which block is the label.
         Tag::B | Tag::Strong | Tag::Th | Tag::Thead | Tag::Summary => {
             style.weight = BOLD_WEIGHT;
         }
@@ -595,18 +441,13 @@ pub(super) fn tag_style(tag: Tag, parent: Inline) -> Inline {
     style
 }
 
-/// Folds one resolved style property
-/// into a span's style.
+/// Apply one resolved style property to a span style.
 ///
-/// The properties a styled span can
-/// carry, and no others: the box
-/// properties are [`apply_box`]'s,
-/// `listStyleType` is a list's own and
-/// [`marker_of`] reads it straight off
-/// the same record, and a value this
-/// build cannot read leaves the
-/// inherited one standing rather than
-/// guessing.
+/// This function handles only properties that a styled span carries.
+/// [`apply_box`] handles box properties. `listStyleType` belongs to a list,
+/// and [`marker_of`] reads it from the same record.
+/// If this build cannot read a value, it keeps the inherited value.
+/// It does not guess a replacement.
 ///
 /// [`marker_of`]: super::marker::marker_of
 pub(super) fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems, out: &mut Inline) {
@@ -641,26 +482,20 @@ pub(super) fn apply_style(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems,
     }
 }
 
-/// Folds one resolved style property
-/// into a block's box.
+/// Apply one resolved style property to a block box.
 ///
-/// The census's high-usage,
-/// previously unsupported set and no
-/// others
-/// (`docs/research/dict-shapes.md`):
-/// `color` is a span's and
-/// [`apply_style`] already resolved
-/// it, `listStyleType` is resolved by
-/// [`marker_of`] and is no part of a
-/// box, and a value
-/// this build cannot read leaves the
-/// box as it was rather than taking
-/// half a declaration.
+/// This function handles properties that the census marks as common and
+/// that earlier builds did not support. See `docs/research/dict-shapes.md`.
+/// It handles no other property.
 ///
-/// CSS forbids a negative padding,
-/// border width and radius and allows
-/// a negative margin, so each arm
-/// clamps exactly what CSS clamps.
+/// `color` belongs to a span, and [`apply_style`] resolves it.
+/// [`marker_of`] resolves `listStyleType`, which is not part of a box.
+/// If this build cannot read a value, the box keeps its earlier state.
+/// The function never applies part of a declaration.
+///
+/// CSS forbids negative padding, border width, and radius.
+/// CSS permits negative margin. Each match arm clamps the values that
+/// CSS clamps.
 ///
 /// [`marker_of`]: super::marker::marker_of
 pub(super) fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems, out: &mut Block) {
@@ -755,18 +590,13 @@ pub(super) fn apply_box(doc: &GlossDoc, key: StyleKey, value: Scalar, em: Ems, o
     }
 }
 
-/// A box length, in the panel's own
-/// pixels.
+/// Return a box length in the panel's pixels.
 ///
-/// Unlike [`length_px`] a box length
-/// may be zero and may be negative: a
-/// `marginRight: 0` overriding a
-/// wider rule is real - Jitendex
-/// writes exactly that - and a
-/// negative margin is legal CSS.
-/// Filtering either out here would
-/// silently leave the wider rule
-/// standing.
+/// A box length can be zero or negative. [`length_px`] permits neither
+/// value. A declaration of `marginRight: 0` can override a wider rule,
+/// and Jitendex writes exactly that style.
+/// CSS also permits a negative margin. If this function removed either
+/// value, the wider rule would remain effective without an error message.
 pub(super) fn box_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     match value {
         Scalar::Num(n) => finite(em.own * n as f32),
@@ -775,8 +605,7 @@ pub(super) fn box_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     }
 }
 
-/// One to four box lengths, as
-/// [`edges_of`] splits them.
+/// Return one to four box lengths in the order that [`edges_of`] uses.
 pub(super) fn box_edges(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<Edges<f32>> {
     match value {
         Scalar::Num(n) => Some(Edges::all(finite(em.own * n as f32)?)),
@@ -785,28 +614,28 @@ pub(super) fn box_edges(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<Edges<
     }
 }
 
-/// One border style per edge.
+/// Return one border style for each edge.
 ///
-/// The same shorthand grammar:
-/// `border-style: none none none
-/// solid` is how one real dictionary
-/// draws a left rule and nothing else.
+/// This function uses the shorthand grammar that [`edges_of`] reads.
+/// A dictionary writes `border-style: none none none solid`.
+/// That declaration draws a left border line and nothing else.
 pub(super) fn border_styles(doc: &GlossDoc, value: Scalar) -> Option<Edges<BorderStyle>> {
     edges_of(doc.scalar_str(value)?, border_style_of)
 }
 
-/// CSS's one-to-four-value edge
-/// grammar, in CSS's own order.
+/// Read the CSS one-to-four-value edge grammar in CSS order.
 ///
-/// One value is all four edges, two
-/// are vertical then horizontal,
-/// three name the fourth from its
-/// opposite, and four are literal. A
-/// fifth value makes the declaration
-/// invalid, and so does any single
-/// value this build cannot read: the
-/// box keeps what it had rather than
-/// taking half a shorthand.
+/// The number of values selects the assignment:
+///
+/// 1. One value sets all four edges.
+/// 2. Two values set the vertical edges, then the horizontal edges.
+/// 3. Three values set the top, right, and bottom edges. The left edge
+///    copies the right edge.
+/// 4. Four values set each edge in order.
+///
+/// A fifth value makes the declaration invalid. A value that this build
+/// cannot read also makes it invalid. The box keeps its earlier state and
+/// does not apply part of a shorthand.
 pub(super) fn edges_of<T: Copy>(text: &str, one: impl Fn(&str) -> Option<T>) -> Option<Edges<T>> {
     let mut parts = text.split_whitespace();
     let top = one(parts.next()?)?;
@@ -823,17 +652,14 @@ pub(super) fn edges_of<T: Copy>(text: &str, one: impl Fn(&str) -> Option<T>) -> 
     parts.next().is_none().then_some(Edges { top, right, bottom, left })
 }
 
-/// One `border-style` keyword.
+/// Read one `border-style` keyword.
 ///
-/// `groove`, `ridge`, `inset` and
-/// `outset` resolve to `solid`, which
-/// is what a browser draws them as at
-/// the hairline widths dictionaries
-/// use - a border the author asked
-/// for, drawn plainly, is closer than
-/// none. `hidden` is `none` plus a
-/// table border-conflict rule this
-/// renderer has no cascade for.
+/// The keywords `groove`, `ridge`, `inset`, and `outset` resolve to
+/// `solid`. A browser draws these keywords as solid lines at the
+/// small widths that dictionaries use.
+/// A solid border better matches the author's intent than no border.
+/// The keyword `hidden` acts as `none` plus a table border-conflict rule.
+/// This renderer does not implement the cascade for that rule.
 pub(super) fn border_style_of(word: &str) -> Option<BorderStyle> {
     Some(match word {
         "none" | "hidden" => BorderStyle::None,
@@ -845,18 +671,13 @@ pub(super) fn border_style_of(word: &str) -> Option<BorderStyle> {
     })
 }
 
-/// `textAlign`, as the scene carries
-/// alignment.
+/// Read `textAlign` into the alignment that the scene carries.
 ///
-/// `start` and `left` are one value
-/// here and `end` and `right` another:
-/// a Japanese-first product has no
-/// bidi, by the spec's own Out of
-/// Scope. `justify` keeps whatever
-/// alignment it inherited rather than
-/// quietly reading as `start`, because
-/// there is no justification pass
-/// behind it.
+/// The keywords `start` and `left` map to one value.
+/// The keywords `end` and `right` map to another value.
+/// The spec excludes bidirectional text as Out of Scope for this product.
+/// The keyword `justify` keeps the inherited alignment.
+/// It does not map to `start` because this build never justifies text.
 pub(super) fn text_align_of(doc: &GlossDoc, value: Scalar) -> Option<Align> {
     Some(match doc.scalar_str(value)?.trim() {
         "start" | "left" => Align::Leading,
@@ -866,21 +687,16 @@ pub(super) fn text_align_of(doc: &GlossDoc, value: Scalar) -> Option<Align> {
     })
 }
 
-/// `whiteSpace`, of which this build
-/// reads one value.
+/// Read the `whiteSpace` property. This build accepts `pre-line` and
+/// `normal`.
 ///
-/// `pre-line` preserves the
-/// dictionary's own newlines and
-/// still wraps, which is exactly what
-/// both text engines do with a string
-/// holding one - so honouring it
-/// costs the paragraph's edge trim
-/// and nothing else. `pre`,
-/// `pre-wrap` and `nowrap` all turn
-/// wrapping off in ways the
-/// measurement seam has no request
-/// for, so they leave the paragraph as
-/// it was.
+/// The value `pre-line` keeps dictionary newlines, and the text still
+/// wraps. The value `normal` restores normal line wrap.
+/// Both text engines behave this way when a string contains a newline.
+/// Therefore, support for `pre-line` needs only paragraph edge trim.
+/// The values `pre`, `pre-wrap`, and `nowrap` specify no-wrap behavior
+/// that the measurement seam cannot provide. Therefore, they leave the
+/// paragraph unchanged.
 pub(super) fn pre_line_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
     match doc.scalar_str(value)?.trim() {
         "pre-line" => Some(true),
@@ -889,17 +705,13 @@ pub(super) fn pre_line_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
     }
 }
 
-/// A CSS length, in the panel's own
-/// pixels.
+/// Return a CSS length in the panel's pixels.
 ///
-/// A number is Yomitan's em-multiplier
-/// convention, the same one the HTML
-/// renderer prints with an `em`
-/// suffix. A string carries its own
-/// unit, which [`css_len`] reads.
-/// Zero and below are no font size, so
-/// a `fontSize: 0` leaves the
-/// inherited one standing.
+/// A number follows the Yomitan em-multiplier convention. The HTML
+/// renderer prints the same number with an `em` suffix.
+/// A string carries its own unit, and [`css_len`] reads that unit.
+/// Zero and negative values are not valid font sizes. Therefore, a
+/// `fontSize: 0` declaration keeps the inherited size.
 pub(super) fn length_px(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     let px = match value {
         Scalar::Num(n) => em.own * n as f32,
@@ -909,34 +721,25 @@ pub(super) fn length_px(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<f32> {
     (px.is_finite() && px > 0.0).then_some(px)
 }
 
-/// One CSS length with its own unit,
-/// sign and zero intact.
+/// Read one CSS length. Keep its unit, sign, and zero value.
 ///
-/// `em` and `%` are relative to the em
-/// the length sits in, `rem` to the
-/// panel's own body size ([`Ems`]),
-/// and `px` to Yomitan's own base (see
-/// [`YOMITAN_BASE_PX`]) so that an
-/// absolute pixel scales with the
-/// panel instead of shrinking on a
-/// dense screen. A bare number is an
-/// em multiplier, as the schema's own
-/// numeric values are.
+/// The units `em` and `%` are relative to the em that holds the length.
+/// The unit `rem` is relative to the panel body size. See [`Ems`].
 ///
-/// Those four are every length unit
-/// real dictionaries write. Counted
-/// over the corpus of
-/// `docs/research/dict-shapes.md`:
-/// inside inline `style` objects, `em`
-/// 5 690 564, `px` 151 516, `rem`
-/// 3 096 and no `%` at all; inside
-/// stylesheet declaration values, `em`
-/// 1 377, `px` 84 and `rem` 33. What
-/// is left unread is `s` (4), `deg`
-/// (3) and `fr` (3), none of them a
-/// length and all three on properties
-/// this build does not map -
-/// `transition`, `transform` and
+/// The unit `px` is relative to the Yomitan base size. See
+/// [`YOMITAN_BASE_PX`]. This base makes an absolute pixel scale with the
+/// panel. Therefore, the pixel does not shrink on a dense screen.
+///
+/// A bare number is an em multiplier, like the numeric values in the schema.
+///
+/// Real dictionaries use no other length unit. The corpus in
+/// `docs/research/dict-shapes.md` gives these counts. Inline `style` objects
+/// use `em` 5 690 564, `px` 151 516, `rem` 3 096, and no `%`.
+/// Stylesheet declaration values use `em` 1 377, `px` 84, and `rem` 33.
+///
+/// This function does not read `s` (4), `deg` (3), or `fr` (3).
+/// None of these units is a length. All three appear on properties that
+/// this build does not map: `transition`, `transform`, and
 /// `grid-template-*`.
 pub(super) fn css_len(text: &str, em: Ems) -> Option<f32> {
     let text = text.trim();
@@ -953,14 +756,14 @@ pub(super) fn css_len(text: &str, em: Ems) -> Option<f32> {
     })
 }
 
-/// A length a box can use.
+/// Return a length that a box can use.
 pub(super) fn finite(px: f32) -> Option<f32> {
     px.is_finite().then_some(px)
 }
 
-/// `fontWeight` on DirectWrite's
-/// scale, which is also CSS's and
-/// fontdb's.
+/// Read `fontWeight` on the DirectWrite scale.
+///
+/// CSS and fontdb use the same scale.
 pub(super) fn weight_of(doc: &GlossDoc, value: Scalar, inherited: u16) -> Option<u16> {
     let number = |n: f64| (n.is_finite() && n >= 1.0).then(|| (n as u16).clamp(100, 900));
     match value {
@@ -976,10 +779,10 @@ pub(super) fn weight_of(doc: &GlossDoc, value: Scalar, inherited: u16) -> Option
     }
 }
 
-/// `fontStyle`. Oblique is italic:
-/// neither engine synthesizes a slant
-/// and a family that has one face for
-/// both is the normal case.
+/// Read `fontStyle`. Treat `oblique` as italic.
+///
+/// Neither engine creates a slant. A font family with one face for both
+/// styles is normal.
 pub(super) fn italic_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
     match doc.scalar_str(value)?.trim() {
         "italic" | "oblique" => Some(true),
@@ -988,15 +791,11 @@ pub(super) fn italic_of(doc: &GlossDoc, value: Scalar) -> Option<bool> {
     }
 }
 
-/// `verticalAlign`, against the em it
-/// sits in.
+/// Read `verticalAlign` and resolve it against the element's em size.
 ///
-/// A line box here holds one line of
-/// text, so its own edges and its text
-/// edges are the same two edges:
-/// `top` cannot differ from
-/// `text-top`, nor `bottom` from
-/// `text-bottom`.
+/// A line box here holds one line of text. Therefore, the line edges and
+/// the text edges are the same two edges. The value `top` cannot differ
+/// from `text-top`, and `bottom` cannot differ from `text-bottom`.
 pub(super) fn align_of(doc: &GlossDoc, value: Scalar, em: f32) -> Option<(f32, VAlign)> {
     Some(match doc.scalar_str(value)?.trim() {
         "baseline" => (0.0, VAlign::Fixed),
@@ -1009,17 +808,12 @@ pub(super) fn align_of(doc: &GlossDoc, value: Scalar, em: f32) -> Option<(f32, V
     })
 }
 
-/// One span's baseline shift on the
-/// line it landed on.
+/// Compute one span's baseline shift on the line where it lands.
 ///
-/// [`VAlign::Fixed`] needs no line.
-/// The rest are CSS's line-relative
-/// values, and the seam reports
-/// exactly two facts about a line -
-/// how tall it is and how far down it
-/// the baseline sits - so a span's own
-/// ascent is its own advance in the
-/// same proportion.
+/// [`VAlign::Fixed`] needs no line. The other values are CSS line-relative
+/// values. The measurement seam reports only line height and baseline
+/// position. Therefore, a span's own ascent uses the same
+/// height-to-ascent ratio as its line.
 pub(super) fn shift_on(style: Inline, line: LineBox, span_h: f32) -> f32 {
     if style.align == VAlign::Fixed || line.h <= 0.0 {
         return style.shift;
@@ -1031,11 +825,9 @@ pub(super) fn shift_on(style: Inline, line: LineBox, span_h: f32) -> f32 {
     match style.align {
         VAlign::TextTop => ascent - own_ascent,
         VAlign::TextBottom => own_descent - descent,
-        // CSS puts the box's middle half
-        // an x-height above the
-        // baseline; with no x-height in
-        // the seam, half the ascent is
-        // the usual stand-in for one.
+        // CSS places the box middle at half an x-height above the baseline.
+        // The seam reports no x-height. Therefore, this code uses half the
+        // ascent as an estimate of one x-height.
         VAlign::Middle => ascent / 4.0 - (own_ascent - own_descent) / 2.0,
         VAlign::Fixed => style.shift,
     }
@@ -1057,19 +849,15 @@ pub(super) fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-/// A CSS colour, as the scene carries
-/// them.
+/// Read a CSS color in the form that the scene carries.
 ///
-/// Hex in all three lengths,
-/// `rgb()`/`rgba()`, and the sixteen
-/// names CSS has had since level 1
-/// plus `orange` - the whole surface a
-/// dictionary's `color` values use.
-/// Alpha parses and is dropped: `Rgb`
-/// is the scene's colour and the panel
-/// composites its own opacity once, at
-/// the end. Anything else keeps the
-/// colour it inherited.
+/// This function reads hex colors in all three lengths, `rgb()`, and
+/// `rgba()`. It also reads the sixteen names that CSS has had since
+/// level 1, plus `orange`. Dictionary `color` values use this full set.
+///
+/// This function ignores any alpha channel. `Rgb` is the scene's color
+/// type, and the panel composites its own opacity once at the end.
+/// If this function cannot read a value, the color keeps its inherited value.
 pub(super) fn color_of(doc: &GlossDoc, value: Scalar) -> Option<Rgb> {
     let text = doc.scalar_str(value)?.trim();
     if let Some(hex) = text.strip_prefix('#') {
@@ -1111,8 +899,8 @@ pub(super) fn hex_color(hex: &[u8]) -> Option<Rgb> {
     }
 }
 
-/// CSS level 1's sixteen, their two
-/// British spellings, and `orange`.
+/// Read the sixteen CSS level 1 names, both spellings of `gray`, and
+/// `orange`.
 pub(super) fn named_color(name: &str) -> Option<Rgb> {
     let mut lower = name.to_ascii_lowercase();
     lower.retain(|c| !c.is_whitespace());
@@ -1138,49 +926,31 @@ pub(super) fn named_color(name: &str) -> Option<Rgb> {
     })
 }
 
-/// The style half of the gloss walk: one node's declarations folded into
-/// the two records it inherits.
+/// This module contains the style half of the gloss walk. It folds one
+/// node's declarations into the two records that the node inherits.
 ///
-/// Methods on [`Paragraphs`] rather than free functions because all five
-/// read the same two things off the walk - the styling gate and the
-/// theme's own body size - and a free function would have taken both as
-/// arguments at every call.
+/// These methods belong to [`Paragraphs`] instead of free functions.
+/// All five methods read the same two values from the walk: the style gate
+/// and the theme body size. A free function would need both values at each
+/// call.
 impl Paragraphs<'_> {
-    /// A node's resolved style record,
-    /// under the styling gate.
+    /// The resolved style record for one node, under the style gate.
     ///
-    /// **The one gate the "honour
-    /// dictionary styling" setting
-    /// closes**, and a method rather
-    /// than a check at each reader for
-    /// exactly that reason: off has to
-    /// mean *neither* inline `style`
-    /// nor a dictionary's own
-    /// `styles.css`, and that sheet
-    /// folds into this same record
-    /// rather than a second one. So a
-    /// source added there is gated by
-    /// construction, and nothing
-    /// downstream learns that a
-    /// setting exists.
+    /// The "honor dictionary styling" setting controls this gate.
+    /// This method applies the gate once. It does not repeat the check for each reader.
+    /// When the setting is off, neither inline `style` nor dictionary
+    /// `styles.css` reaches the record. That stylesheet resolves into the
+    /// same record, not a second record. A new source added here therefore
+    /// uses the gate, and downstream code does not need the setting.
     ///
-    /// An empty record is every
-    /// property unset, which leaves
-    /// HTML's own stylesheet
-    /// ([`tag_style`]) and the theme's
-    /// own font and colours standing.
-    /// A `b` stays bold with styling
-    /// off: markup is what an entry
-    /// *says*, where a `style` object
-    /// is how a dictionary chose to
-    /// draw it.
+    /// An empty record leaves every property unset. Only two sources remain
+    /// visible: HTML's own stylesheet ([`tag_style`]) and the theme's font
+    /// and colors. A `b` stays bold when style support is off because markup
+    /// states what an entry says. A `style` object states how a dictionary
+    /// chooses to draw it.
     ///
-    /// [`styled_marker`] is the third
-    /// reader of the same record and
-    /// the same flag - the marker is
-    /// resolved by a free function
-    /// walking a document, so it
-    /// cannot come through here.
+    /// [`styled_marker`] reads the same record under the same gate. A free
+    /// function walks the whole document, so it cannot call this method.
     ///
     /// [`styled_marker`]: super::marker::styled_marker
     pub(super) fn declarations(&self, id: NodeId) -> &[(StyleKey, Scalar)] {
@@ -1191,31 +961,22 @@ impl Paragraphs<'_> {
         }
     }
 
-    /// One node's resolved inline
-    /// style.
+    /// The resolved inline style for one node.
     ///
-    /// HTML's own stylesheet first - a
-    /// `b` is bold and a `sup` is a
-    /// raised `smaller` - then the
-    /// node's resolved style record,
-    /// which is the dictionary
-    /// author's last word and which
-    /// the dictionary's own
-    /// `styles.css` also feeds. Both
-    /// arrive through
-    /// [`Paragraphs::declarations`],
-    /// so the styling setting turns
-    /// off both at once.
+    /// This method applies HTML's stylesheet first. Thus, a `b` is bold and a
+    /// `sup` is a raised `smaller`. It then applies the node's resolved style
+    /// record. The dictionary author's record has final precedence in the
+    /// cascade, and the dictionary's `styles.css` also feeds it.
+    /// Both inline `style` and `styles.css` arrive through
+    /// [`Paragraphs::declarations`]. Therefore, the setting disables both
+    /// sources at once.
     pub(super) fn styled(&self, id: NodeId, parent: Inline) -> Inline {
         let doc = self.doc;
         let mut style = tag_style(doc.node(id).tag, parent);
         let record = self.declarations(id);
         for (i, (key, value)) in record.iter().enumerate() {
-            // First occurrence wins,
-            // which is the answer
-            // `GlossDoc::style_of`
-            // gives every other reader
-            // of the record.
+            // The first occurrence takes precedence. This matches the result
+            // that `GlossDoc::style_of` gives to every other record reader.
             if record[..i].iter().any(|(seen, _)| seen == key) {
                 continue;
             }
@@ -1224,28 +985,21 @@ impl Paragraphs<'_> {
         style
     }
 
-    /// One node's resolved
-    /// block-level style.
+    /// The resolved block-level style for one node.
     ///
-    /// The inherited half comes from
-    /// the node above; the box starts
-    /// empty, because CSS inherits none
-    /// of it. `inline` is this node's
-    /// own resolved text style, and it
-    /// is load-bearing twice: it seeds
-    /// `border-color`, whose CSS
-    /// initial value is
-    /// `currentColor`, and it is the em
-    /// a box length resolves against -
-    /// `padding: 0.25em` is a quarter
-    /// of the element's *own* font
-    /// size, where `fontSize: 0.8em`
-    /// is eight tenths of its parent's.
+    /// The inherited half comes from the parent. The box starts empty
+    /// because CSS does not inherit it. The `inline` parameter holds this
+    /// node's resolved text style. It has two purposes.
     ///
-    /// A dictionary's own `styles.css`
-    /// feeds this by widening the same
-    /// resolved record, so nothing here
-    /// learns that CSS exists.
+    /// First, `inline` seeds `border-color` because CSS sets its initial
+    /// value to `currentColor`. Second, `inline` supplies the em that
+    /// resolves a box length. For example, `padding: 0.25em` uses one
+    /// quarter of the element's own font size. But `fontSize: 0.8em`
+    /// uses eight tenths of the parent's font size.
+    ///
+    /// A dictionary's `styles.css` also feeds this method because it adds
+    /// to the same resolved record. Therefore, this method does not need
+    /// separate CSS logic.
     pub(super) fn boxed(&self, id: NodeId, parent: Block, inline: Inline) -> Block {
         let start = Block {
             style: BoxStyle { border_color: inline.color, ..BoxStyle::default() },
@@ -1254,37 +1008,28 @@ impl Paragraphs<'_> {
         self.declared(id, start, inline.size)
     }
 
-    /// The two bases a length in this
-    /// node's declarations resolves
-    /// against: the node's own em, and
-    /// the panel's.
+    /// Return the two base sizes that resolve lengths in this node's
+    /// declarations: the node's own em and the panel's em.
     pub(super) fn ems(&self, own: f32) -> Ems {
         Ems { own, root: self.root_em }
     }
 
-    /// One node's own declarations,
-    /// folded over the box it starts
-    /// from.
+    /// Fold this node's declarations into the box where it starts.
     ///
-    /// Split out because a table cell
-    /// starts from Yomitan's own grid
-    /// defaults rather than from an
-    /// empty box
-    /// ([`Paragraphs::cell_defaults`]),
-    /// and the dictionary's last word
-    /// must be applied the same way to
-    /// both. `own` is the node's *own*
-    /// resolved font size, because a
-    /// box length is a fraction of it -
-    /// of the panel's, for a `rem`
-    /// ([`Ems`]).
+    /// This method stays separate from [`Paragraphs::boxed`] because a
+    /// table cell starts from Yomitan's grid defaults
+    /// ([`Paragraphs::cell_defaults`]), not from an empty box.
+    /// The dictionary's resolved declarations must apply in both cases.
+    ///
+    /// The `own` parameter is the node's resolved font size. A box length
+    /// is a fraction of `own`, or of the panel's root em for a `rem` unit.
+    /// See [`Ems`].
     pub(super) fn declared(&self, id: NodeId, mut block: Block, own: f32) -> Block {
         let doc = self.doc;
         let em = self.ems(own);
         let record = self.declarations(id);
         for (i, (key, value)) in record.iter().enumerate() {
-            // First occurrence wins, as
-            // it does for a span.
+            // The first occurrence takes precedence here, as it does for a span.
             if record[..i].iter().any(|(seen, _)| seen == key) {
                 continue;
             }

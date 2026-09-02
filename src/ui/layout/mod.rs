@@ -1,45 +1,46 @@
-//! The popup's measured scene.
+//! The module builds the measured `PopupScene` for one popup.
 //!
-//! Layout lives here, not in the bins: element construction, wrapping,
-//! line stacking, the side panel, scrollbar geometry and hit rects.
-//! Bins measure text through `TextMeasure` and paint the runs the scene
-//! hands them; nothing else about the panel is theirs.
+//! This module owns element construction, text wrap, line stacking, the side
+//! panel, scrollbar geometry, and hit rectangles.
+//! The platform bins measure text through [`TextMeasure`] and paint the runs
+//! that the scene provides. They do not own other panel behavior.
 //!
-//! One pixel space, and no scale factor: core never sees one. Windows
-//! hands in DIPs because its Direct2D target carries the DPI, Linux
-//! hands in device pixels; either way the conversion is the bin's
-//! (physical pixels stay authoritative, logical geometry is derived).
+//! Core uses one pixel space. It never sees a scale factor.
+//! Windows passes DIPs because its Direct2D target carries the DPI.
+//! Linux passes device pixels. Each bin does its own conversion.
+//! Physical pixels remain authoritative. Logical geometry derives from them.
 //!
-//! # The submodules, and the one reason each has to change
+//! # Submodules and one reason to change for each
 //!
-//! Private organisation and not a seam: the inline pass has exactly one
-//! implementation and no trait, so every public path is re-exported below
-//! and no caller anywhere names a submodule. The cut is by reason to
-//! change, so a census finding, a golden field or a table rule each lands
-//! in one file:
+//! These private modules do not form a seam. The inline layout pass has one
+//! implementation and no trait.
+//! The public paths re-export the needed types below. Callers do not name a
+//! private module.
+//! Each module has one reason to change. A census finding, a golden field, and
+//! a table rule each belong in one file:
 //!
-//! | module | one reason to change |
+//! | module | reason to change |
 //! |---|---|
-//! | `measure` | the seam's contract with a platform text engine |
-//! | `scene` | what a bin paints and a geometry snapshot pins |
-//! | `style` | what one CSS declaration means to this renderer |
-//! | `link` | what following a glossary link does |
-//! | `flow` | what a paragraph carries from the walk to the measure |
-//! | `gloss` | what a `GlossDoc` subtree becomes |
-//! | `ruby` | how a reading buys its slot, and where it sits in it |
-//! | `marker` | what a list draws beside its items, and where |
-//! | `image` | how an inline asset is sized and given room |
-//! | `pill` | what an inline box's own edges do to its line |
-//! | `pass` | how blocks stack, and how a box closes around them |
-//! | `table` | HTML's and CSS's table rules |
-//! | `chrome` | what the popup shows of an entry |
+//! | `measure` | the contract with a platform text engine |
+//! | `scene` | the scene that a bin paints and a geometry snapshot pins |
+//! | `style` | the meaning of one CSS declaration |
+//! | `link` | the action for a glossary link |
+//! | `flow` | paragraph data from the walk to the measure |
+//! | `gloss` | the result of a `GlossDoc` subtree |
+//! | `ruby` | the slot and position for a reading |
+//! | `marker` | the marker beside list items and its position |
+//! | `image` | the size and space for an inline asset |
+//! | `pill` | the effect of inline box edges on a line |
+//! | `pass` | block order and box boundaries |
+//! | `table` | the HTML and CSS table rules |
+//! | `chrome` | the popup content for an `Entry` |
 //!
-//! Named in prose rather than linked, because each is private: a public
-//! doc comment linking a private module is a promise this module does not
-//! make.
+//! The table names private modules in prose, not with links.
+//! A public doc comment that links a private module promises an interface that
+//! this module does not provide.
 //!
-//! What stays here is the face: [`scene()`], the request it takes, and the
-//! scrollbar arithmetic a bin asks for by itself.
+//! The public surface is [`scene()`], its request, and the scrollbar arithmetic
+//! that a bin uses.
 
 mod chrome;
 mod flow;
@@ -81,23 +82,23 @@ use measure::measure_text;
 use pass::Pass;
 use style::REGULAR_WEIGHT;
 
-/// One popup's whole layout input.
+/// Input for the complete layout of one popup.
 pub struct SceneRequest<'a> {
     pub presentation: &'a Presentation,
     pub theme: &'a Theme,
-    /// The width to fill.
+    /// Maximum popup width.
     pub max_w: f32,
-    /// The tallest the panel may get.
+    /// Maximum popup height.
     pub max_h: f32,
     pub show_back: bool,
     pub side_panel: bool,
-    /// How much of an entry to show.
+    /// Render settings control how entry content appears.
     pub render: RenderSettings,
-    /// `Some` reserves the Anki slot.
+    /// A `Some` value reserves the Anki slot.
     pub anki: Option<&'a AnkiPopupState>,
 }
 
-/// Lays out one popup.
+/// Build the measured scene for one popup.
 pub fn scene(
     req: &SceneRequest<'_>,
     m: &mut dyn TextMeasure,
@@ -120,16 +121,9 @@ pub fn scene(
     let mut y = 0.0f32;
     let mut reserved_w = 0.0f32;
     let mut probes = Vec::new();
-    // Every buffer the gloss walk
-    // reuses, and the scene it is
-    // filling. Bundled because a
-    // table lays its cells out
-    // through the same paragraph
-    // pass the panel's own stream
-    // uses, so the pass has to be
-    // callable from two places
-    // without threading eight
-    // arguments through both.
+    // Keep the gloss buffers and the scene in one `Pass`.
+    // A table sends each cell through the panel's paragraph pass.
+    // One `Pass` gives both callers the same buffers without eight arguments.
     let mut pass = Pass {
         font,
         theme,
@@ -170,11 +164,8 @@ pub fn scene(
                 h
             }
             Elem::Corner(line) => {
-                // Trailing-aligned: the box
-                // hugs the right edge, and
-                // the run is measured
-                // pre-alignment, so x comes
-                // from the width.
+                // The box uses trailing alignment and touches the right edge.
+                // The run is measured before alignment, so its width determines the x coordinate.
                 let met = measure_line(m, font, line, content_w, &mut pass.measured)?;
                 pass.out.push(SceneElem {
                     kind: ElemKind::Corner,
@@ -372,33 +363,30 @@ pub fn scene(
     })
 }
 
-
-/// The width the next stacking element gets, and the corner's claim spent.
+/// Return the width for the next element and clear the corner reservation.
 ///
-/// Six of the panel's eight element kinds start here, and the reservation
-/// is why: the frequency corner advances no y and hangs at the right edge,
-/// so it narrows the *one* element after it ([`CORNER_GAP`]) and nothing
-/// further down the panel. Reading the reservation therefore has to clear
-/// it, and a seventh arm that read it without clearing it would silently
-/// narrow every block below the corner instead of one.
+/// A corner element stays at the trailing edge and does not advance `y`.
+/// Its width plus [`CORNER_GAP`] reduces the available width for the next
+/// element that uses this function.
+/// This function clears the reservation after it reads it.
+/// Without the clear, later elements would keep the reduced width.
 ///
-/// A free function taking `&mut f32` rather than a closure over
-/// `reserved_w`: the corner's own arm writes the reservation, and a
-/// closure holding it borrowed for the whole loop would forbid that.
+/// Use a free function with `&mut f32`, not a closure over `reserved_w`.
+/// The corner arm writes the reservation.
+/// A closure that holds the borrow through the loop would block that write.
 fn take_avail(content_w: f32, reserved_w: &mut f32) -> f32 {
     let avail_w = (content_w - *reserved_w).max(1.0);
     *reserved_w = 0.0;
     avail_w
 }
-
-/// Overflow past the view, or 0.
+/// Return content overflow past the view, or zero.
 pub fn max_scroll(content_h: i32, view_h: i32) -> i32 {
     (content_h - view_h).max(0)
 }
-
-/// The thumb as `(top, height)`.
+/// Return the thumb as `(top, height)`.
 ///
-/// Floored, and kept in track.
+/// Integer division floors the height.
+/// Clamping keeps the thumb inside the track.
 pub fn scrollbar_thumb(
     track_h: i32,
     content_h: i32,

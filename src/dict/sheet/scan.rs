@@ -1,38 +1,43 @@
-//! A dictionary's `styles.css`, scanned into flat style rules.
+//! A dictionary `styles.css` file, scanned into flat style rules.
 //!
-//! Hand-rolled and character-level, because no regex sees block structure:
-//! nested at-rules, native `&` nesting, and a brace inside a string or a
-//! `url(...)` all defeat a pattern that counts braces. This is deliberately
-//! the same scan `tools/dict-census/census.py` runs over the corpus, so the
-//! rule count the census reports and the rule count this compiles from are
-//! the same number and the census stays a usable gauge.
+//! This scanner uses explicit byte-level logic. A regex cannot see block
+//! structure. Nested at-rules, native `&` nesting, and braces inside a string
+//! or `url(...)` defeat brace counting.
+//! This code uses the scan from `tools/dict-census/census.py` over the corpus.
+//! The census report and this code then have the same rule count.
+//! The census provides a useful measure.
 //!
-//! Total, by the same rule the tree parser follows: malformed input records
-//! its first complaint, drops the rule it was inside, and returns everything
-//! already scanned. A dictionary that ships a broken stylesheet must still
-//! render, and a build must never fail over one.
+//! This scan is total. It follows the tree parser's rule.
+//! Malformed input records its first complaint.
+//! The scan drops the rule that contains the problem and returns all earlier
+//! rules.
+//! A dictionary with a broken stylesheet must still render.
+//! A build must not fail because one stylesheet is broken.
 
-/// One style rule, its `&` nesting already resolved into flat selectors.
+/// One style rule with `&` nesting resolved into flat selectors.
 pub(super) struct Rule {
-    /// The rule's selector list, one entry per top-level comma.
+    /// The rule's selector list has one entry per top-level comma.
     pub(super) selectors: Vec<String>,
-    /// `(property, value)`, property lowercased, **in source order**.
+    /// `(property, value)`, with the property lowercased and entries kept
+    /// **in source order**.
     ///
-    /// Order is load-bearing and must not be sorted: within one rule a
-    /// shorthand that comes after a longhand overwrites it, which is exactly
-    /// what applying them in this order reproduces.
+    /// This order is required. The code must not sort this list.
+    /// Within one rule, a shorthand that follows a longhand overwrites it.
+    /// The code applies declarations in source order to reproduce this result.
     pub(super) decls: Vec<Decl>,
-    /// Did this rule sit inside an at-rule body?
+    /// True when this rule sat inside an at-rule body.
     ///
-    /// Carried rather than dropped here so the compiler counts at-rule
-    /// casualties in the same place it counts unsupported selectors. The
-    /// corpus loses 4 box rules to this (`docs/research/dict-shapes.md`).
+    /// The scanner keeps this rule for the compiler.
+    /// The compiler counts at-rule drops separately.
+    /// The corpus loses 4 box rules to at-rule bodies
+    /// (`docs/research/dict-shapes.md`).
     pub(super) in_at_rule: bool,
-    /// Source order, assigned where the block *opens*.
+    /// Source order, assigned when the block opens.
     ///
-    /// Not where it closes: a nested block closes before its parent, and CSS
-    /// says a nested rule cascades after the rule it sits in. Taking the
-    /// index at `{` is the only reading that puts them in that order.
+    /// The block's closing position is not the source order.
+    /// A nested block closes before its parent, but CSS places the nested rule
+    /// after its parent in the cascade.
+    /// The index at `{` is the only value that preserves this order.
     pub(super) order: u32,
 }
 
@@ -40,47 +45,51 @@ pub(super) struct Rule {
 pub(super) struct Decl {
     pub(super) prop: String,
     pub(super) value: String,
-    /// Was the value marked `!important`?
+    /// True when the value has an `!important` marker.
     ///
-    /// Ordering *within* the sheet only. 96 of these appear across 8 corpus
-    /// stylesheets, so stripping the marker and forgetting it would hand a
-    /// declaration the author flagged as decisive to whichever rule happened
-    /// to be more specific. It never outranks inline `style`, which this
-    /// module's contract gives the last word unconditionally.
+    /// The marker changes order only *within* the sheet. 96 occur across
+    /// 8 corpus stylesheets.
+    /// If code strips the marker and forgets it, specificity alone chooses the
+    /// winner, even against a declaration that the author marked decisive.
+    /// The marker never outranks the inline `style` attribute.
+    /// This module makes the inline `style` attribute win without exception.
     pub(super) important: bool,
 }
 
-/// What one scan recovered.
+/// The rules and first error that one scan recovers.
 pub(super) struct Scan {
     pub(super) rules: Vec<Rule>,
-    /// The first thing that did not parse, for the build's report.
+    /// The first parse error for the build report.
     pub(super) error: Option<&'static str>,
 }
 
-/// Block levels the scanner will descend.
+/// The deepest block nesting that the scanner allows.
 ///
-/// Native CSS nesting is a tree, and resolving `&` multiplies selector lists
-/// at every level, so an adversarial file could ask for a combinatorial
-/// blow-up. The corpus nests three levels deep at most (Jitendex's
-/// `td { & span { ... } }` inside a `& td` inside a forms rule), so this is
-/// five times the deepest real file and exists only to bound the cost.
+/// Native CSS nesting forms a tree.
+/// Each level multiplies selector lists when the code resolves `&`.
+/// Therefore an adversarial file could cause a combinatorial blow-up.
+/// The corpus nests three levels deep at most.
+/// Jitendex's `td { & span { ... } }` is inside a `& td` block, which is inside
+/// a forms rule.
+/// This limit is five times the deepest real file.
+/// It exists only to bound the cost.
 const MAX_NESTING: usize = 16;
 
-/// Resolved selectors one sheet may carry.
+/// The maximum number of resolved selectors in one sheet.
 ///
-/// The corpus's largest sheet compiles 322 selectors, so this bounds a
-/// pathological file at roughly a hundred times the real maximum while
-/// costing a real one nothing.
+/// The largest corpus sheet compiles 322 selectors.
+/// This limit bounds a pathological file at about 100 times the real maximum.
+/// This limit does not affect real files.
 const MAX_SELECTORS: usize = 32_768;
 
 /// One open block.
 struct Frame {
-    /// Resolved selector list. Empty for an at-rule body.
+    /// Resolved selector list. This list is empty for an at-rule body.
     selectors: Vec<String>,
     at_rule: bool,
     decls: Vec<Decl>,
     order: u32,
-    /// Was this frame, or anything above it, an at-rule body?
+    /// True when this frame or any enclosing frame is an at-rule body.
     in_at_rule: bool,
 }
 
@@ -92,9 +101,9 @@ pub(super) fn scan(css: &str) -> Scan {
     let mut selectors_made: usize = 0;
     let mut opened: u32 = 0;
     let b = css.as_bytes();
-    // Byte indices throughout, and safely: every character the scan reacts
-    // to is ASCII, and a UTF-8 continuation byte is never one of them, so a
-    // slice taken at any of these positions lands on a character boundary.
+    // The code uses byte indices throughout. Every character that the scan
+    // handles is ASCII, and a UTF-8 continuation byte is never one of them.
+    // Therefore every slice at these positions starts at a character boundary.
     let mut run = 0usize;
     let mut i = 0usize;
     while i < b.len() {
@@ -103,16 +112,16 @@ pub(super) fn scan(css: &str) -> Scan {
                 buf.push_str(&css[run..i]);
                 match find(b, i + 2, b"*/") {
                     Some(end) => {
-                        // A comment separates tokens, so it collapses to a
-                        // space rather than to nothing: `a/**/b` is two
-                        // selectors' worth of text, not one identifier.
+                        // A comment separates tokens, so this code replaces
+                        // it with one space. For example, `a/**/b` contains
+                        // two selectors' worth of text, not one identifier.
                         buf.push(' ');
                         i = end + 2;
                     }
                     None => {
                         out.error = out.error.or(Some("unterminated comment"));
-                        // Everything after an unterminated comment is
-                        // comment, so the scan is over.
+                        // Everything after an unterminated comment belongs to
+                        // the comment, so the scan ends.
                         break;
                     }
                 }
@@ -123,8 +132,9 @@ pub(super) fn scan(css: &str) -> Scan {
                 if !ok {
                     out.error = out.error.or(Some("unterminated string"));
                 }
-                // Copied verbatim, quotes included: `list-style-type: "＊"`
-                // needs its quotes to survive into the value.
+                // The scan copies a string verbatim, with its quotes.
+                // For example, `list-style-type: "＊"` needs its quotes in
+                // the value.
                 buf.push_str(&css[run..end]);
                 run = end;
                 i = end;
@@ -137,9 +147,9 @@ pub(super) fn scan(css: &str) -> Scan {
                 parens = parens.saturating_sub(1);
                 i += 1;
             }
-            // Inside parentheses a brace or a semicolon is data - a
-            // `url(data:...;base64,...)` or a `calc()` - and must not close
-            // a block.
+            // Inside parentheses, a brace or a semicolon is data. The scanner
+            // must not close a block on either character. Examples include a
+            // `url(data:...;base64,...)` value and a `calc()` expression.
             _ if parens > 0 => i += 1,
             b'{' => {
                 buf.push_str(&css[run..i]);
@@ -148,8 +158,8 @@ pub(super) fn scan(css: &str) -> Scan {
                 opened += 1;
                 if stack.len() >= MAX_NESTING || selectors_made > MAX_SELECTORS {
                     out.error = out.error.or(Some("nesting or selector count over the cap"));
-                    // Push it anyway, with nothing in it: the braces still
-                    // have to balance or every rule after this one is lost.
+                    // The code pushes an empty frame after the cap. The
+                    // braces must still balance, or every later rule is lost.
                     stack.push(Frame { selectors: Vec::new(), ..frame });
                 } else {
                     stack.push(frame);
@@ -181,8 +191,8 @@ pub(super) fn scan(css: &str) -> Scan {
             b';' => {
                 buf.push_str(&css[run..i]);
                 match stack.last_mut() {
-                    // An at-statement - `@import url(...)`, `@charset` - is
-                    // not a declaration and carries no value to keep.
+                    // An at-statement such as `@import url(...)` or `@charset`
+                    // is not a declaration and has no value to keep.
                     Some(frame) if !buf.trim_start().starts_with('@') => {
                         flush(&mut buf, &mut frame.decls);
                     }
@@ -195,18 +205,19 @@ pub(super) fn scan(css: &str) -> Scan {
         }
     }
     if !stack.is_empty() {
-        // Every open frame is a rule whose body never ended, so its
-        // declarations are as unknowable as its extent. Drop them, which is
-        // the same answer the tree parser gives a truncated item.
+        // Each open frame has a body that never ended. Its declarations have
+        // unknown extent, so the scan drops them. The tree parser gives the
+        // same result for a truncated item.
         out.error = out.error.or(Some("unclosed block"));
     }
-    // Emission order is closing order, and a nested rule closes first.
-    // `order` holds the opening index, so this restores source order.
+    // Rules emit when blocks close, so nested rules emit before parents. The
+    // `order` field stores each block's opening index. This sort restores
+    // source order.
     out.rules.sort_by_key(|r| r.order);
     out
 }
 
-/// One block's frame, with `&` resolved against the rule it nests in.
+/// One block frame with `&` resolved against its parent rule.
 fn open(prelude: &str, stack: &[Frame], order: u32, made: &mut usize) -> Frame {
     let in_at_rule = stack.last().is_some_and(|f| f.in_at_rule);
     if prelude.starts_with('@') {
@@ -218,25 +229,25 @@ fn open(prelude: &str, stack: &[Frame], order: u32, made: &mut usize) -> Frame {
             in_at_rule: true,
         };
     }
-    // The nearest enclosing *style* rule, skipping at-rule bodies: an
-    // `@media` between a rule and its nested child does not break the `&`
-    // relationship.
+    // This is the nearest style rule that encloses this block. The walk skips
+    // at-rule bodies. An `@media` block between a rule and its nested child
+    // does not break the `&` relationship.
     let parent = stack.iter().rev().find(|f| !f.at_rule).map(|f| &f.selectors[..]);
     let selectors = resolve(prelude, parent);
     *made += selectors.len();
     Frame { selectors, at_rule: false, decls: Vec::new(), order, in_at_rule }
 }
 
-/// A nested prelude flattened against its parent's selector list.
+/// Flattens a nested prelude against its parent's selector list.
 ///
-/// One flat selector per (parent, nested) pair, because that is what CSS
-/// nesting means. The specificity this build then computes is the flattened
-/// selector's own, which differs from the standard only when a parent list
-/// holds selectors of unequal specificity - `&` formally takes the whole
-/// list's maximum. Every nested rule in the corpus has a parent list whose
-/// members are equally specific (Jitendex's
-/// `div[data-sc-content="forms"], li[data-sc-content="forms"]` is the widest
-/// at two), so the difference is not reachable from real data.
+/// CSS nesting creates one flat selector for each parent and nested pair.
+/// The specificity code then uses each flattened selector's own specificity.
+/// This differs from the standard only when a parent list has unequal
+/// specificity. CSS assigns `&` the maximum specificity of the full list.
+/// Every nested rule in the corpus has equally specific parent selectors.
+/// Jitendex's `div[data-sc-content="forms"], li[data-sc-content="forms"]` is
+/// the widest list, with two members. Therefore this difference does not occur
+/// in real data.
 fn resolve(prelude: &str, parent: Option<&[String]>) -> Vec<String> {
     let own = split_selectors(prelude);
     let Some(parent) = parent else { return own };
@@ -246,7 +257,7 @@ fn resolve(prelude: &str, parent: Option<&[String]>) -> Vec<String> {
             out.push(if s.contains('&') {
                 s.replace('&', p)
             } else {
-                // Bare nesting: `ul { ... }` inside a rule means
+                // Bare nesting means `ul { ... }` inside a rule becomes
                 // `& ul { ... }`.
                 format!("{p} {s}")
             });
@@ -255,10 +266,10 @@ fn resolve(prelude: &str, parent: Option<&[String]>) -> Vec<String> {
     out
 }
 
-/// A prelude split on its top-level commas.
+/// Splits a prelude at its top-level commas.
 ///
-/// Top-level: a comma inside `:has(a, b)`, inside `[data-x="a,b"]`, or
-/// inside a string is part of one selector.
+/// A comma inside `:has(a, b)`, `[data-x="a,b"]`, or a string stays in one
+/// selector.
 pub(super) fn split_selectors(prelude: &str) -> Vec<String> {
     let b = prelude.as_bytes();
     let mut out = Vec::new();
@@ -288,7 +299,7 @@ fn push_trimmed(out: &mut Vec<String>, s: &str) {
     }
 }
 
-/// One `;`-terminated declaration out of the buffer, which it empties.
+/// Extracts one declaration that ends at `;` and clears the buffer.
 fn flush(buf: &mut String, out: &mut Vec<Decl>) {
     let text = buf.trim();
     if let Some((head, value)) = text.split_once(':') {
@@ -301,7 +312,7 @@ fn flush(buf: &mut String, out: &mut Vec<Decl>) {
     buf.clear();
 }
 
-/// `4px !important` as `("4px", true)`.
+/// Parses `4px !important` as `("4px", true)`.
 fn strip_important(value: &str) -> (&str, bool) {
     let Some(head) = value.strip_suffix("important") else { return (value, false) };
     let head = head.trim_end();
@@ -311,11 +322,12 @@ fn strip_important(value: &str) -> (&str, bool) {
     }
 }
 
-/// Is this a CSS property name?
+/// Checks whether text is a CSS property name.
 ///
-/// `-{0,2}[a-z][-a-z0-9]*`, which admits the vendor prefixes the corpus
-/// carries (`-webkit-border-radius`) and rejects the halves of a malformed
-/// block that a `:` happens to split.
+/// The grammar is `-{0,2}[a-z][-a-z0-9]*`.
+/// It accepts vendor prefixes that the corpus contains, such as
+/// `-webkit-border-radius`.
+/// It also rejects the two malformed block halves that a `:` can split.
 fn is_property(name: &str) -> bool {
     let rest = name.strip_prefix("--").or_else(|| name.strip_prefix('-')).unwrap_or(name);
     let mut chars = rest.chars();
@@ -323,10 +335,11 @@ fn is_property(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Just past the closing quote of the string opening at `i`.
+/// Returns the position after the closing quote for the string at `i`.
 ///
-/// `false` when there is none: a CSS string never spans a raw newline, so an
-/// unterminated one ends at the line break and the caller records it.
+/// Returns `false` when no closing quote exists.
+/// A CSS string cannot cross a raw newline. Therefore an unterminated string
+/// ends at the line break, and the caller records this error.
 fn skip_string(b: &[u8], i: usize, quote: u8) -> (usize, bool) {
     let mut i = i + 1;
     while i < b.len() {
@@ -340,8 +353,9 @@ fn skip_string(b: &[u8], i: usize, quote: u8) -> (usize, bool) {
     (b.len(), false)
 }
 
-/// Just past the closer matching the opener at `i`, honouring strings and
-/// nesting. Runs to the end on unbalanced input.
+/// Returns the position after the closer that matches the opener at `i`.
+/// The function skips strings and tracks nested openers and closers.
+/// It reaches the input end when the input is unbalanced.
 fn skip_nested(b: &[u8], i: usize, opener: u8, closer: u8) -> usize {
     let mut depth = 0i32;
     let mut i = i;

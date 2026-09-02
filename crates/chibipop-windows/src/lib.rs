@@ -1,18 +1,20 @@
-//! The Windows platform adapter: this package *is* the adapter
+//! This package is the Windows platform adapter
 //! (ARCHITECTURE.md#workspace-and-seams).
 //!
-//! A lib target beside the bin, not a separate platform-lib crate: it exists
-//! only so this package's own integration tests (`tests/rebuild.rs`,
-//! `tests/geometry_goldens.rs`) can link the platform modules. Nothing else
-//! links it, and nothing should.
+//! This lib target sits beside the bin. It is not a separate
+//! platform-lib crate. It exists only so this package's integration
+//! tests (`tests/rebuild.rs`, `tests/geometry_goldens.rs`) can link
+//! the platform modules. Other code must never link it.
 
-// Allow-by-default lints.
+// Keep these lints allowed by default.
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-// Everything is Win32: on a foreign target this lib is intentionally empty
-// (see main.rs — the whole package cfg-stubs so --workspace builds anywhere).
+// This file contains only Win32 code. On another target, this lib is
+// empty by design. See main.rs for the reason. The `cfg(windows)`
+// attribute makes the whole package empty. This design lets
+// `--workspace` commands build on every host.
 #[cfg(windows)]
 pub mod action;
 #[cfg(windows)]
@@ -32,8 +34,8 @@ pub mod text;
 #[cfg(windows)]
 pub mod ui;
 
-// Core modules, imported at the root so the platform modules above keep
-// addressing them as `crate::…`, unchanged by the workspace split.
+// This file imports core modules at the crate root. The platform modules
+// above can address them as `crate::…`, as they did before the workspace split.
 #[cfg(windows)]
 use chibipop::{
     anki, config, controller, dict, geom, image, library, lookup, paths, present, settings, shot,

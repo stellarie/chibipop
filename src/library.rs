@@ -1,24 +1,37 @@
-//! The archive library.
+//! The on-disk Dictionary library.
+//!
+//! `Library` lists archive files in one directory and the manifest that names
+//! them. `Library::load` reconciles the manifest with the directory on every
+//! read. This keeps the list correct after a manual edit or a crash.
+//!
+//! `Pending` tracks one archive removal and its later rebuild.
+//! It moves a removed archive into a quarantine folder without deleting it.
+//! If the rebuild fails, `Pending::rollback` restores the archive
+//! (ARCHITECTURE.md#dictionary-and-lookup).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// The manifest file name.
+/// The file name of the manifest.
 const MANIFEST: &str = "library.json";
 
-/// Where removals wait.
+/// The folder name for a removed archive.
 ///
-/// Not a top-level `*.zip`.
+/// `Pending::commit` deletes the archive from this folder. The folder is one
+/// level below the library root. `reconcile` scans only the top level, so it
+/// never lists a quarantined file as a Dictionary.
 const QUARANTINE: &str = ".removed";
 
-/// One thing an archive supplies.
+/// The role that an archive supplies.
 ///
-/// A fact about the archive's banks, never a preference and never a
-/// filename: `term_bank_` members mean [`Role::Terms`], `term_meta_bank_`
-/// rows tagged `"freq"` mean [`Role::Frequency`] and rows tagged `"pitch"`
-/// mean [`Role::Pitch`] (ARCHITECTURE.md#dictionary-and-lookup).
+/// chibipop derives each role from banks inside the archive.
+/// A role is not a preference and never comes from the filename.
+/// A `term_bank_` member means [`Role::Terms`].
+/// A `term_meta_bank_` row tagged `"freq"` means [`Role::Frequency`].
+/// A row tagged `"pitch"` means [`Role::Pitch`]
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
@@ -28,20 +41,19 @@ pub enum Role {
 }
 
 impl Role {
-    /// Every role, in the order the settings window stacks its sections.
+    /// All roles in the order that the settings window shows their sections.
     pub const EVERY: [Role; 3] = [Role::Terms, Role::Frequency, Role::Pitch];
 }
 
-/// What an archive supplies: a **set**, in any combination.
+/// The set of roles that an archive supplies, in any combination.
 ///
-/// One archive is one library entry whatever it holds, so an archive
-/// carrying a term bank and frequency data has one row and two roles - the
-/// single-valued `Kind` this replaced made such an archive choose, and made
-/// a pitch archive pretend to be a term one.
+/// One archive is one library entry, whatever roles it holds.
+/// An archive with a term bank and frequency data has one row and two roles.
+/// The old single-valued `Kind` type forced that archive to choose one role.
+/// It also made a pitch archive claim that it was a term archive.
 ///
-/// The empty set is what an archive this build cannot read supplies. It
-/// stays listed - that is the whole point of listing it - so the user can
-/// remove it.
+/// An unreadable archive supplies the empty set.
+/// The library still lists the entry so the user can remove it later.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "Vec<Role>", into = "Vec<Role>")]
 pub struct Roles {
@@ -51,12 +63,12 @@ pub struct Roles {
 }
 
 impl Roles {
-    /// Exactly these, and nothing else.
+    /// Return exactly these roles and no others.
     pub fn only(roles: &[Role]) -> Roles {
         roles.iter().copied().collect()
     }
 
-    /// Does the archive supply this one?
+    /// Return true when the archive supplies this role.
     pub fn has(self, role: Role) -> bool {
         match role {
             Role::Terms => self.terms,
@@ -65,7 +77,7 @@ impl Roles {
         }
     }
 
-    /// Records that it supplies this one.
+    /// Record that the archive supplies this role.
     pub fn insert(&mut self, role: Role) {
         match role {
             Role::Terms => self.terms = true,
@@ -74,12 +86,13 @@ impl Roles {
         }
     }
 
-    /// Nothing this build can read: an unreadable archive.
+    /// Return true when the set has no role. This means that the build cannot
+    /// read the archive.
     pub fn is_empty(self) -> bool {
         !self.terms && !self.frequency && !self.pitch
     }
 
-    /// The roles it does supply, in [`Role::EVERY`] order.
+    /// Iterate over supplied roles in [`Role::EVERY`] order.
     pub fn iter(self) -> impl Iterator<Item = Role> {
         Role::EVERY.into_iter().filter(move |r| self.has(*r))
     }
@@ -107,13 +120,14 @@ impl From<Roles> for Vec<Role> {
     }
 }
 
-/// What the archive itself says it supplies.
+/// Return the roles that the archive itself supplies.
 ///
-/// Three independent questions, one per role, each asked of the banks. An
-/// archive whose `index.json` this build cannot read supplies nothing at
-/// all: the title, the stylesheet and the media paths all hang off that
-/// file, so a library entry without it is a file to be removed rather than
-/// a dictionary with roles.
+/// Ask one independent question for each role. Each question reads the archive
+/// banks.
+/// If this build cannot read the archive's `index.json`, return no roles.
+/// The title, stylesheet, and media paths all depend on that file.
+/// Without it, the library keeps the entry as a file to remove, not a
+/// Dictionary with roles.
 pub fn roles_of(archive: &Path) -> Roles {
     if crate::dict::archive::read_index(archive).is_err() {
         return Roles::default();
@@ -131,27 +145,28 @@ pub fn roles_of(archive: &Path) -> Roles {
     roles
 }
 
-/// One archive in the library.
+/// Describe one archive entry in the library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub file: String,
     pub name: String,
-    /// Derived state, recomputed from the file on every load, so a manifest
-    /// written before roles existed - which carries the old single-valued
-    /// `kind` and no `roles` at all - reads back as the empty set and is
-    /// corrected by `reconcile` before anything looks at it.
+    /// The library derives this field from the file on every load.
+    /// A manifest from before `Roles` existed has the old single-valued `kind`
+    /// field and no `roles` field.
+    /// Such a manifest reads as the empty set. `reconcile` corrects the value
+    /// before any caller reads it.
     #[serde(default)]
     pub roles: Roles,
 }
 
-/// The manifest and its files.
+/// Describe the manifest and its archive entries.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Library {
     pub entries: Vec<Entry>,
 }
 
 impl Library {
-    /// Manifest, reconciled to disk.
+    /// Load the manifest and reconcile it with the files on disk.
     pub fn load(dir: &Path) -> Result<Library> {
         let path = dir.join(MANIFEST);
         let text = match std::fs::read_to_string(&path) {
@@ -168,11 +183,11 @@ impl Library {
         Ok(lib)
     }
 
-    /// Makes the list match disk.
+    /// Make the entry list match the files on disk.
     fn reconcile(&mut self, dir: &Path) {
         restore_quarantined(dir);
         self.entries.retain(|e| dir.join(&e.file).exists());
-        // The file decides the roles.
+        // Derive roles from each archive file.
         for e in &mut self.entries {
             e.roles = roles_of(&dir.join(&e.file));
         }
@@ -185,7 +200,7 @@ impl Library {
                 .collect(),
             Err(_) => return,
         };
-        // read_dir order is not defined.
+        // `read_dir` does not define an order.
         strays.sort();
         for file in strays {
             let path = dir.join(&file);
@@ -193,45 +208,49 @@ impl Library {
             let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
             self.entries.push(Entry { name: title_of(&index, &file), file, roles });
         }
-        // Last, so the listed entries are already ahead of the strays.
+        // Run this call last. The loop above appends stray files after the
+        // manifest entries.
         self.collapse_duplicates(dir);
     }
 
-    /// Collapses byte-identical archives to one entry.
+    /// Collapse byte-identical archives into one entry.
     ///
-    /// Two copies of one dictionary under two names are one dictionary, and
-    /// a library offering both builds it twice: two `dict` rows, two
-    /// stylesheets, every asset stored under two ids, and every hover
-    /// answering each headword twice. A user reported exactly that, from a
-    /// `library.json` naming one archive beside an unlisted, byte-identical
-    /// copy of it.
+    /// Two copies of one Dictionary with different names still represent one
+    /// Dictionary. If the library keeps both entries, the build creates two
+    /// `dict` rows, two stylesheets, two copies of every asset, and two answers
+    /// for each headword.
     ///
-    /// **The first entry wins**, and the order this runs in is what makes
-    /// that the right rule: `reconcile` keeps the manifest's own entries in
-    /// manifest order and appends adopted strays after them, so a listed
-    /// archive always beats an unlisted copy of itself. The manifest is what
-    /// the user curated; the stray is only what happened to be in the
-    /// directory. Nothing is deleted either way - adoption is deliberate,
-    /// and a file the user put here stays where they put it.
+    /// A user reported this exact bug. `library.json` named one archive, and an
+    /// unlisted byte-identical copy sat beside it.
     ///
-    /// **What it costs.** Hashing every archive on every load is not
-    /// affordable: [`crate::dict::build::hash_file`] runs at about
-    /// 400 MiB/s, so one 38 MB dictionary costs ~95 ms and a
-    /// twelve-dictionary library costs seconds - on a path that runs every
-    /// time the settings window opens. So the hash is gated on the one
-    /// discriminator that is free and has no false negatives: byte-identical
-    /// files are the same length. A library of distinct dictionaries
-    /// therefore hashes **nothing at all**, and only a real length collision
-    /// pays - two 38 MB copies, one ~190 ms load, once.
+    /// **The first entry wins.** `reconcile` keeps manifest entries in manifest
+    /// order and appends adopted strays after them. A listed archive therefore
+    /// beats an unlisted copy. The manifest records the user's choice. The
+    /// stray archive is only a file that happens to sit in the directory.
+    ///
+    /// This function deletes neither archive. Adoption is deliberate, and a
+    /// file that the user placed here stays in that location.
+    ///
+    /// **Cost.** A hash of every archive on every load takes too much
+    /// time. [`crate::dict::build::hash_file`] runs at about 400 MiB/s. One
+    /// 38 MB Dictionary takes about 95 ms to hash, and a library with twelve
+    /// Dictionaries takes seconds. This path runs every time the settings
+    /// window opens.
+    ///
+    /// The function first uses file length as a test with no false negatives.
+    /// Byte-identical files have the same length. A library of distinct
+    /// Dictionaries therefore hashes **nothing at all**. Only a real length
+    /// collision adds the hash cost. That cost hashes two 38 MB files once, for
+    /// about 190 ms.
     fn collapse_duplicates(&mut self, dir: &Path) {
         let sizes: Vec<u64> = self
             .entries
             .iter()
             .map(|e| std::fs::metadata(dir.join(&e.file)).map(|m| m.len()).unwrap_or(0))
             .collect();
-        // A length no other archive shares cannot be a duplicate of
-        // anything, so its bytes are never read. Length 0 is a file that
-        // would not stat; it stays listed so it can be removed.
+        // A unique length cannot belong to a duplicate, so the code does not
+        // read its bytes. A length of 0 means that stat failed. Keep that entry
+        // listed so the user can remove it.
         let contested = |i: usize| {
             sizes[i] > 0 && sizes.iter().enumerate().any(|(j, s)| j != i && *s == sizes[i])
         };
@@ -246,23 +265,22 @@ impl Library {
                 continue;
             }
             match crate::dict::build::hash_file(&dir.join(&entry.file)) {
-                // A copy of an archive already kept, so it is not a second
-                // dictionary.
+                // This hash matches a kept archive. This entry is not a second
+                // Dictionary.
                 Ok(hash) if hashes.contains(&hash) => {}
                 Ok(hash) => {
                     hashes.push(hash);
                     kept.push(entry);
                 }
-                // Unreadable is not the same thing as duplicate: it stays
-                // listed so the user can remove it, as `Kind::Unreadable`
-                // already does.
+                // An unreadable archive is not a duplicate. Keep it listed so
+                // the user can remove it.
                 Err(_) => kept.push(entry),
             }
         }
         self.entries = kept;
     }
 
-    /// Atomic manifest write.
+    /// Write the manifest as one atomic operation.
     pub fn save(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join(MANIFEST);
@@ -271,14 +289,15 @@ impl Library {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        // Torn write loses the list.
+        // A torn write could lose the whole list. Write to a temporary file
+        // first and rename it into place.
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
         Ok(())
     }
 
-    /// Copies an archive in.
+    /// Copy an archive into the library.
     pub fn import(&mut self, dir: &Path, source: &Path) -> Result<Entry> {
         let index = crate::dict::archive::read_index(source)?;
         let file = self.free_name(dir, source);
@@ -291,9 +310,9 @@ impl Library {
         Ok(entry)
     }
 
-    /// Drops it, keeping the file.
+    /// Remove an entry from the list without deleting its archive.
     ///
-    /// Deleted only on commit.
+    /// `Pending::commit` deletes the archive later.
     pub fn quarantine(&mut self, dir: &Path, file: &str) -> Result<()> {
         self.entries.retain(|e| e.file != file);
         let from = dir.join(file);
@@ -308,17 +327,18 @@ impl Library {
             .with_context(|| format!("moving {} to {}", from.display(), to.display()))
     }
 
-    /// Every archive a build installs as a Dictionary, in order.
+    /// Return every readable archive that the build installs as a Dictionary,
+    /// in order.
     ///
-    /// Every readable archive, whatever its roles: one archive is one
-    /// `dict` row, because a frequency archive owns its stored claims and a
-    /// pitch archive owns its stored accents, and both need a dictionary to
-    /// own them under (ARCHITECTURE.md#dictionary-and-lookup). One that
-    /// supplies no terms role simply contributes no term rows, which is
-    /// why nothing here asks whether it has one.
+    /// Return every readable archive, whatever roles it holds. One archive is
+    /// one `dict` row because a frequency archive owns its frequency data and
+    /// a pitch archive owns its pitch data. Both roles need a Dictionary row to
+    /// own their data (ARCHITECTURE.md#dictionary-and-lookup). An archive
+    /// without the Terms role adds no term rows, so this function does not
+    /// check for that role.
     ///
-    /// The unreadable ones are what this leaves out - they are listed so
-    /// they can be removed, and there is nothing in them to build.
+    /// Leave unreadable archives out. The library still lists them so the user
+    /// can remove them, but they provide no data for the build.
     pub fn dict_paths(&self, dir: &Path) -> Vec<PathBuf> {
         self.entries
             .iter()
@@ -327,26 +347,26 @@ impl Library {
             .collect()
     }
 
-    /// Frequency archives, in order.
+    /// Return Frequency archives in their library order.
     ///
-    /// The ones whose Reported frequencies a build loads and stores. An
-    /// archive supplying terms as well is in both this list and
-    /// [`Library::dict_paths`], and still owns exactly one `dict` row.
+    /// Return archives whose Reported frequencies the build loads and stores.
+    /// An archive that also supplies Terms appears in this list and
+    /// [`Library::dict_paths`]. It still owns one `dict` row.
     pub fn freq_paths(&self, dir: &Path) -> Vec<PathBuf> {
         self.paths(dir, Role::Frequency)
     }
 
-    /// No archives recorded.
+    /// Return true when the library has no archive.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Paths of the archives holding one role.
+    /// Return paths for archives that supply the selected role.
     fn paths(&self, dir: &Path, role: Role) -> Vec<PathBuf> {
         self.entries.iter().filter(|e| e.roles.has(role)).map(|e| dir.join(&e.file)).collect()
     }
 
-    /// A name that won't clobber.
+    /// Return a file name that does not overwrite a present file.
     fn free_name(&self, dir: &Path, source: &Path) -> String {
         let base = source
             .file_name()
@@ -372,13 +392,13 @@ impl Library {
         }
     }
 
-    /// Is this filename in use?
+    /// Return true when a file or entry already uses this name.
     fn taken(&self, dir: &Path, file: &str) -> bool {
         dir.join(file).exists() || self.entries.iter().any(|e| e.file == file)
     }
 }
 
-/// A change awaiting its build.
+/// A library change that awaits its build.
 #[derive(Debug)]
 pub struct Pending {
     dir: PathBuf,
@@ -388,7 +408,7 @@ pub struct Pending {
 }
 
 impl Pending {
-    /// Nothing has moved yet.
+    /// No archive has moved yet.
     pub fn new(dir: &Path, before: &Library) -> Pending {
         Pending {
             dir: dir.to_path_buf(),
@@ -398,17 +418,17 @@ impl Pending {
         }
     }
 
-    /// Record a copied-in archive.
+    /// Record an archive copied into the library.
     pub fn added(&mut self, file: String) {
         self.added.push(file);
     }
 
-    /// Record a moved-aside archive.
+    /// Record an archive moved into quarantine.
     pub fn held(&mut self, file: String) {
         self.held.push(file);
     }
 
-    /// Keep it. The removals go.
+    /// Delete every archive in quarantine and remove the quarantine folder.
     pub fn commit(&self) -> Result<()> {
         let held = self.dir.join(QUARANTINE);
         for file in &self.held {
@@ -423,9 +443,10 @@ impl Pending {
         Ok(())
     }
 
-    /// Undo it. Archives return.
+    /// Undo a pending change. Restore every held archive and remove every added
+    /// archive.
     ///
-    /// Reports the first failure.
+    /// Continue after an error and return only the first error.
     pub fn rollback(&self) -> Result<()> {
         let held = self.dir.join(QUARANTINE);
         let mut first: Option<anyhow::Error> = None;
@@ -460,7 +481,10 @@ impl Pending {
     }
 }
 
-/// Undo a killed Apply.
+/// Restore archives left by a killed Apply process.
+///
+/// A process can die between quarantine and commit and leave archives in the
+/// quarantine folder. Move them back before `Library::load` reads the manifest.
 fn restore_quarantined(dir: &Path) {
     let held = dir.join(QUARANTINE);
     let Ok(listing) = std::fs::read_dir(&held) else {
@@ -475,7 +499,7 @@ fn restore_quarantined(dir: &Path) {
     let _ = std::fs::remove_dir(&held);
 }
 
-/// The index title, or the stem.
+/// Return the index title. If no title exists, return the file stem.
 fn title_of(index: &Value, file: &str) -> String {
     index
         .get("title")
@@ -540,10 +564,9 @@ mod tests {
         assert!(Library::load(&dir).unwrap().is_empty());
     }
 
-    /// The role a filename used to decide: `freq.zip` carries nothing but a
-    /// term-meta bank of `"freq"` rows, so it supplies frequency and no
-    /// terms - and it is still one library entry, not a second class of
-    /// thing.
+    /// Verify that roles come from archive banks, not the filename. `freq.zip`
+    /// carries only a term-meta bank with `"freq"` rows, so it supplies Frequency
+    /// and no Terms in one library entry.
     #[test]
     fn an_import_reads_its_roles_from_the_archives_banks() {
         let (dir, _guard) = scratch("freq_roles");
@@ -563,8 +586,8 @@ mod tests {
         assert!(dir.join("terms.zip").is_file());
     }
 
-    /// One archive, two roles, one entry - the case the single-valued
-    /// `Kind` this replaced could not express at all.
+    /// Verify that one archive with two roles produces one entry. The old
+    /// single-valued `Kind` type could not express this case.
     #[test]
     fn an_archive_supplying_two_roles_is_one_entry_holding_both() {
         let (dir, _guard) = scratch("both_roles");
@@ -574,8 +597,8 @@ mod tests {
         assert_eq!(1, lib.entries.len());
     }
 
-    /// And a pitch-only archive holds pitch and nothing else, where the
-    /// filename heuristic used to call it a term dictionary.
+    /// Verify that a pitch-only archive supplies only Pitch.
+    /// The old filename heuristic called it a term Dictionary.
     #[test]
     fn a_pitch_only_archive_supplies_pitch_and_neither_other_role() {
         let (dir, _guard) = scratch("pitch_roles");
@@ -617,7 +640,7 @@ mod tests {
         assert_eq!(names_in(&dir), ["terms.zip"]);
     }
 
-    /// The archive is the user's.
+    /// Verify that quarantine keeps the file. The file belongs to the user.
     #[test]
     fn quarantine_drops_the_entry_without_deleting_the_file() {
         let (dir, _guard) = scratch("quarantine");
@@ -639,7 +662,7 @@ mod tests {
         assert!(lib.is_empty());
     }
 
-    /// Not a top-level `*.zip`.
+    /// Verify that a quarantined archive is not a top-level `*.zip` file.
     #[test]
     fn a_quarantined_archive_is_not_a_top_level_zip() {
         let (dir, _guard) = scratch("not_top_level");
@@ -677,7 +700,7 @@ mod tests {
         assert!(!dir.join(QUARANTINE).exists());
     }
 
-    /// No second copy on retry.
+    /// Verify that rollback removes an import without a second copy.
     #[test]
     fn rollback_undoes_an_import() {
         let (dir, _guard) = scratch("rollback_add");
@@ -694,7 +717,8 @@ mod tests {
         assert_eq!(before.entries, Library::load(&dir).unwrap().entries);
     }
 
-    /// A killed Apply hides none.
+    /// Verify that a quarantine left by a killed Apply remains visible to the
+    /// library.
     #[test]
     fn a_quarantine_left_by_a_dead_process_is_restored_on_load() {
         let (dir, _guard) = scratch("orphan");
@@ -722,7 +746,8 @@ mod tests {
         assert_eq!(vec![dir.join("terms.zip")], lib.dict_paths(&dir));
     }
 
-    /// The file outranks the JSON.
+    /// Verify that the archive on disk takes precedence over a stale `roles` value
+    /// in the JSON manifest.
     #[test]
     fn an_entry_that_became_unreadable_is_reclassified_on_load() {
         let (dir, _guard) = scratch("became_bad");
@@ -758,10 +783,10 @@ mod tests {
         assert!(!dir.join("library.json.tmp").exists());
     }
 
-    /// The build list is every readable archive, whatever it holds: a
-    /// frequency archive is a Dictionary in its own right and needs the
-    /// `dict` row its stored claims hang off, and an archive supplying both
-    /// is in both lists and still gets exactly one row.
+    /// Verify that the build list contains every readable archive. An archive
+    /// with the Frequency role is a Dictionary and needs its
+    /// own `dict` row. An archive with both roles appears in both lists but
+    /// still gets one row.
     #[test]
     fn the_build_list_holds_every_readable_archive_and_freq_paths_the_frequency_ones() {
         let dir = Path::new("L");
@@ -785,7 +810,7 @@ mod tests {
     fn a_zip_the_manifest_never_listed_is_adopted_on_load() {
         let (dir, _guard) = scratch("adopt");
         std::fs::create_dir_all(&dir).unwrap();
-        // Built regardless of manifest.
+        // The build writes these files without a manifest entry.
         std::fs::copy(fixture("terms.zip"), dir.join("zz_dropped_in.zip")).unwrap();
         std::fs::copy(fixture("freq.zip"), dir.join("aa_dropped_in.zip")).unwrap();
         Library::default().save(&dir).unwrap();
@@ -821,23 +846,23 @@ mod tests {
         assert!(Library::load(&dir).unwrap().is_empty());
     }
 
-    // ---- one dictionary under two names ----
+    // ---- one Dictionary under two names ----
 
-    /// The reported shape: `library.json` names one archive, and a
-    /// byte-identical copy of it sits unlisted beside it. Adoption makes the
-    /// copy an entry, and the build then makes it a second dictionary - two
-    /// `dict` rows, two stylesheets, and every headword answered twice.
+    /// Verify the reported bug shape. `library.json` names one archive, and a
+    /// byte-identical copy sits unlisted beside it. Adoption turns the copy
+    /// into an entry, and the build then creates a second Dictionary: two
+    /// `dict` rows, two stylesheets, and every headword gets two answers.
     ///
-    /// Built for real rather than counted, because "one dictionary" is a
-    /// claim about the database, and `dict_paths` is what the rebuild hands
-    /// the builder.
+    /// The test runs a real build instead of a path count because "one
+    /// dictionary" is a claim about the database. `dict_paths` only supplies
+    /// paths to the builder for the rebuild.
     #[test]
     fn two_byte_identical_archives_under_different_names_are_one_dictionary() {
         let (dir, _guard) = scratch("identical_copy");
         let mut lib = Library::default();
         lib.import(&dir, &fixture("terms.zip")).unwrap();
         lib.save(&dir).unwrap();
-        // The unlisted copy, exactly as a re-import left one behind.
+        // This copy is unlisted beside the listed archive.
         std::fs::copy(fixture("terms.zip"), dir.join("[JA-EN] terms (2026-08-11).zip")).unwrap();
 
         let loaded = Library::load(&dir).unwrap();
@@ -856,9 +881,9 @@ mod tests {
         assert_eq!(1, dicts, "one archive, however many names it wears");
     }
 
-    /// Nothing is deleted. Adoption is deliberate and the file is the
-    /// user's; only the second *entry* goes, and it stays collapsed on every
-    /// later load rather than reappearing.
+    /// Verify that duplicate collapse deletes no file. Adoption is deliberate,
+    /// and the file belongs to the user. Only the second *entry* disappears,
+    /// and the list stays collapsed on every later load.
     #[test]
     fn collapsing_a_duplicate_leaves_the_file_where_the_user_put_it() {
         let (dir, _guard) = scratch("keeps_the_file");
@@ -874,9 +899,10 @@ mod tests {
         assert_eq!(1, Library::load(&dir).unwrap().entries.len(), "and stays collapsed");
     }
 
-    /// The hash decides, not the length. Two archives can be exactly as long
-    /// as each other and hold different dictionaries, and the length is only
-    /// the gate that decides whether reading them is worth it.
+    /// Verify that the hash, not the length, makes the final decision.
+    /// Two archives can have the same length and still contain different
+    /// Dictionaries. The length only decides whether the code reads their
+    /// bytes.
     #[test]
     fn two_equally_long_archives_with_different_contents_stay_two_dictionaries() {
         let (dir, _guard) = scratch("same_size");
@@ -885,9 +911,9 @@ mod tests {
         let b = dir.join("b.zip");
         std::fs::copy(fixture("terms.zip"), &a).unwrap();
         std::fs::copy(fixture("terms.zip"), &b).unwrap();
-        // One byte flipped inside the zip comment, which every reader
-        // ignores: the same length, a different sha256, still two readable
-        // archives.
+        // Flip one byte inside the zip comment. Every reader ignores this part.
+        // The length stays the same, but sha256 differs, and both archives
+        // remain readable.
         let mut bytes = std::fs::read(&b).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;

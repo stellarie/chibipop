@@ -1,16 +1,17 @@
-//! Apply = save-then-`reload` (ARCHITECTURE.md#settings-and-config).
+//! Apply saves the config, then sends `reload`
+//! (ARCHITECTURE.md#settings-and-config).
 //!
-//! The config file is the sole source of truth: Apply writes the whole
-//! struct, then sends one `reload` verb. The socket's presence *is* the
-//! ApplyMode — connectable means the daemon hot-reloads, absent means
-//! config-only with a notice. No structured settings ever cross the
-//! socket.
+//! The config file holds the only truth. Apply writes the whole
+//! struct, then sends one `reload` verb. The presence of the socket
+//! *is* the ApplyMode. A connectable socket means the daemon reloads
+//! at once. An absent socket means Apply writes the config and shows a
+//! notice. No structured settings cross the socket.
 //!
-//! One thing sits between the save and the `reload`: a change to the
+//! One step sits between the save and the `reload`. A change to the
 //! frequency inputs makes `term.freq` stale, and
-//! [`chibipop::settings::dictionary_work`] is what says so. Reconciling it
-//! is an in-place recompute over rows that are already here, never a
-//! rebuild - see [`reindex`].
+//! [`chibipop::settings::dictionary_work`] reports that fact. Apply
+//! reconciles the ranks with an in-place recompute over the rows that
+//! the database already holds. Apply never rebuilds. See [`reindex`].
 
 use crate::control::{self, Verb};
 use anyhow::{Context, Result};
@@ -21,35 +22,38 @@ use chibipop::settings::{DictionaryWork, SettingsForm};
 use rusqlite::OpenFlags;
 use std::path::Path;
 
-/// The fields the shared form does not model: Linux platform fields
-/// (ARCHITECTURE.md#settings-and-config) plus the lookup-log gate,
-/// edited straight on `Config`.
+/// The fields that the shared form does not model. These fields are
+/// the Linux platform fields (ARCHITECTURE.md#settings-and-config) and
+/// the lookup-log gate. The window edits them directly on `Config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinuxFields {
-    /// Advisory on the native channel; the portal binding later (36).
+    /// Advisory on the native channel. The portal binding comes later (36).
     pub trigger_key_linux: String,
     pub add_key_linux: String,
-    /// The static-region chord. Native-channel only
-    /// (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum): nothing
-    /// registers it with the portal, so it exists to be rendered as a
-    /// copyable `ctl static-region` bind. Empty means no chord, exactly
-    /// as `add_key_linux` does.
+    /// The static-region chord. This chord works on the native channel
+    /// only (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum). No
+    /// code registers it with the portal, so it exists only as a
+    /// copyable `ctl static-region` bind. An empty value means no
+    /// chord, exactly as `add_key_linux` works.
     pub static_region_key_linux: String,
-    /// The mining screenshot's chord, native-channel only for the same
-    /// reason as the static-region one above. `Option`, not a `String`
-    /// with `""` for unbound: the config field is `Option<String>`
-    /// precisely so absence stays typed (the Windows twin carries no such
-    /// sentinel either), so the empty-text-box mapping lives at the UI
-    /// edge and nowhere else.
+    /// The chord for the mining screenshot. It works on the native
+    /// channel only, for the same reason as the static-region chord
+    /// above. The type is `Option`, not a `String` with `""` for
+    /// unbound. The config field is `Option<String>`, so absence stays
+    /// typed. The Windows twin carries no such sentinel either. The map
+    /// from an empty text box therefore stays at the UI edge and
+    /// nowhere else.
     pub screenshot_key_linux: Option<String>,
-    /// `actions.screenshot.save_dir` as typed. Where it resolves *to* is
-    /// the daemon's (`Paths::screenshots_dir`), not this window's.
+    /// `actions.screenshot.save_dir` exactly as the user typed it. The
+    /// daemon resolves the final path (`Paths::screenshots_dir`), not
+    /// this window.
     pub screenshot_save_dir: String,
-    /// The OCR-to-clipboard chord, native-channel only for the same
-    /// reason as the two above. `Option` for the same reason
-    /// `screenshot_key_linux` is: `actions.ocr_clipboard.hotkey_linux` is
-    /// `Option<String>` precisely so absence stays typed, and the
-    /// empty-text-box mapping lives at the UI edge.
+    /// The OCR-to-clipboard chord. It works on the native channel only,
+    /// for the same reason as the two chords above. It is an `Option`
+    /// for the same reason as `screenshot_key_linux`. The field
+    /// `actions.ocr_clipboard.hotkey_linux` is `Option<String>`, so
+    /// absence stays typed, and the map from an empty text box stays at
+    /// the UI edge.
     pub ocr_clipboard_key_linux: Option<String>,
     pub layer: PopupLayer,
     pub show_lookup_log: bool,
@@ -78,21 +82,22 @@ impl LinuxFields {
         cfg.anki.add_key_linux = self.add_key_linux.clone();
         cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
         cfg.actions.screenshot.hotkey_linux = self.screenshot_key_linux.clone();
-        // The nested section carries *both* platforms' chords, so it may
-        // only die when both are absent - the rule
-        // `chibipop::settings::apply_to` already applies from the
-        // Windows side (`an_unset_ocr_clipboard_key_keeps_the_linux_twin`),
-        // read here off the config that call just wrote. Clearing this
-        // box must not evict the Windows key with it.
+        // The nested section carries the chords of *both* platforms, so
+        // it can disappear only when both chords are absent.
+        // `chibipop::settings::apply_to` already applies that rule from
+        // the Windows side
+        // (`an_unset_ocr_clipboard_key_keeps_the_linux_twin`). This code
+        // reads the config that the same call wrote. A cleared box must
+        // not remove the Windows key with it.
         let windows_chord = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey.clone());
         cfg.actions.ocr_clipboard = match (windows_chord, self.ocr_clipboard_key_linux.clone()) {
             (None, None) => None,
             (hotkey, hotkey_linux) => Some(OcrClipboardConfig { hotkey, hotkey_linux }),
         };
-        // A cleared box means the default folder, never the data dir
-        // itself: a relative `save_dir` is joined onto that dir, so an
-        // empty string would scatter PNGs among the database and the
-        // dictionary archives.
+        // A cleared box means the default folder, never the data
+        // directory. The code joins a relative `save_dir` onto that
+        // directory, so an empty string writes PNG files beside the
+        // database and the dictionary archives.
         let dir = self.screenshot_save_dir.trim();
         cfg.actions.screenshot.save_dir = if dir.is_empty() {
             ScreenshotConfig::default().save_dir
@@ -104,29 +109,29 @@ impl LinuxFields {
     }
 }
 
-/// Which mode Apply turned out to be.
+/// The mode that Apply reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// The daemon took the `reload`; `reply` is its one line.
+    /// The daemon took the `reload`. The field `reply` holds its one line.
     Live { reply: String },
-    /// No daemon: saved only.
+    /// No daemon answered. Apply only saved the config.
     ConfigOnly,
 }
 
-/// What a change to the frequency inputs cost beyond the file.
+/// The extra work that a change to the frequency inputs needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frequency {
-    /// Every Frequency rank recomputed in place, over this many `term`
-    /// rows.
+    /// The recompute stamped every Frequency rank in place, over this
+    /// many `term` rows.
     Reindexed(u64),
-    /// No database to restamp yet. A fresh install has no `term` row to
-    /// carry a rank, and the first Rebuild reads these same settings, so
-    /// there is nothing owed here.
+    /// No database exists yet. A fresh install has no `term` row that
+    /// carries a rank, and the first Rebuild reads these same settings.
+    /// This state owes no work.
     NoDatabase,
-    /// The recompute failed. It is one transaction, so every rank is
-    /// still the one the last build or reindex left - which also means
-    /// the saved config now describes a ranking the database does not
-    /// have, until the next Apply or Rebuild.
+    /// The recompute failed. It runs as one transaction, so every rank
+    /// keeps the value that the last build or reindex left. The saved
+    /// config therefore describes a ranking that the database does not
+    /// hold, until the next Apply or Rebuild.
     Failed(String),
 }
 
@@ -134,18 +139,19 @@ pub enum Frequency {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
     pub outcome: ApplyOutcome,
-    /// Clamp notices `apply_to` produced, for the status area.
+    /// The clamp notices that `apply_to` produced, for the status area.
     pub notices: Vec<String>,
-    /// `None` when the frequency inputs did not change, which is every
-    /// Apply that edited something else.
+    /// `None` when the frequency inputs did not change. Every Apply
+    /// that edits another field leaves this field `None`.
     pub frequency: Option<Frequency>,
 }
 
-/// Save the whole struct, reconcile the ranks, then one `reload`.
+/// Save the whole struct, reconcile the ranks, then send one `reload`.
 ///
-/// `db` and `dicts` are only here for the reconcile: the database the
-/// daemon reads, and the identities it holds, which is what turns the
-/// config's exact names into the enabled frequency list.
+/// The reconcile needs `db` and `dicts`, and nothing else does. `db` is
+/// the database that the daemon reads. `dicts` holds the identities in
+/// that database, which turn the exact names in the config into the
+/// enabled frequency list.
 pub fn apply(
     form: &SettingsForm,
     linux: &LinuxFields,
@@ -160,12 +166,13 @@ pub fn apply(
     linux.apply_over(&mut out);
     let notices = chibipop::settings::clamp_notice(form, &out).into_iter().collect();
     out.save(config_path)?;
-    // The rule, before the `reload` that would otherwise hand the daemon
-    // a config its database disagrees with: a strategy, order or
-    // checkbox change recomputes `term.freq` in place from the Reported
-    // frequencies already stored, and never re-reads an archive. Only a
-    // staged library change rebuilds, and that is `super::rebuild`'s
-    // path, reached from the Rebuild button rather than from here.
+    // Apply the rule before the `reload`. Without this step the daemon
+    // gets a config that its database contradicts. A change to the
+    // strategy, the order, or a checkbox recomputes `term.freq` in
+    // place from the stored Reported frequencies. It never reads an
+    // archive again. Only a staged library change needs a rebuild, and
+    // `super::rebuild` owns that path. The Rebuild button reaches it,
+    // not this function.
     let frequency = match chibipop::settings::dictionary_work(&cfg, &out) {
         DictionaryWork::None => None,
         DictionaryWork::Reindex => Some(reindex(db, &out, dicts)),
@@ -177,21 +184,24 @@ pub fn apply(
     Ok(Applied { outcome, notices, frequency })
 }
 
-/// Recompute every Frequency rank from what the database already stores.
+/// Recompute every Frequency rank from the values that the database
+/// already stores.
 ///
-/// A writer connection, because this is an `UPDATE` over the live file
-/// and not a lookup - `SqliteDictionary::open` hands out a read-only one
-/// on purpose. `SQLITE_OPEN_READ_WRITE` without `CREATE`, so a fresh
-/// install answers [`Frequency::NoDatabase`] instead of having an empty
-/// database conjured under the daemon's nose. No `journal_mode` pragma
-/// either: the file a build promoted is already stamped WAL, which is
-/// what lets the daemon's open snapshot keep reading the old ranking
-/// until the commit and the new one afterwards.
+/// This function opens a writer connection, because it runs an `UPDATE`
+/// over the live file and not a lookup. `SqliteDictionary::open`
+/// returns a read-only connection on purpose. The flags are
+/// `SQLITE_OPEN_READ_WRITE` without `CREATE`, so a fresh install
+/// answers [`Frequency::NoDatabase`] and no empty database appears
+/// under the daemon. This function sets no `journal_mode` pragma. A
+/// build already stamped the promoted file WAL, which lets the open
+/// snapshot of the daemon read the old ranking until the commit, and
+/// the new ranking after it.
 ///
-/// The reindex reports a line per thousand rows and they are dropped
-/// here: Apply is synchronous, so the window paints nothing while this
-/// runs and there is no live surface to stream them to. The committed row
-/// count is the report, and [`describe`] is where it is said.
+/// The reindex reports one line for each thousand rows, and this
+/// function drops those lines. Apply runs synchronously, so the window
+/// paints nothing during the recompute and no live surface can show
+/// them. The committed row count is the report, and [`describe`] states
+/// it.
 fn reindex(db: &Path, after: &Config, dicts: &[DictInfo]) -> Frequency {
     if !db.exists() {
         return Frequency::NoDatabase;

@@ -1,110 +1,101 @@
-//! Hybrid damage pacing, as a state machine with no Wayland in it. See
-//! ARCHITECTURE.md#capture-and-masking and
+//! This module implements hybrid damage pacing as a state machine without Wayland.
+//! See ARCHITECTURE.md#capture-and-masking and
 //! ARCHITECTURE.md#hover-cadence.
 //!
-//! The problem: a plain `copy` forces the compositor to repaint, and
-//! `copy_with_damage` answers only when something changed - which on a
-//! still desktop is never, and `RegionCapture::grab` may never block on
-//! damage. So the backend runs one `copy_with_damage` as a *race*
-//! against a deadline and treats the timeout as information: nothing
-//! changed.
+//! A plain `copy` makes the compositor repaint. `copy_with_damage` answers only
+//! after a change. A still desktop therefore gives no answer, and
+//! `RegionCapture::grab` must not block on damage. The backend races one
+//! `copy_with_damage` against a deadline. A timeout means that nothing changed.
 //!
-//! The race is armed on the union of the regions a read grabbed, at
-//! `end_read`, and is deliberately *retained* across reads while the
-//! screen stays still. That is what makes a dwelling hover cost one
-//! deadline wakeup per period and zero copies (the power budget): the
-//! next read waits on the race already in flight instead of asking
-//! for anything.
+//! The backend arms the race on the union of regions that a read grabs, at
+//! `end_read`. It keeps the race across reads while the screen stays still.
+//! A hover then needs one deadline wakeup per period and zero copies.
+//! The next read waits on the active race instead of a new copy request.
 //!
-//! One verdict serves a whole read. The first cached region settles the
-//! race; every later pass in that read trusts the answer, so a
-//! four-tile read on a static screen waits once, not four times. The
-//! verdict is honest for the whole read because the race watches the
-//! union of exactly the boxes that read looks at.
+//! One verdict serves one whole read. The first cached region settles the
+//! race. Each later pass in that read uses the same verdict. A four-tile
+//! read on a static screen then waits once, not four times. The race watches
+//! the union of all boxes that the read touches, so the verdict covers the read.
 //!
-//! A read that never repeats a region - the cursor moved - never
-//! touches the race at all and pays no deadline: plain copies only, as
-//! before.
+//! A read with no repeated region means that the cursor moved. It does not
+//! use the race or pay a deadline. It uses plain copies only, as before.
 //!
 //! **What the two compositors actually do** (measured):
-//! wlroots scopes damage to the frame's box, so a static screen really
-//! does answer at the deadline and cost zero copies - and real damage
-//! wins the race early, at 108 ms of a 250 ms deadline in the smoke
-//! run. Hyprland 0.55.4 fires `copy_with_damage` on essentially every
-//! output commit, so on a live desktop the verdict is `Damaged` at
-//! about one frame's latency and the dwell degrades to a plain copy per
-//! read - never stale, never blocked, just no saving. The invariants
-//! hold either way; the power win is a wlroots-and-sway win today.
+//! wlroots limits damage to the frame box. A static screen therefore answers
+//! at the deadline and costs zero copies. Real damage wins early, at 108 ms
+//! of the 250 ms deadline in the smoke run. Hyprland 0.55.4 fires
+//! `copy_with_damage` on essentially every output commit. A live desktop then gives
+//! `Damaged` at about one frame's latency, and a dwell uses one plain copy per
+//! read. It never returns stale pixels or blocks, but it gives no power benefit.
+//! The invariants hold in both cases. The power win applies to wlroots and sway
+//! today.
 
 use chibipop::geom::PhysRect;
 use std::time::Duration;
 
-/// The dwell deadline: at most four wakeups a second while dwelling
-/// on a static screen.
+/// The dwell deadline. A static screen causes at most four wakeups per second.
 pub const DWELL_DEADLINE: Duration = Duration::from_millis(250);
 
-/// A plain copy waits for one repaint, not for damage. This only
-/// bounds a compositor that never answers at all, so it is far longer
-/// than a frame and still short of a hover feeling hung.
+/// The plain-copy deadline. A plain copy waits for one repaint, not for damage.
+/// This bounds a compositor that gives no answer. It lasts longer than a frame but
+/// remains short enough to avoid a hover that feels hung.
 pub const COPY_DEADLINE: Duration = Duration::from_millis(400);
 
-/// Arming the race is pure saving, so it may never cost a hover:
-/// enumerating a frame's buffer takes microseconds, and a compositor
-/// slower than this loses its damage pacing rather than delaying the
-/// popup that has already been read.
+/// The arm deadline. Frame buffer enumeration takes microseconds, so this setup
+/// must not delay a popup that already has a result. A slower compositor loses
+/// damage pacing instead.
 pub const ARM_DEADLINE: Duration = Duration::from_millis(50);
 
-/// What the damage race said about the screen.
+/// The result from the damage race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// The deadline passed with no damage: the last pixels still hold.
+    /// The deadline passed without damage. The held pixels still match the screen.
     Static,
-    /// Damage arrived (or there was no race to ask).
+    /// Damage arrived, or no race was available.
     Damaged,
 }
 
-/// What one `grab` should do.
+/// The operation for one `grab`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Ask the compositor for these pixels now.
+    /// Ask the compositor for these pixels.
     Copy,
-    /// Settle the race first, then step again.
+    /// Settle the active damage race, then choose the next step.
     Settle,
-    /// Serve the pixels already held; the screen has not changed.
+    /// Serve the held pixels. The screen has not changed.
     Serve,
 }
 
-/// What `end_read` should do with the race.
+/// The operation for `end_read` to apply to the damage race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arm {
-    /// The race in flight already watches this read: cost nothing.
+    /// The active race already watches this read. Keep it without a copy.
     Keep,
-    /// Arm a fresh race on this box.
+    /// Arm a new race on this box.
     Rearm(PhysRect),
-    /// Nothing was read; drop the race.
+    /// No region was read. Drop the race.
     Disarm,
 }
 
-/// The pacing state: what this read has touched, and what the race in
-/// flight is watching.
+/// Pacing state for this read and for the box that the active race watches.
 #[derive(Debug, Default)]
 pub struct Pacer {
-    /// This read's verdict, once one region has settled it.
+    /// Verdict for this read after one region settles the race.
     verdict: Option<Verdict>,
-    /// Union of every region this read asked for.
+    /// Union of every region that this read asks for.
     touched: Option<PhysRect>,
-    /// The box the race in flight watches, if one is armed.
+    /// Box that the active race watches, if one exists.
     watching: Option<PhysRect>,
 }
 
 impl Pacer {
-    /// Start a read: last read's verdict no longer applies.
+    /// Start a read. Clear the verdict from the prior read.
     pub fn begin_read(&mut self) {
         self.verdict = None;
         self.touched = None;
     }
 
-    /// What to do for `region`, given whether its pixels are held.
+    /// Choose the operation for `region` based on whether its pixels are held.
     pub fn step(&mut self, region: PhysRect, cached: bool) -> Step {
         self.touched = Some(match self.touched {
             Some(u) => super::geometry::cover(u, region),
@@ -120,26 +111,25 @@ impl Pacer {
         }
     }
 
-    /// Record what the race answered; it holds for this whole read.
+    /// Store the race verdict for this whole read.
     pub fn settled(&mut self, verdict: Verdict) {
         self.verdict = Some(verdict);
     }
 
-    /// The race is gone - fired, failed, or never armed.
+    /// Mark the race as absent after it fires, fails, or never arms.
     pub fn disarmed(&mut self) {
         self.watching = None;
     }
 
-    /// End a read: keep the race in flight, or arm one on what this
-    /// read actually looked at.
+    /// End a read. Keep the active race or arm one for the regions that it read.
     pub fn end_read(&mut self, armed: bool) -> Arm {
         let verdict = self.verdict.take();
         let Some(union) = self.touched.take() else {
             self.watching = None;
             return Arm::Disarm;
         };
-        // A still-pending race on exactly this box is the whole point:
-        // re-arming it would cost a copy for nothing.
+        // Keep an active race when it watches this exact box. Re-arm it only
+        // when the box changes or damage reaches it.
         if armed && self.watching == Some(union) && verdict != Some(Verdict::Damaged) {
             return Arm::Keep;
         }
@@ -156,7 +146,7 @@ mod tests {
         PhysRect { x, y, w, h }
     }
 
-    /// The three regions one tiled read asks for.
+    /// Three regions that one tiled read asks for.
     const PASS1: PhysRect = PhysRect { x: 100, y: 100, w: 400, h: 200 };
     const TILE1: PhysRect = PhysRect { x: 500, y: 120, w: 300, h: 160 };
     const TILE2: PhysRect = PhysRect { x: 800, y: 120, w: 300, h: 160 };
@@ -187,8 +177,7 @@ mod tests {
         assert_eq!(p.step(TILE1, true), Step::Serve, "one verdict serves the whole read");
     }
 
-    /// The power-budget claim: a dwell on a static screen asks the
-    /// compositor for nothing at all.
+    /// The power budget: a dwell on a static screen sends no request to the compositor.
     #[test]
     fn a_static_dwell_keeps_the_race_and_never_copies() {
         let mut p = Pacer::default();
@@ -220,12 +209,12 @@ mod tests {
         p.settled(Verdict::Damaged);
         assert_eq!(p.step(PASS1, true), Step::Copy);
         assert_eq!(p.step(TILE1, true), Step::Copy, "damage anywhere restages every pass");
-        // The race fired, so nothing is in flight to keep.
+        // The race fired. Nothing remains in flight to keep.
         assert!(matches!(p.end_read(false), Arm::Rearm(_)));
     }
 
-    /// A fired race must never be kept even if the caller still claims
-    /// one is armed: its pixels are already spent.
+    /// Never keep a fired race, even when the caller reports that one remains armed.
+    /// Its pixels are already spent.
     #[test]
     fn a_damaged_verdict_never_keeps_the_race() {
         let mut p = Pacer::default();
@@ -254,7 +243,7 @@ mod tests {
         p.step(PASS1, false);
         p.end_read(false);
 
-        // The cursor moved: nothing cached matches, so nothing settles.
+        // The cursor moved. No held region matches, so no race can settle.
         p.begin_read();
         let moved = rect(2000, 400, 400, 200);
         assert_eq!(p.step(moved, false), Step::Copy);
@@ -281,14 +270,14 @@ mod tests {
         assert_eq!(p.end_read(false), Arm::Rearm(PASS1));
     }
 
-    /// Grabs outside a read bracket (the `probe`-style single shot)
-    /// still work: they just never use the race.
+    /// A grab outside a read bracket, such as a single `probe`, still works.
+    /// It does not use the race.
     #[test]
     fn unbracketed_grabs_settle_and_copy() {
         let mut p = Pacer::default();
         assert_eq!(p.step(PASS1, false), Step::Copy);
         assert_eq!(p.step(PASS1, true), Step::Settle);
-        // No race exists, so the backend reports damage and copies.
+        // No race exists. Report damage and copy.
         p.settled(Verdict::Damaged);
         assert_eq!(p.step(PASS1, true), Step::Copy);
     }
@@ -304,7 +293,7 @@ mod tests {
         p.step(PASS1, true);
         p.settled(Verdict::Static);
         p.step(PASS1, true);
-        // A tile that was served must still be watched next period.
+        // Keep a served tile in the watched box for the next period.
         p.step(TILE2, false);
         let union = super::super::geometry::cover(PASS1, TILE2);
         assert_eq!(p.end_read(true), Arm::Rearm(union));

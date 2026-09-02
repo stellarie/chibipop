@@ -1,15 +1,15 @@
-//! What a list draws beside each of its items, and where it hangs.
+//! Defines the marker beside each list item and its position.
 //!
-//! **One reason to change:** CSS's list-marker rules as this build answers
-//! them - `list-style-type`'s resolved value, the counter, and the gutter
-//! the marker box sits in.
+//! **One reason to change:** change the CSS list marker rules for this build.
+//! These rules resolve `list-style-type`, the counter, and the gutter for the marker box.
 //!
-//! The resolution and the placement are one topic because CSS makes them
-//! one: `list-style-type` is *inherited* and the marker is drawn at the
-//! element with `display: list-item`, so an item's own declaration wins
-//! over its list's - and `list-style-position: outside` is what puts the
-//! resolved marker in a gutter the list's own indent already paid for
-//! rather than on the item's first line.
+//! CSS treats marker resolution and placement as one topic.
+//! CSS inherits `list-style-type`.
+//! CSS draws the marker on an element with `display: list-item`.
+//! An item declaration therefore overrides the list declaration.
+//! `list-style-position: outside` places the marker in a gutter.
+//! The list indent already reserves that gutter.
+//! The marker does not sit on the item's first line.
 
 use crate::dict::gloss::{GlossDoc, Kind, NodeId, StyleKey};
 use super::flow::{Ctx, Flow, NO_LINK};
@@ -19,51 +19,32 @@ use super::ruby::NO_RUBY;
 use super::scene::MarkerBox;
 use super::style::{quoted, Block, Inline};
 
-/// One list marker, measured.
+/// Geometry for one measured list marker.
 ///
-/// What [`measure_markers`] learns and
-/// [`place_markers`] spends. The
-/// baseline is absolute rather than a
-/// share of the height, because that
-/// is what a marker needs: it is set
-/// on the item's own first baseline,
-/// so the two baselines are subtracted
-/// from each other directly.
+/// [`measure_markers`] computes these values, and [`place_markers`] uses them.
+/// `baseline` is an absolute distance, not a fraction of height.
+/// The marker baseline aligns with the item's first baseline.
+/// Layout subtracts the two baselines directly.
 #[derive(Clone, Copy, Default)]
 pub(super) struct MarkerMetrics {
     pub(super) w: f32,
     pub(super) h: f32,
-    /// How far below the run's top edge
-    /// the marker's baseline sits.
+    /// Distance from the run top to the marker baseline.
     pub(super) baseline: f32,
 }
 
-/// Every marker of a paragraph,
-/// measured.
+/// Measures all markers for a paragraph.
 ///
-/// One run each, and nothing here
-/// touches the paragraph's own run.
-/// That is the difference between this
-/// and [`measure_readings`], which has
-/// to run first because a reading
-/// grows the line it sits over: a
-/// marker occupies the gutter the
-/// list's [`LIST_INDENT_EM`] already
-/// reserved, takes no horizontal room
-/// from any line, and grows nothing.
-/// So it needs no filler span, no
-/// re-measure, and no edit to a line
-/// box after the wrap - which is the
-/// rule a bin's own re-measure
-/// enforces.
+/// The function measures one run for each marker.
+/// It leaves the paragraph run unchanged.
+/// [`measure_readings`] must run first because ruby text increases line height.
+/// A marker stays in the gutter that [`LIST_INDENT_EM`] reserves for the list.
+/// A marker takes no horizontal space from a line and adds no height.
+/// It needs no filler span, second measurement, or edit to a line box.
 ///
-/// Measured at the paragraph's wrap
-/// width and not at the gutter's: a
-/// marker is one counter or one
-/// authored string and is free to
-/// overhang the gutter, exactly as a
-/// browser lets `10.` overhang a
-/// narrow one.
+/// The function uses the paragraph wrap width, not the gutter width.
+/// A visible marker contains one glyph, counter, or string.
+/// A marker can extend beyond the gutter edge, like browser text `10.`.
 ///
 /// [`measure_readings`]: super::ruby::measure_readings
 pub(super) fn measure_markers(
@@ -75,10 +56,8 @@ pub(super) fn measure_markers(
     if flow.marker.is_empty() {
         return Ok(Vec::new());
     }
-    // Only a paragraph that carries a
-    // marker pays for this buffer,
-    // which is why it is not one of
-    // the walk's.
+    // Only a paragraph that contains a marker needs this scratch buffer.
+    // The tree walk does not share this buffer.
     let mut scratch = Measured::default();
     let mut out = vec![MarkerMetrics::default(); flow.marker.len()];
     for (slot, mark) in flow.marker.iter().enumerate() {
@@ -93,37 +72,23 @@ pub(super) fn measure_markers(
     Ok(out)
 }
 
-/// The paragraph's markers, placed.
+/// Places all markers for a paragraph.
 ///
-/// Pure, and it reads exactly two
-/// things the measurer already
-/// reported: the first line's box, for
-/// the baseline the marker shares with
-/// the item's first line, and each
-/// marker's own measured width.
+/// This pure function reads two values from the measurer:
+/// 1. The first line box, for the shared baseline.
+/// 2. The measured width of each marker.
 ///
-/// `lead_left` is the paragraph's own
-/// left lead - every list level above
-/// it plus its own margin, border and
-/// padding - and `pen_x` is where that
-/// lead put the pen. A marker's box is
-/// right-aligned against the content
-/// edge of the *list* that owed it,
-/// which is [`FlowMarker::indent`]:
-/// that is where a browser puts an
-/// `outside` marker, and it is why an
-/// item's own `paddingLeft` moves the
-/// item's text and leaves its bullet
-/// where the list drew it. The
-/// marker's trailing [`MARKER_GAP`] is
-/// inside the box, so what separates
-/// the two is the gap it always was -
-/// now spent in the gutter instead of
-/// on the line.
+/// `lead_left` is the paragraph's left offset.
+/// It includes every parent list level, paragraph margin, border, and padding.
+/// `pen_x` is the horizontal position from that offset.
+/// Layout aligns each marker box's right edge with the list content edge.
+/// [`FlowMarker::indent`] stores that edge.
+/// `paddingLeft` moves item text but leaves the bullet position fixed.
+/// The marker box includes [`MARKER_GAP`].
+/// The gap separates the marker from item text in the gutter.
 ///
-/// No alignment slack: `textAlign`
-/// moves line boxes, and a marker box
-/// is not one.
+/// Alignment does not move the marker box.
+/// `textAlign` moves line boxes, but a marker box is not a line box.
 pub(super) fn place_markers(
     flow: &Flow,
     boxes: &[MarkerMetrics],
@@ -140,12 +105,8 @@ pub(super) fn place_markers(
         .filter(|(_, box_)| box_.h > 0.0)
         .map(|(mark, box_)| MarkerBox {
             text: mark.text.clone(),
-            // Never off the panel's own
-            // left edge: a marker wider
-            // than every gutter above it
-            // is drawn against that edge
-            // rather than outside the
-            // surface.
+            // Keep the marker inside the panel.
+            // If its width exceeds the gutter, align it with the left edge.
             x: (mark.indent - lead_left - box_.w).max(-pen_x),
             y: line.y + line.baseline - box_.baseline,
             w: box_.w,
@@ -158,7 +119,7 @@ pub(super) fn place_markers(
         .collect()
 }
 
-/// One marker, as the seam takes it.
+/// Creates one marker span for the measurement seam.
 pub(super) fn marker_span<'a>(font: &'a str, mark: &'a FlowMarker) -> StyledSpan<'a> {
     StyledSpan {
         text: &mark.text,
@@ -170,110 +131,76 @@ pub(super) fn marker_span<'a>(font: &'a str, mark: &'a FlowMarker) -> StyledSpan
     }
 }
 
-/// Yomitan's own list indent, per
-/// level, as a multiple of the list's
-/// own em.
+/// List indent at each level, as a multiple of the list em unit.
 ///
-/// `--list-padding1` in
-/// `ext/css/display.css`, which
-/// Yomitan puts on every list a
-/// glossary contains. Nested levels
-/// *reuse* it rather than stepping it
-/// down, so a list two deep sits at
-/// twice this and not at some halved
-/// second value; the spec's defaults
-/// table states it as `1.4em`.
+/// This value matches `--list-padding1` in `ext/css/display.css` from Yomitan.
+/// Yomitan applies this rule to every glossary list.
+/// Nested levels reuse this value and do not reduce it.
+/// A list at depth two uses twice this indent.
+/// The specification defaults table sets this value to `1.4em`.
 pub(super) const LIST_INDENT_EM: f32 = 1.4;
 
-/// `list-style-type: disc`, CSS's
-/// initial value: U+2022 BULLET.
+/// `list-style-type: disc`, the initial value in CSS: U+2022 BULLET.
 pub(super) const DISC_MARKER: &str = "\u{2022}";
 
 /// `circle`: U+25E6 WHITE BULLET.
 pub(super) const CIRCLE_MARKER: &str = "\u{25E6}";
 
-/// `square`: U+25AA BLACK SMALL
-/// SQUARE.
+/// `square`: U+25AA BLACK SMALL SQUARE.
 pub(super) const SQUARE_MARKER: &str = "\u{25AA}";
 
-/// What sits between a marker and the
-/// item text after it.
+/// Space between a marker and item text.
 ///
-/// The marker box's own trailing gap,
-/// and it is inside the box wherever
-/// that box goes. A stacked item hangs
-/// its marker in the gutter
-/// ([`MarkerBox`]) with the box's right
-/// edge on the list's content edge, so
-/// the gap is what holds the glyph off
-/// the text; a compact item has no
-/// gutter and writes the same marker
-/// as its paragraph's first span, so
-/// the gap is a character on the line.
-/// One label serves both, which is why
-/// [`Marker::label`] appends it and
-/// neither placement has to. It is the
-/// gap the row number already writes
-/// after its `1.`, so a numbered row
-/// and a numbered item read alike.
+/// The marker box contains this final space.
+/// A stacked item places the marker in the gutter ([`MarkerBox`]).
+/// Its right edge touches the list content edge.
+/// The gap separates the glyph from the text.
+/// A compact item has no gutter.
+/// It writes the marker as the paragraph's first span.
+/// The gap then becomes a space character on the line.
+/// One label format serves both layouts.
+/// [`Marker::label`] adds the gap, so placement functions do not add it.
+/// The gap matches the space after `1.` in a row number.
 pub(super) const MARKER_GAP: &str = " ";
 
-/// What a list draws beside each of
-/// its items: `list-style-type`'s
-/// resolved value.
+/// Resolved `list-style-type` value for a list item.
 ///
-/// CSS's `list-style-type` has three
-/// shapes this build answers and one
-/// it declines: a bullet glyph, a
-/// counter, a literal string, and the
-/// locale counter algorithms the spec
-/// puts out of scope. A keyword it
-/// cannot read therefore falls back
-/// to the initial value for the
-/// list's own tag, which is a marker
-/// of the wrong shape rather than no
-/// marker at all.
+/// CSS supports three marker shapes:
+/// 1. A bullet glyph.
+/// 2. An ordinal counter.
+/// 3. A literal string.
 ///
-/// The marker's *content*, and not
-/// the box it is drawn in: CSS keeps
-/// those two apart and so does this
-/// module. [`MarkerBox`] is the box,
-/// which is the scene's own data and
-/// carries a rect; this is what goes
-/// in it, and never leaves layout.
+/// The build does not support locale counter algorithms.
+/// An unknown keyword uses the initial value for the list tag.
+/// The item receives a fallback marker instead of no marker.
+///
+/// This enum represents marker content, not the marker box.
+/// [`MarkerBox`] represents the scene box and holds a rectangle.
+/// This enum remains inside the layout module.
 ///
 /// [`MarkerBox`]: super::scene::MarkerBox
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Marker<'a> {
-    /// One glyph, the same on every
-    /// item.
+    /// One glyph, identical on every item.
     Glyph(&'static str),
-    /// `decimal`: the item's own
-    /// ordinal, from one.
+    /// `decimal`: the item's ordinal number, from one.
     Decimal,
-    /// A CSS string counter, drawn
-    /// verbatim on every item - which
-    /// is how a dictionary gets its
-    /// own ①. No counter algorithm
-    /// runs over it and no suffix is
-    /// added to it, which is the whole
-    /// of what verbatim means here.
+    /// A CSS string counter that appears verbatim on every item.
+    ///
+    /// A dictionary uses this variant for symbols such as ①.
+    /// The system runs no counter algorithm and adds no suffix.
     Literal(&'a str),
-    /// `none`, and an empty string
-    /// counter with it.
+    /// `none`, or an empty string counter.
     None,
 }
 
 impl Marker<'_> {
-    /// The `n`th item's marker text,
-    /// gap and all.
+    /// The marker text for the `n`th item with the gap.
     pub(super) fn label(self, n: usize) -> Option<String> {
         match self {
             Marker::Glyph(glyph) => Some(format!("{glyph}{MARKER_GAP}")),
-            // CSS's `decimal` counter
-            // carries a `.` suffix, which
-            // is also what the row number
-            // writes.
+            // The CSS `decimal` counter uses a `.` suffix.
+            // The row number uses the same suffix.
             Marker::Decimal => Some(format!("{n}.{MARKER_GAP}")),
             Marker::Literal(text) => Some(format!("{text}{MARKER_GAP}")),
             Marker::None => None,
@@ -281,42 +208,25 @@ impl Marker<'_> {
     }
 }
 
-/// One list's or one item's
-/// `listStyleType`, as the walk spends
-/// it.
+/// Resolves `listStyleType` for a list or item.
 ///
-/// `fallback` is the value already in
-/// force, which is what makes this
-/// both the list's resolver and the
-/// item's: CSS *inherits*
-/// `list-style-type` and draws the
-/// marker at the element with
-/// `display: list-item`, so an item's
-/// own declaration wins over its
-/// list's and a declaration this build
-/// cannot read leaves the inherited
-/// one standing - the same rule
-/// [`apply_style`] follows.
+/// `fallback` is the active value.
+/// The function resolves the list value and the item value.
+/// CSS inherits `list-style-type` and draws the marker on `display: list-item`.
+/// An item declaration overrides its list declaration.
+/// An invalid declaration keeps the inherited value, as in [`apply_style`].
 ///
-/// The item half is not a corner case.
-/// Jitendex declares `listStyleType`
-/// on the `li` in every one of the
-/// 38 381 entries that carries one -
-/// 97 150 nodes, all of them `li`,
-/// values `"①"` through `"㊿"` - and
-/// its ①②③ sense numbering is nothing
-/// but that. The list half is what
-/// will come from a dictionary's own
-/// `styles.css`, where Jitendex writes
-/// `ul[data-sc-content="sense-groups"]
-/// { list-style-type: "＊" }`.
+/// Items often declare this property.
+/// Jitendex declares `listStyleType` on every `li` node in 38,381 entries.
+/// These entries contain 97,150 `li` nodes with values from `"①"` to `"㊿"`.
+/// This declaration supplies ordinal values for senses: ①②③.
+/// A dictionary stylesheet can provide a list declaration.
+/// For example, Jitendex writes `ul[data-sc-content="sense-groups"] { list-style-type: "＊" }`.
 ///
-/// Independent of any layout mode by
-/// construction: it takes a document,
-/// a node and a fallback, so a
-/// compact list and this one resolve
-/// the same marker (see
-/// [`Paragraphs::stack_items`]).
+/// This function does not depend on layout mode.
+/// It accepts a document, node, and fallback.
+/// A compact list and a stacked list resolve the same marker.
+/// See [`Paragraphs::stack_items`].
 ///
 /// [`apply_style`]: super::style::apply_style
 pub(super) fn marker_of<'a>(doc: &'a GlossDoc, id: NodeId, fallback: Marker<'a>) -> Marker<'a> {
@@ -326,64 +236,41 @@ pub(super) fn marker_of<'a>(doc: &'a GlossDoc, id: NodeId, fallback: Marker<'a>)
     };
     let text = text.trim();
     if let Some(literal) = quoted(text) {
-        // An empty counter is CSS's own
-        // way of asking for no marker.
+        // An empty counter removes the marker in CSS.
         return if literal.is_empty() { Marker::None } else { Marker::Literal(literal) };
     }
     match text {
         "disc" => Marker::Glyph(DISC_MARKER),
         "circle" => Marker::Glyph(CIRCLE_MARKER),
-        // Not in the census, and one
-        // arm: falling back to `disc`
-        // for it would draw a round
-        // bullet where the author asked
-        // for a square one, which is
-        // worse than reading the third
-        // of CSS's three bullet
-        // keywords.
+        // The corpus has no `square` keyword.
+        // A `disc` fallback would draw a round bullet instead of a square bullet.
+        // Handle the keyword directly.
         "square" => Marker::Glyph(SQUARE_MARKER),
         "decimal" => Marker::Decimal,
-        // Likewise the one keyword whose
-        // fallback would *add* ink: an
-        // author writing `none` removed
-        // the marker, and `disc` would
-        // hand it back.
+        // Do not add ink for `none`.
+        // The author removed the marker with `none`.
+        // A `disc` fallback would restore it incorrectly.
         "none" => Marker::None,
-        // Every remaining keyword is a
-        // locale counter algorithm -
-        // `lower-roman`, `katakana`,
-        // `cjk-ideographic` - which the
-        // spec puts out of scope, so the
-        // value already in force stands.
+        // Other keywords select locale counter algorithms.
+        // Examples include `lower-roman`, `katakana`, and `cjk-ideographic`.
+        // The specification excludes these algorithms.
+        // Keep the current fallback value.
         _ => fallback,
     }
 }
 
-/// One list's or one item's marker,
-/// under the styling gate.
+/// Resolves a list or item marker with the style setting.
 ///
-/// The third and last reader of a
-/// node's resolved style record, and
-/// therefore the third arm of the one
-/// gate the "honour dictionary
-/// styling" setting closes - the other
-/// two go through
-/// [`Paragraphs::declarations`].
-/// `listStyleType` is a declaration
-/// like any other, so styling off must
-/// not let it through: a dictionary
-/// whose ①②③ numbering *is* its
-/// `listStyleType` (Jitendex, 97 150
-/// nodes) has to draw a browser's own
-/// bullet instead, or "renders a
-/// styled dictionary identically to an
-/// unstyled one" would not hold.
+/// This function reads a node's resolved style record.
+/// When the "honour dictionary styling" setting is off, this gate ignores the style.
+/// [`Paragraphs::declarations`] provides the other style gates.
+/// `listStyleType` is a standard CSS declaration.
+/// With style off, the engine ignores this declaration.
+/// A dictionary with ①②③ markers, such as Jitendex, then uses standard browser bullets.
+/// This behavior keeps unstyled output consistent.
 ///
-/// A wrapper rather than a fourth
-/// parameter on [`marker_of`], which
-/// stays a pure question about a
-/// document and a node and knows
-/// nothing about a setting.
+/// This function wraps [`marker_of`].
+/// [`marker_of`] handles document data and node data without settings.
 pub(super) fn styled_marker<'a>(
     doc: &'a GlossDoc,
     id: NodeId,
@@ -397,13 +284,10 @@ pub(super) fn styled_marker<'a>(
     }
 }
 
-/// A list tag's initial
-/// `list-style-type`.
+/// Returns the initial `list-style-type` for a list tag.
 ///
-/// The one thing `ol` and `ul` differ
-/// in, and the bottom of the
-/// inheritance chain [`marker_of`]
-/// walks.
+/// This value distinguishes `ol` from `ul`.
+/// It starts the inheritance chain for [`marker_of`].
 pub(super) fn initial_marker(ordered: bool) -> Marker<'static> {
     if ordered {
         Marker::Decimal
@@ -412,116 +296,71 @@ pub(super) fn initial_marker(ordered: bool) -> Marker<'static> {
     }
 }
 
-/// One list marker, before it is
-/// placed.
+/// One list marker before placement.
 ///
-/// Held beside the paragraph rather
-/// than in it, for the reason
-/// [`MarkerBox`] gives: CSS's
-/// `outside` marker box takes no room
-/// on the line, so putting it in the
-/// run would advance the pen past it
-/// and put every continuation line of
-/// a wrapped item under the bullet.
+/// Layout holds this marker beside the paragraph, not in the paragraph text.
+/// See [`MarkerBox`].
+/// A marker with `list-style-position: outside` takes no horizontal space on the line.
+/// If the marker enters the text run, the pen advances past it.
+/// The wrapped item continuation lines then start below the bullet.
 #[derive(Clone)]
 pub(super) struct FlowMarker {
-    /// The label, its
-    /// [`MARKER_GAP`] included.
+    /// Label text with [`MARKER_GAP`].
     pub(super) text: String,
-    /// The item's own resolved style:
-    /// CSS's `::marker` inherits from
-    /// the element with `display:
-    /// list-item`, not from the markup
-    /// inside it.
+    /// Resolved item style.
+    /// The CSS `::marker` element inherits from the `display: list-item` element.
+    /// It does not inherit from markup inside the item.
     pub(super) style: Inline,
-    /// [`Block::indent`] as of the
-    /// list that owed it, which is
-    /// that list's content edge and so
-    /// where the marker box's right
-    /// edge goes.
+    /// Content edge of the list from [`Block::indent`].
+    /// The marker box's right edge aligns with this position.
     ///
-    /// Carried rather than recomputed
-    /// from the paragraph, because an
-    /// item whose whole content is a
-    /// nested list shares one line
-    /// with its inner item and the two
-    /// markers hang in two different
-    /// gutters.
+    /// The marker stores this value directly.
+    /// Layout does not recalculate it from the paragraph.
+    /// When an item contains only a nested list, both items share one line.
+    /// Their markers hang in two different gutters.
     pub(super) indent: f32,
 }
 
-/// The list half of the gloss walk: a `ul` or an `ol`, its items, and the
-/// marker each item is owed.
+/// Walks list elements in gloss content: `ul`, `ol`, list items, and markers.
 impl Paragraphs<'_> {
-    /// One `ul` or `ol`: its items,
-    /// each marked and one level in.
+    /// Walks one `ul` or `ol` element with indented items and markers.
     ///
-    /// The list is where a marker
-    /// starts: `listStyleType` is
-    /// declared on it and an ordinal
-    /// counts its own items, so both
-    /// are resolved once here. Each
-    /// item then resolves its own
-    /// `listStyleType` against the
-    /// list's, because CSS inherits the
-    /// property and the item is what
-    /// draws the marker.
+    /// The list element defines marker settings.
+    /// It declares `listStyleType` and counts child items.
+    /// Layout resolves both values at the list level.
+    /// Each item resolves its own `listStyleType` against the list value.
+    /// CSS inherits this property, and the item renders the marker.
     ///
-    /// The indent goes on the list too,
-    /// exactly where Yomitan's
-    /// stylesheet puts it, which is
-    /// what lets it accumulate without
-    /// this walk counting levels: an
-    /// item inherits its list's indent
-    /// ([`Block::indent`]) and a list
-    /// inside an item adds another
-    /// [`LIST_INDENT_EM`] to it. It is
-    /// also the gutter each marker
-    /// hangs in, which is why the
-    /// resolved value is handed to
-    /// [`Paragraphs::owe`] with the
-    /// label.
+    /// The list also defines the indent.
+    /// This placement matches the Yomitan stylesheet.
+    /// Nested levels add the indent without explicit depth counting.
+    /// An item inherits the list indent ([`Block::indent`]).
+    /// A nested list adds another [`LIST_INDENT_EM`] unit.
+    /// This indent forms the marker gutter.
+    /// Layout sends this value to [`Paragraphs::owe`].
     pub(super) fn list(&mut self, id: NodeId, ctx: Ctx, ordered: bool, pad_left: f32) {
         let doc = self.doc;
-        // A list that declares its own
-        // left padding replaces the
-        // default gutter rather than
-        // adding to it, exactly as an
-        // author's `padding-left`
-        // replaces the UA's
-        // `padding-inline-start` and
-        // Yomitan's own
-        // `--list-padding1` rule. The
-        // box already paid the declared
-        // padding ([`Paragraphs::wrap`]),
-        // so the level costs nothing
-        // more here. Jitendex's glossary
-        // list (`padding-left: 0.25em`)
-        // is the one list in the
-        // 97-archive corpus that
-        // declares any.
+        // A list with explicit left padding replaces the default gutter.
+        // An author `padding-left` declaration replaces `padding-inline-start`.
+        // It also replaces `--list-padding1` in Yomitan.
+        // The box already accounts for this padding in [`Paragraphs::wrap`].
+        // Do not add an indent for this level.
+        // Only Jitendex declares `padding-left: 0.25em` in the 97-archive test corpus.
         let level =
             if pad_left > 0.0 { 0.0 } else { LIST_INDENT_EM * ctx.inline.size };
         let ctx = Ctx {
             block: Block { indent: ctx.block.indent + level, ..ctx.block },
             ..ctx
         };
-        // Nothing to mark: `display:
-        // list-item` is what earns a
-        // marker and only an `li` has
-        // it, so a list holding none is
-        // walked as any other block -
-        // which keeps `children`'s
-        // bare-string rule over it.
+        // Only `li` elements have `display: list-item` and show markers.
+        // If a list has no `li` children, walk it as a standard block.
+        // This preserves the standard text rules of `children`.
         if !doc.children(id).any(|child| doc.node(child).kind == Kind::ListItem) {
             return self.children(id, ctx);
         }
-        // The list's own declaration
-        // over its tag's initial value.
-        // Each item then resolves again
-        // against this, because the
-        // property is inherited and the
-        // item is what draws the marker.
+        // The list declaration overrides the tag's initial value.
+        // Each item resolves its property against this value.
+        // The property inherits, and the item displays the marker.
         let styling = self.render.styling;
         let inherited = styled_marker(doc, id, initial_marker(ordered), styling);
         let mut n = 0usize;
@@ -535,79 +374,49 @@ impl Paragraphs<'_> {
             }
             n += 1;
             if let Some(label) = styled_marker(doc, child, inherited, styling).label(n) {
-                // The item's own resolved
-                // style: CSS's `::marker`
-                // inherits from the item, not
-                // from the `b` the item's text
-                // may sit inside. The indent
-                // is this list's, because the
-                // gutter the marker hangs in
-                // is this list's padding and
-                // not the item's.
+                // The marker inherits the item's style.
+                // The CSS `::marker` element does not inherit from inner tags such as `b`.
+                // The indent belongs to this list.
+                // The marker hangs in this list's padding, not the item's.
                 let style = self.styled(child, ctx.inline);
                 self.owe(label, style, ctx.block.indent);
             }
             if self.stack_items {
                 self.node(child, at, prose);
             } else {
-                // The list in compact mode:
-                // the item's content joins the
-                // paragraph already open,
-                // separated as the panel has
-                // always separated glossary
-                // items. The `li` opens no
-                // line here, so it draws no
-                // block box either - it is
-                // inline content, and CSS
-                // draws no block box around
-                // inline content.
+                // In compact mode, item content appends to the current paragraph.
+                // Standard glossary item separators apply.
+                // The `li` starts no new line and draws no block box.
+                // Its content is inline, so CSS draws no block box around it.
                 self.pending_sep = true;
                 let inline = self.styled(child, ctx.inline);
                 let link = self.link_of(child, ctx.link);
                 self.children(child, Ctx { inline, link, ..at });
             }
-            // A marker never outlives the
-            // item that owes it: an item
-            // holding no text at all draws
-            // none, rather than marking the
-            // next item twice.
+            // Clear pending markers for an empty item.
+            // An item without text shows no marker.
+            // It must not place two markers on the next item.
             self.pending_marker.clear();
         }
     }
 
-    /// Owes `label` to the next run of
-    /// text, in `style`, hanging in the
-    /// gutter `indent` opened.
+    /// Adds `label` with `style` to the next text run and hangs it at `indent`.
     ///
-    /// Appended when a marker is
-    /// already owed, which is an item
-    /// whose only content is a nested
-    /// list: both levels' markers then
-    /// share the one line they have
-    /// between them. Each keeps its own
-    /// style and its own gutter, so the
-    /// two hang one level apart, as a
-    /// browser draws them.
+    /// This function appends to pending markers.
+    /// When an item contains only a nested list, both markers share one line.
+    /// Each marker keeps its style and gutter indent.
+    /// The markers hang one level apart, as in a browser.
     pub(super) fn owe(&mut self, label: String, style: Inline, indent: f32) {
         self.pending_marker.push(FlowMarker { text: label, style, indent });
     }
-
-    /// Spends the markers owed to the
-    /// run about to be pushed, the way
-    /// the layout mode asks for.
+    /// Applies pending markers to the next text run for the active layout mode.
     ///
-    /// Stacked items have a gutter, so
-    /// the marker hangs in it and the
-    /// item's text - every line of it -
-    /// keeps the item's own indent.
-    /// Compact items have no gutter and
-    /// no line of their own, so the
-    /// marker is written inline. This
-    /// is the one place
-    /// [`Paragraphs::stack_items`]
-    /// reaches a marker: what the
-    /// marker *says* is resolved above
-    /// it and shared.
+    /// Stacked items use a gutter.
+    /// The marker hangs in the gutter, and every item text line keeps its indent.
+    /// Compact items have no gutter or separate marker line.
+    /// Layout writes their markers inline.
+    /// [`Paragraphs::stack_items`] selects this mode.
+    /// Both modes use the same marker text.
     pub(super) fn mark(&mut self) {
         if self.stack_items {
             self.hang();
@@ -615,42 +424,29 @@ impl Paragraphs<'_> {
             self.mark_inline();
         }
     }
-
-    /// Hands the owed markers to the
-    /// paragraph, out of its flow.
+    /// Attaches pending markers to the paragraph outside the text flow.
     ///
-    /// Nothing about the run changes,
-    /// which is the whole point: the
-    /// markers are placed against the
-    /// first line box the wrap produces
-    /// ([`place_markers`]) and no line
-    /// box is touched, so a bin
-    /// re-measuring the element's own
-    /// spans gets exactly these lines
-    /// back.
+    /// The text run stays unchanged.
+    /// Layout places markers against the first line box of the wrapped text.
+    /// See [`place_markers`].
+    /// The line boxes stay unchanged.
+    /// A platform measurement of the spans reproduces the same line geometry.
     pub(super) fn hang(&mut self) {
         self.cur.marker.append(&mut self.pending_marker);
     }
 
-    /// Writes the owed markers as the
-    /// paragraph's leading spans.
+    /// Writes pending markers as first inline spans in the paragraph.
     ///
-    /// `list-style-position: inside`,
-    /// for the two cases with no gutter
-    /// to hang in: a compact list, and
-    /// an item whose only content is a
-    /// table.
+    /// This matches `list-style-position: inside`.
+    /// Layout uses this mode when no gutter exists:
+    /// 1. Compact lists.
+    /// 2. List items that contain only a table.
     ///
-    /// Each its own span at both ends,
-    /// and out of both the open
-    /// reading's slot and the link
-    /// around it: a marker joined to a
-    /// ruby base would hand the reading
-    /// `\u{2022} 猫` to centre over, a
-    /// marker joined to the item's `b`
-    /// would come out bold, and
-    /// `::marker` is no part of an
-    /// `<a>`.
+    /// Each marker forms its own span.
+    /// The marker stays outside open ruby slots and hyperlinks.
+    /// If code merged it with ruby base text, the ruby text would center over `\u{2022} 猫`.
+    /// If code merged it with a `b` tag, the marker would become bold.
+    /// An `<a>` tag must not include `::marker`.
     pub(super) fn mark_inline(&mut self) {
         if self.pending_marker.is_empty() {
             return;

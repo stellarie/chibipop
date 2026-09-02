@@ -1,25 +1,28 @@
-//! The one PNG encoder.
+//! The core PNG encoder.
 //!
-//! Both bins hand pixels to Anki and to disk, and both used to carry
-//! their own writer: the Windows bin drove WinRT's `BitmapEncoder`
-//! (which is why its screenshot thread had to join a WinRT apartment),
-//! and the Linux bin hand-rolled stored - uncompressed - deflate blocks
-//! to avoid a dependency. Neither is a platform fact: a PNG is a PNG.
-//! One pure-Rust encoder in core replaces both, the daemon's capture
-//! dumps stop being raw-size files, and the Windows screenshot thread
-//! needs no apartment.
+//! Both platform bins send pixels to Anki and disk. Each bin once had its own
+//! writer. Windows used WinRT's `BitmapEncoder`, which required its screenshot
+//! thread to join a WinRT apartment. Linux wrote stored, uncompressed deflate
+//! blocks to avoid a dependency.
+//!
+//! These details do not belong to a platform. A PNG has one format. Core now
+//! owns one pure-Rust encoder. The daemon's capture dumps no longer use
+//! raw-size files, and the Windows screenshot thread needs no apartment.
 
 use anyhow::{Context, Result};
 
-/// Bytes of a compressed PNG holding `bgra`, which is `w * h * 4` bytes
-/// of top-down BGRA8 - the capture `Frame` layout on both platforms.
+/// Encode `bgra` as a compressed PNG.
+/// `bgra` contains `w * h * 4` bytes in top-down BGRA8, the capture `Frame`
+/// layout on both platforms.
 ///
-/// Alpha is dropped rather than carried: every capture path in this tree
-/// declares it junk (wlr-screencopy hands back whatever the compositor's
-/// buffer held, `GetDIBits` leaves it zero), so an RGBA PNG would encode
-/// a fully transparent picture on Windows and noise on Linux. Colour
-/// type 2, 8-bit, filtered and deflated by the `png` crate at its
-/// default level.
+/// Capture paths do not provide useful alpha. `wlr-screencopy` returns the
+/// compositor buffer alpha, and `GetDIBits` sets alpha to zero.
+/// An RGBA PNG would therefore appear transparent on Windows and contain
+/// noise on Linux.
+/// The encoder writes color type 2, 8-bit RGB with filtered deflate at the
+/// `png` crate default level.
+/// The function returns an error when dimensions are not positive or the
+/// buffer has fewer than `w * h * 4` bytes.
 pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
     let dims = u32::try_from(w).ok().zip(u32::try_from(h).ok());
     let Some((w, h)) = dims.filter(|(w, h)| *w > 0 && *h > 0) else {
@@ -33,7 +36,7 @@ pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
         bgra.len()
     );
 
-    // BGRA -> RGB, dropping the junk byte.
+    // Convert BGRA -> RGB and discard the alpha byte.
     let mut rgb = Vec::with_capacity(pixels * 3);
     for px in bgra[..need].as_chunks::<4>().0 {
         rgb.extend_from_slice(&[px[2], px[1], px[0]]);
@@ -53,7 +56,7 @@ pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// Decode with the same crate's reader: RGB8 rows, no interlace.
+    /// Decode with the same crate. Expect RGB8 rows without interlace.
     fn decode(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
         let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
         let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
@@ -66,7 +69,7 @@ mod tests {
 
     #[test]
     fn a_single_red_pixel_survives_the_bgra_to_rgb_swap() {
-        // BGRA: blue 0, green 0, red 255, alpha junk.
+        // BGRA stores blue 0, green 0, red 255, and an unused alpha byte.
         let png = encode_bgra_to_png(&[0, 0, 0xff, 0x00], 1, 1).unwrap();
         assert_eq!((1, 1, vec![0xff, 0, 0]), decode(&png));
     }
@@ -86,8 +89,8 @@ mod tests {
 
     #[test]
     fn the_encoded_stream_is_compressed_not_stored() {
-        // 320 KB of flat pixels: a stored-deflate writer emits them all,
-        // any real compressor flattens them to nothing.
+        // A stored-deflate writer keeps all 320 KB of flat pixels.
+        // A real compressor reduces the same data to a small stream.
         let (w, h) = (400i32, 200i32);
         let png = encode_bgra_to_png(&vec![0x40u8; (w * h * 4) as usize], w, h).unwrap();
         assert!(

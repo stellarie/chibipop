@@ -1,4 +1,4 @@
-//! Hotkey-triggered actions.
+//! This module defines actions that hotkeys trigger.
 
 pub mod ocr_clipboard;
 pub mod screenshot;
@@ -12,17 +12,17 @@ use chibipop::worker::ServeNudge;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-/// A hotkey-triggered behavior.
+/// Define one operation that `ActionRegistry` can dispatch from a hotkey.
 pub trait Action {
-    /// Short, stable identifier.
+    /// Return this action's short, stable identifier.
     fn name(&self) -> &str;
-    /// Can this run right now?
+    /// Report whether this action can run with the current state.
     fn is_available(&self, state: &AppState) -> bool;
-    /// Runs the action.
+    /// Run this action with the supplied context.
     fn execute(&mut self, ctx: &mut ActionContext) -> Result<ActionOutcome>;
 }
 
-/// State snapshot for gating.
+/// State that an action checks before it runs.
 pub struct AppState<'a> {
     pub popup_visible: bool,
     pub presentation: Option<&'a Presentation>,
@@ -30,17 +30,17 @@ pub struct AppState<'a> {
     pub anki_connected: bool,
 }
 
-/// What an action may use.
+/// Resources that an action can use while it runs.
 pub struct ActionContext<'a> {
     pub selection: &'a mut selection::RegionSelection,
     pub config: &'a crate::config::ActionsConfig,
     pub exe_dir: &'a Path,
     pub screenshot_tx: &'a mpsc::Sender<ScreenshotCommand>,
-    /// Owned: it is two channel senders, cloned per dispatch.
+    /// This value owns two channel senders. The pump clones it for each dispatch.
     pub ocr_jobs: OcrJobs,
 }
 
-/// Pixels sent to the worker's OCR owner.
+/// Pixel data that the Worker receives for OCR.
 pub struct OcrRequest {
     pub bgra_buf: Vec<u8>,
     pub width: i32,
@@ -48,12 +48,12 @@ pub struct OcrRequest {
     pub result_tx: mpsc::Sender<std::result::Result<Vec<OcrLine>, String>>,
 }
 
-/// The one-off OCR queue, and the worker's nudge.
+/// Connects the one-off OCR queue to the Worker.
 ///
-/// The worker owns the only OCR engine (they are thread-affine) and runs
-/// this queue from its `serve` hook - but it blocks on its own trigger
-/// channel and cannot see this one, so queueing pixels is only half of
-/// handing them over. One type, so the two halves cannot come apart.
+/// The Worker owns the only `OcrEngine` because the engine is thread-affine.
+/// Its `serve` hook reads this queue, but the Worker blocks on its own trigger channel
+/// and cannot see this queue.
+/// This type keeps the pixel queue and wake signal together.
 #[derive(Clone)]
 pub struct OcrJobs {
     tx: mpsc::Sender<OcrRequest>,
@@ -65,7 +65,7 @@ impl OcrJobs {
         OcrJobs { tx, nudge }
     }
 
-    /// Queue pixels, then wake the worker to read them.
+    /// Queue the pixels and wake the Worker to read them.
     pub fn send(&self, request: OcrRequest) -> Result<()> {
         self.tx.send(request).context("sending OCR request")?;
         self.nudge.nudge();
@@ -74,7 +74,7 @@ impl OcrJobs {
 }
 
 impl ActionContext<'_> {
-    /// Test-only, minimal context.
+    /// Return a minimal context for tests.
     #[cfg(test)]
     pub fn empty() -> ActionContext<'static> {
         let (tx, _rx) = mpsc::channel();
@@ -83,18 +83,17 @@ impl ActionContext<'_> {
             config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
             exe_dir: Path::new("."),
             screenshot_tx: Box::leak(Box::new(tx)),
-            // No worker behind it: a queued job is never served, which
-            // is what a test without one wants.
+            // No Worker reads this queue. Tests can use this context without a Worker.
             ocr_jobs: OcrJobs::new(mpsc::channel().0, ServeNudge::disconnected()),
         }
     }
 }
 
-/// How an action's run ended.
+/// The result of one action run.
 #[derive(Debug)]
 pub enum ActionOutcome {
     Completed,
-    /// Pixels ready for the pump.
+    /// Captured pixels that the pump can send to the Worker.
     ScreenshotCaptured {
         bgra_buf: Vec<u8>,
         width: i32,
@@ -108,47 +107,50 @@ pub enum ActionOutcome {
     Failed(String),
 }
 
-/// Worker's input: raw pixels plus the whole add, already decided.
+/// Input for the Worker. It contains raw pixels and the complete `ShotPlan`.
 ///
-/// The rule lives in `chibipop::shot` - the pump plans, the worker
-/// only encodes, writes and posts.
+/// Core (`chibipop::shot`) owns the screenshot rule. The pump creates the plan.
+/// The Worker only encodes the pixels, writes the PNG, and posts the note.
 pub struct ScreenshotCommand {
     pub bgra_buf: Vec<u8>,
     pub width: i32,
     pub height: i32,
     pub plan: crate::shot::ShotPlan,
-    /// The Anki section as the pump saw it, field map normalised.
+    /// The normalized Anki configuration that the pump uses for this command.
     pub anki: crate::config::AnkiConfig,
-    /// AnkiConnect answered a dupe check: without it the PNG is still
-    /// written, but nothing is filed.
+    /// True when AnkiConnect answered the duplicate check.
+    /// If false, the Worker still writes the PNG but does not file a card.
     pub anki_connected: bool,
 }
 
-/// Worker's output: what became of the picture.
+/// Result that the Worker returns after it handles the picture.
 ///
-/// Three answers, not two. A mining screenshot with Anki out of reach
-/// still writes its PNG, and that is neither a card the popup may call
-/// an add nor a failure - flattening it into an error flag is how the
-/// popup came to claim notes Anki had never seen.
+/// This result has three states. A Mining screenshot still writes its PNG when Anki is
+/// unreachable.
+/// That state is neither a card that the popup can report as added nor a failure.
+/// A single error flag would make the popup claim that Anki saw a note when it did not.
 pub struct ScreenshotResult {
     pub expr: String,
-    /// Where the PNG landed - all the filed-nothing diagnostic has to
-    /// report, and the reason that case is worth a line at all.
+    /// Directory that the no-card diagnostic reports.
+    /// The result includes it because the PNG can exist without a filed card.
     pub dir: PathBuf,
-    /// `Ok(Some(id))` filed a note, `Ok(None)` wrote the picture and
-    /// nothing else, `Err` got neither done.
+    /// The Worker files a note when the result is `Ok(Some(id))`.
+    /// The Worker writes the picture without a note when the result is `Ok(None)`.
+    /// `Err` means that an error stopped the operation. The picture can still exist.
     pub filed: Result<Option<i64>, String>,
 }
 
 impl ScreenshotResult {
-    /// The add lifecycle this answer closes - `Some(failed)` - or
-    /// `None` when there is none to close.
+    /// Return the add result for this screenshot.
     ///
-    /// Filing nothing is a picture with no card behind it, so nothing
-    /// may claim the word was filed; the other two both answer the
-    /// popup, which `start_add` marked adding before it authorised the
-    /// picture. A screenshot taken with no popup up carries no word,
-    /// so nothing is waiting on that one either.
+    /// Return `Some(false)` when `expr` is non-empty and the Worker files the note.
+    /// Return `Some(true)` when `expr` is non-empty and the Worker reports an error.
+    /// Return `None` when `expr` is empty or the Worker saves the PNG without a card.
+    ///
+    /// A saved PNG without a card does not mean that the word was filed.
+    /// A filed card or an error closes the popup state that `start_add` marked before it sent
+    /// the command.
+    /// A screenshot without a popup has no word, so no add waits for it.
     pub fn add_failed(&self) -> Option<bool> {
         if self.expr.is_empty() {
             return None;
@@ -161,7 +163,7 @@ impl ScreenshotResult {
     }
 }
 
-/// Actions, indexed by hotkey.
+/// Store actions by their hotkey index.
 #[derive(Default)]
 pub struct ActionRegistry {
     actions: Vec<Option<Box<dyn Action>>>,
@@ -172,12 +174,12 @@ impl ActionRegistry {
         Self::default()
     }
 
-    /// Appends one action.
+    /// Append an action after the current last slot.
     pub fn register(&mut self, action: Box<dyn Action>) {
         self.actions.push(Some(action));
     }
 
-    /// Registers an action at its hotkey slot.
+    /// Place an action at a hotkey index.
     pub fn register_at(&mut self, index: usize, action: Box<dyn Action>) {
         if self.actions.len() <= index {
             self.actions.resize_with(index + 1, || None);
@@ -185,7 +187,8 @@ impl ActionRegistry {
         self.actions[index] = Some(action);
     }
 
-    /// None if skipped or missing.
+    /// Return `None` when the slot has no action or the action cannot run.
+    /// Return an `ActionOutcome` when the action runs. Use `Failed` for an error.
     pub fn dispatch(
         &mut self,
         index: usize,
@@ -297,8 +300,8 @@ mod tests {
 
     #[test]
     fn filing_nothing_is_not_an_add() {
-        // Anki never saw the word: calling this an add flips the
-        // button and caches a dupe for a note that does not exist.
+        // Anki did not see the word. This is not an add.
+        // An add would change the button and cache a duplicate for a note that does not exist.
         assert_eq!(shot_result("猫", Ok(None)).add_failed(), None);
     }
 
@@ -309,8 +312,8 @@ mod tests {
 
     #[test]
     fn a_wordless_screenshot_has_no_add_to_close() {
-        // The plain hotkey, pressed with no popup up: no expr, so no
-        // lifecycle to close - not even when the write fails.
+        // The plain hotkey has no popup, so it has no `expr` or add lifecycle to close.
+        // A failed write does not change this result.
         assert_eq!(shot_result("", Ok(None)).add_failed(), None);
         assert_eq!(shot_result("", Err("disk full".into())).add_failed(), None);
     }

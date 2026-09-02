@@ -1,16 +1,17 @@
-//! The GitHub release check, and the Windows-only self-update.
+//! The release check and the Windows self-update.
 //!
-//! Both platforms read the same `releases/latest` endpoint and match the
-//! same asset naming contract — one suffix per platform, both a forever
-//! contract (`docs/RELEASING.md`).
+//! Both platforms read `releases/latest` and use the same asset name contract.
+//! Each platform has one suffix. This contract remains fixed
+//! (`docs/RELEASING.md`).
 //!
-//! Only Windows *writes*. The `.new`/`.old` exe swap below is
-//! `#[cfg(windows)]`, so on Linux there is no path that replaces the
-//! installed binary: a pacman-owned `/usr/bin/chibipop` must never
-//! self-modify, and the settings button there reports the newer version
-//! and stops (ARCHITECTURE.md#packaging-and-ci). That is a compile-time
-//! property rather than a runtime flag — on Linux the swap is not built,
-//! so it cannot be reached, wired up, or accidentally re-enabled.
+//! Only Windows writes files. The `.new`/`.old` executable swap uses
+//! `#[cfg(windows)]`, so Linux never replaces the installed binary.
+//! A pacman-owned `/usr/bin/chibipop` must not self-modify. The Linux settings
+//! button reports a newer version and stops
+//! (ARCHITECTURE.md#packaging-and-ci).
+//!
+//! This guarantee comes from compilation, not a runtime flag. Linux does not
+//! build the swap, so no Linux path can reach or enable it.
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -19,13 +20,12 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const REPO: &str = "stellarie/chibipop";
 const ASSET_PREFIX: &str = "chibipop-v";
 
-/// Which platform's asset a release check is looking for.
+/// Identifies the platform asset that a release check seeks.
 ///
-/// A release carries one asset per platform and the names differ only in
-/// their tail, so the tail is the whole decision. The prefix and both
-/// suffixes are a forever contract: every shipped binary — including the
-/// ones already installed — parses them off `releases/latest`, so this
-/// matcher has to keep reading names in both shapes.
+/// A release has one asset per platform. Names differ only by their tail, so
+/// the tail determines the platform. The prefix and both suffixes are fixed.
+/// Every shipped binary, even an installed binary, parses these names from
+/// `releases/latest`. This matcher must accept both forms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Windows,
@@ -50,32 +50,30 @@ impl Platform {
     }
 }
 
-/// A release newer than this build, as `releases/latest` describes it.
+/// Release information that is newer than this build, as `releases/latest` describes it.
 ///
-/// The asset is optional because the version news is worth having
-/// without it: a release that carries no asset for this platform — one
-/// cut before the platform existed, or one whose upload half-failed —
-/// is still a release the user wants to hear about. Only *downloading*
-/// needs the asset, which is why [`Release`] and not this type is what
-/// the Windows swap takes.
+/// The asset is optional because version news helps even without an asset. A
+/// release can lack this platform's asset because it predates the platform or
+/// its upload failed. The user still needs the version report. Only a download
+/// needs the asset, so the Windows swap uses [`Release`] instead of `News`.
 #[derive(Debug)]
 pub struct News {
     pub tag: String,
     pub asset: Option<Asset>,
 }
 
-/// One release asset: what to fetch, and what to name to a user who
-/// will fetch it themselves.
+/// One release asset: its download URL and its user-visible name.
 #[derive(Debug)]
 pub struct Asset {
     pub name: String,
     pub url: String,
 }
 
-/// A newer release with a downloadable asset — the swap's input, and so
-/// Windows-only like the swap. On Linux this type does not exist, which
-/// is the tidy end of the same guarantee: nothing there can be holding
-/// a URL it is expected to write to disk.
+/// A newer release with a downloadable asset. The Windows swap consumes this
+/// input.
+///
+/// Linux does not define this type, so Linux code cannot hold a URL that it
+/// must write to disk.
 #[cfg(windows)]
 #[derive(Debug)]
 pub struct Release {
@@ -84,8 +82,7 @@ pub struct Release {
     pub asset_name: String,
 }
 
-/// The newer release for this build's platform, if any, and only if it
-/// can be downloaded.
+/// The newer release for this platform when its asset is downloadable.
 #[cfg(windows)]
 pub fn check(current: &str) -> Result<Option<Release>> {
     match news(current)? {
@@ -94,9 +91,10 @@ pub fn check(current: &str) -> Result<Option<Release>> {
     }
 }
 
-/// The swap's input. Version news is not enough for it: without an
-/// asset there is nothing to fetch, which is a failed update check
-/// rather than a report.
+/// Converts version news into the swap input.
+///
+/// Version news without an asset cannot provide a download, so the update
+/// check returns an error instead of a report.
 #[cfg(windows)]
 fn downloadable(news: News) -> Result<Release> {
     let asset = news.asset.context("no matching asset in release")?;
@@ -108,11 +106,10 @@ pub fn news(current: &str) -> Result<Option<News>> {
     news_at(&format!("https://api.github.com/repos/{REPO}/releases/latest"), current)
 }
 
-/// [`news`] against a named endpoint.
+/// Calls [`news`] with a named endpoint.
 ///
-/// The URL is an argument so a test can point the whole path — request,
-/// payload, matcher — at a local server; the shipped call sites pin the
-/// repo.
+/// The URL argument lets tests point the request, payload, and matcher at a
+/// local server. Shipped call sites use the fixed repository.
 pub fn news_at(api_url: &str, current: &str) -> Result<Option<News>> {
     let mut resp = ureq::get(api_url)
         .header("Accept", "application/vnd.github+json")
@@ -130,8 +127,8 @@ pub fn news_at(api_url: &str, current: &str) -> Result<Option<News>> {
     latest(&json, current, Platform::HOST)
 }
 
-/// The release a `releases/latest` payload describes, if it is newer
-/// than `current`, with `platform`'s asset if it has one.
+/// Returns the release that `releases/latest` describes when it is newer than
+/// `current`. It includes `platform`'s asset when one exists.
 fn latest(
     json: &serde_json::Value,
     current: &str,
@@ -154,8 +151,8 @@ fn latest(
         .iter()
         .filter_map(|a| Some((a.get("name")?.as_str()?, a)))
         .find(|(name, _)| platform.owns_asset(name));
-    // A matched name with no URL is a broken payload, not a release
-    // without an asset: say so rather than quietly reporting less.
+    // A name that matches without a URL means a broken payload, not a release
+    // without an asset. Return the error instead of a silent report.
     let asset = match matched {
         Some((name, a)) => Some(Asset {
             name: name.to_string(),
@@ -170,8 +167,7 @@ fn latest(
     Ok(Some(News { tag, asset }))
 }
 
-/// Downloads and swaps the exe. Windows only, forever: see the module
-/// note.
+/// Downloads and replaces the executable. Windows only. See the module note.
 #[cfg(windows)]
 pub fn download_and_replace(release: &Release) -> Result<()> {
     const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -210,7 +206,7 @@ pub fn download_and_replace(release: &Release) -> Result<()> {
     Ok(())
 }
 
-/// Extracts the exe from zip.
+/// Extracts the executable from a zip archive.
 #[cfg(windows)]
 fn extract_exe(zip_path: &std::path::Path, out: &std::path::Path) -> Result<()> {
     let file = std::fs::File::open(zip_path)
@@ -231,7 +227,7 @@ fn extract_exe(zip_path: &std::path::Path, out: &std::path::Path) -> Result<()> 
     anyhow::bail!("no chibipop.exe found in the release zip")
 }
 
-/// Removes a stale .old exe.
+/// Removes a stale `.old` executable.
 #[cfg(windows)]
 pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
@@ -240,7 +236,7 @@ pub fn cleanup_old() {
     }
 }
 
-/// True if remote > current.
+/// Returns true when `remote > current`.
 fn is_newer(remote: &str, current: &str) -> bool {
     let parse = |s: &str| -> Option<(u32, u32, u32)> {
         let mut parts = s.split('.');
@@ -259,8 +255,8 @@ fn is_newer(remote: &str, current: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// A `releases/latest` payload shaped like GitHub's, carrying both
-    /// platforms' assets plus the files a real release also holds.
+    /// A `releases/latest` payload that matches GitHub's shape. It has assets for
+    /// both platforms and the extra files that real releases contain.
     fn payload(tag: &str) -> serde_json::Value {
         let asset = |name: String| {
             serde_json::json!({
@@ -314,14 +310,13 @@ mod tests {
     fn foreign_release_files_are_not_assets() {
         for name in [
             "SHA256SUMS.txt",
-            // Unversioned, and a second architecture: both are the
-            // shape the contract exists to keep out.
+            // An unversioned file and a second architecture do not match the contract.
             "chibipop-latest-linux-x64.tar.gz",
             "chibipop-v0.9.0-linux-arm64.tar.gz",
             // A detached signature is not the asset it signs.
             "chibipop-v0.9.0-linux-x64.tar.gz.sig",
             "chibipop-v0.9.0-windows-x64.zip.sig",
-            // The source archives GitHub attaches to every release.
+            // GitHub attaches these source archives to every release.
             "v0.9.0.tar.gz",
         ] {
             assert!(!Platform::Linux.owns_asset(name), "{name}");
@@ -352,8 +347,7 @@ mod tests {
         assert!(latest(&json, "0.9.1", Platform::Windows).unwrap().is_none());
     }
 
-    /// A release from before this platform shipped still carries the one
-    /// fact worth reporting - which version it is.
+    /// A release from before this platform shipped still provides the version.
     #[test]
     fn a_release_without_this_platforms_asset_still_reports_the_version() {
         let json = serde_json::json!({
@@ -368,8 +362,8 @@ mod tests {
         assert!(news.asset.is_none(), "{:?}", news.asset);
     }
 
-    /// The swap is stricter than the report: no asset, no update. Only
-    /// Windows has a swap, so only Windows compiles this.
+    /// The swap requires an asset. News without one cannot produce an update.
+    /// Only Windows builds this code.
     #[cfg(windows)]
     #[test]
     fn news_without_an_asset_is_not_downloadable() {
@@ -378,8 +372,8 @@ mod tests {
         assert!(err.contains("no matching asset"), "{err}");
     }
 
-    /// A matched asset with no URL is a broken payload; reporting the
-    /// version and shrugging would hide it.
+    /// A matched asset without a URL indicates a broken payload. A version report
+    /// alone would hide that error.
     #[test]
     fn a_matched_asset_without_a_url_is_an_error() {
         let json = serde_json::json!({

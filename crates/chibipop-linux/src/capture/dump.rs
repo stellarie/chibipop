@@ -1,32 +1,32 @@
-//! `chibipop capture-dump`: the capture backends' own eyes.
+//! `chibipop capture-dump`: the own eyes of the capture backends.
 //!
-//! A diagnostic, like `probe`, and no part of the product: it opens the
-//! real backend the capture ladder picks for this session, grabs real
-//! boxes, writes PNGs, and prints what each grab decided - so a dwell
-//! on a static screen can be *watched* answering without copying, and
-//! damage can be watched arriving. Without it the only proof of a
-//! capture backend is a hover, which is a slow and indirect way to see
-//! one pixel.
+//! This command is a diagnostic, like `probe`, and not a part of the
+//! product. It opens the real backend that the capture ladder picks
+//! for this session. It grabs real boxes, writes PNGs, and prints the
+//! decision of each grab. Therefore you can *watch* a dwell on a
+//! static screen answer without a copy. You can also watch damage
+//! arrive. Without this command the only proof of a capture backend
+//! is a hover, which is a slow and indirect way to see one pixel.
 //!
-//! Both rungs are drivable here, and which one runs obeys the same
-//! `CHIBIPOP_CAPTURE_BACKEND` hook the daemon reads - so
-//! `CHIBIPOP_CAPTURE_BACKEND=portal chibipop capture-dump` is how the
-//! portal fallback gets exercised on a compositor that would otherwise
-//! always take the promptless path. The portal rung shows its consent
-//! dialog exactly as the daemon would; the restore token it writes is
-//! the same one the daemon reads, which is what makes "second launch
-//! is silent" observable from a shell.
+//! This command can drive both rungs. The choice of rung obeys the
+//! same `CHIBIPOP_CAPTURE_BACKEND` hook that the daemon reads.
+//! Therefore `CHIBIPOP_CAPTURE_BACKEND=portal chibipop capture-dump`
+//! exercises the portal rung even on a compositor that always takes
+//! the promptless path. The portal rung shows its consent dialog
+//! exactly as the daemon shows it. The portal rung writes the same
+//! restore token that the daemon reads. That token makes "second
+//! launch is silent" observable from a shell.
 //!
-//! It takes the lock-free path on purpose: no instance lock, no control
-//! socket, safe to run beside a live daemon.
+//! This command takes the lock-free path on purpose: no instance lock
+//! and no control socket. It is safe to run beside a live daemon.
 //!
-//! **One ladder, one bracket.** The backend and the read bracket both
-//! come from [`super::open`] and [`super::read`], so this file proves
-//! the same code the daemon runs rather than a copy of it. A single
-//! named box with no `--dwell` is exactly the product's one-shot path
-//! (own backend, one bracket, no reuse), so it goes through
-//! [`super::oneshot`]; everything else keeps one backend across several
-//! boxes, which is what the dwell damage race needs.
+//! **One ladder, one bracket.** The backend and the read bracket come
+//! from [`super::open`] and [`super::read`]. Therefore this file
+//! proves the same code that the daemon runs, and not a copy of it. A
+//! single named box with no `--dwell` is exactly the one-shot path of
+//! the product (own backend, one bracket, no reuse). That case goes
+//! through [`super::oneshot`]. Every other case keeps one backend
+//! across several boxes, which the dwell damage race needs.
 
 use super::backend;
 use super::geometry;
@@ -37,22 +37,22 @@ use chibipop::text::Frame;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// What the dump was asked to look at.
+/// The target that the caller gave to the dump.
 pub struct Args {
     /// One explicit box in global physical pixels.
     pub region: Option<PhysRect>,
     /// Where the PNGs go.
     pub out: PathBuf,
-    /// Repeat the first grab this many times, as one read each.
+    /// Repeats the first grab this many times, one read for each.
     pub dwell: u32,
-    /// Grab each output whole instead of a centred sample.
+    /// Grabs each whole output, and not a centered sample.
     pub full: bool,
-    /// Where the portal rung's restore token lives, so the dump and
-    /// the daemon share one grant.
+    /// The directory that holds the restore token of the portal rung.
+    /// The dump and the daemon share one grant.
     pub state_dir: PathBuf,
 }
 
-/// `x,y,w,h` in global physical pixels.
+/// Parses `x,y,w,h` in global physical pixels.
 pub fn parse_region(text: &str) -> Result<PhysRect> {
     let mut it = text.split(',');
     let mut next = |what: &str| -> Result<i32> {
@@ -94,9 +94,10 @@ pub fn run(args: Args) -> Result<()> {
         state_dir: args.state_dir.clone(),
     };
 
-    // One named box and no dwell: the product's one-shot path, run as
-    // the product runs it. `oneshot` opens the ladder itself, so
-    // nothing above it is needed and nothing below it is reused.
+    // One named box and no dwell selects the one-shot path of the
+    // product. This code runs that path as the product runs it.
+    // `oneshot` opens the ladder itself. Therefore this code needs
+    // nothing above `oneshot`, and it reuses nothing below it.
     if let (Some(region), 0) = (args.region, args.dwell) {
         println!("capture: one-shot path - this grab's own backend");
         let started = Instant::now();
@@ -154,10 +155,12 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// What one read decided, as a line and (optionally) a PNG.
+/// Prints the decision of one read as a line, and writes a PNG if the
+/// caller gives a path.
 ///
-/// The bracket itself is [`super::read`]; this is the half that is only
-/// a diagnostic's, so the library never learns to print.
+/// [`super::read`] is the bracket itself. This function is the half
+/// that belongs only to the diagnostic. Therefore the library never
+/// learns to print.
 fn report(
     frame: &Frame,
     region: PhysRect,
@@ -189,8 +192,8 @@ fn report(
     Ok(())
 }
 
-/// A box worth looking at on this output: the whole thing, or a
-/// centred sample of hover size.
+/// Returns a box to look at on this output: the whole output, or a
+/// centered sample of hover size.
 fn sample_of(output: PhysRect, full: bool) -> PhysRect {
     if full {
         return output;
@@ -205,7 +208,8 @@ fn pixel(buf: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
     buf.get(o..o + 4).map(|p| [p[0], p[1], p[2], p[3]]).unwrap_or_default()
 }
 
-/// Mean colour, as a hex triple: enough to tell pixels from blackness.
+/// Returns the mean color as a hex triple. The triple is enough to
+/// tell pixels from blackness.
 fn mean(buf: &[u8]) -> String {
     let px = buf.len() / 4;
     if px == 0 {

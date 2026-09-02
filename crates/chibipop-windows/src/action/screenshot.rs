@@ -1,14 +1,19 @@
-//! Mining context screenshot.
+//! This module captures a Mining screenshot.
 
 use crate::action::{Action, ActionContext, ActionOutcome, AppState};
 use crate::text::capture;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Where screenshots land on Windows: `save_dir` as written when it is
-/// absolute, otherwise beside the executable. The Linux twin is
-/// `Paths::screenshots_dir`, which resolves against XDG instead - which
-/// is why this rule is the bin's and not core's.
+/// Resolve `save_dir` for the Windows platform bin.
+///
+/// An absolute `save_dir` stays unchanged.
+/// A relative `save_dir` resolves beside the executable.
+/// The Linux platform bin uses `Paths::screenshots_dir`.
+/// It keeps an absolute `save_dir` unchanged.
+/// It resolves a relative `save_dir` beside the executable in `Portable` mode.
+/// It resolves a relative `save_dir` under `data_dir` in `Explicit` or XDG mode.
+/// Keep this rule in the platform bin because each platform resolves paths differently.
 pub fn save_root(cfg: &crate::config::ScreenshotConfig, exe_dir: &Path) -> PathBuf {
     if Path::new(&cfg.save_dir).is_absolute() {
         PathBuf::from(&cfg.save_dir)
@@ -17,7 +22,7 @@ pub fn save_root(cfg: &crate::config::ScreenshotConfig, exe_dir: &Path) -> PathB
     }
 }
 
-/// Captures a region for mining.
+/// Capture a region for a Mining screenshot.
 pub struct MiningContextScreenshot;
 
 impl Action for MiningContextScreenshot {

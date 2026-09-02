@@ -1,6 +1,7 @@
-//! Worker-level tests over fake `RegionCapture`/`OcrEngine` backends: the
-//! trigger->result flow, latest-wins coalescing, and reload semantics that
-//! the platform bins rely on, with no OS in the loop.
+//! These tests exercise the Worker with fake `RegionCapture` and `OcrEngine`
+//! backends.
+//! They cover the trigger-to-result flow, latest-wins behavior, and reload
+//! semantics that the platform bins use. They do not use an OS.
 
 use chibipop::controller::{LookupOutcome, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect, ScanDisplay};
@@ -15,21 +16,22 @@ use chibipop::worker::{Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerS
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Generous: never reached on a healthy run.
+/// Set a timeout that a healthy test does not reach.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Everything already logged. Every event is sent before the result that
-/// follows it, so a drained snapshot after a received result is complete.
+/// Return all events that the Worker has logged.
+/// The test sends each event before its result, so the test sees a complete
+/// event list after it receives that result.
 fn events(log_rx: &mpsc::Receiver<String>) -> Vec<String> {
     log_rx.try_iter().collect()
 }
 
-/// Canned frames; optionally gated so a test can hold a grab open.
+/// Return fixed frames. A test can use a gate to keep a grab open.
 struct FakeCapture {
     log: mpsc::Sender<String>,
-    /// One token per grab.
+    /// Use one token for each grab.
     gate: Option<mpsc::Receiver<()>>,
-    /// Signalled when a grab starts.
+    /// Send a signal when a grab starts.
     entered_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -65,7 +67,7 @@ impl RegionCapture for FakeCapture {
     }
 }
 
-/// One whole-image word per call, or nothing.
+/// Return one whole-image word for each call, or no words.
 struct FakeOcr {
     log: mpsc::Sender<String>,
     text: Option<String>,
@@ -102,12 +104,12 @@ impl OcrEngine for FakeOcr {
     }
 }
 
-/// One term, one entry, one dictionary.
+/// Return one term, one Entry, and one Dictionary.
 fn dict() -> FakeDictionary {
     dict_named("FakeDict")
 }
 
-/// The same, under another dictionary name.
+/// Return the same term and Entry under another Dictionary name.
 fn dict_named(name: &str) -> FakeDictionary {
     let mut d = FakeDictionary::new();
     d.add_dict(1, name);
@@ -116,20 +118,20 @@ fn dict_named(name: &str) -> FakeDictionary {
     d
 }
 
-/// Every Dictionary name the fakes here answer to, spelled the way the
-/// config has to spell it.
+/// List each Dictionary name that these fakes can answer.
+/// The config must use these exact names.
 ///
-/// A list under `[dictionaries]` names a Dictionary by its whole name and
-/// is matched by equality, and an enabled terms list naming none of the
-/// installed Dictionaries searches nothing - there is no ladder behind it
-/// to widen the scope back out (ARCHITECTURE.md#dictionary-and-lookup). A
-/// fixture that never names itself therefore presents an empty popup, so
-/// every identity these tests expect a card from is listed: the one
-/// `dict()` installs, the two a reopen swaps between, and the one a
-/// reload renames it to.
-/// `WhatTheBinKnew` is deliberately absent - it is the stale name the
-/// reopened file's own identities beat, and a card wearing it is the bug
-/// that test pins.
+/// A list under `[dictionaries]` matches a Dictionary by exact name.
+/// An enabled terms list with no installed Dictionary names searches nothing.
+/// It has no ladder that widens the scope
+/// (ARCHITECTURE.md#dictionary-and-lookup).
+/// A fixture that names no Dictionary therefore shows an empty popup.
+/// List every identity that these tests expect to show as a card.
+/// The list includes the Dictionary from `dict()`, the two names that a reopen
+/// swaps, and the name that a reload assigns.
+/// Exclude `WhatTheBinKnew` on purpose.
+/// The reopened file must replace this stale name.
+/// A card with this name is the failure that the test detects.
 const SEARCHED: [&str; 4] = ["FakeDict", "Renamed", "BeforeTheRebuild", "AfterTheRebuild"];
 
 fn settings() -> WorkerSettings {
@@ -150,7 +152,8 @@ fn settings() -> WorkerSettings {
     }
 }
 
-/// A worker over the fakes; `text` is what OCR "reads" everywhere.
+/// Build a Worker over the fake backends.
+/// OCR returns the supplied optional `text` for every capture.
 fn spawn(
     text: Option<&str>,
     panics: bool,
@@ -178,7 +181,7 @@ fn spawn(
     (worker, dicts, log_rx)
 }
 
-/// Where the fakes' hovers land.
+/// Use this point for fake hovers.
 const AT: PhysPoint = PhysPoint { x: 600, y: 300 };
 
 fn hover(id: u64) -> Trigger {
@@ -188,7 +191,7 @@ fn hover(id: u64) -> Trigger {
     }
 }
 
-/// A hover with our own popup over the hovered point.
+/// Return a hover with the Worker's popup over the hover point.
 fn masked_hover(id: u64, mode: CaptureMode) -> Trigger {
     let popup = PhysRect { x: AT.x - 50, y: AT.y - 50, w: 100, h: 100 };
     Trigger {
@@ -197,9 +200,10 @@ fn masked_hover(id: u64, mode: CaptureMode) -> Trigger {
     }
 }
 
-/// The mask boundary is a capture edge: `FakeOcr`'s one word spans the
-/// whole grab, so a popup anywhere in it takes the word with it rather than
-/// leaving half a glyph to look up (ARCHITECTURE.md#capture-and-masking).
+/// The mask edge acts as a capture edge.
+/// `FakeOcr` returns one word that spans the whole grab, so a popup anywhere
+/// in it drops the word. It does not leave a partial glyph for lookup
+/// (ARCHITECTURE.md#capture-and-masking).
 #[test]
 fn a_live_hover_under_our_own_popup_resolves_nothing() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -217,7 +221,7 @@ fn a_live_hover_under_our_own_popup_resolves_nothing() {
     );
 }
 
-/// A frozen grab predates the popup, so the same rect masks nothing.
+/// A frozen grab predates the popup. The same rect therefore adds no mask.
 #[test]
 fn a_frozen_hover_is_maskless_and_still_resolves() {
     let (worker, _dicts, _log_rx) = spawn(Some("食"), false, None, None);
@@ -230,9 +234,8 @@ fn a_frozen_hover_is_maskless_and_still_resolves() {
     );
 }
 
-/// A backend that answers "unchanged" after its first grab: what a
-/// damage-paced dwell looks like from above the seam
-/// (ARCHITECTURE.md#capture-and-masking).
+/// Return `unchanged` after the first grab. This models a damage-paced dwell
+/// above the seam (ARCHITECTURE.md#capture-and-masking).
 struct DwellingCapture {
     log: mpsc::Sender<String>,
     grabs: u32,
@@ -265,7 +268,7 @@ impl RegionCapture for DwellingCapture {
     }
 }
 
-/// A worker over that backend; OCR reads the one word as ever.
+/// Build a Worker over that backend. OCR returns the same word each time.
 fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
     let (log_tx, log_rx) = mpsc::channel::<String>();
     let capture_log = log_tx.clone();
@@ -291,13 +294,14 @@ fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
     (worker, log_rx)
 }
 
-/// The dwell re-check, at the cost that makes it viable.
+/// Test the dwell re-check and its observable cost.
 ///
-/// A second look at a still screen reuses the first read's words: same
-/// pixels, same mask, same answer, no OCR pass. The popup coming up
-/// between two looks *is* a new question - the pixels OCR reads are the
-/// grab after masking (ARCHITECTURE.md#capture-and-masking) - so that one
-/// look pays a pass, and every dwell behind it is free again.
+/// An unchanged dwell uses one grab and no OCR pass.
+/// The pixels, mask, and answer stay the same, so the Worker reuses the words.
+/// If the popup appears between looks, the Worker asks a new question.
+/// OCR reads the grab after the mask (ARCHITECTURE.md#capture-and-masking).
+/// That look uses one OCR pass.
+/// Each later unchanged dwell uses one grab and no OCR pass.
 #[test]
 fn a_dwell_on_unchanged_pixels_skips_the_ocr_pass() {
     let (worker, log_rx) = spawn_dwelling();
@@ -327,7 +331,8 @@ fn a_dwell_on_unchanged_pixels_skips_the_ocr_pass() {
     assert_eq!((4, 2), passes(&seen), "and every dwell behind it is free again");
 }
 
-/// The whole pipeline: trigger in, presented lookup out, read bracketed.
+/// Test the full pipeline from trigger to lookup result.
+/// The read has guards around capture and OCR.
 #[test]
 fn a_hover_trigger_yields_a_ready_result() {
     let (worker, dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -344,7 +349,7 @@ fn a_hover_trigger_yields_a_ready_result() {
     assert_eq!("FakeDict", top.blocks[0].dict_name);
     assert!(scan.is_empty(), "scan rects are debug-only and were not requested");
 
-    // One read: guard bracket around capture and OCR.
+    // One read: the guard surrounds capture and OCR.
     assert_eq!(vec!["begin_read", "grab", "ocr", "end_read"], events(&log_rx));
 }
 
@@ -357,7 +362,7 @@ fn nothing_recognised_hides_the_popup() {
     assert!(matches!(result.outcome, LookupOutcome::Hide));
 }
 
-/// Drill-down is dictionary-only.
+/// A drill-down uses the Dictionary only.
 #[test]
 fn a_drilldown_never_touches_the_screen() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -372,7 +377,7 @@ fn a_drilldown_never_touches_the_screen() {
     assert!(seen.is_empty(), "no capture, no OCR: {seen:?}");
 }
 
-/// One bad frame is not fatal.
+/// One bad frame does not stop the Worker.
 #[test]
 fn a_panicking_backend_fails_the_hover_and_the_worker_survives() {
     let (worker, _dicts, _log_rx) = spawn(Some("食"), true, None, None);
@@ -384,7 +389,7 @@ fn a_panicking_backend_fails_the_hover_and_the_worker_survives() {
     };
     assert_eq!("a hover lookup panicked", why);
 
-    // Still serving: a screen-free lookup answers afterwards.
+    // The Worker still serves a screen-free lookup.
     worker
         .trigger()
         .send(Trigger { kind: TriggerKind::DrillDown("食".to_string()), id: RequestId(5) })
@@ -394,8 +399,8 @@ fn a_panicking_backend_fails_the_hover_and_the_worker_survives() {
     assert!(matches!(next.outcome, LookupOutcome::DrillDown(_)));
 }
 
-/// Latest-wins: hovers queued behind an in-flight read coalesce to the
-/// newest; the stale one is never answered.
+/// Hovers that arrive while a read runs coalesce to the newest hover.
+/// The Worker does not answer the stale hover.
 #[test]
 fn queued_hovers_coalesce_to_the_newest() {
     let (gate_tx, gate_rx) = mpsc::channel::<()>();
@@ -405,7 +410,7 @@ fn queued_hovers_coalesce_to_the_newest() {
     worker.trigger().send(hover(1)).unwrap();
     entered_rx.recv_timeout(TIMEOUT).expect("the first grab must start");
 
-    // Both arrive while the first read is held open.
+    // Send both while the first read remains open.
     worker.trigger().send(hover(2)).unwrap();
     worker.trigger().send(hover(3)).unwrap();
     gate_tx.send(()).unwrap();
@@ -423,8 +428,9 @@ fn queued_hovers_coalesce_to_the_newest() {
     assert_eq!(2, grabs, "the dropped hover must not have captured");
 }
 
-/// A reload is consumed before the next hover: new dictionary identities,
-/// new language, new scan settings; the reload itself never answers.
+/// Apply a reload before the next hover.
+/// The reload changes Dictionary identities, language, and scan settings.
+/// The reload does not return a result.
 #[test]
 fn a_reload_is_applied_before_the_next_hover() {
     let (worker, dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -455,7 +461,7 @@ fn a_reload_is_applied_before_the_next_hover() {
     );
 }
 
-/// Startup failure surfaces at spawn, not as a dead thread.
+/// Report startup failure from `spawn`, not from a dead Worker.
 #[test]
 fn a_failing_open_fails_the_spawn() {
     let Err(err) = Worker::spawn(settings(), || anyhow::bail!("no backend"), || {}) else {
@@ -464,7 +470,7 @@ fn a_failing_open_fails_the_spawn() {
     assert!(format!("{err:#}").contains("no backend"), "{err:#}");
 }
 
-/// The bin's event loop is woken for every queued result.
+/// Wake the bin event loop after each queued result.
 #[test]
 fn wake_fires_after_each_result() {
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -499,7 +505,7 @@ fn wake_fires_after_each_result() {
 
 // -- trigger mode's hold, end to end through the Worker --
 
-/// A hover somewhere else, so the hold is asked for a second box.
+/// Return a hover at another point. The hold then asks for another box.
 fn hover_at(id: u64, at: PhysPoint) -> Trigger {
     Trigger {
         kind: TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE }),
@@ -511,13 +517,13 @@ fn freeze(id: u64, at: PhysPoint) -> Trigger {
     Trigger { kind: TriggerKind::Freeze(at), id: RequestId(id) }
 }
 
-/// One answer, or a test failure.
+/// Return one result or fail the test.
 fn answer(worker: &Worker) -> chibipop::worker::WorkerResult {
     worker.results().recv_timeout(TIMEOUT).expect("the worker must answer")
 }
 
-/// The whole point of freezing: one copy at press, and every lookup in
-/// the hold reads it - however many lookups the cursor asks for.
+/// Freeze once at press time and use that copy for every lookup in the hold.
+/// The number of cursor lookups does not change this rule.
 #[test]
 fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -525,7 +531,7 @@ fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
     worker.trigger().send(hover(2)).unwrap();
     assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
 
-    // The cursor moved: another box, out of the same frame.
+    // The cursor moved. Ask for another box from the same frame.
     worker.trigger().send(hover_at(3, PhysPoint { x: AT.x + 120, y: AT.y })).unwrap();
     assert!(matches!(answer(&worker).outcome, LookupOutcome::Ready { .. }));
 
@@ -543,13 +549,13 @@ fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
     assert_eq!(2, seen.iter().filter(|e| *e == "ocr").count(), "each box is read once");
 }
 
-/// The read-through property. The same popup rect that hides the word
-/// from a live grab cannot hide it from the hold: those pixels were
-/// copied before the popup existed.
+/// Test read-through behavior.
+/// A live grab cannot read a word under the popup.
+/// The hold can read it because it copied the pixels before the popup existed.
 #[test]
 fn a_hold_resolves_the_word_the_popup_is_covering() {
     let (worker, _dicts, _log_rx) = spawn(Some("食"), false, None, None);
-    // Live, unfrozen: our own popup takes the word with it.
+    // Live mode uses the popup mask, so it drops the word.
     worker.trigger().send(masked_hover(1, CaptureMode::Live)).unwrap();
     assert!(matches!(answer(&worker).outcome, LookupOutcome::Hide));
 
@@ -561,7 +567,7 @@ fn a_hold_resolves_the_word_the_popup_is_covering() {
     );
 }
 
-/// Release ends the hold: the next lookup copies the screen again.
+/// A release ends the hold. The next lookup copies the screen again.
 #[test]
 fn a_thaw_returns_the_worker_to_live_grabs() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -580,8 +586,8 @@ fn a_thaw_returns_the_worker_to_live_grabs() {
     );
 }
 
-/// A crossed output takes a fresh full grab: the second press-time copy
-/// is what makes "hold and glance at the other monitor" work.
+/// When the cursor crosses to another output, trigger mode needs a new full grab.
+/// The second press-time copy lets a hold read the other output.
 #[test]
 fn a_second_freeze_mid_hold_copies_again() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -601,10 +607,10 @@ fn a_second_freeze_mid_hold_copies_again() {
     );
 }
 
-/// The reload gap, through the real seam: a rebuild renames a new
-/// database over the old inode, so the handle the worker holds keeps
-/// reading the old one until a `reload` reopens it - and the reopened
-/// file's identities are what the popup then names.
+/// Test the reload gap through the real seam.
+/// A rebuild renames a new database over the old inode.
+/// The Worker handle still reads the old file until `reload` opens the new file.
+/// The popup then uses the identities from the reopened file.
 #[test]
 fn a_reload_reopens_the_dictionary_the_worker_reads() {
     let (log_tx, _log_rx) = mpsc::channel::<String>();
@@ -624,7 +630,7 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
                     panics: false,
                 }),
                 dict: Box::new(dict_named("BeforeTheRebuild")),
-                // What the settings process's rename leaves behind.
+                // This is the file state after the settings process renames the database.
                 reopen_dict: Some(Box::new(|| Ok(Box::new(dict_named("AfterTheRebuild"))))),
                 serve: None,
                 engine: LookupEngine::new(Deconjugator::new(Vec::new())),
@@ -635,7 +641,7 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
     .expect("the worker must start");
     assert_eq!("BeforeTheRebuild", dicts[0].name);
 
-    // The bin can only send what it knew before the rebuild.
+    // The bin can send only the identities that it had before the rebuild.
     let mut reloaded = settings();
     reloaded.dicts = vec![DictInfo { dict_id: 1, name: "WhatTheBinKnew".to_string() }];
     worker
@@ -657,7 +663,7 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
 
 // -- the `serve` hook: one-off OCR jobs between lookups --
 
-/// One-off pixels, as the Windows bin's OCR-to-clipboard queues them.
+/// Hold one-off pixels that the Windows bin queues for OCR-to-clipboard.
 struct Job {
     bgra: Vec<u8>,
     w: i32,
@@ -665,11 +671,10 @@ struct Job {
     done: mpsc::Sender<Result<Vec<OcrLine>, String>>,
 }
 
-/// A worker with a `serve` hook over the fakes.
+/// Build a Worker with a `serve` hook over fake backends.
 ///
-/// The hook logs every run and drains the job queue through the facade
-/// it is handed - it never sees the engine, and the queue is the bin's,
-/// invisible to the worker.
+/// The hook logs each call and drains the bin's job queue through the facade.
+/// It cannot access the engine. The Worker cannot see the bin's queue.
 fn spawn_serving(
     gate: Option<mpsc::Receiver<()>>,
     entered_tx: Option<mpsc::Sender<()>>,
@@ -704,14 +709,14 @@ fn spawn_serving(
     (worker, job_tx, log_rx)
 }
 
-/// One pixel's worth of BGRA, and somewhere to answer.
+/// Return one BGRA pixel and a channel for its result.
 fn job() -> (Job, mpsc::Receiver<Result<Vec<OcrLine>, String>>) {
     let (done, done_rx) = mpsc::channel();
     (Job { bgra: vec![0u8; 4], w: 1, h: 1, done }, done_rx)
 }
 
-/// The worker runs its hook once before blocking, so a test that wants
-/// to observe the *next* run waits that one out first.
+/// The Worker calls the hook once before it waits.
+/// Consume that call before a test checks the next call.
 fn wait_for_a_hook_run(log_rx: &mpsc::Receiver<String>) {
     assert_eq!(
         Some("serve".to_string()),
@@ -720,9 +725,11 @@ fn wait_for_a_hook_run(log_rx: &mpsc::Receiver<String>) {
     );
 }
 
-/// Both properties at once: a queued job wakes a worker that is blocked -
-/// no poll to catch it - and the hook reads the pixels through the
-/// facade, on the worker's own thread, with no trigger in sight.
+/// Test the nudge path and the OCR facade together.
+/// A queued job wakes a Worker that waits on the trigger channel.
+/// The Worker does not poll for the job.
+/// The hook reads the pixels through the facade on the Worker thread.
+/// No trigger carries the job.
 #[test]
 fn a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade() {
     let (worker, jobs, log_rx) = spawn_serving(None, None);
@@ -744,9 +751,8 @@ fn a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade() {
     );
 }
 
-/// The idle budget is 0 wakeups/s, which is why the 20 ms poll had to go:
-/// with a hook installed and nothing queued, the worker blocks. The poll
-/// it replaced would have logged ~15 hook runs over this window.
+/// The idle budget is 0 wakeups/s. The Worker must wait when no job exists.
+/// A 20 ms poll calls the hook about 15 times in this window.
 #[test]
 fn an_idle_worker_with_a_serve_hook_never_wakes_itself() {
     let (_worker, _jobs, log_rx) = spawn_serving(None, None);
@@ -757,9 +763,11 @@ fn an_idle_worker_with_a_serve_hook_never_wakes_itself() {
     assert!(events(&log_rx).is_empty(), "an idle worker must do nothing at all");
 }
 
-/// The wake that must not be lost: a job queued while a lookup is in
-/// flight is served when that lookup ends, before the worker blocks
-/// again - so a nudge a drained batch swallows still costs nothing.
+/// Do not lose a wake.
+/// If a job enters the queue while a lookup runs, the Worker serves it after
+/// the lookup ends.
+/// The Worker serves it before it waits again.
+/// A nudge that the drain consumes still costs no extra poll.
 #[test]
 fn a_job_queued_during_a_lookup_is_served_before_the_worker_blocks_again() {
     let (release_tx, gate) = mpsc::channel::<()>();

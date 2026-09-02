@@ -1,22 +1,20 @@
-//! Direct2D/DirectWrite paint.
+//! Paints with Direct2D and DirectWrite.
 //!
-//! Hwnd target, not layered.
-//! Caller paints; wndproc won't.
+//! This module paints to an HWND target.
+//! The target is not a layered window.
+//! The caller calls the paint function. `wndproc` does not paint.
 //!
-//! Paint-only. Layout is core's:
-//! `Text` is the `TextMeasure` core
-//! wraps its runs through, and this
-//! module draws the `PopupScene` that
-//! comes back. Every gap, width and y
-//! in the panel is decided there, so
-//! the Linux surface lays the popup
-//! out the same way.
+//! This module only paints. Core owns layout.
+//! `Text` implements core's `TextMeasure` trait.
+//! Core uses `Text` to wrap each run, and this module draws the returned `PopupScene`.
 //!
-//! DIPs, not device pixels: the D2D
-//! target carries the DPI, so the
-//! scene is built at `client / scale`
-//! and the conversion never leaves
-//! this module.
+//! Core decides every panel gap, width, and y position.
+//! The Linux surface uses the same arrangement.
+//!
+//! This module uses DIPs instead of device pixels.
+//! The Direct2D target carries the DPI value.
+//! This module builds the scene at `client / scale`.
+//! The scale conversion stays in this module.
 
 use crate::controller::HitAction;
 use crate::present::Presentation;
@@ -40,24 +38,23 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_numerics::Vector2;
 
-/// Measure-only geometry capture.
+/// Captures measured geometry only.
 ///
-/// The layout goldens' capture side.
+/// Geometry-snapshot goldens use this module to capture the scene.
 pub mod geometry;
 
-/// Cached by font+size+weight+style.
+/// Caches formats for one font family. The key stores the size, weight, and style.
 #[derive(Default)]
 struct FormatCache {
     font: String,
     by_key: HashMap<u64, IDWriteTextFormat>,
 }
 
-/// Packs size+weight+style into a key.
+/// Packs the size, weight, and style into one cache key.
 ///
-/// A format is immutable once created,
-/// so the cache has to key on every
-/// axis a run can vary on, not just
-/// the size it used to.
+/// DirectWrite cannot change a format after it creates the format.
+/// An earlier key stored only the size. A run can also vary in weight and style, so the key must
+/// store all three values.
 fn format_key(size: f32, weight: u16, italic: bool) -> u64 {
     let s = size.to_bits() as u64;
     let w = (weight as u64) << 32;
@@ -65,15 +62,13 @@ fn format_key(size: f32, weight: u16, italic: bool) -> u64 {
     s | w | i
 }
 
-/// DirectWrite, as a text engine.
+/// Uses DirectWrite as the text engine.
 ///
-/// Shapes runs for core's layout and
-/// re-shapes them for paint. It owns
-/// the format cache, so both walks
-/// hit the same `IDWriteTextFormat`s.
+/// `Text` shapes each run for core's layout pass and then shapes it again for paint.
+/// `Text` owns the format cache, so both passes use the same `IDWriteTextFormat` objects.
 pub struct Text {
     dwrite: IDWriteFactory,
-    /// Text formats, reused.
+    /// This field stores the formats for reuse.
     formats: RefCell<FormatCache>,
 }
 
@@ -84,8 +79,7 @@ impl Text {
         Ok(Text { dwrite, formats: RefCell::default() })
     }
 
-    /// One format per font, size,
-    /// weight and style.
+    /// Gets or creates the text format for a font, size, weight, and style.
     fn format(
         &self,
         font: &str,
@@ -125,29 +119,21 @@ impl Text {
         Ok(created)
     }
 
-    /// One wrapped layout.
+    /// Builds one wrapped `IDWriteTextLayout` for a run.
     ///
-    /// The one shaping call in the
-    /// bin: measure and paint both come
-    /// through here, and through the
-    /// same `MeasureRun`, so a run is
-    /// never wrapped two ways nor
-    /// painted in a weight it was not
-    /// measured in.
+    /// This is the only call that shapes text in the bin.
+    /// The measure pass and paint pass both call this function with the same `MeasureRun`.
+    /// A run therefore wraps in one way and never paints with a different weight from its measure
+    /// pass.
     ///
-    /// The whole run is one layout, so
-    /// its spans wrap as one paragraph
-    /// and a bold span can share a line
-    /// with a normal one
-    /// (ARCHITECTURE.md#popup-and-measurement).
-    /// The first span's cached
-    /// `IDWriteTextFormat` is the base
-    /// and the rest override their own
-    /// ranges, so a one-span run makes
-    /// exactly the calls it always did.
-    /// Colour is not here: it changes
-    /// no geometry and needs a brush,
-    /// which only the paint side has.
+    /// The whole run forms one layout, so its spans wrap as one paragraph.
+    /// A bold span can share a line with a normal span (ARCHITECTURE.md#popup-and-measurement).
+    /// The cached `IDWriteTextFormat` of the first span sets the base format.
+    /// Each other span overrides its own range.
+    /// A one-span run therefore uses the same calls as before.
+    ///
+    /// This layout ignores color because color does not change geometry.
+    /// The paint side owns the brush that applies color.
     fn layout(&self, run: MeasureRun<'_>) -> windows::core::Result<IDWriteTextLayout> {
         let base = run.spans.first().copied().unwrap_or(NO_SPAN);
         let format = self.format(base.font, base.size, base.weight, base.italic)?;
@@ -160,10 +146,8 @@ impl Text {
                 .CreateTextLayout(&wide, &format, run.max_w.max(1.0), f32::MAX)
         }?;
         for (span, range) in run.spans.iter().zip(ranges(run.spans)).skip(1) {
-            // SAFETY: each range names
-            // UTF-16 positions inside the
-            // string the layout was just
-            // built from.
+            // SAFETY: Each range names UTF-16 positions inside the string that the layout just
+            // received from this function.
             unsafe {
                 layout.SetFontFamilyName(&HSTRING::from(span.font), range)?;
                 layout.SetFontWeight(DWRITE_FONT_WEIGHT(span.weight as i32), range)?;
@@ -174,21 +158,17 @@ impl Text {
         Ok(layout)
     }
 
-    /// Borrows it as a `TextMeasure`.
+    /// Borrows `Text` as a `TextMeasure`.
     fn measurer(&self) -> Measurer<'_> {
         Measurer(self)
     }
 }
 
-/// What a run with no spans formats as.
+/// Defines the style for a run with no spans.
 ///
-/// Core never builds one - every
-/// element it measures carries a styled
-/// span - but a layout needs a family
-/// and a size whatever its text is, and
-/// an unnamed family is DirectWrite's
-/// to refuse rather than this module's
-/// to guess at.
+/// Core never creates an empty run because it measures every element with a styled span.
+/// A layout still needs a font family and size for text.
+/// DirectWrite must reject an unnamed family, so this module must not choose one.
 const NO_SPAN: StyledSpan<'static> = StyledSpan {
     text: "",
     font: "",
@@ -206,13 +186,10 @@ fn style_of(italic: bool) -> DWRITE_FONT_STYLE {
     }
 }
 
-/// Each span's UTF-16 range in the run.
+/// Gives each span's UTF-16 range inside the run.
 ///
-/// The layout is one string end to end,
-/// so a span is a range in it - which
-/// is the unit both the per-range
-/// formatting and `HitTestTextRange`
-/// take.
+/// The layout holds one string from start to end, so each span maps to a range inside that string.
+/// A range is the unit that per-range formatting and `HitTestTextRange` accept.
 fn ranges<'a>(
     spans: &'a [StyledSpan<'a>],
 ) -> impl Iterator<Item = DWRITE_TEXT_RANGE> + 'a {
@@ -225,7 +202,7 @@ fn ranges<'a>(
     })
 }
 
-/// The line UTF-16 position `at` is on.
+/// Finds the line that contains UTF-16 position `at`.
 fn line_of(lines: &[DWRITE_LINE_METRICS], at: u32) -> usize {
     let mut end = 0u32;
     for (i, line) in lines.iter().enumerate() {
@@ -237,15 +214,13 @@ fn line_of(lines: &[DWRITE_LINE_METRICS], at: u32) -> usize {
     lines.len().saturating_sub(1)
 }
 
-/// The rects `[at, at + len)` fills.
+/// Gives the rects that the range `[at, at + len)` fills.
 ///
-/// One per line the range touches, and
-/// one more per bidi run on a line.
-/// `HitTestTextRange` reports how many
-/// it needed when the buffer was too
-/// small, so `hint` covers the ordinary
-/// case in one call and the retry
-/// covers the rest.
+/// The range returns one rect for each line that it touches.
+/// It returns one more rect for each bidirectional run on a line.
+/// `HitTestTextRange` reports the count that the buffer needs when it is too small.
+/// The `hint` parameter handles the ordinary case in one call.
+/// A retry handles every other case.
 fn hit_range(
     layout: &IDWriteTextLayout,
     at: u32,
@@ -256,10 +231,8 @@ fn hit_range(
     out.clear();
     out.resize(hint.max(1), DWRITE_HIT_TEST_METRICS::default());
     let mut got = 0u32;
-    // SAFETY: `at` and `len` name UTF-16
-    // positions inside the layout's own
-    // text, and the buffer is sized
-    // before each call.
+    // SAFETY: `at` and `len` name UTF-16 positions inside the layout text.
+    // The code sizes the buffer before each call.
     let mut hr = unsafe { layout.HitTestTextRange(at, len, 0.0, 0.0, Some(out), &mut got) };
     if hr.is_err() && got as usize > out.len() {
         out.resize(got as usize, DWRITE_HIT_TEST_METRICS::default());
@@ -270,14 +243,15 @@ fn hit_range(
     Ok(())
 }
 
-/// `Text`, seen through the seam.
+/// Views `Text` through the `TextMeasure` seam.
 ///
-/// The trait wants `&mut self`; the
-/// cache behind it is shared, so the
-/// borrow is what moves, not `Text`.
+/// The `TextMeasure` trait needs `&mut self`.
+/// The cache behind `Text` is shared, so only the borrow changes.
+/// `Text` itself does not move.
 struct Measurer<'a>(&'a Text);
 
-/// Layout cannot read an HRESULT.
+/// Converts a Windows error to a `MeasureError` because the `TextMeasure` trait cannot return a raw
+/// HRESULT.
 fn refused(e: windows::core::Error) -> MeasureError {
     MeasureError::new(e.message())
 }
@@ -290,12 +264,9 @@ impl TextMeasure for Measurer<'_> {
     ) -> std::result::Result<(), MeasureError> {
         out.clear();
         let layout = self.0.layout(run).map_err(refused)?;
-        // The aggregate is still
-        // `GetMetrics`, untouched, so a
-        // one-span run measures exactly
-        // what it did before the seam
-        // widened. Everything below is
-        // detail beside it.
+        // `GetMetrics` still supplies the aggregate values.
+        // A one-span run therefore measures exactly as it did before the seam widened.
+        // The code below adds detail beside that call.
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m) }.map_err(refused)?;
         out.metrics = Metrics { w: m.width, h: m.height, lines: m.lineCount };
@@ -308,9 +279,8 @@ impl TextMeasure for Measurer<'_> {
         let mut rects = Vec::new();
         let (mut y, mut start) = (0.0f32, 0u32);
         for line in &lines {
-            // Trailing whitespace out, so
-            // a line's width means what
-            // `GetMetrics` means by width.
+            // The width excludes whitespace at the end, so a line's width has the same meaning as
+            // the width from `GetMetrics`.
             let visible = line.length.saturating_sub(line.trailingWhitespaceLength);
             let w = if visible == 0 {
                 0.0
@@ -322,10 +292,8 @@ impl TextMeasure for Measurer<'_> {
             y += line.height;
             start += line.length;
         }
-        // A line box per counted line,
-        // whatever DirectWrite filled:
-        // core stacks the gap after an
-        // empty run either way.
+        // Each counted line gets one line box, no matter how many lines DirectWrite fills.
+        // Core still adds the gap after an empty run in either case.
         if out.lines.is_empty() {
             out.lines.push(LineBox { y: 0.0, w: m.width, h: m.height, baseline: m.height });
         }
@@ -339,11 +307,9 @@ impl TextMeasure for Measurer<'_> {
             for rect in &rects {
                 let line = line_of(&lines, rect.textPosition) as u32;
                 match out.spans.iter_mut().rev().find(|b| b.span == i as u32 && b.line == line) {
-                    // One box per span per
-                    // line: a bidi split
-                    // reports the same line
-                    // twice and the box is
-                    // their union.
+                    // Each span gets one box on each line.
+                    // A bidirectional split reports the same line twice, so the code unions both
+                    // reports.
                     Some(b) => {
                         let right = (b.x + b.w).max(rect.left + rect.width);
                         b.x = b.x.min(rect.left);
@@ -354,9 +320,8 @@ impl TextMeasure for Measurer<'_> {
                         line,
                         x: rect.left,
                         w: rect.width,
-                        // Filled below: a
-                        // span's own advance
-                        // needs its line's.
+                        // The code fills this value below.
+                        // A span's own advance needs the advance of its line.
                         h: 0.0,
                     }),
                 }
@@ -377,10 +342,8 @@ impl TextMeasure for Measurer<'_> {
             let mut px = 0.0f32;
             let mut py = 0.0f32;
             let mut hm = DWRITE_HIT_TEST_METRICS::default();
-            // SAFETY: offset is a valid
-            // index into the layout's
-            // UTF-16 text - core walks
-            // the same string.
+            // SAFETY: `offset` is a valid index in the layout's UTF-16 text.
+            // Core walks the same string.
             unsafe { layout.HitTestTextPosition(offset, false, &mut px, &mut py, &mut hm) }
                 .map_err(refused)?;
             out.push(GlyphBox { x: hm.left, y: hm.top, w: hm.width, h: hm.height });
@@ -389,27 +352,23 @@ impl TextMeasure for Measurer<'_> {
     }
 }
 
-/// What each span asked its line for.
+/// Returns the height that each span gets from its line.
 ///
-/// DirectWrite reports a line's advance
-/// but never a range's share of it:
-/// `HitTestTextRange` answers with the
-/// line's own box for every fragment on
-/// it. The share is recoverable from
-/// the line, though, because
-/// DirectWrite sizes a line at the
-/// largest of `size × the face's
-/// advance per em` over its ranges - so
-/// the tallest span on a line fixes
-/// that ratio, and every other span on
-/// it asked for its own size times the
-/// same number. Exact for one family at
-/// mixed sizes, which is what the
-/// census's 18 `fontSize` dictionaries
-/// produce; a fallback face on the same
-/// line makes it the tallest face's
-/// ratio for all of them, which is
-/// never more than the line.
+/// DirectWrite reports the advance of a whole line, not each range's share.
+/// `HitTestTextRange` returns the line's box for every fragment on that line.
+/// That call cannot report the share.
+///
+/// This function recovers each share from the line.
+/// DirectWrite sizes a line at the largest value of `size × the advance-per-em ratio of the face`
+/// across all ranges on that line.
+/// The tallest span fixes that ratio.
+/// Each other span gets its own size times the same ratio.
+///
+/// This method is exact for one font family at mixed sizes.
+/// That case matches the 18 `fontSize` dictionaries in the census corpus.
+/// A fallback face on the same line makes every span use the tallest face's ratio instead of its
+/// own face.
+/// That result is never taller than the line.
 fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
     for (i, geom) in out.lines.iter().enumerate() {
         let i = i as u32;
@@ -429,13 +388,11 @@ fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
     }
 }
 
-/// Lays one popup out, in DIPs.
+/// Builds one popup scene in DIPs.
 ///
-/// The box is one argument because its
-/// two halves are always resolved and
-/// passed together, which leaves room
-/// for the render settings without a
-/// seventh loose parameter.
+/// The `box_dip` parameter packs both halves of the box into one argument.
+/// The function always resolves and passes both halves together.
+/// This packing leaves room for the `render` parameter without a seventh loose parameter.
 fn scene_of(
     text: &Text,
     p: &Presentation,
@@ -445,10 +402,8 @@ fn scene_of(
     side_panel: bool,
     render: RenderSettings,
 ) -> Result<PopupScene> {
-    // The Anki affordance is its own
-    // window here, sized by its own
-    // font: Windows takes the label
-    // and leaves core's slot alone.
+    // On Windows, the Anki control is a child window with its own font and size.
+    // Windows therefore draws the label itself, and this call leaves core's `anki` slot empty.
     layout::scene(
         &SceneRequest {
             presentation: p,
@@ -466,62 +421,52 @@ fn scene_of(
     .context("laying out the popup")
 }
 
-/// `(width, view_h, content_h)`.
+/// Returns `(width, view_h, content_h)`.
 ///
-/// All three in physical pixels: the
-/// scene is in DIPs, and this is the
-/// only place the scale goes back on.
+/// This function returns all three values in physical pixels.
+/// The scene uses DIPs, and this function alone applies the scale again.
 fn popup_size(scene: &PopupScene, scale: f32, max_w: i32) -> (i32, i32, i32) {
     (
-        // No side column: keep the
-        // width the caller offered,
-        // exactly, without a round trip
-        // through the scale.
+        // Without a side column, this code keeps the caller's width exactly.
+        // It does not convert the width through the scale.
         scene.panel_w.map_or(max_w, |w| (w * scale).ceil() as i32),
         (scene.view_h * scale).ceil() as i32,
         (scene.content_h * scale).ceil() as i32,
     )
 }
 
-/// D2D state for one window.
+/// `Renderer` holds the Direct2D state for one window.
 pub struct Renderer {
     hwnd: HWND,
     d2d_factory: ID2D1Factory,
     text: Text,
-    /// Lazy; the window starts 0x0.
+    /// The field stays empty until the window has a real size. A new window starts at zero by zero.
     target: Option<ID2D1HwndRenderTarget>,
-    /// From the last paint pass, in
-    /// DIPs, as the scene reported it.
+    /// The hit targets from the last paint pass, in DIPs, exactly as the scene reported them.
     hits: RefCell<Vec<HitTarget>>,
-    /// The painter's decoded-asset
-    /// cache, or `None` when this build
-    /// cannot open the dictionary
+    /// The painter's decoded-asset cache, or `None` when this build cannot open the dictionary
     /// database.
     ///
-    /// `RefCell` for the same reason
-    /// `hits` and the format cache are:
-    /// `paint_once` takes `&self`, and
-    /// this window is single-threaded
-    /// by construction. `None` is a real
-    /// state and not a failure - the
-    /// popup still paints, with every
-    /// image on the `alt`-text rung.
+    /// This field uses `RefCell` for the same reason as `hits` and the format cache.
+    /// `paint_once` takes `&self`, and this window uses one thread by construction.
+    /// `None` is a real state, not a failure.
+    /// The popup still paints, and every image uses its `alt`-text rung.
     media: RefCell<Option<MediaSurfaces>>,
 }
 
 impl Renderer {
-    /// Factories only, no target.
+    /// Creates the factories only. This function does not create a target.
     ///
-    /// `db` is the dictionary database, which the painter opens its own
-    /// read-only connection onto: the worker owns the dictionary on
-    /// another thread and a `rusqlite::Connection` is not `Sync`.
+    /// The `db` parameter names the dictionary database.
+    /// The painter opens its own read-only connection to `db` because the worker owns the
+    /// dictionary on another thread.
+    /// A `rusqlite::Connection` is not `Sync`.
     pub fn new(hwnd: HWND, db: &std::path::Path) -> Result<Renderer> {
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
                 .context("D2D1CreateFactory")?;
-        // A database this build cannot open costs the panel its images and
-        // never its frame: an image node then renders its `alt` text,
-        // which is the character it stood for.
+        // If this build cannot open the database, the panel loses its images but keeps its frame.
+        // An image node then renders its `alt` text, the character that the image represents.
         let media = match MediaSurfaces::open(db) {
             Ok(cache) => Some(cache),
             Err(e) => {
@@ -570,17 +515,13 @@ impl Renderer {
             .map(|r| r.action.clone())
     }
 
-    /// `(width, view_h, content_h)`.
+    /// Returns `(width, view_h, content_h)`.
     ///
-    /// All three in physical pixels,
-    /// and `box_phys` likewise - one
-    /// argument for the same reason
-    /// [`scene_of`] takes one: its two
-    /// halves are always resolved
-    /// together, and separating them
-    /// would put this over clippy's
-    /// argument cap for no gain in
-    /// clarity.
+    /// This function returns all three values in physical pixels.
+    /// The `box_phys` parameter also uses physical pixels and packs both halves into one argument,
+    /// as [`scene_of`] does.
+    /// The function always resolves and passes both halves together.
+    /// Separate parameters would exceed the clippy argument cap without improving clarity.
     pub fn measure(
         &mut self,
         p: &Presentation,
@@ -606,10 +547,9 @@ impl Renderer {
 
     /// Paints into the client rect.
     ///
-    /// Device loss retries once. The
-    /// scene is built before the retry
-    /// loop: measuring cannot lose a
-    /// device, only painting can.
+    /// A device loss triggers one retry.
+    /// The function builds the scene before the retry loop because only paint can lose a device.
+    /// Measure cannot lose a device.
     pub fn paint(
         &mut self,
         p: &Presentation,
@@ -651,7 +591,7 @@ impl Renderer {
         Ok(((rc.right - rc.left).max(1), (rc.bottom - rc.top).max(1)))
     }
 
-    /// Creates or resizes it.
+    /// Creates or resizes the Direct2D target.
     fn ensure_target(&mut self, w: i32, h: i32) -> Result<()> {
         let size = D2D_SIZE_U {
             width: w.max(1) as u32,
@@ -690,9 +630,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// One BeginDraw/EndDraw cycle.
+    /// Runs one `BeginDraw` and `EndDraw` cycle.
     ///
-    /// Raw error; paint matches it.
+    /// This function returns the raw Direct2D error.
+    /// The caller, `paint`, matches that error.
     fn paint_once(
         &self,
         scene: &PopupScene,
@@ -732,10 +673,8 @@ impl Renderer {
                 target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
 
-            // One buffer for every
-            // element's spans: a rich
-            // entry costs no allocation
-            // per element per frame.
+            // One buffer holds the spans for every element.
+            // A rich entry therefore needs no allocation for each element on each frame.
             let mut spans: Vec<StyledSpan<'_>> = Vec::new();
             for painted in scene.visible(scroll as f32, h as f32) {
                 self.draw_elem(target, theme, painted.elem, painted.pen, &mut spans)?;
@@ -744,9 +683,8 @@ impl Renderer {
             if let Some(side) = &scene.side {
                 let sep_brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.separator), None) }?;
-                // Full-height rule: it
-                // divides the panel, not
-                // just the column.
+                // This rule spans the full height.
+                // It divides the whole panel, not only the column.
                 let sep = D2D_RECT_F {
                     left: side.rule_x,
                     top: side.origin_y,
@@ -756,9 +694,7 @@ impl Renderer {
                 unsafe { target.FillRectangle(&sep, &sep_brush) };
 
                 for painted in side.visible(scroll as f32, h as f32) {
-                    // One role for the
-                    // whole column, the
-                    // collapsed one.
+                    // The whole column uses one role, the collapsed role.
                     let span = StyledSpan {
                         text: &painted.row.text,
                         font: &theme.font_name,
@@ -779,9 +715,9 @@ impl Renderer {
                 }
             }
 
-            // Core derives the track and the content height off the scene
-            // itself, so this renderer, the Linux painter and the golden
-            // capture cannot disagree about what the padding does to either.
+            // Core derives the track and content height from the scene.
+            // This renderer, the Linux painter, and the golden capture therefore agree on how
+            // padding affects both values.
             if let Some((top, thumb_h)) = scene.scrollbar_thumb(theme.padding, h, scroll) {
                 let brush =
                     unsafe { target.CreateSolidColorBrush(&color_f(theme.dimmed_text), None) }?;
@@ -800,8 +736,8 @@ impl Renderer {
 
         let end_result = scope.end();
 
-        // Draw error first: it's finer.
-        // EndDraw signals device loss.
+        // The draw error comes first because it is more specific.
+        // `EndDraw` only signals a device loss.
         draw_result.and(end_result)
     }
 
@@ -826,22 +762,19 @@ impl Renderer {
             return Ok(());
         }
 
-        // Boxes first, under the text: a
-        // pill's fill is behind the label
-        // it tints, and a block's border
-        // frames the paragraph inside it.
-        // The scene resolved every rect,
-        // so this walk decides nothing -
-        // it only draws.
+        // This code draws the boxes first, below the text.
+        // A pill's fill stays behind the label that it tints.
+        // A block's border frames the paragraph inside it.
+        // The scene already resolves every rect, so this walk makes no decisions.
+        // This walk only draws.
         let dy = pen.1 - elem.pen.1;
         for b in elem.boxes() {
             self.draw_box(target, b, dy)?;
         }
-
-        // An image, and its ladder: the asset if this build can decode
-        // it, then the `alt` run the element already carries, then an
-        // outlined box. Never nothing, because nothing is a hole in a
-        // word.
+        // An image uses a ladder.
+        // It tries the asset when this build can decode it, then the `alt` run that the element
+        // already carries, and then an outlined box.
+        // The image always renders something because an empty result would leave a hole in a word.
         if let Some(img) = &elem.image {
             if self.draw_asset(target, elem, img, pen.1, theme)? {
                 return Ok(());
@@ -851,19 +784,15 @@ impl Renderer {
                 return Ok(());
             }
         }
-        // Nothing to shape: an empty table cell draws its border and no
-        // text, and the seam takes no empty run.
+        // An empty table cell has nothing to shape.
+        // It draws its border and no text, and the `TextMeasure` seam receives no empty run.
         if elem.spans.is_empty() {
             return Ok(());
         }
 
-        // One layout for the whole
-        // element, however many styles
-        // it holds: its spans wrap as
-        // one paragraph, so painting
-        // them one at a time would
-        // re-break the lines the scene
-        // already measured
+        // One layout covers the whole element, regardless of its styles.
+        // Its spans wrap as one paragraph.
+        // If the code paints each span alone, it breaks the lines that the scene already measured
         // (ARCHITECTURE.md#popup-and-measurement).
         spans.clear();
         spans.extend(elem.styled_spans(&theme.font_name));
@@ -878,30 +807,21 @@ impl Renderer {
             elem.align,
         )?;
 
-        // The readings, over the bases
-        // they were placed against. Not
-        // spans of the layout above: a
-        // reading takes no horizontal
-        // room from the line it sits on,
-        // so it is drawn where the scene
-        // put it and at the width the
-        // scene measured it at, which is
-        // the element's own.
+        // This loop draws each reading over the base characters that it annotates.
+        // A reading is not a span in the layout above.
+        // It takes no horizontal room from the line that holds it.
+        // The code draws each reading at the position that the scene already placed.
+        // It also uses the element's wrap width, which the scene already measured.
         for run in &elem.ruby {
             let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
             let span = [run.styled_span(&theme.font_name)];
             self.draw_spans(target, &span, &[0.0], elem.wrap_w, at, Align::Leading)?;
         }
 
-        // The list markers, in the
-        // gutters their lists opened.
-        // Always `Align::Leading` off
-        // the pen: a marker box hangs
-        // off the item's *content* edge,
-        // whatever the text inside the
-        // item aligns to. `textAlign`
-        // moves line boxes, and a marker
-        // box is not one.
+        // This loop draws list markers in the gutters that their lists open.
+        // Each marker always uses `Align::Leading` from the pen position.
+        // A marker box sits at the item's *content* edge, regardless of text alignment.
+        // `textAlign` moves line boxes only. A marker box is not a line box.
         for run in &elem.marker {
             let at = Vector2 { X: pen.0 + run.x, Y: pen.1 + run.y };
             let span = [run.styled_span(&theme.font_name)];
@@ -910,36 +830,24 @@ impl Renderer {
         Ok(())
     }
 
-    /// One scene box: its fill, then
-    /// its border.
+    /// Draws one scene box with its fill first and its border second.
     ///
-    /// `dy` is the scroll the element
-    /// was drawn at, since a box's rect
-    /// is in unscrolled panel space like
-    /// every other rect the scene
-    /// reports.
+    /// The `dy` parameter gives the scroll shift for the element.
+    /// The box rect uses unscrolled panel space, like every other rect that the scene reports.
+    /// `dy` moves it to the current scroll position.
     ///
-    /// `DrawRoundedRectangle` strokes
-    /// centred on the path, so the rect
-    /// is inset by half the width and
-    /// the border sits inside the box -
-    /// which is what CSS's border box
-    /// means. Whether one stroke will
-    /// do is `BoxStyle::even_border`'s
-    /// answer, not this painter's: a
-    /// rounded corner between two
-    /// different widths has no single
-    /// path, and the only asymmetric
-    /// border in the census corpus is a
-    /// one-sided rule that a rect draws
+    /// `DrawRoundedRectangle` centers its stroke on the path.
+    /// This function therefore insets the rect by half the border width, so the border stays inside
+    /// the box.
+    /// This placement follows the CSS border box model.
+    /// `BoxStyle::even_border` decides whether one stroke is enough, not this painter.
+    /// A rounded corner between two border widths has no single path.
+    /// The census corpus has only one asymmetric border: a one-sided rule that a rect draws
     /// exactly.
     ///
-    /// Every drawn style strokes solid.
-    /// The scene carries `dashed`,
-    /// `dotted` and `double` faithfully
-    /// for a later painter; the corpus's
-    /// only observed values are `solid`
-    /// and `none`.
+    /// Every drawn style uses a solid stroke.
+    /// The scene still carries `dashed`, `dotted`, and `double` for a later painter.
+    /// The census corpus shows only `solid` and `none`.
     fn draw_box(
         &self,
         target: &ID2D1HwndRenderTarget,
@@ -986,20 +894,21 @@ impl Renderer {
         Ok(())
     }
 
-    /// One asset, composited into its resolved box. `false` means the
-    /// ladder has to fall through.
+    /// Composites one asset into its resolved box.
+    /// `false` means that the caller must continue to the next rung of the ladder.
     ///
-    /// The backing fill first, and only when the node asked for it:
-    /// Yomitan draws one behind a transparent asset, and every image node
-    /// in the census's samples turns it off. The panel's own background is
-    /// the honest backing here - a light grey behind a gaiji would be the
-    /// one opaque patch on a dark theme.
+    /// This function draws the background fill first, but only when the node asks for one.
+    /// Yomitan draws a background fill behind a transparent asset, and every image node in the
+    /// census corpus turns that fill off.
+    /// The panel background supplies this fill.
+    /// A light gray fill behind a gaiji would create the only opaque patch on a dark theme.
     ///
-    /// The `ID2D1Bitmap` is created per paint rather than cached, which is
-    /// what `ui::media`'s own header reserves: a device bitmap belongs to
-    /// a render target and dies with it on device loss, while the bytes
-    /// behind it outlive that. A hover shows a handful of gaiji, so this
-    /// is a handful of uploads per damage and no re-decode.
+    /// This function creates an `ID2D1Bitmap` for each paint. It does not cache the bitmap.
+    /// `ui::media`'s own header gives the reason: a device bitmap belongs to a render target and
+    /// dies with the target after a device loss.
+    /// The bytes behind the bitmap outlive that loss, so the paint pass uploads them.
+    /// A hover shows only a few gaiji at a time, so each damage event needs only a few bitmap
+    /// uploads and no image re-decode.
     fn draw_asset(
         &self,
         target: &ID2D1HwndRenderTarget,
@@ -1015,8 +924,8 @@ impl Renderer {
         let Some(key) = img.key.as_ref() else { return Ok(false) };
         let mut held = self.media.borrow_mut();
         let Some(cache) = held.as_mut() else { return Ok(false) };
-        // The tint is core's decision, so both bins take the expensive
-        // path on exactly the same assets (`SceneImage::tint`).
+        // Core chooses the tint, so both bins take the expensive tint path for the same assets
+        // (`SceneImage::tint`).
         let tint = img.tint(elem.rect, elem.font_size, self.dpi_scale());
         let Ok(bitmap) = cache.bitmap(key, tint, elem.color) else {
             return Ok(false);
@@ -1030,8 +939,8 @@ impl Renderer {
             dpiX: 96.0,
             dpiY: 96.0,
         };
-        // SAFETY: `bitmap.bgra` is `w * h * 4` bytes with no row padding,
-        // which is what `stride` reports and what `size` describes.
+        // SAFETY: `bitmap.bgra` holds `w * h * 4` bytes with no row padding.
+        // `stride` reports that layout, and `size` describes it as well.
         let uploaded = unsafe {
             target.CreateBitmap(size, Some(bitmap.bgra.as_ptr().cast()), bitmap.stride(), &props)
         }?;
@@ -1063,12 +972,11 @@ impl Renderer {
         Ok(true)
     }
 
-    /// The last rung: an outlined box where the character should be.
+    /// Draws the last rung: an outlined box where the character belongs.
     ///
-    /// Outlined and not filled, because a solid block reads as a censored
-    /// glyph while an empty frame reads as a missing one - and because the
-    /// asset it stands in for is usually a character drawn in this very
-    /// colour.
+    /// This function outlines the box. It does not fill the box.
+    /// A solid block would look like a censored glyph, but an empty frame shows an absent glyph.
+    /// The asset that the box replaces is usually a character in this same color.
     fn draw_placeholder(
         &self,
         target: &ID2D1HwndRenderTarget,
@@ -1086,7 +994,7 @@ impl Renderer {
             bottom: rect.y + rect.h - PLACEHOLDER_EDGE / 2.0,
         };
         if edge.right <= edge.left || edge.bottom <= edge.top {
-            // Too small to outline: a filled speck is still visibly ink.
+            // The box is too small for an outline. A filled speck still reads as ink.
             let box_ = D2D_RECT_F {
                 left: rect.x,
                 top: rect.y,
@@ -1100,37 +1008,23 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws one run's spans, each in
-    /// its own colour and at its own
-    /// baseline.
+    /// Draws the spans of one run with each span's color and baseline.
     ///
-    /// One layout - the same shaping
-    /// path the scene was measured
-    /// against - with a drawing effect
-    /// per span range. The first span's
-    /// brush is also the layout's
-    /// default, so a one-span run draws
-    /// exactly what it drew before the
-    /// seam widened. Colour is the one
-    /// styled-span field measurement
-    /// ignores, and this is where it
-    /// is answered
+    /// This function builds one layout with the same path that measures the scene.
+    /// It then sets one effect for each span range.
+    /// The first span's brush also becomes the layout's default brush, so a one-span run draws as
+    /// it did before the seam widened.
+    /// Measurement ignores color, and this function applies that styled-span field
     /// (ARCHITECTURE.md#popup-and-measurement).
     ///
-    /// `verticalAlign` costs one draw
-    /// per *distinct* shift, because
-    /// `DrawTextLayout` has no
-    /// per-range baseline: the layout
-    /// is built once, so every pass
-    /// wraps identically, and a pass
-    /// paints only the spans that share
-    /// its shift by handing the rest a
-    /// fully transparent brush. A run
-    /// with no `verticalAlign` - every
-    /// run the panel's own chrome
-    /// builds - is one pass and one
-    /// `DrawTextLayout`, exactly as
+    /// A `verticalAlign` value needs one draw call for each *distinct* shift because
+    /// `DrawTextLayout` has no per-range baseline.
+    /// `draw_spans` builds the layout once, so every pass wraps the text in the same way.
+    /// Each pass paints only spans with its shift and gives every other span a fully transparent
+    /// brush.
+    /// A run without a `verticalAlign` value needs one pass and one `DrawTextLayout` call, as
     /// before.
+    /// Every run that the panel's chrome builds has no `verticalAlign` value.
     fn draw_spans(
         &self,
         target: &ID2D1HwndRenderTarget,
@@ -1144,13 +1038,9 @@ impl Renderer {
             return Ok(());
         }
         let layout = self.text.layout(MeasureRun { spans, max_w })?;
-        // DirectWrite aligns the whole
-        // wrap box, which is what the
-        // scene measured at: a centred
-        // paragraph that wrapped centres
-        // each of its lines, exactly as
-        // the scene's own per-line offset
-        // says it should.
+        // DirectWrite aligns the whole wrap box, the same box that the scene measured.
+        // A centered paragraph that wraps therefore centers each line as the scene's per-line
+        // offset needs.
         match align {
             Align::Leading => {}
             Align::Center => unsafe { layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER) }?,
@@ -1160,10 +1050,8 @@ impl Renderer {
         }
         for i in 0..spans.len() {
             let shift = shift_at(shifts, i);
-            // Each distinct shift once:
-            // the pass that draws it is
-            // the first span asking for
-            // it, so nothing paints
+            // This code handles each distinct shift once.
+            // The pass for the first span that asks for a shift draws that shift, so no span paints
             // twice.
             if (0..i).any(|j| shift_at(shifts, j) == shift) {
                 continue;
@@ -1175,9 +1063,7 @@ impl Renderer {
                     false => TRANSPARENT,
                 };
                 let brush = unsafe { target.CreateSolidColorBrush(&color, None) }?;
-                // SAFETY: the range names
-                // UTF-16 positions inside
-                // the layout's own text.
+                // SAFETY: The range names UTF-16 positions inside the layout text.
                 unsafe { layout.SetDrawingEffect(&brush, range) }?;
                 default.get_or_insert(brush);
             }
@@ -1191,24 +1077,22 @@ impl Renderer {
     }
 }
 
-/// The baseline shift span `i` asks
-/// for. A run with no shifts at all
-/// hands in an empty slice, so every
-/// span of it sits on its own line's
-/// baseline.
+/// Returns the baseline shift that span `i` requests.
+///
+/// A run with no shifts passes an empty slice.
+/// Every span in that run therefore sits on its own line baseline.
 fn shift_at(shifts: &[f32], i: usize) -> f32 {
     shifts.get(i).copied().unwrap_or(0.0)
 }
 
-/// The stroke a placeholder box is outlined with, in DIPs.
+/// Gives the outline width, in DIPs, for a placeholder box.
 ///
-/// One DIP, which is the hairline this target strokes everything else at:
-/// the panel's own edge, a table cell's rule, and the spec's `1em / 14`
-/// cell border at base size.
+/// One DIP is the hairline width that this target uses elsewhere.
+/// Examples include the panel edge, a table cell rule, and the spec's `1em / 14` cell border at
+/// base size.
 const PLACEHOLDER_EDGE: f32 = 1.0;
 
-/// A brush that paints nothing, for a
-/// span this pass is not drawing.
+/// A brush that paints nothing for a span that this pass skips.
 const TRANSPARENT: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
 /// Ends the draw on drop.
@@ -1217,7 +1101,7 @@ struct DrawScope<'a> {
 }
 
 impl DrawScope<'_> {
-    /// Ends it, returns its result.
+    /// Ends the draw and returns its result.
     fn end(mut self) -> windows::core::Result<()> {
         match self.target.take() {
             Some(t) => unsafe { t.EndDraw(None, None) },

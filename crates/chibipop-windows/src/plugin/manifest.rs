@@ -1,4 +1,5 @@
-//! Plugin manifest parsing.
+//! Parse plugin manifests so the plugin host can validate protocol and role declarations.
+//! This check keeps unsupported declarations out of the plugin process.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

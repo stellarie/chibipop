@@ -1,18 +1,18 @@
-//! One inline asset: how big it is, and how it takes room on a line.
+//! One inline image: its size and the room that it reserves on a line.
 //!
-//! **One reason to change:** the schema's image node - its declared size,
-//! its `alt` fallback, its `appearance` - and the ladder that resolves one
-//! into a box.
+//! **One reason to change:** change the schema rules for an image node.
+//! The node declares a size, an `alt` fallback, and an `appearance`.
+//! This module resolves those values into an image box.
 //!
-//! No decode at any rung, which is the whole reason `dict::media` reads an
-//! intrinsic size out of the container header at extraction time: `scene`
-//! is a measure pass with no database behind it, and an image must not put
-//! a query on the paint path.
+//! No size rung decodes the image.
+//! `dict::media` reads the intrinsic size from the container header at extraction.
+//! `scene` measures content and has no database.
+//! An image must not cause a database query on the paint path.
 //!
-//! The room comes from the same trick [`ruby`](super::ruby) uses and for
-//! the same reason: the measurement seam takes styled spans and no boxes
-//! (ARCHITECTURE.md#popup-and-measurement), so a replaced element can only
-//! occupy a line by *being* a span the measurer charges for.
+//! The reservation uses the technique in [`ruby`](super::ruby) for the same reason.
+//! The measurement seam takes styled spans, not boxes
+//! (see ARCHITECTURE.md#popup-and-measurement).
+//! A replaced element occupies a line only as a span that the measurer charges for.
 
 use crate::dict::gloss::{GlossDoc, NodeId, NodePath, Scalar};
 use crate::dict::media::{Intrinsic, MediaKey};
@@ -25,52 +25,34 @@ use super::scene::{
 };
 use super::style::{finite, shift_on, Inline};
 
-/// Every image of a paragraph, given
-/// the room it needs.
+/// Computes the room that each image needs in a paragraph.
 ///
-/// Called *before* the paragraph is
-/// measured, and it is the whole of
-/// how an inline image occupies a
-/// line. The measurement seam takes
-/// styled spans and no boxes, so a
-/// replaced element can only take room
-/// by *being* a span the measurer
-/// charges for - and editing the line
-/// boxes afterwards would fool nobody,
-/// because both bins re-measure an
-/// element's own spans to paint it and
-/// would get the ungrown lines back.
-/// The ruby filler is the same trick
-/// for the same reason.
+/// Layout calls this function before it measures the paragraph.
+/// This call lets an inline image occupy a line.
+/// The measurement seam takes styled spans, not boxes.
+/// Therefore, a replaced element can occupy a line only as a span that the measurer charges for.
+/// A later change to line boxes cannot affect the line wrap.
+/// Both platform bins re-measure each element's spans before they paint it.
+/// That measurement returns the original lines without growth.
+/// The ruby filler uses the same technique.
 ///
-/// So the run asks, and this decides
-/// what it asks for. Two ratios are
-/// needed and only a measurer knows
-/// either: what one [`IMAGE_SPACER`]
-/// advances per unit of size, and how
-/// far down a line its baseline sits.
-/// One probe answers both.
+/// The paragraph run needs a spacer size, and this function computes it.
+/// The measurer provides two ratios:
+/// the advance of one [`IMAGE_SPACER`] per unit of size, and the baseline distance.
+/// One probe measurement provides both ratios.
 ///
-/// Then the arithmetic. `n` spacers at
-/// size `s` advance `n * u * s`, so
-/// the width the fitted box has fixes
-/// `s` exactly. A span of size `r`
-/// gives `asc * r` to the space above
-/// its line's baseline, so the height
-/// fixes the riser. The spacer is
-/// capped at the riser, which is what
-/// keeps a wide short banner from
-/// making its line as tall as it is
-/// wide: past that cap the reservation
-/// comes out a few percent narrow
-/// instead ([`IMAGE_SPACERS_PER_ASPECT`]).
+/// The arithmetic follows. `n` spacers at size `s` advance `n * u * s`.
+/// Therefore, the fitted box width determines `s`.
+/// A span of size `r` provides `asc * r` above its line baseline.
+/// Therefore, the image height determines the riser.
+/// This function caps spacer size at riser size.
+/// Without this cap, a wide, short banner would make its line as tall as its width.
+/// After the cap, the reservation becomes a few percent narrower instead
+/// ([`IMAGE_SPACERS_PER_ASPECT`]).
 ///
-/// `room` is the width the paragraph
-/// wraps at, and it is both what the
-/// probe is measured against and what
-/// [`image_box`] fits the picture to,
-/// so a picture reserves exactly the
-/// room it will be drawn in.
+/// `room` is the paragraph wrap width.
+/// The probe uses this width, and [`image_box`] fits the picture to this width.
+/// Therefore, the picture reserves the room that the layout later draws.
 pub(super) fn measure_images(
     m: &mut dyn TextMeasure,
     font: &str,
@@ -81,9 +63,8 @@ pub(super) fn measure_images(
     if flow.images.is_empty() {
         return Ok(());
     }
-    // Only a paragraph holding an image
-    // pays for this buffer, which is
-    // why it is not one of the walk's.
+    // Only a paragraph that contains an image needs this scratch buffer.
+    // The tree walk does not own this buffer.
     let mut scratch = Measured::default();
     for (slot, img) in flow.images.iter().enumerate() {
         let probe = StyledSpan {
@@ -95,30 +76,21 @@ pub(super) fn measure_images(
             color: img.style.color,
         };
         m.measure(MeasureRun { spans: &[probe], max_w: room }, &mut scratch)?;
-        // The span's own box, not
-        // `metrics.w`: DirectWrite's
-        // aggregate width excludes
-        // trailing whitespace, and a
-        // lone no-break space is
-        // nothing but that.
+        // Use the span's own box instead of `metrics.w`.
+        // DirectWrite excludes end whitespace from aggregate width.
+        // A lone no-break space counts as end whitespace.
         let per_size = |px: f32| if img.em > 0.0 { px / img.em } else { 0.0 };
         let advance = per_size(scratch.spans.first().map_or(0.0, |b| b.w));
         let ascent = per_size(scratch.lines.first().map_or(0.0, |l| l.baseline));
         let (w, h) = image_box(img, room);
-        // A raised image needs its rise
-        // above the baseline as well as
-        // its own height; a lowered one
-        // hangs into the descent, which
-        // is what a lowered span does
-        // too and what neither reserves.
+        // A raised image needs its height and its rise above the baseline.
+        // A lowered image enters the descent, like a lowered text span.
+        // Neither case reserves descent space.
         let rise = h + img.style.shift.max(0.0);
         let riser = if ascent > 0.0 { rise / ascent } else { rise };
-        // A measurer that charges
-        // nothing for a no-break space
-        // can reserve nothing exactly,
-        // so the spacer keeps the em it
-        // was built with: some room for
-        // the image beats none.
+        // If the measurer gives a no-break space no advance, exact reservation is impossible.
+        // Keep the image's em size in that case.
+        // Some room for the image is better than no room.
         let spacer = if advance > 0.0 && img.spacers > 0 {
             (w / (advance * img.spacers as f32)).min(riser)
         } else {
@@ -134,28 +106,20 @@ pub(super) fn measure_images(
     Ok(())
 }
 
-/// The paragraph's images, as elements.
+/// Returns the paragraph images as scene elements.
 ///
-/// Pure: the lines already carry the
-/// room [`measure_images`] bought, so
-/// this only reads back where each
-/// spacer landed and hangs the image
-/// off that line's baseline.
-/// One element per image rather than a
-/// span of the paragraph, because an
-/// image is a replaced element: it has
-/// a rect and a media key and no text
-/// (`ElemKind::Image`). Its `advance`
-/// is zero - the paragraph's own
-/// advance already counts the line the
-/// riser grew - so it stacks nothing
-/// and shifts nothing after it.
+/// This pure function reads the room that [`measure_images`] reserved.
+/// It finds each spacer and places the image from that line's baseline.
 ///
-/// `room` is the same width
-/// [`measure_images`] reserved
-/// against, and both fit the picture
-/// through [`image_box`], so what is
-/// drawn is exactly what was bought.
+/// The function returns one scene element for each image, not a paragraph span.
+/// An image is a replaced element with a rect and a media key, but no text (`ElemKind::Image`).
+/// Its `advance` is zero.
+/// The paragraph advance already includes the line growth from the riser.
+/// Therefore, the image element adds no stack height and shifts no later element.
+///
+/// `room` is the width that [`measure_images`] used.
+/// Both functions fit the picture through [`image_box`].
+/// Therefore, the drawn picture matches the reserved picture.
 pub(super) fn place_images(
     flow: &Flow,
     measured: &Measured,
@@ -170,13 +134,10 @@ pub(super) fn place_images(
                 .get(b.span as usize)
                 .is_some_and(|s| s.image == slot as u32 && !s.filler)
         };
-        // The first line the reservation
-        // landed on. Its spacers are
-        // non-breaking glue, so they
-        // cannot be split across two -
-        // but a measurer that overflows
-        // rather than looping may still
-        // report one box per fragment.
+        // This is the first line that contains the reservation.
+        // Its spacers are non-breaking glue, so a wrap cannot split them.
+        // Some measurers retry after content overflows.
+        // Other measurers allow overflow and can report one box per fragment.
         let Some(line) = measured.spans.iter().filter(spacer).map(|b| b.line).min() else {
             continue;
         };
@@ -189,14 +150,10 @@ pub(super) fn place_images(
             .filter(spacer)
             .filter(|b| b.line == line)
             .fold(f32::MAX, |l, b| l.min(b.x));
-        // Its bottom on the line's own
-        // baseline, raised by whatever
-        // `verticalAlign` asked for -
-        // `shift_on`'s own resolution,
-        // against the line the image
-        // landed on, with the image's box
-        // as the span height a
-        // line-relative value aligns.
+        // The image bottom sits on the line baseline.
+        // `verticalAlign` raises it by the amount that `shift_on` resolves.
+        // `shift_on` resolves that amount against the line that contains the image.
+        // It uses the image box as the span height for line-relative alignment.
         let (w, h) = image_box(img, room);
         let rect = SceneRect {
             x: line_at(*geom) + left,
@@ -204,12 +161,9 @@ pub(super) fn place_images(
             w,
             h,
         };
-        // The `alt` fallback as one
-        // ordinary span, so a bin that
-        // cannot decode the asset draws
-        // this element exactly as it
-        // draws any other and needs no
-        // second text path.
+        // The `alt` fallback becomes an ordinary span.
+        // A platform bin that cannot decode the asset then paints it like any other element.
+        // It needs no second text path.
         let spans = if img.alt.is_empty() {
             Vec::new()
         } else {
@@ -253,43 +207,26 @@ pub(super) fn place_images(
     out
 }
 
-/// One image's box, fitted to the room
-/// its block was given.
+/// Returns an image box that fits the room assigned to its block.
 ///
-/// A declared size is a demand and not
-/// an answer. `image_size` resolves
-/// what the node asked for and clamps
-/// only at [`IMAGE_MAX_PX`], so a
-/// picture 現代国語例解辞典 declares
-/// `12.72em` wide was drawn 190.8 px
-/// wide inside whatever column it
-/// landed in - over the cell beside it
-/// where the table had one, and off
-/// the panel where it did not. Text in
-/// that cell rewraps when
-/// [`Pass::columns`] scales its track;
-/// a picture has nothing to rewrap, so
-/// the fit has to be here.
+/// A declared size is a request, not a final size.
+/// `image_size` resolves the node request and clamps each axis at [`IMAGE_MAX_PX`].
+/// For example, 現代国語例解辞典 declares one picture as `12.72em` wide.
+/// The layout drew that picture at 190.8 px inside its assigned column.
+/// The column can be a table cell beside the picture or the panel width.
+/// Text in a cell rewraps when [`Pass::columns`] scales its track.
+/// A picture has no text to rewrap, so this function must fit it.
 ///
-/// Yomitan asks for the same thing
-/// twice, `max-width: 100%` on
-/// `.gloss-image-link` and again on
-/// `.gloss-image-container`, and then
-/// clips what is left over with
-/// `overflow: hidden`. This build has
-/// no clip, and its painters stretch
-/// an asset into the rect they are
-/// given, so a width taken alone would
-/// squash a scanned illustration
-/// instead of cropping it. Both axes
-/// scale by the one factor: the reader
-/// gets the whole picture, smaller,
-/// inside its own cell.
+/// Yomitan sets `max-width: 100%` on the image link box, `.gloss-image-link`, and
+/// on `.gloss-image-container`.
+/// It clips overflow with `overflow: hidden`, so the picture keeps its proportions.
+/// This build applies no clip.
+/// Its painters stretch an asset into the received rect.
+/// A width-only constraint would squash a scanned illustration.
+/// This function scales both axes together, so the reader sees the full picture inside its cell.
 ///
-/// Negated rather than reversed, so a
-/// room or a width that is not a
-/// number leaves the declared box
-/// exactly as it was.
+/// This function negates the fit condition instead of reversing the comparison.
+/// A non-number room or width leaves the declared box unchanged.
 ///
 /// [`Pass::columns`]: super::pass::Pass::columns
 pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
@@ -299,31 +236,19 @@ pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
     (room, img.h * (room / img.w))
 }
 
-/// How far above its line's baseline
-/// one image's box reaches.
+/// Returns the distance from a line baseline to an image box top.
 ///
-/// Its own fitted height plus whatever
-/// `verticalAlign` asked for -
-/// [`shift_on`]'s own resolution,
-/// against the line the image landed
-/// on, with the image's box as the
-/// span height a line-relative value
-/// aligns.
+/// The result is the fitted image height plus the `verticalAlign` shift.
+/// [`shift_on`] resolves that shift against the line that contains the image.
+/// The image box provides the span height for line-relative alignment.
 ///
-/// One function rather than the same
-/// two terms in two places, because
-/// two passes ask the same question of
-/// it: [`place_images`] puts the
-/// picture's bottom this far above the
-/// baseline, and [`place_ruby`] puts a
-/// reading's bottom on the top edge
-/// that leaves. A reading over a gaiji
-/// has to follow the picture, so where
-/// the picture sits is one decision -
-/// which is why `room` reaches here
-/// too: a mark over a picture its
-/// column shrank has to come down with
-/// it.
+/// Two passes ask for this distance.
+/// [`place_images`] places the picture's bottom this far above the baseline.
+/// [`place_ruby`] places the ruby text's bottom on the top edge that this function returns.
+/// Ruby text over a gaiji must follow the picture.
+/// One function keeps this position decision consistent.
+/// `room` reaches this function because a narrower column changes image height.
+/// A ruby mark over that image must move down with it.
 ///
 /// [`place_ruby`]: super::ruby::place_ruby
 pub(super) fn image_rise(img: &FlowImage, line: LineBox, room: f32) -> f32 {
@@ -331,42 +256,30 @@ pub(super) fn image_rise(img: &FlowImage, line: LineBox, room: f32) -> f32 {
     h + shift_on(img.style, line, h)
 }
 
-/// One image's box, by the ladder.
+/// Returns an image box from the size ladder.
 ///
-/// What the node declared, then what
-/// the build recorded, then a square
-/// of the text it sits in. No decode
-/// at any rung - that is the whole
-/// reason the intrinsic size is read
-/// out of the container header at
-/// extraction time.
+/// The ladder tries the node declaration, the recorded intrinsic size, and a square of the text.
+/// No rung decodes the image.
+/// The build reads intrinsic size from the container header at extraction.
 ///
-/// The middle arms are the ones that
-/// earn their keep. `height: 1em` and
-/// no width is the shape 字通 and
-/// 三省堂 both write, and one length
-/// plus a ratio is the other length -
-/// which is why the media row carries
-/// `aspect` as its own column rather
-/// than dividing on read. With no
-/// ratio to hand a single length gives
-/// a square, which at least sits on
-/// the line at the size the dictionary
-/// asked for.
+/// The two middle match arms handle a common form.
+/// 字通 and 三省堂 write `height: 1em` without a width.
+/// One length and a ratio determine the other length.
+/// The media row stores `aspect` as its own column for this reason.
+/// Otherwise, each row read would divide two lengths.
+/// Without a ratio, one length produces a square.
+/// The square keeps the image on the line at the declared size.
 pub(super) fn image_size(
     doc: &GlossDoc,
     id: NodeId,
     em: f32,
     recorded: Option<Intrinsic>,
 ) -> (f32, f32) {
-    // `em` multiplies the text the
-    // image sits in; `px` is a scene
-    // pixel. The absent field is `em`,
-    // because the schema's own numeric
-    // lengths are em multipliers - the
-    // same convention [`length_px`]
-    // reads - and Yomitan renders
-    // `width`/`height` as ems.
+    // `em` multiplies the size of the text that contains the image.
+    // `px` represents one scene pixel.
+    // An absent `sizeUnits` field uses `em`.
+    // The schema treats numeric lengths as em multipliers by convention.
+    // [`length_px`] uses that convention, and Yomitan renders `width`/`height` as ems.
     let unit = match doc.attr_of(id, "sizeUnits").and_then(|v| doc.scalar_str(v)) {
         Some("px") => 1.0,
         _ => em,
@@ -384,20 +297,15 @@ pub(super) fn image_size(
     }
 }
 
-/// One declared length, as a bare
-/// number.
+/// Returns one declared length as a bare number.
 ///
-/// The schema's `width` and `height`
-/// are numbers whose unit is the
-/// node's `sizeUnits`, so this is not
-/// [`css_len`]'s job: there is no unit
-/// suffix to read here. A string is
-/// still accepted, because a
-/// dictionary converter writing `"1"`
-/// meant one. Zero and below are no
-/// size at all, which drops to the
-/// next rung rather than collapsing
-/// the image.
+/// The schema stores `width` and `height` as numbers.
+/// Their unit comes from the node's separate `sizeUnits` attribute.
+/// This function does not parse a unit suffix, unlike [`css_len`].
+/// It accepts a string because a dictionary converter that writes `"1"` means one.
+/// A value at or below zero provides no size.
+/// The size ladder then tries its next rung.
+/// The image does not collapse to zero.
 ///
 /// [`css_len`]: super::style::css_len
 pub(super) fn image_len(doc: &GlossDoc, id: NodeId, name: &str) -> Option<f32> {
@@ -409,18 +317,14 @@ pub(super) fn image_len(doc: &GlossDoc, id: NodeId, name: &str) -> Option<f32> {
     finite(n).filter(|n| *n > 0.0)
 }
 
-/// The text an image stands in for.
+/// Returns the text that represents an image.
 ///
-/// `alt` then `title`, and each from
-/// the node's attributes then from its
-/// `data` map. Both places are real:
-/// 三省堂 writes `title` beside
-/// `sizeUnits` as an attribute, and
-/// Jitendex writes
-/// `data: {"gaiji": "", "alt":
-/// "［対義語］"}` - so reading one
-/// place would lose one dictionary's
-/// answer to the same question.
+/// This function tries `alt` and then `title`.
+/// For each name, it checks node attributes before the `data` map.
+/// Both locations occur in dictionary data.
+/// 三省堂 writes `title` beside `sizeUnits` as an attribute.
+/// Jitendex writes `data: {"gaiji": "", "alt": "［対義語］"}` instead.
+/// One location alone would lose a dictionary value.
 pub(super) fn image_alt(doc: &GlossDoc, id: NodeId) -> String {
     for name in ["alt", "title"] {
         for found in [doc.attr_of(id, name), doc.data_of(id, name)] {
@@ -433,8 +337,7 @@ pub(super) fn image_alt(doc: &GlossDoc, id: NodeId) -> String {
     String::new()
 }
 
-/// `appearance`, of which the schema
-/// has two values.
+/// Returns `appearance`. The schema defines two values for this field.
 pub(super) fn image_appearance(doc: &GlossDoc, id: NodeId) -> Appearance {
     match doc.attr_of(id, "appearance").and_then(|v| doc.scalar_str(v)) {
         Some("monochrome") => Appearance::Monochrome,
@@ -442,12 +345,11 @@ pub(super) fn image_appearance(doc: &GlossDoc, id: NodeId) -> Appearance {
     }
 }
 
-/// One boolean image field.
+/// Returns one boolean image field.
 ///
-/// `None` for an absent field and for
-/// one this build cannot read, so each
-/// caller states its own default
-/// rather than sharing a wrong one.
+/// This function returns `None` for an absent field or an unreadable field.
+/// Each caller supplies its own default.
+/// A shared default could be wrong for one caller.
 pub(super) fn image_flag(doc: &GlossDoc, id: NodeId, name: &str) -> Option<bool> {
     match doc.attr_of(id, name)? {
         Scalar::Bool(b) => Some(b),
@@ -455,16 +357,12 @@ pub(super) fn image_flag(doc: &GlossDoc, id: NodeId, name: &str) -> Option<bool>
     }
 }
 
-/// How many [`IMAGE_SPACER`]s one
-/// image reserves with.
+/// Returns the number of [`IMAGE_SPACER`] values that one image reserves.
 ///
-/// From the aspect ratio alone, so it
-/// is decided while the paragraph is
-/// built and is the same number in
-/// every font - the *size* of them is
-/// what [`measure_images`] solves
-/// against the face that is actually
-/// installed.
+/// The aspect ratio alone determines this count.
+/// The tree walk fixes the count while it builds the paragraph.
+/// Every font uses the same count, but spacer size can differ.
+/// [`measure_images`] solves that size for the installed font.
 pub(super) fn image_spacers(w: f32, h: f32) -> usize {
     if !(w > 0.0 && h > 0.0) {
         return 1;
@@ -476,216 +374,140 @@ pub(super) fn image_spacers(w: f32, h: f32) -> usize {
     (wanted as usize).min(IMAGE_SPACER_MAX)
 }
 
-/// An image's index in
-/// [`Flow::images`], or no image at
-/// all.
+/// An image slot in [`Flow::images`], or no image when the value is `u32::MAX`.
 pub(super) const NO_IMAGE: u32 = u32::MAX;
 
-/// What an image's inline room is
-/// bought with: U+00A0 NO-BREAK
-/// SPACE.
+/// Provides an image's inline room: U+00A0 NO-BREAK SPACE.
 ///
-/// An inline image is a replaced
-/// element, and the measurement seam
-/// takes styled spans and no boxes -
-/// so the only way an image can occupy
-/// room on a line is to *be* a span
-/// the measurer charges for. Growing
-/// the line boxes afterwards would
-/// fool nobody: both bins re-measure
-/// an element's own spans to paint it
-/// and would get the ungrown lines
-/// back.
+/// An inline image is a replaced element.
+/// The measurement seam takes styled spans, not boxes.
+/// Therefore, an image can occupy line room only as a span that the measurer charges for.
+/// A later change to line boxes cannot affect the line wrap.
+/// Both platform bins re-measure an element's spans before they paint it.
+/// That measurement returns the original lines without growth.
 ///
-/// Three properties earn this
-/// character the job. It carries no
-/// ink, so nothing shows through a
-/// transparent asset. It has an
-/// advance, which is the whole point.
-/// And it is *non-breaking glue* in
-/// UAX #14, so no wrap can split one
-/// image's reservation across two
-/// lines, and no wrap can separate it
-/// from the word it belongs to - an
-/// image mid-sentence therefore wraps
-/// with the text and forces no break.
+/// This character has three required properties.
+/// It has no ink, so no text shows through a transparent asset.
+/// It has an advance, so it reserves room.
+/// It acts as *non-breaking glue* under UAX #14.
+/// A wrap cannot split one image reservation across lines.
+/// A wrap cannot separate the reservation from its word.
+/// An image in a sentence therefore wraps with nearby text and does not force a break.
 ///
-/// Not U+2060: that has zero advance,
-/// which is why it is the *riser*
-/// below and not this.
+/// This constant is not U+2060.
+/// U+2060 has zero advance.
+/// U+2060 serves as the *riser* below, not as this spacer.
 pub(super) const IMAGE_SPACER: &str = "\u{a0}";
 
-/// What an image's line height is
-/// bought with, and it is
-/// [`RUBY_FILLER`]'s character for
-/// [`RUBY_FILLER`]'s reason: zero
-/// advance, no break opportunity, and
-/// its own size sets its line's height.
+/// Provides an image's line height.
+/// This uses the same character as [`RUBY_FILLER`] for the same reason.
+/// It has zero advance and no break opportunity.
+/// Its size sets the line height.
 ///
-/// A separate span from
-/// [`IMAGE_SPACER`] because a span's
-/// advance and its line height are
-/// both its size, and an image needs
-/// them decided independently: a wide
-/// short banner must not make its line
-/// as tall as it is wide.
+/// This is a separate span from [`IMAGE_SPACER`].
+/// The size of a span sets its advance and its line height.
+/// An image needs these effects to resolve independently.
+/// A wide, short banner must not make its line as tall as its width.
 ///
-/// It also earns the image its
-/// paragraph. [`IMAGE_SPACER`] is
-/// *whitespace*, so a paragraph
-/// holding nothing but an image would
-/// measure as empty and be dropped
-/// ([`Paragraphs::flush`]); U+2060 is
-/// not whitespace, so the riser is
-/// what says the paragraph has
-/// content. [`trim`] needs no such
-/// guard: it trims a named set of
-/// space characters that U+00A0 is
-/// deliberately not in.
+/// This character also gives the image its own paragraph.
+/// [`IMAGE_SPACER`] is *whitespace*.
+/// A paragraph with only spacer spans measures as empty, and [`Paragraphs::flush`] drops it.
+/// U+2060 is not whitespace, so the riser tells the code that the paragraph has content.
+/// [`trim`] needs no guard.
+/// [`trim`] removes a named set of space characters, and U+00A0 is not in that set.
 ///
 /// [`trim`]: super::flow::trim
 pub(super) const IMAGE_RISER: &str = RUBY_FILLER;
 
-/// No-break spaces per unit of an
-/// image's aspect ratio.
+/// Number of no-break spaces per unit of an image's aspect ratio.
 ///
-/// The count is fixed while the
-/// paragraph is built and the *size*
-/// is solved once the measurer has
-/// been asked, because only it knows
-/// what one of these advances
-/// ([`measure_images`]). The count
-/// still has to be generous enough
-/// that the solved size stays under
-/// the size the riser asked for -
-/// otherwise the spacer, not the
-/// image, would decide the line's
-/// height.
+/// The tree walk fixes this count while it builds the paragraph.
+/// Only the measurer knows the advance of one spacer ([`measure_images`]).
+/// It solves the spacer size once after it measures the font.
+/// The count must keep that size below the riser size.
+/// Otherwise, the spacer would set line height instead of the image.
 ///
-/// Four is that bound for every real
-/// face: a no-break space is a space,
-/// a space is between a quarter and a
-/// third of an em, and a face's ascent
-/// is at most 0.85 em - so a space is
-/// never less than a quarter of the
-/// ascent one of these has to fit
-/// inside. Where a face does go
-/// narrower, [`measure_images`] clamps
-/// the size instead of letting the
-/// line grow, and the reservation
-/// comes out a few percent short of
-/// the image rather than the line
-/// coming out several times too tall.
+/// Four is the bound for every real font face.
+/// A no-break space is a space.
+/// A space has a width between one quarter and one third of an em.
+/// A face ascent is at most 0.85 em.
+/// Therefore, a space is never narrower than one quarter of the ascent that the spacers need.
+/// If a face is narrower, [`measure_images`] caps spacer size with no line-height change.
+/// The reservation then becomes a few percent narrower than the image.
+/// The line does not become several times too tall.
 pub(super) const IMAGE_SPACERS_PER_ASPECT: f32 = 4.0;
 
-/// The most no-break spaces one image
-/// may reserve with.
+/// Maximum no-break spaces that one image can reserve.
 ///
-/// A dictionary's declared size is
-/// arbitrary author input, so the
-/// aspect ratio is too, and 64 spans
-/// per image is already far past any
-/// asset a dictionary ships. Beyond
-/// it the reservation is short, which
-/// costs the image some of its room
-/// and costs the panel nothing.
+/// A dictionary declaration is arbitrary author input, so its aspect ratio is arbitrary.
+/// 64 spans per image exceeds every asset in the real dictionary census.
+/// Beyond this limit, the reservation becomes smaller than the image.
+/// The image loses some room, but the panel keeps its size.
 pub(super) const IMAGE_SPACER_MAX: usize = 64;
 
-/// An image's fallback size, in ems:
-/// a square of the text it sits in.
+/// Fallback image size in ems: a square of the text around it.
 ///
-/// The last rung of the sizing ladder,
-/// reached only when the node declares
-/// no size *and* the store recorded
-/// none - which is to say when there
-/// are no bytes either, so what this
-/// sizes is the placeholder box.
+/// This is the last size ladder rung.
+/// The code reaches it when the node declares no size and the store records no size.
+/// That combination also means no image bytes exist.
+/// Therefore, this constant sizes only the placeholder box.
 pub(super) const IMAGE_FALLBACK_EM: f32 = 1.0;
 
-/// The largest box a declared size may
-/// resolve to, per axis, in pixels.
+/// Largest box size that a declared value can resolve to on one axis.
 ///
-/// `dict::media` already refuses a
-/// *recorded* dimension past this, and
-/// for the same reason: a declared
-/// 4 294 967 295 is a corrupt file or
-/// a hostile one, not content, and no
-/// dictionary asset in the census is
-/// anywhere near it. Clamping here is
-/// what keeps author input from
-/// setting a line's height through the
-/// riser [`measure_images`] sizes.
+/// `dict::media` rejects a recorded dimension above this limit for the same reason.
+/// A declared value of 4 294 967 295 indicates a corrupt or hostile file, not real content.
+/// No dictionary asset in the census approaches this value.
+/// Without this clamp, bad author input could set line height through the riser that
+/// [`measure_images`] sizes.
 pub(super) const IMAGE_MAX_PX: f32 = 65_536.0;
 
-/// One image, before it is placed.
+/// One image before layout places it.
 ///
-/// Sized here, while the tree is being
-/// walked, because the sizing ladder
-/// is arithmetic over what the node
-/// declared and what the media row
-/// recorded - no decode, no measurer,
-/// no I/O (`dict::media`).
+/// This struct records image size at the tree walk.
+/// The size ladder uses arithmetic from the node declaration and the media row.
+/// It needs no decode, measurer, or I/O (`dict::media`).
 #[derive(Clone)]
 pub(super) struct FlowImage {
-    /// The resolved box, in the
-    /// panel's own pixels.
+    /// Resolved box in the panel's own pixels.
     pub(super) w: f32,
     pub(super) h: f32,
-    /// The em the image sits in, which
-    /// is what its `4em` tint bound is
-    /// measured against.
+    /// The em value that sizes the image.
+    /// The `4em` tint bound uses this value.
     pub(super) em: f32,
-    /// Its `verticalAlign`, already
-    /// resolved as far as the em alone
-    /// can take it - the rest is
-    /// [`shift_on`]'s, against the line
-    /// the image landed on.
+    /// The `verticalAlign` shift resolved from the image's em unit.
+    /// [`shift_on`] resolves line-relative alignment against the image's line.
     pub(super) style: Inline,
-    /// [`IMAGE_SPACER`]s reserving its
-    /// width, so [`measure_images`] can
-    /// solve their size.
+    /// [`IMAGE_SPACER`] values that reserve the width.
+    /// [`measure_images`] solves their size.
     pub(super) spacers: usize,
-    /// The `alt` fallback, empty when
-    /// the node named none.
+    /// The `alt` fallback.
+    /// It is empty when the node declares none.
     pub(super) alt: String,
-    /// The image node itself, so a hit
-    /// on it resolves to the node and
-    /// not to the paragraph around it.
+    /// The image node path.
+    /// A hit on the image resolves to this node instead of the nearby paragraph.
     pub(super) path: Option<NodePath>,
-    /// What a bin needs to paint it.
+    /// Data that a platform bin needs to paint the image.
     pub(super) scene: SceneImage,
 }
 
-/// The image half of the gloss walk: an `img` node sized and reserved, or
-/// its `alt` text put in the flow instead.
+/// Handles the image part of the gloss walk.
+/// An `img` node is sized and reserved, or its `alt` text enters the flow.
 impl Paragraphs<'_> {
-    /// One image node.
+    /// Handles one image node.
     ///
-    /// An image is a *character*, not
-    /// an illustration: 427 786 census
-    /// nodes carry a gaiji marker and
-    /// sit at `height: 1em` in the
-    /// middle of a definition. So it
-    /// takes room on the line it lands
-    /// on and opens no line of its own:
-    /// `Tag::Img` is inline, and this
-    /// keeps it that way.
+    /// An image acts as a *character*, not an illustration.
+    /// 427 786 census nodes carry a gaiji marker and use `height: 1em` inside a definition.
+    /// Therefore, an image reserves room on its line and opens no line of its own.
+    /// `Tag::Img` is inline, and this method preserves that behavior.
     ///
-    /// The ladder, in the order this
-    /// module tries it. With bytes
-    /// behind the path the image is an
-    /// element of its own, sized from
-    /// what the node declared or from
-    /// what the build recorded. With no
-    /// bytes there is nothing to
-    /// composite, so the `alt` text
-    /// goes into the flow instead -
-    /// which is the *better* rung, not
-    /// a worse one: real text wraps
-    /// with the sentence around it. And
-    /// with neither, a placeholder box
-    /// of one em. Never nothing:
-    /// nothing is a hole in a word.
+    /// This method tries the size ladder in order.
+    /// With bytes at the path, the image becomes its own element.
+    /// It uses the node declaration or the recorded media size.
+    /// Without bytes, no asset exists to composite, so the `alt` text enters the flow.
+    /// This is the better rung because real text wraps with the nearby sentence.
+    /// Without bytes or `alt` text, the method uses a one em placeholder box.
+    /// It never renders nothing because nothing would leave a hole in a word.
     pub(super) fn image(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         let style = self.styled(id, ctx.inline);
@@ -696,24 +518,13 @@ impl Paragraphs<'_> {
         let recorded = path.and_then(|p| self.assets.size(p));
         let (w, h) = image_size(doc, id, style.size, recorded);
         let alt = image_alt(doc, id);
-        // "Show images: off" takes the
-        // ladder's own text rung rather
-        // than cutting the node out.
-        // `alt` is the text alternative
-        // HTML defines for exactly this,
-        // and an image node is a
-        // *character* far more often
-        // than an illustration
-        // (427 786 census nodes carry a
-        // gaiji marker), so a node cut
-        // out whole would leave a hole
-        // in a word. With no `alt` there
-        // is nothing to stand in and the
-        // node draws nothing: no
-        // element, no reservation, and
-        // no rect left behind, which is
-        // the whole of what the setting
-        // asks for.
+        // "Show images: off" selects the text rung instead of node removal.
+        // `alt` is the HTML text alternative for this case.
+        // An image node acts as a *character* more often than an illustration.
+        // 427 786 census nodes carry a gaiji marker.
+        // If code removes the whole node, it leaves a hole in a word.
+        // Without `alt`, the node draws no element, reserves no room, and leaves no rect.
+        // This result matches the setting.
         if !self.render.images {
             if !alt.is_empty() {
                 self.text(&alt, style, ctx.link);
@@ -724,21 +535,17 @@ impl Paragraphs<'_> {
             return self.text(&alt, style, ctx.link);
         }
         let scene = SceneImage {
-            // Only a stored asset gets a
-            // key. Handing a bin a key
-            // with no row behind it would
-            // buy a decode attempt and a
-            // cache entry for an answer
-            // this walk already has.
+            // Give a key only to a stored asset.
+            // A key without a media row would send the platform bin to decode an asset
+            // with no row and create a cache entry.
+            // The walk already has the correct result.
             key: recorded
                 .and(path)
                 .map(|p| MediaKey::new(self.assets.dict_id, p)),
             format: recorded.map(|size| size.format),
             appearance: image_appearance(doc, id),
-            // Yomitan's default is to
-            // draw the backing; every
-            // image node in the census's
-            // samples turns it off.
+            // Yomitan uses the backing by default.
+            // Every image node in the census turns it off.
             background: image_flag(doc, id, "background").unwrap_or(true),
             collapsed: image_flag(doc, id, "collapsed").unwrap_or(false),
             collapsible: image_flag(doc, id, "collapsible").unwrap_or(false),
@@ -758,34 +565,20 @@ impl Paragraphs<'_> {
         );
     }
 
-    /// Buys one image its room on the
-    /// line it lands on.
+    /// Reserves room for one image on its line.
     ///
-    /// Two spans, because a span's
-    /// advance and its line height are
-    /// the same number - its size - and
-    /// an image needs them apart: the
-    /// [`IMAGE_SPACER`] run is charged
-    /// for the width and the
-    /// [`IMAGE_RISER`] for the height.
-    /// [`measure_images`] solves both
-    /// sizes once the measurer has said
-    /// what one of each costs.
+    /// The size of a span sets both its advance and its line height.
+    /// The image needs these effects to resolve independently.
+    /// The [`IMAGE_SPACER`] span reserves width.
+    /// The [`IMAGE_RISER`] span reserves height.
+    /// [`measure_images`] solves both sizes after the measurer provides their advances.
     ///
-    /// The spans are pushed rather than
-    /// coalesced, and a barrier is left
-    /// behind them: an image's
-    /// reservation must be exactly its
-    /// own, or [`place_images`] would
-    /// read a box that included the
-    /// word beside it.
+    /// This method keeps the spans separate and leaves a barrier after them.
+    /// The image reservation must contain only its own spans.
+    /// Otherwise, [`place_images`] would read a box that also contains the adjacent word.
     pub(super) fn reserve(&mut self, img: FlowImage, link: u32) {
-        // An image is worth an item
-        // separator and worth a list
-        // marker, for the same reason
-        // text is: it is content, and
-        // `<li><img></li>` draws its
-        // bullet.
+        // An image counts as an item separator and a list marker, like text.
+        // An image is content, so `<li><img></li>` draws its bullet.
         if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
             self.push(ITEM_SEPARATOR, img.style, link);
         }
