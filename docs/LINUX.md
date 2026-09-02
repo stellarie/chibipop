@@ -510,3 +510,89 @@ native binds are unaffected.
 `~/.local/state/chibipop/chibipop.log` records every channel verdict and
 change. Both name the exact missing protocol or portal when a channel is
 down.
+
+---
+
+## Container regression runner
+
+[`scripts/linux_container_regression.py`](../scripts/linux_container_regression.py)
+runs the Linux gates in Ubuntu 24.04 Docker containers. A container shares the
+host kernel. It is not a Linux virtual machine and does not test another kernel,
+boot loader, installer, GPU, or physical input device.
+
+List the schedule without contacting Docker:
+
+```bash
+python scripts/linux_container_regression.py --list
+```
+
+Preview all Docker arguments:
+
+```bash
+python scripts/linux_container_regression.py --dry-run --loops 3
+```
+
+Run three fresh loops with bounded resources:
+
+```bash
+python scripts/linux_container_regression.py \
+  --loops 3 \
+  --cpus 4 \
+  --memory 8g \
+  --artifacts-dir linux-regression-artifacts
+```
+
+Use `--skip-image-build` only after building the requested `--image`.
+Use `--runtime` for a Docker-compatible CLI. Each loop gets one unique,
+token-labelled container and anonymous writable volumes. The checkout mount is
+read-only. The runner copies it inside the container before Cargo starts. The
+default `--platform linux/amd64` matches the Linux x64 release artifact. When
+the artifact directory is below the repository, the copy excludes that whole
+directory. It rejects repository roots, ancestors, and source directories.
+It also rejects repository paths containing commas because Docker parses
+`--mount` values as comma-separated fields.
+
+| Area | Container evidence | Boundary |
+|---|---|---|
+| Core and Linux tests | Three runs and a 600-test floor | Uses the container's shared host kernel |
+| OCR | Committed corpus quality gate | Does not assess arbitrary desktop pixels |
+| Clippy and release | Exact accepted baseline and zero suppressed findings | Uses stable Rust installed when the image builds |
+| Package | Tarball layout test, real package script, model hashes | Does not install a distro package |
+| Wayland | Headless Sway probe and seven serial live targets | No physical GPU, monitor, pointer, or keyboard |
+| Degradation | Missing layer shell and denied portal tests | Missing Cage or D-Bus fails as an image defect |
+| Direct smoke | Demo pixels, hide restoration, control verbs, then a real trigger round-trip | Cursor-less Sway records the named unavailable lookup sub-step |
+| Portal consent | Portal tests may exercise fake or absent services | Real user consent dialogs need a desktop VM or machine |
+
+Every executed per-loop lifecycle and schedule command gets a log and duration. The
+runner also records JSON, JUnit, tool versions, image ID, Git state, Cargo lock
+hash, compositor logs, and PNGs. It passes the commit timestamp as
+`SOURCE_DATE_EPOCH`; the writable copy does not need `.git`. It writes a report
+after preflight and each loop. A failed command or timeout keeps preceding and
+partial output.
+
+Results distinguish `FAIL` product behavior, `INFRASTRUCTURE` runner or Docker
+failure, `UNAVAILABLE` compositor capability, and dependency-driven `SKIP`.
+JUnit writes infrastructure failures as errors. A Cage or D-Bus self-skip is a
+product `FAIL` because the image promises both prerequisites. Missing optional
+evidence is `UNAVAILABLE`; an evidence directory or copy failure is
+`INFRASTRUCTURE`.
+
+Cleanup first verifies the container's invocation token. It may force-remove
+only that exact container. `--keep-failed-container` preserves a failed
+container for debugging. Anonymous volumes disappear after the runner's normal
+`--volumes` removal. Preserved failed containers retain their volumes. The
+runner never mounts the Docker socket, host home, or host network.
+
+The design borrows these openQA practices:
+
+- Keep test modules serial when they share one system under test.
+- Preserve screenshots, logs, structured results, settings, and version data.
+- Separate product failures from unavailable capabilities and infrastructure.
+- Model each compositor or portal combination as a named scenario.
+- Add region-based visual references only for stable UI areas.
+
+See the official openQA documentation for
+[jobs and result states](https://open.qa/docs/#jobs),
+[needles and screen regions](https://open.qa/docs/#needles),
+[traceability and reproducibility](https://open.qa/docs/#traceability-and-reproducibility-of-tests),
+and [CI integration](https://open.qa/docs/#running-openqa-jobs-as-ci-checks).
