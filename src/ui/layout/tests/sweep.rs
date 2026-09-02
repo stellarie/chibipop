@@ -1,25 +1,22 @@
-//! The corpus sweep: real archives through the real renderer.
+//! The corpus sweep sends dictionary entries through the production parser, stylesheet
+//! cascade, and renderer.
 //!
-//! A sweep is a local-only run that pushes every entry of a corpus directory
-//! through the real structured-content parser, the real `styles.css` cascade,
-//! and [`FakeMeasure`] - the same seam the rest of this module tests against -
-//! and checks a render invariant over every scene it gets. It lives here
-//! rather than in a tool because the invariants are the layout suite's own
-//! property checks turned on input nobody wrote down: the only thing the
-//! corpus adds is shapes. The spec is `.scratch/render-sweep/spec.md`.
+//! The sweep uses [`FakeMeasure`], the measurement seam used by this module's other
+//! tests. It checks every render invariant for every scene. It uses corpus input to add
+//! shapes, not new assertions. It remains in this file so the test suite and sweep use
+//! the same checks.
 //!
-//! Nothing here runs in CI. [`corpus_render_sweep`] is `#[ignore]`d and asks
-//! for a corpus directory by environment variable, and the corpus never enters
-//! the repo. What CI does run is the invariant's own unit tests and
-//! [`a_row_capped_sweep_of_the_fixture_archive_reports_every_entry`], a sweep
-//! of the committed three-row fixture archive - so the machinery is proven
-//! without the corpus.
+//! The corpus sweep does not run in CI. [`corpus_render_sweep`] carries `#[ignore]` and
+//! reads a directory from an environment variable. The corpus does not enter the
+//! repository. CI runs each invariant's unit tests. CI also runs
+//! [`a_row_capped_sweep_of_the_fixture_archive_reports_every_entry`], which sweeps the
+//! committed three-row fixture archive. This test checks the sweep code without the
+//! corpus.
 //!
-//! One thing a sweep does commit: its [`Suppressions`], the adjudicated
-//! non-bugs at `tests/render-sweep/suppressions.toml`. A candidate quotes a
-//! dictionary verbatim and stays out of the repo; a verdict about a shape is
-//! exactly what the repo should remember, so the sweep's judgment
-//! accumulates and a re-run stays quiet about what a human already decided.
+//! The sweep commits one file: its [`Suppressions`]. This file lists non-bugs that a
+//! human judged. The path is `tests/render-sweep/suppressions.toml`. A candidate quotes
+//! dictionary content verbatim, so it never enters the repository. The repository stores
+//! one verdict for each shape. A later run stays quiet about each judged shape.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,91 +32,78 @@ use crate::dict::gloss::{plain_items, renders_text, GlossDoc, Kind, NodeId, Node
 use crate::dict::sheet::{self, Sheet};
 use crate::present::Presentation;
 
-/// The panel width every swept entry is laid out at.
+/// The panel width for every corpus entry.
 ///
-/// The width the rest of this suite measures at, so a candidate's numbers
-/// read against the same arithmetic every other test in the file states.
+/// Other tests use this width. Candidate values therefore use the same arithmetic.
 const SWEEP_W: f32 = 424.0;
 
-/// Tall enough that no entry in the corpus is clamped.
+/// A height that prevents the layout clamp for corpus entries.
 ///
-/// A scene keeps every element it stacked whatever this is - the clamp only
-/// sets `view_h` - but a sweep that scrolled would still be reading a panel
-/// no reader has, so it asks for the whole thing.
+/// The scene retains every stacked element at this height. The clamp changes only
+/// `view_h`. The sweep requests the full height because a scrolled panel hides content.
 const SWEEP_H: f32 = 100_000.0;
 
-/// The width cap [`SWEEP_W`] stands for, in percent of the monitor.
+/// The monitor-width percentage represented by [`SWEEP_W`].
 ///
-/// `Config::default()` asks for a quarter of the screen, so the 424 pixels
-/// the suite measures at are a 1696-pixel monitor's quarter. Pinned by
-/// [`the_swept_widths_run_from_the_default_cap_to_the_ceiling`], so the wide
-/// width below cannot drift from the default it is derived from.
+/// `Config::default()` sets the default cap to one quarter of the screen. This suite
+/// measures 424 pixels on a 1696-pixel monitor. The test
+/// [`the_swept_widths_run_from_the_default_cap_to_the_ceiling`] checks this value. The
+/// wide width uses the same default value.
 const SWEEP_W_PERCENT: f32 = 25.0;
 
-/// The wider panel *width monotonicity* lays every entry out at a second
-/// time.
+/// The wider panel for the width monotonicity check.
 ///
-/// The same monitor at the settings ceiling instead of the default cap:
-/// [`MAX_WIDTH_RANGE`]'s upper bound is 90%, so this is the widest panel a
-/// reader can ask for. The pair is therefore the default width and the
-/// widest one, not the whole of [`MAX_WIDTH_RANGE`] - a reader may also
-/// narrow the panel to 10%, and a narrower panel drawing taller content is
-/// the property holding rather than breaking. What the pair buys is that
-/// content growing between them grows inside a panel somebody can actually
-/// open: a violation is a render a reader could meet by dragging one slider
-/// rightwards.
+/// This width uses the monitor value at the settings ceiling. [`MAX_WIDTH_RANGE`] caps
+/// the width at 90 percent, so this is the widest panel a reader can request. The pair
+/// contains the default width and the widest width, not the full [`MAX_WIDTH_RANGE`]
+/// range. A reader can also request 10 percent. Narrower panels preserve the property
+/// when they draw taller content. The pair checks that extra width does not increase
+/// content height.
 const SWEEP_WIDE_W: f32 = SWEEP_W * MAX_WIDTH_RANGE.1 as f32 / SWEEP_W_PERCENT;
 
-/// Every editorial role reaches the panel.
+/// Enables every editorial role for the panel.
 ///
-/// A sweep asks what the renderer can *lose*, so it turns off the one filter
-/// a reader's settings would otherwise apply. Two reasons, both about noise:
-/// a part-of-speech label the default filter lifts into the card's own field
-/// is not a dropped string, and a subtree the sweep never asked for could not
-/// be a candidate anyway - so the widest filter is both the quietest and the
-/// one that renders the most shapes.
+/// The sweep checks content that the renderer could omit. It disables the only filter
+/// that reader settings apply. The default filter moves a part-of-speech label to the
+/// card field, so that label is not dropped text. An omitted subtree cannot form a
+/// candidate. This filter renders the most shapes and adds the least noise.
 const SWEEP_ROLES: RoleFilter =
     RoleFilter { examples: true, attributions: true, part_of_speech: true };
 
-/// What a swept entry is drawn with.
+/// The render settings for each swept entry.
 ///
-/// Every knob that would hide a dictionary's own work is on: its list
-/// stacking, its declarations, its images. The sweep is looking for defects
-/// in what the renderer does with a dictionary's markup, and a setting that
-/// dropped the markup would hide them.
+/// `stack_items`, `styling`, and `images` stay enabled so the renderer handles the
+/// dictionary markup. A setting that omits markup could hide a defect.
 fn sweep_settings() -> RenderSettings {
     RenderSettings { stack_items: true, styling: true, images: true, roles: SWEEP_ROLES }
 }
 
 /// Which render invariant a violation broke.
 ///
-/// [`as_str`](Self::as_str) is the candidate file's own name for it, so one
-/// shape reads the same in a filename, in a signature, and in the summary.
+/// [`as_str`](Self::as_str) gives the candidate file its own name for the
+/// invariant. One shape therefore reads the same in a filename, in a signature,
+/// and in the summary.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Invariant {
-    /// A visible string the parsed entry holds that the scene does not draw.
+    /// A visible string that the parsed entry holds but the scene does not draw.
     DroppedText,
-    /// A small marked fragment trailing prose that the scene draws on a
-    /// paragraph of its own.
+    /// A small marked fragment that trails prose on its own scene paragraph.
     OrphanFragment,
-    /// More gutter between a list marker's box and its item's first glyph
-    /// than the tree asked for.
+    /// A marker gutter wider than the tree asks for between a marker and its first glyph.
     MarkerGap,
-    /// A box standing outside the panel's own edges.
+    /// A box that stands outside the panel's own edges.
     HorizontalOverflow,
-    /// Two boxes the walk stacked standing on the same pixels.
+    /// Two boxes that the walk stacks and that occupy the same pixels.
     OverlappingBoxes,
-    /// Content the wider of two panels drew taller than the narrower one.
+    /// Content that grew taller at the wider of two panels than at the narrower panel.
     WidthMonotonicity,
 }
 
 impl Invariant {
-    /// Every invariant this build checks.
+    /// Every invariant that this build checks.
     ///
-    /// Read only by [`is_candidate_file`], so a candidate this sweep did not
-    /// write is never mistaken for a stale one of its own. An invariant added
-    /// without joining this list would leave its files behind after a run
-    /// that stopped flagging them.
+    /// [`is_candidate_file`] reads this list. The sweep recognizes only its own
+    /// candidate files. An absent invariant leaves stale files after later runs.
     const ALL: [Invariant; 6] = [
         Invariant::DroppedText,
         Invariant::OrphanFragment,
@@ -140,88 +124,81 @@ impl Invariant {
         }
     }
 
-    /// The invariant a name spells, or `None` when this build checks no
-    /// such thing.
+    /// The invariant named by a signature, or `None` when the name is not valid.
     ///
-    /// The inverse of [`as_str`](Self::as_str), and the whole of what makes
-    /// a suppression entry *unknown*: a committed exemption naming an
-    /// invariant that has since been renamed or removed can never absorb
-    /// anything, so the run says so rather than letting it rot.
+    /// This function reverses [`as_str`](Self::as_str). A suppression can become
+    /// `UNKNOWN` after an invariant rename or removal. Such an entry cannot absorb a
+    /// violation, so the run reports it.
     fn named(name: &str) -> Option<Invariant> {
         Invariant::ALL.into_iter().find(|i| i.as_str() == name)
     }
 }
 
-/// The fingerprint that makes two violations the same candidate.
+/// The fingerprint that groups equivalent violations into one candidate.
 ///
-/// The violated invariant, the dictionary, and the shape around the
-/// violation - and the shape is one string per node from the glossary item
-/// down to the node that broke the rule, each carrying both the selector a
-/// stylesheet would key on and the properties that actually resolved there.
-/// That is the spec's "structural path and resolved selectors" as one value,
-/// because in this tree they are one walk: `dict::sheet` selects on tags and
-/// `data-*` hooks, and what it wins folds into the node's own style record.
+/// It stores the invariant, dictionary, and shape around the violation. The shape has
+/// one string per node from the glossary item to the node with the failure. Each string
+/// stores the stylesheet selector and the resolved properties. This pair represents the
+/// specification's "structural path and resolved selectors". In this tree, one walk
+/// provides both values. `dict::sheet` selects tags and `data-*` hooks, and the cascade
+/// adds the properties that the cascade selected to each node's style record.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Signature {
     invariant: Invariant,
     dictionary: String,
-    /// Glossary item first, violating node last.
+    /// The glossary item is first. The node that broke the rule is last.
     shape: Vec<String>,
 }
 
 impl Signature {
-    /// What [`key`](Self::key) puts between its three fields.
+    /// The separator that [`key`](Self::key) uses between its three fields.
     ///
-    /// Named because two things read the format: a candidate file writes it
-    /// and the suppression list matches against it, and a separator the two
-    /// disagreed about would make every exemption silently miss.
+    /// A candidate file writes this format, and the suppression list matches it. Both
+    /// must use the same separator or every exemption misses without a message.
     const FIELDS: &'static str = " | ";
 
-    /// The shape signature as one line: what one candidate is keyed by, and
-    /// what the filename's digest is taken over.
+    /// The shape signature as one line. This line is the key of one candidate,
+    /// and the filename digest covers it.
     fn key(&self) -> String {
         let sep = Self::FIELDS;
         let shape = self.shape.join(" > ");
         format!("{}{sep}{}{sep}{shape}", self.invariant.as_str(), self.dictionary)
     }
 
-    /// The invariant a written signature names, or `None` when this build
-    /// cannot have produced it.
+    /// The invariant named by a signature, or `None` when this build cannot produce it.
     ///
-    /// `None` covers both ways a committed suppression can be stale: a
-    /// signature naming an invariant nothing checks, and one with too few
-    /// fields to be a signature at all. The dictionary title is not
-    /// validated - the corpus is local and unbounded, so a name this run saw
-    /// no archive for is an *unused* entry, not a malformed one.
+    /// `None` covers an unknown invariant and a signature with too few fields. The
+    /// function does not validate the dictionary title because the corpus is local and
+    /// unbounded. A title absent from this run is an `UNUSED` entry, not a malformed
+    /// entry.
     fn named_invariant(key: &str) -> Option<Invariant> {
         let mut fields = key.split(Self::FIELDS);
         let name = fields.next()?;
-        // A dictionary and a shape have to follow it. A title holding the
-        // separator only splits into more fields, never fewer.
+        // A dictionary and a shape must follow the name. A title with the separator
+        // creates more fields, never fewer.
         let (_dictionary, _shape) = (fields.next()?, fields.next()?);
         Invariant::named(name)
     }
 }
 
-/// One invariant violation, before dedup.
+/// One invariant violation, before the sweep removes duplicates.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Violation {
     signature: Signature,
-    /// What the check measured, for the candidate file to carry.
+    /// What the check measured. The candidate file carries these numbers.
     measured: BTreeMap<String, String>,
 }
 
-/// One visible string a parsed entry holds, and the shape around it.
+/// One visible string from a parsed entry and the shape around it.
 struct Visible {
     text: String,
     shape: Vec<String>,
 }
 
-/// One string with every whitespace run collapsed to one space, trimmed.
+/// Reduces each whitespace run to one space and trims both ends.
 ///
-/// Both sides of every text comparison go through it, because a renderer
-/// folding a dictionary's own newlines and double spaces is doing its job:
-/// only a string that is *gone* is a violation.
+/// Every text comparison folds both values. The renderer can fold dictionary newlines
+/// and repeated spaces without text loss. Only missing text is a violation.
 fn folded(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut gap = false;
@@ -239,28 +216,25 @@ fn folded(text: &str) -> String {
     out
 }
 
-/// One node as a selector, with what resolved on it.
+/// One node as a selector with its resolved properties.
 ///
-/// The two halves of a shape signature in one string: the tag and every
-/// `data-sc-*` hook a dictionary's own stylesheet could select on, then the
-/// properties that actually resolved there. Both lists are sorted, because a
-/// signature may not depend on the order a dictionary happened to write its
-/// `data` fields or its declarations in.
+/// This string contains the two parts of a shape signature. The first part contains the
+/// tag and each `data-sc-*` hook that the dictionary stylesheet can select. The second
+/// part contains the properties that resolve there. The function sorts both lists, so
+/// field and declaration order cannot change a signature.
 ///
-/// A hook's *name* is shape and its *value* is not. The `data` key namespace
-/// is per-dictionary and unbounded (`docs/research/dict-shapes.md`), and
-/// Jitendex proves what that means for a fingerprint: its example boxes carry
-/// `data.sentence-key` and `data.source`, both holding a per-entry
-/// identifier, so a signature over values gave 26 186 violations 6 892
-/// distinct shapes - one per entry, which is no dedupe at all. Nothing is
-/// lost by dropping them, because the resolved property list already says
-/// whether the stylesheet keyed on this node and what it won there: two
-/// `data.content` values a sheet styles identically *are* one shape to the
-/// renderer, and the exemplar quotes the entry verbatim either way.
+/// A hook name describes the shape, but its value does not. The `data` namespace is
+/// local to each dictionary and has no fixed size (`docs/research/dict-shapes.md`).
+/// Jitendex uses `data.sentence-key` and `data.source` in example boxes, and each value
+/// identifies an entry. Values would create 26 186 violations for 6 892 distinct
+/// shapes. Each entry would become a separate shape. The sweep can omit values and still
+/// preserve shape information. The resolved property list states which stylesheet rules
+/// matched and which properties the cascade selected. Two `data.content` values with the
+/// same style are one renderer shape. The exemplar still quotes the entry verbatim.
 fn step(doc: &GlossDoc, id: NodeId) -> String {
     let mut out = match doc.tag_name(id) {
-        // A bare glossary string and a `content`-only wrapper object both
-        // parse to no tag, and they are not the same shape.
+        // A bare glossary string and a `content`-only wrapper object have no tag. They
+        // are different shapes.
         "" => kind_name(doc.node(id).kind).to_string(),
         name => name.to_string(),
     };
@@ -283,11 +257,11 @@ fn step(doc: &GlossDoc, id: NodeId) -> String {
     out
 }
 
-/// An untagged node's name, for a signature to carry.
+/// The name for an untagged node in a signature.
 ///
-/// Exhaustive for the same reason [`style_key_name`] is: a kind added to the
-/// tree must be named here rather than silently sharing a shape with
-/// something it is not.
+/// The exhaustive `match` has the same purpose as [`style_key_name`]. A new node kind
+/// must get a name here. Otherwise it shares a shape with a different node, and the
+/// report gives no useful detail.
 fn kind_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Text => "text",
@@ -305,18 +279,15 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// A resolved property's name, for a signature to carry.
+/// The name for a resolved style property in a signature.
 ///
-/// An exhaustive `match` rather than `Debug`, so adding a property to
-/// [`StyleKey`] is a compile error here and not a silent hole in every
-/// signature that touches it.
+/// The exhaustive `match` makes a new [`StyleKey`] variant a compile error here.
+/// Without it, a new property leaves a silent gap in every affected signature.
 ///
-/// Deliberately not `gloss::html`'s `css_name`, which spells
-/// [`StyleKey::TextDecorationLine`] as the `text-decoration` shorthand
-/// because the longhand is younger than some renderers an Anki note template
-/// runs in. That is a statement about browsers; a signature names the
-/// property the cascade resolved, and the two answers must not be forced to
-/// agree.
+/// This function does not use `css_name` from `gloss::html`. That function spells
+/// [`StyleKey::TextDecorationLine`] as the `text-decoration` shorthand. The shorthand
+/// predates some Anki note templates. That spelling describes browser behavior. A
+/// signature names the property that the cascade resolved. The two names can differ.
 fn style_key_name(key: StyleKey) -> &'static str {
     match key {
         StyleKey::FontStyle => "font-style",
@@ -349,14 +320,13 @@ fn style_key_name(key: StyleKey) -> &'static str {
         StyleKey::PaddingLeft => "padding-left",
     }
 }
-
-/// Every visible string a parsed entry holds, with the shape around each.
+/// Every visible string from a parsed entry and its shape.
 ///
-/// The oracle half of *no dropped text*: what the renderer is answerable
-/// for. Three subtrees are the renderer's by right and not counted - a role
-/// the filter drops, an image node (whose text is its `alt`, and an image
-/// that resolves draws the asset instead), and `<rp>`, which exists only for
-/// a renderer that cannot draw ruby, and this one can.
+/// This function provides the reference for "no dropped text". It lists text that the
+/// renderer must draw. It excludes three valid omissions. The first is a role that the
+/// filter drops. The second is an image node, whose text is `alt`, because a resolved
+/// image draws the asset. The third is `<rp>`, which only helps renderers that cannot
+/// draw ruby. This renderer can draw ruby.
 fn visible_strings(doc: &GlossDoc, roles: RoleFilter) -> Vec<Visible> {
     let mut out = Vec::new();
     let mut shape = Vec::new();
@@ -390,13 +360,12 @@ fn walk_visible(
     shape.pop();
 }
 
-/// Every string a scene draws, folded, in draw order.
+/// Every string that a scene draws, folded, in draw order.
 ///
-/// A run's own text, plus the markers and readings that sit out of its flow:
-/// all three are glyphs a reader sees, so all three answer for a string the
-/// parsed entry held. Joined with a space rather than concatenated, so a
-/// match can never be sewn together across two paragraphs that never touch
-/// on screen.
+/// The result includes a run's own text, markers, and readings that sit outside its
+/// flow. A reader sees glyphs for each part, so each part represents parsed text. The
+/// function joins parts with spaces instead of concatenating them. A match cannot cross
+/// two paragraphs that do not touch on screen.
 fn drawn_text(s: &PopupScene) -> String {
     let mut parts: Vec<&str> = Vec::with_capacity(s.elems.len());
     for e in &s.elems {
@@ -407,57 +376,50 @@ fn drawn_text(s: &PopupScene) -> String {
     folded(&parts.join(" "))
 }
 
-/// What one entry's invariants saw.
+/// The results that each invariant recorded for one entry.
 ///
-/// The check counts ride along because zero violations has to be
-/// distinguishable from zero checks: a walk that stopped finding text would
-/// otherwise report a clean corpus, which is the one failure a sweep must
-/// never be able to hide. One count per invariant rather than one total, so
-/// no invariant's silence can hide behind another's work.
+/// The record keeps check counts because zero violations differs from zero checks. A
+/// walk that finds no text could otherwise report a clean corpus. Each invariant has
+/// its own count, so one silent invariant cannot hide behind another.
 #[derive(Default)]
 struct Checked {
-    /// Visible strings *no dropped text* was stated over.
+    /// Visible strings covered by *no dropped text*.
     strings: u64,
-    /// Trailing fragments *no orphan trailing fragment* was stated over.
+    /// Trailing fragments covered by *no orphan trailing fragment*.
     fragments: u64,
-    /// Marker boxes *bounded marker gap* was stated over.
+    /// Marker boxes covered by *bounded marker gap*.
     markers: u64,
-    /// Drawn boxes *no horizontal overflow* was stated over.
+    /// Drawn boxes covered by *no horizontal overflow*.
     boxes: u64,
-    /// Pairs of stacked boxes *no overlapping boxes* was stated over.
+    /// Pairs of stacked boxes covered by *no overlapping boxes*.
     ///
-    /// The pairs the check actually compared, which is fewer than every
-    /// pair the entry holds: two boxes a whole paragraph apart cannot
-    /// intersect, and the walk stops asking about them.
+    /// The count includes only pairs that the check compares. Boxes separated by a
+    /// full paragraph cannot intersect, so the walk does not compare them.
     pairs: u64,
-    /// Entries *width monotonicity* was stated over.
+    /// Entries covered by *width monotonicity*.
     ///
-    /// Also the number of second layouts this run paid for, since the
-    /// invariant is one comparison per entry: a `widths` of zero beside a
-    /// nonzero `wide_cost` would be time spent on nothing.
+    /// The count also equals the number of second layouts because the invariant compares
+    /// each entry once. A zero `widths` value with nonzero `wide_cost` indicates wasted
+    /// time.
     widths: u64,
-    /// What those second layouts cost.
+    /// The cost of the second layouts.
     ///
-    /// The one number here that is not a count, and it rides along for the
-    /// same reason the counts do: *width monotonicity* doubles the sweep's
-    /// layout work, so the run has to be able to say what its own cost
-    /// was. Set by [`sweep_entry`], which is where the second layout is
-    /// laid out, and [`Duration::ZERO`] from every checker.
+    /// This field is not a count. It records the cost of *width monotonicity*, which
+    /// doubles layout work. [`sweep_entry`] sets the field after the second layout.
+    /// Other checkers report [`Duration::ZERO`].
     wide_cost: Duration,
-    /// Checks an invariant declined to make.
+    /// Number of times that an invariant declines a check.
     ///
-    /// A fragment no paragraph draws as one string, or a marker no ancestor
-    /// list of the paragraph owns: in both, the sweep has no ground to judge
-    /// on and says nothing. Counted because saying nothing quietly is how a
-    /// checker stops working without anybody noticing - a decline that grew
-    /// into the thousands would be a shape this invariant needs to learn,
-    /// not a clean corpus.
+    /// A fragment that no paragraph draws as one string causes one decline. A marker
+    /// with no list ancestor causes another. The check has no basis for a judgment in
+    /// either case, so it records the decline. A large decline count identifies a shape
+    /// that needs support, not a clean corpus.
     declined: u64,
     violations: Vec<Violation>,
 }
 
 impl Checked {
-    /// Every invariant's answer for one entry, as one.
+    /// The answer of every invariant for one entry, as one record.
     fn merge(&mut self, other: Checked) {
         self.strings += other.strings;
         self.fragments += other.fragments;
@@ -471,13 +433,11 @@ impl Checked {
     }
 }
 
-/// *No dropped text*: every visible string the parsed entry holds reaches
-/// the scene.
+/// *No dropped text*: every visible string from a parsed entry reaches the scene.
 ///
-/// The first invariant, and the one that needs no threshold: a string is
-/// either drawn or it is not. It is stated as containment rather than
-/// equality because a paragraph legitimately holds more than one node's text
-/// and a renderer legitimately folds whitespace - see
+/// This invariant needs no threshold. The scene either draws each string or does not.
+/// The check tests containment, not equality, because a paragraph can contain text from
+/// more than one node. The renderer also folds whitespace. See
 /// [`folded_whitespace_and_a_line_break_drop_no_text`].
 fn dropped_text(
     dictionary: &str,
@@ -510,58 +470,47 @@ fn dropped_text(
 
 // ---- the paragraph family ----
 
-/// A trailing fragment is *small* at or below this many drawn characters.
+/// A trailing fragment is *small* when it has at most this many drawn characters.
 ///
-/// A long marked node on its own line reads as a sense separation, which is
-/// what the marker line break is *for*, so the cap is what keeps this
-/// invariant pointed at fragments instead of at every break in every entry.
-/// Twelve clears Jitendex's footnote mark - `[1]` through `[12]`, the whole
-/// of the #18 class - with room for a mark that carries its own
-/// punctuation.
+/// A long marked node on its own line represents a sense separation. The marker line
+/// break supports that separation. The cap limits this invariant to fragments. Twelve
+/// covers Jitendex footnote marks `[1]` through `[12]`, which make up the #18 class.
+/// It also allows a mark with its own punctuation.
 ///
-/// Measured over the local archive: of the 65 004 marked nodes that trail
-/// prose in Jitendex, this cap checks 64 980. It excludes 24, and it is
-/// there for the other 96 archives rather than for this one - a cap that
-/// admitted every marked node would state the invariant over phrases, where
-/// standing on a line of one's own is correct.
+/// The local archive provides the count. Jitendex has 65 004 marked nodes that trail
+/// prose. This cap checks 64 980 and excludes 24. The cap targets the other 96
+/// archives. A cap that includes every marked node would apply the invariant to phrases
+/// where an own line is correct.
 const ORPHAN_MAX_CHARS: usize = 12;
 
-/// How much other text must share the paragraph a trailing fragment landed
-/// in, in characters.
+/// The minimum amount of other text that must share a trailing fragment's paragraph.
 ///
-/// One, because the whole of the #18 class is a fragment drawn with
-/// *nothing else* in its paragraph: the renderer opened a line for the mark
-/// alone, under the sentence it belongs to. Company rather than lead,
-/// measured against the corpus: Jitendex's `example-keyword` (51 062 nodes)
-/// is often the first word of its own sentence, so a fragment with no prose
-/// *ahead* of it is routine and correct - it is a fragment with no prose
-/// beside it at all that is the defect. A larger number asks the renderer
-/// to hold a fragment back until some quota of sentence is drawn, which is
-/// no rule a browser has, so it belongs only in the test that tightens it
-/// ([`the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened`]).
+/// The value is one because every #18 fragment in the local class has no other text in
+/// its paragraph. The renderer puts the mark on a line below its sentence. The check
+/// therefore needs company, not prose before the fragment. `example-keyword` in Jitendex has 51 062
+/// nodes and often starts its own sentence. A fragment with no prose before it is
+/// normal. A fragment with no prose beside it is a defect. A larger value would make
+/// the renderer delay the fragment until it had part of the sentence. Browsers have no
+/// such rule. Use a larger value only in
+/// [`the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened`].
 const ORPHAN_MIN_COMPANY_CHARS: usize = 1;
 
-/// Gutter tolerated between a marker box and its item's first glyph beyond
-/// what the tree asks for, as a fraction of the item's own em.
+/// The extra gutter allowed between a marker box and its item glyph, in ems.
 ///
-/// The #19 class is a whole default list level of surplus -
-/// [`LIST_INDENT_EM`], 1.4em - and the fixed shape's gap is the 0.5em its
-/// dictionary declared, so any tolerance under a level and over rounding
-/// separates the two. Half an em is also what absorbs the difference
-/// between the em a declared padding resolved against and the em this check
-/// spends it in: a length is read as a multiple of its own node's size, and
-/// that node may sit at a smaller size than the paragraph the gap ends at.
+/// The #19 class adds one default list level, [`LIST_INDENT_EM`] at 1.4em. The fixed
+/// shape has the 0.5em that its dictionary declares. A tolerance below one level and
+/// above round-off separates the two. Half an em also covers one round-off difference.
+/// A padding declaration resolves against one em, but the check scales it with another
+/// em. The declared node can use a smaller size than the paragraph at the gap.
 const MARKER_GAP_SLACK_EM: f32 = 0.5;
 
-/// The tuned numbers the invariants read.
+/// The threshold values that the invariants use.
 ///
-/// Passed in rather than read from the constants directly, because a
-/// detector nobody can tighten is a detector nobody can trust: the two
-/// resolved tickets are checked by rendering their verbatim shapes, asking
-/// for zero candidates, and then tightening a threshold past the fix until
-/// the same geometry is flagged again. That is the only evidence available
-/// that these checkers would have caught the defects they were written for,
-/// since the fixes are in the build that runs them.
+/// The sweep passes these values instead of reading constants directly. A detector must
+/// have a test that can tighten its threshold. Each resolved defect follows three steps:
+/// render the real shape, find zero candidates, then tighten one threshold until the
+/// checker flags the same geometry. These tests show that the checkers detect the defects
+/// that they describe.
 #[derive(Clone, Copy, Debug)]
 struct Thresholds {
     orphan_max_chars: usize,
@@ -573,7 +522,7 @@ struct Thresholds {
 }
 
 impl Thresholds {
-    /// What a sweep runs with: the tuned constants above.
+    /// The threshold values that a sweep uses.
     const DEFAULT: Thresholds = Thresholds {
         orphan_max_chars: ORPHAN_MAX_CHARS,
         orphan_min_company: ORPHAN_MIN_COMPANY_CHARS,
@@ -584,38 +533,37 @@ impl Thresholds {
     };
 }
 
-/// One small marked fragment trailing prose, and the shape around it.
+/// One small marked fragment that trails prose and the shape around it.
 struct Fragment {
     text: String,
     shape: Vec<String>,
 }
 
-/// Every small marked fragment that trails prose inside its own parent.
+/// Every small marked fragment that trails prose inside its parent.
 ///
-/// The oracle half of *no orphan trailing fragment*: the marker line
-/// break's own exemption, stated from outside the walk. A marked inline
-/// node whose parent already held prose is markup *inside* a sentence
-/// ([`GlossDoc::inline_prose`]), so the renderer owes it the sentence's
-/// paragraph. What the walk would legitimately break before is excluded
-/// here rather than judged and forgiven later: a marked node with no prose
-/// ahead of it separates senses, and one holding a block of its own opens a
-/// line by tag and not by mark.
+/// This function provides the reference for *no orphan trailing fragment*. The marker
+/// line break is exempt from this walk. A marked inline node whose parent already has
+/// prose belongs inside that sentence ([`GlossDoc::inline_prose`]), so the renderer
+/// owes it the sentence's paragraph. The function excludes nodes that the walk splits
+/// before it checks them. A marked node with no preceding prose separates senses. A
+/// marked node that contains a block opens its own line because of its tag, not its
+/// mark.
 fn trailing_fragments(doc: &GlossDoc, roles: RoleFilter, t: Thresholds) -> Vec<Fragment> {
     let mut out = Vec::new();
     let mut shape = Vec::new();
-    // A top-level item has no parent to hold prose, so nothing trails
-    // anything until a node's own children are walked.
+    // No fragment can trail the top-level item. The walk finds fragments only in its
+    // children.
     for item in doc.items() {
         walk_fragments(doc, item, roles, false, t, &mut shape, &mut out);
     }
     out
 }
 
-/// `prose` is what the walk's own accumulator holds at this node: prose
-/// already seen among the parent's children, in the parent's order. Order is
-/// load-bearing exactly as it is in [`Paragraphs::children`] - a sense head
-/// is marked pills *followed* by a prose fragment, so prose behind a marked
-/// node is no evidence at all.
+/// `prose` records text that the walk has seen in this parent's children.
+///
+/// The value follows parent order, like [`Paragraphs::children`]. A sense head has
+/// marked pills before its prose fragment. Prose after a marked node does not support
+/// the fragment as trailing prose.
 ///
 /// [`Paragraphs::children`]: super::gloss::Paragraphs::children
 fn walk_fragments(
@@ -646,13 +594,11 @@ fn walk_fragments(
     shape.pop();
 }
 
-/// Is this node one run of inline content - nothing under it that opens a
-/// line of its own?
+/// Returns true when a node contains only inline content.
 ///
-/// A marked node holding a `div`, a list, a table or an image is drawn on
-/// its own line because of what it *holds*, and a renderer that kept it in
-/// the sentence would be the defect. So such a node is never a fragment,
-/// however small its text.
+/// A marked node that contains a `div`, list, table, or image starts its own line. The
+/// renderer must not keep that node in the sentence. Its text size does not change this
+/// rule.
 fn inline_only(doc: &GlossDoc, id: NodeId) -> bool {
     let node = doc.node(id);
     !node.tag.is_block()
@@ -663,18 +609,17 @@ fn inline_only(doc: &GlossDoc, id: NodeId) -> bool {
         && doc.children(id).all(|child| inline_only(doc, child))
 }
 
-/// One node's text as a run concatenates it, with nothing in it a reader
-/// cannot see.
+/// The text of one node as a continuous run, excluding text that the reader does not
+/// see.
 ///
-/// Joined with nothing, unlike [`drawn_text`]'s walk over whole elements: a
-/// run's spans sit character after character in one string, so this is the
-/// needle that string is searched for. Three things a run does not hold are
-/// dropped here, or the needle would never match the haystack:
+/// The function joins spans without separators. Spans in one run follow each other
+/// directly, so the result is the string that the search uses. It excludes three child
+/// types:
 ///
-/// - `<rt>`, a reading, which does not flow and rides the element as a
-///   [`RubyBox`] instead ([`measure_readings`]);
-/// - `<rp>`, for the reason [`visible_strings`] drops it;
-/// - an image, whose text is its `alt`.
+/// - `<rt>` readings do not flow. [`RubyBox`] draws them separately through
+///   [`measure_readings`].
+/// - `<rp>` is excluded for the reason [`visible_strings`] gives.
+/// - An image draws its `alt` text as an asset.
 ///
 /// [`measure_readings`]: super::ruby::measure_readings
 fn run_text(doc: &GlossDoc, id: NodeId) -> String {
@@ -692,17 +637,14 @@ fn run_text(doc: &GlossDoc, id: NodeId) -> String {
     out
 }
 
-/// One string with every glyph gone that the renderer writes into a run and
-/// a reader never sees.
+/// Removes glyphs that the reader cannot see from a run.
 ///
-/// [`RUBY_FILLER`] is the word joiner every ruby base wears, and it sits
-/// *between* the base's own characters - so a needle taken from the tree
-/// cannot match a drawn run holding one unless both sides drop it. Compared
-/// against the filler itself rather than against a second copy of its
-/// codepoint, so the two cannot drift apart. The zero-width space rides
-/// along because a shaper gives it no advance either
-/// ([`zero_advance`](super::tests::zero_advance)), and which of the two a
-/// pass reached for is not shape.
+/// [`RUBY_FILLER`] is the word joiner that each ruby base contains. It sits between
+/// base characters. A tree string cannot match a drawn run that includes this filler
+/// unless both values omit it. The function compares against the filler itself, so its
+/// codepoint cannot drift from the renderer. It also removes the zero-width space
+/// because the shaper gives it no advance ([`zero_advance`](super::tests::zero_advance)).
+/// Neither character changes the shape.
 fn unglued(text: &str) -> String {
     let mut buf = [0u8; 4];
     text.chars()
@@ -710,15 +652,13 @@ fn unglued(text: &str) -> String {
         .collect()
 }
 
-/// *No orphan trailing fragment*: a small marked fragment trailing prose is
-/// drawn in the paragraph it trails, not on a line of its own.
+/// *No orphan trailing fragment*: a small marked fragment that trails prose stays in
+/// that paragraph, not on its own line.
 ///
-/// Stated over the drawn paragraphs rather than over the walk's decisions,
-/// so it holds whatever rule put the fragment where it is: the measured
-/// number is how much text the renderer drew beside the fragment in the
-/// paragraph it landed in, and the #18 class is that number being zero.
-/// A fragment the scene draws nowhere is *no dropped text*'s business and
-/// not this one's.
+/// The check applies this rule to drawn paragraphs, not to the walk's decisions. It
+/// therefore checks the final placement. The measured value is text beside the
+/// fragment in its paragraph. #18 has zero company. A fragment that the scene does not
+/// draw belongs to *no dropped text*, not to this invariant.
 fn orphan_fragment(
     dictionary: &str,
     doc: &GlossDoc,
@@ -729,10 +669,9 @@ fn orphan_fragment(
     let drawn: Vec<String> = s.elems.iter().map(|e| folded(&unglued(&e.text))).collect();
     let mut checked = Checked::default();
     for f in trailing_fragments(doc, roles, t) {
-        // Counted only once the fragment is one this invariant can speak
-        // about: a fragment the scene draws nowhere as one string was never
-        // stated over, and a count that rose for it would be the
-        // reassurance ticket 01's string count exists to refuse.
+        // A fragment belongs to *no dropped text* when the scene does not draw it as one
+        // string. A missing fragment would make this invariant appear to work without
+        // evidence.
         let Some(company) = best_company(&drawn, &f.text) else {
             checked.declined += 1;
             continue;
@@ -758,13 +697,13 @@ fn orphan_fragment(
     checked
 }
 
-/// The most text any one paragraph drew beside `fragment`, or `None` when
-/// no paragraph drew the fragment at all.
+/// The largest amount of text that one paragraph draws beside `fragment`, or `None` when
+/// no paragraph draws the fragment.
 ///
-/// The best case rather than the first, because a short fragment's own text
-/// may appear in more than one paragraph of an entry and the question is
-/// whether the renderer kept it in a sentence *somewhere*: one paragraph
-/// that did is the answer, and flagging the coincidence would be noise.
+/// This function reports the best case instead of the first case. A short fragment can
+/// appear in several paragraphs. The question is whether the renderer keeps it inside
+/// a sentence anywhere. One paragraph that keeps it is enough. A flag for another
+/// occurrence would add noise.
 fn best_company(drawn: &[String], fragment: &str) -> Option<usize> {
     let own = fragment.chars().count();
     drawn
@@ -774,30 +713,24 @@ fn best_company(drawn: &[String], fragment: &str) -> Option<usize> {
         .max()
 }
 
-/// *Bounded marker gap*: what stands between a marker box and its item's
-/// first glyph is what the tree asked for.
+/// *Bounded marker gap*: the space between a marker box and its item's first glyph is
+/// within the tree's requested value.
 ///
-/// The gap is read off the placed box - [`place_markers`] right-aligns it
-/// against the content edge of the list that owed it, so what is left of
-/// the paragraph's pen is exactly the indent the levels *below* that list
-/// added. The oracle is the browser rule the #19 fix states: each level
-/// costs [`LIST_INDENT_EM`] unless the list declares its own left padding,
-/// in which case the declaration replaces it, and each node's own declared
-/// left margin, border and padding costs what it declares.
+/// [`place_markers`] right-aligns the marker against the list content edge. The
+/// space left to the paragraph pen equals the indent from levels below that list.
+/// The reference follows the browser rule for #19. Each level costs [`LIST_INDENT_EM`]
+/// unless the list declares left padding. That declaration replaces the default level.
+/// Each node adds its declared left margin, border, and padding.
 ///
-/// Only the innermost marker is asked about. An item whose whole content is
-/// a nested list hangs two markers on one line, and the outer one is
-/// *meant* to stand a level away from the text.
+/// The check examines only the innermost marker. A nested list can place two markers on
+/// one line. The outer marker must remain one level from the text.
 fn marker_gap(dictionary: &str, doc: &GlossDoc, s: &PopupScene, t: Thresholds) -> Checked {
     let mut checked = Checked::default();
     for e in &s.elems {
         let Some(mark) = e.marker.last() else { continue };
-        // A paragraph with no address, or a list this sweep cannot line the
-        // marker up with, is one it declines to judge rather than one it
-        // flags on a guess - and a decline is counted as itself, never as a
-        // check. A run of them has to be able to make `markers=` fall: an
-        // origin path that stopped resolving would otherwise leave the count
-        // where it was while every judgment quietly stopped.
+        // Decline a paragraph with no address or a list that this sweep cannot align.
+        // A decline is not a check. The count must show when origin resolution stops.
+        // Otherwise `markers=` could remain unchanged while the judgment stops.
         let Some(chain) = e.origin.and_then(|o| o.path).and_then(|p| chain_of(doc, p)) else {
             checked.declined += 1;
             continue;
@@ -807,10 +740,8 @@ fn marker_gap(dictionary: &str, doc: &GlossDoc, s: &PopupScene, t: Thresholds) -
             continue;
         };
         checked.markers += 1;
-        // The marker's own trailing gap is inside its width ([`MARKER_GAP`]),
-        // so this is what stands between the box and the pen: the indent the
-        // levels below the marker's list added, and nothing the marker paid
-        // for itself.
+        // The marker's trailing gap is inside its width ([`MARKER_GAP`]). This gap is
+        // the indent from levels below the marker's list, not marker spacing.
         let gap = -(mark.x + mark.w);
         if gap <= 0.0 {
             continue;
@@ -838,19 +769,16 @@ fn marker_gap(dictionary: &str, doc: &GlossDoc, s: &PopupScene, t: Thresholds) -
     checked
 }
 
-/// The nodes a path addresses, glossary item first and the addressed node
-/// last.
+/// The node IDs that a path addresses, from glossary item to final node.
 ///
-/// The arena keeps first-child and next-sibling links and no parent link,
-/// so a scene element's own [`NodePath`] is the only way back up its tree -
-/// which is what a gap needs, since the room between a marker and a glyph
-/// is owed by the ancestors between them.
+/// The arena has first-child and next-sibling links, but no parent link. A scene
+/// element's [`NodePath`] is therefore the only route back through the tree. The gap
+/// check needs each ancestor between the marker and glyph.
 ///
-/// [`NodePath::resolve`] walks the same route and keeps only its end, and a
-/// path holds no prefix constructor to hand this the levels one at a time.
-/// So the descent is written twice on purpose rather than widening a
-/// dictionary API for a test's need - if the route ever stops being "the
-/// nth item, then the nth child", both change together.
+/// [`NodePath::resolve`] walks the same route but keeps only the final node. The path
+/// has no prefix constructor for one-step access. This function repeats the descent so
+/// both routes change together if the path format changes. It visits the nth item, then
+/// the nth child.
 fn chain_of(doc: &GlossDoc, path: NodePath) -> Option<Vec<NodeId>> {
     let mut steps = path.steps().iter();
     let mut id = doc.items().nth(*steps.next()? as usize)?;
@@ -862,13 +790,11 @@ fn chain_of(doc: &GlossDoc, path: NodePath) -> Option<Vec<NodeId>> {
     Some(out)
 }
 
-/// Where in `chain` the innermost drawn marker's own list sits.
+/// The index of the list that owns the innermost drawn marker on `chain`.
 ///
-/// The deepest list ancestor that draws a marker for the item beneath it on
-/// this chain, which is the list whose gutter the innermost [`MarkerBox`]
-/// hangs in ([`Paragraphs::list`]). `None` when no ancestor list draws one:
-/// the marker on this paragraph then belongs to a list the paragraph is not
-/// inside, which this sweep does not judge.
+/// The deepest list ancestor that draws a marker for its child owns the marker gutter
+/// ([`Paragraphs::list`]). `None` means no ancestor list draws the marker. This sweep
+/// does not judge that case.
 ///
 /// [`Paragraphs::list`]: super::marker::Paragraphs::list
 fn marker_list(doc: &GlossDoc, chain: &[NodeId]) -> Option<usize> {
@@ -880,29 +806,24 @@ fn marker_list(doc: &GlossDoc, chain: &[NodeId]) -> Option<usize> {
     })
 }
 
-/// Does `list` draw a marker beside `item`?
+/// Returns true when `list` draws a marker beside `item`.
 ///
-/// `list-style-type` is inherited and the marker is drawn at the item, so
-/// the resolution is the list's own over its tag's initial value and then
-/// the item's over that - the two calls [`Paragraphs::list`] makes, in its
-/// order. The ordinal is irrelevant to whether a marker exists at all, so
-/// the first item's is asked for.
-///
-/// [`Paragraphs::list`]: super::marker::Paragraphs::list
+/// `list-style-type` is inherited. The list resolves its value over the tag's initial
+/// value, then the item resolves its value over the list value. [`Paragraphs::list`]
+/// makes these calls in this order. The ordinal does not affect marker existence, so
+/// the function asks for the first item.
 fn marker_draws(doc: &GlossDoc, list: NodeId, item: NodeId) -> bool {
     let ordered = doc.node(list).tag == Tag::Ol;
     let inherited = styled_marker(doc, list, initial_marker(ordered), true);
     styled_marker(doc, item, inherited, true).label(1).is_some()
 }
 
-/// The left indent the nodes below a marker's list are owed, in ems.
+/// The left indent owed by nodes below a marker list, in ems.
 ///
-/// One term per node: what it declares, plus a default list level for a
-/// list that declared no left padding of its own. That second clause is the
-/// browser rule the #19 fix states - an author's `padding-left` on a list
-/// *replaces* the UA gutter rather than adding to it - and stating it here
-/// rather than reading the walk's arithmetic is what makes this an oracle
-/// instead of a copy.
+/// Each node contributes its declared value. A list with no left padding contributes
+/// [`LIST_INDENT_EM`] as the default list level. An author's `padding-left` replaces the
+/// browser gutter. This rule follows the #19 fix. The function states the rule directly
+/// instead of duplicating the layout arithmetic.
 fn owed_indent_em(doc: &GlossDoc, below: &[NodeId]) -> f32 {
     below
         .iter()
@@ -918,19 +839,13 @@ fn owed_indent_em(doc: &GlossDoc, below: &[NodeId]) -> f32 {
         .sum()
 }
 
-/// One node's declared left edge of one box property, in ems of its own
-/// size.
+/// One node's declared left edge for a box property, in its own ems.
 ///
-/// The wider of the shorthand's left edge and the longhand, where the
-/// cascade would take whichever the dictionary wrote last. Deliberately
-/// generous: this is the room a gap is *allowed*, so reading a declaration
-/// too widely costs a candidate nobody had to adjudicate, and reading it
-/// too narrowly costs a false one somebody does.
-///
-/// Resolved against a unit em, which makes the answer the multiple itself:
-/// the gap it is compared against is measured at the paragraph's own size,
-/// and [`MARKER_GAP_SLACK_EM`] is what covers a node that declared its
-/// padding at some other one.
+/// The result is the larger left edge from the shorthand and longhand. This matches
+/// cascade order and overestimates allowed space, so a declaration cannot create a
+/// false candidate. The result is resolved against one em, which gives the edge
+/// multiple. The comparison uses paragraph size. [`MARKER_GAP_SLACK_EM`] covers a node
+/// that declares padding at another size.
 fn left_of(doc: &GlossDoc, id: NodeId, short: StyleKey, long: Option<StyleKey>) -> f32 {
     let one = Ems { own: 1.0, root: 1.0 };
     let edges = doc
@@ -946,62 +861,52 @@ fn left_of(doc: &GlossDoc, id: NodeId, short: StyleKey, long: Option<StyleKey>) 
 
 // ---- the box family ----
 
-/// How far a box may stand outside the panel before the sweep calls it
-/// overflow, in pixels.
+/// The allowed distance beyond the panel edge before the check reports overflow, in pixels.
 ///
-/// Half a pixel, which is under one device pixel on every display either bin
-/// draws on: a box this far out clips nothing a reader can see. The number is
-/// here for the float arithmetic that placed the box and for nothing else,
-/// which is why it is in pixels and not in ems - one of the two defects this
-/// invariant exists to catch is a runaway indent, and a tolerance scaled by
-/// the font size would grow with exactly the thing running away.
+/// Half a pixel is below one device pixel. It covers float arithmetic from box
+/// placement. The value uses pixels, not ems, because a runaway indent must not increase
+/// its own tolerance with font size.
 const OVERFLOW_SLACK_PX: f32 = 0.5;
 
-/// How deep two boxes must interpenetrate, on both axes, before the sweep
-/// calls them overlapping, in pixels.
+/// The required overlap on both axes before two boxes overlap, in pixels.
 ///
-/// Half a pixel, for the reason [`OVERFLOW_SLACK_PX`] is: stacked boxes meet
-/// edge to edge by design - one paragraph's bottom is the next one's top -
-/// so the question this invariant asks is never "do they touch" but "how far
-/// in", and the answer has to clear the float arithmetic that decided both
-/// edges.
+/// Half a pixel covers float arithmetic. Stacked boxes meet edge to edge by design, so
+/// this invariant tests penetration, not contact. The value must exceed the rounding
+/// error at both edges.
 const OVERLAP_SLACK_PX: f32 = 0.5;
 
 /// One element's own text, cut to this many characters for a candidate file.
 const SNIPPET_CHARS: usize = 40;
 
-/// The panel's own width: the edge a box may not stand outside of.
+/// The panel width that bounds each box.
 ///
-/// A scene reports the width it *wants* only when a side column made it
-/// wider than the box it was offered; with no side column the main column
-/// and its two paddings are that box. Read off the scene rather than from
-/// [`SWEEP_W`], so the invariant states the same thing about a scene laid out
-/// at any other width.
+/// A scene reports its requested width only when a side column expands it beyond the
+/// offered box. Without a side column, the main column and two paddings define the box.
+/// Read the width from the scene instead of [`SWEEP_W`] so the invariant also applies to
+/// other panel widths.
 fn panel_width(s: &PopupScene) -> f32 {
     s.panel_w.unwrap_or(2.0 * s.origin + s.content_w)
 }
 
-/// One box one element puts on the panel.
+/// One box that an element puts on the panel.
 struct DrawnBox<'a> {
-    /// Which of the element's boxes this is, for a signature to carry.
+    /// The box name in a signature.
     name: &'static str,
-    /// The glyphs inside it.
+    /// The text inside the box.
     text: &'a str,
-    /// In panel space, whichever space the scene keeps the original in.
+    /// The rectangle in the scene's panel space.
     rect: SceneRect,
 }
 
-/// Every box one element puts on the panel, in panel space.
+/// Every box that an element puts on the panel, in panel space.
 ///
-/// The element's own ink box, then the two that ride it out of its flow: a
-/// reading over its base and a marker in its list's gutter, both of which the
-/// scene keeps run-relative for a bin to add [`SceneElem::pen`] to. Each is
-/// named, because a paragraph whose ink overflows and a marker hanging off
-/// the panel's left edge share every ancestor and are not the same defect.
+/// The first box is the element's ink box. The other boxes sit outside its flow: a
+/// reading above its base and a marker in its list gutter. The scene stores both as
+/// run-relative coordinates. A platform adds [`SceneElem::pen`]. Each box has a name
+/// because a paragraph with overflow and an outside marker have different defects.
 ///
-/// The names are angle-bracketed for the reason [`elem_shape`]'s are: a shape
-/// step is a node's own selector, and a word the sweep put there has to be
-/// one no node can spell.
+/// Angle brackets mark names that no glossary node can create. A shape step uses a
+/// node selector, but these names identify scene boxes.
 fn drawn_boxes(e: &SceneElem) -> impl Iterator<Item = DrawnBox<'_>> {
     let (px, py) = e.pen;
     std::iter::once(DrawnBox { name: "<element-box>", text: &e.text, rect: e.rect })
@@ -1017,27 +922,18 @@ fn drawn_boxes(e: &SceneElem) -> impl Iterator<Item = DrawnBox<'_>> {
         }))
 }
 
-/// The shape around one scene element, or `None` when it has no shape this
-/// sweep can name.
+/// The shape around a scene element, or `None` when the sweep cannot name it.
 ///
-/// A gloss element's own address, walked into the nodes it names, exactly as
-/// [`marker_gap`] reads one. The panel's own chrome carries no address and no
-/// dictionary node behind it, so it is named by kind instead: a headword that
-/// overflowed is a defect in this renderer rather than in some dictionary's
-/// markup, and a signature that could not tell the two apart would file them
-/// as one shape.
+/// A gloss element uses its address and the nodes on that path, as [`marker_gap`] does.
+/// Panel chrome has no address, so its shape uses its element kind. A headword that
+/// overflows is a renderer defect. Distinct defects must remain distinct.
 ///
-/// `None` is the third case, and it is why this returns an option rather than
-/// falling back to the chrome name for everything without a chain: a gloss
-/// node deeper than a [`NodePath`] reaches carries an address of `None` too,
-/// and filing it as chrome would let one exemption of a chrome shape absorb
-/// every deep-tree defect in the corpus. A caller declines such a box the way
-/// [`marker_gap`] declines a marker it cannot line up.
+/// `None` marks a gloss node deeper than [`NodePath`] can reach. Do not replace it with
+/// a chrome name. One chrome exemption could then absorb every deep-tree defect. A
+/// caller declines such a box, as [`marker_gap`] declines an unaligned marker.
 ///
-/// The chrome name is angle-bracketed because a step is otherwise a node's own
-/// selector: `step` writes a tag and its `data-sc-*` hooks, and a dictionary
-/// may tag a node anything at all, so a word the sweep contributes has to be
-/// one no node can spell.
+/// Chrome names use angle brackets. `step` writes a tag and `data-sc-*` hooks. A
+/// dictionary can choose any node tag, so a sweep name must not match one.
 fn elem_shape(doc: &GlossDoc, e: &SceneElem) -> Option<Vec<String>> {
     let Some(origin) = e.origin else {
         return Some(vec![format!("<chrome:{}>", e.kind.as_str())]);
@@ -1046,12 +942,11 @@ fn elem_shape(doc: &GlossDoc, e: &SceneElem) -> Option<Vec<String>> {
     Some(chain.iter().map(|id| step(doc, *id)).collect())
 }
 
-/// `text` folded and cut to [`SNIPPET_CHARS`] characters.
+/// Folds `text` and limits it to [`SNIPPET_CHARS`] characters.
 ///
-/// A measured number says two boxes met; the text says which two, which is
-/// the first thing an adjudicator looks for. Cut because a glossary paragraph
-/// runs to hundreds of characters and the exemplar quotes the whole entry
-/// verbatim anyway.
+/// A measured value shows that two boxes overlap. The text shows which boxes they are.
+/// This helps review. Glossary paragraphs can contain hundreds of characters, but the
+/// exemplar already quotes the full entry.
 fn snippet(text: &str) -> String {
     let text = folded(text);
     match text.char_indices().nth(SNIPPET_CHARS) {
@@ -1060,22 +955,16 @@ fn snippet(text: &str) -> String {
     }
 }
 
-/// *No horizontal overflow*: every box the panel draws stands inside the
-/// panel.
+/// *No horizontal overflow*: every box that the panel draws stays inside its edges.
 ///
-/// Runaway indent and an unbreakable line are the two shapes this catches,
-/// and they reach the same place from opposite ends: an indent walks the pen
-/// off the right edge, and a chunk no shaper will break carries ink past the
-/// wrap width it was given - [`FakeMeasure`] overflows rather than loops when
-/// one chunk exceeds a line, which is what a real shaper does too. Both are
-/// read off the placed box, so whatever rule put it there is what the
-/// invariant holds.
+/// Runaway indents and unbreakable lines are the two target shapes. An indent moves
+/// the pen past the right edge. A chunk that the shaper cannot break moves the ink past
+/// the wrap width. [`FakeMeasure`] overflows in that case, like a real shaper. The check
+/// reads the placed box, so it tests the result of every layout rule.
 ///
-/// Stated against the *panel* and not against the content column, because the
-/// content edge is not an edge anything is clipped at: a marker hangs left of
-/// it by design and the room it hangs in is the list's own indent, so an
-/// invariant measuring from there would flag every list in the corpus. What a
-/// reader loses is what falls off the surface.
+/// The invariant uses panel edges, not content edges. Markers sit left of the content
+/// edge by design. The list indent provides their space. The panel edge marks what a
+/// reader can lose.
 fn horizontal_overflow(
     dictionary: &str,
     doc: &GlossDoc,
@@ -1103,8 +992,8 @@ fn horizontal_overflow(
             measured.insert("w_px".to_string(), format!("{:.2}", b.rect.w));
             measured.insert("panel_w_px".to_string(), format!("{panel_w:.2}"));
             measured.insert("text".to_string(), snippet(b.text));
-            // A box whose element this sweep cannot name is one it declines
-            // to file rather than one it files under somebody else's shape.
+            // If the sweep cannot name the element, it declines the box instead of
+            // assigning another shape.
             let Some(mut shape) = elem_shape(doc, e) else {
                 checked.declined += 1;
                 continue;
@@ -1123,32 +1012,27 @@ fn horizontal_overflow(
     checked
 }
 
-/// Which promise a box's kind carries, or `None` when it carries none.
+/// Which promise a box kind carries, or `None` when it carries no promise.
 ///
-/// The whole exemption list for *no overlapping boxes*, stated by kind so
-/// that a kind added to the scene is a compile error here rather than a
-/// silent flood of candidates. Two sets of boxes each promise not to stand on
-/// their own, and only boxes from one set are ever compared:
+/// This lists every exemption for *no overlapping boxes*. The exhaustive match makes a
+/// new scene kind a compile error instead of a silent candidate flood. The check
+/// compares only boxes from the same promise set:
 ///
-/// - [`Stack::Flow`] is what the walk stacked one after another. A mis-stacked
-///   row is two of these sharing pixels.
-/// - [`Stack::Assets`] is the images. Each advances no y and composites over
-///   the spacer run whose line already bought its room, so an image against
-///   the paragraph around it is not a defect - but an image against *another*
-///   image is the double-drawn element story 9 asks for, and no run stands
-///   between two of those to report it.
+/// - [`Stack::Flow`] contains boxes that the walk stacks in sequence. A mis-stacked row
+///   has two boxes from this set on shared pixels.
+/// - [`Stack::Assets`] contains images. Each image keeps the spacer run's space and
+///   can overlap that paragraph. Two images at one place form the double-drawn element
+///   that this invariant detects.
 ///
-/// The three kinds that carry no promise are the containers. A block, a table
-/// and a cell each lead the paragraphs inside them in draw order and their
-/// rects cover every one, so a check comparing them would report each
-/// bordered `div` in the corpus as a collision with its own contents. A corner
-/// makes none either: it advances no y and hangs in the width the headword
-/// reserved beside it, which is what a corner is *for*.
+/// Containers carry no promise. A block, table, or cell leads its inner paragraphs and
+/// covers them. A comparison would report each bordered `div` as a collision
+/// with its contents. A corner also carries no promise. It uses reserved headword
+/// width and adds no vertical space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Stack {
-    /// The boxes the walk stacked down the panel.
+    /// Boxes that the walk stacks down the panel.
     Flow,
-    /// The assets composited over it.
+    /// Assets composited over flow boxes.
     Assets,
 }
 
@@ -1165,18 +1049,14 @@ fn stack_of(kind: ElemKind) -> Option<Stack> {
     }
 }
 
-/// *No overlapping boxes*: nothing the walk stacked stands on anything else
-/// it stacked, and no asset is drawn over another.
+/// *No overlapping boxes*: stacked boxes do not share interior pixels, and assets do not
+/// cover other assets.
 ///
-/// Mis-stacked rows and double-drawn elements, stated as each set's own
-/// promise ([`stack_of`]). Only element rects answer for it, and the two
-/// overhangs a correct render has are outside the comparison by construction
-/// rather than forgiven by a tolerance afterwards - neither a [`RubyBox`] nor
-/// a [`MarkerBox`] is an element rect, and neither is in a set that promises
-/// anything. That is not a formality in the ruby case: a reading sits *inside*
-/// the line its own base grew for it ([`measure_readings`]), so a check that
-/// admitted it would report every ruby in the corpus against its own
-/// paragraph.
+/// Mis-stacked rows and double-drawn elements follow each box's promise set
+/// ([`stack_of`]). The check compares element rectangles only. Ruby and marker boxes are
+/// excluded because they are not element rectangles. A reading sits inside the line its
+/// base reserves ([`measure_readings`]). If the check included it, every ruby would appear
+/// as a collision against its paragraph.
 ///
 /// [`measure_readings`]: super::ruby::measure_readings
 fn overlapping_boxes(
@@ -1188,19 +1068,18 @@ fn overlapping_boxes(
     let mut checked = Checked::default();
     let mut boxes: Vec<&SceneElem> =
         s.elems.iter().filter(|e| stack_of(e.kind).is_some()).collect();
-    // Top edge first, draw order within a tie - `sort_by` is stable - so the
-    // loop below can stop at the first box starting past the one it is asking
-    // about, and so a pair is named in one order however the scene listed it.
+    // Sort by top edge, then keep draw order for ties. `sort_by` is stable, so the loop
+    // can stop at the first later box and name each pair in one order.
     boxes.sort_by(|a, b| a.rect.y.total_cmp(&b.rect.y));
     for (i, upper) in boxes.iter().enumerate() {
         let (top, bottom) = (upper.rect.y, upper.rect.y + upper.rect.h);
         for lower in &boxes[i + 1..] {
-            // Sorted, so every box after this one starts lower still.
+            // The sort puts every later box lower on the panel.
             if lower.rect.y >= bottom - t.overlap_slack_px {
                 break;
             }
-            // A promise is only about its own set: an asset over a paragraph
-            // is what compositing is.
+            // Compare only boxes with the same promise. An asset over a paragraph is
+            // valid compositing.
             if stack_of(upper.kind) != stack_of(lower.kind) {
                 continue;
             }
@@ -1218,7 +1097,7 @@ fn overlapping_boxes(
             measured.insert("lower_kind".to_string(), lower.kind.as_str().to_string());
             measured.insert("upper".to_string(), snippet(&upper.text));
             measured.insert("lower".to_string(), snippet(&lower.text));
-            // Two boxes, one of which this sweep cannot name: see
+            // Decline a pair when either box has no sweep name. See
             // [`horizontal_overflow`].
             let (Some(mut shape), Some(under)) =
                 (elem_shape(doc, upper), elem_shape(doc, lower))
@@ -1243,33 +1122,23 @@ fn overlapping_boxes(
 
 // ---- width monotonicity ----
 
-/// How much taller the wider panel may stand before the sweep calls it a
-/// violation, in pixels.
+/// The height increase allowed for the wider panel before a violation, in pixels.
 ///
-/// Half a pixel, for the reason [`OVERFLOW_SLACK_PX`] is: a content height
-/// is a sum of measured advances, and the two panels sum a different number
-/// of them, so the comparison has to clear the float arithmetic that built
-/// both totals. It is no wrap tolerance - one line of unwanted growth is
-/// orders of magnitude past it - and it is in pixels rather than in ems
-/// because what this invariant catches makes content taller, which no font
-/// size scales.
+/// Half a pixel covers float arithmetic in the two content-height sums. It is not wrap
+/// tolerance. One unwanted line is much larger. The value uses pixels because this
+/// invariant measures content height, not font-scaled space.
 const MONOTONIC_SLACK_PX: f32 = 0.5;
 
-/// *Width monotonicity*: a wider panel never draws taller content.
+/// *Width monotonicity*: a wider panel does not draw taller content.
+/// This invariant compares two renders of one entry. Extra width gives each line at
+/// least as much room, so content height can stay the same or decrease. An increase
+/// shows that another rule uses the extra width. Examples include a panel-scaled indent,
+/// a new column break, or a box that fits at one width only. A reader sees a longer entry
+/// after a wider popup.
 ///
-/// The classic wrap-logic property, and the only invariant here stated over
-/// two renders of one entry rather than over one: give a wrapper more room
-/// and every line it breaks holds more or holds the same, so the height can
-/// only fall. A height that rose says some rule spent the extra width on
-/// something other than the wrap - an indent that scaled off the panel, a
-/// column that gained a break, a box that fitted at one width and not at
-/// the other - and a reader widening the popup would watch the entry get
-/// longer.
-///
-/// Stated over `content_h`, the whole body plus both paddings and the number
-/// the panel is sized from, so a violation is height a reader would really
-/// gain. Neither side is clamped: [`SWEEP_H`] is taller than any entry in
-/// the corpus, and the clamp only sets `view_h` anyway.
+/// The check uses `content_h`, which includes the body, both paddings, and the panel
+/// size. Neither scene is clamped. [`SWEEP_H`] exceeds every corpus entry, and the
+/// clamp only sets `view_h`.
 fn width_monotonicity(
     dictionary: &str,
     doc: &GlossDoc,
@@ -1293,13 +1162,10 @@ fn width_monotonicity(
             measured.insert("shape_taller_px".to_string(), format!("{grew:.2}"));
             shape
         }
-        // No shape the sweep can *name* grew, so either the height came from
-        // the room between the boxes - a gap, a margin, a block's own
-        // padding - or it came from a box [`shape_heights`] left out. The
-        // entry is then the only shape this sweep can honestly file it
-        // under, and one candidate per dictionary is the right batch for a
-        // defect no one node's markup owns. The word is angle-bracketed for
-        // the reason [`elem_shape`]'s is: no node can spell it.
+        // No named shape grew. The increase came from space between boxes, such as a
+        // gap or margin, or from padding that [`shape_heights`] excludes. File the
+        // violation under the entry because no node owns that space. Angle brackets
+        // keep this name outside dictionary node names, as in [`elem_shape`].
         None => vec!["<entry>".to_string()],
     };
     checked.violations.push(Violation {
@@ -1313,17 +1179,13 @@ fn width_monotonicity(
     checked
 }
 
-/// The shape whose own boxes grew the most between the two widths, and by
-/// how much.
+/// The shape whose own boxes grew most between widths, with the growth amount.
 ///
-/// Which node to blame, so that two entries whose height rose in the same
-/// markup are one candidate: the entry-level number says an entry grew and
-/// says nothing an adjudicator can generalise from, while a shape is
-/// exactly what one exemplar teaches about the other thousands.
+/// This puts entries with the same markup into one candidate. An entry-level shape gives
+/// a reviewer no reusable detail. A node shape lets one exemplar describe many entries.
 ///
-/// `None` when no one shape grew, which the caller reads as the entry's own
-/// shape rather than as no violation: the total is what the invariant is
-/// stated over, and this walk only attributes it.
+/// `None` means no named shape grew. The caller uses the entry shape instead. The total
+/// height still defines the violation. This function only attributes the increase.
 fn grown_shape(
     doc: &GlossDoc,
     narrow: &PopupScene,
@@ -1344,17 +1206,14 @@ fn grown_shape(
     worst
 }
 
-/// Every shape the scene draws, with the total height its boxes take.
+/// Each shape that a scene draws, with the total height of its boxes.
 ///
-/// Keyed by the same shape a signature carries, so what this compares is
-/// what a candidate is filed under. Summed per shape rather than matched box
-/// for box, because the two renders are two wraps of one tree: a shape may
-/// draw a different number of boxes at each width, and monotonicity holds of
-/// the sum whatever the split.
+/// The key matches the shape stored in a signature. The function sums each shape, not
+/// individual boxes. Two widths can wrap one shape into different box counts, but
+/// monotonicity applies to the total.
 ///
-/// A box this sweep cannot name is left out rather than pooled with the
-/// rest - [`elem_shape`] declines a gloss node deeper than a [`NodePath`]
-/// reaches, and pooling those would blame one shape for another's growth.
+/// A box that this sweep cannot name is omitted. [`elem_shape`] declines a node deeper
+/// than [`NodePath`] can reach. A shared bucket could assign one shape's growth to another.
 fn shape_heights(doc: &GlossDoc, s: &PopupScene) -> BTreeMap<Vec<String>, f32> {
     let mut out: BTreeMap<Vec<String>, f32> = BTreeMap::new();
     for e in &s.elems {
@@ -1366,43 +1225,38 @@ fn shape_heights(doc: &GlossDoc, s: &PopupScene) -> BTreeMap<Vec<String>, f32> {
 
 // ---- the suppression list ----
 
-/// The committed memory of adjudicated non-bugs.
+/// The committed list of reviewed non-bugs.
 ///
-/// A sweep's judgment has to accumulate, or every run re-presents the shapes
-/// the last one already decided were fine. This is the whole of that memory:
-/// shape signature to one-line reason, read from a file a human reviews in a
-/// diff. Nothing here quotes a dictionary, which is what makes it the one
-/// part of a sweep that may be committed.
+/// A sweep's judgment must accumulate. Otherwise each run presents shapes that the last
+/// run already judged safe. This list maps a shape signature to a one-line reason in a
+/// file that a human reviews. It does not quote dictionary content, so it is the only
+/// sweep data that can enter the repository.
 ///
-/// Keyed by signature, so absorbing a violation is one probe rather than a
-/// scan of the list, and the summary prints in a stable order whatever order
-/// the file happened to list.
+/// One lookup absorbs a violation. The summary stays in a stable order regardless of
+/// file order.
 #[derive(Default)]
 struct Suppressions {
     entries: BTreeMap<String, Suppression>,
 }
 
-/// One adjudicated non-bug, and what this run handed it.
+/// One adjudicated non-bug and the work it absorbed.
 struct Suppression {
-    /// Why the shape is not a bug, as the file states it.
+    /// Why the shape is not a bug, as the file states.
     reason: String,
-    /// `None` when this build checks no such invariant: the entry can never
-    /// absorb anything, so a run reports it rather than counting it unused
-    /// for a reason nobody could act on.
+    /// `None` when this build checks no such invariant. The entry cannot absorb a
+    /// violation, so the run reports it instead of calling it `UNUSED`.
     invariant: Option<Invariant>,
-    /// Violations this entry absorbed in this run.
+    /// Violations that this entry absorbed in this run.
     ///
-    /// Zero after a full run is the whole of *unused*: an exemption that
-    /// stopped applying is one nobody would otherwise notice, and a list
-    /// that only ever grows is how exemptions widen.
+    /// Zero after a full run means `UNUSED`. The run reports an exemption that it did not
+    /// use, so the list does not grow without review.
     absorbed: u64,
 }
 
 /// The suppression list as the committed file spells it.
 ///
-/// `deny_unknown_fields` because the two keys are the whole format: a
-/// misspelled `resaon` would otherwise commit an exemption with no stated
-/// reason, which is the one thing this file exists to prevent.
+/// `deny_unknown_fields` defines the complete format. A misspelled `resaon` would
+/// otherwise create an exemption without a reason.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppressFile {
@@ -1426,12 +1280,11 @@ impl Suppressions {
             .with_context(|| format!("in the suppression list at {}", path.display()))
     }
 
-    /// One entry per shape, or an error naming the entry that stopped it.
+    /// One entry per shape, or an error that names the entry that stopped the parse.
     ///
-    /// Every defect here is a defect in a *committed* file, so each is an
-    /// error rather than a warning: an entry with no reason exempts a shape
-    /// nobody can review, and a duplicate signature silently drops one of
-    /// the two reasons a reviewer approved.
+    /// Every defect in a *committed* file is an error, not a warning. An entry without
+    /// a reason exempts a shape that nobody can review. A duplicate signature hides one
+    /// of the reasons that a reviewer approved.
     fn parse(text: &str) -> anyhow::Result<Self> {
         let file: SuppressFile = toml::from_str(text)?;
         let mut entries = BTreeMap::new();
@@ -1455,7 +1308,7 @@ impl Suppressions {
         Ok(Suppressions { entries })
     }
 
-    /// Absorbs one violation, if an entry claims its shape.
+    /// Absorbs one violation, if the entry claims its shape.
     fn absorb(&mut self, key: &str) -> bool {
         match self.entries.get_mut(key) {
             Some(e) => {
@@ -1469,123 +1322,114 @@ impl Suppressions {
 
 // ---- candidates and the report ----
 
-/// One deduplicated violation awaiting adjudication.
+/// One deduplicated violation that awaits review.
 ///
-/// One shape, one exemplar, an occurrence count. The exemplar is the *first*
-/// entry the shape appeared in rather than the worst, because a sweep that
-/// re-chose an exemplar would rewrite a candidate file every run and an
-/// adjudicator would lose the diff.
+/// Each candidate stores one shape, one exemplar, and an occurrence count. The exemplar
+/// is the first entry with the shape, not the worst entry. A stable exemplar keeps
+/// candidate file diffs to count changes.
 struct Candidate {
     signature: Signature,
     occurrences: u64,
     exemplar: Exemplar,
 }
 
-/// The one entry a candidate quotes.
+/// The one entry that a candidate quotes.
 struct Exemplar {
-    /// The row's one-based ordinal in its archive.
+    /// The one-based row number in the archive.
     ///
-    /// Named for what it is: the sweep reads archives, so this is not the
-    /// `entry_id` a built `chibipop.sqlite` would give the row, and an
-    /// adjudicator who treated it as one would open the wrong record. The
-    /// headword beside it is how the row is actually found again.
+    /// The sweep reads archives, not the built store. This value is not the
+    /// `entry_id` that a built `chibipop.sqlite` assigns. The headword beside it locates
+    /// the row again.
     row: i64,
     term: String,
     reading: String,
     measured: BTreeMap<String, String>,
     /// The term-bank row's glossary, verbatim.
     ///
-    /// Verbatim because adjudication reasons about what the dictionary author
-    /// wrote, and a summarised tree is a second opinion about it. This is
-    /// also the only licensing-relevant string in the whole report, and it is
-    /// why candidates are never committed.
+    /// Review uses the dictionary author's exact content. A summarized tree would add a
+    /// second interpretation. This is the only report string with license impact, so
+    /// candidates never enter the repository.
     glossary: String,
 }
 
-/// What one dictionary's sweep saw.
+/// The results from one dictionary's sweep.
 #[derive(Default)]
 struct DictSummary {
     dictionary: String,
     entries: u64,
-    /// Visible strings *no dropped text* was stated over.
+    /// Visible strings checked by *no dropped text*.
     strings: u64,
-    /// Trailing fragments *no orphan trailing fragment* was stated over.
+    /// Trailing fragments checked by *no orphan trailing fragment*.
     fragments: u64,
-    /// Marker boxes *bounded marker gap* was stated over.
+    /// Marker boxes checked by *bounded marker gap*.
     markers: u64,
-    /// Drawn boxes *no horizontal overflow* was stated over.
+    /// Drawn boxes checked by *no horizontal overflow*.
     boxes: u64,
-    /// Pairs of stacked boxes *no overlapping boxes* was stated over.
+    /// Pairs of stacked boxes checked by *no overlapping boxes*.
     pairs: u64,
-    /// Entries *width monotonicity* was stated over, which is also the
-    /// number of second layouts this run paid for.
+    /// Entries checked by *width monotonicity*.
+    ///
+    /// This count also gives the number of second layouts that the run paid for.
     widths: u64,
     /// What those second layouts cost. See [`Checked::wide_cost`].
     wide_cost: Duration,
-    /// What sweeping this archive cost, wall clock.
+    /// Wall-clock cost of sweeping this archive.
     ///
-    /// The denominator of the second layout's share: the invariant that
-    /// doubles the layout work owns its cost, and a share is the form of
-    /// that number a reader of the summary can act on.
+    /// This is the denominator for the second-layout share. *Width monotonicity* doubles
+    /// layout work, so its share tells a reviewer how much time that invariant uses.
     elapsed: Duration,
-    /// Checks an invariant declined to make. See [`Checked::declined`].
     declined: u64,
     violations: u64,
-    /// Violations a committed suppression absorbed.
+    /// Violations that a committed suppression absorbed.
     ///
-    /// Counted beside `violations` rather than taken out of it: an exemption
-    /// that made the violation count fall would be an exemption nobody could
-    /// audit, which is the one thing a suppression list must not become.
+    /// Keep this count beside `violations`, not inside it. A lower violation count would
+    /// hide an exemption from review.
     suppressed: u64,
     candidates: u64,
-    /// Entries whose parse or layout panicked, plus a walk this archive
-    /// refused: an unreadable bank file is one error for the archive.
+    /// Entries with parse or layout panics, plus a refused archive walk.
+    ///
+    /// An unreadable bank file counts as one archive error.
     errors: u64,
 }
 
-/// What filing one violation did.
+/// Result after the sweep records one violation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Filed {
-    /// A committed suppression claimed its shape; no candidate exists.
+    /// A committed suppression claimed the shape. No candidate exists.
     Suppressed,
-    /// A shape already seen: its candidate's count went up.
+    /// A repeated shape increments its candidate count.
     Repeat,
-    /// A shape not seen before: a candidate was opened for it.
+    /// A new shape opens a candidate.
     Fresh,
 }
 
 /// What one sweep saw.
 struct Report {
     dicts: Vec<DictSummary>,
-    /// By [`Signature::key`], so the report is ordered and one shape is one
-    /// entry however many entries showed it.
+    /// Entries keyed by [`Signature::key`]. One shape has one entry, regardless of how
+    /// many entries show it.
     candidates: BTreeMap<String, Candidate>,
-    /// The exemptions this run applied, and what each absorbed.
+    /// Suppression entries applied in this run.
     suppress: Suppressions,
-    /// The invariants this run checked.
+    /// Invariants checked by this run.
     ///
-    /// Held here rather than passed down, because it is the same kind of
-    /// thing the suppression list is: a statement about what this run was
-    /// answerable for, which the summary has to be able to print. It also
-    /// stops a narrowed run from calling every other invariant's exemptions
-    /// unused - they were never given a violation to absorb.
+    /// This field stays here because the summary must report the run's coverage. It
+    /// prevents a narrowed run from calling other invariants' exemptions `UNUSED`.
+    /// Those invariants received no violations.
     only: Vec<Invariant>,
-    /// Did this run leave rows unchecked?
+    /// True when this run left rows unchecked.
     ///
-    /// Learned from the walk itself - a row cap that fired, an unreadable
-    /// bank file, an entry that panicked - rather than from the intent to
-    /// cap, so it says what actually happened. It is what stops such a run
-    /// from calling an exemption unused: the rows that would have used it
-    /// may simply never have been read.
+    /// The walk sets this after a row cap, unreadable bank file, or entry panic. This
+    /// value records what happened, not only the requested cap. It prevents the run from
+    /// labeling an exemption `UNUSED` when an unread row could have used it.
     partial: bool,
 }
 
 impl Default for Report {
-    /// A whole sweep: every invariant, no exemptions, nothing seen yet.
+    /// A complete sweep with every invariant enabled, no suppressions, and no rows seen.
     ///
-    /// Written out rather than derived for one field: an empty `only` would
-    /// be a report that checked nothing, and the default has to be the run a
-    /// caller who said nothing meant.
+    /// The method sets `only` explicitly. An empty `only` would mean that no invariant
+    /// ran. The default must represent a caller that provided no options.
     fn default() -> Self {
         Report {
             dicts: Vec::new(),
@@ -1598,11 +1442,10 @@ impl Default for Report {
 }
 
 impl Report {
-    /// Files one violation: absorbed by an exemption, or collapsed into the
-    /// candidate for its shape.
+    /// Files one violation as suppressed, repeated, or fresh.
     ///
-    /// Suppression comes first, so a suppressed shape costs no exemplar and
-    /// reaches no candidate file at all.
+    /// Suppression comes first. A suppressed shape needs no exemplar and creates no
+    /// candidate file.
     fn record(&mut self, v: Violation, exemplar: impl FnOnce() -> Exemplar) -> Filed {
         let key = v.signature.key();
         if self.suppress.absorb(&key) {
@@ -1623,10 +1466,9 @@ impl Report {
         }
     }
 
-    /// Every dictionary's counts folded into one row.
+    /// Combines every dictionary summary into one total row.
     ///
-    /// One fold and one caller-visible answer, because the printed summary
-    /// and the run manifest must never disagree about what the run saw.
+    /// The summary and manifest use this row, so both report identical counts.
     fn totals(&self) -> DictSummary {
         let mut total = DictSummary { dictionary: "TOTAL".into(), ..DictSummary::default() };
         for d in &self.dicts {
@@ -1648,11 +1490,10 @@ impl Report {
         total
     }
 
-    /// The whole run summary, as a `--nocapture` run prints it.
+    /// Builds the complete run summary printed by `--nocapture`.
     ///
-    /// A string rather than a walk of `println!`s because the absorbed
-    /// counts are the suppression list's own acceptance criterion, and a
-    /// criterion no test can read is a wish.
+    /// A string makes absorbed counts visible to tests. A criterion that no test can
+    /// read is not an enforced criterion.
     fn summary(&self) -> String {
         let mut out = String::new();
         for d in &self.dicts {
@@ -1670,11 +1511,10 @@ impl Report {
         out
     }
 
-    /// Every exemption this run carried: what it absorbed, and the verdict
-    /// on an exemption that absorbed nothing.
+    /// Builds the suppression summary for this run.
     ///
-    /// Printed whether or not the list is empty, because "no exemptions" is
-    /// itself the answer to whether one widened.
+    /// It lists each exemption, its absorbed count, and its verdict. It prints even
+    /// when the list is empty because that state also needs review.
     fn suppression_summary(&self) -> String {
         let mut out = String::new();
         let (mut absorbed, mut unused, mut unknown, mut unchecked) = (0u64, 0u64, 0u64, 0u64);
@@ -1684,9 +1524,9 @@ impl Report {
                 unknown += 1;
                 "UNKNOWN"
             } else if e.invariant.is_some_and(|i| !self.only.contains(&i)) {
-                // This run never checked the invariant, so the entry had
-                // nothing to absorb and saying it went unused would be a
-                // verdict about the filter and not about the exemption.
+                // This run did not check the invariant. The entry had nothing to absorb.
+                // Do not call it `UNUSED`. That verdict describes the filter, not the
+                // exemption.
                 unchecked += 1;
                 "unchecked"
             } else if e.absorbed == 0 && !self.partial {
@@ -1717,21 +1557,18 @@ impl Report {
         out
     }
 
-    /// Writes one JSON file per candidate into `dir`, plus this run's
-    /// manifest, and returns the candidate files.
+    /// Writes one JSON file per candidate into `dir`, writes this run's manifest, and
+    /// returns the candidate files.
     ///
-    /// Clears the sweep's own stale candidate files first, so what is on disk
-    /// after a run is exactly that run's candidates and a shape that stopped
-    /// appearing stops being adjudicated. Only files this sweep could have
-    /// written are removed - `CHIBIPOP_SWEEP_OUT` can name any directory, and
-    /// eating a neighbour's JSON would be a poor way to report a clean
-    /// corpus.
+    /// It first removes stale candidate files that this sweep could have written. After
+    /// the run, disk contains exactly this run's candidates. A shape that no longer
+    /// appears no longer needs review. The sweep removes only its own files.
+    /// `CHIBIPOP_SWEEP_OUT` can name any directory, so deleting another JSON file would
+    /// corrupt the report.
     ///
-    /// The manifest exists because clearing stale candidates makes an empty
-    /// directory ambiguous: a corpus with nothing left to adjudicate and a
-    /// sweep nobody ran look identical on disk. It records what the run
-    /// covered, so the finish-line check can tell a clean sweep from no
-    /// sweep, and can refuse to call a capped or narrowed run a full one.
+    /// The manifest gives an empty directory one meaning. It records whether a clean
+    /// corpus or a sweep that did not run left the directory empty. It also records
+    /// coverage, so the finish-line check can reject a capped or narrowed run as incomplete.
     fn write(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(dir)?;
         for entry in std::fs::read_dir(dir)? {
@@ -1750,11 +1587,10 @@ impl Report {
         Ok(written)
     }
 
-    /// This run's manifest: what it covered, and what it found.
+    /// The manifest for this run: its coverage and results.
     ///
-    /// `rows_unread` and `invariants` are recorded apart from the
-    /// `whole_corpus` verdict they combine into, so a reader of a partial run
-    /// is told which of the two made it partial.
+    /// `rows_unread` and `invariants` remain separate from `whole_corpus`. A partial run
+    /// then shows which condition made it partial.
     fn manifest_json(&self) -> String {
         let t = self.totals();
         let only: Vec<&str> = self.only.iter().map(|i| i.as_str()).collect();
@@ -1775,7 +1611,7 @@ impl Report {
     }
 }
 
-/// One summary row, dictionary or total.
+/// One summary row for a dictionary or the total.
 fn summary_line(d: &DictSummary) -> String {
     format!(
         "sweep  {:<40} entries={:<8} strings={:<9} fragments={:<8} markers={:<8} \
@@ -1797,15 +1633,13 @@ fn summary_line(d: &DictSummary) -> String {
     )
 }
 
-/// What *width monotonicity*'s second layout cost, as a share of the run.
+/// The cost of the second layout for *width monotonicity*, as a share of the run.
 ///
-/// This invariant doubles the sweep's layout work, so it says out loud what
-/// that came to: a cost nobody prints is a cost nobody can decide about, and
-/// the decision this one informs is whether a full-corpus run keeps checking
-/// monotonicity beside the other five or gets a narrowed run of its own.
+/// This invariant doubles layout work. The summary must show that cost so a reviewer
+/// can decide whether a full-corpus run keeps this invariant enabled.
 ///
-/// Printed only by a run that checked it, since a share of a run that never
-/// laid a second panel out is zero over zero.
+/// Print this line only when the run checked the invariant. A run without a second
+/// layout has no cost share.
 fn monotonicity_cost(total: &DictSummary) -> String {
     let (wide, elapsed) = (total.wide_cost.as_secs_f64(), total.elapsed.as_secs_f64());
     let share = if elapsed > 0.0 { 100.0 * wide / elapsed } else { 0.0 };
@@ -1816,10 +1650,10 @@ fn monotonicity_cost(total: &DictSummary) -> String {
     )
 }
 
-/// The run manifest's filename.
+/// The filename of the run manifest.
 ///
-/// Deliberately not a candidate filename, so [`is_candidate_file`] leaves it
-/// alone and a rerun replaces it by name rather than by the clearing sweep.
+/// This is not a candidate filename. [`is_candidate_file`] leaves it alone, and each
+/// rerun replaces it by name.
 const RUN_MANIFEST: &str = "run.json";
 
 /// A candidate's filename: readable prefix, stable suffix.
@@ -1832,11 +1666,10 @@ fn candidate_file(c: &Candidate, key: &str) -> String {
     )
 }
 
-/// Could this sweep have written this file?
+/// Returns true when this sweep could have written `path`.
 ///
-/// The invariant name a candidate leads with is the whole test: it is what
-/// makes clearing stale candidates safe in a directory the sweep does not
-/// own.
+/// The invariant name at the start of a candidate filename lets the sweep remove stale
+/// files in a directory that it does not own.
 fn is_candidate_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
     name.ends_with(".json")
@@ -1888,11 +1721,10 @@ fn slug(name: &str) -> String {
     }
 }
 
-/// FNV-1a over a signature's canonical text.
+/// Applies FNV-1a to canonical signature text.
 ///
-/// A short, stable name for a shape, so a candidate keeps its filename
-/// across runs and a reviewer's diff shows a changed count rather than a
-/// deleted file beside a new one.
+/// This stable shape name keeps the same candidate filename across runs. A review diff
+/// then shows count changes instead of one deleted file and one new file.
 fn digest(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in text.as_bytes() {
@@ -1904,15 +1736,14 @@ fn digest(text: &str) -> u64 {
 
 // ---- the sweep itself ----
 
-/// One term-bank row as the sweep reads it.
+/// One term-bank row that the sweep reads.
 ///
-/// The clump these six values are: they travelled as six parameters through
-/// two functions and the order flipped between them, which is one transposed
-/// argument away from a candidate that quotes the wrong entry.
+/// These six values travel through two functions. Their order changed once, and a
+/// transposed argument then assigned a candidate to the wrong entry.
 ///
-/// `dict` and `row` are the sweep's *own* numbering - it reads archives, not
-/// the built store, so neither is a `chibipop.sqlite` id and a candidate
-/// names the headword as well as the ordinal.
+/// `dict` and `row` use sweep numbering. The sweep reads archives, not the built store,
+/// so neither value is a `chibipop.sqlite` identifier. A candidate also stores the
+/// headword.
 struct Row {
     dict: String,
     dict_id: i64,
@@ -1920,15 +1751,14 @@ struct Row {
     row: i64,
     term: String,
     reading: String,
-    /// The row's glossary, serialised exactly as the builder stores it.
+    /// The row's glossary, serialized exactly as the builder stores it.
     glossary: String,
 }
 
-/// One corpus row as a whole popup: one card, one block, one entry.
+/// One corpus row as a complete popup with one card, block, and entry.
 ///
-/// A standalone panel with no side column, because a sweep is asking about
-/// one entry's own render and a second dictionary in the scene would only
-/// make every shape signature depend on what happened to sit beside it.
+/// The panel has no side column. A sweep checks one entry's render. A second dictionary
+/// would make each shape signature depend on unrelated scene content.
 fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
     let card = Card {
         written: Some(r.term.clone()),
@@ -1939,9 +1769,8 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
             dict_name: r.dict.clone(),
             dict_id: r.dict_id,
             entries: vec![GlossEntry {
-                // The row ordinal stands in for the store's own id: no
-                // database is involved, and every sweep scene holds exactly
-                // one entry, so nothing in the scene needs to tell two apart.
+                // The row ordinal replaces the store identifier. No database is involved,
+                // and each sweep scene has one entry, so the scene needs no distinction.
                 entry_id: r.row,
                 glosses: plain_items(doc),
                 tags: Vec::new(),
@@ -1960,15 +1789,14 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
     }
 }
 
-/// One term-bank row through the whole renderer, checked by every invariant
-/// in `only`.
+/// Sends one term-bank row through the renderer and checks every invariant in `only`.
 ///
-/// `None` when the row renders no text at all: the dictionary builder gives
-/// such a row no `entry` record, so no reader can ever hover it and it is not
-/// the sweep's business either. The two calls around the scene are the hover
-/// path's own, in its order - parse the stored text, fold the dictionary's
-/// stylesheet into the tree, render - so a candidate is a defect a reader
-/// could actually see.
+/// `None` means that the row renders no text. The dictionary builder creates no `entry`
+/// record for such a row, so no reader can hover it. The sweep excludes it.
+///
+/// The two calls around the scene match the hover path: parse stored text, apply the
+/// dictionary stylesheet, then render. A candidate therefore represents a defect that a
+/// reader can see.
 fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
     let mut doc = GlossDoc::parse(&r.glossary);
     if !renders_text(&doc) {
@@ -1978,10 +1806,8 @@ fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
     let doc = Arc::new(doc);
     let p = sweep_card(r, &doc);
     let s = sweep_scene(&p, SWEEP_W);
-    // The second layout is *width monotonicity*'s own cost, so an entry pays
-    // it only when that invariant is checked - and pays it under a clock,
-    // because an invariant that doubles the sweep's layout work has to be
-    // able to say what it took.
+    // The second layout is the cost of *width monotonicity*. Create it only when the
+    // invariant is checked. Measure its time because the invariant doubles layout work.
     let mut spent = Duration::ZERO;
     let wide = only.contains(&Invariant::WidthMonotonicity).then(|| {
         let at = Instant::now();
@@ -1989,8 +1815,8 @@ fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
         spent = at.elapsed();
         wide
     });
-    // The one place every checker is named, so an invariant added to
-    // [`Invariant`] is a compile error until it is wired to a call.
+    // Each checker appears in this match. A new invariant in [`Invariant`] causes a
+    // compile error until the caller connects it to a check.
     let mut found = Checked::default();
     let t = Thresholds::DEFAULT;
     for invariant in only {
@@ -2010,13 +1836,11 @@ fn sweep_entry(r: &Row, sheet: &Sheet, only: &[Invariant]) -> Option<Checked> {
     Some(found)
 }
 
-/// One popup laid out in a panel `max_w` wide, exactly as the hover path
-/// asks for one.
+/// One popup in a panel with maximum width `max_w`, as the hover path requests.
 ///
-/// Named because *width monotonicity* asks for two of them and the pair has
-/// to differ in nothing but the width: a second call spelled out by hand
-/// would be a second render setting away from comparing two different
-/// popups and calling the difference a defect.
+/// *Width monotonicity* needs two scenes that differ only in width. This helper keeps
+/// their render settings identical. A hand-written second call could change another
+/// setting and create a false defect.
 fn sweep_scene(p: &Presentation, max_w: f32) -> PopupScene {
     let theme = Theme::dark();
     let mut m = FakeMeasure::default();
@@ -2036,13 +1860,11 @@ fn sweep_scene(p: &Presentation, max_w: f32) -> PopupScene {
     .expect("FakeMeasure never refuses a run")
 }
 
-/// The row cap, raised as an error because the archive walk is a stream and
-/// stops on one.
+/// The row cap represented as an archive-walk error.
 ///
-/// `for_each_term` hands the caller one row at a time and aborts on the first
-/// `Err`, which is the only way to stop before the last bank file - and
-/// stopping is the whole point of the cap, since deserialising every row of a
-/// 37 MB archive is most of what a capped run is trying to skip.
+/// `for_each_term` sends one row to the callback and stops on the first `Err`. The cap
+/// uses that error to stop before the next bank file. This keeps a capped run from
+/// reading every row of a 37 MB archive.
 #[derive(Debug)]
 struct RowCap;
 
@@ -2056,21 +1878,20 @@ impl std::error::Error for RowCap {}
 
 /// Sweeps one archive into `report`.
 ///
-/// Every entry is rendered inside [`catch_unwind`](std::panic::catch_unwind):
-/// a panic in the parser or the walk is this archive's own defect to report,
-/// not a reason the other 96 archives go unswept. The default panic hook
-/// still prints, which is what an adjudicator wants - a counted panic with no
-/// backtrace is a worse bug report than a noisy one.
+/// The function renders each entry inside [`catch_unwind`](std::panic::catch_unwind).
+/// A parser or walk panic becomes an error for this archive, and other archives
+/// continue. The default panic hook still prints the panic, so a reviewer sees the
+/// count and the backtrace.
 ///
-/// `cap` bounds the *rows read*, not the entries rendered, so an archive of
-/// image-only gaiji rows costs a capped run no more than any other. That is
-/// what makes the cap a cost bound rather than a sample size.
+/// `cap` limits the *rows read*, not the entries rendered. An image-only gaiji row
+/// therefore costs the same as any other row under a cap. The cap bounds work, not
+/// sample size.
 fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report) {
     let title = archive_title(zip);
     let css = read_styles_css(zip).ok().flatten().unwrap_or_default();
     let sheet = Sheet::compile(&css);
-    // Taken once per archive: the walk holds `report` borrowed for every row,
-    // and six names are cheaper to copy than to reason about.
+    // Copy the list once per archive. The walk borrows `report` for each row, and six
+    // copied names cost less than repeated access.
     let only = report.only.clone();
     let mut sum = DictSummary { dictionary: title.clone(), ..DictSummary::default() };
     let mut rows: i64 = 0;
@@ -2125,16 +1946,15 @@ fn sweep_archive(zip: &Path, dict_id: i64, cap: Option<u64>, report: &mut Report
     });
     if let Err(err) = walk {
         if err.chain().any(|e| e.is::<RowCap>()) {
-            // Rows this archive holds and this run never read.
+            // The archive has rows that this run did not read.
             report.partial = true;
         } else {
             sum.errors += 1;
             eprintln!("sweep  {title}: {err:#}");
         }
     }
-    // A panicked entry and an unreadable bank file are rows that went
-    // unchecked as surely as capped ones, so neither may leave an exemption
-    // looking stale.
+    // A panic or unreadable bank file leaves rows unchecked, like a row cap. Do not mark
+    // an exemption as stale when the run did not inspect all rows.
     report.partial |= sum.errors > 0;
     sum.elapsed = at.elapsed();
     report.dicts.push(sum);
@@ -2152,12 +1972,11 @@ fn archive_title(zip: &Path) -> String {
     })
 }
 
-/// Every term archive in a corpus directory, in a stable order.
+/// Every term archive in a corpus directory, in stable order.
 ///
-/// The terms role is what makes an archive sweepable: one supplying only
-/// frequency data or only Pitch patterns carries no glossary, so there is
-/// nothing in it to render. Asked of the archive's own banks, exactly as
-/// the library asks it.
+/// An archive needs the terms role to provide glossary content. An archive with only
+/// frequency or Pitch data has nothing to render. This function checks the archive's
+/// banks, like the library.
 fn corpus_archives(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading the corpus at {}: {e}", dir.display()))
@@ -2175,30 +1994,26 @@ fn corpus_archives(dir: &Path) -> Vec<PathBuf> {
 
 /// The corpus directory of Yomitan `.zip` archives.
 const CORPUS_ENV: &str = "CHIBIPOP_SWEEP_CORPUS";
-/// Term-bank rows read per dictionary. Unset reads every row of every
-/// archive.
+/// Term-bank rows read per dictionary. An unset value reads every row.
 const ROWS_ENV: &str = "CHIBIPOP_SWEEP_ROWS";
-/// Where candidate files land.
+/// Directory for candidate files.
 const OUT_ENV: &str = "CHIBIPOP_SWEEP_OUT";
-/// Invariants to check, comma-separated. Unset checks every one.
+/// Invariants to check, separated by commas. An unset value checks every invariant.
 const ONLY_ENV: &str = "CHIBIPOP_SWEEP_ONLY";
 
-/// The row cap, or `None` for the whole archive.
+/// The row cap, or `None` for the entire archive.
 ///
-/// Unset is uncapped by design: the full run is the primary target and the
-/// cap is the iteration loop, so forgetting to set it sweeps everything
-/// rather than silently sweeping a sample.
+/// An unset value means no cap. The full run is the primary target. The cap supports
+/// short test runs. Forgetting it therefore sweeps all rows instead of a sample.
 fn row_cap() -> Option<u64> {
     let raw = std::env::var(ROWS_ENV).ok()?;
     Some(raw.parse().unwrap_or_else(|_| panic!("{ROWS_ENV} must be a row count, got {raw:?}")))
 }
 
-/// The invariants this run checks.
+/// The invariants that this run checks.
 ///
-/// The iteration loop's other half, beside [`row_cap`]: narrowing a run to
-/// the one invariant being tuned is what makes a capped run answer in seconds
-/// rather than in a minute, and it is what lets a candidate count be read as
-/// one invariant's own rather than as five invariants' sum.
+/// [`row_cap`] and this filter support short test runs. A narrowed run can answer
+/// quickly and report one invariant's count instead of a combined count.
 fn invariant_filter() -> Vec<Invariant> {
     match std::env::var(ONLY_ENV) {
         Ok(raw) => named_invariants(&raw),
@@ -2206,11 +2021,10 @@ fn invariant_filter() -> Vec<Invariant> {
     }
 }
 
-/// The invariants a comma-separated list names.
+/// The invariants named by a comma-separated list.
 ///
-/// A name this build does not check stops the run, for the reason a
-/// malformed row cap does: a filter that silently matched nothing would sweep
-/// a whole corpus and report it clean.
+/// An unknown name stops the run, like a malformed row cap. A filter that silently
+/// selects nothing could sweep a full corpus and report it as clean.
 fn named_invariants(raw: &str) -> Vec<Invariant> {
     let only: Vec<Invariant> = raw
         .split(',')
@@ -2226,10 +2040,10 @@ fn named_invariants(raw: &str) -> Vec<Invariant> {
     only
 }
 
-/// Where candidates are written.
+/// The directory for candidate files.
 ///
-/// Under `.scratch/`, which this repo does not track: a candidate quotes a
-/// dictionary's own content verbatim and none of it may ever be committed.
+/// The default is under `.scratch/`, which this repository does not track. A candidate
+/// quotes dictionary content verbatim, so no candidate content can enter the repository.
 fn candidate_dir() -> PathBuf {
     match std::env::var_os(OUT_ENV) {
         Some(dir) => PathBuf::from(dir),
@@ -2239,20 +2053,18 @@ fn candidate_dir() -> PathBuf {
 
 /// The committed suppression list.
 ///
-/// A fixed repo path and no environment override, unlike the three knobs
-/// above: those move where a *local* run reads and writes, and this file is
-/// the run's committed memory. A sweep that could be pointed at a different
-/// list would be a sweep whose exemptions nobody reviewed.
+/// This path is fixed. The environment variables above can move local input and output,
+/// but they cannot move the reviewed list. A sweep must use the list that the repository
+/// commits.
 fn suppression_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/render-sweep/suppressions.toml")
 }
 
-/// A scene that lost a string the parsed entry holds is a violation, and the
-/// candidate names both the string and the shape it sat in.
+/// A scene that loses parsed text is a *No dropped text* violation. The candidate names
+/// the text and its shape.
 ///
-/// The scene is a real one, mutated: dropping a whole paragraph is exactly
-/// what the #18 class of defect does to a fragment, and building the scene by
-/// hand would only assert against a fixture of this test's own arithmetic.
+/// The test removes a paragraph from a real scene. This models the #18 defect.
+/// A hand-built scene would test only this fixture's arithmetic.
 #[test]
 fn a_scene_that_lost_a_paragraph_is_a_dropped_text_violation() {
     let glossary = sc(concat!(
@@ -2281,12 +2093,11 @@ fn a_scene_that_lost_a_paragraph_is_a_dropped_text_violation() {
     );
 }
 
-/// One shape is one candidate, however many entries showed it.
+/// Repeated instances of one shape become one candidate.
 ///
-/// The whole reason a signature exists: Jitendex's own footnote defect stood
-/// 9 784 times, and an adjudication batch of 9 784 identical items is not a
-/// batch. The exemplar is the first entry, so a candidate file's diff between
-/// two runs is a changed count and not a swapped-out quotation.
+/// This is the purpose of a signature. Jitendex's footnote defect appeared 9 784 times,
+/// but those identical items form one review batch. The first entry remains the exemplar,
+/// so later runs change only the count in the candidate file.
 #[test]
 fn repeats_of_one_shape_collapse_into_one_counted_candidate() {
     let glossary = sc(r#"{"tag":"div","data":{"content":"note"},"content":"vanished"}"#);
@@ -2324,8 +2135,8 @@ fn repeats_of_one_shape_collapse_into_one_counted_candidate() {
     assert_eq!("dropped-text", json["invariant"]);
     assert_eq!(glossary, json["exemplar"]["glossary"], "the glossary is quoted verbatim");
     assert_eq!("vanished", json["exemplar"]["measured"]["missing"]);
-    // The filename is a shape's stable name, so a rerun rewrites one file
-    // rather than leaving a stale one beside a new one.
+    // The filename gives the shape a stable name. A rerun rewrites the same file instead
+    // of leaving a stale file beside a new file.
     assert_eq!(candidate_file(c, &key), candidate_file(c, &key));
     assert!(
         candidate_file(c, &key).starts_with("dropped-text-fixture-"),
@@ -2334,14 +2145,11 @@ fn repeats_of_one_shape_collapse_into_one_counted_candidate() {
     );
 }
 
-/// The boundary: a renderer folding a dictionary's own whitespace and
-/// splitting one item across lines has dropped nothing.
+/// The boundary: folded dictionary whitespace and a line break do not drop text.
 ///
-/// Every string here reaches the panel, but none of them reaches it
-/// character-for-character - `  spaced\n   out  ` is drawn `spaced out`, and
-/// the `br` puts `after` in a paragraph of its own. An invariant that
-/// compared the two verbatim would flag all three and drown the adjudication
-/// batch in its own noise.
+/// The input text reaches the panel, but not character-for-character. `  spaced\n   out  `
+/// becomes `spaced out`, and `br` puts `after` in its own paragraph. A verbatim
+/// comparison would flag valid output and add noise.
 #[test]
 fn folded_whitespace_and_a_line_break_drop_no_text() {
     let glossary = sc(concat!(
@@ -2360,23 +2168,20 @@ fn folded_whitespace_and_a_line_break_drop_no_text() {
     assert_eq!(Vec::<Violation>::new(), found.violations);
 }
 
-/// One fixture glossary and its dictionary's own CSS, through the same two
-/// calls [`sweep_entry`] makes.
+/// A fixture glossary and its dictionary CSS use the same two calls as [`sweep_entry`].
 ///
-/// The tree comes back beside the scene because the paragraph-family
-/// invariants are stated over both: a checker reads the very tree the walk
-/// read, folded stylesheet and all, so its oracle cannot drift from the
-/// render it judges.
+/// The function returns the parsed tree and scene because paragraph-family invariants
+/// inspect both. The stylesheet and tree match the renderer's inputs, so the reference
+/// stays aligned with the judged render.
 fn swept(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene) {
     swept_media(glossary, css, Vec::new())
 }
 
-/// [`swept`], for a dictionary whose build also recorded assets.
+/// [`swept`] for a dictionary build that records assets.
 ///
-/// The sizing pass reads what the build recorded rather than the bytes, so an
-/// image fixture is a path and four numbers - no archive, no decoder, no
-/// database. Split out rather than folded into every caller, because exactly
-/// one invariant asks about assets and the other four never have one.
+/// The size pass reads recorded asset dimensions, not asset bytes. An image fixture
+/// therefore needs a path and four numbers. This helper keeps media data out of callers
+/// that do not inspect assets.
 fn swept_media(
     glossary: &str,
     css: &str,
@@ -2387,22 +2192,19 @@ fn swept_media(
     (doc, s)
 }
 
-/// One fixture glossary at both swept widths, through the calls
-/// [`sweep_entry`] makes for *width monotonicity*.
+/// One fixture glossary at the two widths used by *width monotonicity*.
 ///
-/// The pair rather than one scene, because the whole invariant is a
-/// comparison: a test that built the wider scene by hand would compare the
-/// renderer against its own arithmetic.
+/// The pair is required because the invariant compares two scenes. A hand-built wide
+/// scene would compare the renderer with test arithmetic.
 fn swept_pair(glossary: &str, css: &str) -> (Arc<GlossDoc>, PopupScene, PopupScene) {
     let (doc, p) = sweep_fixture(glossary, css, Vec::new());
     (doc, sweep_scene(&p, SWEEP_W), sweep_scene(&p, SWEEP_WIDE_W))
 }
 
-/// One fixture glossary as a parsed tree and the popup around it.
+/// Builds one fixture glossary as a parsed tree and popup presentation.
 ///
-/// The two halves every helper above needs, split out because the scene is
-/// what they disagree about: one panel, two panels, or a panel of a width a
-/// test chose.
+/// The parsed tree and presentation support the helpers above. Tests can then inspect
+/// one panel, two panels, or a chosen width.
 fn sweep_fixture(
     glossary: &str,
     css: &str,
@@ -2426,8 +2228,8 @@ fn sweep_fixture(
     (doc, p)
 }
 
-/// The #18 shape, verbatim from the corpus: Jitendex's example translation
-/// and the footnote mark that trails it.
+/// The #18 shape, copied verbatim from the corpus: Jitendex's example translation and
+/// trailing footnote mark.
 const FOOTNOTE_TREE: &str = concat!(
     r##"{"tag":"div","data":{"content":"example-sentence-b"},"content":["##,
     r##"{"tag":"span","lang":"en","content":"He still holds the heavyweight title."},"##,
@@ -2437,16 +2239,11 @@ const FOOTNOTE_TREE: &str = concat!(
 /// The sentence the mark trails, as the panel draws it.
 const FOOTNOTE_SENTENCE: &str = "He still holds the heavyweight title.";
 
-/// A fragment on a paragraph of its own is a violation, and the candidate
-/// names both the fragment and the prose it was cut from.
+/// A fragment on its own paragraph is a violation. The candidate names the fragment and
+/// its source prose.
 ///
-/// The scene is a real one, mutated, exactly as
-/// [`a_scene_that_lost_a_paragraph_is_a_dropped_text_violation`] is: the
-/// footnote's fix is in this build, so the only way to put the defect back
-/// is to split the paragraph the fix keeps whole - which is precisely what
-/// the marker line break did to 9 784 Jitendex entries. Building the scene
-/// by hand instead would assert against a fixture of this test's own
-/// arithmetic.
+/// The test starts with a real scene and removes the paragraph split that the #18 defect
+/// caused. A hand-built scene would test only fixture arithmetic.
 #[test]
 fn a_footnote_split_from_its_sentence_is_an_orphan_fragment() {
     let glossary = sc(FOOTNOTE_TREE);
@@ -2482,15 +2279,11 @@ fn a_footnote_split_from_its_sentence_is_an_orphan_fragment() {
     );
 }
 
-/// The resolved #18 shape flags nothing, and flags again the moment the
-/// threshold is tightened past the fix.
+/// The resolved #18 shape stays quiet, then flags when the threshold exceeds the fix.
 ///
-/// Both halves of the same sanity check. The fix is in this build, so a
-/// clean run over the corpus node proves the invariant is quiet about
-/// correct output; tightening [`ORPHAN_MIN_COMPANY_CHARS`] past the
-/// sentence's own length proves the same checker is measuring the real
-/// company of the real mark, and would have reported zero for the render
-/// Jitendex readers actually saw.
+/// The first check confirms correct output. The second raises
+/// [`ORPHAN_MIN_COMPANY_CHARS`] above the sentence length. The checker then reports the
+/// mark's actual company, which proves that the same check sees the corpus shape.
 #[test]
 fn the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened() {
     let glossary = sc(FOOTNOTE_TREE);
@@ -2511,15 +2304,11 @@ fn the_fixed_footnote_re_flags_when_its_company_threshold_is_tightened() {
     );
 }
 
-/// The boundary: marked labels standing side by side are sense
-/// separations, and a separation is not an orphan.
+/// Boundary case: adjacent marked labels separate senses, so neither is an orphan.
 ///
-/// Jitendex's sense head, which is the shape the marker line break exists
-/// for: a part-of-speech pill followed by a forms-restriction span, both
-/// marked, neither trailing a sentence. Prose *behind* a marked node is no
-/// evidence either - the second span here holds text and the first still
-/// keeps its own line - so an invariant that read the parent
-/// symmetrically would flag every sense head in the corpus.
+/// Jitendex's sense head has a part-of-speech pill and a forms-restriction span. Both
+/// nodes are marked, but neither trails a sentence. Prose after a marked node does not
+/// support it. A symmetric parent check would flag every sense head.
 #[test]
 fn marked_labels_that_trail_no_prose_are_no_orphans() {
     let glossary = sc(concat!(
@@ -2540,15 +2329,13 @@ fn marked_labels_that_trail_no_prose_are_no_orphans() {
     assert_eq!(Vec::<Violation>::new(), found.violations);
 }
 
-/// Both orphan thresholds, at the exact value each turns on.
+/// Checks both orphan thresholds at their exact boundaries.
 ///
-/// A threshold nothing pins is a threshold any edit can move: a `<=` that
-/// became a `<` here would silently stop checking the widest fragment the
-/// cap admits, and a `>=` that became a `>` would flag every fragment
-/// keeping the least company there is. So one scene is stated twice - a
-/// fragment of exactly [`ORPHAN_MAX_CHARS`] characters keeping exactly
-/// [`ORPHAN_MIN_COMPANY_CHARS`] character of company, then the same
-/// fragment one character longer, which is no longer a fragment at all.
+/// A boundary test protects each comparison. A change from `<=` to `<` would omit the
+/// widest allowed fragment. A change from `>=` to `>` would flag the fragment with least
+/// company. The test checks a fragment of exactly [`ORPHAN_MAX_CHARS`] characters with
+/// exactly [`ORPHAN_MIN_COMPANY_CHARS`] character of company. It also checks a fragment
+/// one character longer, which is not a fragment.
 #[test]
 fn a_fragment_at_the_cap_with_one_character_of_company_passes() {
     let tree = |mark: &str| {
@@ -2583,8 +2370,8 @@ fn a_fragment_at_the_cap_with_one_character_of_company_passes() {
     assert_eq!(0, found.fragments, "one character past the cap is a phrase, not a fragment");
 }
 
-/// The #19 shape, verbatim: Jitendex's sense list around the glossary list
-/// that declares its own indent.
+/// The #19 shape, copied verbatim: Jitendex's sense list around its glossary list that
+/// declares its own indent.
 const SENSE_TREE: &str = concat!(
     r#"{"tag":"ul","data":{"content":"sense-groups"},"content":["#,
     r#"{"tag":"li","data":{"content":"sense-group"},"content":["#,
@@ -2595,7 +2382,7 @@ const SENSE_TREE: &str = concat!(
     r#""content":[{"tag":"li","content":"to eat"}]}]}]}]}]}"#,
 );
 
-/// That dictionary's own `styles.css`, likewise verbatim.
+/// The dictionary's own `styles.css` file, copied verbatim.
 const SENSE_CSS: &str = "ul[data-sc-content=\"sense-groups\"] { list-style-type: \"\u{ff0a}\" }
      li[data-sc-content=\"sense-group\"] { padding-left: 0.25em }
      li[data-sc-content=\"sense\"] {
@@ -2606,16 +2393,12 @@ const SENSE_CSS: &str = "ul[data-sc-content=\"sense-groups\"] { list-style-type:
          }
      }";
 
-/// A marker a whole default level from its gloss is a violation, and the
-/// fixed shape of the same tree is not.
+/// A marker one default level from its gloss is a violation. The fixed shape is not.
 ///
-/// The mutation is the #19 defect exactly: the glossary list charged a full
-/// [`LIST_INDENT_EM`] level *and* the two paddings its dictionary declared,
-/// so the sense number stood 1.9em from the gloss where the author asked
-/// for 0.5em. Moving the placed marker box left by one level reproduces
-/// that geometry against the real tree and the real CSS, which is the
-/// nearest a build carrying the fix can come to the render a reader of
-/// あくどい saw.
+/// The test recreates #19 with the real tree and CSS. The glossary list adds one default
+/// [`LIST_INDENT_EM`] level plus its declared padding, so the marker sits 1.9em away
+/// instead of the requested 0.5em. The test moves the placed marker left by one level
+/// and restores the pre-fix geometry. It uses the real scene that a reader of あくどい saw.
 #[test]
 fn a_marker_a_default_level_from_its_gloss_is_a_marker_gap() {
     let (doc, mut s) = swept(&sc(SENSE_TREE), SENSE_CSS);
@@ -2662,15 +2445,13 @@ fn a_marker_a_default_level_from_its_gloss_is_a_marker_gap() {
     );
 }
 
-/// The boundary: a list that declares no padding is owed its default
-/// gutter, and a gap of exactly one level spends none of the tolerance.
+/// Boundary case: a list without padding keeps its default gutter. A gap of exactly one
+/// level uses no tolerance.
 ///
-/// The counterpart to the #19 rule. Jitendex's glossary list replaced the
-/// default level with its own 0.25em; this one declares nothing, so the
-/// level stands and the marker of the list *above* it hangs a full 1.4em
-/// from the gloss - which is what a browser draws and what Yomitan's own
-/// `--list-padding1` puts there. Asserted at zero slack, so the boundary is
-/// the invariant's own arithmetic and not the tolerance around it.
+/// This is the counterpart to #19. The glossary list declares no padding, so the default
+/// level remains. The marker from the outer list sits 1.4em from the gloss and matches
+/// browser output and Yomitan's `--list-padding1`. Zero slack isolates the invariant
+/// arithmetic.
 #[test]
 fn a_default_gutter_under_a_suppressed_marker_is_no_marker_gap() {
     let glossary = sc(concat!(
@@ -2694,15 +2475,11 @@ fn a_default_gutter_under_a_suppressed_marker_is_no_marker_gap() {
     assert_eq!(Vec::<Violation>::new(), found.violations);
 }
 
-/// The resolved #19 shape flags nothing, and flags again the moment the
-/// tolerance is tightened past the padding its dictionary declared.
+/// The resolved #19 shape stays quiet, then flags when slack drops below its padding.
 ///
-/// The other half of the #18 sanity check, and it has to be stated as a
-/// tightened tolerance rather than a tightened rule: the gap the fix leaves
-/// *is* the declared 0.5em, so a checker that flagged it would be wrong
-/// about a browser. What the tightening shows is that this checker measures
-/// that 0.5em - the same number the ticket pinned - and would therefore
-/// have reported the 1.9em a reader saw.
+/// The fixed gap is the declared 0.5em. A checker that flags it would reject browser
+/// output. This test lowers the tolerance until the checker reports that same gap. The
+/// pre-fix shape had 1.9em, which this check would have reported.
 #[test]
 fn the_fixed_gutter_re_flags_when_its_slack_is_tightened_past_the_declaration() {
     let (doc, s) = swept(&sc(SENSE_TREE), SENSE_CSS);
@@ -2714,17 +2491,16 @@ fn the_fixed_gutter_re_flags_when_its_slack_is_tightened_past_the_declaration() 
     assert_eq!(
         Some(&format!("{:.2}", 0.5 * BOX_EM)),
         found.violations[0].measured.get("gap_px"),
-        "and the number it reports is the gap the ticket pinned",
+        "and the number it reports is the pinned gap",
     );
 }
 
-/// The paragraph family collapses and files like the tracer invariant did.
+/// Paragraph-family violations collapse into counted candidates.
 ///
-/// One shape is one candidate whatever the invariant, and a candidate file
-/// leads with the invariant's own name - which is what makes clearing stale
-/// files safe ([`is_candidate_file`]). An invariant added without a name in
-/// [`Invariant::ALL`] would leave its files behind after a run that stopped
-/// flagging them, so the name is asserted from both ends.
+/// One shape produces one candidate for each invariant. The candidate filename starts
+/// with the invariant name, so [`is_candidate_file`] can remove stale files.
+/// [`Invariant::ALL`] must include every invariant name or stale files remain. The test
+/// checks both shapes.
 #[test]
 fn paragraph_family_violations_collapse_into_counted_candidates() {
     let glossary = sc(FOOTNOTE_TREE);
@@ -2765,27 +2541,21 @@ fn paragraph_family_violations_collapse_into_counted_candidates() {
     );
 }
 
-/// A declared indent no shaper may break: one span whose `padding-left` is
-/// wider than the panel it is drawn in.
+/// An indent that no shaper can break: one span with `padding-left` wider than the panel.
 ///
-/// An inline box buys its horizontal room with `PILL_SPACER`, U+00A0, which
-/// is UAX #14's class GL - so the whole reservation is one chunk, and a
-/// measurer that cannot fit a chunk on a line overflows rather than loops.
-/// That is the *unbreakable line* failure exactly, written the one way a
-/// dictionary can write it: in its own stylesheet.
+/// `PILL_SPACER` uses U+00A0 with UAX #14 class GL. The reservation is one unbreakable
+/// chunk. A measurer that cannot fit it on a line overflows and avoids a loop.
+/// This models the *unbreakable line* failure with dictionary CSS.
 const WIDE_PAD_TREE: &str =
     r##"{"tag":"span","data":{"content":"wide"},"content":"x"}"##;
 
-/// The declaration itself: 40em of left padding, at a panel 424 pixels wide.
+/// The declaration: 40em of left padding in a 424-pixel panel.
 const WIDE_PAD_CSS: &str = "span[data-sc-content=\"wide\"] { padding-left: 40em }";
 
-/// A run the panel cannot hold is a violation, and the candidate names the
-/// edge it left and by how much.
+/// A run wider than the panel is a violation. The candidate names the edge and overhang.
 ///
-/// No mutation: the padding is a real declaration, the chunk is really
-/// unbreakable, and the 487.5 pixels of ink really run 75.5 past a 424-pixel
-/// panel. The one number an adjudicator needs is that overhang, so it is the
-/// one this test pins.
+/// The test uses a real padding declaration and an unbreakable chunk. The 487.5 pixels
+/// of ink extend 75.5 pixels past a 424-pixel panel. The test records that overhang.
 #[test]
 fn an_unbreakable_line_wider_than_the_panel_is_a_horizontal_overflow() {
     let (doc, s) = swept(&sc(WIDE_PAD_TREE), WIDE_PAD_CSS);
@@ -2811,13 +2581,12 @@ fn an_unbreakable_line_wider_than_the_panel_is_a_horizontal_overflow() {
     );
 }
 
-/// The boundary: a box whose last pixel is the panel's last pixel is inside
-/// it, and the same box one pixel wider is not.
+/// Boundary case: a box with its final pixel at the panel edge is inside. A box one
+/// pixel wider is outside.
 ///
-/// One scene stated twice, because the whole invariant is one comparison and
-/// a `>` that became a `>=` would stop checking the widest box a panel can
-/// hold. Asserted at zero slack, so what is pinned is the invariant's own
-/// arithmetic and not [`OVERFLOW_SLACK_PX`] around it.
+/// The test repeats one scene because the invariant uses `>`. A change to `>=` would
+/// reject the widest valid box. Zero slack isolates the invariant from
+/// [`OVERFLOW_SLACK_PX`].
 #[test]
 fn a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow() {
     let (doc, mut s) = swept(&sc(WIDE_PAD_TREE), WIDE_PAD_CSS);
@@ -2836,16 +2605,12 @@ fn a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow() {
     assert_eq!(Some(&"1.00".to_string()), over.violations[0].measured.get("over_px"));
 }
 
-/// A marker hanging in its gutter is no overflow, however far left it hangs.
+/// A marker in its gutter is not horizontal overflow, even when it reaches the panel
+/// edge.
 ///
-/// The first of the two overhangs this family exempts by construction, and
-/// the reason the invariant is stated against the panel rather than against
-/// the content column: a marker is drawn *outside* its item's own box by
-/// definition ([`MarkerBox`]), so an edge measured at the pen would flag
-/// every list in the corpus. This marker is wider than the gutter it was
-/// given, which is the extreme of that shape - [`place_markers`] clamps it to
-/// the panel's own left edge, so its box starts at exactly zero and the check
-/// has to let it. Asserted at zero slack.
+/// Markers sit outside their item boxes by definition ([`MarkerBox`]). The panel edge,
+/// not the content edge, bounds this invariant. [`place_markers`] clamps this wide marker
+/// to the panel's left edge. Zero slack checks the exact boundary.
 #[test]
 fn a_marker_clamped_to_the_panel_edge_is_no_horizontal_overflow() {
     let glossary = sc(concat!(
@@ -2870,23 +2635,20 @@ fn a_marker_clamped_to_the_panel_edge_is_no_horizontal_overflow() {
     assert!(stacked.violations.is_empty(), "and it is on no other box's pixels");
 }
 
-/// The #19-adjacent shape a dictionary can still write: two blocks a
-/// negative top margin pulls into each other.
+/// The #19-adjacent shape: two blocks that a negative top margin pulls together.
 const PULLED_TREE: &str = concat!(
     r##"{"tag":"div","content":[{"tag":"div","content":"first line here"},"##,
     r##"{"tag":"div","data":{"content":"pull"},"content":"second line here"}]}"##,
 );
 
-/// The declaration itself: two ems of pull, against a gap of four pixels.
+/// The declaration: two ems of negative margin against a four-pixel gap.
 const PULLED_CSS: &str = "div[data-sc-content=\"pull\"] { margin-top: -2em }";
 
-/// Two paragraphs standing on the same pixels are a violation, and the
-/// candidate names both of them.
+/// Two paragraphs on the same pixels are a violation. The candidate names both boxes.
 ///
-/// No mutation here either: CSS allows a negative margin, [`box_len`] keeps
-/// one, and two ems of it really pulls the second block 26 pixels up into the
-/// first. That is the mis-stacked row this invariant exists to find, and a
-/// reader would see one sentence written over another.
+/// CSS permits a negative margin, and [`box_len`] retains it. Two ems of margin pull the
+/// second block 26 pixels into the first. This is the mis-stacked row that the invariant
+/// detects. A reader would see one sentence over another.
 ///
 /// [`box_len`]: super::style::box_len
 #[test]
@@ -2921,14 +2683,11 @@ fn two_paragraphs_a_negative_margin_pulled_together_are_overlapping_boxes() {
     );
 }
 
-/// The boundary: one paragraph's last pixel row is the next one's first, and
-/// that is a stack rather than a collision.
+/// Boundary case: adjacent paragraph edges form a stack, not a collision.
 ///
-/// The same scene stated twice, for the reason
-/// [`a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow`] is: a
-/// `<=` that became a `<` here would flag every paragraph in the corpus
-/// against the one under it, because meeting edge to edge is what stacking
-/// *is*. Asserted at zero slack.
+/// The test checks the `<=` boundary at zero slack. If the operator changes to `<`, the
+/// check would flag every edge-to-edge paragraph in the corpus because that is normal
+/// stacking.
 #[test]
 fn two_paragraphs_meeting_edge_to_edge_are_no_overlapping_boxes() {
     let (doc, mut s) = swept(&sc(PULLED_TREE), PULLED_CSS);
@@ -2947,13 +2706,10 @@ fn two_paragraphs_meeting_edge_to_edge_are_no_overlapping_boxes() {
     assert_eq!(Some(&"1.00".to_string()), over.violations[0].measured.get("overlap_h_px"));
 }
 
-/// The other boundary: two cells of one row share every pixel of their
-/// height and none of their width.
+/// Boundary case: two cells can share all y pixels without overlap.
 ///
-/// The half of the rule a check reading only y would lose. A table row is the
-/// one shape in the corpus that stacks nothing - both paragraphs start at the
-/// row's own top - so an invariant that called vertical coincidence a
-/// collision would report every table a dictionary holds.
+/// The check must test x as well as y. Table cells start at the row top, so a y-only
+/// check would flag every table.
 #[test]
 fn two_cells_sharing_a_row_are_no_overlapping_boxes() {
     let glossary = sc(concat!(
@@ -2973,16 +2729,11 @@ fn two_cells_sharing_a_row_are_no_overlapping_boxes() {
     assert!(found.violations.is_empty(), "and they stand side by side, not on each other");
 }
 
-/// A reading over its base is no overlap, although its box is wholly inside
-/// its paragraph's.
+/// A reading above its base is not overlap, even when its box lies inside the paragraph.
 ///
-/// The second overhang this family exempts by construction, and the one where
-/// the exemption is load-bearing rather than tidy: a reading sits in the room
-/// its own base grew for it, so its box is *contained* by the box of the
-/// paragraph drawing it - which this test asserts, so that a checker widened
-/// to compare every drawn box would fail here rather than report every ruby
-/// in the corpus. Nothing about the reading is forgiven by a tolerance: a
-/// [`RubyBox`] is not an element rect, so it never enters the comparison.
+/// A reading uses space that its base reserves. [`RubyBox`] stays inside the paragraph
+/// box, but it is not an element rectangle. The check excludes it, so no ruby appears as
+/// a collision.
 #[test]
 fn a_reading_over_its_base_is_no_overlapping_box() {
     let glossary = sc(concat!(
@@ -3013,14 +2764,11 @@ fn a_reading_over_its_base_is_no_overlapping_box() {
     assert!(over.violations.is_empty(), "and it is on the panel");
 }
 
-/// Two assets composited on one line stand beside each other, and one moved
-/// onto the other is a violation.
+/// Tests two assets on one line and then moves one asset over the other.
 ///
-/// The *double-drawn element* half of story 9, and the reason the assets
-/// carry a promise of their own rather than joining the flow's: an image
-/// shares pixels with the paragraph around it by design - the spacer run
-/// whose line bought its room sits right under it - so nothing in the flow
-/// can report two assets landing on one place. Only another asset can.
+/// This covers the double-drawn element case of *No overlapping boxes*. An image
+/// overlaps its spacer paragraph by design. The spacer reserves line space. A flow box
+/// cannot detect two assets at one location, so only another asset can report this defect.
 #[test]
 fn two_assets_composited_on_one_place_are_overlapping_boxes() {
     let glossary = sc(concat!(
@@ -3053,14 +2801,13 @@ fn two_assets_composited_on_one_place_are_overlapping_boxes() {
     assert_eq!(Some(&"20.00".to_string()), v.measured.get("overlap_w_px"));
 }
 
-/// The box family collapses and files like the tracer invariant did.
+/// Tests candidate creation for the box family.
 ///
-/// The same claim [`paragraph_family_violations_collapse_into_counted_candidates`]
-/// makes, for the two invariants added after it: one shape is one candidate
-/// whatever the invariant, and a candidate file leads with the invariant's own
-/// name, which is what makes clearing stale files safe ([`is_candidate_file`]).
-/// Both are filed into one report, because the two shapes must not collapse
-/// into each other either.
+/// It applies the rule from
+/// [`paragraph_family_violations_collapse_into_counted_candidates`]. One shape creates
+/// one candidate for each invariant. The filename starts with the invariant name, so
+/// [`is_candidate_file`] removes stale files. Both violations enter the report, so the
+/// shapes stay separate.
 #[test]
 fn box_family_violations_collapse_into_counted_candidates() {
     let wide = sc(WIDE_PAD_TREE);
@@ -3120,21 +2867,18 @@ fn box_family_violations_collapse_into_counted_candidates() {
     assert_eq!("75.50", json["exemplar"]["measured"]["over_px"]);
 }
 
-/// The shape the property is about: prose long enough that the narrow panel
-/// wraps it and the wide one needs fewer lines for it.
+/// Defines prose that wraps in the narrow panel and uses fewer lines in the wide panel.
 const WRAPPED_TREE: &str = concat!(
     r##"{"tag":"div","data":{"content":"gloss"},"content":""##,
     "He still holds the heavyweight title, and nobody in the division ",
     r##"has come close to taking it from him."}"##,
 );
 
-/// The two swept widths are the default panel and the widest one.
+/// Checks that the two sweep widths are the default cap and the settings ceiling.
 ///
-/// [`SWEEP_WIDE_W`] is derived from the default width cap, and a derivation
-/// nothing pins is a derivation a settings edit can silently invalidate: a
-/// default of 90% would make both panels the same width and leave this
-/// invariant comparing a scene against itself, reporting a monotone corpus
-/// for the one reason a sweep must never be able to hide.
+/// The code derives [`SWEEP_WIDE_W`] from the default cap. This test protects that
+/// relation. If both widths became equal, the invariant would compare one scene with
+/// itself and could report false monotonicity.
 #[test]
 fn the_swept_widths_run_from_the_default_cap_to_the_ceiling() {
     let default = crate::config::Config::default().popup.max_width_percent;
@@ -3147,15 +2891,12 @@ fn the_swept_widths_run_from_the_default_cap_to_the_ceiling() {
     const { assert!(SWEEP_WIDE_W > SWEEP_W, "so the second layout is a wider panel") };
 }
 
-/// Content that grew at the wider panel is a violation, and the candidate
-/// names both widths, both heights, and the shape that grew.
+/// A wider panel with taller content is a *Width monotonicity* violation.
 ///
-/// The scene pair is a real one, mutated, as
-/// [`a_scene_that_lost_a_paragraph_is_a_dropped_text_violation`] is: this
-/// renderer is monotone over the fixture, so the only honest way to state
-/// the invariant is against real geometry with one unwanted line put back -
-/// which is exactly what a wrap rule that spent the extra width badly would
-/// draw.
+/// The candidate records both widths, both heights, and the grown shape. The test
+/// mutates a real scene pair, like
+/// [`a_scene_that_lost_a_paragraph_is_a_dropped_text_violation`]. The renderer keeps
+/// monotonicity for this fixture. The added line models a wrap rule that uses more width.
 #[test]
 fn a_wider_panel_that_drew_taller_content_is_a_width_monotonicity_violation() {
     let glossary = sc(WRAPPED_TREE);
@@ -3169,9 +2910,8 @@ fn a_wider_panel_that_drew_taller_content_is_a_width_monotonicity_violation() {
     let gloss = |s: &PopupScene| {
         s.elems.iter().position(|e| e.text.contains("heavyweight")).expect("the gloss")
     };
-    // One paragraph's worth of unwanted growth, in the paragraph itself and
-    // in the height the panel is sized from: a wrap rule spending the extra
-    // width badly is the same two numbers moving together.
+    // Add one paragraph of unwanted height to the paragraph and `content_h`.
+    // A bad wrap rule changes both values together.
     let taller = narrow.elems[gloss(&narrow)].rect.h;
     let at = gloss(&wide);
     wide.elems[at].rect.h += taller;
@@ -3201,15 +2941,12 @@ fn a_wider_panel_that_drew_taller_content_is_a_width_monotonicity_violation() {
     );
 }
 
-/// The boundary: a wider panel drawing content of exactly the same height is
-/// monotone, and one pixel more is not.
+/// Tests the exact boundary for *Width monotonicity*.
 ///
-/// One pair stated three times, for the reason
-/// [`a_box_ending_exactly_at_the_panel_edge_is_no_horizontal_overflow`] is: a
-/// `<=` that became a `<` here would flag every entry whose height the extra
-/// width cannot change - a one-line gloss, a headword, an image - which is
-/// most of the corpus. Asserted at zero slack, so what is pinned is the
-/// comparison and not [`MONOTONIC_SLACK_PX`] around it.
+/// Equal content heights are monotone. One extra pixel is not. The test checks one pair
+/// three times because if `<=` changes to `<`, every entry whose height cannot shrink
+/// would fail. A one-line gloss, headword, or image can have that shape. Zero slack
+/// separates the invariant boundary from [`MONOTONIC_SLACK_PX`].
 #[test]
 fn a_wider_panel_no_taller_than_the_narrow_one_is_no_width_monotonicity() {
     let (doc, narrow, mut wide) = swept_pair(&sc(WRAPPED_TREE), "");
@@ -3231,14 +2968,12 @@ fn a_wider_panel_no_taller_than_the_narrow_one_is_no_width_monotonicity() {
     assert_eq!(1, over.violations.len(), "one pixel taller is not");
 }
 
-/// The second layout is laid out only for the invariant that needs it, and
-/// the run says what it cost.
+/// Checks that only *Width monotonicity* creates the second layout and reports its cost.
 ///
-/// This invariant doubles the sweep's layout work, so the cost is part of
-/// its contract: a disabled invariant must cost nothing at all, which is
-/// observable as a run that compared no widths and spent no time doing it.
-/// Over a fixture archive rather than the environment, for the reason
-/// [`a_narrowed_run_checks_only_the_invariants_it_names`] is.
+/// This invariant doubles layout work. A disabled invariant must add no cost. The test
+/// checks zero width comparisons and zero second-layout time when it is disabled. It
+/// uses a fixture archive instead of the environment, as
+/// [`a_narrowed_run_checks_only_the_invariants_it_names`] does.
 #[test]
 fn the_second_layout_is_paid_for_only_when_width_monotonicity_is_checked() {
     let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan/terms.zip");
@@ -3270,12 +3005,11 @@ fn the_second_layout_is_paid_for_only_when_width_monotonicity_is_checked() {
     assert!(cost.contains(&format!("over {} entries", w.widths)), "over its own entries: {cost}");
 }
 
-/// Width monotonicity collapses and files like every invariant before it.
+/// Tests candidate creation for *Width monotonicity*.
 ///
-/// The same claim the two family tests make: one shape is one candidate, an
-/// entry the sweep cannot attribute is its own shape rather than somebody
-/// else's, and a candidate file leads with the invariant's own name, which
-/// is what makes clearing stale files safe ([`is_candidate_file`]).
+/// One shape creates one candidate. If the sweep cannot assign a shape, it uses the
+/// entry shape instead. The filename starts with the invariant name, so
+/// [`is_candidate_file`] can remove stale files.
 #[test]
 fn width_monotonicity_violations_collapse_into_counted_candidates() {
     let glossary = sc(WRAPPED_TREE);
@@ -3286,9 +3020,8 @@ fn width_monotonicity_violations_collapse_into_counted_candidates() {
     let attributed = width_monotonicity("Fixture", &doc, &narrow, &wide, Thresholds::DEFAULT);
     assert_eq!(1, attributed.violations.len(), "one entry that grew inside one node");
 
-    // The other half of the rule: the height rose and no drawn shape grew,
-    // so the entry itself is the shape - the stacking between the boxes is
-    // what a candidate would be adjudicated over.
+    // The height rose, but no drawn shape grew. Thus, the entry is the shape.
+    // Adjudication concerns the space between the boxes.
     let (doc2, narrow2, mut wide2) = swept_pair(&glossary, "");
     wide2.content_h = narrow2.content_h + 100.0;
     let entry = width_monotonicity("Fixture", &doc2, &narrow2, &wide2, Thresholds::DEFAULT);
@@ -3334,14 +3067,12 @@ fn width_monotonicity_violations_collapse_into_counted_candidates() {
     assert!(json["exemplar"]["measured"]["wide_h_px"].is_string(), "{json}");
 }
 
-/// A narrowed run checks what it was told to and nothing else.
+/// Checks that a narrowed run checks only the named invariants.
 ///
-/// The two halves of the filter, over a fixture archive rather than the
-/// environment: a process-wide variable is no way for one test to state what
-/// it wants. What is pinned is that naming an invariant runs that invariant's
-/// checks and stops the others - a filter that quietly ran everything would
-/// make a narrowed candidate count a lie - and that a name this build does
-/// not check stops the run instead of matching nothing.
+/// The test uses a fixture archive, not the process environment, so one test does not
+/// affect another. Each name starts its check and excludes other checks. A narrowed
+/// candidate count is then accurate. An unknown name stops the run instead of selecting
+/// no invariant.
 #[test]
 fn a_narrowed_run_checks_only_the_invariants_it_names() {
     let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan/terms.zip");
@@ -3371,24 +3102,22 @@ fn a_narrowed_run_checks_only_the_invariants_it_names() {
     assert!(refused.is_err(), "a name this build cannot check stops the run");
 }
 
-/// The sweep. Local only, and the effort's primary target.
+/// Runs the local corpus sweep. This test is the primary target of this module.
 ///
 /// ```text
 /// CHIBIPOP_SWEEP_CORPUS=~/.local/share/chibipop/library \
 ///   cargo test -p chibipop --lib corpus_render_sweep -- --ignored --nocapture
 /// ```
 ///
-/// `--nocapture` because the run summary is the point; `CHIBIPOP_SWEEP_ROWS`
-/// caps rows per dictionary while iterating on an invariant,
-/// `CHIBIPOP_SWEEP_ONLY` narrows the run to the invariants being iterated on,
-/// and `CHIBIPOP_SWEEP_OUT` moves the candidate files. `#[ignore]`d rather
-/// than skipped-when-unset so a normal `cargo test` counts it as ignored and
-/// says so, instead of passing a test that did nothing.
+/// Use `--nocapture` to show the summary. Set `CHIBIPOP_SWEEP_ROWS` to limit rows per
+/// Dictionary. Set `CHIBIPOP_SWEEP_ONLY` to select render invariants. Set
+/// `CHIBIPOP_SWEEP_OUT` to select the candidate directory.
 ///
-/// The committed suppression list is loaded before the first archive, and a
-/// list that will not parse stops the run: a sweep that quietly swept with
-/// no exemptions would re-present every shape already adjudicated, and the
-/// adjudicator would have no way to tell.
+/// The test carries `#[ignore]` when no corpus variable is set. A normal `cargo test`
+/// then reports the ignored test. It never passes a test that did no work.
+///
+/// The test loads the committed suppression list before the first archive. A parse error
+/// stops the run. This prevents repeated reports for shapes that already have review.
 #[test]
 #[ignore = "needs a local corpus: set CHIBIPOP_SWEEP_CORPUS and run with --ignored --nocapture"]
 fn corpus_render_sweep() {
@@ -3413,14 +3142,17 @@ fn corpus_render_sweep() {
     println!("sweep  wrote {} candidate files to {}", written.len(), out.display());
 }
 
-/// The committed proof that the sweep machinery works, corpus or no corpus.
+/// Proves the sweep machinery with a committed fixture and no local corpus.
 ///
-/// Runs in CI, sweeps the three-row fixture archive under a row cap, and
-/// asserts the whole pipeline: the cap bounds the rows, unset sweeps them
-/// all, two runs produce the same candidate set, and every candidate reaches
-/// disk as readable JSON carrying its count and its exemplar. Zero candidates
-/// is a pass - the fixture is not a defect, and a test that demanded one
-/// would pin the sweep to whatever the fixture happens to render today.
+/// CI sweeps the three-row fixture archive. The test checks:
+///
+/// - The row cap limits rows read.
+/// - An absent cap reads all rows.
+/// - Two runs produce the same candidate set.
+/// - Each candidate reaches disk as readable JSON with its count and exemplar.
+///
+/// Zero candidates is valid. The fixture has no known defect. A required candidate would
+/// bind the sweep to the fixture's current render.
 #[test]
 fn a_row_capped_sweep_of_the_fixture_archive_reports_every_entry() {
     let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan/terms.zip");
@@ -3468,7 +3200,7 @@ fn a_row_capped_sweep_of_the_fixture_archive_reports_every_entry() {
         assert!(json["exemplar"]["glossary"].is_string(), "{path:?}: {text}");
         assert!(json["shape"].as_array().is_some_and(|s| !s.is_empty()), "{path:?}: {text}");
     }
-    // Written twice, the directory holds one run's candidates and not two.
+    // The second write leaves only one run's candidates.
     let twice = whole.write(&out).expect("writing candidates again");
     let mine = std::fs::read_dir(&out)
         .expect("the candidate directory")
@@ -3477,8 +3209,8 @@ fn a_row_capped_sweep_of_the_fixture_archive_reports_every_entry() {
         .count();
     assert_eq!(twice.len(), mine, "a rerun replaces its own output");
 
-    // The manifest is what tells a clean corpus apart from an unrun sweep, so it
-    // survives the clearing pass and reports the run that just happened.
+    // The manifest distinguishes a clean corpus from a sweep that did not run.
+    // It remains after stale-candidate removal and reports the latest run.
     let text = std::fs::read_to_string(out.join(RUN_MANIFEST)).expect("the run manifest");
     let run: serde_json::Value = serde_json::from_str(&text).expect("readable JSON");
     assert_eq!(Some(1), run["dictionaries"].as_u64(), "one archive was swept");
@@ -3496,13 +3228,12 @@ fn a_row_capped_sweep_of_the_fixture_archive_reports_every_entry() {
     std::fs::remove_dir_all(&out).expect("cleaning up");
 }
 
-/// The awkward archive: ruby, images, SVG, and assets the store cannot read.
+/// The media archive contains ruby, images, SVG, and unreadable assets.
 ///
-/// `terms.zip` is three tidy rows. This one is every media shape the census
-/// found, including a row whose only content is an image and which therefore
-/// renders no text at all - so it proves the sweep survives the shapes that
-/// would panic a walk that assumed text, and that the build's own
-/// `renders_text` gate keeps a row no reader can hover out of the entry count.
+/// `terms.zip` has three simple rows. This archive includes each media shape from the
+/// census. One row contains only an image, so it renders no text. The test confirms that
+/// the sweep accepts shapes that could break a text-only walk. `renders_text` excludes
+/// that row from the entry count.
 #[test]
 fn a_sweep_of_the_media_fixture_renders_every_row_that_holds_text() {
     let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip");
@@ -3517,13 +3248,11 @@ fn a_sweep_of_the_media_fixture_renders_every_row_that_holds_text() {
     assert!(d.strings > 0, "the invariant was stated over real strings");
 }
 
-/// The committed format: one shape signature, one line saying why the shape
-/// is not a bug.
+/// The committed format has one shape signature and one-line reason for each non-bug.
 ///
-/// Every other case here is a defect in a *committed* file, so each is an
-/// error and not a warning. An entry with no reason exempts a shape nobody
-/// can review, a duplicate silently drops one of two reasons a reviewer
-/// approved, and a misspelled key does both at once.
+/// Every other case is an error in a committed file, not a warning. A reason-free entry
+/// suppresses a shape that nobody can review. A duplicate hides one approved reason. A
+/// misspelled key causes both defects.
 #[test]
 fn a_suppression_entry_is_a_signature_and_a_one_line_reason() {
     let one = concat!(
@@ -3567,13 +3296,12 @@ fn a_suppression_entry_is_a_signature_and_a_one_line_reason() {
     assert!(Suppressions::parse("").expect("no exemptions is a list").entries.is_empty());
 }
 
-/// An exemption the sweep cannot act on is named, never obeyed in silence.
+/// The summary names each exemption that the sweep cannot use.
 ///
-/// The two ways a committed entry rots. *Unknown* is a signature this build
-/// could not have produced, so nothing will ever match it. *Unused* is a
-/// signature it could have produced and did not, which is how an exemption
-/// outlives the defect it forgave - and a run that never said so would let
-/// the list only grow.
+/// A committed entry can be stale in two ways. `UNKNOWN` names a signature for an
+/// invariant that this build cannot produce. No violation can match it. `UNUSED` names a
+/// valid signature that no violation matched. It shows that the exemption outlived the
+/// defect it suppressed.
 #[test]
 fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
     let text = concat!(
@@ -3592,15 +3320,15 @@ fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
     assert!(verdict_for(&full, "dropped-glyph |").contains("UNKNOWN"), "{full}");
     assert!(full.contains("entries=2  absorbed=0  unused=1  unchecked=0  unknown=1"), "{full}");
 
-    // A partial run left rows unread, so it has no standing to call an entry
-    // unused. An unknown one is unknown however much a run read.
+    // A partial run left rows unread. It cannot call an entry `UNUSED`.
+    // An `UNKNOWN` entry stays `UNKNOWN` for every row count.
     let partial = Report { suppress: list(), partial: true, ..Report::default() }.summary();
     assert!(!partial.contains("UNUSED"), "{partial}");
     assert!(partial.contains("unused=0  unchecked=0  unknown=1"), "{partial}");
     assert!(verdict_for(&partial, "dropped-glyph |").contains("UNKNOWN"), "{partial}");
 
-    // A run that never checked *no dropped text* has no standing to call its
-    // exemption unused either: the entry was never offered a violation.
+    // A run that did not check *No dropped text* cannot call its exemption `UNUSED`.
+    // The run offered no violation to that entry.
     let narrowed = Report {
         suppress: list(),
         only: named_invariants("horizontal-overflow"),
@@ -3615,11 +3343,10 @@ fn an_unknown_or_unused_suppression_is_named_in_the_summary() {
     );
 }
 
-/// The summary's own line for one suppression entry.
+/// Returns the summary line for one suppression entry.
 ///
-/// Both suppression tests read a verdict off the printed report rather than
-/// off a field, because the report is what a reviewer audits and a count no
-/// run prints is a count nobody checks.
+/// Both suppression tests read a verdict from the printed report, not a field. Review
+/// can then audit a count that the run prints.
 fn verdict_for<'a>(summary: &'a str, needle: &str) -> &'a str {
     summary
         .lines()
@@ -3627,33 +3354,30 @@ fn verdict_for<'a>(summary: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no line for {needle} in:\n{summary}"))
 }
 
-/// The committed list is readable by the build that reads it.
+/// Checks that the build reads the committed suppression list.
 ///
-/// It is edited by hand between sweeps, and the next sweep is the only thing
-/// that would otherwise notice a typo - hours into a corpus run, or worse,
-/// never. This is the one thing CI can check about a file whose entries are
-/// about dictionaries CI has never seen.
+/// A developer edits this file by hand between sweeps. Without this test, a typo remains
+/// hidden until the next sweep, which can start hours later. This is the only CI check
+/// for a dictionary file that CI does not otherwise read.
 #[test]
 fn the_committed_suppression_list_parses() {
     let path = suppression_file();
     Suppressions::load(&path).unwrap_or_else(|e| panic!("{e:#}"));
 }
 
-/// The whole suppression path over a real archive: one shape absorbed, one
-/// shape still a candidate.
+/// Tests the complete suppression path with a real archive.
 ///
-/// `sweep.zip` renders four rows into two distinct violating shapes, and
-/// `sweep-suppressions.toml` exempts one of them and names a third shape no
-/// row produces. So one run shows every half of the rule: an exemption that
-/// absorbs and reports its count, a violation that still reaches a candidate
-/// file, and an exemption that absorbed nothing and is called out for it.
+/// `sweep.zip` renders four rows as two distinct violation shapes.
+/// `sweep-suppressions.toml` suppresses one shape and names a third shape that no row
+/// produces. One run shows every suppression result. One exemption absorbs violations
+/// and reports its count. One violation remains a candidate. One exemption absorbs
+/// nothing and receives `UNUSED`.
 ///
-/// The violating shape is a runaway indent a row declares on itself, which is
-/// one of the two shapes *no horizontal overflow* is stated for and one a
-/// browser puts in the same place. It replaced a base-less `<ruby>`, which
-/// used to drop its reading and no longer does (issue 21): the two ruby rows
-/// stay in the archive as controls, so a renderer that lost a reading again
-/// would raise the violation count here rather than pass quietly.
+/// One row declares a runaway indent. *No horizontal overflow* checks this shape. A
+/// browser places the shape the same way. This shape replaces a `<ruby>` without a base.
+/// Issue 21 recorded a dropped reading for the earlier shape. The two ruby rows remain
+/// controls. If the renderer loses a reading again, this test increases the violation
+/// count.
 #[test]
 fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yomitan");
@@ -3693,8 +3417,8 @@ fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
         "{summary}",
     );
 
-    // On disk: the shape awaiting adjudication, and nothing for the one a
-    // human already decided about.
+    // The directory contains the candidate that needs review.
+    // It contains no file for the shape that a human judged.
     let out = std::env::temp_dir()
         .join(format!("chibipop-sweep-suppress-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
@@ -3705,7 +3429,7 @@ fn a_suppressed_fixture_shape_absorbs_its_violations_and_writes_no_candidate() {
     assert_eq!(open, json["signature"], "{text}");
     std::fs::remove_dir_all(&out).expect("cleaning up");
 
-    // A capped run read one row, so the shape it never reached is not unused.
+    // A capped run reads one row. It cannot call an unreached shape `UNUSED`.
     let mut capped = Report { suppress: list(), ..Report::default() };
     sweep_archive(&zip, 1, Some(1), &mut capped);
     let capped = capped.summary();

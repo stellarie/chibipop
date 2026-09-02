@@ -1,4 +1,4 @@
-//! Editing a live database.
+//! Edits a live database and keeps its file.
 
 use crate::dict::build::DICT_KEYED;
 use crate::dict::frequency::{reduce, FreqTable};
@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 /// Base id for an empty table.
 const FIRST_ID: i64 = 1;
 
-/// Next free entry.entry_id.
+/// Returns the next free `entry.entry_id`.
 pub fn next_entry_id(conn: &Connection) -> Result<i64> {
     next_id(conn, "SELECT MAX(entry_id) FROM entry")
 }
 
-/// Next free dict.dict_id.
+/// Returns the next free `dict.dict_id`.
 pub fn next_dict_id(conn: &Connection) -> Result<i64> {
     next_id(conn, "SELECT MAX(dict_id) FROM dict")
 }
 
-/// MAX + 1; NULL means empty.
+/// Returns MAX + 1. SQL NULL means that the table has no rows.
 fn next_id(conn: &Connection, sql: &str) -> Result<i64> {
     let highest: Option<i64> =
         conn.query_row(sql, [], |r| r.get(0)).with_context(|| format!("running {sql}"))?;
@@ -31,7 +31,7 @@ fn next_id(conn: &Connection, sql: &str) -> Result<i64> {
     }
 }
 
-/// Rows one addition inserted.
+/// Reports the rows that one addition inserted.
 #[derive(Debug)]
 pub struct Added {
     pub dict_id: i64,
@@ -41,15 +41,15 @@ pub struct Added {
     pub first_entry_id: i64,
 }
 
-/// Inserts one dictionary.
+/// Adds one Dictionary from an archive.
 ///
-/// Ids come from MAX + 1.
+/// IDs use MAX + 1.
 ///
-/// Any archive, whatever it supplies: a Dictionary holds a set of roles, so
-/// one with frequency data and no term bank simply contributes no term rows
-/// and still gets the `dict` row its stored claims and accents hang off
-/// (ADR-0014). The refusal that used to stand here rejected an archive for
-/// being called something with `Freq` in it.
+/// An archive can supply several Dictionary roles. An archive with only
+/// frequency data adds no `term` rows. It still gets a `dict` row, so stored
+/// Reported frequencies and Pitch patterns can use that id
+/// (ARCHITECTURE.md#dictionary-and-lookup). The code does not reject an
+/// archive because its name contains `Freq`.
 pub fn add_dictionary(
     conn: &mut Connection,
     archive: &Path,
@@ -60,18 +60,16 @@ pub fn add_dictionary(
     let tables: Vec<FreqTable> = sources.into_iter().map(|s| s.table).collect();
 
     let tx = conn.transaction().context("opening the addition transaction")?;
-    // Reduced under the strategy this database's other ranks were reduced
-    // under, so an added dictionary is ranked the way the built ones are.
-    // From the archives the caller lists rather than from what is stored,
-    // because the archives in effect are what the caller is asserting: a
-    // frequency change reconciles storage separately
-    // ([`reapply_frequencies`]) and no term addition is a frequency change.
+    // Reduce the new Dictionary with the strategy recorded in this database.
+    // Use the caller's archive list, not the stored claims. The caller's list
+    // defines the active frequency archives. [`reapply_frequencies`] reconciles
+    // stored claims separately, and term-row insertion does not change frequency data.
     let strategy = reindex::recorded(&tx)?.strategy;
     let ranks = reduce(&tables, strategy);
     let dict_id = next_dict_id(&tx)?;
     let slot = crate::dict::build::Slot {
         dict_id,
-        // build-dict's own relation.
+        // Keep the priority relation that build-dict uses.
         priority: dict_id - 1,
         first_entry_id: next_entry_id(&tx)?,
     };
@@ -84,13 +82,11 @@ pub fn add_dictionary(
         &mut batches,
         on_progress,
     )?;
-    // `insert_archive` writes every bank it reads before it returns.
+    // `insert_archive` writes every bank before it returns.
     //
-    // The archive's own Pitch patterns go in under the same `dict_id`,
-    // because an archive supplies roles rather than being one thing: an
-    // import that stored only the terms would leave a pitch dictionary
-    // silent until the next full rebuild, and one that carries both would
-    // land half of itself.
+    // Store the archive's Pitch patterns under the same `dict_id`.
+    // One archive can supply more than one role. The same id preserves both its
+    // terms and its Pitch patterns in a combined archive.
     let table = crate::dict::pitch::load_pitch(archive)
         .with_context(|| format!("reading the pitch of {}", archive.display()))?;
     let accents = crate::dict::build::store_pitch(&tx, dict_id, &table)?;
@@ -110,17 +106,16 @@ pub fn add_dictionary(
     })
 }
 
-/// Brings the stored Reported frequencies back in line with the frequency
-/// archives the library holds, then recomputes every Frequency rank.
+/// Reconciles stored Reported frequencies with the frequency archives, then
+/// recomputes every Frequency rank.
 ///
-/// The archive-driven entry point, for an import or a removal: `freqs` is
-/// every frequency archive in effect, so a dictionary it names gets its
-/// `dict` row and its claims stored and one it no longer names loses them.
-/// The strategy already recorded is preserved - only the archives changed.
-/// A settings change reads no archive and goes through
+/// Use this archive-driven entry point for an import or removal. `freqs` lists
+/// every active frequency archive. A Dictionary that the list names keeps its
+/// `dict` row and stored claims. A Dictionary that leaves the list loses its claims.
+/// Preserve the recorded strategy. A settings change reads no archive and calls
 /// [`crate::dict::reindex::reindex`] instead.
 ///
-/// Returns the number of `term` rows restamped.
+/// Returns the number of `term` rows that the pass restamped.
 pub fn reapply_frequencies(
     conn: &mut Connection,
     freqs: &[PathBuf],
@@ -139,7 +134,7 @@ pub fn reapply_frequencies(
     Ok(processed)
 }
 
-/// Adds one archive to meta.
+/// Records one archive in `meta`.
 pub fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
     let record = serde_json::to_value(crate::dict::build::source_hash(archive)?)
         .context("encoding the source record")?;
@@ -161,30 +156,29 @@ pub fn record_source(conn: &Connection, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Rows one removal deleted.
+/// Reports the rows that one removal deleted.
 #[derive(Debug)]
 pub struct Removed {
     pub dict_id: i64,
     pub dicts: usize,
     pub sources: usize,
-    /// Blobs the sweep dropped afterwards, which is fewer than the media
-    /// rows whenever another dictionary ships the same asset.
+    /// Counts blobs dropped after the sweep. The count can be lower than the
+    /// media row count when another Dictionary ships the same asset.
     pub blobs: usize,
-    /// Rows deleted per dict-keyed table, in [`DICT_KEYED`] order.
+    /// Counts rows deleted from each Dictionary-keyed table, in [`DICT_KEYED`] order.
     ///
-    /// One array rather than one field each, because the array *is* the list
-    /// the removal walks: a table added to the schema widens the walk and
-    /// this report together, and there is no second place left to forget it.
-    /// Read it through [`Removed::rows_in`] or one of the three named
-    /// accessors, never by index.
+    /// One array holds the counts and the table order. When the schema gains a
+    /// table, both the deletion walk and this report gain that table together.
+    /// Read this array through [`Removed::rows_in`] or a named accessor.
+    /// Do not read it by index.
     pub rows: [usize; DICT_KEYED.len()],
 }
 
 impl Removed {
-    /// Rows deleted from one table by name.
+    /// Returns the count for one table name.
     ///
-    /// A table this build does not know is `0`, which is the truth: a
-    /// removal that walked no such table deleted nothing from it.
+    /// Returns `0` for a table that this build does not know. A removal that
+    /// visits no such table deletes no rows from it.
     pub fn rows_in(&self, table: &str) -> usize {
         DICT_KEYED.iter().position(|t| *t == table).map_or(0, |i| self.rows[i])
     }
@@ -202,16 +196,14 @@ impl Removed {
     }
 }
 
-/// Deletes one dictionary.
+/// Removes one Dictionary.
 ///
-/// Absent ids are a no-op.
+/// An absent `dict_id` is a no-op.
 ///
-/// Every table [`DICT_KEYED`] names, children first, then the `dict` row
-/// itself. The list is checked against the schema of the database in hand
-/// before a single row goes ([`refuse_unlisted_tables`]), because the
-/// removal falling behind the schema is the defect this shape exists to
-/// prevent - ticket 17 added `dict_style` and left the removal alone, and
-/// the next removal died on that table's foreign key.
+/// Delete rows from each table in [`DICT_KEYED`] in child-first order. Then
+/// delete the `dict` row. Check the list against the live schema before any
+/// delete with [`refuse_unlisted_tables`]. A schema change can leave child rows
+/// that reference the removed `dict`.
 pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) -> Result<Removed> {
     let tx = conn.transaction().context("opening the removal transaction")?;
     crate::dict::build::ensure_indexes(&tx)?;
@@ -230,26 +222,22 @@ pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) ->
     Ok(Removed { dict_id, dicts, sources, blobs, rows })
 }
 
-/// Refuses a removal that would leave a row behind.
+/// Rejects a removal when the schema has an unknown Dictionary-keyed table.
 ///
-/// Which tables a removal has to walk is knowledge, and ticket 17 proved it
-/// is knowledge that goes stale silently: `dict_style` arrived with the
-/// schema and not with the removal, and because no committed fixture ships a
-/// `styles.css` the table was empty in every test, so a removal that
-/// forgot it passed the whole suite. The next real removal deleted the
-/// `dict` row out from under a live `dict_style` row and died on the foreign
-/// key.
+/// The schema and [`DICT_KEYED`] list must stay in sync. A schema table such
+/// as `dict_style` can appear while the list remains unchanged. An empty
+/// `dict_style` table does not expose that mismatch in tests. A later removal
+/// can then leave a child row and hit a foreign-key error.
 ///
-/// So the list is not trusted, it is checked - against the live schema,
-/// before anything is deleted, inside the transaction. A table this build's
-/// own DDL creates with a `dict_id` column and [`DICT_KEYED`] does not name
-/// aborts the removal and says which table and what to do about it.
+/// Check the live schema inside the transaction before any delete. If this
+/// build's DDL creates a table with a `dict_id` column and [`DICT_KEYED`] does
+/// not list it, reject the removal and name the table.
 fn refuse_unlisted_tables(conn: &Connection) -> Result<()> {
     let present = crate::dict::build::dict_keyed_tables(conn)?;
     let unlisted: Vec<&str> = present
         .iter()
         .map(String::as_str)
-        // `dict` is the parent row, deleted last and counted on its own.
+        // `dict` is the parent row. Delete it last and count it separately.
         .filter(|t| *t != "dict" && !DICT_KEYED.contains(t))
         .collect();
     if !unlisted.is_empty() {
@@ -262,36 +250,34 @@ fn refuse_unlisted_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Drops the blobs no media row references any more.
+/// Deletes blobs that no `media` row references.
 ///
-/// A content-addressed blob is shared, across dictionaries as well as
-/// across paths, so removing one dictionary's media rows cannot simply
-/// remove its blobs - the next dictionary may ship the same asset. A sweep
-/// is the only correct answer, and its cost lands on removing a dictionary
-/// rather than on any hover.
+/// A content-addressed blob can serve several Dictionaries and paths. A
+/// removal deletes only that Dictionary's `media` rows. It cannot delete a
+/// blob until no other Dictionary references the asset.
+/// The sweep runs during Dictionary removal, not during hover.
 ///
-/// `media_blob` is deliberately not in [`DICT_KEYED`]: it carries no
-/// `dict_id`, because content is what addresses it. This sweep is the whole
-/// of its removal, and it runs after the per-dictionary deletes so that
-/// "referenced by nobody" is already true of the rows it looks at.
+/// `media_blob` is not in [`DICT_KEYED`] because it has no `dict_id`. Its
+/// `hash` identifies each row by content. Run this sweep after the
+/// per-Dictionary deletes, when the rows that remain show all live references.
 fn sweep_orphan_blobs(conn: &Connection) -> Result<usize> {
     conn.execute("DELETE FROM media_blob WHERE blob_id NOT IN (SELECT blob_id FROM media)", [])
         .context("dropping unreferenced media blobs")
 }
 
-/// Bounded ANALYZE of changes.
+/// Updates planner statistics with a bounded `ANALYZE`.
 fn refresh_stats(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA analysis_limit = 400; PRAGMA optimize;")
         .context("refreshing the planner statistics")
 }
 
-/// Deletes one dict's rows.
+/// Deletes rows for one `dict_id` from one table.
 fn delete_rows(conn: &Connection, table: &str, dict_id: i64) -> Result<usize> {
     let sql = format!("DELETE FROM {table} WHERE dict_id = ?1");
     conn.execute(&sql, params![dict_id]).with_context(|| format!("running {sql}"))
 }
 
-/// Drops one archive from meta.
+/// Removes one archive from `meta`.
 pub fn forget_source(conn: &Connection, archive: &Path) -> Result<usize> {
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let raw: Option<String> = conn
@@ -393,12 +379,12 @@ mod tests {
         .unwrap();
     }
 
-    /// The synthetic dictionary these tests add beside the built ones.
+    /// The synthetic Dictionary that these tests add beside the built
+    /// Dictionaries.
     ///
-    /// Above every id the fixture build allocates, and that is now two: one
-    /// for `terms.zip` and one for `freq.zip`, because a frequency dictionary
-    /// is a dictionary - it is what the user orders and enables, and its
-    /// claims are stored under its own `dict_id`.
+    /// The fixture build assigns ids 1 and 2 to `terms.zip` and `freq.zip`.
+    /// This Dictionary uses the next id, because a frequency Dictionary also
+    /// has its own `dict_id` and the user can order and enable it.
     const SECOND: i64 = 3;
 
     fn add_entry(conn: &Connection, entry_id: i64, dict_id: i64) {
@@ -424,7 +410,7 @@ mod tests {
         .unwrap();
     }
 
-    /// dict SECOND: 2 entries, 3 terms.
+    /// `SECOND`: two entries and three `term` rows.
     fn add_second_dictionary(conn: &Connection) {
         add_dict(conn, SECOND);
         add_entry(conn, 4, SECOND);
@@ -457,7 +443,7 @@ mod tests {
         mapped.map(|r| r.unwrap()).collect()
     }
 
-    /// Every byte of one dict.
+    /// Returns every stored value for one `dict_id`.
     fn snapshot(conn: &Connection, dict_id: i64) -> Vec<String> {
         let mut all = rows(conn, &format!("SELECT * FROM dict WHERE dict_id = {dict_id}"));
         all.extend(rows(
@@ -584,7 +570,7 @@ mod tests {
         .unwrap()
     }
 
-    /// n entries, 2n terms.
+    /// Adds `n` entries and `2n` `term` rows for one `dict_id`.
     fn add_bulk_dictionary(conn: &Connection, dict_id: i64, n: i64) {
         add_dict(conn, dict_id);
         let base = dict_id * 1_000_000;
@@ -688,9 +674,9 @@ mod tests {
         assert_eq!(vec!["freq.zip"], source_names(&conn), "only the removed archive goes");
     }
 
-    /// Removing a pitch dictionary takes its accents with it, through the
-    /// same [`DICT_KEYED`] walk every other dict-keyed table takes - and the
-    /// dictionary beside it keeps its own.
+    /// A Pitch Dictionary removal removes its accents through the same
+    /// [`DICT_KEYED`] walk as every other Dictionary-keyed table. The other Dictionary
+    /// keeps its own accents.
     #[test]
     fn removing_a_pitch_dictionary_removes_its_accents() {
         let dir = std::env::temp_dir().join("chibipop_edit_test");
@@ -728,8 +714,8 @@ mod tests {
         );
     }
 
-    /// An import stores the archive's accents too, so a pitch dictionary
-    /// added from the settings window works without a rebuild.
+    /// An import stores the archive's Pitch patterns under the new Dictionary.
+    /// A Pitch Dictionary added from the settings window works without a full build.
     #[test]
     fn adding_a_pitch_archive_stores_its_accents_under_the_new_dictionary() {
         let (mut conn, _guard) = fixture_db("adding_pitch");
@@ -747,9 +733,9 @@ mod tests {
     #[test]
     fn a_full_archive_path_matches_the_recorded_file_name() {
         let (mut conn, _guard) = fixture_db("full_path_still_matches");
-        // Forward slashes on purpose: `Path` parses them as separators on
-        // both Windows and Linux, so this exercises the same contract on the
-        // platform-neutral core's whole build matrix.
+        // Use forward slashes on purpose. `Path` parses them as separators on Windows
+        // and Linux, so this test covers the same contract in the platform-neutral
+        // core on both platforms.
         let path = Path::new("C:/Users/Stella/chibipop/library/terms.zip");
 
         let gone = remove_dictionary(&mut conn, 1, path).unwrap();
@@ -828,7 +814,7 @@ mod tests {
         vec![fixture("freq.zip")]
     }
 
-    /// terms.zip under a new name.
+    /// Copies `terms.zip` with a new file name.
     fn copied_archive(test_name: &str, as_name: &str) -> (PathBuf, TempDbGuard) {
         let dir = std::env::temp_dir().join("chibipop_edit_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -1008,11 +994,10 @@ mod tests {
         assert_eq!(0, count(&conn, "SELECT priority FROM dict WHERE dict_id = 1"));
     }
 
-    /// A Dictionary holds a set of roles, so an archive with frequency data
-    /// and no term bank is added like any other and simply contributes no
-    /// term rows - the `dict` row is what its stored claims and accents hang
-    /// off. The refusal this replaced turned that archive away for being
-    /// called something with `Freq` in it.
+    /// A Dictionary can supply frequency data without a term bank. The import
+    /// adds no `term` rows, but it still gets a `dict` row. Stored Reported
+    /// frequencies and Pitch patterns can use that id. The previous implementation
+    /// rejected an archive when its name held `Freq`.
     #[test]
     fn a_frequency_archive_is_added_as_a_dictionary_that_contributes_no_entries() {
         let (mut conn, _guard) = fixture_db("add_a_freq_archive");
@@ -1071,19 +1056,18 @@ mod tests {
         assert!(seen > 1_000, "an edit must not leave the planner reading {after}");
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- Media store ----
 
     fn media_zip() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
     }
 
-    /// A blob is content-addressed and therefore shared, across
-    /// dictionaries as well as across paths, so removing one dictionary
-    /// cannot simply remove its blobs.
+    /// A content-addressed blob is shared across Dictionaries and paths. A removal
+    /// cannot delete its blobs until no other Dictionary references them.
     #[test]
     fn removing_a_dictionary_drops_its_media_and_only_the_orphaned_blobs() {
         let (mut conn, _guard) = fixture_db("remove_media");
-        // Two dictionaries from one archive: every blob is shared.
+        // Add the same archive twice. Each blob then has two Dictionary references.
         let first = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
         let second = add_dictionary(&mut conn, &media_zip(), &[], &|_| {}).unwrap();
         assert_eq!(16, count(&conn, "SELECT COUNT(*) FROM media"), "eight paths, twice");
@@ -1101,8 +1085,8 @@ mod tests {
         assert_eq!(0, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
 
-    /// A live database's blob table was filled by an earlier session, so an
-    /// addition has to find an existing row rather than collide with it.
+    /// A previous build can fill the live database's blob table. An addition must
+    /// reuse each row with the same content instead of a duplicate.
     #[test]
     fn adding_a_dictionary_reuses_the_blobs_a_previous_build_wrote() {
         let (mut conn, _guard) = fixture_db("add_media_reuses_blobs");
@@ -1117,18 +1101,16 @@ mod tests {
         assert_eq!(7, count(&conn, "SELECT COUNT(*) FROM media_blob"));
     }
 
-    // ---- removing a dictionary and adding the same one back ----
+    // ---- remove one Dictionary and add it again ----
 
-    /// One archive carrying every kind of row a `dict_id` keys: a term bank,
-    /// the dictionary's own `styles.css`, and a referenced image asset.
+    /// One archive with each row type that uses a `dict_id`: a term bank, the
+    /// Dictionary's `styles.css`, and a referenced image asset.
     ///
-    /// Built here rather than committed, because the point of it is that it
-    /// is *complete*. `tests/fixtures/yomitan/terms.zip` ships neither a
-    /// stylesheet nor media, so every removal test written against it
-    /// exercises a database in which `dict_style` and `media` are empty -
-    /// which is exactly why a removal that forgets `dict_style` passed the
-    /// suite for a whole ticket. The PNG is the real committed asset from
-    /// `tests/fixtures/media`, so no new binary blob enters the tree.
+    /// Create this archive in the test because it must be *complete*.
+    /// `tests/fixtures/yomitan/terms.zip` has no stylesheet or media, so tests
+    /// based on it leave `dict_style` and `media` empty. That empty state let
+    /// an earlier removal omit `dict_style` without a failure. The PNG comes
+    /// from `tests/fixtures/media`, so this test adds no binary file.
     fn complete_archive(test_name: &str) -> (PathBuf, TempDbGuard) {
         use std::io::Write as _;
         let dir = std::env::temp_dir().join("chibipop_edit_test");
@@ -1156,8 +1138,8 @@ mod tests {
         (path.clone(), TempDbGuard(path))
     }
 
-    /// A database holding exactly one dictionary, built from `archive` by the
-    /// real builder.
+    /// Opens a database with exactly one Dictionary. The real builder creates it
+    /// from `archive`.
     fn db_from(test_name: &str, archive: &Path) -> (Connection, TempDbGuard) {
         let dir = std::env::temp_dir().join("chibipop_edit_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -1177,8 +1159,8 @@ mod tests {
         rows(conn, "PRAGMA foreign_key_check")
     }
 
-    /// The user's exact path: remove a dictionary from the list, then add the
-    /// same archive straight back.
+    /// Test path for a user: remove one Dictionary, then add the same archive
+    /// again.
     #[test]
     fn removing_a_dictionary_and_adding_it_back_leaves_a_sound_database() {
         let (archive, _aguard) = complete_archive("round_trip");
@@ -1197,32 +1179,25 @@ mod tests {
             count(&conn, "SELECT COUNT(*) FROM dict_style"),
             "one dictionary, one stylesheet"
         );
-        // And the lookup the user could no longer get a popup from.
+        // Check the term that the removal made unavailable to the popup.
         let sql = "SELECT COUNT(*) FROM term WHERE surface = 'ねこ' AND dict_id = {d}";
         assert_eq!(vec!["Integer(1)"], of_dict(&conn, sql, made.dict_id), "the term is back");
     }
 
-    /// A removal leaves no row keyed on the removed `dict_id`, in **any**
-    /// table - and the set of tables is read out of the schema rather than
-    /// written down here.
+    /// A removal leaves no row with the removed `dict_id` in **any** table. The
+    /// table set comes from the schema, not a list written in this test.
     ///
-    /// That is the whole point. A test listing the tables it checks is a
-    /// second list to forget, and forgetting the list is the defect: this
-    /// one goes red on its own the moment the DDL grows a `dict_id` column
-    /// the removal does not delete from, with no test edit at all. The
-    /// fixture is the complete archive, so every table it checks actually
-    /// holds rows to begin with - a check against an empty table proves
-    /// nothing, which is how this stayed hidden.
+    /// This test avoids a second list of tables. When the DDL adds a
+    /// `dict_id` column, this test detects a removal that does not delete that
+    /// table. The complete archive puts rows in every table that the check
+    /// visits. An empty table cannot prove that the removal handled it.
     #[test]
     fn a_removal_leaves_no_row_keyed_on_the_removed_dictionary_in_any_table() {
         let (archive, _aguard) = complete_archive("no_rows_left");
         let (mut conn, _guard) = db_from("no_rows_left", &archive);
-        // Until a dictionary's roles are a set, the builder cannot give one
-        // `dict_id` both a term bank and reported frequencies: a frequency
-        // archive gets a dict row of its own. So the claim goes in directly,
-        // because the precondition below is the point - a check against an
-        // empty table proves nothing. The accent goes in the same way and
-        // for the same reason: this fixture archive ships no pitch bank.
+        // The fixture archive has a term bank but no frequency or pitch bank.
+        // Add one claim and one accent under its `dict_id` so every Dictionary-keyed
+        // table has a row. An empty table cannot prove that removal handles it.
         conn.execute(
             "INSERT INTO reported_freq (dict_id, term, reading, rank) VALUES (1, 'ねこ', NULL, 3)",
             [],
@@ -1253,14 +1228,12 @@ mod tests {
         assert!(fk_violations(&conn).is_empty(), "and nothing dangles");
     }
 
-    /// The guard itself: a table the schema keys on `dict_id` and
-    /// `DICT_KEYED` does not name aborts the removal by name, before a row
-    /// moves.
+    /// The guard rejects a schema table with a `dict_id` but no
+    /// [`DICT_KEYED`] entry. It names the table before a row moves.
     ///
-    /// This is the production half of the test above. The next person to add
-    /// a table gets a message naming their table rather than a foreign-key
-    /// error two tickets later, and a user whose database somehow carries an
-    /// unknown table keeps it whole.
+    /// This test covers the production check. A new table gets a direct message,
+    /// not a later foreign-key error. A database with an unknown table stays
+    /// unchanged.
     #[test]
     fn a_dict_keyed_table_the_removal_does_not_know_aborts_it_by_name() {
         let (mut conn, _guard) = fixture_db("unlisted_table_refused");
@@ -1269,7 +1242,7 @@ mod tests {
                  dict_id INTEGER PRIMARY KEY REFERENCES dict(dict_id),
                  note    TEXT NOT NULL
              );
-             INSERT INTO dict_note (dict_id, note) VALUES (1, 'ticket 23 was here');",
+             INSERT INTO dict_note (dict_id, note) VALUES (1, 'a note the removal does not know');",
         )
         .unwrap();
         let before = snapshot(&conn, 1);

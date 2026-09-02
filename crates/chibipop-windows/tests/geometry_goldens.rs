@@ -1,18 +1,18 @@
-//! DirectWrite geometry-snapshot goldens (ADR-0011).
+//! This test checks DirectWrite geometry-snapshot goldens.
 //!
-//! One JSON golden per fixture under `tests/goldens/geometry/`,
-//! compared with EXACT equality - no tolerance. DirectWrite metrics
-//! are deterministic for a fixed font file, so tier0's pinned runner
-//! image must reproduce them bit-for-bit; a mismatch names the fixture,
-//! the element, and the coordinate that moved.
+//! Each fixture has one JSON golden under `tests/goldens/geometry/`.
+//! The test compares snapshots with EXACT equality. It allows no tolerance.
+//! DirectWrite metrics stay deterministic for a fixed font file.
+//! The pinned tier0 runner image must reproduce the metrics bit-for-bit.
+//! A mismatch names the fixture, the element, and the coordinate that moved.
 //!
-//! `CHIBIPOP_BLESS=1` flips every test from assert to write: goldens
-//! are rewritten and the run passes loudly. That is the ONLY way this
-//! file writes; a normal run can never overwrite a golden. Missing
-//! golden without bless = failure telling the maintainer to bless.
+//! Set `CHIBIPOP_BLESS=1` to make each golden test write its golden.
+//! This is the ONLY way that this file writes a golden.
+//! A normal run never overwrites a golden.
+//! If a golden is absent and bless is off, the test fails and tells the maintainer to bless it.
 //!
-//! Windows-only: capture calls DirectWrite. Elsewhere this whole file
-//! compiles to zero tests.
+//! Windows-only: this test calls DirectWrite.
+//! Elsewhere, this file compiles to zero tests.
 #![cfg(windows)]
 
 use chibipop_windows::ui::render::geometry::{fixtures, snapshot, to_json_text};
@@ -32,10 +32,9 @@ fn blessing() -> bool {
     std::env::var("CHIBIPOP_BLESS").as_deref() == Ok("1")
 }
 
-/// Leaves only: every scalar under
-/// its dotted path. Empty containers
-/// keep a marker so vanishing whole
-/// sections is a named diff too.
+/// Keep each scalar under its dotted path so the diff can name the field.
+/// Keep a marker for each empty container so a vanished section appears in the diff.
+/// The marker names a whole section that vanishes.
 fn flatten(v: &Value, path: &str, out: &mut BTreeMap<String, String>) {
     match v {
         Value::Object(m) if m.is_empty() => {
@@ -61,17 +60,18 @@ fn flatten(v: &Value, path: &str, out: &mut BTreeMap<String, String>) {
     }
 }
 
-/// "…elements.3.y" -> the golden's
-/// "…elements.3.text", so a moved
-/// coordinate is named by what it
-/// belongs to, not just an index.
+/// The function maps `…elements.3.y` to the
+/// golden's `…elements.3.text` path.
+/// It names a moved coordinate by its
+/// element, not only by its index.
 ///
-/// Walks *up* until it finds one,
-/// because ADR-0013's fields nest:
+/// The function walks upward until it finds
+/// an owner. Widened fields nest.
+/// For example,
 /// `elements.3.measured.line_boxes.1.baseline`
-/// has no text of its own and the
-/// element three levels above it is
-/// still what moved.
+/// has no text of its own.
+/// The element three levels above it still
+/// identifies the moved coordinate.
 fn owner_text(path: &str, golden: &BTreeMap<String, String>) -> Option<String> {
     let (mut parent, field) = path.rsplit_once('.')?;
     if field == "text" || field == "kind" {
@@ -125,7 +125,7 @@ fn check(name: &str) {
         return;
     }
 
-    // Field-level diff, not a blob.
+    // The test reports a field-level diff, not one blob.
     let golden_v: Value = serde_json::from_str(&golden_text)
         .unwrap_or_else(|e| panic!("golden {} is not valid JSON: {e}", path.display()));
     let mut golden_flat = BTreeMap::new();
@@ -154,8 +154,8 @@ fn check(name: &str) {
 
     let total = lines.len();
     if total == 0 {
-        // Same fields, different bytes:
-        // the serializer itself drifted.
+        // Equal fields with different bytes show that
+        // the serializer changed.
         panic!(
             "geometry golden '{name}': every field matches but the serialized text differs - \
              the golden serializer changed. Re-bless deliberately or revert the change."
@@ -169,7 +169,7 @@ fn check(name: &str) {
     panic!(
         "geometry golden '{name}' diverged ({total} field(s)):\n{}\n\
          If this layout change is INTENTIONAL, re-bless via the CI bless dispatch and \
-         commit the reviewed diff (ADR-0011). Never widen this to a tolerance.",
+         commit the reviewed diff. Never widen this to a tolerance.",
         lines.join("\n")
     );
 }
@@ -254,19 +254,19 @@ fn geometry_golden_pitch_sources() {
     check("pitch_sources");
 }
 
-/// The ADR-0011 fixture set, pinned:
-/// exactly these sixteen, one golden
-/// file each. The first seven are the
-/// original set with its intent
-/// unchanged; the next six are the
-/// ones ADR-0013 requires, because the
-/// widened schema has fields no
-/// plain-string fixture can fill; the
-/// last three are ticket 02's, and
-/// they are the only thing pinning the
-/// card header's pitch geometry.
+/// Pin this fixture set to exactly sixteen
+/// fixtures with one golden file each.
+/// The first seven keep the original intent
+/// unchanged.
+/// The next six satisfy the widened schema
+/// because text-only fixtures cannot fill
+/// its fields.
+/// The last three came with the card
+/// header's pitch geometry.
+/// These are the only fixtures that pin
+/// that geometry.
 #[test]
-fn the_fixture_set_is_the_sixteen_from_adr_0011() {
+fn the_fixture_set_is_the_pinned_sixteen() {
     let names: Vec<&str> = fixtures().iter().map(|f| f.name).collect();
     assert_eq!(
         vec![
@@ -294,30 +294,31 @@ fn the_fixture_set_is_the_sixteen_from_adr_0011() {
     }
 }
 
-/// One fixture's own claim about its
-/// captured snapshot.
+/// One fixture's claim about its captured
+/// snapshot.
 type Claim = (&'static str, fn(&Value) -> bool);
 
-/// Each fixture actually exercises the
-/// feature it is named for.
+/// Each fixture tests the feature in its
+/// name.
 ///
-/// A "ruby run" fixture whose scene
-/// carries no [`RubyBox`] is not a
-/// fixture, and the way to notice is
-/// not to read the golden by eye - a
-/// tree that stopped parsing the way
-/// its author meant would simply
-/// bless quieter geometry. So each of
-/// the six names a predicate over the
-/// captured scene, and the capture is
-/// the same one the golden holds.
+/// A "ruby run" fixture without a
+/// [`RubyBox`] in its scene is not a
+/// fixture.
+/// Do not inspect the golden by eye to find
+/// this error.
+/// If the tree no longer matches its author's
+/// intended parse, a bless run can record
+/// geometry with absent content.
+/// Each named feature has a predicate over
+/// the captured scene.
+/// The predicate uses the same capture as
+/// the golden.
 #[test]
 fn every_new_fixture_carries_the_feature_it_is_named_for() {
     let want: &[Claim] = &[
-        // Two spans on one line, in
-        // two different sizes: the one
-        // thing the old seam could not
-        // express.
+        // Two spans share one line and use two
+        // sizes. The old seam could not express
+        // this case.
         ("styled_spans", |v| {
             elems(v).any(|e| {
                 let spans = arr(e, "spans");
@@ -326,8 +327,8 @@ fn every_new_fixture_carries_the_feature_it_is_named_for() {
                     && spans.windows(2).any(|w| w[0]["size"] != w[1]["size"])
             })
         }),
-        // A box that paints: a fill or
-        // a border, not merely spacing.
+        // A box must paint a fill or a border.
+        // Empty space alone does not count.
         ("bordered_pill", |v| {
             elems(v).any(|e| {
                 boxes(e).any(|b| {
@@ -338,29 +339,27 @@ fn every_new_fixture_carries_the_feature_it_is_named_for() {
                 })
             })
         }),
-        // Two markers on one element:
-        // two levels sharing the line
-        // between them.
+        // Two markers share one element.
+        // Two levels share the line between them.
         ("nested_list", |v| elems(v).any(|e| arr(e, "marker").len() > 1)),
         ("table_spans", |v| {
             elems(v).any(|e| e["kind"] == "Table")
                 && elems(v).filter(|e| e["kind"] == "Cell").count() > 1
         }),
         ("ruby_run", |v| elems(v).any(|e| !arr(e, "ruby").is_empty())),
-        // An asset with a media key,
-        // which is what says the store
-        // was consulted rather than the
-        // node believed.
+        // An asset has a media key when the store
+        // supplies it.
+        // The key shows that the code consulted the
+        // store, not the node.
         ("inline_image", |v| {
             elems(v).any(|e| e["kind"] == "Image" && e["image"]["key"] != Value::Null)
         }),
-        // Marked kana: a pitch element
-        // whose high moras carry an
-        // overline. A box with a top
-        // border and no fill is what
-        // the notation *is*, so a
-        // fixture without one is not
-        // drawing an accent at all.
+        // Marked kana use a pitch element whose
+        // high moras carry an overline.
+        // A top border without a fill represents
+        // this notation.
+        // A fixture without this box does not draw
+        // a pitch pattern.
         ("pitch_single", |v| {
             elems(v).any(|e| {
                 e["kind"] == "Pitch"
@@ -371,15 +370,13 @@ fn every_new_fixture_carries_the_feature_it_is_named_for() {
                     })
             })
         }),
-        // Four accents, four rows.
+        // Four pitch elements use four rows.
         ("pitch_multiple", |v| elems(v).filter(|e| e["kind"] == "Pitch").count() == 4),
-        // The dedup: the `split`
-        // variant draws two rows and
-        // the `agreed` one draws a
-        // single row naming four
-        // dictionaries, so a capture
-        // that lost the collapse shows
-        // it here.
+        // The `split` variant draws two rows.
+        // The `agreed` variant draws one row with
+        // the names of four Dictionaries.
+        // This capture shows if the code loses that
+        // collapse.
         ("pitch_sources", |v| {
             let rows: Vec<&Value> = elems(v).filter(|e| e["kind"] == "Pitch").collect();
             rows.len() == 3
@@ -400,8 +397,8 @@ fn every_new_fixture_carries_the_feature_it_is_named_for() {
     }
 }
 
-/// Every element of every variant, in
-/// draw order.
+/// Return every element from every variant in draw order.
+/// The bin paints the elements in this order.
 fn elems(snap: &Value) -> impl Iterator<Item = &Value> {
     snap["variants"]
         .as_object()
@@ -411,13 +408,14 @@ fn elems(snap: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-/// One element's array field, or empty.
+/// Return an element's array field or an empty slice.
+/// This lets callers inspect each field without a branch.
 fn arr<'a>(elem: &'a Value, field: &str) -> &'a [Value] {
     elem[field].as_array().map_or(&[], Vec::as_slice)
 }
 
-/// Every box on one element, block
-/// first, exactly as a bin paints them.
+/// Return each box on one element in paint order.
+/// The bin paints the block box before the inline boxes.
 fn boxes(elem: &Value) -> impl Iterator<Item = &Value> {
     let block = (elem["block_box"] != Value::Null).then(|| &elem["block_box"]);
     block.into_iter().chain(arr(elem, "inline_boxes"))

@@ -1,4 +1,7 @@
-//! Protocol version negotiation.
+//! Check the protocol version that the plugin handshake selects.
+//!
+//! The host accepts a version only when the plugin offered it and the manifest
+//! declares the same version. This check prevents mismatched protocol contracts.
 
 use anyhow::{bail, Result};
 

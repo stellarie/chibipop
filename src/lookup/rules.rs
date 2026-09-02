@@ -1,8 +1,8 @@
-//! Deconjugation rule types and loading.
+//! Deconjugation rule types and rule-file input.
 //!
-//! `data/deconjugator.json` is a list mixing comment strings with rule
-//! objects. Any of `dec_end` / `con_end` / `dec_tag` / `con_tag` may be a
-//! single string or a list of strings.
+//! `data/deconjugator.json` mixes comment strings with rule objects. Each
+//! `dec_end`, `con_end`, `dec_tag`, and `con_tag` field can contain one string or
+//! a list of strings.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -42,16 +42,15 @@ pub struct Rule {
 #[serde(untagged)]
 enum Element {
     Rule(Box<Rule>),
-    // The `String` payload is never read, but it is load-bearing: it is what
-    // makes serde's untagged matching accept comment strings (and only
-    // strings) instead of failing to parse, or silently accepting malformed
-    // rule objects. Do not change it to `()` (a JSON string can't
-    // deserialise into `()`) or to `IgnoredAny` (matches any JSON value).
+    // Serde never reads the `String` payload, but the untagged match needs it to
+    // accept comment strings and reject other values. Do not replace it with
+    // `()`. A JSON string cannot deserialize into `()`. Do not replace it with
+    // `IgnoredAny`, because that type accepts every JSON value.
     #[allow(dead_code)]
     Comment(String),
 }
 
-/// Load rules, discarding comment strings and `substitution` rules.
+/// Load rules. Discard comment strings and rules with type `substitution`.
 pub fn load_rules(path: &Path) -> Result<Vec<Rule>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading rules from {}", path.display()))?;
@@ -80,7 +79,7 @@ mod tests {
     #[test]
     fn loads_real_rule_file_skipping_comments_and_substitutions() {
         let rules = load_rules(&rules_path()).unwrap();
-        // 106 objects in the file, minus 2 `substitution` rules.
+        // The file has 106 objects. Two have type `substitution`.
         assert_eq!(104, rules.len());
         assert!(rules.iter().all(|r| r.rule_type != "substitution"));
     }

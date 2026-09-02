@@ -1,14 +1,16 @@
-//! The shm buffers copies land in (ADR-0002: shm everywhere, CPU crop,
-//! no GPU plumbing inside a capture backend).
+//! This module holds the shm buffers that receive the copies
+//! (ARCHITECTURE.md#capture-and-masking: shm everywhere, CPU crop, no
+//! GPU plumbing inside a capture backend).
 //!
-//! One file per pool, in `XDG_RUNTIME_DIR` and unlinked the instant it
-//! exists: the fd keeps it alive, so however this process ends it
-//! leaves nothing behind - the same discipline as the control socket.
+//! Each pool gets one file in `XDG_RUNTIME_DIR`. The code unlinks the
+//! file the instant it exists. The fd keeps the file alive. The
+//! process can end in any way, and the file leaves nothing behind.
+//! This is the same discipline as the control socket.
 //!
-//! The compositor maps the file writable and copies into it. We read
-//! the bytes back with `read_at` instead of mapping it here: it is the
-//! same one kernel copy a mapping would cost, and it keeps this crate
-//! free of `unsafe`.
+//! The compositor maps the file writable and copies into it. This
+//! code reads the bytes back with `read_at`, and does not map the
+//! file. A mapping costs the same single kernel copy. The `read_at`
+//! call also keeps this crate free of `unsafe`.
 
 use anyhow::{Context, Result};
 use std::fs::{File, OpenOptions};
@@ -20,7 +22,7 @@ use wayland_client::protocol::wl_shm::{Format, WlShm};
 use wayland_client::protocol::wl_shm_pool::WlShmPool;
 use wayland_client::{Dispatch, QueueHandle};
 
-/// The buffer a pool currently offers.
+/// The buffer that a pool offers now.
 struct Current {
     buffer: WlBuffer,
     h: i32,
@@ -29,7 +31,7 @@ struct Current {
     w: i32,
 }
 
-/// One growable shm pool and the buffer carved out of it.
+/// One shm pool that can grow, and the buffer inside it.
 pub struct Pool {
     file: File,
     pool: WlShmPool,
@@ -38,7 +40,7 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// A pool of `size` bytes, backed by an unlinked file.
+    /// Creates a pool of `size` bytes in an unlinked file.
     pub fn new<D>(shm: &WlShm, qh: &QueueHandle<D>, tag: &str, size: i32) -> Result<Pool>
     where
         D: Dispatch<WlShmPool, ()> + 'static,
@@ -50,12 +52,13 @@ impl Pool {
         Ok(Pool { file, pool, size, current: None })
     }
 
-    /// A buffer with exactly these parameters, reusing the mapping
-    /// whenever the previous grab's shape still fits.
+    /// Returns a buffer with exactly these parameters. The pool
+    /// reuses the mapping while the shape of the previous grab still
+    /// fits.
     ///
-    /// The returned proxy stays owned by the pool: a copy in flight
-    /// must never have its buffer destroyed under it, so the swap only
-    /// happens when a *new* shape is asked for.
+    /// The pool keeps ownership of the returned proxy. A copy in
+    /// flight must keep its buffer. Therefore the pool swaps the
+    /// buffer only for a *new* shape.
     pub fn buffer<D>(
         &mut self,
         qh: &QueueHandle<D>,
@@ -67,8 +70,8 @@ impl Pool {
     where
         D: Dispatch<WlBuffer, ()> + 'static,
     {
-        // Bytes per pixel is the format's business, not the pool's: a
-        // 24-bit buffer's stride is three times its width, not four.
+        // The format decides the bytes per pixel, not the pool. The
+        // stride of a 24-bit buffer is three times its width, not four.
         anyhow::ensure!(
             w > 0 && h > 0 && stride > 0,
             "the compositor described a {w}x{h} buffer with stride {stride}"
@@ -94,7 +97,7 @@ impl Pool {
         Ok(buffer)
     }
 
-    /// Read the first `len` bytes the compositor wrote.
+    /// Reads the first `len` bytes that the compositor wrote.
     pub fn read(&self, len: usize, into: &mut Vec<u8>) -> Result<()> {
         anyhow::ensure!(len <= self.size as usize, "a {len}-byte read past a {}-byte pool", self.size);
         into.clear();
@@ -112,14 +115,14 @@ impl Drop for Pool {
     }
 }
 
-/// An unlinked file in the runtime dir, or the temp dir if there is
-/// none.
+/// Creates an unlinked file in the runtime dir. If there is no
+/// runtime dir, this function uses the temp dir.
 fn scratch_file(tag: &str) -> Result<File> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let path = dir.join(format!("chibipop-capture-{}-{tag}", std::process::id()));
-    // A stale file from a killed process must never be adopted.
+    // This code must never adopt a stale file from a killed process.
     let _ = std::fs::remove_file(&path);
     let file = OpenOptions::new()
         .read(true)

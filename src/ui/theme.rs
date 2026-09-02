@@ -1,56 +1,56 @@
-//! Popup colours and sizes.
+//! Colors and sizes for the popup.
 //!
-//! Windows-free by design.
+//! This module stays platform-neutral by design.
 
-/// Track and thumb width, px.
+/// The scrollbar track width uses layout units.
 pub const SCROLLBAR_W: i32 = 4;
 
-/// Shortest the thumb may get.
+/// The minimum scrollbar thumb height uses layout units.
 pub const SCROLLBAR_MIN_THUMB: i32 = 16;
 
-/// One scheme's whole look.
+/// Complete appearance for one theme.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
-    /// Panel fill. Opaque RGB.
+    /// Opaque RGB color that fills the panel.
     pub background: (u8, u8, u8),
-    /// Panel edge.
+    /// RGB color for the panel edge.
     pub border: (u8, u8, u8),
-    /// Card/rows rule.
+    /// RGB color for card and row separators.
     pub separator: (u8, u8, u8),
 
-    /// The card's headword.
+    /// RGB color for the headword in the card.
     pub headword_text: (u8, u8, u8),
-    /// The card's reading.
+    /// RGB color for the reading in the card.
     pub reading_text: (u8, u8, u8),
-    /// Gloss text in the top card.
+    /// RGB color for Gloss text in the top card.
     pub body_text: (u8, u8, u8),
-    /// Dictionary-name label.
+    /// RGB color for the Dictionary name label.
     pub dict_label_text: (u8, u8, u8),
-    /// Collapsed rows.
+    /// RGB color for collapsed rows.
     pub collapsed_text: (u8, u8, u8),
-    /// Frequency, POS, `…` marker.
+    /// RGB color for frequency, POS, and the `…` marker.
     pub dimmed_text: (u8, u8, u8),
-    /// The frequency badge.
+    /// RGB color for the frequency badge.
     pub frequency_text: (u8, u8, u8),
 
-    /// Yu Gothic UI in both themes.
+    /// Font family. Both themes use Yu Gothic UI.
     pub font_name: String,
-    /// The top card's headword.
+    /// Font size for the card headword.
     pub headword_size: f32,
-    /// Kana reading line.
+    /// Font size for the Kana reading line.
     pub reading_size: f32,
-    /// Reading and glosses.
+    /// Font size for reading and gloss text.
     pub body_size: f32,
-    /// Dictionary name label.
+    /// Font size for the Dictionary name label.
     pub dict_label_size: f32,
-    /// Collapsed rows and metadata.
+    /// Font size for collapsed rows and metadata.
     pub collapsed_size: f32,
-    /// Frequency, POS tags.
+    /// Font size for frequency and POS tags.
     pub dimmed_size: f32,
-    /// The frequency badge size.
+    /// Font size for the frequency badge.
     pub frequency_size: f32,
 
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite weight from 100 through 900.
     pub headword_weight: u16,
     pub reading_weight: u16,
     pub body_weight: u16,
@@ -68,29 +68,29 @@ pub struct Theme {
     pub dimmed_italic: bool,
     pub frequency_italic: bool,
 
-    /// Inner panel padding, px.
+    /// The inner panel padding uses layout units.
     pub padding: i32,
-    /// Match window::CORNER_RADIUS.
+    /// Corner radius. It must match `window::CORNER_RADIUS`.
     pub corner_radius: i32,
-    /// Horizontal rule thickness.
+    /// The horizontal rule thickness uses layout units.
     pub separator_height: f32,
-    /// Panel border stroke, px.
+    /// The panel border stroke width uses layout units.
     pub border_width: f32,
-    /// Window alpha, 0.0-1.0.
+    /// Window opacity from 0.0 through 1.0.
     pub opacity: f32,
 
-    /// Overlay: pass-1 capture box.
+    /// Overlay color for the pass-1 capture box.
     pub scan_pass1: (u8, u8, u8),
-    /// Overlay: a forward tile.
+    /// Overlay color for a forward tile.
     pub scan_tile: (u8, u8, u8),
-    /// Overlay: the resolved word.
+    /// Overlay color for the resolved word.
     pub scan_anchor: (u8, u8, u8),
-    /// Overlay: the defined chars.
+    /// Overlay color for the defined chars.
     pub scan_match: (u8, u8, u8),
 }
 
 impl Theme {
-    /// The default (spec M3-D6).
+    /// Default dark theme from spec M3-D6.
     pub fn dark() -> Theme {
         Theme {
             background: (24, 24, 28),
@@ -137,7 +137,7 @@ impl Theme {
         }
     }
 
-    /// Overridable in the TOML.
+    /// TOML can override this theme.
     pub fn light() -> Theme {
         Theme {
             background: (250, 250, 252),
@@ -189,7 +189,7 @@ impl Theme {
 mod tests {
     use super::*;
 
-    /// Adjacent outlines must differ.
+    /// Each scan outline color must differ from every other color in both themes.
     #[test]
     fn scan_colours_are_distinct_in_both_themes() {
         for t in [Theme::dark(), Theme::light()] {
@@ -207,7 +207,7 @@ mod tests {
         }
     }
 
-    /// Highlight outshines pass-1.
+    /// The match highlight must be brighter than the pass-1 box.
     #[test]
     fn the_match_highlight_is_brighter_than_the_pass1_box_in_dark_theme() {
         let t = Theme::dark();

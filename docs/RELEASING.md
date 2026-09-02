@@ -13,10 +13,11 @@ chibipop-vX.Y.Z-linux-x64.tar.gz
 v0.9.3 carried the zip alone.
 
 **Both names are a forever contract.** Every shipped binary's update check
-parses asset names off `releases/latest` (ADR-0007), so the `chibipop-v`
-prefix and the `-windows-x64.zip` / `-linux-x64.tar.gz` suffixes cannot
-change shape — not even to look tidier. `scripts/package-linux.sh` refuses a
-version that would not produce a parseable name.
+parses asset names off `releases/latest`
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#packaging-and-ci)), so the
+`chibipop-v` prefix and the `-windows-x64.zip` / `-linux-x64.tar.gz` suffixes
+cannot change shape — not even to look tidier. `scripts/package-linux.sh`
+refuses a version that would not produce a parseable name.
 
 The zip contains:
 
@@ -40,15 +41,15 @@ once. That is the one step a downloaded binary cannot remove.
 executable on first run.
 
 **`plugins/meikiocr/` ships enabled by discovery.** It is the reference
-text-provider plugin, per spec section 10. Discovery adds it to the in-memory
+text-provider plugin. Discovery adds it to the in-memory
 enabled list when its manifest parses successfully. `config.toml` holds the
 machine-specific meikiocr install path, the HF cache directory, and the ONNX
 thread cap — the user edits that file, never `adapter.py` or `plugin.toml`.
 
 ### The Linux tarball
 
-Same shape, plus what a Wayland install needs (ADR-0007). One `tar xzf` is
-the whole installation:
+Same shape, plus what a Wayland install needs. One `tar xzf` is the whole
+installation:
 
 ```
 chibipop-vX.Y.Z-linux-x64/
@@ -82,9 +83,9 @@ something else).
 **The tarball works with no network and no first-run download.** There is no
 `libonnxruntime.so` in it and no rpath: on linux-x64 `ort`'s pinned
 `download-binaries` prebuilt is a *static* archive, so ONNX Runtime is inside
-`chibipop` (which is why the binary is ~62 MB). ADR-0009 was written
-expecting a shared library beside the binary; see its 2026-08-26 addendum.
-`ldd` on the shipped binary names the entire floor:
+`chibipop` (which is why the binary is ~62 MB). The original design expected a
+shared library beside the binary. A 2026-08-26 check found the prebuilt
+statically linked instead. `ldd` on the shipped binary names the entire floor:
 
 ```
 libstdc++.so.6  libgcc_s.so.1  libm.so.6  libc.so.6
@@ -107,7 +108,8 @@ needs `__isoc23_strtoull` and friends (glibc 2.38 — 22.04 has 2.35) and
 the floor, not the runner catalogue**, and `ubuntu-24.04` is the oldest hosted
 image that satisfies it. Moving the pin forward when 24.04 retires is a
 deliberate bump of the supported-distro floor, made in a commit that says so.
-See ADR-0007's 2026-08-26 addendum.
+The runner pin and the `ort` linkage are coupled, so re-verify the runner
+floor on every `ort` bump.
 
 The release run prints the real numbers rather than a distro name — the
 highest versioned symbol the binary references from each library — so
@@ -135,9 +137,8 @@ so "is this the asset the workflow built" is a `sha256sum`.
 
 ### The AUR packages
 
-Two, templated in [`packaging/aur/`](../packaging/aur) and pushed by hand
-(ADR-0007). An Arch user installs and updates through pacman and never sees
-a tarball:
+Two, templated in [`packaging/aur/`](../packaging/aur) and pushed by hand. An
+Arch user installs and updates through pacman and never sees a tarball:
 
 | package | builds from | ONNX Runtime |
 |---|---|---|
@@ -149,9 +150,9 @@ makes the source package a *distro* package is `--no-default-features
 --features system-onnxruntime` — the default feature downloads a pinned
 ONNX Runtime prebuilt mid-build and links it statically, which a distro
 package must not do, and `system-onnxruntime` switches `ort` to dlopening
-`libonnxruntime.so` instead (ADR-0009). Nothing else about the build
-differs, and the models are committed, so neither package downloads
-anything but its own source.
+`libonnxruntime.so` instead. Nothing else about the build differs, and the
+models are committed, so neither package downloads anything but its own
+source.
 
 Both install one layout, and it is not free-form: `/usr/bin/chibipop`
 resolves its data by walking up from its own directory
@@ -178,7 +179,7 @@ like any other test.
 
 A pacman install is never portable mode: nothing writes a `chibipop.toml`
 beside `/usr/bin/chibipop`, so config, data and state land in the XDG
-directories (ADR-0006).
+directories.
 
 **Bumping.** One command rewrites both templates for a tag — pkgver, pkgrel,
 every checksum, and both `.SRCINFO`s:
@@ -303,7 +304,7 @@ scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.g
 
 `.github/workflows/ci.yml` runs [`REGRESSION.md`](REGRESSION.md) tier 0 on
 every push to `main` and every pull request, plus a mirrored Linux gate on
-ubuntu (ticket 29; both bins are named `chibipop`, so link-producing steps
+ubuntu (both bins are named `chibipop`, so link-producing steps
 exclude the foreign bin crate — see the workspace `Cargo.toml`):
 
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the
@@ -323,10 +324,10 @@ exclude the foreign bin crate — see the workspace `Cargo.toml`):
 - `cargo build --release --workspace --exclude chibipop-linux`.
 
 `.github/workflows/release.yml` runs a subset of the same gates on the tag
-itself — tests on both platforms, plus ADR-0009's OCR quality gate on the
-Linux job — and refuses to build at all if the tag disagrees with
-`Cargo.toml`. It is not a second CI: pushing a tag on a commit CI has not
-already gated is the mistake it cannot save you from.
+itself — tests on both platforms, plus the OCR quality gate on the Linux job —
+and refuses to build at all if the tag disagrees with `Cargo.toml`. It is not
+a second CI: pushing a tag on a commit CI has not already gated is the mistake
+it cannot save you from.
 
 ### What CI cannot do
 

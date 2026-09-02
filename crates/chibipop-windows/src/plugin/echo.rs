@@ -1,4 +1,4 @@
-//! A fixture plugin for tests.
+//! A test fixture plugin for plugin tests.
 
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
@@ -26,7 +26,7 @@ pub fn run(mode: &str) -> ! {
                 "capabilities": {"geometry": true, "languages": ["ja"]}}}),
             ("echo/grandchild", _) => serde_json::json!({"result": {"pid": grandchild}}),
             (_, "crash") => std::process::exit(3),
-            // park() may wake spuriously.
+            // `park()` can return without an explicit wake.
             (_, "hang") => loop {
                 std::thread::park();
             },
@@ -43,7 +43,7 @@ pub fn run(mode: &str) -> ! {
         reply["id"] = serde_json::json!(id);
         let _ = writeln!(out, "{reply}");
         let _ = out.flush();
-        // Never drains stdin again.
+        // The plugin does not read stdin again.
         if mode == "deaf" {
             loop {
                 std::thread::park();
@@ -53,7 +53,7 @@ pub fn run(mode: &str) -> ! {
     std::process::exit(0)
 }
 
-/// Outlives its parent.
+/// Starts a child process that outlives the plugin process.
 fn sleeper() -> Option<u32> {
     Command::new(std::env::current_exe().ok()?)
         .args(["plugin-echo", "sleeper"])

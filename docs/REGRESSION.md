@@ -57,9 +57,11 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 
 ## Tier 0 — the automated gate (~2 min, no screen)
 
-**The three `cargo` lines are the CI contract.** They are unchanged since 2026-07-29 and are what
-`.github/workflows/ci.yml` runs; the numbers beside them were last re-measured on **2026-08-11**.
-Two of them are `grep -c` counts rather than exit codes, and that is deliberate — see the note
+**The `cargo` lines below are the CI contract.** `.github/workflows/ci.yml` is the authoritative
+source for this gate. Read that workflow before you trust this prose, because the workflow moves
+first and this page follows it. The clippy baseline last moved on **2026-08-26**, per the comment
+in `ci.yml`. The test and timing numbers beside the lines were last re-measured on **2026-08-11**.
+The two clippy lines are counts rather than exit codes, and that is deliberate — see the note
 under the table. CI additionally passes `--color never` and runs the suite three times; both of
 those are explained in the callouts below, and neither is optional there.
 
@@ -67,15 +69,31 @@ those are explained in the callouts below, and neither is optional there.
 distinction matters for the stray-killing line, because CI has no chibipop installed and this
 machine has two.
 
+**Clippy is two passes, not one.** `ci.yml` runs no single pass with a bare `-D warnings`. Pass 1
+runs plain clippy, subtracts cargo's `generated N warnings` summaries, and counts the accepted
+findings. That count must be **exactly 1**. Pass 2 repeats the same run with `-D warnings` and six
+named suppressions, and must count **0**. A single pass with a bare `-D warnings` turns the core
+library's accepted finding into a hard error. No rmeta is produced, the dependent
+`chibipop-windows` crate never gets linted, and its own findings vanish from the count.
+
 ```bash
-export PATH="/c/Users/Stella/scoop/persist/rustup/.cargo/bin:$PATH"; export RUSTUP_HOME=/c/Users/Stella/scoop/persist/rustup/.rustup
+rustup_persist="${SCOOP:-$HOME/scoop}/persist/rustup"   # a scoop rustup; point this at your own install
+export RUSTUP_HOME="$rustup_persist/.rustup"; export PATH="$rustup_persist/.cargo/bin:$PATH"
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -eq 'chibipop.exe' -and \$_.ExecutablePath -like '*\target\*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
 cargo test --workspace --exclude chibipop-linux 2>&1 | awk '/^test result: ok\./ {s+=$4} END {print "TOTAL:", s+0}'
-cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | grep -E "^error" | grep -vc "could not compile"
+cargo clippy --workspace --color never --all-targets --all-features 2>&1 | grep -E "^warning" | grep -vcE "generated [0-9]+ warning"
+cargo clippy --workspace --color never --all-targets --all-features -- -D warnings -A clippy::while_let_loop -A clippy::doc_lazy_continuation -A clippy::useless_conversion -A clippy::too_many_arguments -A clippy::needless_lifetimes -A clippy::type_complexity 2>&1 | grep -cE "^(error|warning)"
 cargo build --release --workspace --exclude chibipop-linux 2>&1 | grep -E "^error|Finished"
 ```
 
-The `--workspace --exclude chibipop-linux` flags arrived with ticket 29: `default-members`
+**`scripts/manual_regression.py` automates this document's own tier and item numbering.** Run
+`python scripts/manual_regression.py --list` to print every check id on this page. Run
+`python scripts/manual_regression.py --tier 0 --repo-root . --repeat-tests 3` to drive this tier.
+The script carries both clippy counts as `--expected-clippy-warnings 1` and
+`--expected-other-clippy 0`. Its `--stop-target-strays` flag replaces the kill line above, and it
+matches on the repo's `target` directory for the reason the callout below gives.
+
+The `--workspace --exclude chibipop-linux` flags arrived with `default-members`, which
 serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
 Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
 `chibipop`, so link-producing commands must exclude the foreign bin crate (collision);
@@ -87,8 +105,8 @@ check-shaped clippy spans the whole workspace unexcluded.
 >
 > | Path | What it is | Killing it costs |
 > |---|---|---|
-> | `C:\Users\Stella\Documents\chibipop-latest` | the real install — config, dictionary library, a 256 MB database | closes the program the user is actually using |
-> | `C:\Users\Stella\Documents\chibipop-nightly` | where branch builds land, seeded 2026-08-18 | closes a build under test |
+> | `%USERPROFILE%\Documents\chibipop-latest` | the real install — config, dictionary library, a 256 MB database | closes the program the user is actually using |
+> | `%USERPROFILE%\Documents\chibipop-nightly` | where branch builds land, seeded 2026-08-18 | closes a build under test |
 > | `<repo>\target\debug` and `target\release` | test children and leftover strays | nothing — this is the only class worth killing |
 >
 > The replacement filters on `ExecutablePath` so it reaches **only** the third row. Verified
@@ -117,7 +135,7 @@ check-shaped clippy spans the whole workspace unexcluded.
 >
 > Nothing else in the suite moves. CI is **green on the same commit**. So this is DirectWrite
 > font drift between this box and the `windows-2025` runner image, not a regression.
-> ADR-0011 asserts these metrics with **no tolerance** on purpose.
+> The goldens assert these metrics with **no tolerance** on purpose.
 >
 > **Do not bless it here.** `CHIBIPOP_BLESS=1` on this machine writes goldens that red CI for
 > every other machine. Blessing is a `workflow_dispatch` on the runner, reviewed and committed
@@ -148,7 +166,7 @@ belongs to the `linux` job, not to this tier.
 > did not run**: every fresh clone, every worktree, and CI. The ignored tests beside the total are
 > *different* tests.
 >
-> **Amended 2026-08-27 (ticket 17).** Until then it probed `data/chibipop.sqlite` and nothing else,
+> **Amended 2026-08-27.** Until then it probed `data/chibipop.sqlite` and nothing else,
 > so it skipped on *every* tree, this one included — the Windows box above is the exception, because
 > that repo path is where its own `build-dict --out` default lands. It now resolves the dictionary
 > the way the product does (`$CHIBIPOP_GOLDEN_DB`, the Linux daemon's
@@ -321,7 +339,7 @@ hook's boxed closure, and a `LookupState` bundle for the five reload-replaced lo
 It was **4** until 2026-08-09, **3** until 2026-08-25, and **2** until 2026-08-26. The fourth was
 `while_let_loop`, on `worker_main`'s trigger drain; the hot-reload branch replaced that loop with an
 explicit `drain` (a `Reload` message must never be swallowed by newest-wins coalescing), so the lint
-went with it. The third was `layout_pass` in the Windows bin crate, deleted when ticket 27 moved the
+went with it. The third was `layout_pass` in the Windows bin crate, deleted by the move of the
 popup's layout walk into core as `PopupScene`. The second was `useless_conversion` at
 `src/lookup/deconj.rs:78`, gone with upstream's own rewrite of that function. Each of those is a
 legitimate step down, not a suppression — the count went **down** because the code did, and no
@@ -499,7 +517,7 @@ counted fresh, not assumed.
 
 **917 → 924 is Task 8, and all seven new tests are unit tests.** `src/plugin/text.rs` adds two pure
 functions plus the `PluginText` struct. `estimate_offset` is the text-only downgrade's proportional
-cursor-to-byte estimate (spec 7.2): it turns a cursor x into a char index by position across the
+cursor-to-byte estimate: it turns a cursor x into a char index by position across the
 line's screen region, then reads that char's byte offset back out of `char_indices()` — never a
 byte index computed by hand — so every return value is either `0` or something `char_indices()`
 already proved to be a boundary. `the_estimate_always_returns_a_char_boundary` sweeps every x from
@@ -955,10 +973,11 @@ was displaying.
 
 **On Linux the guard does not exist and this step's instrument now does.** Capture exclusion is a
 compositor rule there, not a setting, and the popup is kept out of its own lookups by the core
-capture mask instead (`CONTEXT.md`, ADR-0008). The visual half still applies verbatim: turn on
-**Outline what each hover captured**, screenshot, and nothing chibipop drew may be sitting inside
-a capture box. The outline itself is drawn two physical px *outside* each box for exactly that
-reason, so a border touching the inside of one is a bug in the overlay, not in the mask.
+capture mask instead (`CONTEXT.md`, [`ARCHITECTURE.md`](../ARCHITECTURE.md#capture-and-masking)).
+The visual half still applies verbatim: turn on **Outline what each hover captured**, screenshot,
+and nothing chibipop drew may be sitting inside a capture box. The outline itself is drawn two
+physical px *outside* each box for exactly that reason, so a border touching the inside of one is
+a bug in the overlay, not in the mask.
 
 > [!note] 1.14–1.16 were added 2026-08-11; 1.14 and 1.15 ran **in part**, 1.16 **not at all**
 > They are the acceptance checks for the per-character-retrigger / OCR-language branch. All three
@@ -1591,8 +1610,8 @@ The work proceeded on the ruling that the encode is paid only by plugin users, w
 **Pass** when the real byte count and p95 land inside the bracket above, and the p95 is **under
 10 ms**. Record the number here either way.
 
-**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen spec
-section 6 and consider the length-prefixed binary frame named in spec section 12.
+**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen the
+PNG transport and consider the length-prefixed binary frame instead.
 
 ### 1.24 Provider trait, no behaviour change — **added 2026-08-17, not run**
 

@@ -1,79 +1,78 @@
-//! Which capture backend serves this session (ADR-0002), decided by
-//! *advertised capability* at startup and never by compositor identity.
+//! The capture backend for this session comes from the advertised
+//! capability at startup. It never comes from the compositor identity.
+//! See ARCHITECTURE.md#capture-and-masking.
 //!
-//! Two rungs, in this order. Rung 1 is wlr-screencopy: compositor-side
-//! region capture that prompts for nothing, so on Hyprland/sway/niri a
-//! hover works the instant the daemon starts. Rung 2 is the
-//! xdg-desktop-portal ScreenCast + PipeWire fallback, which costs one
-//! consent dialog and exists for the compositors with no screencopy at
-//! all (GNOME, and anything else that only speaks the portal). The
-//! order is the whole point: a wlr compositor that *also* runs a portal
-//! must keep taking the promptless path, so screencopy wins whenever it
-//! is advertised even when the portal is right there beside it.
+//! The ladder has two rungs in this order. Rung 1 is wlr-screencopy.
+//! It captures a region through the compositor and needs no prompt.
+//! A hover works as soon as the daemon starts on Hyprland, sway, or niri.
+//! Rung 2 is the xdg-desktop-portal ScreenCast + PipeWire fallback.
+//! It needs one consent dialog and supports compositors without screencopy,
+//! such as GNOME. A compositor can also run a portal, but screencopy
+//! still wins when it is advertised.
 //!
-//! Absence is never fatal. When neither rung is present the daemon
-//! stays up and [`Selection::Unsupported`] names the exact missing
-//! capability by its protocol/interface name, so a compositor upgrade
-//! self-heals the install with no code change.
+//! An absent rung is not fatal. When both rungs are absent, the daemon
+//! stays up. [`Selection::Unsupported`] names the capability requirements
+//! missing from the path that the selection tried. A compositor upgrade
+//! self-heals the install without a code change.
 //!
 //! Test hook: `CHIBIPOP_CAPTURE_BACKEND=auto|screencopy|portal|none`
-//! forces a rung (or the empty ladder, to exercise the unsupported
-//! diagnostic) instead of the capability-selected one. Forcing
-//! `portal` on Hyprland — which advertises screencopy and so would
-//! never reach rung 2 on its own — is how ticket 34's fallback backend
-//! is smoke-tested.
+//! selects a rung or an empty ladder for the unsupported diagnostic.
+//! The hook overrides capability selection. Hyprland advertises screencopy
+//! and also runs a portal, so `portal` forces the fallback for a smoke test.
 
-/// The portal interface whose presence on the session bus is the
-/// fallback rung's capability probe.
+/// The portal interface that the fallback rung probes on the session bus.
 pub const SCREENCAST_INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 
-/// The ladder, in ADR-0002 order.
+/// The capture ladder in rung order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    /// Rung 1: `zwlr_screencopy_manager_v1` region capture. Promptless.
+    /// Rung 1: `zwlr_screencopy_manager_v1` captures regions without a prompt.
     WlrScreencopy,
-    /// Rung 2: portal ScreenCast negotiated once at startup, frames
-    /// arriving over PipeWire. One consent dialog, then nothing.
+    /// Rung 2: portal ScreenCast starts once at startup. Frames arrive through
+    /// PipeWire after one consent dialog.
     Portal,
 }
 
-/// What this session advertises, as far as the capture ladder cares.
+/// The capabilities that this session advertises to the capture ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// `zwlr_screencopy_manager_v1` and its plumbing are advertised.
+    /// The session advertises the required globals: `zwlr_screencopy_manager_v1`, `wl_shm`, and
+    /// `wl_output`.
     pub screencopy: bool,
-    /// `org.freedesktop.portal.ScreenCast` answers on the session bus.
+    /// The session bus answers for `org.freedesktop.portal.ScreenCast`.
     pub portal_screencast: bool,
 }
 
 impl Capabilities {
-    /// `globals` is the daemon's startup registry probe; `portal` is the
-    /// D-Bus probe the caller already ran.
+    /// `globals` is the daemon startup registry probe. `portal` is the D-Bus probe
+    /// that the caller already ran.
     pub fn scan(globals: &[crate::wayland::Advertised], portal: bool) -> Capabilities {
         Capabilities { screencopy: crate::capture::available(globals), portal_screencast: portal }
     }
 }
 
-/// The `CHIBIPOP_CAPTURE_BACKEND` test hook.
+/// The test hook that reads `CHIBIPOP_CAPTURE_BACKEND`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendOverride {
-    /// Walk the ladder as ADR-0002 describes it.
+    /// Use the normal ladder. It selects the first available rung in fixed
+    /// ladder order. The order is `WlrScreencopy`, then `Portal`.
     Auto,
-    /// Force rung 1 (fail rather than fall through to the portal).
+    /// Force rung 1. Report it as unsupported when rung 1 is absent. Do not use
+    /// the portal.
     Screencopy,
-    /// Force rung 2, pretending screencopy is absent — the documented
-    /// way to exercise the fallback on a wlr compositor.
+    /// Force rung 2 as if screencopy were absent. Use this path to test the
+    /// fallback on a wlr compositor.
     Portal,
-    /// Pretend the ladder is empty: exercise the unsupported path.
+    /// Treat the ladder as empty and exercise the unsupported path.
     None,
 }
 
 impl BackendOverride {
-    /// The environment variable this hook reads.
+    /// The environment variable that this hook reads.
     pub const ENV: &'static str = "CHIBIPOP_CAPTURE_BACKEND";
 
-    /// One of `auto|screencopy|portal|none`, or `None` for anything
-    /// else.
+    /// The accepted values are `auto|screencopy|portal|none`. Return `None` for
+    /// every other value.
     pub fn parse(value: &str) -> Option<BackendOverride> {
         match value {
             "auto" => Some(BackendOverride::Auto),
@@ -84,7 +83,7 @@ impl BackendOverride {
         }
     }
 
-    /// The override and, when the value was unrecognized, a diagnostic.
+    /// Return the override and a diagnostic when the value is not recognized.
     pub fn from_env() -> (BackendOverride, Option<String>) {
         match std::env::var(Self::ENV) {
             Err(_) => (BackendOverride::Auto, Option::None),
@@ -102,17 +101,19 @@ impl BackendOverride {
     }
 }
 
-/// What [`select`] decided: a live backend, or exactly what is missing.
+/// The result from [`select`]: a live backend or the capability requirements
+/// missing from the attempted path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
-    /// The backend the daemon should open.
+    /// The backend that the daemon must open.
     Backend(Backend),
-    /// No capture at all; `missing` names exactly what is absent.
+    /// No capture is available. `missing` lists capability requirements absent
+    /// from the attempted path, not necessarily every absent capability.
     Unsupported { missing: Vec<String> },
 }
 
 impl Selection {
-    /// The chosen backend, or `None` when nothing is available.
+    /// Return the selected backend, or `None` when no backend is available.
     pub fn backend(&self) -> Option<Backend> {
         match self {
             Selection::Backend(b) => Some(*b),
@@ -120,26 +121,26 @@ impl Selection {
         }
     }
 
-    /// The one startup line the daemon logs for the capture channel.
+    /// Return the one startup line for the capture channel.
     pub fn startup_line(&self) -> String {
         match self {
             Selection::Backend(Backend::WlrScreencopy) => {
-                "capture: wlr-screencopy region capture (promptless - ADR-0002 rung 1)".to_string()
+                "capture: wlr-screencopy region capture (promptless - ladder rung 1)".to_string()
             }
             Selection::Backend(Backend::Portal) => {
-                "capture: portal ScreenCast + PipeWire (eager consent at startup - ADR-0002 rung 2)"
+                "capture: portal ScreenCast + PipeWire (eager consent at startup - ladder rung 2)"
                     .to_string()
             }
             Selection::Unsupported { missing } => format!(
-                "capture: unsupported - missing {}; a compositor or portal offering the missing capability self-heals this install (ADR-0002)",
+                "capture: unsupported - missing {}; a compositor or portal offering the missing capability self-heals this install",
                 missing.join(", ")
             ),
         }
     }
 }
 
-/// The capabilities `caps` lacks, by exact protocol/interface name, so
-/// a compositor upgrade self-heals the install (ADR-0002).
+/// Return the exact protocol or interface names that `caps` lacks. A compositor
+/// upgrade self-heals the install.
 fn missing(caps: &Capabilities) -> Vec<String> {
     let mut names = Vec::new();
     if !caps.screencopy {
@@ -151,9 +152,8 @@ fn missing(caps: &Capabilities) -> Vec<String> {
     names
 }
 
-/// Walk the capture ladder (ADR-0002). Capability-first, promptless
-/// rung first: screencopy wins whenever it is advertised, even on a
-/// session that also runs a portal.
+/// Select a rung according to `ov`. `Auto` selects the first available rung
+/// in fixed ladder order. Other values constrain or empty the ladder.
 pub fn select(caps: &Capabilities, ov: BackendOverride) -> Selection {
     match ov {
         BackendOverride::Auto => {
@@ -181,8 +181,7 @@ pub fn select(caps: &Capabilities, ov: BackendOverride) -> Selection {
                 Selection::Unsupported { missing: vec![SCREENCAST_INTERFACE.to_string()] }
             }
         }
-        // Simulated empty ladder: report both rungs' needs as if
-        // nothing were advertised anywhere.
+        // Simulate an empty ladder. Report both rung requirements as absent.
         BackendOverride::None => Selection::Unsupported {
             missing: missing(&Capabilities { screencopy: false, portal_screencast: false }),
         },
@@ -205,8 +204,8 @@ mod tests {
         Advertised { name: 1, interface: interface.to_string(), version: 1 }
     }
 
-    /// The acceptance criterion: Hyprland advertises screencopy *and*
-    /// runs a portal, and it must keep taking the promptless path.
+    /// Keep the promptless path when Hyprland advertises screencopy and also
+    /// runs a portal.
     #[test]
     fn screencopy_beats_the_portal_even_when_both_are_present() {
         assert_eq!(
@@ -227,8 +226,8 @@ mod tests {
         );
     }
 
-    /// The diagnostic names the exact absent capabilities so an upgrade
-    /// on either side self-heals.
+    /// Name the exact absent capabilities so an upgrade on either side
+    /// self-heals the install.
     #[test]
     fn neither_rung_names_both_missing_capabilities() {
         let Selection::Unsupported { missing } = select(&NOTHING, BackendOverride::Auto) else {
@@ -238,9 +237,8 @@ mod tests {
         assert_eq!(None, select(&NOTHING, BackendOverride::Auto).backend());
     }
 
-    /// Forcing `portal` on a wlr compositor is the documented smoke
-    /// test; forcing `screencopy` where it is absent must fail honestly
-    /// rather than quietly prompting.
+    /// Force `portal` on a wlr compositor for the documented smoke test.
+    /// If screencopy is absent, report the absence instead of a prompt.
     #[test]
     fn the_forced_overrides_pin_their_backend() {
         assert_eq!(Selection::Backend(Backend::Portal), select(&BOTH, BackendOverride::Portal));
@@ -258,8 +256,8 @@ mod tests {
         );
     }
 
-    /// `none` simulates a compositor with neither rung, whatever this
-    /// machine actually advertises.
+    /// Let `none` simulate a compositor with no rung, regardless of this
+    /// machine's advertised capabilities.
     #[test]
     fn the_none_override_lists_both_capabilities() {
         let Selection::Unsupported { missing } = select(&BOTH, BackendOverride::None) else {
@@ -269,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn every_startup_line_is_one_greppable_line_naming_the_adr() {
+    fn every_startup_line_is_one_greppable_line_naming_its_rung_or_the_way_back() {
         for selection in [
             Selection::Backend(Backend::WlrScreencopy),
             Selection::Backend(Backend::Portal),
@@ -278,7 +276,7 @@ mod tests {
             let line = selection.startup_line();
             assert!(line.starts_with("capture: "), "{line}");
             assert!(!line.contains('\n'), "{line}");
-            assert!(line.contains("ADR-0002"), "{line}");
+            assert!(line.contains("rung ") || line.contains("self-heals"), "{line}");
         }
         assert!(
             Selection::Backend(Backend::WlrScreencopy).startup_line().contains("promptless"),
@@ -302,8 +300,7 @@ mod tests {
         assert_eq!(Option::None, BackendOverride::parse("pipewire"));
     }
 
-    /// Selection is by capability, so the screencopy half comes from
-    /// the same probe the backend itself uses.
+    /// Select by capability. Use the same screencopy probe as the backend.
     #[test]
     fn capabilities_scan_uses_the_screencopy_probe_and_the_portal_answer() {
         let globals = [advertised(MANAGER_GLOBAL), advertised("wl_shm"), advertised("wl_output")];

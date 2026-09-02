@@ -1,7 +1,7 @@
 //! The settings window.
 //!
-//! Modeless - see D9.
-//! Numbers are combos, not spins.
+//! The window is modeless. Refer to decision D9.
+//! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{LayoutMode, SentenceMode, FIELD_SOURCES};
 use crate::dict::frequency::RankingStrategy;
@@ -45,16 +45,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// What the user did with the window. Read and cleared by `app::run`.
+/// The window reports each user action. `app::run` reads and clears this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsOutcome {
     Apply,
     Cancel,
-    /// Only from a running instance.
+    /// Available only from an active instance.
     Quit,
 }
 
-/// A click app.rs must service.
+/// The window reports a click event that `app.rs` must handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsClick {
     AnkiTest,
@@ -62,16 +62,16 @@ pub enum SettingsClick {
     CssEditor,
 }
 
-/// Who owns the window.
+/// The mode selects how the window applies changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyMode {
-    /// `run`: applies live.
+    /// `run` applies changes immediately.
     Live,
-    /// Saves for the next start.
+    /// Saves changes for the next application start.
     Standalone,
 }
 
-// ---- control ids ----
+// ---- Control identifiers ----
 
 const ID_APPLY: i32 = 100;
 const ID_MODE_LIVE: i32 = 102;
@@ -83,7 +83,7 @@ const ID_SUMMARY: i32 = 107;
 const ID_HIGHLIGHT: i32 = 108;
 const ID_SCROLL: i32 = 109;
 const ID_EXCLUDE: i32 = 110;
-/// The Terms list.
+/// The Terms dictionary list.
 const ID_TERMS: i32 = 111;
 const ID_TERMS_UP: i32 = 112;
 const ID_TERMS_DOWN: i32 = 113;
@@ -92,7 +92,7 @@ const ID_SHOW_SCAN: i32 = 115;
 const ID_QUIT: i32 = 116;
 const ID_TERMS_ADD: i32 = 117;
 const ID_TERMS_REMOVE: i32 = 118;
-/// The Frequency list.
+/// The Frequency dictionary list.
 const ID_FREQS: i32 = 119;
 const ID_FREQ_ADD: i32 = 120;
 const ID_FREQ_REMOVE: i32 = 121;
@@ -115,88 +115,86 @@ const ID_CAPTURE_H: i32 = 137;
 const ID_SCAN_ALNUM: i32 = 138;
 const ID_PER_CHAR: i32 = 139;
 const ID_OCR_LANG: i32 = 140;
-// 141 was Include / exclude,
-// 142 the Not-searched box.
-/// Clips the page content.
+// Identifier 141 was the Include or exclude control.
+// Identifier 142 was the Not-searched box.
+/// The viewport pane clips the page content.
 const ID_VIEWPORT: i32 = 143;
-/// Holds the page content.
+/// The content pane holds the page content.
 const ID_CONTENT: i32 = 144;
 /// The Updates group box.
 const ID_UPDATES: i32 = 145;
-/// Engine combo, OCR tab.
+/// The Engine combo box on the OCR tab.
 const ID_ENGINE: i32 = 146;
-/// Configure button, OCR tab.
+/// The Configure button on the OCR tab.
 const ID_ENGINE_CONFIGURE: i32 = 147;
-/// Engine-log checkbox, OCR tab.
+/// The Engine log checkbox on the OCR tab.
 const ID_ENGINE_LOG: i32 = 148;
-/// Adapter-log checkbox.
+/// The Adapter log checkbox.
 const ID_ADAPTER_LOG: i32 = 149;
-/// Include-screenshot checkbox.
+/// The Include screenshot checkbox.
 const ID_INCLUDE_SCREENSHOT: i32 = 150;
-/// Notify-on-add checkbox.
+/// The Notify on add checkbox.
 const ID_NOTIFY_ON_ADD: i32 = 151;
-/// Customize CSS button.
+/// The Customize CSS button.
 const ID_CSS_EDITOR: i32 = 152;
-/// Sentence combo, Anki tab.
+/// The Sentence combo box on the Anki tab.
 const ID_SENTENCE_MODE: i32 = 156;
-/// Static region key button.
+/// The Static region key button.
 const ID_STATIC_REGION_KEY: i32 = 157;
-/// "Region hotkey" label.
+/// The Region hotkey label.
 const ID_STATIC_REGION_LABEL: i32 = 158;
-/// Overlay outline checkbox.
+/// The Overlay outline checkbox.
 const ID_SHOW_STATIC_OVERLAY: i32 = 159;
-/// Capture-exclusion hint text.
+/// The Capture exclusion hint text.
 const ID_STATIC_CAPTURE_HINT: i32 = 160;
-/// First-dict-only checkbox.
+/// The First dictionary only checkbox.
 const ID_FIRST_DICT_ONLY: i32 = 161;
-/// OCR clipboard key button.
+/// The OCR clipboard key button.
 const ID_OCR_CLIPBOARD_KEY: i32 = 162;
-/// Layout-mode combo, General tab.
+/// The Layout mode combo box on the General tab.
 const ID_LAYOUT_MODE: i32 = 163;
-/// Dictionary-styling checkbox.
+/// The Dictionary styling checkbox.
 const ID_DICT_STYLING: i32 = 164;
-/// Show-examples checkbox.
+/// The Show examples checkbox.
 const ID_SHOW_EXAMPLES: i32 = 165;
-/// Show-attributions checkbox.
+/// The Show attributions checkbox.
 const ID_SHOW_ATTRIBUTIONS: i32 = 166;
-/// Show-images checkbox.
+/// The Show images checkbox.
 const ID_SHOW_IMAGES: i32 = 167;
-/// Show-part-of-speech checkbox.
+/// The Show part of speech checkbox.
 const ID_SHOW_POS: i32 = 168;
-/// Frequency move-up button.
+/// The Move up button for the Frequency list.
 const ID_FREQ_UP: i32 = 169;
-/// Frequency move-down button.
+/// The Move down button for the Frequency list.
 const ID_FREQ_DOWN: i32 = 170;
-/// The Pitch list.
+/// The Pitch dictionary list.
 const ID_PITCH: i32 = 171;
-/// Pitch move-up button.
+/// The Move up button for the Pitch list.
 const ID_PITCH_UP: i32 = 172;
-/// Pitch move-down button.
+/// The Move down button for the Pitch list.
 const ID_PITCH_DOWN: i32 = 173;
-/// Pitch Add button.
+/// The Add button for the Pitch list.
 const ID_PITCH_ADD: i32 = 174;
-/// Pitch Remove button.
+/// The Remove button for the Pitch list.
 const ID_PITCH_REMOVE: i32 = 175;
-/// Ranking-strategy combo, Dictionaries tab.
+/// The Ranking strategy combo box on the Dictionaries tab.
 const ID_RANKING: i32 = 176;
 
-/// First field-map combo id.
+/// The first field-map combo identifier.
 const ID_FIELD_MAP_BASE: i32 = 200;
 
-/// Field-map combo choices, in the order they are filled.
+/// Choices for the field-map combo boxes in fill order.
 ///
-/// A Win32 combo answers with the index it was filled at, so the fill in
-/// `build_field_map_rows` and the read-back in `form` are two halves of
-/// one edge and must walk this single sequence. Two lists that merely
-/// agree today would map every field to the wrong source the day one of
-/// them gains an entry.
+/// A Win32 combo box returns a selection index. `build_field_map_row` adds
+/// rows, and `read` reads them. These operations form one interface.
+/// Both operations must process this exact sequence. If the lists diverge,
+/// a field can use an incorrect source.
 ///
-/// Which sources a mapping may name is a core rule, so the vocabulary is
-/// `chibipop::config::FIELD_SOURCES` and this window only renders it. The
-/// `"(none)"` sentinel prepended here is not one of them: it is this
-/// window's idiom for "this field maps to nothing", dropped by
-/// `row_mapping` before save, never a stored value. Prepending it is also
-/// why the read-back is offset by one.
+/// Core rules specify which sources a field map can name. The source list is
+/// `chibipop::config::FIELD_SOURCES`. The window displays only that list.
+/// The window adds the `"(none)"` sentinel before the source list.
+/// `row_mapping` removes this sentinel before save. The system never stores
+/// this sentinel. The extra entry shifts the read index by one.
 const FIELD_MAP_SOURCES: [&str; FIELD_SOURCES.len() + 1] = {
     let mut all = ["(none)"; FIELD_SOURCES.len() + 1];
     let mut i = 0;
@@ -207,7 +205,7 @@ const FIELD_MAP_SOURCES: [&str; FIELD_SOURCES.len() + 1] = {
     all
 };
 
-/// Field rows per pump.
+/// The pump adds this many field rows per cycle.
 const FIELD_MAP_ROWS_PER_PUMP: usize = 4;
 
 struct PendingFieldMap {
@@ -226,21 +224,20 @@ impl PendingFieldMap {
     }
 }
 
-/// The sentence-capture combo, in the order it is filled.
+/// The sentence capture combo box in fill order.
 ///
-/// A Win32 combo answers with the index it was filled at, so this table
-/// is both halves of the UI edge: the labels going in, and the mode
-/// coming back out.
+/// A Win32 combo box returns a selection index. The table defines the labels
+/// and output modes.
 const SENTENCE_MODES: [(SentenceMode, &str); 3] = [
     (SentenceMode::Line, "Current line"),
     (SentenceMode::All, "All lines"),
     (SentenceMode::Static, "Static region"),
 ];
 
-/// The mode a combo selection names.
+/// The mode for a combo box selection.
 ///
-/// No selection (`-1`, a combo that lost it) reads as the default, which
-/// is the item `build` selects when it finds none.
+/// An empty selection (`-1`) uses the default item. `build` selects this
+/// item when no match exists.
 fn sentence_mode_at(selection: isize) -> SentenceMode {
     usize::try_from(selection)
         .ok()
@@ -248,22 +245,21 @@ fn sentence_mode_at(selection: isize) -> SentenceMode {
         .map_or(SentenceMode::Line, |&(mode, _)| mode)
 }
 
-/// The layout-mode combo, in the order it is filled.
+/// The layout mode combo box in fill order.
 ///
-/// The same one-table-per-edge rule as [`SENTENCE_MODES`], and for the
-/// same reason: a Win32 combo answers with the index it was filled at,
-/// so a second list that merely agreed today would read the wrong mode
-/// the day either gained an entry. The Linux window's `LAYOUT_MODES`
-/// carries the same two labels.
+/// The table obeys the single-table rule of [`SENTENCE_MODES`]. A Win32
+/// combo box returns a selection index. A separate list can diverge when
+/// either list gains an entry. That mismatch returns the wrong mode.
+/// The Linux window definition `LAYOUT_MODES` contains the same two labels.
 const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
     (LayoutMode::Roomy, "Roomy \u{2014} one item per line"),
     (LayoutMode::Compact, "Compact \u{2014} one line per dictionary"),
 ];
 
-/// The layout mode a combo selection names.
+/// The layout mode for a combo box selection.
 ///
-/// No selection (`-1`, a combo that lost it) reads as the default, which
-/// is the item `build` selects when it finds none.
+/// An empty selection (`-1`) uses the default item. `build` selects this
+/// item when no match exists.
 fn layout_mode_at(selection: isize) -> LayoutMode {
     usize::try_from(selection)
         .ok()
@@ -271,24 +267,23 @@ fn layout_mode_at(selection: isize) -> LayoutMode {
         .map_or(LayoutMode::Roomy, |&(mode, _)| mode)
 }
 
-/// The ranking-strategy combo, in the order it is filled.
+/// The ranking strategy combo box in fill order.
 ///
-/// The same one-table-per-edge rule as [`SENTENCE_MODES`], and for the
-/// same reason: a Win32 combo answers with the index it was filled at, so
-/// the labels going in and the strategy coming back out are two halves of
-/// this one table. The Linux window's `RANKING_STRATEGIES` carries the
-/// same three labels; the kebab-case TOML spellings are
-/// [`RankingStrategy`]'s own and never these.
+/// The table obeys the single-table rule of [`SENTENCE_MODES`]. A Win32
+/// combo box returns a selection index. Input labels and output strategies
+/// form one table. The Linux window definition `RANKING_STRATEGIES` contains
+/// the same three labels. The kebab-case TOML values belong to
+/// [`RankingStrategy`], not to this table.
 const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
     (RankingStrategy::BestRank, "Best rank \u{2014} the commonest claim wins"),
     (RankingStrategy::Priority, "Priority \u{2014} the highest list that has the word"),
     (RankingStrategy::Median, "Median \u{2014} the middle of what they claim"),
 ];
 
-/// The strategy a combo selection names.
+/// The ranking strategy for a combo box selection.
 ///
-/// No selection (`-1`, a combo that lost it) reads as the default, which
-/// is the item `build` selects when it finds none.
+/// An empty selection (`-1`) uses the default item. `build` selects this
+/// item when no match exists.
 fn ranking_strategy_at(selection: isize) -> RankingStrategy {
     usize::try_from(selection)
         .ok()
@@ -296,23 +291,23 @@ fn ranking_strategy_at(selection: isize) -> RankingStrategy {
         .map_or(RankingStrategy::BestRank, |&(strategy, _)| strategy)
 }
 
-/// First plugin-enable id.
+/// The first plugin enable identifier.
 const ID_PLUGIN_ENABLE_BASE: i32 = 1000;
-/// First plugin-configure id.
+/// The first plugin configure identifier.
 const ID_PLUGIN_CONFIGURE_BASE: i32 = 1500;
-/// Plugin id block size.
+/// The plugin identifier block size.
 const PLUGIN_ID_SPAN: i32 = 100;
 
-// Win32 tab control messages
+// Win32 messages for the tab control.
 const TCM_FIRST: u32 = 0x1300;
 const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
 const TCM_INSERTITEMW_MSG: u32 = TCM_FIRST + 62;
 const TCIF_TEXT_VAL: u32 = 0x0001;
-// TCN_SELCHANGE = -551 as u32
+// TCN_SELCHANGE = -551 as u32.
 const TCN_SELCHANGE_CODE: u32 = (-551i32) as u32;
 const TAB_H: i32 = 28;
 
-/// Win32 NMHDR layout.
+/// The Win32 NMHDR memory layout.
 #[repr(C)]
 struct NmhdrRaw {
     hwnd_from: HWND,
@@ -320,7 +315,7 @@ struct NmhdrRaw {
     code: u32,
 }
 
-/// Win32 TCITEMW layout.
+/// The Win32 TCITEMW memory layout.
 #[repr(C)]
 struct TcItemW {
     mask: u32,
@@ -332,7 +327,7 @@ struct TcItemW {
     l_param: isize,
 }
 
-/// What an Apply disables.
+/// The list contains controls that the Apply action disables.
 const WHILE_BUSY: [i32; 23] = [
     ID_APPLY,
     ID_QUIT,
@@ -359,7 +354,7 @@ const WHILE_BUSY: [i32; 23] = [
     ID_CHECK_UPDATE,
 ];
 
-// ---- layout, 96-DPI px ----
+// ---- Layout dimensions in 96-DPI pixels ----
 
 const WIN_W: i32 = 560;
 const PAD: i32 = 14;
@@ -371,19 +366,20 @@ const BTN_PITCH: i32 = ROW_H + 4;
 const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
-/// ~3 lines of status text.
+/// The status control has space for about three lines of text.
 const STATUS_H: i32 = 58;
-/// First y below the tab strip.
+/// The first vertical coordinate below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
-/// Below the bottom row's top.
+/// The vertical offset below the top of the bottom row.
 const BOTTOM_UPDATE_DY: i32 = 20;
 const BOTTOM_STATUS_DY: i32 = BOTTOM_UPDATE_DY + ROW_H + 8 + GROUP_GAP;
 const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 2;
-/// The bottom row's own height.
+/// The height of the bottom row.
 const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
-/// Apply's x, right-aligned.
+/// The horizontal coordinate of the right-aligned Apply button.
 const BOTTOM_APPLY_X: i32 = WIN_W - PAD - 144;
-/// Bottom row: id, x, y offset.
+/// Each bottom-row item stores a control identifier, a horizontal coordinate,
+/// and a vertical offset.
 const BOTTOM_ROW: [(i32, i32, i32); 5] = [
     (ID_UPDATES, PAD - 6, 0),
     (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
@@ -391,31 +387,31 @@ const BOTTOM_ROW: [(i32, i32, i32); 5] = [
     (ID_APPLY, BOTTOM_APPLY_X, BOTTOM_BTN_DY),
     (ID_QUIT, PAD, BOTTOM_BTN_DY),
 ];
-/// One scroll line, 96-DPI px.
+/// The height of one scroll line at 96 DPI.
 const SCROLL_LINE: i32 = 20;
-/// Lines per wheel notch.
+/// The number of scroll lines per wheel notch.
 const WHEEL_LINES: i32 = 3;
 
 // ---- Dictionaries tab ----
 
-/// One line above each list.
+/// The height of one text line above each list.
 const DICT_CAP_H: i32 = 18;
-/// Beside a four-button column.
+/// The dictionary list height matches a column of four buttons.
 const DICT_LIST_H: i32 = 3 * BTN_PITCH + ROW_H;
-/// Six 17px rows plus border.
+/// The list has space for six 17-pixel rows and a border.
 const _: () = assert!((DICT_LIST_H - 2) / 17 >= 6);
 
-/// One section's group height.
+/// The group height for one section.
 ///
-/// The strategy row is Frequency's alone: it is the rule that reduces
-/// *that* list, and drawing it anywhere else would claim it reduces the
-/// other two as well (ADR-0014).
+/// The strategy row belongs to the Frequency list only. It gives the rule
+/// for that list. If the row appeared elsewhere, users can think that it
+/// also reduces the other two lists. Refer to ARCHITECTURE.md#dictionary-and-lookup.
 fn role_group_h(role: Role) -> i32 {
     let strategy = if role == Role::Frequency { ROW_H + ROW_GAP } else { 0 };
     20 + DICT_CAP_H + strategy + DICT_LIST_H + 8
 }
 
-// ---- field-map columns ----
+// ---- Field-map columns ----
 
 const COL_GAP: i32 = 12;
 const COL_AREA_W: i32 = WIN_W - 2 * PAD - 20;
@@ -428,38 +424,38 @@ const COL_LABEL_MAX_CHARS: usize = 18;
 
 // ---- Plugins tab ----
 
-/// Wraps a long refusal reason.
+/// The status area height allows a long refusal reason.
 const PLUGIN_STATUS_H: i32 = ROW_H + 16;
-/// One plugin row's own height.
+/// The height of one plugin row.
 const PLUGIN_ROW_H: i32 = 2 * ROW_H + PLUGIN_STATUS_H;
 
-/// One role's section, as the ids it owns.
+/// A Section owns one role and its control identifiers.
 ///
-/// The three sections differ only in which controls they own, and a Win32
-/// control is reached by its id, so this table *is* the section: `build`
-/// creates from it, `WM_NOTIFY` routes a notification back through it, and
-/// `move_selected` and `update_list_buttons` act on it. A second list that
-/// merely agreed with this one today would act on the wrong section the
-/// day either gained a control.
+/// The three sections differ only in their control identifiers.
+/// Win32 identifies controls by their identifiers. The table defines each section.
+/// `build` creates controls from this table. `WM_NOTIFY` routes notifications
+/// through this table. `move_selected` and `update_list_buttons` use this table.
+/// A second list can diverge and select the wrong section.
 struct Section {
     role: Role,
-    /// The ListView.
+    /// The ListView control.
     list: i32,
     up: i32,
     down: i32,
     add: i32,
     remove: i32,
-    /// The group box's own caption.
+    /// The caption of the group box.
     group: &'static str,
-    /// One line above the list.
+    /// The text line above the list.
     hint: &'static str,
 }
 
-/// The three sections, stacked in [`Role::EVERY`] order.
+/// The three sections use [`Role::EVERY`] order.
 ///
-/// One list per role, each with its own order and its own checkbox: a
-/// mixed archive is a row in every section it has data for, and unticking
-/// its definitions may not silently kill its frequency data (ADR-0014).
+/// Each role has one list with its own order and checkbox. A mixed archive
+/// appears in each section that provides its data. The window must not disable
+/// its frequency data when the user clears its definitions
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 const SECTIONS: [Section; 3] = [
     Section {
         role: Role::Terms,
@@ -493,12 +489,12 @@ const SECTIONS: [Section; 3] = [
     },
 ];
 
-/// The section a list id names.
+/// Returns the Section for a list identifier.
 fn section_of_list(id: i32) -> Option<&'static Section> {
     SECTIONS.iter().find(|s| s.list == id)
 }
 
-/// The section a Move button belongs to, and the way it moves.
+/// Returns the Section for a Move button and its direction.
 fn move_button(id: i32) -> Option<(&'static Section, bool)> {
     SECTIONS.iter().find_map(|s| {
         if s.up == id {
@@ -511,26 +507,26 @@ fn move_button(id: i32) -> Option<(&'static Section, bool)> {
     })
 }
 
-/// The section a Remove button belongs to.
+/// Returns the Section for a Remove button.
 fn remove_button(id: i32) -> Option<&'static Section> {
     SECTIONS.iter().find(|s| s.remove == id)
 }
 
-/// Does this id name an Add button?
+/// Checks whether an identifier names an Add button.
 ///
-/// One answer for all three, because an import lands in the lists its
-/// roles name and never in the one whose button was pressed: the button is
-/// per section only so the user need not leave the section to import.
+/// One handler returns one result for all three buttons. Imported data
+/// populates lists by role name, not by clicked button. Each section has a
+/// button, so users can import data from that section.
 fn is_add_button(id: i32) -> bool {
     SECTIONS.iter().any(|s| s.add == id)
 }
 
-/// A click to service.
+/// Lists click events to process.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    /// The archive's roles pick the lists.
+    /// Archive roles select the lists that receive the data.
     Add,
-    /// Out of every list, whichever section asked.
+    /// The handler removes the item from all lists, regardless of its section.
     Remove(Role),
     ConfigureEngine,
 }
@@ -539,29 +535,30 @@ fn class_name() -> PCWSTR {
     w!("ChibipopSettingsClass")
 }
 
-/// Viewport and content pane.
+/// Returns the viewport and content pane handles.
 fn pane_class_name() -> PCWSTR {
     w!("ChibipopSettingsPaneClass")
 }
 
-/// Scale a 96-DPI value.
+/// Scales a 96-DPI value for the current display DPI.
 ///
-/// We are PER_MONITOR_AWARE_V2.
+/// The application uses PER_MONITOR_AWARE_V2 mode.
 fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
-    // SAFETY: FFI call on a live window handle; returns 96 for an invalid one,
-    // which degrades to no scaling rather than to a wrong size.
+    // SAFETY: The FFI call accepts a window handle. An invalid handle returns
+    // 0, and the caller then uses 96 DPI. The fallback leaves the size unchanged.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let dpi = if dpi == 0 { 96 } else { dpi };
     (v as i64 * dpi as i64 / 96) as i32
 }
 
-/// Monitor work-area height.
+/// Gets the monitor work-area height.
 ///
-/// Physical px; None if unknown.
+/// The function measures physical pixels. It returns None when the height is
+/// unknown.
 fn work_area_height(hwnd: HWND) -> Option<i32> {
-    // SAFETY: `hwnd` need not be valid - MonitorFromWindow falls back
-    // to the nearest monitor either way, and `mi` is sized by its own
-    // `cbSize`, which is the contract GetMonitorInfoW checks.
+    // SAFETY: `hwnd` can be invalid because MonitorFromWindow selects
+    // the nearest monitor. `mi` sets `cbSize` to its structure size,
+    // as GetMonitorInfoW requires.
     unsafe {
         let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO {
@@ -574,13 +571,14 @@ fn work_area_height(hwnd: HWND) -> Option<i32> {
     }
 }
 
-/// A window's client height.
+/// Gets the client-area height of a window.
 ///
-/// Physical px; 0 if unknown.
+/// The value uses physical pixels. The function returns 0 when the height is
+/// unknown.
 fn client_h(hwnd: HWND) -> i32 {
-    // SAFETY: `rc` is a stack local the call only writes through; a failure
-    // leaves it zeroed, which reads as an unknown height rather than a wrong
-    // one. `hwnd` need not be valid - the call reports `Err` for a stale one.
+    // SAFETY: `rc` is local stack storage that the call updates.
+    // A failure leaves `rc` zeroed, which gives an unknown height.
+    // `GetClientRect` returns `Err` when `hwnd` is stale.
     unsafe {
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
@@ -588,25 +586,22 @@ fn client_h(hwnd: HWND) -> i32 {
     }
 }
 
-/// Pins the bottom row.
+/// Positions the bottom row.
 ///
-/// The row sits a fixed distance
-/// above the client bottom, so
-/// no tab's height can move it.
-/// The band above takes what is
-/// left, so a tall tab scrolls.
+/// The row stays a fixed distance above the bottom of the client area. Tab
+/// height does not affect row position. The upper area fills the space that
+/// remains, so tall tabs scroll.
 fn place_bottom(hwnd: HWND) {
     let ch = client_h(hwnd);
     if ch <= 0 {
         return;
     }
     let top = ch - dpi_scale(hwnd, BOTTOM_H + PAD);
-    // SAFETY: every id in `BOTTOM_ROW` names a direct child of `hwnd`, made
-    // in `build`; before that `GetDlgItem` yields `Err` rather than a
-    // dangling handle, and `panes` states the same contract for the band.
-    // `SWP_NOSIZE` leaves each control's size alone, `SWP_NOMOVE` leaves the
-    // band's origin alone, and `SWP_NOZORDER` keeps the seat `place_viewport`
-    // chose.
+    // SAFETY: Each identifier in `BOTTOM_ROW` names a direct child that
+    // `hwnd` created in `build`. `GetDlgItem` returns `Err` on failure.
+    // `panes` has the same contract. `SWP_NOSIZE` keeps control sizes,
+    // `SWP_NOMOVE` keeps the band origin, and `SWP_NOZORDER` keeps
+    // the z-order position from `place_viewport`.
     unsafe {
         for (id, x, dy) in BOTTOM_ROW {
             let Ok(c) = GetDlgItem(Some(hwnd), id) else {
@@ -635,39 +630,38 @@ fn place_bottom(hwnd: HWND) {
             band,
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
-        // The page it ranged by moved.
+        // The page position changed, so repage the viewport.
         repage(hwnd, viewport);
     }
 }
 
-/// Re-pages after a resize.
+/// Updates the page size after a window resize.
 ///
-/// Keeps the range, takes the new
-/// band as the page, so the
-/// scrollbar stays the only copy.
+/// The function keeps the scroll range and updates the page size to the new
+/// band height. The scrollbar remains the single source of truth.
 fn repage(hwnd: HWND, viewport: HWND) {
     let mut si = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
         fMask: SIF_RANGE,
         ..Default::default()
     };
-    // SAFETY: `si` is initialised with its own size and passed by mutable
-    // pointer for the call's duration only. `set_scroll_range` takes a height
-    // and stores it as `nMax + 1`, so reading it back this way is exact.
+    // SAFETY: `si` starts with its own size and the call receives a mutable
+    // pointer. `set_scroll_range` stores the height as `nMax + 1`, so this
+    // read returns the exact height.
     if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
         return;
     }
     set_scroll_range(hwnd, si.nMax + 1, client_h(viewport));
 }
 
-/// Slides the content pane.
+/// Scrolls the content pane vertically.
 ///
-/// `y` is physical px, <= 0.
+/// `y` is a physical-pixel coordinate that is less than or equal to 0.
 fn move_content(hwnd: HWND, y: i32) {
-    // SAFETY: `panes` states its own contract and yields `Err` rather than a
-    // dangling handle; the pane it returns is a live descendant of `hwnd`,
-    // destroyed only with it. `SWP_NOSIZE` leaves the band height alone and
-    // `SWP_NOZORDER` keeps the seat `place_viewport` chose.
+    // SAFETY: `panes` returns `Err` on failure. The returned pane is a
+    // valid descendant of `hwnd` that stays valid until window destruction.
+    // `SWP_NOSIZE` keeps the band height, and `SWP_NOZORDER` keeps
+    // the z-order position from `place_viewport`.
     unsafe {
         let Ok((_, content)) = panes(hwnd) else {
             return;
@@ -684,14 +678,11 @@ fn move_content(hwnd: HWND, y: i32) {
     }
 }
 
-/// Re-ranges the scrollbar.
+/// Recalculates the scrollbar range.
 ///
-/// Physical px. `content_h` is the
-/// SELECTED tab's, so a short tab
-/// needs no scrollbar. `view_h` is
-/// the viewport's own, read not
-/// assumed. Position resets to 0:
-/// the pane it described changed.
+/// The dimensions use physical pixels. `content_h` gives the selected tab
+/// height, so short tabs need no scrollbar. `view_h` comes from the viewport.
+/// The position resets to 0 because pane content changed.
 fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32) {
     let si = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
@@ -702,86 +693,83 @@ fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32) {
         nPos: 0,
         ..Default::default()
     };
-    // SAFETY: `hwnd` is the settings window and `si` is a fully initialised
-    // local passed by const pointer; `SetScrollInfo` only reads it, and only
-    // for the duration of the call.
+    // SAFETY: `hwnd` is the settings window. `si` is initialized and passed
+    // as a const pointer. `SetScrollInfo` reads `si` during the call.
     unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
     move_content(hwnd, 0);
 }
 
-/// Moves to a new position.
+/// Moves the scroll position.
 ///
-/// `pick` reads the live info and
-/// names the position it wants.
+/// `pick` reads current scroll info and selects the target position.
 fn scroll_to(hwnd: HWND, pick: impl FnOnce(&SCROLLINFO) -> i32) {
     let mut si = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
         fMask: SIF_ALL,
         ..Default::default()
     };
-    // SAFETY: `si` is initialised with its own size and passed by mutable
-    // pointer for the call's duration only. Reading the position back is what
-    // keeps the scrollbar the single source of truth.
+    // SAFETY: The code initializes `si` with its own size and passes a mutable
+    // pointer. The returned position remains the scrollbar's single source of truth.
     if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
         return;
     }
     let old = si.nPos;
-    // Negative when content fits.
+    // A negative value means that content fits without a scrollbar.
     let max = (si.nMax - si.nPage as i32 + 1).max(0);
     si.nPos = pick(&si).clamp(0, max);
     if si.nPos == old {
         return;
     }
     si.fMask = SIF_POS;
-    // SAFETY: same contract as `set_scroll_range`.
+    // SAFETY: `SetScrollInfo` has the same contract as `set_scroll_range`.
     unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
     move_content(hwnd, -si.nPos);
 }
 
 thread_local! {
-    // Pending outcome, by `HWND`.
+    // Stores the queued outcome for an `HWND`.
     static OUTCOME: Cell<Option<(isize, SettingsOutcome)>> = const { Cell::new(None) };
 
-    // The pending Add or Remove.
+    // Stores a queued Add or Remove action.
     static ACTION: Cell<Option<(isize, Action)>> = const { Cell::new(None) };
 
-    // Pending Anki/update click.
+    // Stores a queued Anki or update click event.
     static CLICK: Cell<Option<(isize, SettingsClick)>> = const { Cell::new(None) };
 
-    // Pending tab switch.
+    // Stores a queued tab switch index.
     static TAB: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
 
-    // Key capture: hwnd + ctrl id.
+    // Stores key capture state for a window handle and control identifier.
     static CAPTURING: Cell<Option<(isize, i32)>> = const { Cell::new(None) };
 
-    // Button text before capture.
+    // Stores button text before key capture.
     static CAPTURE_PREV: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
 
-    // Captured vkcode, by `HWND`.
+    // Stores the captured virtual key code for each `HWND`.
     static CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
-    // Anki add-key vk, by `HWND`.
+    // Stores the Anki add virtual key code for each `HWND`.
     static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
-    // Static region key vk.
+    // Stores the Static region virtual key code for each `HWND`.
     static SR_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
-    // OCR clipboard key vk.
+    // Stores the OCR clipboard virtual key code for each `HWND`.
     static OCR_CLIP_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
-    // Field-map toggle click, by `HWND`.
+    // Stores the field-map toggle click flag for each `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
 
-    // Pending Anki-model switch.
+    // Stores a queued Anki model selection.
     static ANKI_MODEL_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
-    // Pending OCR-language switch.
+    // Stores a queued OCR language selection.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
-    // Plugin dirs, by `HWND`.
+    // Stores plugin directories for each `HWND`.
     static PLUGIN_DIRS: RefCell<Option<(isize, Vec<PathBuf>)>> = const { RefCell::new(None) };
 
-    // The row being dragged, by `HWND`.
+    // Stores active drag-row state for each `HWND`.
     static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
 }
 
@@ -791,10 +779,9 @@ fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
 
 fn record_action(hwnd: HWND, action: Action) {
     ACTION.with(|c| c.set(Some((hwnd.0 as isize, action))));
-    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
-    // live for the duration of this call. WM_NULL carries no payload and is
-    // discarded by `DefWindowProcW`; posting it only ends the caller's
-    // `GetMessageW` block so `pump` runs without waiting for other input.
+    // SAFETY: The window procedure handles `hwnd`, so it stays valid during
+    // this call. WM_NULL has no payload, and `DefWindowProcW` discards it.
+    // WM_NULL wakes `GetMessageW`, so `pump` runs immediately.
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
@@ -810,8 +797,8 @@ fn record_field_map_toggle(hwnd: HWND) {
 
 fn record_anki_model_change(hwnd: HWND) {
     ANKI_MODEL_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
-    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
-    // live for this call. WM_NULL only wakes the app pump.
+    // SAFETY: The window procedure handles `hwnd`, so it stays valid during
+    // this call. WM_NULL wakes the application message pump.
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
@@ -821,7 +808,7 @@ fn remember_plugin_dirs(hwnd: HWND, dirs: Vec<PathBuf>) {
     PLUGIN_DIRS.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, dirs)));
 }
 
-/// The dir a Configure id names.
+/// Returns the directory for a Configure button identifier.
 fn plugin_dir_at(hwnd: HWND, idx: usize) -> Option<PathBuf> {
     PLUGIN_DIRS.with(|c| match &*c.borrow() {
         Some((h, dirs)) if *h == hwnd.0 as isize => dirs.get(idx).cloned(),
@@ -829,22 +816,22 @@ fn plugin_dir_at(hwnd: HWND, idx: usize) -> Option<PathBuf> {
     })
 }
 
-/// Configure button's index.
+/// Returns the index for a Configure button.
 fn plugin_configure_idx(id: i32) -> Option<usize> {
     (ID_PLUGIN_CONFIGURE_BASE..ID_PLUGIN_CONFIGURE_BASE + PLUGIN_ID_SPAN)
         .contains(&id)
         .then(|| (id - ID_PLUGIN_CONFIGURE_BASE) as usize)
 }
 
-/// Opens it in Explorer.
+/// Opens the directory in File Explorer.
 unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
     let Some(dir) = plugin_dir_at(hwnd, idx) else {
         return;
     };
     let path = wide(&dir.to_string_lossy());
-    // SAFETY: `path` is NUL-terminated UTF-16 valid for the
-    // call; the OS only reads it, and a bad path just fails
-    // to open rather than causing UB.
+    // SAFETY: `path` is a null-terminated UTF-16 string valid for the
+    // call. The operating system only reads the buffer. An invalid path
+    // fails to open and does not cause undefined behavior.
     unsafe {
         let _ = ShellExecuteW(
             Some(hwnd),
@@ -857,7 +844,7 @@ unsafe fn open_plugin_dir(hwnd: HWND, idx: usize) {
     }
 }
 
-/// Sets or appends the path.
+/// Sets the folder path or appends it when absent.
 fn set_config_path(existing: &str, path: &str) -> String {
     let escaped = path.replace('\\', "\\\\");
     let new_line = format!("meikiocr_path = \"{escaped}\"");
@@ -883,9 +870,9 @@ fn set_config_path(existing: &str, path: &str) -> String {
     result
 }
 
-/// Pick a folder via file dialog.
+/// Selects a folder with a file dialog.
 ///
-/// `None` if cancelled.
+/// Returns `None` when the user cancels the dialog.
 unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
     let mut buf = vec![0u16; 1024];
     let filter: Vec<u16> = "Any file\0*.*\0\0".encode_utf16().collect();
@@ -901,7 +888,7 @@ unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
         Flags: OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
         ..Default::default()
     };
-    // SAFETY: same contract as `pick_archives`.
+    // SAFETY: `ofn` contains pointers to buffers that outlive this call.
     let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
     if !picked {
         return None;
@@ -914,22 +901,19 @@ unsafe fn pick_folder(owner: HWND, title: &str) -> Option<PathBuf> {
 
 fn record_language_change(hwnd: HWND) {
     LANG_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
-    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
-    // live for the duration of this call. WM_NULL carries no payload and is
-    // discarded by `DefWindowProcW`; posting it only ends the caller's
-    // `GetMessageW` block so `pump` re-scopes the list without waiting for
-    // other input.
+    // SAFETY: The window procedure handles `hwnd`, so it stays valid during
+    // this call. WM_NULL has no payload, and `DefWindowProcW` discards it.
+    // WM_NULL wakes `GetMessageW`, so `pump` updates the list.
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
 }
 
-/// Starts capture mode.
+/// Starts key capture mode.
 unsafe fn begin_capture(hwnd: HWND, id: i32) {
-    // SAFETY: `id` is a key-capture button
-    // id, a live descendant of `hwnd`;
-    // `window_text` / `SetWindowTextW`
-    // state their own contracts.
+    // SAFETY: `id` is a key capture button identifier and a valid
+    // descendant of `hwnd`. `window_text` and `SetWindowTextW` define
+    // their own safety contracts.
     unsafe {
         let Ok(btn) = dlg_item(hwnd, id) else { return };
         let prev = window_text(btn);
@@ -939,11 +923,11 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
     }
 }
 
-/// Ends capture, unchanged.
+/// Ends key capture mode without changes.
 unsafe fn cancel_capture(hwnd: HWND) {
-    // SAFETY: `id` came from `CAPTURING`, only ever set by
-    // `begin_capture` to a live descendant of `hwnd`; the stashed text
-    // was captured from that same control.
+    // SAFETY: `id` originates from `CAPTURING`, which `begin_capture` sets
+    // to a valid descendant of `hwnd`. The saved text originates from that
+    // same control.
     unsafe {
         let mine = hwnd.0 as isize;
         let captured = CAPTURING
@@ -966,12 +950,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             let notify = (wparam.0 >> 16) as u16;
-            // Any click cancels capture.
+            // Any mouse click cancels key capture mode.
             unsafe { cancel_capture(hwnd) };
-            // A role list reports through WM_NOTIFY, so nothing a list
-            // itself does arrives here any more. Its buttons still do, and
-            // which section each one belongs to is `SECTIONS`' answer
-            // rather than a second table of ids that would have to agree.
+            // Role lists report events through WM_NOTIFY. List events do not
+            // arrive here. `SECTIONS` defines each button association.
             if let Some((section, up)) = move_button(id) {
                 unsafe { move_selected(hwnd, section, up) };
                 return LRESULT(0);
@@ -1005,9 +987,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             match id {
-                // 1 is IDOK: Enter, not the id.
+                // The value 1 represents IDOK from the Enter key, not a control identifier.
                 ID_APPLY | 1 => record_outcome(hwnd, SettingsOutcome::Apply),
-                // Escape. X goes via WM_CLOSE.
+                // The value 2 represents the Escape key. Window close uses WM_CLOSE.
                 2 => record_outcome(hwnd, SettingsOutcome::Cancel),
                 ID_QUIT => record_outcome(hwnd, SettingsOutcome::Quit),
                 ID_ENGINE_CONFIGURE => record_action(hwnd, Action::ConfigureEngine),
@@ -1032,9 +1014,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_NOTIFY => {
-            // SAFETY: `lparam` is a pointer to an NMHDR (or a larger struct
-            // whose first member is NMHDR); the OS guarantees this for any
-            // WM_NOTIFY the system sends.
+            // SAFETY: `lparam` points to an NMHDR structure or to a structure
+            // with an NMHDR first member. The operating system guarantees this
+            // layout for WM_NOTIFY messages.
             let nmhdr = unsafe { &*(lparam.0 as *const NmhdrRaw) };
             if nmhdr.code == TCN_SELCHANGE_CODE && nmhdr.id_from == ID_TAB as usize {
                 let tab = unsafe {
@@ -1042,29 +1024,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 };
                 TAB.with(|c| c.set(Some((hwnd.0 as isize, tab))));
             }
-            // Both halves of a row arrive as this one notification: the
-            // arrows and a click move the selection, and the space bar and
-            // a click on the box move the checkbox. Only the selection can
-            // stale a Move button, but re-greying off either is one branch
-            // instead of two, and a tick needs no bookkeeping of its own -
-            // the control is where a row's enabled flag lives until `read`
-            // asks for it.
+            // Arrow keys and clicks change row selection. The space bar and
+            // checkbox clicks change checkbox state. Both actions trigger
+            // this notification. Only selection changes affect Move button
+            // state, but one branch updates buttons for either change.
+            // The control stores enabled state until `read` queries it.
             if nmhdr.code == LVN_ITEMCHANGED
                 && section_of_list(nmhdr.id_from as i32).is_some()
             {
                 unsafe { update_list_buttons(hwnd) };
             }
-            // A drag starts here and is tracked below: the control decides
-            // that a press has become a drag and then tracks nothing
-            // itself, so from this notification on the gesture is this
-            // window's. Which section it belongs to is `SECTIONS`' answer,
-            // and it is the *only* list the drop can land in.
+            // Drag operations start here and continue below. The control detects
+            // a drag gesture but does not track movement.
+            // The window procedure tracks the rest of the gesture. `SECTIONS` identifies
+            // the target section. A drop cannot enter another list.
             if nmhdr.code == LVN_BEGINDRAG {
                 if let Some(section) = section_of_list(nmhdr.id_from as i32) {
-                    // SAFETY: LVN_BEGINDRAG's `lparam` is an NMLISTVIEW,
-                    // whose first member is the NMHDR just read; the
-                    // control guarantees this for the notification it
-                    // names.
+                    // SAFETY: For LVN_BEGINDRAG, `lparam` points to an
+                    // NMLISTVIEW structure whose first member is NMHDR.
+                    // The control guarantees this layout for this notification.
                     let nm = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
                     let origin = (nm.ptAction.x, nm.ptAction.y);
                     unsafe { begin_drag(hwnd, section, nm.iItem, origin) };
@@ -1072,9 +1050,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
-        // The three below only exist while a row is being dragged, so each
-        // is claimed only then: with no drag in progress they are the
-        // default handler's, unchanged.
+        // These three messages apply only during an active row drag.
+        // Without an active drag, the default handler processes them.
         WM_MOUSEMOVE if drag_of(hwnd).is_some() => {
             unsafe { track_drag(hwnd) };
             LRESULT(0)
@@ -1088,7 +1065,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SIZE => {
-            // The clamp lands here too.
+            // The position clamp also routes to this branch.
             place_bottom(hwnd);
             LRESULT(0)
         }
@@ -1106,15 +1083,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
-            // Signed high word; low is keys.
+            // The high word contains the signed delta. The low word contains key state.
             let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
             let step = delta / WHEEL_DELTA as i32 * WHEEL_LINES * dpi_scale(hwnd, SCROLL_LINE);
-            // Forward scrolls towards the top.
+            // Wheel rotation moves the content toward the top.
             scroll_to(hwnd, |si| si.nPos - step);
             LRESULT(0)
         }
         WM_CLOSE => {
-            // Same outcome as Escape.
+            // The message produces the same outcome as the Escape key.
             record_outcome(hwnd, SettingsOutcome::Cancel);
             LRESULT(0)
         }
@@ -1122,9 +1099,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Once per process.
+/// Registers the window class once per process.
 ///
-/// Latch only after success.
+/// Sets the registration flag only after success.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -1132,10 +1109,9 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the `..Default`
-    // spread zeroes every field not set here); `lpfnWndProc` points at a
-    // `'static extern "system" fn` valid for the process lifetime, which is
-    // what the OS requires.
+    // SAFETY: `wc` is an initialized `WNDCLASSEXW` structure with unset fields
+    // set to zero. `lpfnWndProc` points to an extern system function that stays
+    // valid for the process lifetime, as the operating system requires.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1157,9 +1133,9 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Both panes use this.
+/// Handles messages for both panes.
 ///
-/// Only what `wndproc` claims.
+/// It forwards only messages that `wndproc` handles.
 unsafe extern "system" fn pane_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -1168,27 +1144,26 @@ unsafe extern "system" fn pane_wndproc(
 ) -> LRESULT {
     match msg {
         WM_COMMAND | WM_NOTIFY => {
-            // SAFETY: `hwnd` is a live pane created by this module, and its
-            // parent outlives it - the parent creates it and the OS destroys
-            // it with the parent. `GetParent` reports `Err` rather than
-            // handing back a stale handle, and that case forwards nothing.
+            // SAFETY: `hwnd` is a valid pane window that this module created.
+            // The parent window outlives this pane. `GetParent` returns `Err`
+            // on failure. The code forwards no message for an invalid handle.
             let parent = unsafe { GetParent(hwnd) };
             match parent {
-                // SAFETY: `p` is the live parent just returned above;
-                // `wparam` and `lparam` are passed on unchanged, so their
-                // meaning is the one the original sender gave them.
+                // SAFETY: `p` is the valid parent handle returned above.
+                // The code passes `wparam` and `lparam` unchanged.
+                // The original message semantics remain.
                 Ok(p) => unsafe { SendMessageW(p, msg, Some(wparam), Some(lparam)) },
                 Err(_) => LRESULT(0),
             }
         }
-        // SAFETY: default handling of a message this proc does not claim.
+        // SAFETY: `DefWindowProcW` handles messages that this procedure does not handle.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-/// Once per process.
+/// Registers the pane window class once per process.
 ///
-/// Latch only after success.
+/// Sets the registration flag only after success.
 unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -1196,10 +1171,9 @@ unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the `..Default`
-    // spread zeroes every field not set here); `lpfnWndProc` points at a
-    // `'static extern "system" fn` valid for the process lifetime, which is
-    // what the OS requires.
+    // SAFETY: `wc` is an initialized `WNDCLASSEXW` structure with unset fields
+    // set to zero. `lpfnWndProc` points to an extern system function that stays
+    // valid for the process lifetime, as the operating system requires.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1221,16 +1195,16 @@ unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// The shell's own UI font.
+/// Gets the system user interface font.
 ///
-/// `None` leaves the default.
+/// Returns `None` to keep the default font.
 unsafe fn ui_font() -> Option<HFONT> {
     let mut ncm = NONCLIENTMETRICSW {
         cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
         ..Default::default()
     };
-    // SAFETY: `ncm` is stack storage of exactly the size declared in its own
-    // `cbSize` field, which is the contract this call checks.
+    // SAFETY: `ncm` is stack storage with a size that matches its `cbSize`
+    // field, as the SystemParametersInfoW contract requires.
     let ok = unsafe {
         SystemParametersInfoW(
             SPI_GETNONCLIENTMETRICS,
@@ -1243,7 +1217,7 @@ unsafe fn ui_font() -> Option<HFONT> {
     if !ok {
         return None;
     }
-    // SAFETY: `lfMessageFont` was populated by the call above.
+    // SAFETY: `SystemParametersInfoW` populated `lfMessageFont` above.
     let font = unsafe { CreateFontIndirectW(&ncm.lfMessageFont) };
     if font.is_invalid() {
         None
@@ -1252,16 +1226,15 @@ unsafe fn ui_font() -> Option<HFONT> {
     }
 }
 
-/// Fonts that may render kana.
+/// Lists fonts that can display Japanese kana glyphs.
 ///
-/// No coverage guarantee.
-/// `@` = vertical duplicates.
+/// Glyph coverage is not guaranteed.
+/// A font name that starts with `@` represents a vertical layout variant.
 pub fn japanese_font_families() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    // SAFETY: `lf` and `out` are stack/owned data that outlive the call;
-    // `EnumFontFamiliesExW` invokes the callback synchronously on this thread
-    // for the duration of this call only, so the `&mut Vec` it is handed
-    // cannot dangle. The device context is released on every path.
+    // SAFETY: `lf` and `out` are local storage that outlives the call.
+    // `EnumFontFamiliesExW` calls the callback synchronously on this thread,
+    // so its `&mut Vec` stays valid. `ReleaseDC` runs on every path.
     unsafe {
         let hdc = GetDC(None);
         let lf = LOGFONTW {
@@ -1288,9 +1261,9 @@ unsafe extern "system" fn enum_font_cb(
     _kind: u32,
     lparam: LPARAM,
 ) -> i32 {
-    // SAFETY: the OS passes a valid `ENUMLOGFONTEXW` and the `lparam` this
-    // callback was registered with, which `japanese_font_families` set to a
-    // live `&mut Vec<String>` that outlives the enumeration.
+    // SAFETY: The operating system passes a valid `ENUMLOGFONTEXW` pointer
+    // and the `lparam` value. `japanese_font_families` supplies an
+    // `&mut Vec<String>` pointer that outlives font enumeration.
     unsafe {
         let elf = &*(lf as *const ENUMLOGFONTEXW);
         let name = String::from_utf16_lossy(
@@ -1308,9 +1281,9 @@ unsafe extern "system" fn enum_font_cb(
     1
 }
 
-/// Combo rows: name, tag.
+/// Builds combo box rows with a name and tag.
 ///
-/// D4: absent tag kept, marked.
+/// Decision D4: The function preserves and marks absent tags.
 fn language_choices(installed: Vec<(String, String)>, configured: &str) -> Vec<(String, String)> {
     let mut out = installed;
     if !configured.is_empty() && !out.iter().any(|(_, tag)| tag_matches(tag, configured)) {
@@ -1322,7 +1295,7 @@ fn language_choices(installed: Vec<(String, String)>, configured: &str) -> Vec<(
     out
 }
 
-/// Row holding `configured`.
+/// Returns the row index that contains the `configured` value.
 fn language_index(rows: &[(String, String)], configured: &str) -> Option<usize> {
     if configured.is_empty() {
         return None;
@@ -1335,7 +1308,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// One child control, UI font.
+/// Creates a child control with the standard user interface font.
 #[allow(clippy::too_many_arguments)]
 unsafe fn child(
     parent: HWND,
@@ -1349,9 +1322,8 @@ unsafe fn child(
     id: i32,
     font: Option<HFONT>,
 ) -> WinResult<HWND> {
-    // SAFETY: `parent` is this window's live handle; `text` is copied by the
-    // OS during the call; `id` is passed as the menu handle, the documented
-    // meaning for a child window.
+    // SAFETY: `parent` is a valid window handle. The operating system copies
+    // `text` during the call. `id` acts as the child window identifier menu parameter.
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -1369,8 +1341,8 @@ unsafe fn child(
         )?
     };
     if let Some(f) = font {
-        // SAFETY: `hwnd` was just created; `WM_SETFONT` copies nothing and
-        // the font outlives the window (it is destroyed in `Drop`).
+        // SAFETY: `hwnd` was created above. `WM_SETFONT` performs no pointer
+        // copy, and the font outlives the window until destruction in `Drop`.
         unsafe {
             SendMessageW(
                 hwnd,
@@ -1383,20 +1355,15 @@ unsafe fn child(
     Ok(hwnd)
 }
 
-/// A control by id, pane or not.
+/// Finds a control by identifier across panes.
 ///
-/// `GetDlgItem` stops at direct
-/// children. Page controls are
-/// grandchildren of the window,
-/// inside the two panes.
+/// `GetDlgItem` inspects direct child windows only. Tab page controls are
+/// child windows of the internal viewport panes.
 unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
-    // SAFETY: `root` is the settings window's live handle; every `GetDlgItem`
-    // result is checked, so a missing pane or control yields `Err` here rather
-    // than a dangling handle. Every caller passes a named `ID_*`, each unique
-    // and non-zero. The id 0 that group boxes and labels share now sits only
-    // on the content pane - the Updates box took `ID_UPDATES` so
-    // `place_bottom` can reach it - and nothing ever looks 0 up anyway, so
-    // searching the window first cannot return the wrong control.
+    // SAFETY: `root` is a valid window handle. The function checks each
+    // `GetDlgItem` result and returns `Err` when a control is absent.
+    // Callers supply unique non-zero `ID_*` constants. Shared identifier 0
+    // exists only on the content pane, so the root search finds the correct control.
     unsafe {
         if let Ok(c) = GetDlgItem(Some(root), id) {
             return Ok(c);
@@ -1406,11 +1373,10 @@ unsafe fn dlg_item(root: HWND, id: i32) -> WinResult<HWND> {
     }
 }
 
-/// The viewport and its content.
+/// Returns the viewport pane and content pane.
 unsafe fn panes(root: HWND) -> WinResult<(HWND, HWND)> {
-    // SAFETY: `root` is the settings window's live handle; both results are
-    // checked, so a window without panes - anything before `build` finishes -
-    // yields `Err` here rather than a dangling handle.
+    // SAFETY: `root` is a valid window handle. The function checks both
+    // lookup results. Windows without initialized panes return `Err` safely.
     unsafe {
         let viewport = GetDlgItem(Some(root), ID_VIEWPORT)?;
         let content = GetDlgItem(Some(viewport), ID_CONTENT)?;
@@ -1418,37 +1384,34 @@ unsafe fn panes(root: HWND) -> WinResult<(HWND, HWND)> {
     }
 }
 
-/// The shift that turns a state-image index into item state.
+/// Converts a state image index to ListView item state with a bit shift.
 ///
-/// A ListView has no check field: the checkbox *is* the item's state
-/// image, index 1 for clear and 2 for ticked, moved into the high nibble
-/// `LVIS_STATEIMAGEMASK` covers. The SDK spells this
-/// `INDEXTOSTATEIMAGEMASK`, which is a macro and so has no symbol the
-/// `windows` crate could re-export.
+/// ListView items have no independent checkbox field. State image 1 represents
+/// cleared, and state image 2 represents checked. The value shifts into the
+/// mask that `LVIS_STATEIMAGEMASK` defines. The Windows SDK defines this
+/// operation as the `INDEXTOSTATEIMAGEMASK` macro.
 const LV_STATE_IMAGE_SHIFT: u32 = 12;
 
-/// The state image a ticked or a clear row carries.
+/// Returns the state image index for a checked or cleared row.
 fn check_state(checked: bool) -> u32 {
     let index: u32 = if checked { 2 } else { 1 };
     index << LV_STATE_IMAGE_SHIFT
 }
 
-/// Does this item state say ticked?
+/// Checks whether item state has a checked checkbox.
 ///
-/// Anything else reads as clear, including the 0 carried by a row that
-/// predates the extended style: a row with no box drawn on it has not
-/// been ticked.
+/// Other values mean cleared. Value 0 occurs when a row was inserted before
+/// extended checkbox style initialization.
 fn state_is_checked(state: u32) -> bool {
     state & LVIS_STATEIMAGEMASK.0 == check_state(true)
 }
 
-/// One role's list, empty and ready to fill.
+/// Creates an empty role ListView control for new items.
 ///
-/// Report view with one nameless column, because report is the only view
-/// `LVS_EX_CHECKBOXES` draws a box in and the row text lives in column 0.
-/// The extended style is applied before any row is inserted: comctl32
-/// builds the state image list when that style arrives, and a row that
-/// predates it gets state image 0 and no box at all.
+/// The control uses report view with one untitled column. Report view is
+/// required for `LVS_EX_CHECKBOXES` checkboxes, and column 0 displays row text.
+/// The code applies the extended style before it adds rows, so comctl32
+/// initializes the state image list correctly.
 unsafe fn make_role_list(
     parent: HWND,
     y: i32,
@@ -1456,9 +1419,9 @@ unsafe fn make_role_list(
     id: i32,
     font: Option<HFONT>,
 ) -> WinResult<HWND> {
-    // SAFETY: `parent` is a live pane owned by the caller and `child`
-    // states its own contract; every message below goes to the control it
-    // just returned, and each struct is fully initialised by `..Default`.
+    // SAFETY: `parent` is a valid pane owned by the caller. `child` creates
+    // the control. Windows messages target the new control, and parameter
+    // structures are initialized with Default.
     unsafe {
         let style = LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER;
         let list = child(parent, WC_LISTVIEW, "", WINDOW_STYLE(style) | WS_TABSTOP | WS_BORDER,
@@ -1469,32 +1432,29 @@ unsafe fn make_role_list(
         let column = LVCOLUMNW { mask: LVCF_WIDTH, ..Default::default() };
         SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(0)),
             Some(LPARAM(&column as *const _ as isize)));
-        // The only column, so this is "take the whole client width" -
-        // otherwise a long dictionary name is clipped at zero.
+        // The single column fills the full client width.
+        // Without this width, the control truncates long dictionary names.
         SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)),
             Some(LPARAM(LVSCW_AUTOSIZE_USEHEADER as isize)));
-        // The drag's insertion mark is drawn by the control, in whatever
-        // colour it was last told; the default is a fixed one and would
-        // vanish against a dark row. The rows' own text colour is the one
-        // that follows the user's theme by definition.
+        // The control draws the drag insertion mark with the configured color.
+        // The default fixed color can disappear against dark theme rows.
+        // Row text color follows the active user theme.
         SendMessageW(list, LVM_SETINSERTMARKCOLOR, None,
             Some(LPARAM(GetSysColor(COLOR_WINDOWTEXT) as isize)));
         Ok(list)
     }
 }
 
-/// One row's own name.
+/// Gets the text of one ListView row.
 ///
-/// A ListView has no "how long is this row" message, so the buffer is
-/// grown until the control stops filling it. Guessing one size and
-/// truncating would be a real bug rather than a cosmetic one: a dictionary
-/// is identified by its exact name now (ADR-0014), so a shortened name is
-/// a different dictionary.
+/// Win32 ListView controls provide no text length query message.
+/// The code enlarges the buffer until the control returns the complete text.
+/// Dictionaries use exact names. Truncated text can reference the wrong
+/// Dictionary. Refer to ARCHITECTURE.md#dictionary-and-lookup.
 unsafe fn lv_text(list: HWND, index: i32) -> String {
-    // SAFETY: `list` is a live ListView owned by the caller; `item` is
-    // fully initialised and its `pszText` points at `buf`, which outlives
-    // the call and is described by `cchTextMax` - the contract
-    // LVM_GETITEMTEXTW writes against.
+    // SAFETY: `list` is a valid ListView handle. `item` is initialized
+    // with `pszText` set to `buf`. `buf` outlives the call, and
+    // `cchTextMax` specifies buffer capacity for LVM_GETITEMTEXTW.
     unsafe {
         let mut buf = vec![0u16; 256];
         loop {
@@ -1512,9 +1472,8 @@ unsafe fn lv_text(list: HWND, index: i32) -> String {
             )
             .0
             .clamp(0, buf.len() as isize) as usize;
-            // A full buffer may have been truncated, so it is not an
-            // answer; 64Ki wide chars is, because no dictionary title is
-            // that long and looping forever is worse than a clipped name.
+            // A full buffer can indicate truncation.
+            // The limit of 64 Ki wide characters bounds allocation size.
             if copied + 1 < buf.len() || buf.len() >= 1 << 16 {
                 return String::from_utf16_lossy(&buf[..copied]);
             }
@@ -1523,11 +1482,11 @@ unsafe fn lv_text(list: HWND, index: i32) -> String {
     }
 }
 
-/// Is this row ticked?
+/// Checks whether a row checkbox is checked.
 unsafe fn lv_checked(list: HWND, index: i32) -> bool {
-    // SAFETY: `list` is a live ListView owned by the caller;
-    // LVM_GETITEMSTATE takes the row in `wparam` and the mask in `lparam`
-    // and answers with the masked state, carrying no pointer either way.
+    // SAFETY: `list` is a valid ListView handle. LVM_GETITEMSTATE takes
+    // the row index in `wparam` and the mask in `lparam`. The call returns
+    // the masked state. The call passes no pointer arguments.
     unsafe {
         let state = SendMessageW(
             list,
@@ -1540,18 +1499,18 @@ unsafe fn lv_checked(list: HWND, index: i32) -> bool {
     }
 }
 
-/// How many rows a list holds.
+/// Returns the total number of rows in the list.
 unsafe fn lv_count(list: HWND) -> i32 {
-    // SAFETY: `list` is a live ListView owned by the caller;
-    // LVM_GETITEMCOUNT carries no payload.
+    // SAFETY: `list` is a valid ListView handle. LVM_GETITEMCOUNT passes
+    // no pointer arguments.
     unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None).0 as i32 }
 }
 
-/// The selected row, or -1.
+/// Returns the selected row index, or -1 when no row is selected.
 unsafe fn lv_selection(list: HWND) -> i32 {
-    // SAFETY: `list` is a live ListView owned by the caller;
-    // LVM_GETNEXTITEM takes the row to search after in `wparam` - all ones
-    // for "from the top" - and answers with a row index or -1.
+    // SAFETY: `list` is a valid ListView handle. LVM_GETNEXTITEM takes
+    // the previous index in `wparam` (-1 searches from start) and returns
+    // a row index or -1.
     unsafe {
         SendMessageW(
             list,
@@ -1563,42 +1522,42 @@ unsafe fn lv_selection(list: HWND) -> i32 {
     }
 }
 
-/// One row: name and checkbox.
+/// Gets the row name and checkbox state.
 unsafe fn lv_row(list: HWND, index: i32) -> DictRow {
-    // SAFETY: `lv_text` and `lv_checked` state their own contracts.
+    // SAFETY: `lv_text` and `lv_checked` meet their safety conditions.
     unsafe { DictRow { name: lv_text(list, index), enabled: lv_checked(list, index) } }
 }
 
-/// Every row of a role's list, or `None` if the control is gone.
+/// Gets all rows of a role list, or `None` when the control is absent.
+///
+/// `id` identifies a descendant of `hwnd`. Absent controls return `Err`, and
+/// `lv_row` meets its safety conditions.
 unsafe fn lv_rows(hwnd: HWND, id: i32) -> Option<Vec<DictRow>> {
-    // SAFETY: `id` names a descendant of `hwnd`; a missing one yields
-    // `Err` here rather than a dangling handle, and `lv_row` states its
-    // own contract.
     unsafe {
         let list = dlg_item(hwnd, id).ok()?;
         Some((0..lv_count(list).max(0)).map(|i| lv_row(list, i)).collect())
     }
 }
 
-/// The row holding `name`, if the list has one.
+/// Finds the row index that matches `name`, if present.
 ///
-/// Compared for equality rather than asked of LVM_FINDITEMW, whose string
-/// search is the control's own and not the exact-name rule the config now
-/// keys on (ADR-0014).
+/// The function compares exact string equality and does not call LVM_FINDITEMW.
+/// Configuration lookup requires exact dictionary names.
+/// Refer to ARCHITECTURE.md#dictionary-and-lookup.
 unsafe fn lv_find(list: HWND, name: &str) -> Option<i32> {
-    // SAFETY: `list` is a live ListView owned by the caller; `lv_text`
-    // states its own contract.
+    // SAFETY: `list` is a valid ListView handle owned by the caller.
+    // `lv_text` meets its safety conditions.
     unsafe { (0..lv_count(list).max(0)).find(|&i| lv_text(list, i) == name) }
 }
 
-/// Overwrite one row in place.
+/// Replaces text and checkbox state of a row in place.
 ///
-/// Text and checkbox both, because a move trades two whole rows: swapping
-/// the names alone would leave each dictionary wearing the other's tick.
+/// A reorder swaps both text and checkbox states. If the code exchanged text
+/// alone, it would attach checkbox state to the wrong Dictionary.
 unsafe fn lv_set(list: HWND, index: i32, row: &DictRow) {
-    // SAFETY: `list` is a live ListView owned by the caller; `item` is
-    // fully initialised and its `pszText` points at a buffer that outlives
-    // the call, which copies the text. `lv_check` states its own contract.
+    // SAFETY: `list` is a valid ListView handle. `item` is initialized,
+    // and `pszText` points to valid memory copied during the call.
+    // `lv_check` meets its safety conditions.
     unsafe {
         let mut text = wide(&row.name);
         let item = LVITEMW {
@@ -1612,15 +1571,13 @@ unsafe fn lv_set(list: HWND, index: i32, row: &DictRow) {
     }
 }
 
-/// Tick or clear one row.
+/// Sets or clears the checkbox for one row.
 ///
-/// Always after the row exists, never folded into inserting it: with
-/// `LVS_EX_CHECKBOXES` comctl32 stamps state image 1 on a new item itself,
-/// so an `LVIF_STATE` an insert carried is overwritten and every imported
-/// dictionary would arrive unticked.
+/// Runs after a row is added. With `LVS_EX_CHECKBOXES`, comctl32
+/// assigns state image 1 to a new item and overwrites the state passed at insert.
 unsafe fn lv_check(list: HWND, index: i32, checked: bool) {
-    // SAFETY: `list` is a live ListView owned by the caller; `item` is
-    // fully initialised and carries no pointer of its own.
+    // SAFETY: `list` is a valid ListView handle. `item` is initialized
+    // and contains no external pointer fields.
     unsafe {
         let item = LVITEMW {
             state: LIST_VIEW_ITEM_STATE_FLAGS(check_state(checked)),
@@ -1632,11 +1589,11 @@ unsafe fn lv_check(list: HWND, index: i32, checked: bool) {
     }
 }
 
-/// Append one row; returns its index.
+/// Appends one row to the list and returns its index.
 unsafe fn lv_append(list: HWND, row: &DictRow) -> i32 {
-    // SAFETY: `list` is a live ListView owned by the caller; `item` is
-    // fully initialised and its `pszText` points at a buffer that outlives
-    // the call, which copies the text. `lv_check` states its own contract.
+    // SAFETY: `list` is a valid ListView handle. `item` is initialized,
+    // and `pszText` points to valid memory copied during the call.
+    // `lv_check` meets its safety conditions.
     unsafe {
         let mut text = wide(&row.name);
         let item = LVITEMW {
@@ -1655,14 +1612,13 @@ unsafe fn lv_append(list: HWND, row: &DictRow) -> i32 {
     }
 }
 
-/// Select and scroll to `index`, or clear the selection when it is < 0.
+/// Selects and scrolls to `index`, or clears selection when index is less than 0.
 ///
-/// Every row is cleared first: LVM_SETITEMSTATE with row -1 is the
-/// documented way to reach them all at once, and a list holding two
-/// selected rows would give the Move buttons two answers.
+/// The function clears all row selections first. LVM_SETITEMSTATE with row -1
+/// updates all rows. The first clear avoids multiple selections that confuse Move buttons.
 unsafe fn lv_select(list: HWND, index: i32) {
-    // SAFETY: `list` is a live ListView owned by the caller; both structs
-    // are fully initialised and neither carries a pointer of its own.
+    // SAFETY: `list` is a valid ListView handle. Both structures are
+    // initialized and carry no pointer members.
     unsafe {
         let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
         let clear = LVITEMW { stateMask: both, ..Default::default() };
@@ -1678,10 +1634,10 @@ unsafe fn lv_select(list: HWND, index: i32) {
     }
 }
 
-/// Refill, selecting `at` or the last row if the list is shorter.
+/// Refills the list and selects `at` or the last row if the list is shorter.
 unsafe fn fill_role_list(list: HWND, rows: &[DictRow], at: i32) {
-    // SAFETY: `list` is a live ListView owned by the caller; `lv_append`
-    // and `lv_select` state their own contracts.
+    // SAFETY: `list` is a valid ListView handle. `lv_append` and
+    // `lv_select` meet their safety conditions.
     unsafe {
         SendMessageW(list, LVM_DELETEALLITEMS, None, None);
         for row in rows {
@@ -1691,12 +1647,12 @@ unsafe fn fill_role_list(list: HWND, rows: &[DictRow], at: i32) {
     }
 }
 
-/// Where a move inside one list would land.
+/// Calculates the target row index for a move operation within one list.
 ///
-/// One list per role makes a move a trade with the neighbour and nothing
-/// else: there is no second box to cross into, and an empty enabled list
-/// is a legitimate "search nothing" rather than a state to defend against
-/// (ADR-0014), so no row is pinned in place to keep one non-empty.
+/// Each role has its own list, so a move swaps an item with its neighbor.
+/// An empty enabled list is a valid configuration that searches no dictionaries.
+/// The code does not force a list to contain an item.
+/// Refer to ARCHITECTURE.md#dictionary-and-lookup.
 fn move_target(len: usize, index: usize, up: bool) -> Option<usize> {
     if index >= len {
         return None;
@@ -1708,11 +1664,10 @@ fn move_target(len: usize, index: usize, up: bool) -> Option<usize> {
     }
 }
 
-/// Can a section's Move button act?
+/// Checks whether a section Move button can move a row.
 ///
-/// `count` and `selection` are the ListView's own answers, and a selection
-/// is negative when the list has none - which is what an emptied list
-/// reports, and what greys both Move buttons.
+/// `count` and `selection` come from the ListView control. A negative
+/// selection means no selected row, so both Move buttons stay disabled.
 fn can_move(count: i32, selection: i32, up: bool) -> bool {
     match (usize::try_from(count), usize::try_from(selection)) {
         (Ok(len), Ok(index)) => move_target(len, index, up).is_some(),
@@ -1720,16 +1675,15 @@ fn can_move(count: i32, selection: i32, up: bool) -> bool {
     }
 }
 
-/// Reorder inside one section.
+/// Reorders rows within one section.
 ///
-/// The two rows are traded in place rather than the list refilled, and the
-/// selection follows the row the user is aiming: a refill empties the list
-/// for an instant, `update_list_buttons` would then see nothing selected,
-/// and the focus would come off the very Move button being pressed.
+/// The function swaps rows in place. It does not refill the list.
+/// The selection follows the moved item. A refill would clear selection
+/// briefly and remove focus from the active Move button.
 unsafe fn move_selected(hwnd: HWND, section: &Section, up: bool) {
-    // SAFETY: `section.list` names a live descendant of `hwnd`, created in
-    // `build`; a missing one yields `Err` rather than a dangling handle,
-    // and each `lv_*` helper states its own contract.
+    // SAFETY: `section.list` identifies a valid descendant of `hwnd`
+    // created in `build`. Absent controls return `Err`, and all
+    // `lv_*` helpers meet their safety conditions.
     unsafe {
         let Ok(list) = dlg_item(hwnd, section.list) else { return };
         let cur = lv_selection(list);
@@ -1748,19 +1702,17 @@ unsafe fn move_selected(hwnd: HWND, section: &Section, up: bool) {
     }
 }
 
-/// Disable what cannot act.
+/// Disables buttons that cannot act.
 ///
-/// Focus is moved onto the list a button belongs to *before* that button is
-/// disabled. A disabled control keeps the focus Windows gave it and the
-/// keyboard then talks to nothing, so pressing Move up until the row
-/// reaches the top would strand the user on a dead button - and reaching
-/// these buttons by keyboard is the whole point of the tab order.
+/// Focus moves to the parent list before the button is disabled.
+/// A disabled control retains Windows focus and drops keyboard input.
+/// The code moves focus so keyboard navigation does not stop on a disabled button.
 unsafe fn update_list_buttons(hwnd: HWND) {
-    // SAFETY: every id below is a live descendant of `hwnd`, created in
-    // `build`, and each `dlg_item` result is checked before use.
+    // SAFETY: Each identifier below names a valid descendant of `hwnd`
+    // created in `build`. Each `dlg_item` lookup is validated.
     unsafe {
-        // Read once: one control holds the focus, so no later button can
-        // match a handle this loop has already moved it off.
+        // Read focus once. Only one control has focus, so later iterations
+        // cannot match a focus handle that already moved.
         let focused = GetFocus();
         for section in &SECTIONS {
             let Ok(list) = dlg_item(hwnd, section.list) else { continue };
@@ -1769,9 +1721,9 @@ unsafe fn update_list_buttons(hwnd: HWND) {
             for (id, enable) in [
                 (section.up, can_move(count, cur, true)),
                 (section.down, can_move(count, cur, false)),
-                // A row is all Remove needs: an unreadable archive is a
-                // row with no roles at all, listed in Terms precisely so
-                // it can still be removed (ADR-0014).
+                // Remove needs only one row. Unreadable archives appear
+                // in Terms without roles, so users can remove them.
+                // Refer to ARCHITECTURE.md#dictionary-and-lookup.
                 (section.remove, cur >= 0),
             ] {
                 if let Ok(btn) = dlg_item(hwnd, id) {
@@ -1785,14 +1737,11 @@ unsafe fn update_list_buttons(hwnd: HWND) {
     }
 }
 
-/// A drag in progress: the row, the list it came out of, and where the
-/// press landed.
+/// Stores active drag state: the source row, source list, and initial cursor position.
 ///
-/// `origin` is `NMLISTVIEW::ptAction`, the point the button went down at,
-/// in that list's own client coordinates - the frame every later reading
-/// is taken in, because a drop position is only meaningful against the
-/// list the row started in. The section is carried rather than looked up
-/// again so a drag cannot end in a list it did not begin in.
+/// `origin` stores `NMLISTVIEW::ptAction` in list client coordinates.
+/// Later cursor readings use this coordinate space. The state keeps the section
+/// so a drag cannot drop into a different list.
 #[derive(Clone, Copy)]
 struct Drag {
     window: isize,
@@ -1801,55 +1750,45 @@ struct Drag {
     origin: (i32, i32),
 }
 
-/// Shortest travel that turns a press into a reorder, px.
+/// Minimum cursor travel in pixels that starts a reorder drag.
 ///
-/// Every row carries a checkbox, so a press on a row is as likely to be a
-/// tick as the start of a drag: without a floor the wobble in a click on
-/// that box would flash an insertion line and could land as a one-row
-/// move. comctl32 applies its own `SM_CXDRAG` before it sends
-/// `LVN_BEGINDRAG` and `drop_gap`'s rounding needs half a row before it
-/// answers differently, so this floor is a third guard - and the only one
-/// that is this module's own, holds whatever those two do next, and can be
-/// asserted with no mouse in the room. `action::selection` sets the same
-/// kind of floor on the region overlay's drag.
+/// Rows have checkboxes, so a click can toggle a checkbox instead of a drag.
+/// A slight mouse move during a click stays a click. The threshold starts a drag
+/// only after enough travel.
+/// comctl32 checks `SM_CXDRAG`, and `drop_gap` needs half a row movement.
+/// The threshold adds a third check.
 const DRAG_DEADBAND_PX: i32 = 5;
 
-/// Has the cursor left the point the press landed on?
+/// Checks whether the cursor moved past the drag threshold from press origin.
 ///
-/// Either axis clears it, as `selection::meets_drag_threshold` reads a
-/// selection rect. Both axes would refuse a drag straight down the list,
-/// which is the gesture itself, and a purely sideways drag needs no
-/// refusing: it answers with the row's own position.
+/// A move beyond the threshold on either axis starts the drag.
+/// A check on both axes would reject vertical drags.
 fn clears_drag_deadband(origin: (i32, i32), now: (i32, i32)) -> bool {
     (now.0 - origin.0).abs() >= DRAG_DEADBAND_PX
         || (now.1 - origin.1).abs() >= DRAG_DEADBAND_PX
 }
 
-/// The gap between rows a cursor sits over, `0..=rows`.
+/// Returns the row gap index under the cursor, in the range `0..=rows`.
 ///
-/// `top` is row 0's own top in the list's client coordinates, so a
-/// scrolled list needs no second question, and the nearest boundary wins
-/// because a gap is what the insertion mark is drawn on. The clamp is what
-/// confines a drag to its own section: a cursor above or below this list -
-/// including one over another role's list - answers with this list's first
-/// or last gap and never with another list's row. Each role's order is its
-/// own and a row has no meaning in a list it holds no role for (ADR-0014).
+/// `top` is the top coordinate of row 0 in list client coordinates.
+/// The nearest boundary selects the insertion mark position. The clamp
+/// restricts the drag to this section. Cursors outside the list clamp
+/// to the first or last gap. Refer to ARCHITECTURE.md#dictionary-and-lookup.
 fn drop_gap(y: i32, top: i32, row_h: i32, rows: i32) -> i32 {
     if row_h <= 0 || rows <= 0 {
         return 0;
     }
-    // Rounded, not truncated: above row 0 the offset goes negative and
-    // integer division truncates towards zero, which would read a cursor a
-    // row and a half above the list as the gap below its first row.
+    // The code rounds to the nearest boundary rather than truncation.
+    // Offsets above row 0 are negative, and truncation toward zero selects
+    // the incorrect gap.
     let offset = y - top;
     (offset * 2 + row_h).div_euclid(row_h * 2).clamp(0, rows)
 }
 
-/// The row a drag from `from` lands on when it is dropped in `gap`.
+/// Returns the target row index when the code drops `from` into `gap`.
 ///
-/// The row vacates its own place on the way, so every gap below it loses
-/// one: `rows` reads as "last", and every gap above `from` reads as the
-/// row it sits over.
+/// The source row leaves the list before the move, so later gap indices shift
+/// down by one. A gap above `from` has the row index that it covers.
 fn drop_target(from: i32, gap: i32) -> i32 {
     if gap > from {
         gap - 1
@@ -1858,10 +1797,10 @@ fn drop_target(from: i32, gap: i32) -> i32 {
     }
 }
 
-/// The insertion mark a gap names: the row, and the side of it.
+/// Returns the insertion mark location: row index and boundary side.
 ///
-/// The control marks a gap as a row plus a side, so every gap is "before
-/// this row" except the one past the end, which is "after the last".
+/// The control defines an insertion mark by row and side. Gaps select
+/// before the row, except the final gap, which selects after the last row.
 fn insert_mark_at(gap: i32, rows: i32) -> (i32, u32) {
     if gap >= rows {
         (rows - 1, LVIM_AFTER)
@@ -1870,16 +1809,16 @@ fn insert_mark_at(gap: i32, rows: i32) -> (i32, u32) {
     }
 }
 
-/// Row 0's top and one row's height, in the list's client coordinates.
+/// Returns the top coordinate of row 0 and the row height in list client
+/// coordinates.
 ///
-/// Both come off row 0's own bounds, because that top *is* the scroll
-/// offset and every row of a report-view ListView is the same height.
-/// `None` when the list holds no rows, which is the one case the control
-/// refuses to answer - and also the one case no drag can have started in.
+/// The function computes these values from row 0 bounds. The top coordinate
+/// represents the scroll offset, and report view rows share equal height.
+/// The function returns `None` when the list contains no rows.
 unsafe fn lv_row_metrics(list: HWND) -> Option<(i32, i32)> {
-    // SAFETY: `list` is a live ListView owned by the caller; `rect` is
-    // writable stack storage that outlives the call, and LVM_GETITEMRECT
-    // reads the wanted part out of `left` before it overwrites the rect.
+    // SAFETY: `list` is a valid ListView handle. `rect` is local stack
+    // storage that outlives the call. LVM_GETITEMRECT reads the requested
+    // part code from `left` before it writes the output.
     unsafe {
         let mut rect = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
         let got = SendMessageW(
@@ -1896,16 +1835,14 @@ unsafe fn lv_row_metrics(list: HWND) -> Option<(i32, i32)> {
     }
 }
 
-/// The cursor, in one control's client coordinates.
+/// Returns the cursor position in control client coordinates.
 ///
-/// Asked of the mouse rather than decoded out of a message's `lparam`, as
-/// `selection::cursor_point` does: a captured drag reports in the
-/// capturing window's frame, and the only frame a drop position means
-/// anything in is the dragged list's own.
+/// The function gets the mouse position with GetCursorPos. A captured drag
+/// reports coordinates relative to the capture window, but drop calculations
+/// require list client coordinates.
 unsafe fn cursor_in(ctrl: HWND) -> (i32, i32) {
-    // SAFETY: `pt` is writable stack storage for both calls, and `ctrl` is
-    // a live control owned by the caller. A failed `GetCursorPos` leaves
-    // `pt` at the origin, which reads as the top of the list.
+    // SAFETY: `pt` is local stack storage for both calls. `ctrl` is a
+    // valid control handle. If GetCursorPos fails, `pt` remains zeroed.
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -1914,13 +1851,12 @@ unsafe fn cursor_in(ctrl: HWND) -> (i32, i32) {
     }
 }
 
-/// Draw the insertion mark at `at`, or take it away.
+/// Draws the insertion mark at `at` or removes it when `None`.
 unsafe fn lv_insert_mark(list: HWND, at: Option<(i32, u32)>) {
-    // SAFETY: `list` is a live ListView owned by the caller; `mark` is
-    // fully initialised, declares its own size, and carries no pointer.
+    // SAFETY: `list` is a valid ListView handle. `mark` is an initialized
+    // structure with explicit size and no pointer fields.
     unsafe {
-        // Row -1 is the documented "no mark", so an absent gap and a
-        // finished drag are the same message.
+        // Row -1 means no insertion mark. The clear and end paths send this value.
         let (item, flags) = at.unwrap_or((-1, 0));
         let mark = LVINSERTMARK {
             cbSize: std::mem::size_of::<LVINSERTMARK>() as u32,
@@ -1933,22 +1869,19 @@ unsafe fn lv_insert_mark(list: HWND, at: Option<(i32, u32)>) {
     }
 }
 
-/// The drag this window has in progress.
+/// Returns the active drag operation in this window.
 fn drag_of(hwnd: HWND) -> Option<Drag> {
     DRAG.with(|c| c.get()).filter(|d| d.window == hwnd.0 as isize)
 }
 
-/// Take the row and take the mouse.
+/// Starts a row drag and captures mouse input.
 ///
-/// Capture goes on the settings window rather than on the list, mirroring
-/// the region overlay (`action::selection`): whoever holds it gets the
-/// moves and the button-up, and this window's wndproc is where they are
-/// answered and where every other piece of its pending state already
-/// lives. comctl32 sends `LVN_BEGINDRAG` and then tracks nothing itself,
-/// so the gesture from here on is this module's.
+/// The settings window captures the mouse instead of the ListView.
+/// The window procedure processes movement and button release messages.
+/// comctl32 issues `LVN_BEGINDRAG` and does not track further mouse motion.
 unsafe fn begin_drag(hwnd: HWND, section: &'static Section, from: i32, origin: (i32, i32)) {
-    // SAFETY: `hwnd` is the window whose own wndproc is running, so it is
-    // live for the duration of this call, which is all `SetCapture` needs.
+    // SAFETY: `hwnd` has a window procedure, so it stays valid during
+    // the `SetCapture` call.
     unsafe {
         if from < 0 {
             return;
@@ -1959,19 +1892,17 @@ unsafe fn begin_drag(hwnd: HWND, section: &'static Section, from: i32, origin: (
     }
 }
 
-/// Move the mark to where a drop would land.
+/// Updates insertion mark location based on current cursor position.
 unsafe fn track_drag(hwnd: HWND) {
-    // SAFETY: `drag.section.list` names a live descendant of `hwnd`,
-    // created in `build`; a missing one yields `Err` rather than a
-    // dangling handle, and each helper states its own contract.
+    // SAFETY: `drag.section.list` names a valid descendant of `hwnd`
+    // created in `build`. Each helper meets its safety conditions.
     unsafe {
         let Some(drag) = drag_of(hwnd) else { return };
         let Ok(list) = dlg_item(hwnd, drag.section.list) else { return };
         let now = cursor_in(list);
         let rows = lv_count(list);
-        // Below the floor the gesture is still a click, so nothing is
-        // marked: a press on a row's checkbox that wobbles must read as a
-        // tick, and a mark would promise a move it is not going to make.
+        // Movement below the threshold remains a click, so no insertion
+        // mark appears. Checkbox clicks must not trigger move marks.
         let at = if clears_drag_deadband(drag.origin, now) {
             lv_row_metrics(list)
                 .map(|(top, row_h)| insert_mark_at(drop_gap(now.1, top, row_h, rows), rows))
@@ -1982,13 +1913,13 @@ unsafe fn track_drag(hwnd: HWND) {
     }
 }
 
-/// Give the mouse back without reordering.
+/// Releases mouse capture without a row-order change.
 ///
-/// Losing the capture - a menu, a task switch, anything that takes the
-/// mouse - ends the gesture, so the mark goes and the row stays.
+/// When another component takes capture, this function cancels the drag
+/// gesture. It removes the insertion mark and keeps the original row order.
 unsafe fn cancel_drag(hwnd: HWND) {
-    // SAFETY: as `track_drag`. No `ReleaseCapture` here: this runs because
-    // the mouse has already gone somewhere else.
+    // SAFETY: `cancel_drag` has the same contract as `track_drag`. It does
+    // not call `ReleaseCapture` because another component took capture.
     unsafe {
         let Some(drag) = drag_of(hwnd) else { return };
         DRAG.with(|c| c.set(None));
@@ -1998,26 +1929,24 @@ unsafe fn cancel_drag(hwnd: HWND) {
     }
 }
 
-/// Commit the drop, or abandon it, and give the mouse back.
+/// Commits or cancels a drop and releases mouse capture.
 ///
-/// Released outside the window the gesture is abandoned, because leaving
-/// the window is the way out of a drag; released outside only the *list*
-/// it lands on that list's first or last position, which is `drop_gap`'s
-/// clamp and never another role's list.
+/// The function cancels the drag when the user releases outside the window.
+/// A release outside the list boundaries selects the first or last position
+/// in that list.
 unsafe fn finish_drag(hwnd: HWND) {
-    // SAFETY: as `track_drag`; `ReleaseCapture` has no preconditions and
-    // `released_inside` states its own contract.
+    // SAFETY: `finish_drag` has the same contract as `track_drag`.
+    // `ReleaseCapture` has no preconditions, and `released_inside` has
+    // its own safety contract.
     unsafe {
         let Some(drag) = drag_of(hwnd) else { return };
-        // Cleared before the capture goes: `ReleaseCapture` sends this
-        // window its own WM_CAPTURECHANGED, and `cancel_drag` would
-        // otherwise abandon the very drop this call is committing.
+        // Clear state before the code releases capture. ReleaseCapture sends
+        // WM_CAPTURECHANGED, which would otherwise trigger `cancel_drag`.
         DRAG.with(|c| c.set(None));
         let _ = ReleaseCapture();
         let Ok(list) = dlg_item(hwnd, drag.section.list) else { return };
         lv_insert_mark(list, None);
-        // The cheap veto first: off the window there is nothing to read a
-        // drop position for.
+        // The check returns early when the cursor is outside the window.
         if !released_inside(hwnd) {
             return;
         }
@@ -2031,14 +1960,10 @@ unsafe fn finish_drag(hwnd: HWND) {
         if to == drag.from {
             return;
         }
-        // One `move_selected` per row crossed, so a drop and a Move button
-        // are the same mutation and there is one implementation of what a
-        // move means: trading with the neighbour, repeated, is exactly
-        // lifting the row out and putting it back at `to`, and the
-        // selection and the buttons follow because that one path already
-        // carries them. That same path moves whatever is *selected*, so the
-        // dragged row has to become the selection first, and a row the list
-        // no longer holds cannot.
+        // The loop calls `move_selected` for each crossed row. A drag drop
+        // and a Move button click share the same reorder logic. Neighbor
+        // swaps move the row to `to` and update selection and button state.
+        // The dragged row must become the selection before the loop starts.
         lv_select(list, drag.from);
         if lv_selection(list) != drag.from {
             return;
@@ -2049,14 +1974,12 @@ unsafe fn finish_drag(hwnd: HWND) {
     }
 }
 
-/// Is the cursor still on the window?
+/// Checks whether the cursor remains within the window rectangle.
 ///
-/// The whole window rect, frame and all: releasing on the title bar is
-/// still releasing on the settings window.
+/// The function checks the full window rectangle. It includes the title bar and frame.
 unsafe fn released_inside(hwnd: HWND) -> bool {
-    // SAFETY: `hwnd` is the live settings window; `rect` and `pt` are
-    // writable stack storage that outlives every call. A window whose rect
-    // cannot be read holds no drop.
+    // SAFETY: `hwnd` is the valid settings window handle. `rect` and `pt`
+    // are local stack storage that outlive each call.
     unsafe {
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_err() {
@@ -2070,15 +1993,15 @@ unsafe fn released_inside(hwnd: HWND) -> bool {
     }
 }
 
-/// True when idx > 0.
+/// Returns true when the engine combo selects a plugin.
 fn should_show_configure(engine_combo_index: isize) -> bool {
     engine_combo_index > 0
 }
 
-/// Lang enable, cfg show.
+/// Updates OCR language availability and configuration button display.
 unsafe fn update_engine_controls(hwnd: HWND) {
-    // SAFETY: each id is a live descendant of `hwnd`, created in
-    // `build`; a missing one is skipped via `dlg_item`'s `Err`.
+    // SAFETY: Each identifier names a valid descendant of `hwnd` created
+    // in `build`. Absent controls return `Err` and are skipped.
     unsafe {
         let Ok(engine) = dlg_item(hwnd, ID_ENGINE) else {
             return;
@@ -2102,10 +2025,10 @@ unsafe fn update_engine_controls(hwnd: HWND) {
     }
 }
 
-/// Show/hide static-mode controls.
+/// Shows or hides controls for static capture mode.
 unsafe fn update_static_controls(hwnd: HWND) {
-    // SAFETY: each id is a live descendant
-    // of `hwnd`, created in `build`.
+    // SAFETY: Each identifier names a valid descendant of `hwnd`
+    // created in `build`.
     unsafe {
         let is_static = dlg_item(hwnd, ID_SENTENCE_MODE)
             .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
@@ -2126,14 +2049,11 @@ unsafe fn update_static_controls(hwnd: HWND) {
     }
 }
 
-
-/// An edit or combo's own text.
+/// Gets text from an edit control or combo box.
 unsafe fn window_text(ctrl: HWND) -> String {
-    // SAFETY: `ctrl` is a live control the caller
-    // obtained from `dlg_item`; the buffer is sized
-    // to the length `GetWindowTextLengthW` itself
-    // reported, which is the contract `GetWindowTextW`
-    // writes against.
+    // SAFETY: `ctrl` is a valid control handle obtained from `dlg_item`.
+    // The buffer size matches `GetWindowTextLengthW`, as the
+    // `GetWindowTextW` contract requires.
     unsafe {
         let len = GetWindowTextLengthW(ctrl);
         if len <= 0 {
@@ -2146,7 +2066,7 @@ unsafe fn window_text(ctrl: HWND) -> String {
 }
 
 unsafe fn combo_row(combo: HWND, index: usize) -> Option<String> {
-    // SAFETY: `combo` is a live combo box owned by the caller.
+    // SAFETY: `combo` is a valid combo box handle owned by the caller.
     unsafe {
         let len = SendMessageW(combo, CB_GETLBTEXTLEN, Some(WPARAM(index)), None).0;
         if len < 0 {
@@ -2168,7 +2088,7 @@ unsafe fn combo_row(combo: HWND, index: usize) -> Option<String> {
 }
 
 unsafe fn combo_rows_match(combo: HWND, rows: &[String]) -> bool {
-    // SAFETY: `combo` is a live combo box owned by the caller.
+    // SAFETY: `combo` is a valid combo box handle owned by the caller.
     unsafe {
         let count = SendMessageW(combo, CB_GETCOUNT, None, None).0;
         if count < 0 || count as usize != rows.len() {
@@ -2181,7 +2101,7 @@ unsafe fn combo_rows_match(combo: HWND, rows: &[String]) -> bool {
 }
 
 unsafe fn fill_combo_if_changed(combo: HWND, rows: &[String]) {
-    // SAFETY: `combo` is a live combo box owned by the caller.
+    // SAFETY: `combo` is a valid combo box handle owned by the caller.
     unsafe {
         if combo_rows_match(combo, rows) {
             return;
@@ -2205,12 +2125,12 @@ unsafe fn fill_combo_if_changed(combo: HWND, rows: &[String]) {
     }
 }
 
-/// Pick .zip archives.
+/// Selects `.zip` dictionary archives with a file dialog.
 ///
-/// Empty when cancelled.
+/// Returns an empty vector when the user cancels.
 unsafe fn pick_archives(owner: HWND) -> Vec<PathBuf> {
     let mut buf = vec![0u16; 32 * 1024];
-    // Win32 wants a NUL-run.
+    // Win32 expects a double null-terminated string.
     let filter: Vec<u16> = "Yomitan archives (*.zip)\0*.zip\0\0"
         .encode_utf16()
         .collect();
@@ -2230,10 +2150,9 @@ unsafe fn pick_archives(owner: HWND) -> Vec<PathBuf> {
             | OFN_NOCHANGEDIR,
         ..Default::default()
     };
-    // SAFETY: `buf`, `filter` and `title` outlive the call and are borrowed
-    // by `ofn` for exactly its duration; `nMaxFile` is `buf`'s own length, so
-    // the dialog cannot write past it. `lStructSize` declares the size the
-    // call validates against. The owner window is live on this thread.
+    // SAFETY: `buf`, `filter`, and `title` outlive the call, and `ofn` borrows
+    // them. `nMaxFile` gives the buffer length, so the call cannot overflow it.
+    // `lStructSize` gives the structure size for validation.
     let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
     if !picked {
         return Vec::new();
@@ -2241,9 +2160,9 @@ unsafe fn pick_archives(owner: HWND) -> Vec<PathBuf> {
     split_picked(&buf)
 }
 
-/// Split the picker's buffer.
+/// Splits the file dialog buffer into path components.
 ///
-/// Two shapes; see the tests.
+/// Supports single-file and multi-file selection formats.
 fn split_picked(buf: &[u16]) -> Vec<PathBuf> {
     let mut parts = buf
         .split(|&c| c == 0)
@@ -2260,18 +2179,16 @@ fn split_picked(buf: &[u16]) -> Vec<PathBuf> {
     rest.iter().map(|name| dir.join(name)).collect()
 }
 
-/// The permitted values for a numeric combo, with `current` inserted if it is
-/// not already one of them.
+/// Returns permitted values for a numeric combo box. It adds `current` when
+/// absent.
 ///
-/// Inserting rather than snapping matters: a hand-edited config holding 43
-/// must not silently become 45 merely because the user opened Settings and
-/// pressed Apply without touching that control.
+/// The function preserves custom configured values exactly. A custom
+/// value like 43 must not change to 45 when the user opens Settings and
+/// presses Apply.
 fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     let mut v: Vec<i64> = (lo..=hi).step_by(step as usize).collect();
-    // Out-of-range values are clamped the same way `settings::apply_to` clamps
-    // them. Leaving them out instead would drop the combo to its first entry,
-    // so a hand-edited 250 would display as 10 while the model would have
-    // written 90 - the window and the model disagreeing about one number.
+    // The code clamps out-of-range values as `settings::apply_to` does.
+    // Without custom values, the combo box resets to its first entry.
     let current = current.clamp(lo, hi);
     if !v.contains(&current) {
         v.push(current);
@@ -2280,7 +2197,8 @@ fn numeric_choices(lo: i64, hi: i64, step: i64, current: i64) -> Vec<i64> {
     v
 }
 
-/// Config's choice for field.
+
+/// Finds the configured source for a field name.
 fn default_source<'a>(existing: &'a [crate::config::FieldMapping], field: &str) -> &'a str {
     existing
         .iter()
@@ -2302,12 +2220,12 @@ fn begin_field_map_result(
     !fields.is_empty() && !field_names_match(rows, fields)
 }
 
-/// True if rows match fields.
+/// Returns true when rendered rows match model field names.
 fn field_names_match(rows: &[(String, HWND)], fields: &[String]) -> bool {
     rows.len() == fields.len() && rows.iter().zip(fields).all(|((n, _), f)| n == f)
 }
 
-/// A mapping, or none.
+/// Returns a field map entry, or `None` when the field is unmapped.
 fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMapping> {
     (source != "(none)").then(|| crate::config::FieldMapping {
         anki_field: anki_field.to_string(),
@@ -2315,30 +2233,17 @@ fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMap
     })
 }
 
-/// The field map an Apply saves: the rows merged into the saved map, never
-/// the rows alone.
+/// Merges rendered field rows into the saved field map on Apply.
 ///
-/// `readings` is one entry per rendered row - field name, and the source its
-/// combo currently shows - so its keys are exactly the field names the note
-/// type has: the window builds one row per name `modelFieldNames` returned
-/// (`app.rs:797-806`) and rebuilds them whenever that list changes
-/// (`field_names_match`). A row is therefore a *view* of one mapping, not
-/// the mapping itself, and a saved mapping whose field the model lacks - a
-/// renamed field, a deleted one, or one belonging to the note type the user
-/// just switched away from - has no row to be read out of and must survive
-/// the save untouched. Rebuilding from the rows alone silently deleted it
-/// the first time the user opened the Anki tab and pressed Apply (ticket
-/// 21).
+/// `readings` contains one entry per visible row: a field name and selected
+/// source. Rows represent note type fields. The configuration keeps mappings
+/// for fields that the current model does not show.
 ///
-/// `"(none)"` is the opposite case and must stay so: a row exists, so the
-/// user looked at a field the model *has* and said no. `row_mapping` drops
-/// it and the saved value is not handed back.
+/// The `"(none)"` sentinel means that a visible field stays unmapped.
+/// `row_mapping` discards the sentinel, so the system stores no mapping.
 ///
-/// Order is the rows' order first - the model's field order, which is the
-/// order the user just read down the tab - then the mappings no row covered,
-/// keeping the order the config had them in. Rows first makes the saved
-/// order equal the displayed order, and the result is a fixed point of this
-/// function, so pressing Apply again never reshuffles the user's TOML.
+/// The function puts visible rows first in model order. It then appends
+/// stored mappings in their configuration order.
 fn merged_field_map(
     saved: &[crate::config::FieldMapping],
     readings: &[(&str, &str)],
@@ -2356,29 +2261,29 @@ fn merged_field_map(
     out
 }
 
-/// Rows per field-map column.
+/// Returns the number of rows needed in each field-map column.
 fn field_map_rows_needed(n: usize) -> i32 {
     n.div_ceil(2).max(1) as i32
 }
 
-/// Truncated for a column.
+/// Truncates a label to fit within a field-map column.
 fn column_label(name: &str) -> &str {
     name.char_indices()
         .nth(COL_LABEL_MAX_CHARS)
         .map_or(name, |(i, _)| &name[..i])
 }
 
-/// One discovered plugin's row.
+/// Stores display data for one discovered plugin.
 struct PluginRow {
     label: String,
     roles: String,
     status: String,
     checked: bool,
-    /// False for a refused plugin.
+    /// The value is false when the plugin is refused.
     can_enable: bool,
 }
 
-/// Discovered text-provider names.
+/// Returns the names of discovered text provider plugins.
 fn discovered_text_providers(
     found: &[(PathBuf, Result<crate::plugin::manifest::Manifest>)],
 ) -> Vec<String> {
@@ -2397,7 +2302,7 @@ fn discovered_text_providers(
     names
 }
 
-/// Renders one plugin's row.
+/// Builds display data for one plugin row.
 fn plugin_row(
     dir: &Path,
     parsed: &Result<crate::plugin::manifest::Manifest>,
@@ -2424,14 +2329,14 @@ fn plugin_row(
     }
 }
 
-/// A refused plugin's folder.
+/// Returns the directory name for a refused plugin.
 fn dir_label(dir: &Path) -> String {
     dir.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-/// This row's plugin name.
+/// Returns the plugin name for this row.
 fn plugin_key(dir: &Path, parsed: &Result<crate::plugin::manifest::Manifest>) -> String {
     match parsed {
         Ok(m) => m.name.clone(),
@@ -2439,7 +2344,8 @@ fn plugin_key(dir: &Path, parsed: &Result<crate::plugin::manifest::Manifest>) ->
     }
 }
 
-/// Roles, joined for display.
+
+/// Formats plugin roles into a comma-separated string.
 fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
     if roles.is_empty() {
         return "—".to_string();
@@ -2454,7 +2360,7 @@ fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
         .join(", ")
 }
 
-/// Group box height for n rows.
+/// Calculates group box height for a specified number of rows.
 fn plugins_group_h(n: usize) -> i32 {
     let body = if n == 0 {
         40
@@ -2465,7 +2371,7 @@ fn plugins_group_h(n: usize) -> i32 {
     20 + body + 8
 }
 
-/// Toggle glyph for fold state.
+/// Returns the toggle glyph for a collapsed or expanded state.
 fn field_map_toggle_label(collapsed: bool) -> &'static str {
     if collapsed {
         "Field mapping \u{25B6}"
@@ -2474,7 +2380,7 @@ fn field_map_toggle_label(collapsed: bool) -> &'static str {
     }
 }
 
-/// `&&` renders one `&`.
+/// Escapes ampersands for Windows control label display.
 fn apply_caption(mode: ApplyMode) -> &'static str {
     if mode == ApplyMode::Live {
         "Apply"
@@ -2483,7 +2389,7 @@ fn apply_caption(mode: ApplyMode) -> &'static str {
     }
 }
 
-/// What that button will do.
+/// Returns the Apply hint text.
 fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
     match (mode, staged) {
         (ApplyMode::Live, false) => "Applying saves your settings and uses them right away.",
@@ -2495,12 +2401,12 @@ fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
     }
 }
 
-/// Junk keeps the old value.
+/// Invalid text leaves the stored value unchanged.
 fn parse_px(text: &str, fallback: i32) -> i32 {
     text.trim().parse().unwrap_or(fallback)
 }
 
-/// `None` unless capturing.
+/// Returns `None` when key capture is not active.
 fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     let mine = hwnd.0 as isize;
     let id = CAPTURING
@@ -2517,7 +2423,7 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
     Some((id, crate::config::trigger_key_name(vk)))
 }
 
-/// A captured key, or template.
+/// Formats a captured virtual key or returns a template string.
 fn resolved_captured_key(
     cell: &'static std::thread::LocalKey<Cell<Option<(isize, u16)>>>,
     hwnd: HWND,
@@ -2529,30 +2435,31 @@ fn resolved_captured_key(
         .map_or_else(|| template.to_string(), stored_trigger_key)
 }
 
-/// What `read()` persists.
+/// Returns the hotkey string representation to persist.
 fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&CAPTURED_VK, hwnd, template)
 }
 
-/// Same, for the Anki add key.
+/// Formats the Anki add hotkey string to persist.
 fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&ANKI_CAPTURED_VK, hwnd, template)
 }
 
-/// Same, for the static key.
+/// Formats the static region hotkey string to persist.
 fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
 }
 
-/// Same, for the OCR clipboard key. This is the edge where the window's
-/// "Not set" button becomes the form's `None`: nothing inward carries
-/// an empty string meaning "off" (ADR-0012).
+/// Formats the OCR clipboard hotkey string to persist.
+///
+/// Converts a "Not set" state to `None`. Internal settings do not use
+/// empty strings to indicate disabled state. Refer to ARCHITECTURE.md#settings-and-config.
 fn resolved_ocr_clipboard_key(hwnd: HWND, template: Option<&str>) -> Option<String> {
     let key = resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template.unwrap_or_default());
     (!key.is_empty()).then_some(key)
 }
 
-/// Parseable form of `vk`.
+/// Converts a virtual key code into parseable string format.
 fn stored_trigger_key(vk: u16) -> String {
     match vk {
         0x10 => "shift".into(),
@@ -2562,73 +2469,70 @@ fn stored_trigger_key(vk: u16) -> String {
         _ => format!("0x{vk:02X}"),
     }
 }
-
 pub struct SettingsWindow {
     hwnd: HWND,
-    /// Clips the content pane.
+    /// Viewport window that clips the content pane.
     viewport: HWND,
-    /// Slides inside the viewport.
+    /// Content window that scrolls inside the viewport pane.
     content: HWND,
     font: Option<HFONT>,
-    /// The numeric values each combo offers, in the order they were added, so
-    /// `read` can map a selection index back to a value.
+    /// Numeric values for each combo box in insertion order. `read` uses
+    /// this list to map selection indices back to values.
     widths: Vec<i64>,
     heights: Vec<i64>,
     summaries: Vec<i64>,
     passes: Vec<i64>,
     fonts: Vec<String>,
-    /// Language tags, combo order.
+    /// OCR language tags in combo box order.
     ocr_langs: Vec<String>,
-    /// Engine values, combo order.
+    /// Engine identifiers in combo box order.
     engine_names: Vec<String>,
-    /// Engine name → plugin dir.
+    /// Map from engine name to plugin directory path.
     engine_dirs: HashMap<String, PathBuf>,
-    /// What Apply has yet to do.
+    /// Stores changes that require an Apply update.
     staged: RefCell<SettingsForm>,
-    /// General-tab-only controls.
+    /// Control handles for the General tab only.
     general_ctrls: Vec<HWND>,
-    /// Dictionaries-tab controls.
+    /// Control handles for the Dictionaries tab.
     dict_ctrls: Vec<HWND>,
-    /// OCR/Debug-tab controls.
+    /// Control handles for the OCR and Debug tab.
     ocr_ctrls: Vec<HWND>,
-    /// Anki-tab-only controls.
+    /// Control handles for the Anki tab only.
     anki_ctrls: Vec<HWND>,
-    /// Plugins-tab-only controls.
+    /// Control handles for the Plugins tab only.
     plugin_ctrls: Vec<HWND>,
-    /// Plugin names, checkbox order.
+    /// Plugin names in checkbox order.
     plugin_names: Vec<String>,
-    /// Anki field name -> its combo.
+    /// Map from Anki field name to combo box handle.
     field_map_rows: RefCell<Vec<(String, HWND)>>,
-    /// Field-map labels + group box.
+    /// Handles for field-map labels and group box.
     field_map_extra: RefCell<Vec<HWND>>,
     pending_field_map: RefCell<Option<PendingFieldMap>>,
-    /// True while collapsed.
+    /// True when the field-map section is collapsed.
     field_map_collapsed: Cell<bool>,
-    /// Anki static rows end, page y.
+    /// Vertical coordinate where static Anki rows end.
     anki_static_bottom: i32,
-    /// Each tab's page height, 96-DPI.
+    /// Height of each tab page in 96-DPI pixels.
     tab_heights: [i32; 5],
-    /// Tallest tab's bottom y.
+    /// Maximum bottom vertical coordinate among all tabs.
     bottom_y0: i32,
-    /// Which tab is showing.
+    /// Index of the active tab.
     current_tab: Cell<u32>,
-    /// What Apply will do.
+    /// Operation mode for the Apply button.
     apply_mode: ApplyMode,
 }
 
 impl SettingsWindow {
-    /// Create and show the window, populated from `form`.
+    /// Creates and displays a settings window from `form`.
     ///
-    /// `stale` are names the config's dictionary lists carry that no
-    /// installed dictionary answers to (spec D6a); when non-empty a warning
-    /// naming them is shown, because that is what a dictionary rename looks
-    /// like from in here.
+    /// `stale` lists configured dictionary names that are not installed.
+    /// The window displays a warning dialog when this list is not empty.
+    /// The dialog names those dictionaries.
     ///
-    /// `mode` words the Apply button.
+    /// `mode` sets the Apply button label and action.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
-        // SAFETY: every call below is an ordinary window-creation FFI call
-        // with handles this function owns; each `?` leaves nothing to leak
-        // because the window is the only resource and it is not yet created.
+        // SAFETY: Window creation FFI calls below use handles owned by this
+        // function. Early returns from `?` do not leak resources.
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
                 .context("GetModuleHandleW(None)")?
@@ -2643,7 +2547,7 @@ impl SettingsWindow {
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                // Placeholder: fit_to sizes it after build.
+                // Initial placeholder size. `fit_to` adjusts dimensions after build.
                 WIN_W,
                 400,
                 None,
@@ -2656,7 +2560,7 @@ impl SettingsWindow {
             let font = ui_font();
             let mut win = SettingsWindow {
                 hwnd,
-                // `build` creates both.
+                // `build` creates the viewport and content panes.
                 viewport: HWND::default(),
                 content: HWND::default(),
                 font,
@@ -2685,22 +2589,18 @@ impl SettingsWindow {
                 current_tab: Cell::new(0),
                 apply_mode: mode,
             };
-            // `build` reports where its layout actually ended; the window is
-            // then sized to that rather than to a guess. The first version of
-            // this file passed a hand-tuned height straight to
-            // `CreateWindowExW` - which takes the OUTER size - so 39px of
-            // caption and frame ate the Apply and Cancel buttons entirely and
-            // the window opened with no way to accept anything. Measuring the
-            // content means that cannot recur, at any DPI or font size.
+            // `build` reports final layout height. The window sizes to
+            // match content dimensions. Window frame borders and title bar
+            // are accounted for so buttons remain visible across display DPIs.
             let content_h = win.build(form, stale)?;
-            // Both sides from one vector.
+            // Populates both sides from a single vector.
             if let Some(tag) = win.selected_language() {
                 win.staged.borrow_mut().dict_list_language = tag;
             }
-            // Sizes AND shows - see `fit_to` for why showing cannot go
-            // through `ShowWindow` here.
+            // Adjusts size and shows the window. Refer to `fit_to` for why
+            // `ShowWindow` is not used here.
             win.fit_to(WIN_W, content_h + PAD);
-            // General tab, from the top.
+            // Displays the General tab at top scroll offset.
             win.reset_scroll();
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
@@ -2711,13 +2611,12 @@ impl SettingsWindow {
         self.hwnd
     }
 
-    /// Bring an already-open window forward instead of creating a second.
+    /// Activates the current window. It does not open a duplicate.
     ///
-    /// Restores first if minimized: `SetForegroundWindow` alone does **not**
-    /// un-minimize, so minimizing Settings and picking it from the tray again
-    /// would take this branch and appear to do nothing at all.
+    /// Restores minimized windows before activation. `SetForegroundWindow`
+    /// does not restore minimized windows.
     pub fn focus(&self) {
-        // SAFETY: `self.hwnd` is live until `Drop`.
+        // SAFETY: `self.hwnd` remains valid until `Drop`.
         unsafe {
             if IsIconic(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_RESTORE);
@@ -2726,7 +2625,7 @@ impl SettingsWindow {
         }
     }
 
-    /// The pending Apply/Cancel, cleared by reading.
+    /// Retrieves and clears the queued Apply or Cancel action.
     pub fn take_outcome(&self) -> Option<SettingsOutcome> {
         OUTCOME.with(|c| match c.get() {
             Some((h, o)) if h == self.hwnd.0 as isize => {
@@ -2737,7 +2636,7 @@ impl SettingsWindow {
         })
     }
 
-    /// Anki/update click, if any.
+    /// Retrieves and clears a queued Anki or update click action.
     pub fn take_click(&self) -> Option<SettingsClick> {
         CLICK.with(|c| match c.get() {
             Some((h, k)) if h == self.hwnd.0 as isize => {
@@ -2748,10 +2647,10 @@ impl SettingsWindow {
         })
     }
 
-    /// The Anki URL field's text.
+    /// Retrieves text from the Anki URL edit control.
     pub fn anki_url(&self) -> String {
-        // SAFETY: `ID_ANKI_URL` is a live descendant of
-        // `self.hwnd`, created in `build`.
+        // SAFETY: `ID_ANKI_URL` is a valid descendant of `self.hwnd`
+        // created in `build`.
         unsafe {
             dlg_item(self.hwnd, ID_ANKI_URL)
                 .map(|c| window_text(c))
@@ -2759,10 +2658,10 @@ impl SettingsWindow {
         }
     }
 
-    /// The Anki model field's text.
+    /// Retrieves text from the Anki model edit control.
     pub fn anki_model(&self) -> String {
-        // SAFETY: `ID_ANKI_MODEL` is a live descendant of
-        // `self.hwnd`, created in `build`.
+        // SAFETY: `ID_ANKI_MODEL` is a valid descendant of `self.hwnd`
+        // created in `build`.
         unsafe {
             dlg_item(self.hwnd, ID_ANKI_MODEL)
                 .map(|c| window_text(c))
@@ -2770,9 +2669,9 @@ impl SettingsWindow {
         }
     }
 
-    /// The selected theme name.
+    /// Retrieves the selected theme name from the combo box.
     pub fn read_theme_name(&self) -> String {
-        // SAFETY: `ID_THEME` created in `build`.
+        // SAFETY: `ID_THEME` was created in `build` as a valid descendant of `self.hwnd`.
         unsafe {
             let idx = dlg_item(self.hwnd, ID_THEME)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
@@ -2785,9 +2684,9 @@ impl SettingsWindow {
         }
     }
 
-    /// The selected font name.
+    /// Retrieves the selected font name from the combo box.
     pub fn read_font_name(&self) -> String {
-        // SAFETY: `ID_FONT` created in `build`.
+        // SAFETY: `ID_FONT` was created in `build` as a valid descendant of `self.hwnd`.
         unsafe {
             let idx = dlg_item(self.hwnd, ID_FONT)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
@@ -2799,9 +2698,9 @@ impl SettingsWindow {
         }
     }
 
-    /// Run a pending button.
+    /// Processes a queued button action.
     ///
-    /// Callback precedes a picker.
+    /// Calls the callback before it opens a file picker.
     pub fn pump(&self, before_blocking: impl FnOnce()) {
         self.pump_field_map();
         if self.take_language_change() {
@@ -2817,19 +2716,18 @@ impl SettingsWindow {
         let Some(action) = action else {
             return;
         };
-        // SAFETY: each helper acts only on live descendants of
-        // `self.hwnd`, which outlives this call, and each states
-        // its own contract.
+        // SAFETY: Each helper operates only on valid descendants of
+        // `self.hwnd` that outlive this call.
         unsafe {
             match action {
                 Action::Remove(role) => self.remove_selected(role),
                 Action::Add => {
-                    // D9: the picker pumps too.
+                    // Decision D9: The file picker runs an internal message pump.
                     before_blocking();
                     self.add_picked();
                 }
                 Action::ConfigureEngine => {
-                    // D9: the picker pumps too.
+                    // Decision D9: The file picker runs an internal message pump.
                     before_blocking();
                     self.configure_engine();
                 }
@@ -2837,20 +2735,20 @@ impl SettingsWindow {
         }
     }
 
-    /// Forget what Apply just did.
+    /// Clears the queued Apply operation record.
     pub fn clear_staged(&self) {
         self.staged.borrow_mut().clear_staged();
     }
 
-    /// Take what Apply just wrote.
+    /// Updates per-language lists with values that Apply wrote.
     pub fn reseed_per_language(&self, written: &BTreeMap<String, Vec<String>>) {
         self.staged.borrow_mut().reseed_per_language(written);
     }
 
-    /// Say what Apply is doing.
+    /// Displays status text during an Apply operation.
     pub fn set_status(&self, text: &str) {
-        // SAFETY: `ID_STATUS` is a live child of `self.hwnd`, created in
-        // `build`; `SetWindowTextW` copies the string during the call.
+        // SAFETY: `ID_STATUS` is a valid child of `self.hwnd` created in
+        // `build`. `SetWindowTextW` copies the string during the call.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
@@ -2858,12 +2756,11 @@ impl SettingsWindow {
         }
     }
 
-    /// Show what was really applied.
+    /// Updates controls to show applied dimensions.
     pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
-        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are live descendants of
-        // `self.hwnd`, created in `build`; each `dlg_item` result is
-        // checked, and `SetWindowTextW` copies the string during the call,
-        // so each temporary outlives its only use.
+        // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are valid descendants of
+        // `self.hwnd` created in `build`. Each `dlg_item` lookup is validated,
+        // and `SetWindowTextW` copies text buffers during execution.
         unsafe {
             for (id, px) in [
                 (ID_CAPTURE_W, ocr.capture_width),
@@ -2876,13 +2773,12 @@ impl SettingsWindow {
         }
     }
 
-    /// Re-word Apply after staging.
+    /// Updates Apply button label and status text.
     fn refresh_apply(&self) {
         let staged = self.staged.borrow();
         let has_staged = staged.has_staged();
-        // SAFETY: `ID_APPLY` and `ID_STATUS` are live children of `self.hwnd`,
-        // created in `build`; `SetWindowTextW` copies each string during the
-        // call, so the temporaries below outlive every use.
+        // SAFETY: `ID_APPLY` and `ID_STATUS` are valid child windows of
+        // `self.hwnd` created in `build`. `SetWindowTextW` copies the strings.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
                 let caption = wide(apply_caption(self.apply_mode));
@@ -2895,12 +2791,11 @@ impl SettingsWindow {
         }
     }
 
-    /// Lock it while Apply runs.
+    /// Disables controls while Apply runs.
     pub fn set_busy(&self, busy: bool) {
-        // SAFETY: every id in `WHILE_BUSY` is a live descendant of
-        // `self.hwnd`, created in `build`; each `dlg_item` result is
-        // checked. Focus is moved off the controls first, since a disabled
-        // window keeping focus leaves the keyboard talking to nothing.
+        // SAFETY: Each identifier in `WHILE_BUSY` names a valid descendant of
+        // `self.hwnd` created in `build`. Focus moves off the controls first
+        // so keyboard input is not trapped on disabled controls.
         unsafe {
             if busy {
                 let _ = SetFocus(Some(self.hwnd));
@@ -2917,7 +2812,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Pending tab switch, if any.
+    /// Retrieves and clears a queued tab switch index.
     pub fn take_tab_change(&self) -> Option<u32> {
         TAB.with(|c| match c.get() {
             Some((h, tab)) if h == self.hwnd.0 as isize => {
@@ -2928,7 +2823,7 @@ impl SettingsWindow {
         })
     }
 
-    /// Pending switch, if any.
+    /// Retrieves and clears a queued OCR language switch index.
     fn take_language_change(&self) -> bool {
         LANG_CHANGED.with(|c| match c.get() {
             Some(h) if h == self.hwnd.0 as isize => {
@@ -2939,10 +2834,10 @@ impl SettingsWindow {
         })
     }
 
-    /// The language combo's own tag.
+    /// Retrieves the selected OCR language tag from the combo box.
     fn selected_language(&self) -> Option<String> {
-        // SAFETY: `ID_OCR_LANG` is a live descendant of `self.hwnd`, made
-        // in `build`; a missing one yields `Err` here rather than a handle.
+        // SAFETY: `ID_OCR_LANG` is a valid descendant of `self.hwnd` created
+        // in `build`. Absent controls return `Err`.
         let i = unsafe {
             dlg_item(self.hwnd, ID_OCR_LANG)
                 .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
@@ -2954,10 +2849,10 @@ impl SettingsWindow {
         self.ocr_langs.get(i as usize).cloned()
     }
 
-    /// Selected engine's plugin dir.
+    /// Returns the plugin directory path for the selected OCR engine.
     fn selected_engine_dir(&self) -> Option<&Path> {
-        // SAFETY: `ID_ENGINE` is a live descendant of
-        // `self.hwnd`, created in `build`.
+        // SAFETY: `ID_ENGINE` is a valid descendant of `self.hwnd`
+        // created in `build`.
         let idx = unsafe {
             let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else {
                 return None;
@@ -2968,10 +2863,10 @@ impl SettingsWindow {
         self.engine_dirs.get(name).map(|p| p.as_path())
     }
 
-    /// Selected engine's own name.
+    /// Returns the selected OCR engine name.
     fn selected_engine_name(&self) -> Option<&str> {
-        // SAFETY: `ID_ENGINE` is a live descendant of
-        // `self.hwnd`, created in `build`.
+        // SAFETY: `ID_ENGINE` is a valid descendant of `self.hwnd`
+        // created in `build`.
         let idx = unsafe {
             let Ok(e) = dlg_item(self.hwnd, ID_ENGINE) else {
                 return None;
@@ -2981,9 +2876,9 @@ impl SettingsWindow {
         self.engine_names.get(idx).map(|s| s.as_str())
     }
 
-    /// Re-split for the combo.
+    /// Updates dictionary rows for a new OCR language.
     ///
-    /// Snapshots the old one first.
+    /// Keeps the previous selection when the new language supports it.
     fn rescope_dicts(&self) {
         let Some(next) = self.selected_language() else {
             return;
@@ -2993,9 +2888,8 @@ impl SettingsWindow {
         if prev == next {
             return;
         }
-        // SAFETY: `ID_TERMS` names a live descendant of `self.hwnd`, made in
-        // `build`; `lv_rows` and `fill_role_list` state their own contracts
-        // and every handle is checked before it is used.
+        // SAFETY: `ID_TERMS` is a valid descendant of `self.hwnd` created
+        // in `build`. `lv_rows` and `fill_role_list` meet their conditions.
         unsafe {
             let Some(rows) = lv_rows(self.hwnd, ID_TERMS) else { return };
             staged.terms = rows;
@@ -3019,7 +2913,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Pending fold toggle, if any.
+    /// Checks and clears the queued field-map toggle flag.
     pub fn take_field_map_toggle(&self) -> bool {
         FIELD_MAP_TOGGLE.with(|c| match c.get() {
             Some(h) if h == self.hwnd.0 as isize => {
@@ -3030,7 +2924,7 @@ impl SettingsWindow {
         })
     }
 
-    /// Pending model switch, if any.
+    /// Retrieves and clears a queued Anki model switch selection.
     pub fn take_anki_model_change(&self) -> bool {
         ANKI_MODEL_CHANGED.with(|c| match c.get() {
             Some(h) if h == self.hwnd.0 as isize => {
@@ -3041,10 +2935,10 @@ impl SettingsWindow {
         })
     }
 
-    /// A tab's height, page y.
+    /// Tab page height in page coordinates.
     ///
-    /// Anki grows with its field
-    /// map: measured, not stored.
+    /// The Anki tab expands with field-map rows. The method measures
+    /// this height from the field-map rows.
     fn tab_page_h(&self, tab: u32) -> i32 {
         if tab == 3 {
             return self.field_map_bottom() - CONTENT_Y;
@@ -3052,17 +2946,15 @@ impl SettingsWindow {
         self.tab_heights.get(tab as usize).copied().unwrap_or(0)
     }
 
-    /// Re-range for the shown tab.
-    ///
-    /// Back to the top with it.
+    /// Recalculates scroll range for the active tab and scrolls to top.
     fn reset_scroll(&self) {
         let content_h = dpi_scale(self.hwnd, self.tab_page_h(self.current_tab.get()));
         set_scroll_range(self.hwnd, content_h, client_h(self.viewport));
     }
 
-    /// Show one tab, hide the rest.
+    /// Shows the selected tab and hides all other tabs.
     pub fn switch_tab(&self, tab: u32) {
-        // SAFETY: `self.hwnd` is live until `Drop`.
+        // SAFETY: `self.hwnd` remains valid until `Drop`.
         unsafe { cancel_capture(self.hwnd) };
         let groups = [
             &self.general_ctrls,
@@ -3075,9 +2967,8 @@ impl SettingsWindow {
             return;
         }
         self.current_tab.set(tab);
-        // SAFETY: every HWND in every group was created in
-        // `build` as a descendant of `self.hwnd` and lives until
-        // the window is destroyed.
+        // SAFETY: Every window handle in every group was created in
+        // `build` as a descendant of `self.hwnd` and persists until destruction.
         unsafe {
             for (i, ctrls) in groups.iter().enumerate() {
                 let cmd = if i as u32 == tab { SW_SHOW } else { SW_HIDE };
@@ -3091,13 +2982,12 @@ impl SettingsWindow {
         self.reset_scroll();
     }
 
-    /// Flips the fold and resizes.
+    /// Toggles field-map collapse state and resizes the window.
     pub fn toggle_field_map(&self) {
         let collapsed = !self.field_map_collapsed.get();
         self.field_map_collapsed.set(collapsed);
-        // SAFETY: `self.hwnd` is live until `Drop`; `ID_FIELD_MAP_TOGGLE`
-        // and every hwnd `apply_field_map_visibility` touches are its
-        // children, created in `build`/`build_field_map_rows`.
+        // SAFETY: `self.hwnd` remains valid until `Drop`. `ID_FIELD_MAP_TOGGLE`
+        // and controls touched by `apply_field_map_visibility` are child windows.
         unsafe {
             self.apply_field_map_visibility();
             if let Ok(btn) = dlg_item(self.hwnd, ID_FIELD_MAP_TOGGLE) {
@@ -3108,15 +2998,14 @@ impl SettingsWindow {
         self.ensure_room_for(self.field_map_bottom());
     }
 
-    /// Captures `vk`; true if used.
+    /// Records captured key code `vk`. Returns true if accepted.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
         let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
             return false;
         };
-        // SAFETY: `id` is one of the key capture ids, a live descendant of
-        // `self.hwnd`,
-        // created in `build`; `SetWindowTextW` copies the
-        // string during the call.
+        // SAFETY: `id` is a key capture button identifier and a valid
+        // descendant of `self.hwnd` created in `build`. `SetWindowTextW`
+        // copies the text string during the call.
         unsafe {
             if let Ok(btn) = dlg_item(self.hwnd, id) {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
@@ -3125,11 +3014,10 @@ impl SettingsWindow {
         true
     }
 
-    /// Fills deck/model + map rows.
+    /// Populates Anki deck and model combos and field-map rows.
     pub fn populate_combos(&self, decks: &[String], models: &[String], fields: Vec<String>) {
-        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are live descendants of
-        // `self.hwnd`, created in `build`; each `SendMessageW` copies the
-        // string during the call.
+        // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are valid descendants of
+        // `self.hwnd` created in `build`. `SendMessageW` copies text buffers.
         unsafe {
             if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
                 fill_combo_if_changed(deck, decks);
@@ -3141,24 +3029,18 @@ impl SettingsWindow {
         self.populate_field_map(fields);
     }
 
-    /// Fills map rows only.
+    /// Rebuilds field-map rows without updates to the deck or model combos.
     pub fn populate_fields(&self, fields: Vec<String>) {
         self.populate_field_map(fields);
     }
 
-    /// Rebuilds the field-map rows.
+    /// Rebuilds field-map rows for the current Anki note type.
     ///
-    /// No-op if empty or unchanged.
+    /// Returns without changes when field names are empty or unchanged.
     ///
-    /// One row per field the note type has, so a saved mapping naming a
-    /// field it does not have gets no row and the user cannot see it. That
-    /// is the deliberate choice: showing a disabled row per missing field
-    /// would be more honest, but the rows are two columns of fixed geometry
-    /// sized off the model's field count, and an invisible mapping is only
-    /// confusing where a deleted one is data loss. `merged_field_map` is
-    /// what makes it safe - the save preserves what it never rendered
-    /// (ticket 21). Nothing here deletes a mapping the user did not ask to
-    /// delete: unmapping is setting a rendered row to `"(none)"`.
+    /// Creates one row for each note type field. Saved mappings for absent
+    /// fields have no row. `merged_field_map` keeps those mappings during save.
+    /// Set a field row to `"(none)"` to remove its mapping.
     fn populate_field_map(&self, fields: Vec<String>) {
         let needs_rebuild = {
             let rows = self.field_map_rows.borrow();
@@ -3168,9 +3050,8 @@ impl SettingsWindow {
         if !needs_rebuild {
             return;
         }
-        // SAFETY: every hwnd in `field_map_extra`/`field_map_rows` was
-        // created by this same function as a descendant of `self.hwnd`, and
-        // is destroyed here exactly once before its slot is reused.
+        // SAFETY: Every window handle in `field_map_extra` and `field_map_rows`
+        // was created as a descendant of `self.hwnd` and is destroyed here.
         unsafe {
             for hwnd in self.field_map_extra.borrow_mut().drain(..) {
                 let _ = DestroyWindow(hwnd);
@@ -3179,8 +3060,7 @@ impl SettingsWindow {
                 let _ = DestroyWindow(hwnd);
             }
         }
-        // Nothing said about the map seeds nothing: `default_source` already
-        // renders an unmapped field as `"(none)"`.
+        // Unmapped fields default to `"(none)"` through `default_source`.
         let existing = self.staged.borrow().field_map.clone().unwrap_or_default();
         if let Some(group) = self.build_field_map_box(fields.len()) {
             self.field_map_extra.borrow_mut().push(group);
@@ -3213,7 +3093,7 @@ impl SettingsWindow {
             }
             has_more
         };
-        // SAFETY: every hwnd was just created as a descendant of `self.hwnd`.
+        // SAFETY: Each window handle was created as a valid descendant of `self.hwnd`.
         unsafe { self.apply_field_map_visibility() };
         self.ensure_room_for(self.field_map_bottom());
         if has_more {
@@ -3222,17 +3102,16 @@ impl SettingsWindow {
     }
 
     fn wake(&self) {
-        // SAFETY: `self.hwnd` is live until `Drop`; WM_NULL only wakes pump.
+        // SAFETY: `self.hwnd` remains valid until `Drop`. WM_NULL wakes the message pump.
         unsafe {
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         }
     }
-
-    /// Shows/hides field-map rows.
+    /// Shows or hides field-map rows based on collapse state.
     unsafe fn apply_field_map_visibility(&self) {
         let visible = self.current_tab.get() == 3 && !self.field_map_collapsed.get();
         let cmd = if visible { SW_SHOW } else { SW_HIDE };
-        // SAFETY: every hwnd here is a live descendant of `self.hwnd`,
+        // SAFETY: Each window handle here is a valid descendant of `self.hwnd`
         // created in `build_field_map_rows`.
         unsafe {
             for &c in self.field_map_extra.borrow().iter() {
@@ -3244,9 +3123,9 @@ impl SettingsWindow {
         }
     }
 
-    /// Field-map area's bottom.
+    /// Calculates bottom vertical coordinate of the field-map area.
     ///
-    /// Window y, like `bottom_y0`.
+    /// Expressed in window coordinates that match `bottom_y0`.
     fn field_map_bottom(&self) -> i32 {
         let n = self.pending_field_map.borrow().as_ref().map_or_else(
             || self.field_map_rows.borrow().len(),
@@ -3260,23 +3139,15 @@ impl SettingsWindow {
         CONTENT_Y + page
     }
 
-    /// Right below the tab strip.
+    /// Places the viewport immediately below the tab strip in z-order.
     ///
-    /// Tab order follows z-order, so
-    /// the pages must sit there, not
-    /// after the Apply row.
-    ///
-    /// Only the window's own
-    /// children can displace it.
+    /// Tab navigation follows z-order, so pages must precede the Apply row.
+    /// Only child windows of the main window affect this placement.
     unsafe fn place_viewport(&self) {
-        // SAFETY: `self.viewport` is a live child of `self.hwnd` from `build`
-        // on, destroyed only with it; before that it is null and the call
-        // fails harmlessly. `GetDlgItem` yields the tab control, a sibling of
-        // the viewport, which is what `SetWindowPos` requires of an insert-
-        // after handle. Without it the seat is left alone: creation order
-        // already puts the viewport there, so moving it anywhere else - to
-        // `HWND_BOTTOM` above all - would only be worse.
-        // `SWP_NOSIZE | SWP_NOMOVE` leave its rect alone.
+        // SAFETY: `self.viewport` is a valid child of `self.hwnd` created in
+        // `build`. `GetDlgItem` returns the tab control, which is a sibling
+        // window as required by `SetWindowPos`. `SWP_NOSIZE` and `SWP_NOMOVE`
+        // preserve window dimensions and coordinates.
         unsafe {
             let Ok(after) = GetDlgItem(Some(self.hwnd), ID_TAB) else {
                 return;
@@ -3299,9 +3170,9 @@ impl SettingsWindow {
         let y0 = self.anki_static_bottom;
         let rows_n = field_map_rows_needed(field_count);
         let map_h = 20 + rows_n * ROW_H + 8;
-        // SAFETY: `h` is `self.hwnd` and `page` its content pane, both live
-        // for the caller's duration; every control created is a child of
-        // `page` and outlives this call.
+        // SAFETY: `h` is `self.hwnd` and `page` is its content pane.
+        // Both windows are valid during the call. Created controls are
+        // children of `page` and outlive this function.
         unsafe {
             child(
                 page,
@@ -3336,7 +3207,7 @@ impl SettingsWindow {
         let row = idx_i32 % rows_n;
         let x = PAD + col * (COL_W + COL_GAP);
         let y = y0 + 20 + row * ROW_H;
-        // SAFETY: `h` and `page` are live descendants owned by this window.
+        // SAFETY: `h` and `page` are valid windows owned by this instance.
         unsafe {
             let label = child(
                 page,
@@ -3390,18 +3261,16 @@ impl SettingsWindow {
         }
     }
 
-    /// Fits the window to content.
+    /// Adjusts window dimensions to fit page content.
     ///
-    /// Never below build's own size.
+    /// Dimensions do not decrease below initial layout sizes.
     fn ensure_room_for(&self, needed_bottom: i32) {
         let new_y0 = needed_bottom.max(self.bottom_y0);
-        // SAFETY: `self.content` is a live descendant of `self.hwnd`, created
-        // once in `build` and never destroyed before `self.hwnd` itself.
-        // `SWP_NOMOVE` leaves its origin alone and `SWP_NOZORDER` keeps the
-        // placement `place_viewport` chose. The viewport is not touched here:
-        // `place_bottom` sizes it from the client, off `fit_to`'s `WM_SIZE`.
+        // SAFETY: `self.content` is a valid descendant of `self.hwnd` created
+        // in `build`. `SWP_NOMOVE` keeps the origin, and `SWP_NOZORDER` keeps
+        // the placement from `place_viewport`.
         unsafe {
-            // Or the pages clip.
+            // Keeps page content visible.
             let _ = SetWindowPos(
                 self.content,
                 None,
@@ -3412,23 +3281,21 @@ impl SettingsWindow {
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
-        // Unconditional: shrink too.
+        // Adjusts window size downward when content shrinks.
         self.fit_to(WIN_W, new_y0 + BOTTOM_H + PAD);
-        // The band just changed size.
+        // The resize changed the band dimensions.
         self.reset_scroll();
     }
 
-    /// Drop the selected row, out of every section.
+    /// Removes the selected dictionary row from all role sections.
     ///
-    /// One archive is one library entry, so removing it is not a change to
-    /// one list: `stage_remove` drops the name from all three roles
-    /// (ADR-0014) and the controls have to say the same thing. `role` only
-    /// names the section that asked, and so which selection names the row.
+    /// An archive represents one library entry. The remove action removes its
+    /// name from all three role lists. `role` identifies the section that
+    /// supplied the selection. Refer to ARCHITECTURE.md#dictionary-and-lookup.
     unsafe fn remove_selected(&self, role: Role) {
-        // SAFETY: every `section.list` names a live descendant of
-        // `self.hwnd`, created in `build`; a missing one yields `Err` here
-        // rather than a dangling handle, and each `lv_*` helper and
-        // `update_list_buttons` states its own contract.
+        // SAFETY: Each `section.list` identifies a valid descendant of
+        // `self.hwnd` created in `build`. Absent controls return `Err`.
+        // `lv_*` helpers and `update_list_buttons` meet their safety conditions.
         unsafe {
             let Some(asked) = SECTIONS.iter().find(|s| s.role == role) else { return };
             let Ok(list) = dlg_item(self.hwnd, asked.list) else { return };
@@ -3441,7 +3308,7 @@ impl SettingsWindow {
                 let Ok(list) = dlg_item(self.hwnd, section.list) else { continue };
                 let Some(at) = lv_find(list, &name) else { continue };
                 SendMessageW(list, LVM_DELETEITEM, Some(WPARAM(at as usize)), None);
-                // The row under the deleted one, or none left to select.
+                // Selects the row below the deleted item, or clears selection when empty.
                 lv_select(list, at.min(lv_count(list) - 1));
             }
             self.staged.borrow_mut().stage_remove(&name);
@@ -3450,16 +3317,16 @@ impl SettingsWindow {
         }
     }
 
-    /// Stage whatever was picked.
+    /// Stages selected dictionary archives for addition.
     unsafe fn add_picked(&self) {
-        // SAFETY: `pick_archives` owns every buffer it hands the dialog;
-        // every `section.list` names a live descendant of `self.hwnd`, and
-        // `lv_append` and `lv_select` each state their own contract.
+        // SAFETY: `pick_archives` owns all dialog buffers. Each `section.list`
+        // identifies a valid descendant of `self.hwnd`. `lv_append` and
+        // `lv_select` meet their safety conditions.
         unsafe {
             let picked = pick_archives(self.hwnd);
             for path in picked {
-                // The archive's roles pick the lists, and one archive can
-                // land in more than one of them.
+                // Archive roles determine destination lists. An archive can
+                // add items to multiple lists.
                 let Some(roles) = self.staged.borrow_mut().stage_add(&path) else {
                     eprintln!(
                         "chibipop: {} is already listed, or is not a dictionary chibipop can read.",
@@ -3476,14 +3343,14 @@ impl SettingsWindow {
                 else {
                     continue;
                 };
-                // The bottom of each of its role lists, ticked, leaving
-                // every row the user curated where it already is
-                // (ADR-0014).
+                // Appends items selected to the bottom of each role list.
+                // Current rows preserve their order.
+                // Refer to ARCHITECTURE.md#dictionary-and-lookup.
                 let row = DictRow { name, enabled: true };
                 for section in SECTIONS.iter().filter(|s| roles.has(s.role)) {
                     let Ok(list) = dlg_item(self.hwnd, section.list) else { continue };
                     let at = lv_append(list, &row);
-                    // Or an import lands below the fold, unseen.
+                    // Scrolls to the new item so imported rows remain visible.
                     lv_select(list, at);
                 }
             }
@@ -3492,7 +3359,7 @@ impl SettingsWindow {
         }
     }
 
-    /// Picks a folder, saves it.
+    /// Selects a folder with a dialog and saves the path.
     unsafe fn configure_engine(&self) {
         let Some(name) = self.selected_engine_name() else {
             return;
@@ -3501,8 +3368,8 @@ impl SettingsWindow {
             return;
         };
         let title = format!("Select your {name} installation");
-        // SAFETY: `self.hwnd` is live; the picker frees its
-        // own PIDL before returning.
+        // SAFETY: `self.hwnd` is a valid window handle. The folder picker
+        // frees its PIDL allocation before return.
         let picked = unsafe { pick_folder(self.hwnd, &title) };
         let Some(path) = picked else { return };
         let cfg_path = dir.join("config.toml");
@@ -3515,16 +3382,14 @@ impl SettingsWindow {
         self.set_status(&format!("Saved {name} path."));
     }
 
-    /// Resize so the client area holds `client_w` x `client_h` 96-DPI pixels,
-    /// and show the window.
+    /// Resizes the client area to `client_w` by `client_h` 96-DPI pixels,
+    /// and displays the window.
     ///
-    /// `CreateWindowExW` takes the **outer** size, so the caption and frame
-    /// must be added on top - `AdjustWindowRectEx` is what knows how much that
-    /// is, and it is per-monitor, so it cannot be a constant.
+    /// `CreateWindowExW` requires outer window dimensions. `AdjustWindowRectEx`
+    /// calculates border and caption offsets for the target monitor DPI.
     fn fit_to(&self, client_w: i32, client_h: i32) {
-        // SAFETY: `self.hwnd` is live; `rc` is stack storage the call only
-        // writes through. A failure leaves the created size in place, which is
-        // merely the old behaviour rather than anything unsound.
+        // SAFETY: `self.hwnd` is a valid window handle. `rc` is local stack
+        // storage that the call modifies. Failure leaves the current window size.
         unsafe {
             let mut rc = RECT {
                 left: 0,
@@ -3546,21 +3411,18 @@ impl SettingsWindow {
                     0,
                     rc.right - rc.left,
                     outer_h,
-                    // SWP_SHOWWINDOW, not a separate `ShowWindow` call: the
-                    // FIRST ShowWindow in a process ignores its nCmdShow and
-                    // uses STARTUPINFO.wShowWindow instead. A chibipop
-                    // launched hidden - from a shortcut set to "minimized", a
-                    // scheduled task, or `Start-Process -WindowStyle Hidden` -
-                    // therefore had its settings window created, sized, and
-                    // then silently forced invisible, with no error anywhere.
-                    // SetWindowPos sets WS_VISIBLE directly and is immune.
+                    // Use SWP_SHOWWINDOW instead of a separate `ShowWindow` call.
+                    // The first `ShowWindow` call in a process uses
+                    // `STARTUPINFO.wShowWindow` instead of `nCmdShow`.
+                    // A hidden startup state can hide the settings window.
+                    // `SetWindowPos` sets `WS_VISIBLE` directly and avoids that state.
                     SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW,
                 );
             }
         }
     }
 
-    /// Create every control, returning the 96-DPI `y` its layout reached.
+    /// Creates all window controls and returns the final vertical coordinate.
     unsafe fn build(&mut self, form: &SettingsForm, stale: &[String]) -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
@@ -3573,13 +3435,11 @@ impl SettingsWindow {
         let mut plugin_names: Vec<String> = Vec::new();
         let mut plugin_dirs: Vec<PathBuf> = Vec::new();
 
-        // SAFETY: `h` is the window just created by `open`. Every control
-        // below is created as a child of `h`, of `h`'s viewport pane, or of
-        // that pane's content pane, and each parent is created before any of
-        // its children. Windows destroys a child with its parent, so every
-        // handle taken here lives until `h` is destroyed.
+        // SAFETY: `h` is the window created by `open`. Child controls belong
+        // to `h` or its internal panes. Parents are created before children.
+        // Child window handles persist until destruction of `h`.
         unsafe {
-            // Tabs and the role lists need comctl init.
+            // Tabs and role lists require Common Controls initialization.
             let icex = INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
                 dwICC: ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES,
@@ -3647,7 +3507,7 @@ impl SettingsWindow {
                 Some(WPARAM(4)),
                 Some(LPARAM(&item as *const _ as isize)),
             );
-            // Sized when the band is known.
+            // The height stays 0 until the band height is known.
             self.viewport = child(
                 h,
                 pane_class_name(),
@@ -3672,12 +3532,12 @@ impl SettingsWindow {
                 ID_CONTENT,
                 None,
             )?;
-            // Or Tab skips every page.
+            // Without WS_EX_CONTROLPARENT, Tab skips every page.
             for pane in [self.viewport, self.content] {
                 let ex = GetWindowLongW(pane, GWL_EXSTYLE) as u32 | WS_EX_CONTROLPARENT.0;
                 SetWindowLongW(pane, GWL_EXSTYLE, ex as i32);
             }
-            // Page y, not window y.
+            // `y` now counts from the page top, not from the window top.
             let page = self.content;
             y = 0;
 
@@ -3695,7 +3555,7 @@ impl SettingsWindow {
                     f,
                 )
             };
-            // Same, but carrying WS_GROUP so it ends the preceding group.
+            // The same box, but WS_GROUP ends the group before it.
             let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
                 child(
                     page,
@@ -3789,9 +3649,9 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Popup ----
-            // WS_GROUP terminates the radio group above. Without it the group
-            // runs to the end of the window and arrow keys walk straight out
-            // of Live/Hold Shift into the combos.
+            // WS_GROUP ends the radio group above. Without it, the group runs
+            // to the end of the window. The arrow keys then walk out of the
+            // Live and Hold Shift buttons into the combos.
             gen.push(group_start(
                 "Popup",
                 y,
@@ -3844,9 +3704,8 @@ impl SettingsWindow {
             )?;
             gen.push(fonts_hwnd);
             let mut families = japanese_font_families();
-            // Spec D4: an absent configured font is still offered and
-            // selected, so opening Settings and applying cannot silently
-            // change a setting the user never touched.
+            // Keep a configured font when the system does not list it.
+            // The code preserves the stored value until the user changes it.
             if !families.iter().any(|x| x == &form.font) {
                 families.push(form.font.clone());
                 families.sort();
@@ -3994,11 +3853,10 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Entry content ----
-            // The render settings' own group rather than four more rows
-            // under Popup, and the Linux window groups them the same
-            // way: these six decide what an entry *contains*, where the
-            // rows above decide how big the panel is. Every one is a
-            // portable field, so neither window may drop one.
+            // The render settings have a separate group, not four more rows
+            // under Popup. The Linux window groups them in the same way.
+            // These six fields define entry content. The rows above define
+            // panel size. Both windows must keep every portable field.
             y += 12;
             gen.push(group("Entry content", y, ROW_H + ROW_GAP + 5 * ROW_H + 30)?);
             y += 20;
@@ -4061,12 +3919,13 @@ impl SettingsWindow {
 
             // ---- Dictionaries ----
             //
-            // One section per role, each listing every installed
-            // dictionary that holds that role with a checkbox for it, and
-            // each ordered on its own. A mixed archive is a row in every
-            // section it has data for, because enabled is per role:
-            // unticking its definitions may not silently kill its
-            // frequency data (ADR-0014).
+            // The window shows one section for each role. Each section lists
+            // every installed dictionary for that role and gives each row a
+            // checkbox. Each section keeps its own order. A mixed archive
+            // appears in every section that provides its data because the
+            // enabled flag belongs to each role. Do not disable its frequency
+            // data when the user clears its definitions
+            // (ARCHITECTURE.md#dictionary-and-lookup).
             y = 0;
             let bx = WIN_W - PAD - BTN_W - 8;
             let list_w = bx - 2 * PAD + 4;
@@ -4075,8 +3934,8 @@ impl SettingsWindow {
                 if n > 0 {
                     y += GROUP_GAP;
                 }
-                // WS_GROUP ends the preceding one, so only the first box
-                // may go without it.
+                // WS_GROUP ends the box before it, so only the first box can
+                // go without it.
                 let box_h = role_group_h(section.role);
                 dict.push(if n == 0 {
                     group(section.group, y, box_h)?
@@ -4088,8 +3947,8 @@ impl SettingsWindow {
                     WINDOW_STYLE(0), PAD, y, hint_w, DICT_CAP_H, 0, f)?);
                 y += DICT_CAP_H;
                 if section.role == Role::Frequency {
-                    // Above this list and no other: the rule reduces the
-                    // dictionaries in it and says nothing about the rest.
+                    // The strategy row belongs to this list only. It changes
+                    // the dictionary order for this list, not for the other two.
                     dict.push(child(page, w!("STATIC"), "Combine ranks by",
                         WINDOW_STYLE(0), PAD, y + 4, 110, ROW_H, 0, f)?);
                     let ranking = child(page, w!("COMBOBOX"), "",
@@ -4103,8 +3962,8 @@ impl SettingsWindow {
                             SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(at)), None);
                         }
                     }
-                    // The default is the item `ranking_strategy_at` reads
-                    // a lost selection as, so the two cannot disagree.
+                    // If no ranking is selected, choose the first item.
+                    // The default and read-back values stay consistent.
                     if SendMessageW(ranking, CB_GETCURSEL, None, None).0 < 0 {
                         SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(0)), None);
                     }
@@ -4129,7 +3988,7 @@ impl SettingsWindow {
             }
             y += GROUP_GAP;
 
-            // A rebuild is library-only.
+            // A rebuild uses the library only.
             if form.library_empty && !form.terms.is_empty() {
                 dict.push(child(page, w!("STATIC"),
                     "chibipop is using a dictionary built outside the app. Adding or \
@@ -4139,10 +3998,10 @@ impl SettingsWindow {
                 y += 48;
             }
 
-            // Spec D6a: name the entry, because a config name matching
-            // nothing installed is also what a renamed archive looks like.
-            // Its place is kept rather than dropped, so an unplugged drive
-            // does not quietly rewrite the lists (ADR-0014).
+            // Keep a configured name when no installed dictionary matches it.
+            // The archive can have a new name or an unavailable path.
+            // Do not rewrite the lists in either case
+            // (ARCHITECTURE.md#dictionary-and-lookup).
             if !stale.is_empty() {
                 let msg = format!(
                     "\"{}\" names no installed dictionary — it may have been renamed, or \
@@ -4164,7 +4023,7 @@ impl SettingsWindow {
             let found = crate::plugin::discover::discover(&plugins_root);
             let mut engine_names = vec!["builtin".to_string()];
             engine_names.extend(discovered_text_providers(&found));
-            // Spec D4: keep it offered.
+            // The combo still offers the configured engine.
             if form.engine != "builtin" && !engine_names.contains(&form.engine) {
                 engine_names.push(form.engine.clone());
             }
@@ -4790,12 +4649,12 @@ impl SettingsWindow {
             y += 8 + GROUP_GAP;
             let y_plugins = y;
 
-            // Window y from here on.
-            // place_bottom re-pins these.
+            // `y` counts from the window top from this point.
+            // `place_bottom` positions these controls again.
             let bottom_y0 = y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
 
             // ---- Updates ----
-            // Stays on `h`, not the pane.
+            // The Updates box stays on `h`, not on the pane.
             child(
                 h,
                 w!("BUTTON"),
@@ -4822,7 +4681,7 @@ impl SettingsWindow {
             )?;
 
             // ---- Apply / Cancel ----
-            // Also the progress line.
+            // The Apply / Cancel box also shows the progress line.
             let staged = form.has_staged();
             child(
                 h,
@@ -4848,7 +4707,7 @@ impl SettingsWindow {
                 ID_APPLY,
                 f,
             )?;
-            // Far left: not beside Apply.
+            // Quit sits at the far left, not beside Apply.
             child(
                 h,
                 w!("BUTTON"),
@@ -4862,7 +4721,7 @@ impl SettingsWindow {
                 f,
             )?;
 
-            // The band the tabs occupy.
+            // The tabs occupy this band.
             let band_h = bottom_y0 - CONTENT_Y;
             let _ = SetWindowPos(
                 self.viewport,
@@ -4888,7 +4747,7 @@ impl SettingsWindow {
             self.tab_heights = [y_general, y_dict, y_ocr, y_ank, y_plugins];
             self.bottom_y0 = bottom_y0;
 
-            // Start on General tab.
+            // The window starts on the General tab.
             for &c in dict.iter().chain(&ocr).chain(&ank).chain(&plug) {
                 let _ = ShowWindow(c, SW_HIDE);
             }
@@ -4905,10 +4764,10 @@ impl SettingsWindow {
         Ok(self.bottom_y0 + BOTTOM_H)
     }
 
-    /// The controls' current values, as a form.
+    /// Returns the current values of the controls as a form.
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
-        // SAFETY: every id below is a live descendant of `self.hwnd`, made
-        // in `build` and destroyed only with the window in `Drop`.
+        // SAFETY: every id below names a live descendant of `self.hwnd`.
+        // `build` makes each one, and `Drop` destroys it with the window.
         unsafe {
             let h = self.hwnd;
             let checked = |id: i32| -> bool {
@@ -4933,12 +4792,11 @@ impl SettingsWindow {
                 |id: i32| -> String { dlg_item(h, id).map(|c| window_text(c)).unwrap_or_default() };
             let px = |id: i32, fallback: i32| -> i32 { parse_px(&text_of(id), fallback) };
 
-            // Empty is not missing.
+            // An empty list is valid. It is not an absent control.
             //
-            // A role's list *is* its control: a row's position is that
-            // role's priority and its checkbox is that role's enabled
-            // flag, so a read is what the ListView holds. The template
-            // answers only for a control that is not there.
+            // Each role list stores row order and enabled flags. Read the
+            // ListView whenever its control exists. Use `template` only when
+            // the control is absent.
             let role_rows = |id: i32, fallback: &[DictRow]| -> Vec<DictRow> {
                 lv_rows(h, id).unwrap_or_else(|| fallback.to_vec())
             };
@@ -4993,12 +4851,11 @@ impl SettingsWindow {
             let ocr_clipboard_key =
                 resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
 
-            // A row is a *view* of one mapping, never the mapping itself, so
-            // the save merges; `merged_field_map` owns that decision. The
-            // `rows.is_empty()` branch that used to substitute
-            // `template.field_map` here is gone, not forgotten: no rows means
-            // the window knows no field names, so every saved mapping is
-            // unknown and the merge returns that same map untouched.
+            // Each row contains one field and its selected source.
+            // Merge the row values with saved mappings.
+            // Keep mappings for fields absent from the current model.
+            // `"(none)"` removes a mapping for a visible field.
+            // When no rows exist, keep the saved map unchanged.
             let rows = self.field_map_rows.borrow();
             let readings: Vec<(&str, &str)> = rows
                 .iter()
@@ -5011,10 +4868,6 @@ impl SettingsWindow {
                     (name.as_str(), src)
                 })
                 .collect();
-            // Always an answer, never `None`: a merged map is complete even
-            // with no rows, so core's "a window with nothing to say must not
-            // wipe the map" rule (ticket 20) has nothing left to protect on
-            // this path.
             let saved = template.field_map.as_deref().unwrap_or_default();
             let field_map = Some(merged_field_map(saved, &readings));
 
@@ -5096,9 +4949,9 @@ impl SettingsWindow {
     }
 }
 
-/// Fill a combo with `values`, selecting `current`.
+/// Fills a combo with `values` and selects `current`.
 unsafe fn fill_numeric(combo: HWND, values: &[i64], current: i64) {
-    // SAFETY: `combo` is a live control created by the caller.
+    // SAFETY: the caller creates `combo`, so it is a live control.
     unsafe {
         for (i, v) in values.iter().enumerate() {
             SendMessageW(
@@ -5198,17 +5051,17 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
-        // A window destroyed mid-drag: the OS releases the capture it held,
-        // and this drops the row it was carrying so no later window's
-        // button-up can find it.
+        // The user can destroy a window during a drag. The operating system
+        // releases capture, so this code clears the row that the drag stored.
+        // A later button-up event cannot find that row.
         DRAG.with(|c| {
             if c.get().is_some_and(|d| d.window == self.hwnd.0 as isize) {
                 c.set(None);
             }
         });
-        // SAFETY: the window is this struct's own, still live, and destroyed
-        // exactly once. The font outlives every control that used it because
-        // the window (and therefore its children) is destroyed first.
+        // SAFETY: `SettingsWindow` owns the window and destroys it once. The font
+        // outlives every control because this code destroys the window and
+        // its children before it deletes the font.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
             if let Some(f) = self.font {
@@ -5218,17 +5071,18 @@ impl Drop for SettingsWindow {
     }
 }
 
-/// Re-tick and re-order the terms list for one OCR language.
+/// Creates Terms rows for one OCR language.
 ///
-/// `list` is that language's own `per_language` entry, so it names the
-/// dictionaries it searches in priority order: those rows come first,
-/// ticked and in the list's order, and every other installed name follows
-/// unticked. `per_language` is term-only (ADR-0014), so this is the Terms
-/// section's alone.
+/// `list` is that language's `per_language` entry. It names dictionaries in
+/// search priority order. Named rows come first. They are checked and use list
+/// order. Other installed names follow and remain unchecked.
+/// `per_language` stores Terms data only
+/// (ARCHITECTURE.md#dictionary-and-lookup), so this function serves the Terms
+/// section.
 fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<DictRow> {
     let readable = |n: &String| !unreadable.iter().any(|u| u == n);
-    // A list naming nothing that is installed belongs to some other
-    // library, and hiding every dictionary is not what it asked for.
+    // A list that names nothing installed belongs to some other library.
+    // That list does not ask this code to hide every dictionary.
     let named = |n: &String| crate::present::keeps_dict(n, list);
     let row = |name: &String, enabled: bool| DictRow { name: name.clone(), enabled };
     if !all.iter().filter(|n| readable(n)).any(named) {
@@ -5245,7 +5099,7 @@ fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<Dic
 mod tests {
     use super::*;
 
-    /// X quits standalone chibipop.
+    /// The X button quits standalone chibipop.
     #[test]
     fn wm_close_records_a_cancel_outcome() {
         let hwnd = HWND(4242 as *mut core::ffi::c_void);
@@ -5285,9 +5139,9 @@ mod tests {
         assert_eq!("(none)", default_source(&[], "Expression"));
     }
 
-    /// The combo is core's vocabulary behind this window's sentinel, and
-    /// the offset that introduces is what the save read-back decodes by
-    /// index. Off by one here maps every field to the wrong source.
+    /// The combo puts this window's `"(none)"` sentinel before `FIELD_SOURCES`.
+    /// That entry shifts each read index by one. Save decodes the shifted index.
+    /// A wrong index maps every field to the wrong source.
     #[test]
     fn field_map_combo_is_the_none_sentinel_then_core_sources() {
         assert_eq!("(none)", FIELD_MAP_SOURCES[0]);
@@ -5308,9 +5162,8 @@ mod tests {
         assert_eq!(None, row_mapping("Front", "(none)"));
     }
 
-    /// Ticket 21's data loss: the note type no longer has `LegacyAudio`, so
-    /// no row renders for it and the pre-merge read-back deleted the
-    /// mapping the user never touched.
+    /// Protects against data loss. The note type lacks `LegacyAudio`, so the
+    /// window renders no row for it. The merge must keep its mapping.
     #[test]
     fn merged_field_map_keeps_a_mapping_the_model_lacks() {
         let saved = vec![
@@ -5343,16 +5196,16 @@ mod tests {
         );
     }
 
-    /// A row exists, so the user looked at that field and said no. Merging
-    /// must not hand the old value back.
+    /// A row exists, so the user selected no source for that field.
+    /// The merge must not restore the old mapping.
     #[test]
     fn merged_field_map_does_not_resurrect_a_none_row() {
         let saved = vec![mapping("Front", "expression")];
         assert!(merged_field_map(&saved, &[("Front", "(none)")]).is_empty());
     }
 
-    /// The whole subtlety in one assert: same empty combo reading, opposite
-    /// outcomes, decided by whether the model has the field at all.
+    /// An empty combo result has two meanings. The model can show the field,
+    /// or the model can omit it. The merge must distinguish these cases.
     #[test]
     fn merged_field_map_separates_a_none_row_from_a_field_with_no_row() {
         let saved = vec![
@@ -5365,7 +5218,8 @@ mod tests {
         );
     }
 
-    /// Rows in the model's order, then the survivors in the config's.
+    /// The merge keeps rendered rows in model order.
+    /// It appends other mappings in their saved configuration order.
     #[test]
     fn merged_field_map_orders_rows_first_then_survivors() {
         let saved = vec![
@@ -5384,7 +5238,7 @@ mod tests {
         );
     }
 
-    /// Pressing Apply twice must not reshuffle the user's TOML.
+    /// A second Apply must not reorder the user's TOML.
     #[test]
     fn merged_field_map_is_a_fixed_point_under_a_second_apply() {
         let saved = vec![mapping("OldAudio", "audio"), mapping("Front", "sentence")];
@@ -5393,16 +5247,16 @@ mod tests {
         assert_eq!(once, merged_field_map(&once, &readings));
     }
 
-    /// AnkiConnect never answered, so no row was ever rendered. This is what
-    /// makes the old `rows.is_empty()` branch redundant.
+    /// AnkiConnect returned no fields, so the window rendered no row.
+    /// The merge keeps the saved map.
     #[test]
     fn merged_field_map_keeps_everything_when_no_row_was_rendered() {
         let saved = vec![mapping("Front", "expression"), mapping("Back", "glossary")];
         assert_eq!(saved, merged_field_map(&saved, &[]));
     }
 
-    /// The whole seam, not only the decision: a real window renders a note
-    /// type that has lost a mapped field, and Apply still saves it.
+    /// Tests the complete field-map path. A real window renders a note type
+    /// that lost a mapped field, and Apply still saves its mapping.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -5517,7 +5371,7 @@ mod tests {
         assert_eq!(12, field_map_rows_needed(23));
     }
 
-    /// Never zero, even for an empty list.
+    /// The count is never zero, even for an empty list.
     #[test]
     fn field_map_rows_needed_floors_at_one() {
         assert_eq!(1, field_map_rows_needed(0));
@@ -5535,7 +5389,7 @@ mod tests {
         assert_eq!("Glossary", column_label("Glossary"));
     }
 
-    /// Boundary: exactly the max stays whole.
+    /// At the boundary, a name of exactly the maximum length stays whole.
     #[test]
     fn column_label_keeps_a_max_length_name_whole() {
         let name = "ABCDEFGHIJKLMNOPQR"; // 18 chars
@@ -5549,7 +5403,7 @@ mod tests {
         assert_eq!("IsWordAndSentenceC", column_label("IsWordAndSentenceCard"));
     }
 
-    /// Truncation must land on a char boundary.
+    /// The code must cut only at a char boundary.
     #[test]
     fn column_label_is_char_boundary_safe() {
         let name = "日本語日本語日本語日本語日本語日本語日本語";
@@ -5563,22 +5417,20 @@ mod tests {
         assert!(field_map_toggle_label(false).ends_with('\u{25BC}'));
     }
 
-    /// The window must be sized from its own content, never from a guessed
-    /// constant.
+    /// The client area must determine the window size. A guessed constant must
+    /// not set it.
     ///
-    /// The first version of this file handed a hand-tuned height straight to
-    /// `CreateWindowExW`, which takes the **outer** size — so 39px of caption
-    /// and frame ate the Apply and Cancel buttons and the window opened with
-    /// no way to accept anything. `cargo test` could not see it and neither
-    /// could the compiler; an adversarial review measured it.
+    /// `CreateWindowExW` receives the **outer** size. The 39px caption and
+    /// frame can cover the Apply and Cancel buttons.
+    /// `cargo test` cannot detect this size fault. The compiler cannot detect
+    /// it. A desktop review measured the fault.
     ///
-    /// This pins the arithmetic that made it possible: a client area is
-    /// strictly smaller than the outer window it lives in, so any code path
-    /// that treats a desired *content* height as a *window* height loses
-    /// exactly the non-client overhead.
+    /// Locks the arithmetic. The client area is smaller than the outer window
+    /// that contains it. Code that treats content height as window height loses
+    /// non-client overhead.
     #[test]
     fn a_client_area_is_smaller_than_its_window() {
-        // Measured on this machine for the style this window uses.
+        // We measured this value on this machine for the style this window uses.
         const CAPTION_AND_FRAME: i32 = 39;
         let content_bottom = 618 + ROW_H + 4;
         let outer_if_guessed = 620;
@@ -5588,8 +5440,8 @@ mod tests {
         );
     }
 
-    /// DPI scaling must be identity at 96 and proportional above it - the
-    /// process is PER_MONITOR_AWARE_V2, so Windows scales nothing for us.
+    /// The DPI scale must stay identity at 96, and grow in proportion above
+    /// 96. The process is PER_MONITOR_AWARE_V2, so Windows scales nothing.
     #[test]
     fn the_dpi_scale_is_identity_at_96() {
         assert_eq!(100, (100i64 * 96 / 96) as i32);
@@ -5597,9 +5449,9 @@ mod tests {
         assert_eq!(200, (100i64 * 192 / 96) as i32);
     }
 
-    /// A hand-edited value off the step must be offered rather than snapped -
-    /// opening Settings and applying must never change a setting the user did
-    /// not touch.
+    /// The combo must offer a hand-edited value that is off the step, and
+    /// must not snap it. Settings must never change a setting that the user
+    /// did not touch.
     #[test]
     fn an_off_step_value_is_inserted_in_order() {
         assert_eq!(vec![10, 13, 15, 20], numeric_choices(10, 20, 5, 13));
@@ -5621,7 +5473,7 @@ mod tests {
         buf
     }
 
-    /// One file is a whole path.
+    /// One selected file produces one path.
     #[test]
     fn a_single_pick_is_not_treated_as_a_directory() {
         assert_eq!(
@@ -5630,7 +5482,7 @@ mod tests {
         );
     }
 
-    /// A directory, then names.
+    /// A multi-file result gives the directory first, then each file name.
     #[test]
     fn a_multi_pick_joins_each_name_onto_the_directory() {
         assert_eq!(
@@ -5656,7 +5508,7 @@ mod tests {
         assert!(split_picked(&[]).is_empty());
     }
 
-    /// UTF-16 keeps non-ASCII.
+    /// UTF-16 preserves non-ASCII file names.
     #[test]
     fn a_japanese_filename_round_trips() {
         assert_eq!(
@@ -5674,8 +5526,8 @@ mod tests {
         TAB.with(|c| c.set(None));
     }
 
-    /// The vertical-writing duplicates Windows lists beside each family are
-    /// never wanted, and the real list must not be empty on this machine.
+    /// Windows lists a duplicate with vertical layout for each font family.
+    /// The list must remove every duplicate and contain at least one family.
     #[test]
     fn the_japanese_font_list_excludes_vertical_duplicates() {
         let families = japanese_font_families();
@@ -5697,7 +5549,7 @@ mod tests {
         assert_eq!(None, take_captured_key(hwnd, 0x10));
     }
 
-    /// Ends capture with its name.
+    /// A named key ends the capture. The call returns that name.
     #[test]
     fn take_captured_key_accepts_a_named_key() {
         let hwnd = HWND(6002 as *mut core::ffi::c_void);
@@ -5710,7 +5562,7 @@ mod tests {
         CAPTURED_VK.with(|c| c.set(None));
     }
 
-    /// Any vk is now valid.
+    /// The capture accepts a virtual key code that was not listed before.
     #[test]
     fn take_captured_key_accepts_a_previously_unlisted_key() {
         let hwnd = HWND(6003 as *mut core::ffi::c_void);
@@ -5723,7 +5575,7 @@ mod tests {
         CAPTURED_VK.with(|c| c.set(None));
     }
 
-    /// Stashed so `read()` can see it later.
+    /// The call records the vk, so `read()` can see it later.
     #[test]
     fn take_captured_key_records_the_vk_for_read() {
         let hwnd = HWND(6007 as *mut core::ffi::c_void);
@@ -5735,7 +5587,7 @@ mod tests {
         CAPTURED_VK.with(|c| c.set(None));
     }
 
-    /// A second capturable control.
+    /// The Anki add key uses a separate capture control.
     #[test]
     fn take_captured_key_routes_the_anki_add_key_to_its_own_id() {
         let hwnd = HWND(6008 as *mut core::ffi::c_void);
@@ -5764,7 +5616,7 @@ mod tests {
         OCR_CLIP_CAPTURED_VK.with(|c| c.set(None));
     }
 
-    /// The two cells stay apart.
+    /// The Anki capture state and trigger capture state stay separate.
     #[test]
     fn take_captured_key_does_not_disturb_the_trigger_key_cell() {
         let hwnd = HWND(6009 as *mut core::ffi::c_void);
@@ -5798,8 +5650,8 @@ mod tests {
         assert_eq!("garbage", resolved_trigger_key(hwnd, "garbage"));
     }
 
-    /// The "Not set" button is the form's `None`, never an empty string
-    /// standing in for it (ADR-0012).
+    /// The "Not set" button represents the form's `None`.
+    /// An empty string must not replace it (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn resolved_ocr_clipboard_key_maps_an_unset_button_to_none() {
         let hwnd = HWND(6015 as *mut core::ffi::c_void);
@@ -5823,7 +5675,7 @@ mod tests {
         assert_eq!("ctrl", resolved_anki_add_key(hwnd, "ctrl"));
     }
 
-    /// The default normalizes.
+    /// The code normalizes the default letter.
     #[test]
     fn resolved_anki_add_key_normalizes_the_default_letter() {
         let hwnd = HWND(6013 as *mut core::ffi::c_void);
@@ -5873,13 +5725,13 @@ mod tests {
         assert_eq!(640, parse_px("640", 500));
     }
 
-    /// Typing leaves stray spaces.
+    /// User input can contain spaces around the number.
     #[test]
     fn parse_px_ignores_surrounding_space() {
         assert_eq!(640, parse_px("  640 ", 500));
     }
 
-    /// The trap: never zero.
+    /// Invalid input must keep the fallback value.
     #[test]
     fn parse_px_keeps_the_old_value_for_junk() {
         assert_eq!(500, parse_px("", 500));
@@ -5890,14 +5742,14 @@ mod tests {
 
     // ---- apply caption ----
 
-    /// Only `run` applies live.
+    /// Live mode applies immediately when no changes are staged.
     #[test]
     fn a_live_window_with_nothing_staged_just_applies() {
         assert_eq!("Apply", apply_caption(ApplyMode::Live));
         assert!(apply_hint(ApplyMode::Live, false).contains("right away"));
     }
 
-    /// No rebuild, no restart.
+    /// A staged update needs no rebuild or restart.
     #[test]
     fn a_staged_dictionary_promises_an_in_place_update() {
         assert_eq!("Apply", apply_caption(ApplyMode::Live));
@@ -5907,7 +5759,7 @@ mod tests {
         assert!(!hint.contains("restart"), "{hint}");
     }
 
-    /// It reloads no other process.
+    /// Standalone mode restarts chibipop after Apply.
     #[test]
     fn a_standalone_window_never_promises_a_live_apply() {
         assert_eq!("Apply && Restart", apply_caption(ApplyMode::Standalone));
@@ -5925,7 +5777,7 @@ mod tests {
         ]
     }
 
-    /// Spec D4: never reselect.
+    /// A configured language remains in the list when it is not installed.
     #[test]
     fn a_configured_language_missing_from_the_list_is_appended() {
         let got = language_choices(installed(), "ko");
@@ -5933,7 +5785,7 @@ mod tests {
         assert_eq!(("ko (not installed)".to_string(), "ko".to_string()), got[2]);
     }
 
-    /// Survives a failed call.
+    /// An empty installed-language list still shows the configured language.
     #[test]
     fn an_empty_list_still_offers_the_configured_language() {
         assert_eq!(
@@ -5942,7 +5794,7 @@ mod tests {
         );
     }
 
-    /// Display name out, tag in.
+    /// The row keeps the display name and the tag.
     #[test]
     fn an_installed_language_keeps_its_display_name_and_its_tag() {
         let got = language_choices(installed(), "ja");
@@ -5960,7 +5812,7 @@ mod tests {
         assert_eq!(vec!["ja".to_string(), "en-US".to_string()], tags);
     }
 
-    /// A blank combo if this drifts.
+    /// A case mismatch must not produce an empty combo.
     #[test]
     fn a_configured_tag_matches_its_entry_whatever_its_case() {
         let rows = language_choices(installed(), "EN-us");
@@ -5968,14 +5820,14 @@ mod tests {
         assert_eq!(Some(1), language_index(&rows, "EN-us"));
     }
 
-    /// Nothing to keep, none added.
+    /// An empty configured language must not create a blank row.
     #[test]
     fn an_empty_configured_language_is_not_offered_as_a_blank_row() {
         assert!(language_choices(Vec::new(), "").is_empty());
         assert_eq!(installed(), language_choices(installed(), ""));
     }
 
-    /// What `read` gives back.
+    /// `read` returns this tag.
     #[test]
     fn an_untouched_combo_reads_back_the_configured_tag() {
         for configured in ["ja", "en-US", "ko"] {
@@ -6024,7 +5876,7 @@ mod tests {
         assert_eq!(Some(1), language_index(&rows, "ja-JP"));
     }
 
-    /// FIX 1 behaviour, still live.
+    /// FIX 1 behavior remains active.
     #[test]
     fn a_genuinely_absent_language_is_still_appended_and_read_back() {
         let rows = language_choices(installed_four(), "ko");
@@ -6036,7 +5888,7 @@ mod tests {
         assert_eq!(Some(4), language_index(&rows, "ko"));
     }
 
-    /// Boundary, not starts_with.
+    /// The match uses a subtag boundary, not `starts_with`.
     #[test]
     fn a_partial_subtag_is_treated_as_absent() {
         let rows = language_choices(installed_four(), "zh-Han");
@@ -6045,7 +5897,7 @@ mod tests {
         assert_eq!("zh-Han", rows[4].1);
     }
 
-    /// First match wins; arbitrary.
+    /// The first installed language that matches is selected. The choice is arbitrary.
     #[test]
     fn an_ambiguous_prefix_picks_the_first_installed_match() {
         let rows = language_choices(installed_four(), "zh");
@@ -6088,8 +5940,8 @@ mod tests {
         }
     }
 
-    /// Two sections sharing an id would make `dlg_item` hand back the
-    /// wrong control, and one list would answer for two sections.
+    /// Shared identifiers make `dlg_item` return the wrong control.
+    /// One list can then answer for two sections.
     #[test]
     fn no_two_dictionary_controls_share_an_id() {
         let mut ids: Vec<i32> = SECTIONS
@@ -6103,9 +5955,8 @@ mod tests {
         assert_eq!(total, ids.len(), "every dictionary control needs its own id");
     }
 
-    /// A Move button acts on the section it sits in, never on whichever
-    /// list was touched last: that ambiguity is what three independent
-    /// lists remove.
+    /// Each Move button names one section. It must not act on the list
+    /// selected last. Three independent lists remove this ambiguity.
     #[test]
     fn each_move_button_names_its_own_section_and_direction() {
         for section in &SECTIONS {
@@ -6127,8 +5978,8 @@ mod tests {
         assert!(remove_button(ID_QUIT).is_none());
     }
 
-    /// One Add per section so the user need not leave it, one meaning for
-    /// all three: the archive's roles pick the lists.
+    /// Each section has an Add button. All three buttons have the same action.
+    /// The archive's roles select the destination lists.
     #[test]
     fn every_section_has_an_add_button_and_no_other_control_is_one() {
         for section in &SECTIONS {
@@ -6149,8 +6000,8 @@ mod tests {
 
     // ---- the checkbox is a state image ----
 
-    /// The two indices comctl32 draws, in the nibble
-    /// `LVIS_STATEIMAGEMASK` covers: 1 clear, 2 ticked.
+    /// comctl32 stores checkbox state in the nibble that
+    /// `LVIS_STATEIMAGEMASK` covers. Index 1 means clear, and index 2 means ticked.
     #[test]
     fn a_ticked_row_carries_state_image_two_and_a_clear_one_carries_one() {
         assert_eq!(0x2000, check_state(true));
@@ -6163,9 +6014,8 @@ mod tests {
         assert!(!state_is_checked(check_state(false)));
     }
 
-    /// Selection and focus share the state word with the checkbox, so a
-    /// selected clear row must not read as ticked - the bug that would
-    /// silently enable every row the user clicked on.
+    /// Selection and focus share the checkbox state word. A selected clear row
+    /// must not read as ticked. Otherwise a click can enable every row.
     #[test]
     fn selection_and_focus_bits_do_not_read_as_a_tick() {
         let live = LVIS_SELECTED.0 | LVIS_FOCUSED.0;
@@ -6174,14 +6024,14 @@ mod tests {
         assert!(state_is_checked(check_state(true) | live));
     }
 
-    /// A row that predates the extended style has no state image at all,
-    /// and a row with no box drawn on it has not been ticked.
+    /// A row that predates the extended style has no state image. A row
+    /// with no box carries no tick.
     #[test]
     fn a_row_with_no_state_image_reads_as_clear() {
         assert!(!state_is_checked(0));
     }
 
-    // ---- moving inside one section ----
+    // ---- Move rows inside one section ----
 
     #[test]
     fn up_trades_with_the_row_above() {
@@ -6203,7 +6053,7 @@ mod tests {
         assert_eq!(None, move_target(3, 2, false));
     }
 
-    /// A selection index the list has outgrown cannot reorder it.
+    /// A selection index beyond the last row cannot reorder the list.
     #[test]
     fn a_move_from_beyond_the_last_row_refuses() {
         assert_eq!(None, move_target(2, 2, true));
@@ -6211,16 +6061,16 @@ mod tests {
         assert_eq!(None, move_target(0, 0, true));
     }
 
-    /// There is no second box to cross into and no row worth pinning in
-    /// place: an empty enabled list is a legitimate "search nothing"
-    /// (ADR-0014), so a section's only row simply cannot move.
+    /// A one-row list has no second row for a move. An empty enabled list means
+    /// "search nothing" (ARCHITECTURE.md#dictionary-and-lookup).
+    /// The only row in the section cannot move.
     #[test]
     fn the_only_row_in_a_section_can_move_neither_way() {
         assert_eq!(None, move_target(1, 0, true));
         assert_eq!(None, move_target(1, 0, false));
     }
 
-    /// Greying is the same question as moving, asked without moving.
+    /// A disabled button reports the move condition but does not move a row.
     #[test]
     fn the_move_buttons_die_at_that_sections_own_ends() {
         assert!(!can_move(3, 0, true), "the top row cannot go up");
@@ -6235,17 +6085,17 @@ mod tests {
         assert!(!can_move(3, -1, false));
     }
 
-    /// A negative count is what a control that is not there reports.
+    /// A control that is not there reports a negative count.
     #[test]
     fn an_absent_list_greys_both_move_buttons() {
         assert!(!can_move(-1, 0, true));
         assert!(!can_move(-1, 0, false));
     }
 
-    // ---- dragging a row into place ----
+    // ---- Drag a row into place ----
 
-    /// The floor is what keeps a click on a row's checkbox a click: press
-    /// and release land on one pixel, and no reorder may come out of that.
+    /// A small pointer move on a checkbox must remain a click.
+    /// The pointer must exceed the deadband before the list starts a drag.
     #[test]
     fn a_press_and_release_on_one_pixel_is_a_click_and_not_a_drag() {
         assert!(!clears_drag_deadband((40, 30), (40, 30)));
@@ -6258,7 +6108,7 @@ mod tests {
         assert!(!clears_drag_deadband((40, 30), (40 - stop, 30 - stop)));
     }
 
-    /// Either axis and either way: a list is dragged up as often as down.
+    /// Movement on either axis starts a drag in either direction.
     #[test]
     fn travel_of_the_floor_on_one_axis_becomes_a_drag() {
         assert!(clears_drag_deadband((40, 30), (40, 30 + DRAG_DEADBAND_PX)));
@@ -6267,9 +6117,9 @@ mod tests {
         assert!(clears_drag_deadband((40, 30), (40 - DRAG_DEADBAND_PX, 30)));
     }
 
-    /// A row is 17px tall (see `DICT_LIST_H`), so a three-row list has its
-    /// boundaries at 0, 17, 34 and 51 and each row answers with whichever
-    /// of its own two is nearer - the one the mark would be drawn on.
+    /// A row is 17px tall (see `DICT_LIST_H`). A three-row list has boundaries
+    /// at 0, 17, 34, and 51. Each row uses the nearer boundary. The list draws
+    /// the insertion mark on that boundary.
     #[test]
     fn a_cursor_over_a_row_reads_the_nearer_of_its_two_boundaries() {
         assert_eq!(0, drop_gap(0, 0, 17, 3));
@@ -6281,10 +6131,9 @@ mod tests {
         assert_eq!(3, drop_gap(51, 0, 17, 3), "under the last row");
     }
 
-    /// The clamp *is* the confinement: a cursor dragged out of this list -
-    /// over another role's list, or off the window entirely - answers with
-    /// this list's own first or last gap, so a row can never cross into a
-    /// list it holds no role for (ADR-0014).
+    /// The function clamps a cursor to this list. A cursor outside this list
+    /// or over another list uses the first or last gap here. A row cannot enter
+    /// a list that has no such role (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn a_cursor_outside_the_list_clamps_to_that_lists_own_ends() {
         assert_eq!(0, drop_gap(-9, 0, 17, 3), "a row and a half above it");
@@ -6292,26 +6141,25 @@ mod tests {
         assert_eq!(3, drop_gap(4000, 0, 17, 3), "far below the window");
     }
 
-    /// Row 0's top *is* the scroll offset, so a scrolled list needs no
-    /// second one: every gap moves with it and the row under the cursor
-    /// stays the row the user is looking at.
+    /// Row 0 starts at the scroll offset. A scrolled list needs no second
+    /// offset. Every gap moves with the list, so the cursor still identifies
+    /// the visible row.
     #[test]
     fn a_scrolled_list_reads_its_gaps_from_row_zeros_own_top() {
         assert_eq!(2, drop_gap(0, -34, 17, 6));
         assert_eq!(3, drop_gap(17, -34, 17, 6));
     }
 
-    /// A control with no rows has no gap to drop into, and one that
-    /// answered nothing about its row height must not divide by it.
+    /// A control with no rows has no gap for a drop. A control that reports
+    /// no row height must not divide by that height.
     #[test]
     fn a_list_with_no_rows_or_no_height_reads_the_first_gap() {
         assert_eq!(0, drop_gap(80, 0, 17, 0));
         assert_eq!(0, drop_gap(80, 0, 0, 3));
     }
 
-    /// The dragged row vacates its own place on the way, so the gap just
-    /// below it is the place it already holds and every gap further down
-    /// loses one.
+    /// The dragged row leaves its old position. The gap below it maps to that
+    /// position, and each later gap maps to the row before it.
     #[test]
     fn a_gap_below_the_dragged_row_loses_the_place_that_row_vacates() {
         assert_eq!(0, drop_target(0, 0));
@@ -6323,8 +6171,8 @@ mod tests {
         assert_eq!(2, drop_target(2, 3));
     }
 
-    /// The mark is a row and a side of it, and only the gap past the last
-    /// row is on the far side of one.
+    /// The mark identifies a row and its side. Only the gap after the last row
+    /// lies beyond a row.
     #[test]
     fn the_insertion_mark_sits_above_a_gaps_row_except_past_the_last() {
         assert_eq!((0, 0), insert_mark_at(0, 3));
@@ -6333,20 +6181,18 @@ mod tests {
         assert_eq!((2, LVIM_AFTER), insert_mark_at(3, 3));
     }
 
-    /// The acceptance criterion as arithmetic: a cursor below the list
-    /// lands its row last and one above it lands the row first, and both
-    /// answers are positions in the list the drag started in.
+    /// States the acceptance criterion as arithmetic. A cursor below the list
+    /// places the row last. A cursor above it places the row first.
+    /// Both results refer to the source list.
     #[test]
     fn a_drag_off_either_end_lands_the_row_at_that_end_of_its_own_list() {
         assert_eq!(2, drop_target(0, drop_gap(4000, 0, 17, 3)));
         assert_eq!(0, drop_target(2, drop_gap(-4000, 0, 17, 3)));
     }
 
-    /// One implementation of what a move means: a drop is the Move button
-    /// pressed once per row crossed, and that walk has to equal lifting the
-    /// row out of the list and putting it back at the drop position. Every
-    /// row against every gap, so neither direction nor either end is left
-    /// untried.
+    /// One rule defines a move. A drop must match each Move-button step that
+    /// the row crosses. The result must equal a list that removes the row and
+    /// inserts it at the drop position. The test checks every row and gap.
     #[test]
     fn a_drop_reorders_a_list_exactly_as_repeated_move_buttons_do() {
         let names = ["A", "B", "C", "D"];
@@ -6369,15 +6215,14 @@ mod tests {
         }
     }
 
-    /// The centre of one row, in screen coordinates.
+    /// Returns the center of one row in screen coordinates.
     ///
-    /// A drag is driven by moving the real cursor, because that is what
-    /// `track_drag` and `finish_drag` read: a captured drag reports in the
-    /// capturing window's frame, and only the list's own frame means
-    /// anything to a drop.
+    /// The test moves the real cursor because `track_drag` and `finish_drag`
+    /// read it. A captured drag uses the frame of the window that owns capture.
+    /// `drop_gap` needs coordinates in the list's frame.
     unsafe fn row_centre(list: HWND, index: i32) -> POINT {
-        // SAFETY: `list` is a live ListView owned by the caller; `rect` and
-        // `pt` are writable stack storage that outlives every call.
+        // SAFETY: the caller owns `list`, a live ListView. `rect` and `pt`
+        // are writable stack storage that outlives every call.
         unsafe {
             let mut rect = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
             SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(index as usize)),
@@ -6391,12 +6236,12 @@ mod tests {
         }
     }
 
-    /// The notification the control sends once a press has become a drag,
-    /// with the cursor's own point as the one the button went down at.
+    /// Sends the ListView notification that starts a drag.
+    /// The cursor position becomes the action point.
     unsafe fn send_begin_drag(hwnd: HWND, list: HWND, id: i32, item: i32) {
-        // SAFETY: `hwnd` and `list` are live windows owned by the caller,
-        // and `nm` is fully initialised stack storage that outlives the
-        // send - which is the contract WM_NOTIFY's `lparam` carries.
+        // SAFETY: the caller owns `hwnd` and `list`, both live windows. `nm`
+        // is fully initialized stack storage that outlives the send, which
+        // is the contract that WM_NOTIFY's `lparam` carries.
         unsafe {
             let (x, y) = cursor_in(list);
             let nm = NMLISTVIEW {
@@ -6414,18 +6259,18 @@ mod tests {
         }
     }
 
-    /// Move the cursor and tell the window, which is what it sees while it
-    /// holds the capture.
+    /// Moves the cursor and sends a mouse-move message to the window.
+    /// The window receives the message while it owns capture.
     unsafe fn drag_cursor_to(hwnd: HWND, pt: POINT) {
-        // SAFETY: `hwnd` is a live window owned by the caller; neither
-        // message carries a pointer.
+        // SAFETY: the caller owns `hwnd`, a live window. Neither message
+        // carries a pointer.
         unsafe {
             let _ = SetCursorPos(pt.x, pt.y);
             SendMessageW(hwnd, WM_MOUSEMOVE, None, None);
         }
     }
 
-    /// Three rows in every section, so a drag has somewhere to go in each.
+    /// Every section gets three rows, so a drag has a target in each one.
     fn three_of_each() -> SettingsForm {
         let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         form.terms = rows(&[("Terms A", true), ("Terms B", true), ("Terms C", true)]);
@@ -6434,16 +6279,14 @@ mod tests {
         form
     }
 
-    /// The gesture end to end on real controls: the notification the
-    /// ListView sends starts it, the cursor decides where the row lands,
-    /// and the button-up commits through the very path the Move buttons
-    /// use - so the selection follows the row that was dragged.
+    /// Drives the full gesture on real controls. The ListView notification
+    /// starts the gesture. The cursor sets the destination. Button release
+    /// commits the same path as the Move buttons, so selection follows the row.
     ///
-    /// The insertion mark itself is not asserted here: wine's comctl32
-    /// answers 0 to both `LVM_SETINSERTMARK` and `LVM_GETINSERTMARK`, so it
-    /// has neither, and this test's whole value would be lost to that gap.
-    /// What decides where the mark goes is `drop_gap` and `insert_mark_at`,
-    /// pinned above with no control at all.
+    /// The test does not check the insertion mark. Wine's comctl32 returns 0
+    /// for both `LVM_SETINSERTMARK` and `LVM_GETINSERTMARK`, so it draws no mark.
+    /// `drop_gap` and `insert_mark_at` set the mark position. Other tests check
+    /// them without controls.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6454,9 +6297,9 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: `h` is the window just opened, live for this whole test;
-        // `ID_TERMS` names the list `build` created inside it, and every
-        // helper here states its own contract.
+        // SAFETY: `h` is the window that this test opened, and it stays live
+        // for the whole test. `ID_TERMS` names the list that `build` created
+        // inside it, and every helper here states its own contract.
         let (order, selected) = unsafe {
             let list = dlg_item(h, ID_TERMS).expect("the terms list");
             drag_cursor_to(h, row_centre(list, 2));
@@ -6473,11 +6316,11 @@ mod tests {
         assert_eq!(0, selected, "the selection follows the row that was dragged");
     }
 
-    /// Each role's order is its own, so a drag has nowhere to go but its
-    /// own list: released over another section it lands on the end of the
-    /// list it started in, and that other section does not move a row
-    /// (ADR-0014). Both ways, because the sections are stacked and a drag
-    /// leaves through the top as easily as the bottom.
+    /// Each role has its own order, so a drag cannot enter another role list.
+    /// A release over another section places the row at the end of its source
+    /// list. The other section remains unchanged
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
+    /// The test checks movement toward both ends because sections stack vertically.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6488,17 +6331,17 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; all three ids name lists `build` created.
+        // SAFETY: as above. All three ids name lists that `build` created.
         let (terms, freqs, pitch) = unsafe {
             let terms = dlg_item(h, ID_TERMS).expect("the terms list");
             let freqs = dlg_item(h, ID_FREQS).expect("the frequency list");
             let pitch = dlg_item(h, ID_PITCH).expect("the pitch list");
-            // Down and out of Terms, releasing on a Frequency row.
+            // Down and out of Terms, then release on a Frequency row.
             drag_cursor_to(h, row_centre(terms, 0));
             send_begin_drag(h, terms, ID_TERMS, 0);
             drag_cursor_to(h, row_centre(freqs, 1));
             SendMessageW(h, WM_LBUTTONUP, None, None);
-            // Up and out of Pitch, releasing on a Terms row.
+            // Up and out of Pitch, then release on a Terms row.
             drag_cursor_to(h, row_centre(pitch, 2));
             send_begin_drag(h, pitch, ID_PITCH, 2);
             drag_cursor_to(h, row_centre(terms, 0));
@@ -6520,8 +6363,8 @@ mod tests {
         assert_eq!(Some(form.frequency.clone()), freqs, "frequency was asked for nothing");
     }
 
-    /// A row carries a checkbox, so a press on a row is as often a tick as
-    /// the start of a drag: the tick lands and the row stays where it is.
+    /// A row has a checkbox. A pointer action can change its state or start a drag.
+    /// The test checks the state change and the unchanged row order.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6532,14 +6375,14 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; `lv_check` states its own contract.
+        // SAFETY: As above. `lv_check` states its own contract.
         let order = unsafe {
             let list = dlg_item(h, ID_TERMS).expect("the terms list");
             let on_the_box = row_centre(list, 0);
             lv_check(list, 0, false);
             drag_cursor_to(h, on_the_box);
-            // The control read the press as a drag after all; the hand that
-            // made it moved two pixels, which is not a reorder.
+            // The control treated the action as a drag. The pointer moved two
+            // pixels, which does not reorder the list.
             send_begin_drag(h, list, ID_TERMS, 0);
             drag_cursor_to(h, POINT { x: on_the_box.x + 1, y: on_the_box.y + 2 });
             SendMessageW(h, WM_LBUTTONUP, None, None);
@@ -6552,8 +6395,8 @@ mod tests {
         );
     }
 
-    /// Leaving the window is the way out of a drag: the row stays where it
-    /// was, the mouse goes back, and nothing is left holding it.
+    /// A release outside the window cancels the drag. The row stays in place,
+    /// mouse capture returns, and no drag state remains.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6564,7 +6407,7 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; `GetWindowRect`, `GetCursorPos` and `PtInRect`
+        // SAFETY: As above. `GetWindowRect`, `GetCursorPos`, and `PtInRect`
         // all write into or read from stack storage that outlives them.
         let (off_window, order, captured, dragging) = unsafe {
             let list = dlg_item(h, ID_TERMS).expect("the terms list");
@@ -6572,13 +6415,13 @@ mod tests {
             send_begin_drag(h, list, ID_TERMS, 0);
             let mut rect = RECT::default();
             let _ = GetWindowRect(h, &mut rect);
-            // Beside the window rather than under it: it is far taller than
-            // it is wide, so the room is at the sides.
+            // Place the cursor beside the window rather than below it. The window
+            // is taller than it is wide, so the side provides space.
             let middle = (rect.top + rect.bottom) / 2;
             let beside = if rect.left > 40 { rect.left - 40 } else { rect.right + 40 };
             drag_cursor_to(h, POINT { x: beside, y: middle });
-            // The premise, read back rather than assumed: the desktop
-            // clamps a cursor to its own bounds.
+            // Read the cursor position to confirm that the desktop clipped it
+            // to its bounds.
             let mut landed = POINT::default();
             let _ = GetCursorPos(&mut landed);
             let off = !PtInRect(&rect, landed).as_bool();
@@ -6593,9 +6436,8 @@ mod tests {
         assert!(!dragging, "and no row may still be in the air");
     }
 
-    /// Anything may take the mouse mid-drag - a menu, a task switch - and
-    /// when it does the gesture is over: a row left in the air would be
-    /// dropped by the next stray button-up, wherever the cursor had got to.
+    /// Another component can take capture during a drag.
+    /// That action ends the gesture. The next button-up must not move the row.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6606,18 +6448,18 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; the capture is taken by a live control of this
-        // same window and handed straight back.
+        // SAFETY: As above. A live control in this window takes and returns
+        // capture.
         let (dragging, order) = unsafe {
             let list = dlg_item(h, ID_TERMS).expect("the terms list");
             drag_cursor_to(h, row_centre(list, 0));
             send_begin_drag(h, list, ID_TERMS, 0);
-            // Far enough that a commit here would really move the row.
+            // Move far enough that a drop would change the order.
             drag_cursor_to(h, row_centre(list, 2));
             SetCapture(list);
             let dragging = drag_of(h).is_some();
             let _ = ReleaseCapture();
-            // The button-up that would otherwise have committed the drop.
+            // The button-up event would otherwise commit the drop.
             SendMessageW(h, WM_LBUTTONUP, None, None);
             (dragging, lv_rows(h, ID_TERMS))
         };
@@ -6626,10 +6468,9 @@ mod tests {
         assert_eq!(Some(form.terms.clone()), order, "and no drop may follow it");
     }
 
-    /// The part of the shared path a drag must not route around: a drop
-    /// that lands a row at the top grounds Move up, and a disabled control
-    /// keeps the focus Windows gave it - so the focus comes off first or
-    /// the keyboard is left talking to nothing.
+    /// Tests the shared path after a drop at the top.
+    /// The Move up button becomes disabled. Focus must leave it first because
+    /// Windows keeps focus on a disabled control.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6640,12 +6481,12 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; `IsWindowEnabled`, `GetFocus` and `SetFocus`
-        // read and move the focus between live controls of this window.
+        // SAFETY: As above. `IsWindowEnabled`, `GetFocus`, and `SetFocus`
+        // read and move focus between live controls in this window.
         let (parked, order, live, focused) = unsafe {
             let list = dlg_item(h, ID_TERMS).expect("the terms list");
             let up = dlg_item(h, ID_TERMS_UP).expect("the terms Move up button");
-            // Row 1 can go up, so the button is live and worth focusing.
+            // Row 1 can move up, so the button is enabled and can receive focus.
             lv_select(list, 1);
             update_list_buttons(h);
             let _ = SetFocus(Some(up));
@@ -6669,8 +6510,8 @@ mod tests {
 
     // ---- the ranking-strategy combo ----
 
-    /// The table is both halves of the edge, so every label the combo was
-    /// filled with reads back as the strategy that put it there.
+    /// The table defines both combo labels and strategies. Every label that
+    /// `build` adds must read back as the strategy at the same index.
     #[test]
     fn the_ranking_combo_reads_back_the_strategy_at_each_index() {
         for (at, (strategy, _)) in RANKING_STRATEGIES.iter().enumerate() {
@@ -6678,8 +6519,8 @@ mod tests {
         }
     }
 
-    /// `build` selects item 0 when it matches nothing, so a lost selection
-    /// has to read as whatever item 0 is.
+    /// `build` selects item 0 when no configured value matches.
+    /// A lost selection must read as item 0.
     #[test]
     fn a_ranking_combo_with_no_selection_reads_the_item_build_would_select() {
         assert_eq!(RANKING_STRATEGIES[0].0, ranking_strategy_at(-1));
@@ -6701,7 +6542,7 @@ mod tests {
         }
     }
 
-    // ---- re-scoping the terms list ----
+    // ---- Rescope the Terms list ----
 
     fn installed_two() -> Vec<String> {
         vec![
@@ -6721,7 +6562,7 @@ mod tests {
             .collect()
     }
 
-    /// No list: every row ticked.
+    /// An empty list leaves every row ticked.
     #[test]
     fn an_empty_language_list_leaves_every_row_ticked() {
         assert_eq!(
@@ -6730,7 +6571,7 @@ mod tests {
         );
     }
 
-    /// Exact names, never a prefix of one.
+    /// The list matches exact names, not prefixes.
     #[test]
     fn a_language_list_ticks_and_orders_the_rows_it_names() {
         assert_eq!(
@@ -6748,9 +6589,8 @@ mod tests {
         );
     }
 
-    /// Stale list: nothing unticked. A name that is only part of an
-    /// installed one is stale like any other - the substring match this
-    /// replaced is what made a rename look like a deliberate scope.
+    /// A stale list leaves every row ticked. A partial name is also stale.
+    /// The rule rejects substring matches for renamed dictionaries.
     #[test]
     fn a_list_matching_nothing_installed_leaves_every_row_ticked() {
         assert_eq!(
@@ -6759,7 +6599,7 @@ mod tests {
         );
     }
 
-    /// Blanks pin nothing.
+    /// Blank entries do not select any dictionary.
     #[test]
     fn a_blank_only_list_leaves_every_row_ticked() {
         assert_eq!(
@@ -6768,7 +6608,7 @@ mod tests {
         );
     }
 
-    /// Unreadable rows cannot scope.
+    /// An unreadable row cannot select a scope.
     #[test]
     fn a_list_naming_only_an_unreadable_row_leaves_every_row_ticked() {
         let mut all = installed_two();
@@ -6783,8 +6623,9 @@ mod tests {
         );
     }
 
-    /// It must stay removable, and Terms is the one section an empty role
-    /// set is listed in at all (ADR-0014).
+    /// The unreadable row must remain removable. Terms is the only section
+    /// that lists a dictionary with no roles
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn an_unreadable_row_survives_a_re_scope_so_it_can_still_be_removed() {
         let mut all = installed_two();
@@ -6802,15 +6643,14 @@ mod tests {
 
     // ---- the layout budget ----
 
-    /// The list sits beside a four-button column, so it may not be shorter
-    /// than one.
+    /// The list sits beside four buttons, so its height cannot be less than
+    /// one row.
     #[test]
     fn a_role_list_is_as_tall_as_its_four_button_column() {
         assert_eq!(3 * BTN_PITCH + ROW_H, DICT_LIST_H);
     }
 
-    /// Only Frequency has a rule to pick, so only its group pays for the
-    /// row that picks one.
+    /// Only Frequency has a ranking rule. Only its group includes the ranking row.
     #[test]
     fn only_the_frequency_group_is_taller_by_the_strategy_row() {
         let plain = 20 + DICT_CAP_H + DICT_LIST_H + 8;
@@ -6819,9 +6659,9 @@ mod tests {
         assert_eq!(plain + ROW_H + ROW_GAP, role_group_h(Role::Frequency));
     }
 
-    /// The whole seam, not only the decisions: a real window renders three
-    /// role sections and every row reads back with the checkbox and the
-    /// position it was given, and the strategy combo round-trips.
+    /// Tests the complete path. A real window renders three role sections.
+    /// Read-back must preserve each row's checkbox and position.
+    /// The strategy combo must also round-trip.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6843,10 +6683,10 @@ mod tests {
         assert_eq!(RankingStrategy::Median, back.ranking_strategy);
     }
 
-    /// A checkbox may only affect the section it sits in, and a Move button
-    /// only the list beside it: one dictionary supplying two roles has two
-    /// rows, and unticking its definitions may not touch its frequency
-    /// data (ADR-0014).
+    /// A checkbox affects only its section. A Move button affects only its
+    /// adjacent list. A dictionary with two roles has two rows. If the user
+    /// clears its definitions, its frequency data must not change
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6860,9 +6700,9 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: `h` is the window just opened, live for this whole test;
-        // both ids name controls `build` created inside it, and each
-        // `lv_*` helper states its own contract.
+        // SAFETY: `h` is the window that this test opened, and it stays live
+        // for the whole test. Both ids name controls that `build` created.
+        // Each `lv_*` helper states its own contract.
         unsafe {
             let freqs = dlg_item(h, ID_FREQS).expect("the frequency list");
             lv_select(freqs, 0);
@@ -6878,9 +6718,9 @@ mod tests {
         assert_eq!(form.pitch, back.pitch, "pitch was asked to change nothing");
     }
 
-    /// Every row is listable and removable even with no roles at all: an
-    /// unreadable archive is carried in Terms for exactly that reason, so
-    /// its Remove button has to be live when its row is selected.
+    /// Every row remains visible and removable, even when it has no roles.
+    /// Terms carries unreadable archives for this reason, so Remove must be
+    /// enabled when the user selects the row.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6893,7 +6733,7 @@ mod tests {
             .expect("opening the settings window");
         let h = window.hwnd();
 
-        // SAFETY: as above; `IsWindowEnabled` reads a live control.
+        // SAFETY: As above. `IsWindowEnabled` reads a live control.
         let (listed, removable) = unsafe {
             let terms = dlg_item(h, ID_TERMS).expect("the terms list");
             lv_select(terms, 0);
@@ -6907,12 +6747,11 @@ mod tests {
         assert!(removable, "an unreadable archive must stay removable");
     }
 
-    /// The window feeds the core seam and the seam decides: a frequency
-    /// reorder, tick or strategy change is a reindex, and a terms or pitch
-    /// change is a config write and the existing `reload`. The rule itself
-    /// is `settings::dictionary_work`'s, so this asserts only that every
-    /// control reaches it - a `read` that dropped the strategy on the
-    /// floor would silently never rerank.
+    /// The window passes values to the core path. A frequency reorder, tick, or
+    /// strategy change requests a reindex. A Terms or Pitch change writes config
+    /// and uses the stored `reload`.
+    /// `settings::dictionary_work` owns this rule. The test checks that each
+    /// control reaches it. A `read` step that omits the strategy skips a rank update.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6924,7 +6763,7 @@ mod tests {
         form.frequency = rows(&[("Mixed", true), ("Freq only", true)]);
         form.pitch = rows(&[("Pitch only", true)]);
         let before = crate::settings::apply_to(&form, &crate::config::Config::default());
-        // One window per change: they would otherwise accumulate.
+        // Create one window for each change. Otherwise changes could accumulate.
         let work = |touch: &dyn Fn(HWND)| {
             let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
                 .expect("opening the settings window");
@@ -6934,10 +6773,9 @@ mod tests {
         };
         let reorder = |list: i32, down: i32| {
             move |h: HWND| {
-                // SAFETY: both ids name controls `build` created inside
-                // `h`, which is live for this call; `lv_select` states its
-                // own contract and the button is driven the way a click
-                // drives it.
+                // SAFETY: Both ids name controls that `build` created inside `h`.
+                // `lv_select` states its own contract. The code sends the same
+                // message as a click.
                 unsafe {
                     let l = dlg_item(h, list).expect("a role list");
                     lv_select(l, 0);
@@ -6947,7 +6785,7 @@ mod tests {
         };
         let untick = |list: i32| {
             move |h: HWND| {
-                // SAFETY: as above; `lv_check` states its own contract.
+                // SAFETY: As above. `lv_check` states its own contract.
                 unsafe {
                     let l = dlg_item(h, list).expect("a role list");
                     lv_check(l, 0, false);
@@ -6961,8 +6799,8 @@ mod tests {
         assert_eq!(
             Reindex,
             work(&|h| {
-                // SAFETY: `ID_RANKING` names the combo `build` created
-                // inside `h`, live for this call.
+                // SAFETY: `ID_RANKING` names the combo that `build` created
+                // inside `h`. It stays live for this call.
                 unsafe {
                     let combo = dlg_item(h, ID_RANKING).expect("the ranking combo");
                     let at = RANKING_STRATEGIES

@@ -1,55 +1,61 @@
-//! Whether this session paints the pointer into the pixels we OCR
-//! (ticket 52), and the diagnostic that says so out loud.
+//! This module reports whether this session paints the pointer into
+//! the pixels that chibipop OCRs. It also holds the diagnostic that
+//! says so out loud.
 //!
-//! Every capture request chibipop makes asks for pixels *without* a
-//! cursor: the wlr rung passes `overlay_cursor = 0` on both slots
-//! (`session::WITHOUT_CURSOR`) and the portal rung never sends
-//! `cursor_mode = EMBEDDED`. Neither request can help when the
-//! compositor drew the pointer into the framebuffer *before* the copy
-//! happened: with a software cursor there is no separate pointer to
-//! leave out, only pixels that already contain one. The copy is then
-//! faithful and the frame has an arrow in it, sitting exactly on the
-//! text being looked up, and OCR reads the arrow as part of the glyph.
+//! Every capture request of chibipop asks for pixels *without* a
+//! cursor. The wlr rung passes `overlay_cursor = 0` on both slots
+//! (`session::WITHOUT_CURSOR`). The portal rung never sends
+//! `cursor_mode = EMBEDDED`. Neither request helps when the
+//! compositor drew the pointer into the framebuffer *before* the
+//! copy. With a software cursor there is no separate pointer to omit.
+//! There are only pixels that already contain one. The copy is then
+//! faithful, and the frame holds an arrow. The arrow sits exactly on
+//! the text of the lookup, and OCR reads the arrow as part of the
+//! glyph.
 //!
-//! Measured on this desk (2026-08-26, Hyprland 0.55.4, NVIDIA RTX 5080,
-//! `cursor:no_hardware_cursors = 1`): `chibipop capture-dump` of a
-//! 220x220 box around the pointer contains the arrow; flipping the
-//! option to `false` and dumping the same box with the pointer in the
-//! same place contains no arrow. One option, the whole effect.
+//! The author measured this effect on one desk (2026-08-26, Hyprland
+//! 0.55.4, NVIDIA RTX 5080, `cursor:no_hardware_cursors = 1`). A
+//! `chibipop capture-dump` of a 220x220 box around the pointer
+//! contains the arrow. A change of the option to `false`, and a dump
+//! of the same box with the pointer in the same place, contains no
+//! arrow. One option gives the whole effect.
 //!
-//! So the pointer's absence is a *compositor* property, not something a
-//! client can request, and the only honest thing chibipop can do is name
-//! it: a startup line and a degraded Capture row that say which option
-//! to change. Silence would leave the user with an app that reads the
-//! wrong character under the cursor and no way to know why.
+//! Therefore the absence of the pointer is a *compositor* property,
+//! and not a property that a client can request. The only honest act
+//! for chibipop is to name the property. It prints a startup line and
+//! a degraded Capture row that name the option to change. Silence
+//! would give the user an app that reads the wrong character under
+//! the cursor, and no way to know why.
 //!
-//! Hyprland-gated, like `cursor::hyprctl` (ADR-0003's documented
-//! identity exception): it is the compositor whose option is known,
-//! whose default many NVIDIA setups override, and whose `hyprctl` can be
-//! asked. Elsewhere the verdict is [`PointerInFrames::Unknown`] and
-//! nothing is printed - a guess would be worse than silence.
+//! This probe is Hyprland-gated, like `cursor::hyprctl` (the one
+//! identity exception). Hyprland is the compositor whose option the
+//! author knows, whose default many NVIDIA setups override, and whose
+//! `hyprctl` answers questions. On every other compositor the verdict
+//! is [`PointerInFrames::Unknown`], and the probe prints nothing. A
+//! guess would be worse than silence.
 
 use crate::cursor::hyprctl;
 use std::process::Command;
 
-/// The Hyprland option that decides it.
+/// The Hyprland option that decides the answer.
 pub const OPTION: &str = "cursor:no_hardware_cursors";
 
-/// What the compositor's own configuration says about the pointer being
-/// in captured frames.
+/// What the configuration of the compositor says about the pointer in
+/// captured frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInFrames {
-    /// Hardware cursor planes: the display engine overlays the pointer
-    /// after the framebuffer is composed, so the pixels screencopy
-    /// copies never contain it. Nothing to say.
+    /// Hardware cursor planes. The display engine overlays the
+    /// pointer after it composes the framebuffer. Therefore the
+    /// pixels that screencopy copies never contain the pointer. There
+    /// is nothing to say.
     Never,
-    /// `no_hardware_cursors = 1`: the compositor renders the pointer
-    /// into every frame. Every capture we take has it.
+    /// `no_hardware_cursors = 1`. The compositor renders the pointer
+    /// into every frame. Every capture holds the pointer.
     Always,
-    /// `no_hardware_cursors = 2` (auto, NVIDIA only): the compositor
-    /// falls back to a software cursor when the driver cannot give it a
-    /// plane, so this session may or may not have the pointer in its
-    /// frames and the config alone cannot say which.
+    /// `no_hardware_cursors = 2` (auto, NVIDIA only). If the driver
+    /// cannot give the compositor a plane, the compositor uses a
+    /// software cursor instead. Therefore this session can hold the
+    /// pointer in its frames, and the config alone cannot tell you.
     Maybe,
     /// Not a Hyprland session, or `hyprctl` did not answer.
     Unknown,
@@ -58,12 +64,14 @@ pub enum PointerInFrames {
 impl PointerInFrames {
     /// The startup line, when there is something to say.
     ///
-    /// Actionable and exact: the option, the value to set, and the
-    /// one-liner that tries it without an edit or a reload. The
-    /// `Maybe` line is informational and names the check rather than a
-    /// fix, because `auto` is only a problem on the hardware where it
-    /// falls back - telling every auto session to change a setting it
-    /// may not need is how a diagnostic teaches people to ignore it.
+    /// The line is exact and it names an action: the option, the
+    /// value to set, and the one-line command that tries the value
+    /// with no edit and no reload. The `Maybe` line gives information
+    /// only. It names the check, and not a fix. `auto` is a problem
+    /// only on the hardware that uses a software cursor. Many auto
+    /// sessions do not need the change. A diagnostic that tells every
+    /// auto session to change the setting teaches people to ignore
+    /// the diagnostic.
     pub fn startup_line(self) -> Option<String> {
         match self {
             PointerInFrames::Always => Some(format!(
@@ -83,14 +91,14 @@ impl PointerInFrames {
         }
     }
 
-    /// What the Capture status row appends when the pointer is known to
-    /// be in the pixels: the backend still serves, so the row keeps
-    /// naming it and adds the defect and its fix
-    /// ([`crate::tray::status::ChannelState::degraded_by`]).
+    /// The text that the Capture status row adds when the pointer is
+    /// certainly in the pixels. The backend still serves. Therefore
+    /// the row keeps the backend name, and it adds the defect and the
+    /// fix ([`crate::tray::status::ChannelState::degraded_by`]).
     ///
     /// Only the certain case degrades a row. `auto` gets the startup
-    /// line and no permanent attention flag: an icon parked on
-    /// NeedsAttention for a maybe is an icon nobody reads.
+    /// line and no permanent attention flag. An icon that stays on
+    /// NeedsAttention for a maybe is an icon that nobody reads.
     pub fn row_defect(self) -> Option<String> {
         match self {
             PointerInFrames::Always => {
@@ -108,19 +116,19 @@ impl PointerInFrames {
 /// set: true
 /// ```
 ///
-/// The value is what matters; `set` only says whether the user wrote it
-/// down, and a default is as effective as a setting.
+/// The value matters. `set` only tells you whether the user wrote the
+/// option in the config. A default has the same effect as a setting.
 pub fn parse_getoption_int(out: &str) -> Option<i64> {
     out.lines()
         .find_map(|line| line.trim().strip_prefix("int:"))
         .and_then(|value| value.trim().parse().ok())
 }
 
-/// Read the option's value: `0` off, `1` on, `2` auto (NVIDIA only).
+/// Reads the value of the option: `0` off, `1` on, `2` auto (NVIDIA only).
 ///
-/// An unknown number is `Unknown`, not a guess - a future Hyprland may
-/// add a value, and inventing a verdict for it would print a fix the
-/// user does not need.
+/// An unknown number gives `Unknown`, and not a guess. A future
+/// Hyprland can add a value. A verdict invented for that value would
+/// print a fix that the user does not need.
 pub fn verdict(value: Option<i64>) -> PointerInFrames {
     match value {
         Some(0) => PointerInFrames::Never,
@@ -130,9 +138,9 @@ pub fn verdict(value: Option<i64>) -> PointerInFrames {
     }
 }
 
-/// Ask this session, once, at startup. `Unknown` on anything unexpected:
-/// a missing binary, a non-Hyprland session, or an answer that does not
-/// parse must never cost a startup.
+/// Asks this session one time at startup. Every unexpected condition
+/// gives `Unknown`. A missing binary, a session without Hyprland, or
+/// an answer that does not parse must never cost a startup.
 pub fn probe() -> PointerInFrames {
     if !hyprctl::available() {
         return PointerInFrames::Unknown;
@@ -141,8 +149,8 @@ pub fn probe() -> PointerInFrames {
 }
 
 fn read_option(option: &str) -> Option<i64> {
-    // Same reason as `hyprctl::sample`: no child inherits the daemon's
-    // shutdown mask (ticket 13).
+    // The reason is the same as in `hyprctl::sample`. No child
+    // inherits the shutdown mask of the daemon.
     let out = crate::signals::unmasked(&mut Command::new("hyprctl"))
         .args(["getoption", option])
         .output()
@@ -157,7 +165,7 @@ fn read_option(option: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
-    /// The shape `hyprctl` printed on the diagnosed session, verbatim.
+    /// The exact shape that `hyprctl` printed on the diagnosed session.
     #[test]
     fn getoption_output_parses() {
         assert_eq!(Some(1), parse_getoption_int("int: 1\nset: true\n"));
@@ -177,8 +185,8 @@ mod tests {
         assert_eq!(PointerInFrames::Unknown, verdict(Some(7)), "nor is a value we do not know");
     }
 
-    /// The measured case: the diagnostic must name the option, the value
-    /// to set, and a way to see it for yourself.
+    /// The measured case. The diagnostic must name the option, the
+    /// value to set, and a way to see the effect yourself.
     #[test]
     fn a_software_cursor_session_is_told_exactly_what_to_change() {
         let line = PointerInFrames::Always.startup_line().expect("a loud line");
@@ -189,8 +197,8 @@ mod tests {
         assert!(defect.contains(OPTION));
     }
 
-    /// Auto is a check, not a verdict: it says something, and it does
-    /// not park the tray on NeedsAttention.
+    /// Auto is a check, and not a verdict. It says something, and it
+    /// does not leave the tray on NeedsAttention.
     #[test]
     fn an_auto_session_is_told_how_to_check_but_does_not_degrade_a_row() {
         let line = PointerInFrames::Maybe.startup_line().expect("an informational line");
@@ -198,8 +206,8 @@ mod tests {
         assert_eq!(None, PointerInFrames::Maybe.row_defect());
     }
 
-    /// Silence where there is nothing to report - including sessions
-    /// this probe cannot read at all.
+    /// The probe stays silent when there is nothing to report. This
+    /// includes a session that the probe cannot read.
     #[test]
     fn hardware_cursors_and_unreadable_sessions_say_nothing() {
         for quiet in [PointerInFrames::Never, PointerInFrames::Unknown] {
@@ -208,8 +216,8 @@ mod tests {
         }
     }
 
-    /// Off a Hyprland session there is no option to read, and the probe
-    /// must not shell out looking for one.
+    /// Without a Hyprland session there is no option to read. The
+    /// probe must not start a child process to look for one.
     #[test]
     fn a_session_without_hyprland_probes_to_unknown() {
         if !hyprctl::available() {

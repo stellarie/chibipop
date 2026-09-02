@@ -1,29 +1,26 @@
-//! Geometry-snapshot capture for the layout goldens (ADR-0011, widened
-//! by ADR-0013).
+//! Capture geometry snapshots for the layout goldens.
+//! See `ARCHITECTURE.md#popup-and-measurement` for the schema contract.
 //!
-//! A snapshot is everything `layout_pass` computes for one fixture
-//! `Presentation`, as JSON with fixed-precision floats: element rects,
-//! hit rects and their `HitAction`s, content height, `max_scroll`, the
-//! side-panel geometry, plus the `measure()` triple the popup is sized
-//! from. Capture is the measure-only walk - no window, no render
-//! target, no painting - so it runs on the unmodified build.
+//! A snapshot records the values that `layout_pass` computes for one
+//! `Presentation`. It stores fixed-precision JSON for element rects, hit rects,
+//! `HitAction`s, content height, `max_scroll`, side-panel geometry, and the
+//! `measure()` triple.
 //!
-//! **ADR-0013 widened the schema.** An element now also projects its
-//! styled spans, the line and span geometry the measurer reported for
-//! them, its box record, its readings, its list markers, its dictionary
-//! address, and its image's media key. Those fields are why the
-//! widening was needed at all: `Metrics { w, h, lines }` says nothing
-//! about where a smaller span sits inside a taller line, and the
-//! baseline that answers it reaches no other test. After the re-bless
-//! these goldens defend the DirectWrite adapter's per-range formatting
-//! and its baseline reporting, neither of which anything else exercises.
+//! The capture only measures the scene. It uses no window, render target, or paint
+//! operation. Therefore it runs on the unmodified build.
 //!
-//! Floats stay at the same fixed precision the schema always used, and
-//! the goldens keep exact equality - see [`px`].
+//! **Schema expansion.** Each element now records styled spans, line and span
+//! geometry from the measurer, its box, readings, list markers, dictionary
+//! address, and media key. `Metrics { w, h, lines }` cannot show the position
+//! of a small span inside a tall line. The baseline supplies that position, and
+//! no other test checks it. The goldens now protect range format behavior in the
+//! DirectWrite adapter and its baseline output after each bless run.
 //!
-//! The fixtures live here, not in the test, so the golden test and the
-//! `CHIBIPOP_BLESS=1` bless path share one code path (ADR-0011: capture
-//! and verify must not drift apart).
+//! Floats keep the schema's fixed precision, and goldens use exact equality.
+//! See [`px`].
+//!
+//! Keep the fixtures here. The golden test and the `CHIBIPOP_BLESS=1` bless path
+//! must call the same capture path, so capture and check stay consistent.
 
 use super::*;
 use crate::dict::media::{Intrinsic, MediaFormat};
@@ -36,34 +33,31 @@ use crate::text::TextSpan;
 use crate::ui::layout::{BoxStyle, Edges, ElemBox, GlossOrigin, MarkerBox, Rgb, RubyBox};
 use serde_json::{json, Value};
 
-/// One capture's full input.
+/// Complete input for one capture.
 pub struct Spec {
     pub theme: Theme,
     pub p: Presentation,
-    /// Physical px, like `measure`.
+    /// Maximum width in physical pixels. The capture uses this value as `measure`.
     pub max_w: i32,
     pub max_h: i32,
     pub show_back: bool,
     pub side_panel: bool,
-    /// Physical px; clamped to
-    /// `max_scroll` like the app does.
+    /// Scroll request in physical pixels. The code clamps it to
+    /// `max_scroll` as the app does.
     pub scroll: i32,
     pub anki: AnkiPopupState,
-    /// Source-text geometry for the
-    /// match highlight, if the
-    /// fixture exercises it.
+    /// Source text geometry for the match highlight when the fixture covers it.
     pub span: Option<TextSpan>,
 }
 
 impl Spec {
-    /// The common case: dark theme,
-    /// default popup box, no chrome.
+    /// Build the common case with the dark theme and default popup box.
+    /// This case has no chrome.
     fn plain(p: Presentation) -> Spec {
         Spec {
             theme: Theme::dark(),
             p,
-            // 1920x1080 at the default
-            // 25% x 45% popup config.
+            // Use the default 25% x 45% popup config for a 1920x1080 display.
             max_w: 480,
             max_h: 486,
             show_back: false,
@@ -75,28 +69,21 @@ impl Spec {
     }
 }
 
-/// A named fixture: one golden file,
-/// one or more labelled captures.
+/// A named fixture with one golden file and one or more labeled captures.
 pub struct Fixture {
     pub name: &'static str,
     pub variants: Vec<(&'static str, Spec)>,
 }
 
-/// The sixteen ADR-0011 fixtures.
+/// The sixteen pinned fixtures.
 ///
-/// Seven from the original set, whose
-/// intent is unchanged, then the six
-/// ADR-0013 requires: the widened
-/// schema has fields no plain-string
-/// fixture can ever fill, and an
-/// unfilled field gates nothing. The
-/// last three are ticket 02's, for the
-/// same reason again: pitch has no
-/// geometry before that ticket, so
-/// nothing could be captured from a
-/// build that drew none, and these
-/// three are the only thing pinning
-/// the card header's marks.
+/// Seven fixtures come from the original set. Six more cover fields that
+/// plain-string fixtures cannot fill. An empty field does not gate the test.
+/// The final three cover card-header pitch geometry, which had no earlier
+/// fixture. They pin the header marks.
+///
+/// Per-fixture purpose lives in `ARCHITECTURE.md#verification`. Keep the text
+/// consistent with this list.
 pub fn fixtures() -> Vec<Fixture> {
     vec![
         wrapping_heavy(),
@@ -118,9 +105,9 @@ pub fn fixtures() -> Vec<Fixture> {
     ]
 }
 
-/// Captures every variant of `f`.
+/// Capture every variant in `f`.
 ///
-/// The golden file's whole content.
+/// The result contains the whole golden file.
 pub fn snapshot(f: &Fixture) -> Result<Value> {
     let mut variants = serde_json::Map::new();
     for (label, spec) in &f.variants {
@@ -129,35 +116,26 @@ pub fn snapshot(f: &Fixture) -> Result<Value> {
     Ok(json!({ "fixture": f.name, "variants": Value::Object(variants) }))
 }
 
-/// Stable golden serialization.
+/// Serialize a snapshot with stable text.
 pub fn to_json_text(v: &Value) -> String {
     let mut s = serde_json::to_string_pretty(v).expect("geometry snapshots are plain JSON trees");
     s.push('\n');
     s
 }
 
-/// One measure-only capture.
+/// Capture one scene without paint or a window.
 ///
-/// Builds the scene through the same
-/// `Text` engine paint uses, then
-/// projects it onto the golden's
-/// schema. Nothing here decides
-/// geometry: it only reads it.
+/// Build the scene with the same `Text` engine that paint uses. Then project it
+/// onto the golden schema. This function reads geometry and does not choose it.
 fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
     let text = Text::new()?;
-    // No window: the capture is
-    // defined at 96 dpi. The runner
-    // has no HWND to ask anyway.
+    // Use no window. The capture uses 96 DPI because the runner has no HWND to query.
     let scale = 1.0f32;
 
-    // The shipped render settings, so
-    // a golden pins what a fresh
-    // install draws. A fixture is not
-    // where a knob is exercised: the
-    // render settings are asserted
-    // through `layout::scene` with the
-    // layout fake, which needs no font
-    // stack (`src/ui/layout/tests.rs`).
+    // Use the shipped render settings so the golden records a fresh install.
+    // Do not exercise a render knob in a fixture. The layout tests assert those
+    // settings through `layout::scene` with the layout fake. The fake needs no
+    // font stack (`src/ui/layout/tests.rs`).
     let scene = scene_of(
         &text,
         &spec.p,
@@ -198,11 +176,9 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         None => Value::Null,
     };
 
-    // paint_once's thumb, off the same
-    // scene method it calls, so the
-    // golden records the derivation the
-    // renderer performs rather than a
-    // second copy of it.
+    // Read the thumb from the same scene method that
+    // `paint_once` calls. The golden records the derivation
+    // that the renderer uses, not a second copy.
     let thumb = scene
         .scrollbar_thumb(spec.theme.padding, view_h, scroll_dip)
         .map(|(top, h)| json!({ "top": top, "h": h }))
@@ -213,9 +189,8 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         elements.push(elem_json(i, e, &text, &spec.theme, scale)?);
     }
 
-    // The main column only, as before:
-    // the side column's targets are
-    // covered by `side_panel` above.
+    // Record main-column targets only. `side_panel` covers the side-column
+    // targets above.
     let hit_json: Vec<Value> = scene
         .hits
         .iter()
@@ -265,16 +240,11 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
     }))
 }
 
-/// One element, whole.
+/// Serialize one complete element.
 ///
-/// `pen` rides along with the rect
-/// because every field ADR-0013 added
-/// below it - the readings, the
-/// markers, and the measurer's own
-/// line and span boxes - is
-/// *run-relative*, and a run-relative
-/// coordinate with no origin beside it
-/// is a number a reviewer cannot check.
+/// Keep `pen` with the rect. The added fields include readings, markers, and
+/// the measurer's line and span boxes. These fields use *run-relative*
+/// coordinates. A reviewer cannot check a coordinate without its origin.
 fn elem_json(i: usize, e: &SceneElem, text: &Text, theme: &Theme, scale: f32) -> Result<Value> {
     let spans: Vec<Value> = e
         .spans
@@ -324,28 +294,19 @@ fn elem_json(i: usize, e: &SceneElem, text: &Text, theme: &Theme, scale: f32) ->
     }))
 }
 
-/// What the measurer said about this
-/// element's run, asked again.
+/// Ask the measurer for the geometry of one element run.
 ///
-/// The scene carries no [`LineBox`] and
-/// no [`SpanBox`] - it keeps the
-/// stacked result, not the detail - so
-/// a baseline and a span's share of its
-/// line reach the golden only by asking
-/// the adapter. This is still reading
-/// rather than deciding: the request is
-/// the one [`SceneElem::styled_spans`]
-/// exists to rebuild, at the width the
-/// scene reports, which is exactly what
-/// `paint_once` re-measures at draw
-/// time. If it answered differently
-/// here the panel's ink would not match
-/// its own hit rects.
+/// The scene has no [`LineBox`] or [`SpanBox`]. It stores stacked results, not
+/// line detail. Ask the adapter for a baseline and each span's share of its
+/// line.
 ///
-/// `null` for an element with no spans:
-/// a rule, a block's own box, a
-/// table's own box, and a cell's
-/// border have no text to wrap.
+/// The request rebuilds the spans from [`SceneElem::styled_spans`] at the scene
+/// width. `paint_once` makes the same request at paint time.
+/// This function reads geometry. It does not choose it. If the adapter returned
+/// another result, the panel ink would not match its hit rects.
+///
+/// Return `null` when the element has no spans. Rules, block boxes, table boxes,
+/// and cell borders have no text to wrap.
 fn measured_json(text: &Text, theme: &Theme, e: &SceneElem, scale: f32) -> Result<Value> {
     if e.spans.is_empty() {
         return Ok(Value::Null);
@@ -391,15 +352,10 @@ fn measured_json(text: &Text, theme: &Theme, e: &SceneElem, scale: f32) -> Resul
     }))
 }
 
-/// A positioned run that is not in its
-/// element's flow.
+/// A positioned run outside its element flow.
 ///
-/// A reading and a list marker carry
-/// the same nine fields and neither is
-/// a span of the text the measurer
-/// wrapped, so they project through one
-/// shape rather than two that could
-/// drift.
+/// A reading and a list marker share the same nine fields. Neither is a span
+/// that the measurer wraps. Use one shape for both to prevent drift.
 struct OutOfFlow<'a> {
     text: &'a str,
     x: f32,
@@ -460,14 +416,11 @@ impl<'a> From<&'a MarkerBox> for OutOfFlow<'a> {
     }
 }
 
-/// One box to fill and stroke.
+/// Serialize one box that can receive fill and stroke.
 ///
-/// The declared widths, not the used
-/// ones: `border_used` is derived from
-/// these two fields and the layout
-/// tests already pin the derivation, so
-/// putting it here would only make one
-/// change diff twice.
+/// Record declared widths, not used widths. `border_used` comes from those
+/// fields, and layout tests already pin that calculation. A record here
+/// would duplicate one change.
 fn box_json(b: &ElemBox, scale: f32) -> Value {
     json!({
         "rect": {
@@ -497,8 +450,7 @@ fn style_json(s: BoxStyle, scale: f32) -> Value {
     })
 }
 
-/// Four edges in CSS's own order:
-/// top, right, bottom, left.
+/// Return four edges in CSS order: top, right, bottom, left.
 fn lengths(e: Edges<f32>, scale: f32) -> Value {
     json!([
         px(e.top * scale),
@@ -512,13 +464,10 @@ fn rgb(c: Rgb) -> Value {
     json!([c.0, c.1, c.2])
 }
 
-/// Where in its dictionary an element
-/// came from.
+/// Serialize the dictionary address of an element.
 ///
-/// The path is its child indices,
-/// outermost first - the identity a
-/// sense picker selects on, and `null`
-/// for a node too deep to address.
+/// `path` contains child indices from the outermost node. This is the identity
+/// that a sense picker selects. Return `null` when a node is too deep to address.
 fn origin_json(o: Option<GlossOrigin>) -> Value {
     match o {
         None => Value::Null,
@@ -530,12 +479,11 @@ fn origin_json(o: Option<GlossOrigin>) -> Value {
     }
 }
 
-/// The asset an image element names.
+/// Serialize the asset named by an image element.
 ///
-/// The key and the format, not the
-/// bytes: core resolved the rect from
-/// the recorded intrinsic size, and the
-/// rect is the element's own.
+/// Record the key and format, not bytes. Core resolves each image box from its
+/// declared dimensions first, then its recorded intrinsic size, and finally a
+/// square with the surrounding text size. The element owns that resolved box.
 fn image_json(img: &SceneImage) -> Value {
     json!({
         "key": img.key.as_ref().map(|k| json!({ "dict_id": k.dict_id, "path": k.path })),
@@ -547,11 +495,10 @@ fn image_json(img: &SceneImage) -> Value {
     })
 }
 
-/// Two decimals, as a string: the
-/// golden compares text, never
-/// reparsed floats. `-0.0` becomes
-/// `0.0` so the sign of nothing
-/// can't diff.
+/// Format a value with two decimals as a string.
+///
+/// The golden compares text and never parses floats again. Convert `-0.0` to
+/// `0.0` so zero has one sign.
 fn px(v: f32) -> Value {
     let r = (f64::from(v) * 100.0).round() / 100.0;
     let r = if r == 0.0 { 0.0 } else { r };
@@ -562,7 +509,7 @@ fn rect_json(r: PhysRect) -> Value {
     json!({ "x": r.x, "y": r.y, "w": r.w, "h": r.h })
 }
 
-// ---- fixtures (ADR-0011 §Fixture set) ----
+// ---- fixtures ----
 
 fn card(
     written: Option<&str>,
@@ -583,11 +530,11 @@ fn card(
     }
 }
 
-/// One accent, and the dictionaries that gave it.
+/// One accent and the dictionaries that supplied it.
 ///
-/// Real accents out of `docs/research/pitch-accent-shapes.md`'s census, so a
-/// golden that moves says something about a reading somebody's dictionary
-/// actually publishes.
+/// Use real accents from `docs/research/pitch-accent-shapes.md`'s census. A
+/// changed golden then reports geometry from a reading that a real dictionary
+/// publishes.
 fn pitch(fall: u32, dicts: &[&str]) -> PitchRow {
     PitchRow {
         accent: Accent {
@@ -600,42 +547,41 @@ fn pitch(fall: u32, dicts: &[&str]) -> PitchRow {
     }
 }
 
-/// The layout pass renders each row's parsed tree, so a geometry fixture
-/// carries the tree its own strings parse to - a bare glossary string per
-/// item, the shape 20 of the census's 72 dictionaries emit. The blessed
-/// geometry is unchanged by that: the inline pass joins one row's items
-/// with the same `; ` the panel always drew and coalesces them into one
-/// styled span, so the seam gets the request it got before the pass
-/// existed.
+/// Parse one row as one dictionary block.
 ///
-/// One block, one matched term-bank row: the geometry the goldens hold is
-/// one dictionary label with one gloss body under it. The six structured
-/// fixtures below use [`tree`] instead, because none of this can express
-/// a second style on a line.
+/// The layout pass renders each row's parsed tree. A fixture therefore uses the
+/// tree that its strings parse to. Each item remains a bare glossary string,
+/// the shape that 20 of the census's 72 dictionaries emit. The inline pass
+/// joins one row's items with the same `; ` that the panel uses and coalesces
+/// them into one styled span. The seam receives the same request as before the
+/// pass existed.
+///
+/// One block represents one matched term-bank row. The goldens hold one
+/// dictionary label with one gloss body. The six structured fixtures use [`tree`]
+/// because this helper cannot express a second style on one line.
 fn block(dict: &str, glosses: &[&str]) -> GlossBlock {
     GlossBlock::parse(dict, &serde_json::json!(glosses).to_string())
 }
 
-/// One structured-content item wrapping `content`, as a term bank stores
-/// a row.
+/// Wrap `content` as one structured-content item, as a term bank stores a row.
 fn sc(content: &str) -> String {
     format!(r#"[{{"type":"structured-content","content":{content}}}]"#)
 }
 
-/// One dictionary's whole contribution, structured: its own rows, its own
-/// `styles.css`, and the media rows its build recorded.
+/// Build one dictionary contribution with its rows, `styles.css`, and recorded
+/// media rows.
 ///
-/// Five arguments because a real block is five facts and splitting them
-/// into overload-shaped helpers would put the same body in three places.
-/// The stylesheet fold is `dict::sheet`'s and the hover path runs it
-/// between the parse and the tree cache (`SqliteDictionary::entries`), so
-/// a fixture reproduces a real hover by calling the same two functions -
-/// and everything below this line has no idea CSS was involved.
+/// A real block has five facts, so this helper takes five arguments.
+/// Keep the same body in one helper. Do not duplicate it across
+/// overload-shaped helpers.
+/// `dict::sheet` performs the stylesheet fold. The hover path calls it between
+/// parse and tree-cache steps in `SqliteDictionary::entries`. This fixture calls
+/// the same two functions to reproduce a real hover. Code below need not know
+/// about CSS.
 ///
-/// `dict_id` is a real number rather than `NO_ROW` wherever the fixture
-/// carries media or wants a checkable [`GlossOrigin`]: an element's media
-/// key and its dictionary address are both built from it, and zero would
-/// hide a mix-up between them.
+/// Use a real `dict_id`, not `NO_ROW`, when the fixture has media or checks a
+/// [`GlossOrigin`]. The media key and dictionary address both use this value.
+/// A zero value would hide a mix-up between them.
 fn tree(
     dict: &str,
     dict_id: i64,
@@ -652,9 +598,8 @@ fn tree(
             sheet::apply(&mut doc, &sheet);
             let doc = std::sync::Arc::new(doc);
             GlossEntry {
-                // Rows of one dictionary are numbered as a term bank
-                // numbers them, so a snapshot names which row an element
-                // came from and not merely which dictionary.
+                // Number rows within each dictionary like a term bank.
+                // The snapshot can then name the source row, not only the dictionary.
                 entry_id: dict_id * 100 + i as i64 + 1,
                 glosses: crate::dict::gloss::plain_items(&doc),
                 tags: Vec::new(),
@@ -666,11 +611,11 @@ fn tree(
     GlossBlock { dict_name: dict.to_string(), dict_id, entries }
 }
 
-/// One recorded media row, as `dict::media::probe` writes it.
+/// Record one media row as `dict::media::probe` writes it.
 ///
-/// A path and four numbers: the sizing pass reads what the build recorded
-/// rather than the bytes, so an image fixture needs no archive, no
-/// decoder and no database.
+/// Construct an [`Intrinsic`] from a format and two dimensions. The caller stores
+/// the path with the returned value. The size pass reads these values, not the
+/// bytes. An image fixture then needs no archive, decoder, or database.
 fn recorded(format: MediaFormat, w: f32, h: f32) -> Intrinsic {
     Intrinsic { format, width: w, height: h, aspect: w / h }
 }
@@ -688,8 +633,8 @@ fn present(top: Option<Card>, collapsed: Vec<CollapsedRow>) -> Presentation {
     Presentation { top, collapsed, all_cards, sentence: None }
 }
 
-/// 30px char boxes from x=100, like
-/// present.rs's own span fixtures.
+/// Create 30-pixel character boxes from x=100, like the fixtures in
+/// `present.rs`.
 fn span_of(text: &str, cursor_byte_offset: usize) -> TextSpan {
     let geom = (0..text.chars().count())
         .map(|i| TextGeom {
@@ -705,7 +650,7 @@ fn span_of(text: &str, cursor_byte_offset: usize) -> TextSpan {
     }
 }
 
-/// 1. The wrap loop and gap stacking.
+/// 1. The wrap loop and gap stack.
 fn wrapping_heavy() -> Fixture {
     let top = card(
         Some("胡蝶の夢"),
@@ -732,13 +677,13 @@ fn wrapping_heavy() -> Fixture {
         4,
     );
     let mut spec = Spec::plain(present(Some(top), vec![]));
-    // Narrow: every gloss wraps.
+    // Use a narrow width so every gloss wraps.
     spec.max_w = 360;
     spec.max_h = 700;
     Fixture { name: "wrapping_heavy", variants: vec![("default", spec)] }
 }
 
-/// 2. The same rows, both modes.
+/// 2. The same rows in both modes.
 fn side_panel_fixture() -> Fixture {
     let build = |side: bool| {
         let top = card(
@@ -752,8 +697,8 @@ fn side_panel_fixture() -> Fixture {
         let collapsed = vec![
             row(Some("生"), Some("せい"), "life; living"),
             row(Some("生"), Some("き"), "pure; undiluted"),
-            // Headless: the panel path
-            // skips it, inline keeps it.
+            // Headless row: the panel path skips it,
+            // but inline mode keeps it.
             row(None, None, "summary-only row with no headword"),
         ];
         let mut spec = Spec::plain(present(Some(top), collapsed));
@@ -766,7 +711,7 @@ fn side_panel_fixture() -> Fixture {
     }
 }
 
-/// 3. Overflow: `max_scroll`, thumb.
+/// 3. Overflow with `max_scroll` and the thumb.
 fn scrolled() -> Fixture {
     let blocks: Vec<GlossBlock> = (1..=8)
         .map(|i| {
@@ -790,7 +735,7 @@ fn scrolled() -> Fixture {
     Fixture { name: "scrolled", variants: vec![("default", spec)] }
 }
 
-/// 4. `HIGHLIGHT_PAD` vs glyph boxes.
+/// 4. Compare `HIGHLIGHT_PAD` with glyph boxes.
 fn match_highlight_fixture() -> Fixture {
     let top = card(
         Some("可哀想"),
@@ -805,9 +750,8 @@ fn match_highlight_fixture() -> Fixture {
     Fixture { name: "match_highlight", variants: vec![("default", spec)] }
 }
 
-/// 5. Every `HitAction`'s rect: back
-///    button, drill-down kanji, expand
-///    rows, plus corner and Anki label.
+/// 5. Rects for every `HitAction`: the back button, drill-down kanji, expanded
+///    rows, corner, and Anki label.
 fn full_chrome() -> Fixture {
     let top = card(
         Some("雑談"),
@@ -831,22 +775,20 @@ fn full_chrome() -> Fixture {
     Fixture { name: "full_chrome", variants: vec![("default", spec)] }
 }
 
-/// 6. Degenerate gap paths.
+/// 6. Degenerate paths for gaps.
 fn minimal_edge() -> Fixture {
-    // No reading, no PoS, unranked,
-    // and a block with no glosses:
-    // label drawn, body skipped.
+    // No reading, part-of-speech label, or Frequency rank.
+    // The block has no glosses, so it draws the label and skips the body.
     let sparse = Spec::plain(present(
         Some(card(Some("猫"), None, &[], None, vec![block("大辞林", &[])], 1)),
         vec![],
     ));
-    // Nothing at all: the popup the
-    // renderer sizes to bare padding.
+    // Empty presentation: the renderer sizes the popup to its padding.
     let empty = Spec::plain(present(None, vec![]));
     Fixture { name: "minimal_edge", variants: vec![("sparse", sparse), ("empty", empty)] }
 }
 
-/// 7. Everything at once.
+/// 7. All features together.
 fn kitchen_sink() -> Fixture {
     let top = card(
         Some("面白い"),
@@ -863,8 +805,7 @@ fn kitchen_sink() -> Fixture {
                 ],
             ),
             block("大辞林", &["心が引かれて、楽しい気持ちになるさま。興味をそそられるさま。"]),
-            // Empty glosses: the label
-            // stands alone.
+            // Empty glosses: the label stands alone.
             block("新明解国語辞典", &[]),
         ],
         3,
@@ -890,30 +831,29 @@ fn kitchen_sink() -> Fixture {
     Fixture { name: "kitchen_sink", variants: vec![("default", spec)] }
 }
 
-// ---- the six ADR-0013 added ----
+// ---- the six added by the widening ----
 //
-// Authored, not captured. ADR-0011's capture property - "capturable from
-// the unmodified pre-refactor build" - does not reach styled content,
-// because the unmodified build had no styled spans to capture. Every
-// tree below is a real corpus shape out of `docs/research/dict-shapes.md`
-// rather than an invented one, so a golden that moves says something
-// about a dictionary somebody owns.
+// These six fixtures are authored, not captured. The capture property
+// "capturable from the unmodified pre-refactor build" does not include styled
+// content because the old build had no styled spans. Each tree comes from a
+// real shape in `docs/research/dict-shapes.md`, not an invented shape. A changed
+// golden therefore reports geometry from a dictionary that uses the shape.
 
-/// 8. Mixed styling inside one wrapped paragraph.
+/// 8. Mixed styles inside one wrapped paragraph.
 ///
-/// The single fact ADR-0013 exists to change: before it a run boundary
-/// was always a line boundary, so bold text and normal text could not
-/// share a wrapped line. This paragraph makes five style changes without
-/// a break, and the narrow box forces the mix to wrap.
+/// This fixture tests the schema change. Before the change, a run boundary
+/// always matched a line boundary. Bold and normal text could not share a
+/// wrapped line. This paragraph makes five style changes without a line break,
+/// and the narrow box forces a wrap.
 ///
-/// Every property in it is a census property, ranked by dictionaries that
-/// emit it: `fontWeight` (24 dictionaries, 846 326 nodes), `fontSize`
-/// (18 / 772 971), `verticalAlign` (18 / 632 811) and `color` (8 /
-/// 380 317), plus `fontStyle` (6 / 238) for the rare case. `sup` and
-/// `sub` take their rise and their smaller size from HTML's own
-/// stylesheet, which is what puts a non-zero `shift` and a shorter
-/// `span_box` height on a taller line - the arithmetic that has no answer
-/// without a baseline.
+/// Each property comes from the census, with counts for dictionaries that emit
+/// it: `fontWeight` (24 dictionaries, 846 326 nodes), `fontSize`
+/// (18 dictionaries, 772 971 nodes), `verticalAlign` (18 dictionaries,
+/// 632 811 nodes), and `color` (8 dictionaries, 380 317 nodes). The rare
+/// `fontStyle` case has 6 dictionaries and 238 nodes. `sup` and `sub` get
+/// their rise and smaller size from HTML's own stylesheet. This creates a
+/// non-zero `shift` and a shorter `span_box` on a taller line. The baseline
+/// supplies the required arithmetic.
 fn styled_spans() -> Fixture {
     let body = concat!(
         r##"{"tag":"div","content":["##,
@@ -936,47 +876,38 @@ fn styled_spans() -> Fixture {
         4,
     );
     let mut spec = Spec::plain(present(Some(top), vec![]));
-    // Narrow enough that the mixed
-    // styles have to share lines.
+    // Use a narrow width so the mixed styles share wrapped lines.
     spec.max_w = 340;
     Fixture { name: "styled_spans", variants: vec![("default", spec)] }
 }
 
-/// 9. The box record: a pill from a stylesheet, a bordered block inline.
+/// 9. Box records: a stylesheet pill and an inline bordered block.
 ///
-/// The census's single largest scope correction. Margin, padding, border
-/// style, border width and border radius each appear in 11 to 14 of 72
-/// dictionaries, and that is how those dictionaries draw their pills.
+/// This fixture tests scope correction. The census shows margin, padding,
+/// border style, border width, and border radius in 11 to 14 of 72 dictionaries.
+/// Those dictionaries use them to draw pills.
 ///
-/// Two variants because the corpus has two mechanisms and they barely
-/// overlap - 29 structured dictionaries write their boxes inline, 13
-/// write them only in `styles.css`, and by the question that matters all
-/// 14 stylesheet dictionaries draw their pill in CSS:
+/// Use two variants because the corpus has two mechanisms with little overlap.
+/// Twenty-nine structured dictionaries write boxes inline. Thirteen write them
+/// only in `styles.css`. All 14 stylesheet Dictionaries draw boxes in CSS.
 ///
-/// - `css` is Jitendex's own pill, `span[data-sc-class="tag"]` with a
-///   radius, a padding and a margin over 48 776 sampled nodes. It is an
-///   inline box: a pill keeps its place on its line rather than breaking
-///   one.
-/// - `inline` is the other half, three answers in one tree. Its first
-///   `div` is a genuine bordered block, and its box is a container
-///   around **both** paragraphs that block emits - which is what a
-///   browser draws, and which is why the box arrives as a textless
-///   `Block` element ahead of the runs it frames. The `span` inside it
-///   carries a `data.content` marker *and* a box that only spaces
-///   (padding and a right margin, no fill and no border), so it opens a
-///   line - that is ticket 01's sense separator - and then resolves to
-///   **no box drawn**, where before ticket 15's fix a marker-carrying
-///   node became a block box and indented its own line by its padding.
-///   It does still *reserve* that padding and margin, as an inline box
-///   in a browser does: the room is spacer spans in the run itself
-///   (`ui::layout`'s `pill` pass), so what a box with no ink costs the
-///   line is advance and not pixels.
-///   The second `div` is the same block with the marker span *first*:
-///   the shape that used to lose its box entirely, because the
-///   paragraph the block opened was flushed empty before it could carry
-///   one. It now draws the same single box as the first. See the
-///   fixture-set note in
-///   `docs/adr/0011-layout-golden-verification.md`.
+/// - `css` is Jitendex's own pill, `span[data-sc-class="tag"]` with a radius,
+///   padding, and margin across 48 776 sampled nodes. It is an inline box, so it
+///   keeps its place on a line instead of breaking it.
+/// - `inline` covers the other mechanism with three answers in one tree. Its
+///   first `div` is a bordered block. Its box contains **both** paragraphs that
+///   the block emits. A browser draws this box, so the layout creates a textless
+///   `Block` element before the runs that it frames. The inner `span` has a
+///   `data.content` marker and a box with only padding and a right margin. It
+///   opens a line as the sense separator, then resolves to **no box drawn**.
+///   An earlier marker node became a block box and indented its line by its
+///   padding. The layout still reserves that padding and margin. The inline box
+///   uses spacer spans in `ui::layout`'s `pill` pass, so it costs line advance,
+///   not pixels.
+///   The second `div` uses the same block with the marker span first. This shape
+///   once lost its box because the block flushed an empty paragraph before it
+///   could carry one. It now draws the same single box as the first. See the
+///   fixture-set note in `ARCHITECTURE.md#verification`.
 fn bordered_pill() -> Fixture {
     let jitendex = concat!(
         r#"{"tag":"div","data":{"content":"glossary"},"content":["#,
@@ -1036,29 +967,26 @@ fn bordered_pill() -> Fixture {
     Fixture { name: "bordered_pill", variants: vec![("css", css), ("inline", inline)] }
 }
 
-/// 10. Hanging list markers, two levels deep.
+/// 10. List markers with two levels.
 ///
-/// `li` is in 20 of the census's 72 dictionaries over 838 412 nodes and
-/// `ul` in 19; `ol` in 4. A marker hangs in the gutter its list already
-/// paid for, so its `x` is negative and it is not in the element's text -
-/// which is precisely the geometry a snapshot has to hold, because
-/// nothing about it survives into `rect`.
+/// The census has `li` in 20 of 72 dictionaries with 838 412 nodes. It has
+/// `ul` in 19 and `ol` in 4. A marker uses the gutter that its list already
+/// paid for. Its `x` is negative, and it is outside the element text. The
+/// snapshot must hold this geometry because `rect` does not retain it.
 ///
-/// - `jitendex` is the real tree read out of Jitendex's own record: a
-///   `ul[sense-groups]` of `li[sense-group]`, each holding a bare `ol` of
-///   `li[sense]` whose inline `listStyleType` numbers the sense, each of
-///   those holding a `ul[glossary]`. Its two list rules are CSS-only, and
-///   the second is written with native `&` nesting. An item whose whole
-///   content is a nested list gives the two levels one line between them,
-///   so that element carries **two** markers hanging in two gutters -
-///   what a browser draws. It also carries the sense's own example pair
-///   and the entry's attribution line, which is the *other* half of
-///   Jitendex's real record and the only place a golden sees ticket 15's
-///   default: `RoleFilter::CARD` keeps examples and attributions, where
-///   the deleted six-name drop list hid 40 975 nodes of exactly this
-///   shape, all of them Jitendex's.
-/// - `plain` is the default ladder with no stylesheet at all: a `ul`'s
-///   bullet, an `ol`'s number, and the indent each level adds.
+/// - `jitendex` is the real tree from Jitendex's record:
+///   a `ul[sense-groups]` with `li[sense-group]` children. Each child has a
+///   bare `ol` with `li[sense]` children. Each sense has a `ul[glossary]`.
+///   Its two list rules use CSS only, and the second uses native `&` syntax.
+///   An item whose full content is a nested list gives the two levels one line
+///   between them. The element then carries **two** markers in two gutters, as
+///   a browser draws them. It also carries the sense's example pair and the
+///   entry's attribution line. This is the *other* half of Jitendex's real
+///   record and the only place a golden sees the role-filter default:
+///   `RoleFilter::CARD` keeps examples and attributions. The deleted six-name
+///   drop list hid 40 975 nodes, all from the six Jitendex names it dropped.
+/// - `plain` uses the default ladder without a stylesheet. It has a `ul` bullet,
+///   an `ol` number, and the indent that each level adds.
 fn nested_list() -> Fixture {
     let senses = concat!(
         r#"{"tag":"ul","data":{"content":"sense-groups"},"content":["#,
@@ -1122,20 +1050,20 @@ fn nested_list() -> Fixture {
     }
 }
 
-/// 11. A table carrying both spans.
+/// 11. A table with both span types.
 ///
-/// `table` is in 16 of 72 dictionaries, `td` in 18, `th` in 11, `tbody`
-/// in 1; `rowSpan` in 7 over 116 813 nodes and `colSpan` in 2 over 4 597.
-/// A conjugation table is the shape the spec's own fixture list names,
-/// and it is the one place three `ElemKind`s meet: a `Table` leading its
-/// `Cell`s in draw order so the grid's background sits under them, and
-/// each cell's paragraphs following it as their own addressed runs.
+/// The census has `table` in 16 of 72 dictionaries, `td` in 18, `th` in 11,
+/// and `tbody` in 1. It has `rowSpan` in 7 over 116 813 nodes and `colSpan` in
+/// 2 over 4 597 nodes.
+/// A conjugation table is the shape that the pinned fixture list names. It is
+/// the only place where three `ElemKind`s meet. A `Table` precedes its `Cell`s
+/// in draw order, so the grid background stays below them. Each cell's
+/// paragraphs follow as addressed runs.
 ///
-/// Both spans in one grid on purpose. A `colSpan` header over a
-/// `rowSpan` body cell is what makes the placement pass's "leftmost
-/// column no span from above has claimed" rule observable: get it wrong
-/// and a cell lands in the wrong column, which is a moved `x` and not a
-/// missing feature.
+/// Place both spans in one grid. A `colSpan` header above a `rowSpan` body cell
+/// exposes the placement rule: the pass skips columns that earlier `rowSpan`
+/// claims still occupy and chooses the leftmost free column. A wrong choice
+/// moves a cell's `x` instead of removing the feature.
 fn table_spans() -> Fixture {
     let grid = concat!(
         r#"{"tag":"table","content":{"tag":"tbody","content":["#,
@@ -1161,25 +1089,22 @@ fn table_spans() -> Fixture {
     Fixture { name: "table_spans", variants: vec![("default", spec)] }
 }
 
-/// 12. Readings, positioned over their bases.
+/// 12. Readings above their bases.
 ///
-/// `ruby` is in 14 of 72 dictionaries over 864 045 nodes and `rt` over
-/// 864 054, and chibipop used to delete every one of them. A reading
-/// takes no horizontal room from the line it sits on, so it is neither in
-/// the element's text nor one of its spans: it is placed once and drawn
-/// where it is told, which makes the snapshot the only record of where
-/// that is.
+/// The census has `ruby` in 14 of 72 dictionaries with 864 045 nodes and `rt`
+/// with 864 054 nodes. chibipop once deleted these nodes. A reading uses no
+/// horizontal room from its line. It is outside the element text and spans.
+/// The layout places and draws it at its assigned position, so the snapshot is
+/// its only record.
 ///
-/// **Two term-bank rows under one dictionary label**, which is ticket
-/// 16's shape and no other fixture holds it: the census found 6 220 大辞林
-/// headwords with more than one row and a worst case of eleven, and the
-/// panel used to repeat the dictionary's name once per row. Rows here
-/// mean one label with two gloss bodies under it.
+/// **Two term-bank rows under one dictionary label** form a shape that no other
+/// fixture has. The census found 6 220 大辞林 headwords with more than one row,
+/// with a maximum of eleven. The panel once repeated the dictionary name for
+/// each row. These rows mean one label with two gloss bodies.
 ///
-/// The second row's `斉` carries a six-mora reading over a one-character
-/// base, so the reading overhangs its base on both sides and the
-/// centring has something to get wrong; its `rt` is also styled, because
-/// a reading takes `fontSize` and `color` like anything else.
+/// The second row's `斉` has a six-mora reading above a one-character base. The
+/// reading extends beyond the base on both sides. This checks center placement.
+/// Its `rt` also has a style because a reading takes `fontSize` and `color`.
 fn ruby_run() -> Fixture {
     let first = sc(concat!(
         r#"[{"tag":"ruby","content":["胡蝶",{"tag":"rp","content":"（"},"#,
@@ -1211,24 +1136,23 @@ fn ruby_run() -> Fixture {
     Fixture { name: "ruby_run", variants: vec![("default", spec)] }
 }
 
-/// 13. Assets composited inline, and the ladder under them.
+/// 13. Inline assets with their text ladder.
 ///
-/// `img` is the fourth most widely used tag - 30 of the 52 structured
-/// dictionaries, 386 141 nodes - and chibipop dropped every one. 字通
-/// alone averages more than four per term row. The three nodes here are
-/// the census's own representative samples, verbatim in shape:
+/// `img` is the fourth most widely used tag: 30 of the 52 structured
+/// dictionaries and 386 141 nodes. chibipop once dropped every one. 字通 alone
+/// averages more than four per term row. These three nodes come from the
+/// census representative samples and keep their source shape:
 ///
-/// 1. a `height: 1em` GIF gaiji, sized from its recorded intrinsic size;
-/// 2. 三省堂's monochrome intonation SVG, which declares both axes and is
-///    a *mask* to be tinted with the body colour rather than painted
-///    black on a dark panel;
-/// 3. a gaiji SVG with no recorded row at all, which falls to its `alt`
-///    text and puts `［対義語］` in the flow.
+/// 1. A `height: 1em` GIF gaiji that uses its recorded intrinsic size.
+/// 2. 三省堂's monochrome intonation SVG, which declares both axes and acts as a
+///    *mask*. Do not paint it black on a dark panel.
+/// 3. A gaiji SVG with no recorded row. It uses its `alt` text and puts
+///    `［対義語］` in the flow.
 ///
-/// All three sit mid-sentence, which is the point: dropping them does not
-/// lose an illustration, it punches holes in words. The element's own
-/// `rect` is the resolved image box and its `image` names the asset, so
-/// this fixture is where the media key reaches a golden.
+/// Put all three in mid-sentence. A dropped asset removes part of a word, not
+/// only an illustration. The element `rect` is the resolved image box, and
+/// `image` names the asset. This fixture therefore reaches the media key in a
+/// golden.
 fn inline_image() -> Fixture {
     let body = concat!(
         r#"["用例：","#,
@@ -1264,14 +1188,14 @@ fn inline_image() -> Fixture {
     Fixture { name: "inline_image", variants: vec![("default", spec)] }
 }
 
-/// 14. **One accent** — the card header's new geometry at its simplest, and
-///     the only fixture that pins where an overline and a downstep tick land.
+/// 14. **One accent**: the simplest card-header pitch geometry. This fixture
+///     pins the positions of an overline and a downstep tick.
 ///
-/// `雑談 / ざつだん`, heiban, which is 48.0% of ticket 01's censused accents:
-/// the first mora low, the other three high, and no tick - so this golden
-/// records the overline's own extent with nothing else in the row to confuse
-/// it. Every mark is an `inline_box` with one border edge, so the fields that
-/// move here are exactly the ones marked kana is drawn out of.
+/// `雑談 / ざつだん` uses heiban, which represents 48.0% of the census's
+/// accents. The first mora is low, the other three are high, and no tick exists.
+/// The golden records the overline extent without another row mark. Each mark
+/// is an `inline_box` with one border edge. Fields that change supply paint for
+/// marked kana.
 fn pitch_single() -> Fixture {
     let mut top = card(
         Some("雑談"),
@@ -1288,13 +1212,13 @@ fn pitch_single() -> Fixture {
     }
 }
 
-/// 15. **Several accents** — the row stack, and the tick inside a word.
+/// 15. **Several accents**: the row stack and an in-word tick.
 ///
-/// `白目 / しろめ` with all four of the accents ticket 01's census unions out
-/// of its five pitch dictionaries, which is the corpus maximum and reached by
-/// only 50 of 218 783 expression+reading pairs. Heiban, atamadaka, nakadaka
-/// and odaka in one capture, so the golden holds one row of each shape and
-/// the gap the walk stacks between them.
+/// `白目 / しろめ` has all four accents that the census combines from its five
+/// pitch dictionaries. This is the corpus maximum. Only 50 of 218 783
+/// expression+reading pairs reach it. Heiban, atamadaka, nakadaka, and odaka
+/// appear in one capture. The golden holds one row of each shape and the gap
+/// that the layout stacks between rows.
 fn pitch_multiple() -> Fixture {
     let mut top = card(
         Some("白目"),
@@ -1316,18 +1240,19 @@ fn pitch_multiple() -> Fixture {
     }
 }
 
-/// 16. **Several source dictionaries** — the dedup, as the panel draws it.
+/// 16. **Several source dictionaries**: the panel's dedup result.
 ///
-/// `合縁奇縁 / あいえんきえん`, where three of the census's dictionaries say
-/// `5` and 大辞泉 says heiban: two rows, three names against one. The
-/// `agreed` variant is the same reading with every dictionary unanimous,
-/// which is 81.4% of the readings two or more of them know - one row naming
-/// four. The pair is what a golden needs to pin the dedup, because the
-/// difference between them is a whole row of geometry.
+/// For `合縁奇縁 / あいえんきえん`, three census Dictionaries report position `5`,
+/// while 大辞泉 reports heiban. The panel shows two rows: three names in one and
+/// one name in the other.
+/// The `agreed` variant repeats the reading with all dictionaries unanimous.
+/// This covers 81.4% of readings known by at least two dictionaries and gives
+/// one row with four names. This pair pins dedup because the difference is one
+/// full geometry row.
 ///
-/// A kana-only headword in the `agreed` variant on purpose: the marked kana
-/// then sits directly under the headword with no reading line between them,
-/// which is a different y for every element below it.
+/// The `agreed` variant uses a kana-only headword on purpose. Marked kana then
+/// sits directly below the headword without a reading line. Every later element
+/// gets a different `y` value.
 fn pitch_sources() -> Fixture {
     let mut split = card(
         Some("合縁奇縁"),

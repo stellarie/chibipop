@@ -1,4 +1,4 @@
-//! Running one plugin process.
+//! Runs one plugin process.
 
 use crate::plugin::manifest::Manifest;
 use crate::plugin::proto::{Hello, Ready};
@@ -30,13 +30,13 @@ pub struct Host {
     stderr_log: Arc<Mutex<VecDeque<String>>>,
 }
 
-/// Ring buffer capacity.
+/// The maximum number of lines in the ring buffer.
 const LOG_CAP: usize = 50;
 
-/// The active plugin's stderr.
+/// Holds recent stderr lines from the active plugin.
 static ENGINE_LOG: OnceLock<Arc<Mutex<VecDeque<String>>>> = OnceLock::new();
 
-/// Reads the log from anywhere.
+/// Returns recent stderr lines from the active plugin.
 pub fn engine_log_lines() -> Vec<String> {
     match ENGINE_LOG.get() {
         Some(log) => log.lock().unwrap().iter().cloned().collect(),
@@ -44,7 +44,7 @@ pub fn engine_log_lines() -> Vec<String> {
     }
 }
 
-/// Evicts the oldest once full.
+/// Removes the oldest line when the buffer is full.
 fn push_log_line(buf: &Mutex<VecDeque<String>>, line: String) {
     let mut b = buf.lock().unwrap();
     if b.len() >= LOG_CAP {
@@ -59,7 +59,7 @@ struct Queued {
     closed: bool,
 }
 
-/// One request, never a backlog.
+/// Stores at most one request. A new request replaces the queued request.
 #[derive(Default)]
 struct Outbox {
     queued: Mutex<Queued>,
@@ -72,7 +72,7 @@ impl Outbox {
         if q.closed {
             return false;
         }
-        // A stale one had no reader.
+        // Replace a stale request that has no reader.
         q.bytes = Some(bytes);
         self.ready.notify_one();
         true
@@ -101,24 +101,23 @@ impl Outbox {
     }
 }
 
-/// Kills its members on close.
+/// A job that kills its member processes when it closes.
 struct Job(HANDLE);
 
-// SAFETY: a job handle names a kernel object and is not thread-affine. Every
-// call this type makes through it - SetInformationJobObject,
-// AssignProcessToJobObject, CloseHandle - is valid from any thread of the
-// process holding the handle, so moving it between threads breaks no
-// invariant. `Host` has to stay `Send`: a plugin call runs on the worker
-// thread, not the one that spawned it.
+// SAFETY: A job handle names a kernel object and is not thread-affine. Any
+// thread in this process can call SetInformationJobObject,
+// AssignProcessToJobObject, or CloseHandle with this handle. This handle can
+// cross threads and preserve every invariant. `Host` must stay `Send` because
+// a worker thread calls the plugin, not the thread that spawned it.
 unsafe impl Send for Job {}
 
 impl Job {
     fn create() -> Result<Job> {
-        // SAFETY: a null name asks for an unnamed job and a null security
-        // descriptor asks for the default one. That is what `None` and a null
-        // `PCWSTR` mean here, and neither is dereferenced. The handle returned
-        // is owned by the `Job` built from it on the next line, and is closed
-        // exactly once, in `Drop`.
+        // SAFETY: A null name asks for an unnamed job, and a null security
+        // descriptor asks for the default one. `None` and a null `PCWSTR` have
+        // these meanings here. This call does not dereference either value. The
+        // `Job` on the next line owns the returned handle, and `Drop` closes it
+        // exactly once.
         let handle =
             unsafe { CreateJobObjectW(None, PCWSTR::null()) }.context("CreateJobObjectW")?;
         let job = Job(handle);
@@ -129,11 +128,11 @@ impl Job {
             },
             ..Default::default()
         };
-        // SAFETY: `job.0` is the handle created above and still open.
+        // SAFETY: `job.0` is the handle created above, and it remains open.
         // `JobObjectExtendedLimitInformation` is the class whose payload is
-        // exactly `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, so the pointee type
-        // and the byte count agree with what the call reads. `info` is fully
-        // initialised, outlives the call, and the call only reads it.
+        // exactly `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`. The pointer type and
+        // byte count match the payload that the call reads. `info` is fully
+        // initialized, outlives the call, and the call only reads it.
         unsafe {
             SetInformationJobObject(
                 job.0,
@@ -147,10 +146,10 @@ impl Job {
     }
 
     fn adopt(&self, child: &Child) -> Result<()> {
-        // SAFETY: `self.0` stays open for as long as `self` lives. The process
-        // handle is borrowed from `child`, which outlives this call, and the
-        // call neither stores nor closes it. A handle from `Command::spawn`
-        // carries PROCESS_SET_QUOTA and PROCESS_TERMINATE, the access needed.
+        // SAFETY: `self.0` stays open while `self` exists. The process handle is
+        // borrowed from `child`, which outlives this call. This call neither
+        // stores nor closes the handle. A handle from `Command::spawn` carries
+        // PROCESS_SET_QUOTA and PROCESS_TERMINATE, which this call needs.
         unsafe { AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle())) }
             .context("AssignProcessToJobObject")
     }
@@ -158,9 +157,9 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateJobObjectW` in `create`, is owned
-        // by this struct alone, and `Drop` runs exactly once. It is also the
-        // only handle, so this close is what KILL_ON_JOB_CLOSE acts on.
+        // SAFETY: `self.0` came from `CreateJobObjectW` in `create`, and this
+        // struct owns it alone. `Drop` runs exactly once. This is the only
+        // handle, so its close triggers KILL_ON_JOB_CLOSE.
         unsafe {
             let _ = CloseHandle(self.0);
         }
@@ -178,7 +177,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
         .spawn()
         .with_context(|| format!("starting plugin \"{}\"", m.name))?;
     if let Err(e) = job.adopt(&child) {
-        // The job cannot sweep it.
+        // The job cannot kill this process because `adopt` failed.
         if child.kill().is_ok() {
             let _ = child.wait();
         }
@@ -190,7 +189,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
     let stderr = child.stderr.take().context("plugin stderr")?;
 
     let (tx, lines) = mpsc::channel();
-    // A read cannot be interrupted.
+    // No code can interrupt this read.
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             if tx.send(line).is_err() {
@@ -202,12 +201,12 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
     let stderr_log = Arc::clone(
         ENGINE_LOG.get_or_init(|| Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAP)))));
     let log_mine = Arc::clone(&stderr_log);
-    // Named for panic messages.
+    // The thread name appears in panic messages.
     std::thread::Builder::new()
         .name(format!("{}-stderr", m.name))
         .spawn(move || {
             for line in BufReader::new(stderr).lines() {
-                // A dead plugin ends the loop.
+                // Stop the loop when the stderr read fails.
                 let Ok(line) = line else { break };
                 eprintln!("{line}");
                 let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -218,7 +217,7 @@ pub fn spawn(m: &Manifest, dir: &Path) -> Result<Host> {
 
     let outbox: Arc<Outbox> = Arc::default();
     let mine = Arc::clone(&outbox);
-    // Nor a write to a full pipe.
+    // This thread writes requests so a full pipe does not stop the caller.
     std::thread::spawn(move || {
         while let Some(msg) = mine.take() {
             if stdin.write_all(&msg).is_err() || stdin.flush().is_err() {
@@ -260,7 +259,7 @@ impl Host {
         &self.ready
     }
 
-    /// This plugin's recent stderr.
+    /// Returns recent stderr lines from this plugin.
     pub fn recent_log(&self) -> Vec<String> {
         self.stderr_log.lock().unwrap().iter().cloned().collect()
     }
@@ -273,7 +272,7 @@ impl Host {
     ) -> Result<serde_json::Value> {
         let got = self.attempt(method, params, deadline);
         if got.is_err() {
-            // Only ours can be pending.
+            // Only this request can remain queued.
             self.outbox.clear();
         }
         got
@@ -285,7 +284,7 @@ impl Host {
         params: serde_json::Value,
         deadline: Duration,
     ) -> Result<serde_json::Value> {
-        // Stale lines are never ours.
+        // Stale lines cannot belong to this request.
         while self.lines.try_recv().is_ok() {}
 
         let id = self.next_id;
@@ -297,7 +296,7 @@ impl Host {
 
         let started = Instant::now();
         loop {
-            // One budget, not one per line.
+            // Use one deadline for the request, not one deadline per line.
             let left = match deadline.checked_sub(started.elapsed()) {
                 Some(d) if !d.is_zero() => d,
                 _ => bail!("plugin missed its {} ms deadline", deadline.as_millis()),
@@ -324,13 +323,13 @@ impl Host {
     }
 
     pub fn shutdown(&mut self) {
-        // Frees an idle writer thread.
+        // Wake the idle writer thread so it can exit.
         self.outbox.close();
-        // A failed kill never reaps.
+        // A failed kill does not reap the child.
         if self.child.kill().is_ok() {
             let _ = self.child.wait();
         }
-        // The close kills the tree.
+        // The job kills the process tree when its handle closes.
         drop(self.job.take());
     }
 }
@@ -355,14 +354,14 @@ mod tests {
         assert_eq!(outbox.take(), None);
     }
 
-    /// The deaf-plugin leak.
+    /// The `deaf` plugin must not leave a request buffer queued.
     #[test]
     fn an_abandoned_request_is_dropped_rather_than_left_queued() {
         let outbox = Outbox::default();
         assert!(outbox.put(vec![0u8; 256 * 1024]));
         outbox.clear();
         outbox.close();
-        // A dump would be 256 KiB.
+        // The queued request would retain 256 KiB.
         assert!(outbox.take().is_none());
     }
 
@@ -374,7 +373,7 @@ mod tests {
         assert_eq!(outbox.take(), None);
     }
 
-    /// Or the writer thread leaks.
+    /// The writer thread must exit when the outbox closes.
     #[test]
     fn a_waiting_writer_wakes_when_the_outbox_closes() {
         let outbox = Arc::new(Outbox::default());

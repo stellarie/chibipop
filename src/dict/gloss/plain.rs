@@ -1,55 +1,49 @@
-//! The plain-text renderer.
+//! The plain-text renderer reads a [`GlossDoc`] document-tree.
 //!
-//! One of three renderers over [`GlossDoc`] - the other two are the Anki HTML
-//! field ([`super::html`]) and the popup scene (`ui::layout`). Before ticket
-//! 02 this walk and the HTML walk were two independent recursions over the
-//! raw JSON, which is what let the card and the popup drift apart; they now
-//! read one parsed tree.
+//! [`super::html`] renders Anki HTML, and `ui::layout` builds a `PopupScene`.
+//! Before the arena rewrite, the plain-text walk and HTML walk parsed raw JSON
+//! separately. Their results could differ. Both renderers now read one parsed
+//! tree.
 //!
-//! Two consumers need a plain string and will keep needing one: the
-//! collapsed-row summary, which is one line by construction, and the Anki
-//! plain-text `glossary` field.
+//! Two consumers need a plain string. A collapsed-row summary needs one line.
+//! The Anki plain-text `glossary` field needs all summary lines.
 //!
-//! Both are summaries, so this walk applies [`RoleFilter::SUMMARY`] - one
-//! named policy through the one role gate every renderer over this tree
-//! shares, rather than a fourth idea of what an example is. It is a fixed
-//! policy and not a parameter because [`renders_text`] is the *build*-time
-//! gate on whether a term row becomes an `entry` row at all: a setting that
-//! reached in here would make a dictionary's row count depend on a popup
-//! preference.
+//! Both outputs are summaries, so this renderer applies
+//! [`RoleFilter::SUMMARY`]. All [`GlossDoc`] renderers use this role policy.
+//! At Dictionary build time, [`renders_text`] decides whether a term row
+//! becomes an `entry` row. A popup setting must not change the number of
+//! Dictionary rows. The fixed policy is not a parameter.
 //!
-//! The line-breaking rules are ticket 01's and are reproduced exactly.
-//! A block tag emits a mark, [`tidy`] turns every mark into a line break and
-//! drops the empty parts, and an inline tag's children cannot break a line
-//! because the schema admits no break there. One exemption, shared with the
-//! popup's inline pass: a marked inline node beside bare sentence text is
-//! markup inside a sentence, not a sense separator, and stays in its line
-//! ([`GlossDoc::prose`]).
+//! This renderer preserves the original line-break rules. A block tag emits a
+//! mark. [`tidy`] changes each mark to a line break and removes empty parts.
+//! Inline children cannot add a line break because the schema forbids one
+//! there. The popup inline pass uses the same rule. A marked inline node beside
+//! plain sentence text stays on its line. [`GlossDoc::prose`] identifies this
+//! case.
 
 use super::{GlossDoc, ItemType, Kind, NodeId, Role, RoleFilter, Tag};
 
-/// A pending line break, written into the render buffer and resolved by
-/// [`tidy`]. A private-use control sequence rather than `\n` so that a
-/// dictionary's own `\n` inside a string is distinguishable from a break this
-/// renderer decided on.
+/// A line-break mark that waits in the render buffer for [`tidy`].
+///
+/// The renderer uses a private-use control sequence instead of `\n`. This
+/// separates a Dictionary's `\n` from a break that the renderer adds.
 const BLOCK_MARK: &str = "\u{0}LI\u{0}";
 
-/// A reading, in parentheses after its base.
+/// Writes a ruby base and its readings to a plain-text buffer.
 ///
-/// `<ruby>猫<rt>ねこ</rt></ruby>` is `猫(ねこ)` here, which is what the
-/// census's highest-volume bilingual dictionary already writes by hand -
-/// JMdict renders readings as parenthetical text and never emits `ruby` at
-/// all - so the two shapes reach a card as one shape.
+/// `<ruby>猫<rt>ねこ</rt></ruby>` becomes `猫(ねこ)`. The largest bilingual
+/// Dictionary in the census already uses this form. JMdict writes readings as
+/// parenthetical text and does not emit `ruby`. Both forms therefore produce
+/// the same Anki card text.
 ///
-/// The parentheses are added only when nothing already supplies them.
-/// `<rp>` exists precisely to carry them for a renderer that cannot draw
-/// ruby, and this is that renderer, so a ruby that brought its own is left
-/// alone rather than printed as `猫((ねこ))`; so is a reading a dictionary
-/// wrote already bracketed.
+/// The renderer adds parentheses only when the source does not supply them.
+/// `<rp>` supplies parentheses for a renderer that cannot draw ruby. This
+/// renderer keeps those parentheses and does not print `猫((ねこ))`. It also
+/// keeps brackets that a Dictionary writes around the reading.
 ///
-/// One slot per `rt`, in document order, so per-character furigana -
-/// `<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>` - renders `漢(かん)字(じ)`
-/// and not `漢字(かんじ)`.
+/// The renderer uses one slot for each `rt` in document order. Therefore,
+/// `<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>` becomes `漢(かん)字(じ)`.
+/// It does not become `漢字(かんじ)`.
 fn ruby_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
     let fenced = doc.children(id).any(|c| doc.node(c).tag == Tag::Rp);
     let mut prose = doc.prose(id);
@@ -75,17 +69,17 @@ fn ruby_into(doc: &GlossDoc, id: NodeId, out: &mut String) {
     }
 }
 
-/// Does this reading already carry its own brackets?
+/// Tests whether a reading already has brackets.
 ///
-/// Both widths, because a Japanese dictionary writing them by hand writes
-/// the full-width pair.
+/// This function accepts standard and full-width pairs. A Japanese Dictionary
+/// can write the full-width pair.
 fn bracketed(reading: &str) -> bool {
     let open = reading.starts_with('(') || reading.starts_with('（');
     let close = reading.ends_with(')') || reading.ends_with('）');
     open && close
 }
 
-/// One plain-text string per top-level glossary item.
+/// Renders one plain-text string for each top-level glossary item.
 pub fn plain_items(doc: &GlossDoc) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
@@ -100,18 +94,18 @@ pub fn plain_items(doc: &GlossDoc) -> Vec<String> {
     out
 }
 
-/// Does any glossary item render any plain text at all?
+/// Tests whether any glossary item produces plain-text output.
 ///
-/// The dictionary builder's question, asked once per term-bank row: a
-/// glossary that renders nothing - an image-only gaiji row, a whitespace-only
-/// wrapper - is not an entry and gets no `entry` record. Answered off the
-/// same walk [`plain_items`] uses, but without building the strings it would
-/// then throw away, which over two and a half million term rows is worth not
-/// doing.
+/// The Dictionary builder calls this function once for each term-bank row. A
+/// glossary with no plain-text output is not an Entry and gets no `entry`
+/// record. Examples include an image-only gaiji row and a wrapper that contains
+/// only spaces.
 ///
-/// Exactly equivalent to `plain_items(doc).is_empty()`: [`tidy`] keeps a part
-/// if and only if the part survives `str::trim`, so testing the parts is
-/// testing the result.
+/// This function uses the [`plain_items`] walk but does not allocate output
+/// strings. This saves allocations across more than two million term rows.
+///
+/// The result equals `!plain_items(doc).is_empty()`. [`tidy`] keeps a part only
+/// when that part remains after `str::trim`. This function tests the same parts.
 pub fn renders_text(doc: &GlossDoc) -> bool {
     let mut buf = String::new();
     for id in doc.items() {
@@ -124,31 +118,31 @@ pub fn renders_text(doc: &GlossDoc) -> bool {
     false
 }
 
-/// One top-level glossary item into the render buffer.
+/// Renders one top-level glossary item into the buffer.
 fn item_into(doc: &GlossDoc, id: NodeId, buf: &mut String) {
     match doc.node(id).item_type {
-        // An image-only item has no plain text at all.
+        // An image-only item has no plain-text output.
         ItemType::Image => {}
         ItemType::Text => buf.push_str(doc.text(id)),
-        // Yomitan drops a `structured-content` item's children straight into
-        // a block `.gloss-content`, so the item itself neither breaks a line
-        // nor takes part in the drop rules.
+        // Yomitan places the children of a `structured-content` item directly
+        // in a `.gloss-content` block. The item therefore adds no line break
+        // and does not use the role rules.
         ItemType::StructuredContent => children_into(doc, id, true, buf),
         _ if doc.is_plain_string(id) => buf.push_str(doc.text(id)),
         _ => node_into(doc, id, false, buf),
     }
 }
 
-/// The part-of-speech labels, in order and without duplicates.
+/// Returns part-of-speech labels in order without duplicates.
 ///
-/// A separate walk rather than a by-product of [`plain_items`], because the
-/// labels are the card's own field: `Card::pos` renders them above the
-/// glosses, so leaving them inline would print them twice.
+/// This separate walk prevents duplicate labels in the Anki card.
+/// `Card::pos` places labels above the glosses, and [`plain_items`] omits the
+/// same labels from the glosses.
 pub fn pos_labels(doc: &GlossDoc) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     for id in doc.items() {
-        // A bare glossary string carries no `data` map and so no label.
+        // A plain glossary string has no `data` map or label.
         if doc.is_plain_string(id) {
             continue;
         }
@@ -157,16 +151,14 @@ pub fn pos_labels(doc: &GlossDoc) -> Vec<String> {
     out
 }
 
-/// One node's part-of-speech labels, and its children's.
+/// Collects part-of-speech labels from one node and its descendants.
 ///
-/// Two roles stop this walk, and they stop it for opposite reasons.
-/// [`Role::PartOfSpeech`] is the label itself: collect it and do not
-/// descend, because a label is a leaf as far as this field goes. An example
-/// or an attribution stops it because the subtree is editorial matter the
-/// summary drops whole - a label written inside a quoted sentence describes
-/// the quotation, not the entry, so hoisting it into the card's own `pos`
-/// field would put a word in the dictionary's mouth. That was the deleted
-/// drop list's rule too; the role is only how the rule is spelled now.
+/// Two roles stop this walk for different reasons. [`Role::PartOfSpeech`] is
+/// the label. The walk collects that label but does not enter its descendants.
+///
+/// An example or attribution is Editorial content that the summary omits. A
+/// label inside a quotation describes that quotation, not the Entry. It must
+/// not enter the card's `pos` field. The old drop list used the same rule.
 fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut String) {
     let role = doc.role(id);
     if role == Role::PartOfSpeech {
@@ -186,23 +178,22 @@ fn collect_pos(doc: &GlossDoc, id: NodeId, out: &mut Vec<String>, buf: &mut Stri
     }
 }
 
-/// One node into the render buffer.
+/// Renders one node into the buffer.
 ///
-/// A node's own rendering depends on one thing about the context it sits
-/// in: `prose` says whether a bare string with visible text stands beside
-/// it, or a prose fragment stands before it - either is what exempts a
-/// marked inline node from the marker line break ([`GlossDoc::prose`],
-/// [`GlossDoc::inline_prose`]). Everything else is the children's, and that
-/// context comes from this node's own tag: whether a run of strings becomes
-/// lines is decided in [`children_into`] from the parent tag alone, and
-/// whether a reading is bracketed in [`ruby_into`] from the `ruby` it sits
-/// under.
+/// `prose` records this node's context. It is true when visible plain-text is
+/// beside the node or a prose fragment precedes it. In this context, a marked
+/// inline node does not add a line break. See [`GlossDoc::prose`] and
+/// [`GlossDoc::inline_prose`].
 ///
-/// An image is the one tag with no plain rendering at all: it is a character
-/// this renderer cannot draw, which is why the tree keeps it for the popup
-/// renderer that can. An `rt` or `rp` reached outside a `ruby` is malformed
-/// and renders as the plain text it holds, which is exactly what the popup's
-/// inline pass does with it.
+/// The parent tag sets the child context. [`children_into`] uses only that tag
+/// to decide whether a string sequence becomes separate lines.
+/// [`ruby_into`] uses the parent `ruby` node to decide whether a reading needs
+/// brackets.
+///
+/// An image is the only tag with no plain-text output. It can represent a
+/// character that this renderer cannot draw. The popup renderer can draw that
+/// character. An `rt` or `rp` outside a `ruby` is malformed. This renderer
+/// keeps its plain-text output, as the popup inline pass does.
 fn node_into(doc: &GlossDoc, id: NodeId, prose: bool, out: &mut String) {
     let n = doc.node(id);
     if !RoleFilter::SUMMARY.allows(doc.role(id)) {
@@ -229,14 +220,14 @@ fn node_into(doc: &GlossDoc, id: NodeId, prose: bool, out: &mut String) {
     children_into(doc, id, !n.tag.is_inline(), out);
 }
 
-/// A node's children.
+/// Renders the children of one node.
 ///
-/// Yomitan concatenates them, with one exception:
-/// [`GlossDoc::is_string_list`] - a glossary array of plain strings is a
-/// list, one line per string.
+/// Yomitan concatenates child output with one exception.
+/// [`GlossDoc::is_string_list`] identifies a glossary array of plain strings.
+/// Each string in that array gets one line.
 ///
-/// `block_ctx` is false only under an inline tag, where the schema admits no
-/// line break: Yomitan appends every child of an inline node into the one
+/// `block_ctx` is false only under an inline tag. The schema permits no line
+/// break there. Therefore, Yomitan puts all children of an inline node in one
 /// box.
 fn children_into(doc: &GlossDoc, id: NodeId, block_ctx: bool, out: &mut String) {
     if block_ctx && doc.is_string_list(id) {
@@ -253,12 +244,14 @@ fn children_into(doc: &GlossDoc, id: NodeId, block_ctx: bool, out: &mut String) 
     }
 }
 
-/// Cleans one rendered string.
+/// Resolves one rendered string.
 ///
-/// Every block mark becomes a line break, and an empty part is dropped so
-/// that nested blocks give one line per innermost block instead of a run of
-/// blank ones. Both platform text engines break hard on `\n`, so a break made
-/// here reaches the panel.
+/// Each block mark becomes a line break. This function removes empty parts.
+/// Nested blocks therefore produce one line for each innermost block. They do
+/// not produce a sequence of blank lines.
+///
+/// Both platform text engines use `\n` as a hard break. A break from this
+/// function therefore reaches the Panel.
 fn tidy(text: &str) -> String {
     let parts: Vec<&str> =
         text.split(BLOCK_MARK).map(str::trim).filter(|p| !p.is_empty()).collect();
@@ -266,7 +259,9 @@ fn tidy(text: &str) -> String {
     collapsed.split('\n').map(str::trim).collect::<Vec<_>>().join("\n").trim().to_string()
 }
 
-/// Collapses space, tab, U+3000.
+/// Collapses each run of supported whitespace to one space.
+///
+/// Supported whitespace includes spaces, tabs, and U+3000.
 fn collapse_spaces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_run = false;
@@ -290,8 +285,10 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    /// The plain glosses of one glossary, straight from a JSON fixture -
-    /// the seam the spec names: structured content in, rendered output out.
+    /// Returns plain-text glosses from one JSON fixture.
+    ///
+    /// The fixture supplies structured content. This helper returns the
+    /// rendered output that the specification defines.
     fn plain(g: &Value) -> Vec<String> {
         plain_items(&doc(g))
     }
@@ -344,10 +341,11 @@ mod tests {
         assert_eq!(vec!["one\ntwo".to_string()], plain(&g));
     }
 
-    /// Jitendex writes a loanword note as a marked span inside the
-    /// parenthesis (`data.content = "lang-source-wasei"`, 4 114 nodes),
-    /// and the marker break used to cut the note in two. Beside bare
-    /// sentence text a marker separates nothing ([`GlossDoc::prose`]).
+    /// Jitendex places a marked loanword note inside the parentheses.
+    ///
+    /// `data.content = "lang-source-wasei"` occurs on 4,114 nodes. The old
+    /// marker rule split each note. A marker beside sentence text does not
+    /// separate blocks. See [`GlossDoc::prose`].
     #[test]
     fn a_marked_span_amid_bare_text_stays_in_its_line() {
         let g = json!([{"type": "structured-content", "content": [
@@ -377,10 +375,9 @@ mod tests {
         assert_eq!(vec!["あ い\nう".to_string()], plain(&g));
     }
 
-    /// Ticket 11 took `rt` off the drop list: a reading is information a
-    /// reader of a plain string wants, and dropping it silently was the bug.
-    /// An image stays dropped - it is a character this renderer cannot
-    /// draw.
+    /// An `rt` remains because a plain-text reader needs its reading. The old
+    /// drop rule lost this text. An image remains omitted because this renderer
+    /// cannot draw it.
     #[test]
     fn a_reading_renders_after_its_base_and_an_image_is_still_dropped() {
         let g = json!([{"type": "structured-content", "content": [
@@ -393,9 +390,9 @@ mod tests {
         assert_eq!(vec!["猫(ねこ)".to_string()], plain(&g));
     }
 
-    /// `rp` carries the parentheses HTML wrote for a renderer that cannot
-    /// draw ruby, and this is that renderer, so it must not add a second
-    /// pair around them.
+    /// HTML uses `rp` to supply parentheses for a renderer that cannot draw
+    /// ruby. The plain-text renderer must use these parentheses. It must not add
+    /// a second pair.
     #[test]
     fn a_ruby_that_brought_its_own_parentheses_is_not_bracketed_twice() {
         let g = json!([{"type": "structured-content", "content": [
@@ -409,9 +406,8 @@ mod tests {
         assert_eq!(vec!["猫(«ねこ»)".to_string()], plain(&g));
     }
 
-    /// The same rule when the dictionary bracketed the reading itself
-    /// rather than delegating to `rp`, in the full width a Japanese
-    /// dictionary writes.
+    /// This test applies the same rule when a Dictionary supplies brackets in
+    /// `rt` text instead of an `rp`. It uses Japanese full-width brackets.
     #[test]
     fn a_reading_written_already_bracketed_is_left_alone() {
         let g = json!([{"type": "structured-content", "content": [
@@ -420,9 +416,8 @@ mod tests {
         assert_eq!(vec!["猫（ねこ）".to_string()], plain(&g));
     }
 
-    /// Per-character furigana is several pairings in one `ruby`, which is
-    /// how a monolingual dictionary writes a two-kanji headword. Each
-    /// reading follows its own base, not all of them the last one.
+    /// A monolingual Dictionary can put several base and reading pairs in one
+    /// `ruby`. Each reading must follow its own base.
     #[test]
     fn per_character_furigana_brackets_each_reading_after_its_own_base() {
         let g = json!([{"type": "structured-content", "content": [
@@ -434,9 +429,9 @@ mod tests {
         assert_eq!(vec!["漢(かん)字(じ)".to_string()], plain(&g));
     }
 
-    /// An `rt` reached with no `ruby` around it is malformed. It renders as
-    /// the text it holds, unbracketed, which is exactly what the popup's
-    /// inline pass does with it - the two renderers may not disagree.
+    /// An `rt` without a `ruby` is malformed. This renderer outputs its text
+    /// without brackets, as the popup inline pass does. Both renderers must
+    /// agree.
     #[test]
     fn an_orphaned_rt_renders_as_plain_text() {
         let g = json!([{"type": "structured-content", "content": [
@@ -497,8 +492,8 @@ mod tests {
         assert_eq!(vec!["repetition mark".to_string()], plain(&g));
     }
 
-    /// A `ruby` whose content is a single node rather than an array, which
-    /// is the shape most of the census's ruby-emitting dictionaries write.
+    /// Most Dictionaries in the census put one node directly in the `content`
+    /// of a `ruby`. They do not use an array for that node.
     #[test]
     fn ruby_reads_a_non_list_content_and_still_brackets_its_reading() {
         let g = json!([{"type": "structured-content", "content": {
@@ -601,9 +596,10 @@ mod tests {
         assert_eq!(vec!["conjugation\nたべる".to_string()], plain(&g));
     }
 
-    /// LF and CRLF alike: a dictionary that stores its own line breaks
-    /// inside one string keeps them, and each glossary item stays its own
-    /// vec entry.
+    /// A Dictionary can store LF or CRLF line breaks in one string.
+    ///
+    /// The renderer keeps these breaks. It keeps each glossary item in a
+    /// separate `Vec` element.
     #[test]
     fn a_plain_string_keeps_its_own_line_breaks() {
         let g = json!(["one\ntwo", "three\r\nfour"]);
@@ -624,7 +620,7 @@ mod tests {
         assert_eq!(vec!["to run".to_string()], plain(&g));
     }
 
-    /// Prose broken up by its own inline markup, not a list of lines.
+    /// Inline markup can divide prose without making a list of lines.
     #[test]
     fn a_string_array_mixed_with_a_link_stays_on_one_line() {
         let g = json!([{"type": "structured-content", "content": {
@@ -729,9 +725,9 @@ mod tests {
         assert_eq!(vec!["noun".to_string()], pos(&g));
     }
 
-    /// The dictionary builder writes an `entry` row if and only if
-    /// [`renders_text`] says yes, so the two must never disagree: a drift
-    /// here changes every dictionary's entry count and every `entry_id`.
+    /// The Dictionary builder writes an `entry` row only when [`renders_text`]
+    /// returns true. This result must agree with [`plain_items`]. A difference
+    /// would change each Dictionary's Entry count and each `entry_id`.
     #[test]
     fn renders_text_agrees_with_plain_items_on_every_shape() {
         let cases = [

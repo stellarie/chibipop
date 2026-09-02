@@ -1,13 +1,14 @@
-//! What one hover costs, measured three ways.
+//! This benchmark measures one hover in three ways.
 //!
-//! Behind the open question in the dictionary render-parity spec: the spec
-//! parses structured content at *build* time and stores a typed tree, on the
-//! stated grounds that "hover runs roughly 25 point queries and cannot afford
-//! a parse". Storing the raw Yomitan JSON and parsing per hover keeps parser
-//! bugs hot-fixable and costs no schema bump, so the choice turns entirely on
-//! whether that parse actually fits in a hover. This measures it.
+//! It compares parse at build time with parse at hover time.
+//! One plan parses structured content at build time and stores a typed tree.
+//! That plan assumes a hover performs about 25 point queries and cannot include a parse.
 //!
-//! Three modes, all printing a table to stdout:
+//! Another plan stores raw Yomitan JSON and parses it at hover time.
+//! This plan lets developers fix parser defects without a schema change.
+//! Parse time decides between the plans, so this benchmark measures that time.
+//!
+//! Each mode prints a table to standard output:
 //!
 //! ```sh
 //! cargo run -p chibipop --release --example hover_parse_bench -- parse
@@ -15,24 +16,30 @@
 //! cargo run -p chibipop --release --example hover_parse_bench -- hover [db] [label]
 //! ```
 //!
-//! `parse` is the counterfactual: `serde_json` over the real glossary
-//! payloads `tools/hover-parse-bench/payload.py` extracted, plus a full
-//! recursive walk of each tree so the parse cannot be elided and the number
-//! includes traversal cost comparable to building a typed tree.
+//! `parse` is the alternative case.
+//! It applies `serde_json` to real glossary payloads that
+//! `tools/hover-parse-bench/payload.py` extracted.
+//! It performs a full recursive walk of each tree.
+//! The caller consumes the walk result, so the optimizer keeps the parse.
+//! It includes traversal cost similar to the cost of a typed tree build.
 //!
-//! `build` writes a throwaway multi-dictionary database from the `library`
-//! list in `results/summary.json` - the same twelve archives `payload.py`
-//! measured its "realistic library" column over, so the two cannot drift.
-//! It uses chibipop's own `dict::build::build`, and it must be pointed at a
-//! scratch path: never the user's `~/.local/share/chibipop/chibipop.sqlite`.
+//! `build` writes a temporary multi-Dictionary database from the `library`
+//! list in `results/summary.json`.
+//! It uses the same twelve archives that `payload.py` used for its "realistic library" column.
+//! The shared list prevents drift.
+//! The mode calls chibipop's `dict::build::build`.
+//! Set a temporary path, not the user's
+//! `~/.local/share/chibipop/chibipop.sqlite`.
 //!
-//! `hover` is the baseline: `terms_for` then `entries` against a database,
-//! including the `GlossDoc` parse `entries` already does today.
-//! It opens through `SqliteDictionary::open`, which passes
-//! `SQLITE_OPEN_READ_ONLY` with no `SQLITE_OPEN_CREATE` and runs no
-//! migration, so pointing it at the live database cannot modify it.
+//! `hover` is the baseline.
+//! It calls `terms_for` and then `entries` against a database.
+//! This measurement includes the `GlossDoc` parse that `entries` performs.
+//! The mode opens the database through `SqliteDictionary::open`.
+//! The open flags include `SQLITE_OPEN_READ_ONLY` but not
+//! `SQLITE_OPEN_CREATE`.
+//! The mode runs no migration and does not modify the database.
 //!
-//! Release mode is mandatory. A debug-profile serde number is meaningless.
+//! Release mode is required. A debug-profile serde result is not valid for this comparison.
 
 use anyhow::{Context, Result};
 use chibipop::dict::build::build;
@@ -47,13 +54,14 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Per-term timing floor. Short of this, `Instant` resolution and cache
-/// noise dominate a single parse.
+/// `MIN_SAMPLE` sets the minimum duration for each term sample.
+/// Below this duration, `Instant` resolution and cache noise dominate one parse.
 const MIN_SAMPLE: Duration = Duration::from_millis(50);
 
-/// Sweeps over the whole term list in `hover` mode. Repeating one term back
-/// to back would measure a cache that a real hover never has; sweeping the
-/// list and taking the per-term median keeps the access pattern realistic.
+/// `HOVER_SWEEPS` sets the number of full term-list sweeps in `hover` mode.
+///
+/// Repeated calls to one term measure a cache state that an actual hover does not have.
+/// The median for each term keeps the access pattern close to actual hovers.
 const HOVER_SWEEPS: usize = 5;
 
 fn results_dir() -> PathBuf {
@@ -71,12 +79,13 @@ struct Record {
     bytes: usize,
     lib_rows: usize,
     lib_bytes: usize,
-    /// Library archives were scanned first, so `payloads[..lib_rows]` is the
-    /// realistic-library subset and the whole slice is the all-corpus one.
+    /// The scan reads the library archives first.
+    /// Therefore, `payloads[..lib_rows]` is the library subset.
+    /// The full slice is the corpus subset.
     payloads: Vec<String>,
 }
 
-/// The half of `summary.json` the Rust side reads back.
+/// `Summary` stores the fields that the Rust benchmark reads from `summary.json`.
 #[derive(Deserialize)]
 struct Summary {
     corpus: String,
@@ -105,7 +114,7 @@ fn load_summary() -> Result<Summary> {
 
 // ---- statistics ----
 
-/// Nearest-rank percentile, matching `payload.py`'s `percentile`.
+/// `percentile` uses the nearest-rank percentile from `payload.py`.
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -114,7 +123,7 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
     sorted[i]
 }
 
-/// The middle sweep of one term's samples. Sorts in place.
+/// `median` returns the median sample from one term. It sorts samples in place.
 fn median(samples: &mut [f64]) -> f64 {
     samples.sort_by(f64::total_cmp);
     samples[samples.len() / 2]
@@ -128,8 +137,9 @@ struct Row {
     p95: f64,
     p99: f64,
     max: f64,
-    /// Aggregate: total payload bytes divided by total microseconds, which
-    /// is bytes per microsecond, which is megabytes per second.
+    /// Total payload bytes divided by total microseconds.
+    ///
+    /// This result is bytes per microsecond, which equals megabytes per second.
     mb_s: Option<f64>,
 }
 
@@ -168,10 +178,11 @@ fn print_table(title: &str, rows: &[Row]) {
 
 // ---- mode: parse ----
 
-/// Every node, and every byte of every string and key. Returned so the
-/// caller can `black_box` it: without a consumed result the optimizer is
-/// free to delete the walk, and with a cheap result it is free to delete
-/// most of the tree.
+/// `walk` reads every node and every byte of each string and key.
+///
+/// The caller passes its result to `black_box`.
+/// Without a consumed result, the optimizer can delete the walk.
+/// A low-cost result can also let it delete most of the tree.
 fn walk(v: &Value) -> usize {
     match v {
         Value::Null => 1,
@@ -183,9 +194,11 @@ fn walk(v: &Value) -> usize {
     }
 }
 
-/// Every node of a parsed `GlossDoc`, and every byte of its text. The
-/// arena's equivalent of `walk`: a linear sweep of the node vector, which is
-/// also how ticket 17's style matcher will read it.
+/// `walk_doc` reads every node of a parsed `GlossDoc` and every byte of its text.
+///
+/// This function is the arena form of `walk`.
+/// It makes one linear pass through the node vector.
+/// The style matcher reads the vector in the same way.
 fn walk_doc(doc: &GlossDoc) -> usize {
     doc.all_nodes()
         .iter()
@@ -199,18 +212,21 @@ fn walk_doc(doc: &GlossDoc) -> usize {
         .sum()
 }
 
-/// Which representation a timing pass builds.
+/// `Rep` selects the representation that one timed pass builds.
 #[derive(Clone, Copy)]
 enum Rep {
-    /// What `docs/research/hover-parse-cost.md` measured, kept so its
-    /// numbers stay reproducible from this harness.
+    /// `Value` selects the representation measured in
+    /// [hover-parse-cost.md](../docs/research/hover-parse-cost.md).
+    /// This benchmark keeps it so it can reproduce those results.
     Value,
-    /// What ticket 02 shipped.
+    /// `Typed` selects the shipped arena representation.
     Typed,
 }
 
-/// One hover's worth of parsing: every payload behind one headword, parsed
-/// and walked. Repeated until `MIN_SAMPLE` elapses, then averaged.
+/// `time_parse` parses and walks every payload for one headword.
+///
+/// It repeats the pass until `MIN_SAMPLE` expires.
+/// It returns the average time for one pass.
 fn time_parse(rep: Rep, payloads: &[String]) -> f64 {
     let started = Instant::now();
     let mut iters: u32 = 0;
@@ -249,34 +265,36 @@ fn mode_parse() -> Result<()> {
         records.iter().map(|r| r.rows).sum::<usize>(),
         records.iter().map(|r| r.bytes).sum::<usize>() as f64 / 1e6,
     );
-    // Both representations, over the same payloads in the same run: the
-    // `Value` row anchors the published numbers and the `GlossDoc` row is
-    // the one ticket 02 is answerable for.
+    // Both representations use the same payloads in the same run.
+    // The `Value` row anchors the published results.
+    // The `GlossDoc` row measures the shipped arena.
     parse_pass(&records, Rep::Value, "serde_json::Value + full walk")?;
     parse_pass(&records, Rep::Typed, "GlossDoc::parse + full walk")
 }
 
 fn parse_pass(records: &[Record], rep: Rep, label: &str) -> Result<()> {
 
-    // Three slices of every headword, because they answer different halves
-    // of the question:
+    // Each headword has three slices.
+    // Each slice answers a different part of the measurement:
     //
-    // - `library` / `all 97`: every matching row. This is what a renderer
-    //   would parse if it parsed everything a headword matched.
-    // - `top 10`: what chibipop actually renders. `LookupEngine::run`
-    //   truncates to `MAX_RESULTS` before it ever calls `entries`, so no
-    //   hover deserializes more than ten entries however many rows matched.
-    //   `payload.py` writes payloads in library-priority order, which for a
-    //   single surface form is the order the engine ranks them in: equal
-    //   match length, equal form, equal headword frequency, then `dict_id`
-    //   ascending. So the leading ten are a faithful stand-in for the ten
-    //   the popup would draw.
+    // - `library` and `all 97` include every row that matches.
+    //   A renderer parses this slice when it parses all rows for a headword.
+    // - `top 10` is the slice that chibipop renders.
+    //   `LookupEngine::run` truncates to `MAX_RESULTS` before it calls `entries`.
+    //   One hover therefore deserializes no more than ten entries.
     //
-    // The frequency and worst-case samples stay apart. `payload.py` retains
-    // every worst-case headword it can afford, so they sit at ~2% of the
-    // file while being the most extreme headwords in a 97-archive corpus.
-    // Folding them in would drag the frequency sample's p95 and p99 up to
-    // the worst case's median and make the percentiles describe nothing.
+    // `payload.py` writes payloads in library priority order.
+    // For one surface form, this is engine rank order.
+    // The order uses equal match length, equal form, equal headword frequency, and then
+    // `dict_id` from low to high.
+    // The first ten therefore represent the entries that the popup draws.
+    //
+    // Keep the frequency sample separate from the worst-case sample.
+    // `payload.py` retains every worst-case headword that fits its limit.
+    // These headwords make up about 2% of the file and are the most extreme in a
+    // 97-archive corpus.
+    // If the frequency sample included them, its p95 and p99 would approach the worst-case median.
+    // Those percentiles would not describe the frequency sample.
     let mut freq_lib = Vec::new();
     let mut freq_lib_bytes = 0.0;
     let mut freq_all = Vec::new();
@@ -343,7 +361,7 @@ fn mode_build(args: &[String]) -> Result<()> {
     let corpus =
         PathBuf::from(args.get(1).cloned().unwrap_or_else(|| summary.corpus.clone()));
 
-    // A throwaway build must never land on the user's library.
+    // A temporary build must not write to the user's Dictionary library.
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() && out.starts_with(Path::new(&home).join(".local/share/chibipop")) {
         anyhow::bail!("refusing to build into the real library: {}", out.display());
@@ -366,7 +384,8 @@ fn mode_build(args: &[String]) -> Result<()> {
     let started = Instant::now();
     let last = std::cell::Cell::new(Instant::now());
     let counts = build(&terms, &freqs, &out, &|msg| {
-        // The builder reports every 5000 entries; one line a second is enough.
+        // The builder reports after each 5000 entries.
+        // One line each second is enough.
         if last.get().elapsed() >= Duration::from_secs(1) {
             last.set(Instant::now());
             println!("  {msg}");
@@ -385,10 +404,11 @@ fn mode_build(args: &[String]) -> Result<()> {
 
 // ---- mode: hover ----
 
-/// A second read-only handle, used only to weigh the glossary JSON a hover
-/// deserializes. `length()` on TEXT counts characters, so the cast to BLOB
-/// is what makes this a byte count. Opened once: it is a measurement aid,
-/// never on a timed path.
+/// `Scale` uses a second read-only handle to measure glossary JSON bytes for one hover.
+///
+/// `length()` on TEXT counts characters.
+/// The cast to BLOB makes it count bytes.
+/// The mode opens this handle once outside the timed path.
 struct Scale {
     conn: Connection,
 }
@@ -430,13 +450,16 @@ fn mode_hover(args: &[String]) -> Result<()> {
 
     let records = load_records()?;
 
-    // What one hover actually reads out of this database, measured once and
-    // untimed. This also serves as the cache-warming pass.
+    // First, measure what one hover reads from this database.
+    // Keep this pass outside the timed region.
+    // This pass also warms the cache.
     //
-    // Two shapes, because `LookupEngine::run` sorts and then truncates to
-    // `MAX_RESULTS` before it calls `entries`: `all` passes every matched
-    // entry id, `top` passes the leading ten. `top` is what a hover pays
-    // today; `all` is the ceiling if the cap were ever lifted.
+    // Measure two shapes because `LookupEngine::run` sorts and truncates to
+    // `MAX_RESULTS` before it calls `entries`.
+    // `all` passes every matched entry ID.
+    // `top` passes the first ten.
+    // `top` measures the current hover cost.
+    // `all` is the upper limit when the cap is removed.
     let scale = Scale::open(&db)?;
     let mut hits: Vec<(&str, bool)> = Vec::new();
     let mut total_entries = 0usize;
@@ -468,8 +491,8 @@ fn mode_hover(args: &[String]) -> Result<()> {
         anyhow::bail!("no sampled term matched anything in {}", db.display());
     }
 
-    // Sweep the whole list repeatedly and keep each term's median sweep.
-    // Hammering one term would measure a cache no real hover enjoys.
+    // Repeat the full list and keep the median sweep for each term.
+    // Repeated calls to one term measure a cache state that an actual hover does not have.
     let mut top_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(HOVER_SWEEPS); hits.len()];
     let mut all_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(HOVER_SWEEPS); hits.len()];
     for _ in 0..HOVER_SWEEPS {
@@ -492,9 +515,9 @@ fn mode_hover(args: &[String]) -> Result<()> {
         }
     }
 
-    // Same split as `parse`: the worst-case headwords are deliberately
-    // over-represented in the retained file and would poison the frequency
-    // sample's tail.
+    // Use the same sample split as `parse`.
+    // The retained file contains too many worst-case headwords for a frequency sample.
+    // They distort the end of its distribution.
     let mut freq_top = (Vec::new(), 0.0);
     let mut freq_all = (Vec::new(), 0.0);
     let mut worst_top = (Vec::new(), 0.0);

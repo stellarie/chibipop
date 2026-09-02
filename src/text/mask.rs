@@ -1,50 +1,58 @@
-//! Keeping chibipop's own popup out of its own OCR input (ADR-0008).
+//! This module removes chibipop's popup from its OCR source.
+//! (ARCHITECTURE.md#capture-and-masking).
 //!
-//! No portable protocol-level surface exclusion exists on Wayland, so the
-//! Worker masks in core: before OCR, the captured frame's overlap with the
-//! popup rect is filled flat white with a hard edge (benchmark-tuned; the
-//! fill color is irrelevant to the chosen engine and the 1 px feather
-//! bought nothing measurable). Both rects are core state in physical
-//! pixels, so exclusion is pure arithmetic - no protocol dependency,
-//! identical on every capture backend.
+//! Wayland has no portable protocol to exclude one surface from another surface's capture.
+//! Therefore, the Worker applies the mask in Core.
+//! Before OCR, the code fills the overlap between the captured frame and the popup rect with flat white.
+//! The fill has a hard edge.
 //!
-//! The mask boundary is a capture edge: words whose boxes intersect the
-//! mask are dropped, never half-recognised, exactly like words clipped at
-//! a tile edge.
+//! Benchmarks define this method. Each candidate OCR engine produced the same result for each fill color.
+//! A one-pixel feather changed no measured result.
+//!
+//! Both rects use physical pixels in Core.
+//! The mask uses arithmetic only and needs no protocol call.
+//! Every capture backend uses the same mask.
+//!
+//! The engine treats the mask boundary as a capture edge.
+//! The engine drops each word that overlaps this boundary.
+//! It does not recognize a word part.
+//! The engine applies the same rule to a word clipped by a tile edge.
 
 use crate::geom::PhysRect;
 
-/// How the pixels relate to the popup, in time.
+/// This enum records whether a grab occurred before or after the popup appeared.
 ///
-/// A live grab happens while the popup may be on screen, so the popup must
-/// be masked out of it. A frozen grab predates the popup by construction -
-/// trigger mode captures at trigger press, before anything is shown - so a
-/// frozen buffer never self-contaminates and is left untouched (ADR-0008).
+/// A live grab can include the visible popup, so the code applies the mask to each live grab.
+/// Trigger mode takes a frozen grab before it creates the popup.
+/// The frozen buffer therefore contains no popup pixels, and the code leaves it unchanged.
+/// (ARCHITECTURE.md#capture-and-masking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureMode {
-    /// Grabbed while the popup may be visible: mask it.
+    /// A live grab can include the popup, so the code applies the mask.
     Live,
-    /// Grabbed before the popup existed: nothing to mask.
+    /// A frozen grab occurs before the popup exists, so the code does not need a mask.
     Frozen,
 }
 
-/// The screen area OCR must not read: our own popup, if any.
+/// A `CaptureMask` identifies the screen area that OCR must not read.
 ///
-/// Physical pixels, like every rect below the seams. The platform bin
-/// decides whether to supply one at all: Windows keeps its guard/WDA
-/// exclusion and supplies [`CaptureMask::NONE`]; Wayland supplies the
-/// controller's `PopupPlaced` rect.
+/// The area is the popup when a popup exists.
+/// All rects below the seams use physical pixels.
+/// The platform bin decides whether the code needs a mask.
+/// Windows uses its capture guard and WDA exclusion, so it supplies [`CaptureMask::NONE`].
+/// Wayland supplies the Controller's `PopupPlaced` rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureMask {
     popup: Option<PhysRect>,
 }
 
 impl CaptureMask {
-    /// No popup to hide.
+    /// This value represents a capture with no popup mask.
     pub const NONE: CaptureMask = CaptureMask { popup: None };
 
-    /// Mask `popup` out of live grabs; frozen grabs predate the popup
-    /// and stay maskless (ADR-0008).
+    /// This function uses `popup` as the mask for a live grab.
+    /// A frozen grab precedes the popup, so the returned mask is empty.
+    /// (ARCHITECTURE.md#capture-and-masking).
     pub fn for_mode(mode: CaptureMode, popup: Option<PhysRect>) -> CaptureMask {
         match mode {
             CaptureMode::Live => CaptureMask { popup },
@@ -52,53 +60,53 @@ impl CaptureMask {
         }
     }
 
-    /// This mask as it bears on one grab: the popup restricted to
-    /// `region`, or [`CaptureMask::NONE`] when it does not reach it.
+    /// Return the part of the mask that overlaps `region`.
     ///
-    /// Everything a grab does with a mask is a function of this value
-    /// alone - the white fill, the word drop, and the key that decides
-    /// whether an unchanged re-grab may reuse an earlier pass's words.
-    /// Clipping first is what makes those three agree by construction
-    /// rather than by argument: two grabs of the same box whose clipped
-    /// masks are equal are the same question, and a popup that moved
-    /// somewhere else entirely does not make them different.
+    /// Return [`CaptureMask::NONE`] when the popup does not overlap `region`.
+    /// The clipped mask controls the white fill, word removal, and reuse key for an unchanged grab.
+    ///
+    /// The code clips the mask first, so these three uses cannot differ.
+    /// Two grabs of the same region ask the same question when their clipped masks are equal.
+    /// A popup outside the region does not change the clipped mask or the OCR result.
     pub fn clipped_to(&self, region: PhysRect) -> CaptureMask {
         CaptureMask { popup: self.popup.and_then(|p| p.intersection(region)) }
     }
 
-    /// The popup∩region overlap, in `region`-local pixels.
+    /// Return the popup overlap in coordinates relative to `region`.
     ///
-    /// `None` when nothing needs masking: no popup, or no overlap. A
-    /// shared edge is no overlap (`PhysRect::intersection` is half-open).
+    /// Return `None` when no popup or overlap exists.
+    /// A shared edge does not overlap because `PhysRect::intersection` uses half-open bounds.
     pub fn overlap_in(&self, region: PhysRect) -> Option<PhysRect> {
         let hit = self.popup?.intersection(region)?;
         Some(hit.translated(-region.x, -region.y))
     }
 
-    /// Whether a recognised word's box touches the mask.
+    /// Report whether a recognized word rect overlaps the mask.
     ///
-    /// The mask boundary is a capture edge: a word intersecting it must be
-    /// dropped rather than half-recognised (ADR-0008). `rect` is in
-    /// desktop pixels, like the mask.
+    /// The engine treats the mask boundary as a capture edge.
+    /// It must drop an overlapping word, not recognize part of that word.
+    /// Both `rect` and the mask use physical pixels.
+    /// (ARCHITECTURE.md#capture-and-masking).
     pub fn hides(&self, rect: PhysRect) -> bool {
         self.popup.is_some_and(|p| p.intersection(rect).is_some())
     }
 
-    /// White-fill the popup overlap in a grabbed frame.
+    /// Fill the popup overlap with flat white in a captured frame.
     ///
-    /// `buf` is BGRA8, `w * h * 4` bytes, top-down - [`super::Frame`]'s
-    /// format - covering `region`'s pixels one-to-one. White, hard edge:
-    /// the benchmarked safe fill across all candidate engines.
+    /// `buf` uses [`super::Frame`]'s top-down BGRA8 format and has `w * h * 4` bytes.
+    /// The buffer maps one-to-one to `region` in physical pixels.
+    /// The fill has a hard edge.
+    /// Benchmarks found this fill safe for all candidate OCR engines.
     pub fn apply(&self, buf: &mut [u8], w: i32, h: i32, region: PhysRect) {
         let Some(local) = self.overlap_in(region) else { return };
         fill_white(buf, w, h, local);
     }
 }
 
-/// Flat white over `rect`, clamped to the image.
+/// Fill `rect` with flat white and clamp the rect to the image.
 ///
-/// Clamped to `buf` as well as to `w`/`h`: a backend that hands back a
-/// short buffer must not turn a mask into a panic.
+/// The function also clamps the rect to the length of `buf`.
+/// A short buffer cannot cause a panic.
 fn fill_white(buf: &mut [u8], w: i32, h: i32, rect: PhysRect) {
     let stride = w.max(0) as usize * 4;
     if stride == 0 {
@@ -151,7 +159,7 @@ mod tests {
 
     #[test]
     fn partial_overlap_is_clipped_and_region_local() {
-        // Popup hangs off the region's bottom-right corner.
+        // The popup extends beyond the region's bottom-right corner.
         let got = mask(r(150, 180, 100, 100)).overlap_in(r(100, 100, 100, 100));
         assert_eq!(Some(r(50, 80, 50, 20)), got);
     }
@@ -170,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_shared_edge_is_no_overlap() {
-        // Popup starts exactly where the region ends.
+        // The popup starts at the exact end of the region.
         assert_eq!(None, mask(r(200, 100, 50, 50)).overlap_in(r(100, 100, 100, 100)));
         assert!(!mask(r(200, 100, 50, 50)).hides(r(150, 100, 50, 50)));
     }
@@ -184,8 +192,9 @@ mod tests {
         assert!(!m.hides(r(80, 150, 20, 20)), "adjacent, touching only the edge");
     }
 
-    /// A 6x4 frame with a distinct non-white byte pattern; the masked
-    /// pixels must be flat white and every other byte untouched.
+    /// The frame uses distinct nonwhite bytes.
+    /// The mask must fill selected pixels with flat white.
+    /// All other bytes must stay unchanged.
     #[test]
     fn apply_white_fills_exactly_the_overlap() {
         let (w, h) = (6, 4);
@@ -193,7 +202,7 @@ mod tests {
         let mut buf: Vec<u8> = (0..(w * h * 4) as usize).map(|i| (i % 251) as u8).collect();
         let before = buf.clone();
 
-        // Popup covers the region's columns 2..4, rows 1..3.
+        // The popup covers region columns 2 through 4 and rows 1 through 3.
         mask(r(12, 21, 2, 2)).apply(&mut buf, w, h, region);
 
         for y in 0..h as usize {
@@ -215,8 +224,8 @@ mod tests {
         let (w, h) = (4, 4);
         let region = r(0, 0, w, h);
         let mut buf = vec![0u8; (w * h * 4) as usize];
-        // Popup extends past the region on two sides; must not panic and
-        // must fill only the in-frame part.
+        // The popup extends beyond two region edges.
+        // The code must fill only the part inside the frame and must not panic.
         mask(r(2, -3, 100, 5)).apply(&mut buf, w, h, region);
         for y in 0..h as usize {
             for x in 0..w as usize {
@@ -236,12 +245,12 @@ mod tests {
         assert_eq!(before, buf);
     }
 
-    /// A backend that hands back fewer rows than it promised must cost a
-    /// mask, not the process.
+    /// A short buffer cannot stop the process.
+    /// The mask fills only the available rows.
     #[test]
     fn apply_to_a_short_buffer_fills_what_is_there_and_does_not_panic() {
         let (w, h) = (4, 4);
-        // Two rows only, where four were claimed.
+        // The buffer has two rows, but the call claims that it has four rows.
         let mut buf = vec![0u8; (w * 2 * 4) as usize];
         mask(r(0, 0, 4, 4)).apply(&mut buf, w, h, r(0, 0, w, h));
         assert_eq!(vec![0xFFu8; (w * 2 * 4) as usize], buf, "both real rows are white");

@@ -1,29 +1,31 @@
-//! The rebuild, in this process (ADR-0005).
+//! The rebuild runs in this process (ARCHITECTURE.md#settings-and-config).
 //!
 //! Windows spawns `chibipop.exe build-dict` as a child with
-//! `CREATE_NO_WINDOW` and reads its stdout; on Linux there is no window
-//! to suppress and no reason for a second process, so the same core
-//! builder runs on a background thread here and its progress lines go
-//! straight down a channel. `chibipop::dict::build::build` owns the whole
-//! crash-safety story: it builds into `<out>.building`, reads the finished
-//! file back before anything depends on it, clears the sidecars the
-//! database being replaced left under `<out>`'s name, and only then
-//! renames. A dead rebuild leaves a stray `.building` and nothing else,
-//! and the rename is the single instant the switch happens. The daemon's
-//! open snapshot keeps reading the old inode throughout.
+//! `CREATE_NO_WINDOW` and reads its stdout. Linux has no window to
+//! suppress and no reason for a second process. The same core builder
+//! runs here on a background thread. Its progress lines go straight
+//! down a channel. `chibipop::dict::build::build` owns the whole
+//! crash-safety design. It builds into `<out>.building`. It reads the
+//! finished file back before anything depends on it. It clears the
+//! sidecars that the replaced database left under the name of `<out>`.
+//! It renames only after these steps. A dead rebuild leaves one stray
+//! `.building` file and nothing else. The rename is the single instant
+//! of the switch. The open snapshot of the daemon reads the old inode
+//! for the whole build.
 //!
-//! After a successful promote exactly one `reload` verb goes to the
-//! daemon, and *after* rather than before on purpose: the promote is
-//! atomic and the old inode stays readable, so a daemon told to drop its
-//! handles first would only spend the build with no dictionary at all —
-//! and would have to be running for the promote to be safe, which it may
-//! not be. Reopening afterwards is both race-free and optional.
+//! After a successful promote, exactly one `reload` verb goes to the
+//! daemon. The verb goes *after* the promote, not before, on purpose.
+//! The promote is atomic, and the old inode stays readable. A daemon
+//! that drops its handles first has no dictionary for the whole build.
+//! The opposite order is safe only with a running daemon, and the
+//! daemon can be absent. A reopen after the promote has no race, and
+//! it is optional.
 //!
-//! That reload has **two** handles to reopen in the daemon, not one: the
-//! worker's dictionary (`worker::ReopenDict`) and, since ticket 03, the
-//! popup's own media-store connection (`Popup::reconfigure`). Failure
-//! sends nothing — the old database is still the live one, and telling
-//! the daemon to reopen it would be noise.
+//! That reload reopens **two** handles in the daemon, not one: the
+//! dictionary of the worker (`worker::ReopenDict`) and the media-store
+//! connection of the popup (`Popup::reconfigure`). A failure sends
+//! nothing. The old database is still the live one. A reload command
+//! for that database is only noise.
 
 use crate::control::{self, Verb};
 use crate::lock::{self, InstanceLock, LockError};
@@ -36,41 +38,44 @@ use std::path::{Path, PathBuf};
 pub enum Progress {
     /// One raw builder line, for [`chibipop::dict::progress::friendly`].
     Line(String),
-    /// Built, renamed over, staged library changes kept, daemon told.
+    /// The build finished, the rename happened, the library keeps the
+    /// staged changes, and the daemon knows.
     Done { entries: i64, terms: i64, reload: Reload },
     /// Nothing changed: the old database is still the live one.
     Failed(String),
 }
 
-/// What the one `reload` verb achieved.
+/// The result of the one `reload` verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reload {
-    /// The daemon answered; its one reply line.
+    /// The daemon answered. This value holds its one reply line.
     Sent(String),
-    /// Nothing listening on the control socket.
+    /// No process listens on the control socket.
     NoDaemon,
 }
 
-/// Everywhere one rebuild reads or writes.
+/// Every path that one rebuild reads or writes.
 #[derive(Debug, Clone)]
 pub struct Plan {
-    /// The archive library the staged edits land in.
+    /// The archive library that receives the staged edits.
     pub library_dir: PathBuf,
-    /// The database the daemon reads; built beside, renamed over.
+    /// The database that the daemon reads. The build writes a new file
+    /// beside it, then renames the new file over it.
     pub out: PathBuf,
-    /// Where the library flock file lives.
+    /// The directory that holds the library flock file.
     pub runtime_dir: PathBuf,
-    /// The daemon's control socket; absent means no daemon.
+    /// The control socket of the daemon. An absent socket means no daemon.
     pub socket: PathBuf,
 }
 
-/// Take the library and start building.
+/// Take the library and start the build.
 ///
-/// The flock is claimed synchronously so a refusal reaches the status
-/// area before any file moves, then moves into the thread: the kernel
-/// releases it however the rebuild ends. Everything after the claim —
-/// staging, building, committing, the `reload` — happens on the thread
-/// and is reported through `sink`.
+/// This function claims the flock synchronously, so a refusal reaches
+/// the status area before any file moves. The flock then moves into
+/// the thread, and the kernel releases it however the rebuild ends.
+/// Every later step runs on the thread and reports through `sink`.
+/// These steps are the staging, the build, the commit, and the
+/// `reload`.
 pub fn spawn(
     form: &SettingsForm,
     plan: Plan,
@@ -81,7 +86,8 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("chibipop-rebuild".to_string())
         .spawn(move || {
-            // Held for the whole build, dropped with the thread.
+            // The thread holds the lock for the whole build and drops
+            // it at exit.
             let _lock: InstanceLock = lock;
             sink(run(&form, &plan, &sink));
         })
@@ -91,7 +97,7 @@ pub fn spawn(
 
 /// One rebuild, start to finish.
 fn run(form: &SettingsForm, plan: &Plan, sink: &impl Fn(Progress)) -> Progress {
-    // Refuses an empty library before it moves anything.
+    // This call refuses an empty library before it moves any file.
     let pending = match chibipop::settings::stage_into_library(form, &plan.library_dir) {
         Ok(pending) => pending,
         Err(e) => return Progress::Failed(format!("{e:#}")),
@@ -111,21 +117,22 @@ fn run(form: &SettingsForm, plan: &Plan, sink: &impl Fn(Progress)) -> Progress {
 
 /// Build the staged library into `plan.out`.
 ///
-/// The archive names are announced here, in the same terse `term dict
-/// [i] <file>` / `freq dict      <file>` spelling the Windows
-/// `build-dict` command prints: core's builder only counts rows, so the
-/// caller is what tells the user which file is being read.
+/// This function prints the archive names. It uses the same `term dict
+/// [i] <file>` and `freq dict      <file>` spelling that the Windows
+/// `build-dict` command prints. The core builder only counts rows, so
+/// the caller must name the file that the build reads.
 ///
-/// The first list is `dict_paths`, which is every readable archive the
-/// build installs as a dictionary row - a frequency- or pitch-only
-/// archive is a dictionary in its own right now (ADR-0014), not something
-/// the term list skips. The `term dict` prefix stays because
-/// [`chibipop::dict::progress::friendly`] is what turns these into
-/// "Reading <file>…", and it parses exactly that word; the second list
-/// re-announces the archives read for their frequencies, so an archive
-/// carrying both roles is named twice on purpose.
+/// The first list is `dict_paths`. That list holds every readable
+/// archive that the build installs as a dictionary row. A
+/// frequency-only or pitch-only archive is now a dictionary of its own
+/// (ARCHITECTURE.md#dictionary-and-lookup), and the term list does not
+/// skip it. The `term dict` prefix stays because
+/// [`chibipop::dict::progress::friendly`] turns these lines into
+/// "Reading <file>…" and parses exactly that word. The second list
+/// names the archives that the build reads for their frequencies. An
+/// archive with both roles therefore appears twice on purpose.
 fn build(plan: &Plan, sink: &impl Fn(Progress)) -> anyhow::Result<(i64, i64)> {
-    // Reconciled: what stage_into_library just wrote is what builds.
+    // The build reads exactly what stage_into_library wrote.
     let lib = Library::load(&plan.library_dir)?;
     let dicts = lib.dict_paths(&plan.library_dir);
     let freqs = lib.freq_paths(&plan.library_dir);
@@ -141,12 +148,12 @@ fn build(plan: &Plan, sink: &impl Fn(Progress)) -> anyhow::Result<(i64, i64)> {
     Ok((counts.entries, counts.terms))
 }
 
-/// The archive's own file name, which is what the user recognises.
+/// The file name of the archive, because the user recognizes that name.
 fn file_name(path: &Path) -> String {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
 }
 
-/// The one `reload`, sent only after a successful rename.
+/// Send the one `reload` verb, only after a successful rename.
 fn notify(socket: &Path) -> Reload {
     match control::send_to(socket, Verb::Reload) {
         Ok(reply) => Reload::Sent(reply),
@@ -154,14 +161,14 @@ fn notify(socket: &Path) -> Reload {
     }
 }
 
-/// Let the removals go.
+/// Complete the staged removals.
 fn keep(pending: &Pending) {
     if let Err(e) = pending.commit() {
         eprintln!("chibipop: clearing the library's .removed folder failed: {e:#}");
     }
 }
 
-/// Put every archive back.
+/// Restore every archive.
 fn put_back(pending: &Pending, why: &str) {
     match pending.rollback() {
         Ok(()) => eprintln!("chibipop: {why} - your dictionary archives were put back."),
@@ -173,7 +180,7 @@ fn put_back(pending: &Pending, why: &str) {
     }
 }
 
-/// The status line a finished rebuild earns.
+/// Build the status line for a finished rebuild.
 pub fn describe(progress: &Progress) -> String {
     match progress {
         Progress::Line(line) => {
@@ -205,7 +212,7 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Arc;
 
-    /// A directory that goes away with the test.
+    /// A directory that the test removes at drop.
     struct Scratch(PathBuf);
 
     impl Drop for Scratch {
@@ -234,12 +241,12 @@ mod tests {
             library_dir: dir.join("library"),
             out: dir.join("chibipop.sqlite"),
             runtime_dir: dir.join("run"),
-            // Nothing listens unless a test binds it.
+            // No process listens unless a test binds this path.
             socket: dir.join("run/absent.sock"),
         }
     }
 
-    /// A form that stages `sources` in.
+    /// A form that stages `sources`.
     fn staging(sources: &[PathBuf]) -> SettingsForm {
         let cfg = chibipop::config::Config::default();
         let mut form = chibipop::settings::from_config(&cfg, &[]);
@@ -249,7 +256,7 @@ mod tests {
         form
     }
 
-    /// Drives one rebuild to its last message.
+    /// Drive one rebuild to its last message.
     fn drive(form: &SettingsForm, plan: Plan) -> (Vec<Progress>, Progress) {
         let (tx, rx) = mpsc::channel();
         spawn(form, plan, move |p| {
@@ -259,9 +266,9 @@ mod tests {
         collect(rx)
     }
 
-    /// Which inode a path names right now: the whole point of building
-    /// beside and renaming over is that this changes while an open
-    /// connection keeps the old one.
+    /// The inode that a path names now. The build writes beside the
+    /// file and renames over it, so this inode changes while an open
+    /// connection keeps the old inode.
     fn inode(path: &Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
         std::fs::metadata(path).unwrap().ino()
@@ -273,7 +280,8 @@ mod tests {
         (all, last)
     }
 
-    /// Every name in the library, sorted: what a rollback must restore.
+    /// Every name in the library, sorted. A rollback must restore this
+    /// list.
     fn listing(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
@@ -284,7 +292,7 @@ mod tests {
         names
     }
 
-    /// A listener that counts requests and replies like the daemon.
+    /// A listener that counts the requests and answers like the daemon.
     fn fake_daemon(path: &Path) -> Arc<AtomicUsize> {
         let listener = UnixListener::bind(path).expect("binding the fake daemon socket");
         let seen = Arc::new(AtomicUsize::new(0));
@@ -313,12 +321,13 @@ mod tests {
         }
     }
 
-    /// The core contract: built beside, renamed over, nothing left behind.
+    /// The core contract. The build writes beside the file, renames
+    /// over it, and leaves nothing.
     #[test]
     fn a_rebuild_lands_on_the_database_and_leaves_no_building_file() {
         let (dir, _guard) = scratch("lands");
         let p = plan(&dir);
-        // A stale .building from a killed rebuild must not stop the next.
+        // A stale .building file from a killed rebuild must not stop the next rebuild.
         std::fs::write(dir.join("chibipop.sqlite.building"), b"junk").unwrap();
         std::fs::write(&p.out, b"the old database").unwrap();
 
@@ -336,10 +345,10 @@ mod tests {
         );
     }
 
-    /// What "the daemon keeps serving lookups mid-rebuild" means: the open
-    /// snapshot reads the old inode until it reopens, and reopening is
-    /// what shows the new dictionary. This is the whole `reload` contract
-    /// in one test.
+    /// This test defines how the daemon answers lookups during a
+    /// rebuild. The open snapshot reads the old inode until the daemon
+    /// reopens the file. Only a reopen shows the new dictionary. This
+    /// test holds the whole `reload` contract.
     #[test]
     fn an_open_snapshot_keeps_reading_the_old_database_until_it_reopens() {
         let (dir, _guard) = scratch("snapshot");
@@ -349,7 +358,7 @@ mod tests {
         let (_, built) = drive(&first, p.clone());
         done(&built);
 
-        // The daemon's connection, opened before the second rebuild.
+        // The connection of the daemon, opened before the second rebuild.
         let daemon = SqliteDictionary::open(&p.out).expect("the daemon's snapshot");
         let before = daemon.dicts().unwrap().len();
         let old_inode = inode(&p.out);
@@ -358,10 +367,10 @@ mod tests {
             staging(&[]),
             &Library::load(&p.library_dir).unwrap(),
         );
-        // A genuinely different second dictionary, so the count moves. A
-        // copy of the first under another name would not: `Library::load`
-        // collapses byte-identical archives to one entry, because two names
-        // for one archive are one dictionary.
+        // A different second dictionary, so the count moves. A copy of
+        // the first under another name does not move the count.
+        // `Library::load` collapses byte-identical archives to one
+        // entry, because two names for one archive are one dictionary.
         let extra = dir.join("second.zip");
         std::fs::copy(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -393,21 +402,21 @@ mod tests {
 
     /// The reported failure, end to end, through the real rebuild.
     ///
-    /// A user re-imported their one dictionary, rebuilt, and got no popups
-    /// at all. Their library held two byte-identical copies of the archive,
-    /// one listed in `library.json` and one not, so the build made **two**
-    /// dictionaries out of one file - their log said
+    /// A user imported one dictionary again, rebuilt, and saw no popup.
+    /// The library held two byte-identical copies of the archive. The
+    /// file `library.json` listed one copy and not the other, so the
+    /// build made **two** dictionaries from one file. The log said
     /// `2 dictionary/ies: Jitendex.org [2026-08-11], Jitendex.org
-    /// [2026-08-11]` - and every lookup after it reported
+    /// [2026-08-11]`. Every later lookup reported
     /// `database disk image is malformed`.
     ///
-    /// This is the scenario, not the mechanism: one archive under two
-    /// names has to rebuild into one dictionary, the promoted file has to be
-    /// sound, a lookup has to answer, and exactly one `reload` has to go
-    /// out. The mechanism that broke the file - a stale write-ahead log left
-    /// under the promoted file's name - has its own test beside
-    /// `dict::build::promote`, which is where the ordering that fixes it
-    /// lives.
+    /// This test covers the scenario, not the mechanism. One archive
+    /// under two names must rebuild into one dictionary. The promoted
+    /// file must be sound. A lookup must answer. Exactly one `reload`
+    /// must go to the daemon. A stale write-ahead log under the name of
+    /// the promoted file broke the file. That mechanism has its own
+    /// test beside `dict::build::promote`, which holds the order that
+    /// fixes it.
     #[test]
     fn the_reported_failure_rebuilds_into_one_sound_dictionary_that_answers() {
         let (dir, _guard) = scratch("reported");
@@ -416,11 +425,11 @@ mod tests {
         let media_zip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/media/media.zip");
 
-        // What they had before: one dictionary, imported and built.
+        // The state before the failure: one dictionary, imported and built.
         done(&drive(&staging(std::slice::from_ref(&media_zip)), p.clone()).1);
         assert_eq!(1, SqliteDictionary::open(&p.out).unwrap().dicts().unwrap().len());
 
-        // The re-import's leftover: the same bytes, a second name, unlisted.
+        // The leftover of the second import: the same bytes under a second, unlisted name.
         std::fs::copy(&media_zip, p.library_dir.join("[JA-EN] media (2026-08-11).zip")).unwrap();
         let again = chibipop::settings::with_library(
             staging(&[]),
@@ -452,15 +461,15 @@ mod tests {
                 .count(),
             "and the rebuild only ever read one archive: {lines:?}",
         );
-        // The lookup they could not get a popup from.
+        // The lookup that gave the user no popup.
         assert_eq!(1, reopened.terms_for("ねこ").expect("the lookup must not fail").len());
     }
 
-    /// A build that dies after the library was already edited: the
-    /// archives go back, the live database never moves, and the daemon is
-    /// told nothing. The failure is forced by leaving a *directory* where
-    /// the build-beside file goes, which is what a killed rebuild plus a
-    /// clumsy cleanup looks like on disk.
+    /// A build dies after an edit to the library. The rollback restores
+    /// the archives, the live database does not move, and the rebuild
+    /// tells the daemon nothing. This test forces the failure with a
+    /// *directory* at the path of the build-beside file. A killed
+    /// rebuild plus a rough cleanup leaves exactly that on disk.
     #[test]
     fn a_failed_build_puts_the_archives_back_and_leaves_the_database_alone() {
         let (dir, _guard) = scratch("failed");
@@ -485,7 +494,7 @@ mod tests {
         assert_eq!(library_before, listing(&p.library_dir), "the staged archive must be undone");
     }
 
-    /// The empty-library refusal reaches the status area, and nothing moves.
+    /// The refusal of an empty library reaches the status area, and nothing moves.
     #[test]
     fn an_empty_library_is_refused_without_touching_the_database() {
         let (dir, _guard) = scratch("empty");
@@ -530,8 +539,8 @@ mod tests {
         assert_eq!(0, seen.load(Ordering::SeqCst), "a failed rebuild tells the daemon nothing");
     }
 
-    /// No daemon is not a failure: the config file (and now the database)
-    /// is the source of truth, read at next start.
+    /// An absent daemon is not a failure. The config file and now the
+    /// database hold the truth, and the next start reads them.
     #[test]
     fn an_absent_daemon_is_reported_not_treated_as_a_failure() {
         let (dir, _guard) = scratch("no_daemon");
@@ -540,8 +549,9 @@ mod tests {
         assert!(matches!(last, Progress::Done { reload: Reload::NoDaemon, .. }), "{last:?}");
     }
 
-    /// Two settings processes, one library: the second is refused before
-    /// it moves a file, and the message names the holder.
+    /// Two settings processes share one library. The flock refuses the
+    /// second process before it moves a file, and the message names the
+    /// holder.
     #[test]
     fn a_concurrent_rebuild_is_refused_by_the_library_flock() {
         let (dir, _guard) = scratch("contend");
@@ -562,13 +572,14 @@ mod tests {
         assert!(!p.out.exists(), "a refused rebuild writes nothing");
 
         drop(held);
-        // Freed, but not always instantly reacquirable: sibling tests in
-        // this binary fork children (settings::child, cursor::hyprctl),
-        // and a fork clones the fd table - between clone and exec the
-        // child's copy of `held`'s fd keeps the flock alive (CLOEXEC
-        // closes only at exec). A bounded retry rides out that window;
-        // production never hits it because the holding process forks
-        // nothing while it rebuilds.
+        // The lock is free, but a new claim can still fail at once.
+        // Sibling tests in this binary fork children (settings::child,
+        // cursor::hyprctl), and a fork clones the fd table. Between the
+        // clone and the exec, the copy of the fd of `held` in the child
+        // keeps the flock alive, because CLOEXEC closes the fd only at
+        // exec. A bounded retry covers that window. Production never
+        // meets it, because the holding process forks nothing during a
+        // rebuild.
         let mut tries = 0;
         let last = loop {
             let (tx, rx) = mpsc::channel();
@@ -599,7 +610,7 @@ mod tests {
         let failed = Progress::Failed("invalid Zip archive".to_string());
         assert!(describe(&failed).contains("unchanged"), "{}", describe(&failed));
         assert!(describe(&failed).contains("invalid Zip archive"));
-        // Raw builder lines go through the shared renderer.
+        // The shared renderer formats raw builder lines.
         assert_eq!(
             "12,500 of 768,636 entries…",
             describe(&Progress::Line("progress  12500 / 768636".to_string()))

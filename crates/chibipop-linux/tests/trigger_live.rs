@@ -1,26 +1,23 @@
-//! Trigger mode against a real compositor, when there is one.
+//! Test Trigger mode with a real compositor.
 //!
-//! CI is headless (ADR-0007), so this skips without `WAYLAND_DISPLAY` and
-//! skips again where the capture protocol ADR-0002's promptless rung needs
-//! is not advertised - that is a compositor verdict, not a test failure.
-//! A third verdict skips it too, and the daemon is the one who gives it:
-//! a press looks up what is under the cursor, so a session where
-//! ADR-0003's cursor ladder found no rung has nothing for these verbs to
-//! act on. That is the ticket-48 headless-sway case (sway 1.9 advertises
-//! no ext-image-copy-capture, runs no portal and is not Hyprland); the
-//! diagnostic it prints instead has its own tests in `daemon.rs`.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci). The test skips without
+//! `WAYLAND_DISPLAY`.
+//! It also skips when the capture protocol required by the promptless rung is absent.
+//! That condition is a compositor state, not a test failure.
+//! The daemon can report a third skip condition: a press reads the cursor position, so no
+//! cursor rung leaves these verbs without a target.
+//! This is the headless-sway case. sway 1.9 advertises no ext-image-copy-capture, runs no
+//! portal, and is not Hyprland.
+//! `daemon.rs` has tests for that diagnostic.
 //!
-//! One test, deliberately: it drives a whole daemon - real screencopy
-//! backend, real meikiocr models, real SQLite dictionary built here from
-//! the repo's Yomitan fixtures - through the three trigger verbs and reads
-//! everything back out of the daemon's own log. It synthesizes no input
-//! and never touches the seat, so it cannot know what is on the screen and
-//! asserts nothing about the words it reads: which word resolves is the
-//! smoke's business (ticket 35's Comments), and the frozen-hold mechanism
-//! is this one's.
+//! One test drives one daemon with a real screencopy backend, real meikiocr models, and a
+//! real SQLite dictionary built from the repository's Yomitan fixtures.
+//! It sends the three trigger verbs and reads the daemon log.
+//! It synthesizes no input and never touches the seat.
+//! Therefore, it does not assert which screen word resolves.
+//! That lookup is outside this test. The test checks frozen-hold behavior.
 //!
-//! The lookup log stays off here for the same reason: the screen belongs
-//! to whoever is at the machine.
+//! The lookup log stays off because the screen belongs to the person at the machine.
 
 #![cfg(target_os = "linux")]
 
@@ -31,8 +28,8 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// wlr-screencopy: rung 1, and the one this test wants - a portal session
-/// would open a consent dialog in someone's face.
+/// `wlr-screencopy` is rung 1, which this test needs.
+/// A portal session would open a consent dialog on the user's screen.
 const NEEDED: &str = "zwlr_screencopy_manager_v1";
 
 struct Session {
@@ -47,18 +44,15 @@ impl Session {
         Session::start_with(name, &[("terms.zip", fixture("terms.zip"))])
     }
 
-    /// A private XDG tree with the compositor's socket linked in, a library
-    /// stocked with `archives` as `(name in the library, source)`, a
-    /// dictionary built out of that library, and a daemon started on top.
+    /// Create a private XDG tree, link the compositor socket, stock `archives` as
+    /// `(name in the library, source)`, build a Dictionary, and start a daemon.
     ///
-    /// Built through `Library` rather than from a path list, because the
-    /// library is what decides how many dictionaries a build makes - two
-    /// names for one archive are one dictionary - and a test that skipped it
-    /// would build something the daemon never would.
+    /// Build through `Library`, not from a path list. `Library` determines how many
+    /// Dictionaries a build makes. Two names for one archive still produce one Dictionary.
+    /// A direct path-list build could produce a result that the daemon never uses.
     ///
-    /// `name` keeps two live sessions out of each other's tree: the tests
-    /// here run in parallel, and each daemon writes its own log, socket and
-    /// database under this directory.
+    /// `name` separates the trees of live sessions.
+    /// The tests run in parallel, and each daemon writes its log, socket, and database there.
     fn start_with(name: &str, archives: &[(&str, PathBuf)]) -> Session {
         let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
         let dir = std::env::temp_dir()
@@ -76,8 +70,8 @@ impl Session {
             .expect("linking the compositor socket into the scratch tree");
         }
 
-        // A real dictionary, so the pipeline has all three parts and the
-        // log line naming them is worth asserting.
+        // Build a real Dictionary so the pipeline has all three parts.
+        // The test can then assert the log line that names them.
         let library = dir.join("data/chibipop/library");
         for (name, source) in archives {
             std::fs::copy(source, library.join(name)).expect("stocking the library");
@@ -85,9 +79,8 @@ impl Session {
         let counts = build_from_library(&library, &dir.join("data/chibipop/chibipop.sqlite"));
         assert!(counts > 0, "the fixture must produce entries");
 
-        // Hold-key mode: this test presses the verbs itself, and live
-        // mode would OCR on every cursor move of whoever is at the
-        // machine.
+        // Use Hold-key mode. This test sends the verbs itself.
+        // Live mode would run OCR on every cursor move from the person at the machine.
         let mut cfg = chibipop::config::Config::default();
         cfg.trigger.mode = chibipop::config::TriggerMode::HoldKey;
         cfg.save(&dir.join("config/chibipop/chibipop.toml")).expect("writing the config");
@@ -117,7 +110,7 @@ impl Session {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Wait for a line containing `needle`, and answer it.
+    /// Wait for a log line that contains `needle`, then return it.
     fn wait_for(&self, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -129,7 +122,7 @@ impl Session {
         panic!("waited 30s for {needle:?}; the log was:\n{}", self.log());
     }
 
-    /// How many lines carry `needle` right now.
+    /// Count the log lines that contain `needle`.
     fn count(&self, needle: &str) -> usize {
         self.log().lines().filter(|l| l.contains(needle)).count()
     }
@@ -137,8 +130,8 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // SIGTERM, not a kill: the daemon unlinks its socket and drops
-        // its lock on the way out.
+        // Send SIGTERM, not kill.
+        // The daemon unlinks its socket and drops its lock before exit.
         let _ = Command::new("kill").arg("-TERM").arg(self.daemon.id().to_string()).status();
         let _ = self.daemon.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -149,8 +142,8 @@ fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/yomitan").join(name)
 }
 
-/// Builds the library at `dir` into `out`, exactly as the settings
-/// process's rebuild thread does, and answers the entry count.
+/// Build the library at `dir` into `out`, as the settings process rebuild thread does.
+/// Return the entry count.
 fn build_from_library(dir: &Path, out: &Path) -> i64 {
     let lib = chibipop::library::Library::load(dir).expect("reading the library");
     chibipop::dict::build::build(&lib.dict_paths(dir), &lib.freq_paths(dir), out, &|_| {})
@@ -189,39 +182,38 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
     }
     let session = Session::start("trigger");
 
-    // The cursor gate, asked of the daemon rather than re-derived from
-    // the registry here: it logs exactly one `cursor:` line at startup,
-    // and `hover unsupported` in it means a press has no position to
-    // freeze on. Skipping is the honest answer; the alternative is a
-    // 30 s wait for a grab that cannot happen.
+    // Ask the daemon for the cursor gate. Do not derive it from the registry here.
+    // Startup logs exactly one `cursor:` line.
+    // If it contains `hover unsupported`, a press has no position for a frozen grab.
+    // Skip then. Otherwise, the test would wait 30 s for a grab that cannot occur.
     let cursor = session.wait_for("cursor: ");
     if cursor.contains("hover unsupported") {
         eprintln!("skipping: this session gave the cursor ladder no rung - {cursor}");
         return;
     }
 
-    // All three parts of the pipeline, on the worker thread.
+    // The worker thread has all three pipeline parts.
     let up = session.wait_for("worker: pipeline up");
     assert!(up.contains("FixtureTerms"), "the built dictionary must be the one it opened: {up}");
     session.wait_for("lookups ready");
 
-    // A press: one frozen grab of the output under the cursor, taken
-    // before any popup exists, and the lookup that follows it.
+    // A press takes one frozen grab of the output under the cursor before any popup exists.
+    // The daemon then does the lookup.
     session.ctl("trigger-down");
     let frozen = session.wait_for("trigger: frozen grab of output");
     assert!(frozen.contains("for cursor"), "the grab must name the cursor it froze on: {frozen}");
     assert_eq!(0, session.count("no pipeline"), "the pipeline must have served it");
     assert_eq!(0, session.count("no cursor sample yet"), "the cursor channel must have answered");
-    // Whatever is on this screen, the read itself must not have failed.
+    // The screen content does not matter. The lookup itself must succeed.
     assert_eq!(0, session.count("lookup failed"), "log was:\n{}", session.log());
 
-    // Release drops the frame.
+    // Release drops the frozen frame.
     session.ctl("trigger-up");
     session.wait_for("hold released, frozen grab dropped");
     assert_eq!(1, session.count("frozen grab of output"), "one press, one grab");
 
-    // Toggle latches: a stray release must not end it, a second toggle
-    // must (ADR-0010).
+    // Toggle latches the hold.
+    // A stray release must not end it. A second toggle must end it.
     session.ctl("toggle");
     assert_eq!(2, session.count("frozen grab of output"), "toggle-on grabs too");
     session.ctl("trigger-up");
@@ -234,40 +226,36 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
     session.ctl("toggle");
     assert_eq!(2, session.count("hold released"), "toggle-off ends the hold");
 
-    // And a press with no dictionary rebuild in sight still only ever
-    // grabbed once per press.
+    // A press without a dictionary rebuild must still create only one grab.
     assert_eq!(2, session.count("frozen grab of output"), "no grab without a press");
 }
 
-/// The reported failure against a real daemon.
+/// This test reproduces the reported failure with a real daemon.
 ///
-/// A user re-imported their one dictionary and rebuilt, and their log read:
-///
+/// A user re-imported one Dictionary and rebuilt it. The log contained:
 /// ```text
 /// worker: pipeline up in 827 ms; 2 dictionary/ies: Jitendex.org [2026-08-11], Jitendex.org [2026-08-11]
 /// lookup failed: database disk image is malformed
 /// ```
 ///
-/// Two faults in two lines. The library held two byte-identical copies of
-/// one archive, so the build made two dictionaries out of one file; and the
-/// promote renamed the new database in while leaving the old one's
-/// write-ahead log under its name, so the next reader recovered the old
-/// pages into the new file.
+/// Two faults appear in the log. The library held two byte-identical copies of one archive,
+/// so the build made two Dictionaries from one file.
+/// The promote renamed the new database but left the old write-ahead log under its name.
+/// The next reader then recovered old pages into the new file.
 ///
-/// Both are fixed in core and have their own tests there. This one exists
-/// because neither can be *observed* the way the user met them without a
-/// real daemon: two live read-only handles onto the database (the worker's
-/// dictionary and the popup's media store), held across a promote, then
-/// reopened by one `reload`. It presses no trigger verb and takes no grab
-/// of its own - the daemon's startup is the only thing that touches the
-/// screen.
+/// Core fixes both faults and tests them separately.
+/// This test covers that behavior in a live daemon. Neither fault can be *observed* as the
+/// user saw it without a real daemon.
+/// The worker's Dictionary and the popup's Media store hold read-only database handles across
+/// a promote.
+/// One `reload` reopens both handles.
+/// The test sends no trigger verb and takes no grab. Daemon startup alone touches the screen.
 #[test]
 fn a_rebuild_under_a_live_daemon_serves_one_sound_dictionary() {
     if skip() {
         return;
     }
-    // The library a re-import leaves behind: one archive, twice, under two
-    // names.
+    // A re-import leaves one archive under two names in the library.
     let session = Session::start_with(
         "rebuild",
         &[
@@ -283,8 +271,8 @@ fn a_rebuild_under_a_live_daemon_serves_one_sound_dictionary() {
     );
     session.wait_for("lookups ready");
 
-    // The rebuild, run while the daemon holds the database open - the same
-    // core builder on the same path the settings process uses.
+    // Rebuild while the daemon holds the database open.
+    // Use the same core builder and path as the settings process.
     build_from_library(&session.library(), &session.db());
     for suffix in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{suffix}", session.db().display()));
@@ -295,19 +283,19 @@ fn a_rebuild_under_a_live_daemon_serves_one_sound_dictionary() {
         );
     }
 
-    // The one verb the settings process sends after a successful promote.
-    // It has two handles to reopen in there, not one.
+    // The settings process sends this verb after a successful promote.
+    // The daemon must reopen two handles, not one.
     session.ctl("reload");
     session.wait_for("config: reloaded");
 
-    // The database the daemon is now serving, read cold.
+    // Open the database that the daemon now serves.
     let reopened = chibipop::lookup::sqlite::SqliteDictionary::open(&session.db())
         .expect("the promoted database must open");
     assert_eq!(1, reopened.dicts().expect("reading the dictionary list").len());
     use chibipop::lookup::model::Dictionary as _;
-    // Two rows, and both from one dictionary: `terms.zip` carries the kana
-    // headword ねこ and the kanji 猫 that reads the same, and each indexes
-    // this surface. A duplicated dictionary would have answered four.
+    // Two rows come from one Dictionary.
+    // `terms.zip` carries the kana headword ねこ and the kanji 猫 with the same reading.
+    // Each row indexes this surface. A duplicated Dictionary would return four rows.
     assert_eq!(
         2,
         reopened.terms_for("ねこ").expect("the lookup must not fail").len(),

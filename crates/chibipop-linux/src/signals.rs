@@ -1,10 +1,9 @@
-//! The daemon's shutdown-signal discipline (ticket 13): which thread may
-//! see SIGINT/SIGTERM, and who must not inherit that answer.
+//! This module explains how the daemon receives shutdown signals.
 //!
-//! Two rules, and they only work together. The signalfd is the daemon's
-//! one way in, so every *thread* has to be out of the running for
-//! delivery — and a mask survives `exec`, so every *child* has to be
-//! given the default disposition back.
+//! `signalfd` is the only path for SIGINT and SIGTERM.
+//! Every daemon thread must block both signals.
+//! The signal mask remains active after `exec`.
+//! Each child process must unblock both signals before it calls `exec`.
 
 use anyhow::{Context, Result};
 use calloop::signals::{Signal, Signals};
@@ -12,44 +11,48 @@ use nix::sys::signal::{SigSet, Signal as NixSignal};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-/// The two the daemon shuts down on: an interactive Ctrl-C and a
-/// supervisor stopping the unit. Everything else keeps its default.
+/// The daemon stops for SIGINT from Ctrl-C or SIGTERM from a supervisor.
+/// All other signals keep their default disposition.
 const SHUTDOWN: [Signal; 2] = [Signal::SIGINT, Signal::SIGTERM];
 
-/// Take SIGINT/SIGTERM off every thread this process will ever have, and
-/// answer with the calloop source that now owns them.
+/// Block SIGINT and SIGTERM before the daemon creates another thread.
+/// Return the calloop event source for both signals.
 ///
-/// **Call this before the first thread is spawned.** `Signals::new` masks
-/// its *calling* thread only — calloop's own docs say so, and say the
-/// simplest fix is to set the source up first — and a thread inherits the
-/// mask at spawn, so ordering is the whole mechanism. Called after, the
-/// daemon's other threads (tray, zbus, shortcuts, clipboard, ...) are all
-/// candidates for a process-directed signal with an empty `SigBlk`, the
-/// kernel picks one, and it takes the default action: exit 143 with the
-/// control socket and the instance lock still on disk, and neither the
-/// `signal:` nor the `shutdown:` line ever written.
+/// `Signals::new` blocks signals only on the thread that calls it.
+/// Each new thread inherits that signal mask.
+/// The daemon must call this function before it creates any other thread.
+/// The tray, zbus, shortcuts, and clipboard threads are examples.
+/// Otherwise, the kernel can deliver a process signal to one of those threads.
+/// The default action then stops the process.
+/// SIGTERM makes the process exit with code 143.
+/// The control socket and the instance lock remain on disk.
+/// No `signal:` or `shutdown:` line appears.
 ///
-/// The source is registered on the pump later, which is not a gap: the
-/// signals are blocked from here on, so one arriving during startup waits
-/// in the signalfd instead of killing a half-built daemon.
+/// The daemon registers the event source on the calloop event pump later.
+/// This order does not lose signals.
+/// A startup signal remains in the signalfd.
+/// The signal cannot stop a partly initialized daemon.
 pub fn block_shutdown() -> Result<Signals> {
     Signals::new(&SHUTDOWN).context("blocking SIGINT/SIGTERM for the whole process")
 }
 
-/// Give `command` the default disposition back before it execs.
+/// Unblock SIGINT and SIGTERM in `command` before `exec`.
 ///
-/// [`block_shutdown`]'s mask outlives `exec`, so without this every child
-/// the daemon spawns starts life deaf to a SIGTERM. The settings window
-/// (ADR-0005) is the one that matters — a long-lived process a session or
-/// a supervisor has to be able to stop — but the rule is cheaper to hold
-/// everywhere than to re-derive per call site. Exactly the two signals
-/// [`block_shutdown`] took are handed back: whatever the daemon's own
-/// parent chose to block is none of this function's business.
+/// The signal mask from [`block_shutdown`] remains active after `exec`.
+/// Without this function, every child process starts with SIGTERM blocked.
+/// The settings process is the primary example.
+/// See ARCHITECTURE.md#settings-and-config.
+/// A session or supervisor must be able to stop that process.
+/// Apply this rule at every child process call site.
+/// This rule is simpler than a separate decision at each call site.
+/// This function unblocks only the two signals that [`block_shutdown`] blocked.
+/// It preserves every signal that the daemon parent blocked.
 pub fn unmasked(command: &mut Command) -> &mut Command {
-    // SAFETY: `pre_exec` runs in the forked child, where only
-    // async-signal-safe calls are allowed. `pthread_sigmask` is one
-    // (POSIX lists it), it allocates nothing, and the `SigSet` it is
-    // handed is built on the stack.
+    // SAFETY: `pre_exec` calls this closure in the forked child process.
+    // Only async-signal-safe calls are valid there.
+    // POSIX defines `pthread_sigmask` as async-signal-safe.
+    // This closure allocates no memory.
+    // The stack owns the `SigSet` argument.
     unsafe {
         command.pre_exec(|| {
             let mut mask = SigSet::empty();
@@ -64,13 +67,13 @@ pub fn unmasked(command: &mut Command) -> &mut Command {
 mod tests {
     use super::*;
 
-    /// What `/proc/<tid>/status` says this thread has blocked.
+    /// Get this thread's signal mask. `/proc/<tid>/status` reports it as `SigBlk`.
     fn blocked() -> SigSet {
         SigSet::thread_get_mask().expect("reading the thread's signal mask")
     }
 
-    /// The rule the ticket was filed on: the block reaches threads that
-    /// do not exist yet, and only those spawned after it.
+    /// New threads inherit the signal mask.
+    /// Only threads that start after [`block_shutdown`] inherit it.
     #[test]
     fn a_thread_spawned_after_the_block_inherits_it() {
         let before = std::thread::spawn(blocked).join().unwrap();
@@ -88,9 +91,8 @@ mod tests {
         drop(guard);
     }
 
-    /// And the rule that keeps the first one from costing more than it
-    /// buys: the mask survives `exec`, so a child would inherit a
-    /// SIGTERM it has no signalfd to read.
+    /// The signal mask remains active after `exec`.
+    /// A child needs [`unmasked`] because it does not own a signalfd.
     #[test]
     fn a_child_gets_the_default_disposition_back() {
         let guard = block_shutdown().unwrap();
@@ -104,14 +106,12 @@ mod tests {
         drop(guard);
     }
 
-    /// `SigBlk` as the child itself reports it, with or without
-    /// [`unmasked`] applied.
+    /// Read `SigBlk` from the child process, with or without [`unmasked`].
     ///
-    /// `grep` is exec'd directly, with no shell in between: the mask
-    /// itself survives `exec`, but Ubuntu's `dash` build clears its
-    /// inherited mask at startup, so a `/bin/sh -c` probe measures the
-    /// shell's own policy instead of the leak (it turned CI red while
-    /// every bash-as-sh box passed).
+    /// Call `grep` directly without a shell.
+    /// The signal mask remains active after `exec`.
+    /// The Ubuntu build of `dash` clears the inherited mask at startup.
+    /// A `/bin/sh -c` check would test shell policy, not the inherited mask.
     fn child_mask(unmask: bool) -> SigSet {
         let mut command = Command::new("grep");
         command.args(["^SigBlk:", "/proc/self/status"]);
@@ -123,8 +123,8 @@ mod tests {
         let text = String::from_utf8(out.stdout).unwrap();
         let hex = text.split_whitespace().nth(1).expect("SigBlk: <hex>");
         let bits = u64::from_str_radix(hex, 16).expect("a hex mask");
-        // Bit n-1 is signal n, the same order /proc prints and sigset
-        // stores; rebuilt as a SigSet so the assertions read in signals.
+        // Bit n-1 represents signal n in `/proc` and `sigset`.
+        // Rebuild a `SigSet` so the assertions can inspect each signal.
         let mut mask = SigSet::empty();
         for signal in NixSignal::iterator() {
             if bits & (1 << (signal as i32 - 1)) != 0 {

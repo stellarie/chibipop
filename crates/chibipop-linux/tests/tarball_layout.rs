@@ -1,15 +1,14 @@
-//! The release tarball, built and taken apart again.
+//! Build the release tarball, extract it, and check its layout.
 //!
-//! `scripts/package-linux.sh` decides where the asset puts things and
-//! `src/ocr/models.rs` decides where the running binary looks for them.
-//! Those are two files, and the failure they can produce between them is
-//! the worst kind: a release that builds green, extracts cleanly, and then
-//! refuses to OCR because the models are one directory off. So this test
-//! runs the real script over a stub binary, extracts the real tarball, and
-//! asks the binary's own search where the models are.
+//! `scripts/package-linux.sh` chooses each asset path.
+//! `src/ocr/models.rs` chooses the model path that a binary uses.
+//! A mismatch can pass the release build and extraction, then stop OCR because the models
+//! sit one directory away.
+//! This test runs the real script with a stub binary, extracts the real tarball, and asks the
+//! binary search code for the model path.
 //!
-//! It is cheap enough to keep in the default sweep: the models compress in
-//! about a second, and the alternative is finding out at release time.
+//! The test fits the default sweep. Model compression takes about one second.
+//! A cheap test can prevent a broken release.
 #![cfg(target_os = "linux")]
 
 use chibipop_linux::ocr::models;
@@ -17,8 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// A version the repo will never carry, so nothing here can be confused
-/// for a real asset.
+/// A version that the repository never carries.
+/// No file in this test can look like a real asset.
 const VERSION: &str = "v99.98.97";
 const ASSET: &str = "chibipop-v99.98.97-linux-x64";
 
@@ -26,8 +25,8 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
 }
 
-/// A scratch root, per test, cleaned on entry rather than on exit: a
-/// failure that leaves the tree behind is a failure you can go and look at.
+/// Create one scratch root per test.
+/// Clean the root on entry, not on exit, so a failure leaves the tree for inspection.
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("chibipop-tarball-{tag}-{}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
@@ -35,9 +34,9 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Enough of a binary for packaging to be a fair test: the ELF magic the
-/// script checks, and the executable bit. Packaging the real 62 MB release
-/// binary would only measure `cp`.
+/// Use only the binary parts that make this test fair.
+/// The stub has the ELF magic that the script checks and the executable bit.
+/// A real 62 MB release binary needs only `cp`.
 fn stub_binary(dir: &Path) -> PathBuf {
     let path = dir.join("chibipop-stub");
     std::fs::write(&path, b"\x7fELF stub binary, not a real one\n").unwrap();
@@ -78,14 +77,15 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
     let first = package(&out, VERSION, &binary);
     expect_ok(&first);
 
-    // The forever contract (ADR-0007): the update check parses this name
-    // off releases/latest, so its shape is not ours to drift.
+    // The asset name is a permanent contract (ARCHITECTURE.md#packaging-and-ci).
+    // The update check parses this name from releases/latest.
+    // Do not change its shape.
     let tarball = out.join(format!("{ASSET}.tar.gz"));
     assert!(tarball.is_file(), "no {} - packaging wrote something else", tarball.display());
 
-    // Sorted names, no owners, no timestamps, `gzip -n`: the same inputs
-    // must give the same bytes, or "is this the asset CI built" stops
-    // being a question a sha256sum can answer.
+    // The script sorts names, removes owners and timestamps, and runs `gzip -n`.
+    // The same inputs must produce the same bytes.
+    // Without reproducibility, a sha256sum cannot answer whether CI built this asset.
     let once = std::fs::read(&tarball).unwrap();
     expect_ok(&package(&out, VERSION, &binary));
     assert_eq!(once, std::fs::read(&tarball).unwrap(), "the tarball is not reproducible");
@@ -101,24 +101,23 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
         .unwrap();
     assert!(status.success(), "tar xzf refused the asset");
 
-    // One directory at the top, named after the asset: `tar xzf` in a
-    // home directory must not scatter files across it.
+    // The archive has one top directory named after the asset.
+    // A `tar xzf` in a home directory must not spread files outside that directory.
     let entries: Vec<PathBuf> =
         std::fs::read_dir(&extract).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(1, entries.len(), "expected one top-level directory, got {entries:?}");
     let root_dir = extract.join(ASSET);
     assert_eq!(vec![root_dir.clone()], entries);
 
-    // The whole point: the shipped binary's own search, run against a
-    // really extracted tree.
+    // Check the shipped binary's search code against the tree that `tar` extracted.
     assert_eq!(
         Some(root_dir.join("models/meiki")),
         models::beside(&root_dir),
         "the binary would not find the bundled models beside itself"
     );
 
-    // The Windows zip's shape, plus what Linux adds. Named explicitly:
-    // every one of these is something a user notices missing.
+    // The list matches the Windows zip and the files that Linux adds.
+    // Name each file because a user notices each missing file.
     for rel in [
         "chibipop",
         "data/deconjugator.json",
@@ -137,8 +136,8 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
         assert!(root_dir.join("models/meiki").join(name).is_file(), "the asset is missing {name}");
     }
 
-    // Executable, and only the binary is: a data file arriving with the
-    // executable bit is how a tarball ends up looking like malware.
+    // The binary is executable. No other file is executable.
+    // An executable data file can make the tarball look malicious.
     let mode = |rel: &str| {
         std::fs::metadata(root_dir.join(rel)).unwrap().permissions().mode() & 0o777
     };
@@ -149,8 +148,8 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// A version string that is not the contract must stop the release, not
-/// produce an asset no update check can read.
+/// A version outside the asset-name contract must stop the release.
+/// It must not produce an asset that an update check cannot read.
 #[test]
 fn a_version_that_breaks_the_asset_name_is_refused() {
     let root = scratch("version");
@@ -171,9 +170,9 @@ fn a_version_that_breaks_the_asset_name_is_refused() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// Both bin crates produce a binary named `chibipop` and cargo uplifts
-/// both to `target/<profile>/chibipop`, so packaging the wrong one is a
-/// live hazard - see the workspace Cargo.toml.
+/// Both bin crates produce a binary named `chibipop`.
+/// Cargo copies both binaries to `target/<profile>/chibipop`.
+/// A package step can therefore select the wrong binary. See the workspace Cargo.toml.
 #[test]
 fn a_binary_that_is_not_an_elf_is_refused() {
     let root = scratch("elf");

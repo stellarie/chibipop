@@ -1,15 +1,15 @@
-//! The platform-neutral half of the OCR pipeline: upscale mapping and
-//! hit-scan resolution composing correctly. The companion test that drives
-//! the real Windows OCR engine over the BGRA fixture lives in
-//! `crates/chibipop-windows/tests/ocr_fixture.rs`.
+//! This test covers the platform-neutral OCR path.
+//! It checks the upscale coordinate map and hit-scan resolution together.
+//! The companion test drives the real Windows OCR engine with the BGRA fixture.
+//! It lives in `crates/chibipop-windows/tests/ocr_fixture.rs`.
 
 use chibipop::geom::{PhysPoint, PhysRect};
 use chibipop::text::layout::{map_from_upscaled, resolve, OcrLine, OcrWord};
 
 #[test]
 fn mapping_and_resolution_compose_correctly() {
-    // A word at (200,100) in a 2x-upscaled image of a region whose origin is
-    // (1000,500) must land at virtual-desktop (1100,550) and resolve there.
+    // A 2x-upscaled image region has origin (1000,500). A word at image point
+    // (200,100) must map to virtual-desktop point (1100,550) and resolve there.
     let mapped = OcrLine {
         words: vec![OcrWord {
             text: "食".to_string(),

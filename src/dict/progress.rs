@@ -1,16 +1,16 @@
-//! Builder progress lines, rendered for a person.
+//! Converts builder progress lines into text for people.
 //!
-//! [`build`](super::build::build) and the `build-dict` command both speak
-//! the same terse machine lines (`progress  12500 / 768636`, `term dict
-//! [0] jitendex.zip`, `building  creating index`, a final `wrote …`).
-//! Every settings surface that shows a rebuild renders them through
-//! `friendly`, so the Win32 status area and the iced status area say the
-//! same sentence for the same build step — and both swallow the final
-//! `wrote …` line, which names the temp file the user must never see.
+//! [`build`](super::build::build) and the `build-dict` command write the same
+//! short machine lines. Examples are `progress  12500 / 768636`, `term dict
+//! [0] jitendex.zip`, `building  creating index`, and a final `wrote …` line.
+//! Each settings surface that shows a build sends these lines to `friendly`.
+//! The Win32 status area and the iced status area show the same text for each
+//! build step. Both areas hide the final `wrote …` line because it names a
+//! temporary file.
 
-/// One builder line, for a person.
+/// Converts one builder line into text for a person.
 ///
-/// None for lines to swallow.
+/// Returns `None` when a status area must hide the line.
 pub fn friendly(line: &str) -> Option<String> {
     if let Some(rest) = line.strip_prefix("progress") {
         let rest = rest.trim();
@@ -27,7 +27,7 @@ pub fn friendly(line: &str) -> Option<String> {
     }
     let rest = line.strip_prefix("term dict").or_else(|| line.strip_prefix("freq dict"))?;
     let rest = rest.trim();
-    // Drop the build-dict command's [i] prefix.
+    // Remove the `[i]` prefix that the `build-dict` command adds.
     let name = match rest.strip_prefix('[').and_then(|a| a.split_once(']')) {
         Some((n, tail)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => tail.trim(),
         _ => rest,
@@ -38,7 +38,7 @@ pub fn friendly(line: &str) -> Option<String> {
     Some(format!("Reading {name}…"))
 }
 
-/// Groups digits by comma.
+/// Adds commas between groups of three digits.
 fn format_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -103,7 +103,7 @@ mod tests {
         );
     }
 
-    /// Not for the user.
+    /// The status areas must hide the builder's final line.
     #[test]
     fn the_builders_final_line_is_swallowed() {
         assert_eq!(

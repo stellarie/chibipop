@@ -1,4 +1,4 @@
-//! Strikes disable a plugin.
+//! Track consecutive plugin failures so the host can disable a plugin at its configured limit.
 
 pub struct Strikes {
     limit: u8,

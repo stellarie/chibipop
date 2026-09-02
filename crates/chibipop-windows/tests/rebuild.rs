@@ -1,7 +1,8 @@
-//! Rebuild, against a child.
+//! This test checks the rebuild path with a child process.
 //!
-//! Windows-only: it spawns the real chibipop.exe, whose build-dict path
-//! lives behind cfg(windows). Elsewhere this file compiles to zero tests.
+//! Windows-only: this test starts the real chibipop.exe.
+//! Its build-dict path exists only with cfg(windows).
+//! Elsewhere, this file compiles to zero tests.
 #![cfg(windows)]
 
 use chibipop::dict::progress::friendly;
@@ -11,7 +12,7 @@ use chibipop_windows::rebuild::{spawn_with, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
-/// The real chibipop.exe.
+/// Use the built chibipop.exe so the test covers the real child process.
 const BUILDER: &str = env!("CARGO_BIN_EXE_chibipop");
 
 struct TempDirGuard(PathBuf);
@@ -35,7 +36,7 @@ fn scratch(test_name: &str) -> (PathBuf, TempDirGuard) {
     (dir.clone(), TempDirGuard(dir))
 }
 
-/// Named independently.
+/// Keep the rebuild's temporary path explicit so tests can detect a leftover file.
 fn tmp_of(out: &Path) -> PathBuf {
     PathBuf::from(format!("{}.tmp", out.display()))
 }
@@ -66,8 +67,9 @@ fn a_fixture_library_builds_and_reports_done() {
 
     let db = SqliteDictionary::open(&out).unwrap();
     assert_eq!(3, db.entries(&[1, 2, 3, 4]).unwrap().len(), "3 entries built");
-    // One archive is one dictionary whatever it supplies, so the
-    // frequency archive owns a `dict` row of its own now (ADR-0014).
+    // One archive is one Dictionary, regardless of what it supplies.
+    // The frequency archive now owns its own `dict` row.
+    // This follows (ARCHITECTURE.md#dictionary-and-lookup).
     let mut names: Vec<String> =
         db.dicts().unwrap().into_iter().map(|d| d.name).collect();
     names.sort();
@@ -102,7 +104,7 @@ fn progress_lines_arrive_before_done() {
     assert!(lines.iter().any(|l| l.starts_with("wrote ")), "{lines:?}");
 }
 
-/// From real child output.
+/// Check archive-line text from the real child process.
 #[test]
 fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
     let (dir, _guard) = scratch("friendly");
@@ -119,10 +121,11 @@ fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
         })
         .collect();
     let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
-    // freq.zip is named twice on purpose: it is one of the dictionaries
-    // the build installs *and* an archive whose reported frequencies it
-    // loads, so it is in both of `build-dict`'s lists (ADR-0014). The
-    // archives are announced case-folded, which puts it first.
+    // `freq.zip` appears twice on purpose.
+    // The build installs it as one Dictionary and loads its Reported frequency data.
+    // Therefore, it appears in both `build-dict` lists.
+    // This follows (ARCHITECTURE.md#dictionary-and-lookup).
+    // The build uses folded case for archive names, so this one appears first.
     let read: Vec<&String> = shown.iter().filter(|s| s.starts_with("Reading ")).collect();
     assert_eq!(
         vec!["Reading freq.zip…", "Reading terms.zip…", "Reading freq.zip…"],
@@ -148,9 +151,10 @@ fn a_failed_build_leaves_an_existing_output_byte_identical() {
         panic!("expected Failed last, got {msgs:?}");
     };
     assert!(why.contains("the builder failed"), "a real child ran: {why}");
-    // An archive this build cannot read is not a dictionary and is not
-    // built (ADR-0014), so a library holding only one is a library holding
-    // nothing to build - and the child says so itself.
+    // The build cannot read this archive, so it is not a Dictionary.
+    // The builder skips it (ARCHITECTURE.md#dictionary-and-lookup).
+    // A library with only this unreadable archive has no archive to build.
+    // The child reports this condition itself.
     assert!(why.contains("no readable archives"), "the child's own error: {why}");
     assert!(
         msgs.iter().any(|m| matches!(m, Progress::Line(l) if l.contains("broken.zip"))),
@@ -174,7 +178,7 @@ fn an_empty_library_directory_is_a_failure_not_an_empty_database() {
     let Some(Progress::Failed(why)) = msgs.last() else {
         panic!("expected Failed last, got {msgs:?}");
     };
-    // The child would exit 0 here.
+    // Reject an empty library before the child process starts.
     assert_eq!(1, msgs.len(), "refused before spawning: {msgs:?}");
     assert!(why.contains("no dictionary archives"), "{why}");
     assert_eq!(known, std::fs::read(&out).unwrap().as_slice(), "untouched");
@@ -192,7 +196,7 @@ fn a_missing_library_directory_is_a_failure() {
     assert!(!out.exists(), "nothing is created from nothing");
 }
 
-/// Held files are not built.
+/// A quarantined archive does not enter the build.
 #[test]
 fn a_quarantined_archive_is_invisible_to_the_real_builder() {
     let (dir, _guard) = scratch("quarantined");
@@ -211,11 +215,11 @@ fn a_quarantined_archive_is_invisible_to_the_real_builder() {
         "the held archive was read anyway: {msgs:?}"
     );
     assert!(held.join("terms.zip").is_file(), "and it is still there");
-    // freq.zip survives the quarantine and is a dictionary of its own.
+    // `freq.zip` stays outside the quarantine and forms its own Dictionary.
     assert_eq!(2, SqliteDictionary::open(&out).unwrap().dicts().unwrap().len());
 }
 
-/// All held is still empty.
+/// A library with all archives quarantined is empty.
 #[test]
 fn a_library_whose_archives_are_all_quarantined_refuses() {
     let (dir, _guard) = scratch("all_held");

@@ -1,39 +1,35 @@
-//! ADR-0002's fallback capture rung: xdg-desktop-portal ScreenCast
-//! frames arriving over PipeWire, cropped into core's `RegionCapture`.
+//! This module implements the fallback capture rung (ARCHITECTURE.md#capture-and-masking).
+//! xdg-desktop-portal ScreenCast frames arrive over PipeWire and become
+//! cropped `RegionCapture` frames.
 //!
-//! This is the only path on GNOME and KDE, and the shape of the ADR is
-//! visible in the files here:
+//! This rung is the only capture path on GNOME and KDE. These modules provide:
 //!
-//! - [`dbus`] runs the consent handshake, **eagerly at startup**: one
-//!   dialog covering every monitor (`SelectSources` with
-//!   `multiple=true`), `persist_mode=2`, and a restore token so the
-//!   second launch is silent. A denial is a named channel state with a
-//!   retry, never an exit.
-//! - [`token`] persists that token, rotating it every time the portal
-//!   issues a fresh one.
-//! - [`pipewire`] consumes the stream on PipeWire's own thread; the
-//!   library is dlopened, so nothing here needs a build-time PipeWire.
-//! - [`frame`] parks the newest frame and crops out of it without
-//!   copying the monitor.
-//! - [`metadata`] turns `cursor_mode=METADATA` samples into core
-//!   cursor positions - ADR-0003's rung 2, riding this same stream so
-//!   cursor tracking costs no second consent.
-//! - [`pod`] serialises the SPA format handshake by hand, because
-//!   PipeWire's builders are `static inline` and unreachable through
-//!   dlopen.
+//! - [`dbus`] runs the consent handshake **at startup**. One dialog covers
+//!   every monitor (`SelectSources` with `multiple=true`), `persist_mode=2`,
+//!   and a restore token. The second launch has no dialog. A denial becomes
+//!   a named channel state with a retry, and the daemon does not exit.
+//! - [`token`] stores the token and rotates it after each fresh portal token.
+//! - [`pipewire`] reads the stream on PipeWire's thread. The code loads the
+//!   library at runtime, so this module needs no build-time PipeWire.
+//! - [`frame`] stores the newest frame and crops regions from it. It never
+//!   copies the monitor.
+//! - [`metadata`] converts `cursor_mode=METADATA` samples to core cursor
+//!   positions. This is cursor ladder rung 2. Cursor updates need no second
+//!   consent because they use this stream.
+//! - [`pod`] serializes the SPA format handshake by hand because PipeWire's
+//!   builders are `static inline`. dlopen cannot access them.
 //!
-//! **Only one stream is connected.** The dialog asks for every
-//! monitor, because asking again per monitor is a second dialog; but
-//! the streams for monitors the user is not on stay unconnected, so a
-//! four-monitor desk pays for one. Crossing to another monitor swaps
-//! the connected node ([`PortalCapture::grab`] does it as part of
-//! answering), which costs a frame and no dialog.
+//! **The code connects only one stream.** The dialog asks for every monitor
+//! because one question for each monitor would create one dialog per monitor.
+//! The code leaves streams for other monitors unconnected, so a four-monitor
+//! desk uses one stream. A move to another monitor changes the connected node.
+//! [`PortalCapture::grab`] makes this change as part of its result. The change
+//! needs one frame but no dialog.
 //!
-//! **Shape.** Pull-shaped like the trait demands and like the
-//! screencopy rung: `grab` crops whatever the stream has most recently
-//! parked and never waits for damage. The one wait in the file is for
-//! the *first* frame after a connect, which is the stream starting
-//! rather than the screen changing, and it has a deadline.
+//! **Shape.** This rung has the pull shape that the trait and screencopy rung
+//! require. `grab` crops the newest parked frame and never waits for damage.
+//! The only wait is for the first frame after a connect. It waits for stream
+//! start, not for a screen change, and it has a deadline.
 
 pub mod dbus;
 pub mod frame;
@@ -54,19 +50,17 @@ use std::time::Duration;
 /// What `Frame::source` says: the rung, for logs and `probe`.
 pub const SOURCE: &str = "portal-screencast";
 
-/// How long the whole consent handshake may take.
+/// Maximum duration for the complete consent handshake.
 ///
-/// Generous on purpose: this is a human reading a dialog, and the
-/// budget is only there so a portal that never answers cannot hang
-/// startup forever.
+/// The duration gives a person time to read the dialog. A portal that never
+/// answers must not block startup forever. This duration is the only guard.
 pub const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long a `grab` may wait for the first frame of a stream it just
-/// connected.
+/// Maximum time that `grab` can wait for the first frame after it connects.
 ///
-/// Not a wait for damage - the stream has to hand over one frame
-/// before there is anything to crop, and a monitor swap re-opens that
-/// window. Missing the deadline fails one grab, never the daemon.
+/// This is not a wait for damage. The stream must deliver one frame before
+/// the code can crop pixels. A monitor change starts this wait again. A missed
+/// deadline fails one grab, not the daemon.
 pub const FIRST_FRAME_DEADLINE: Duration = Duration::from_millis(500);
 
 /// Is the portal's ScreenCast interface on the session bus?
@@ -74,31 +68,31 @@ pub fn available() -> bool {
     dbus::probe()
 }
 
-/// Does the portal advertise `cursor_mode=METADATA`, i.e. can
-/// ADR-0003's rung 2 exist on this session?
+/// Returns whether the portal advertises `cursor_mode=METADATA`. This indicates
+/// whether cursor ladder rung 2 can exist on this session.
 pub fn cursor_metadata_available() -> bool {
     dbus::available_cursor_modes().is_some_and(|m| m & dbus::CURSOR_MODE_METADATA != 0)
 }
 
-/// Where a cursor sample goes once it is in core's coordinates. The
-/// daemon backs this with a calloop channel; nothing here knows that.
+/// Receives a cursor sample after the code converts it to core coordinates.
+/// The daemon connects this sink to a calloop channel. This module does not
+/// access that channel.
 pub type CursorSink = Arc<dyn Fn(PhysPoint) + Send + Sync>;
 
-/// Why the portal rung is not serving. Every variant has a `detail`
-/// short enough for a tray row and specific enough to act on.
+/// Describes why the portal rung cannot serve. Every variant has a `detail`.
+/// The `detail` fits a tray row and names a repair.
 #[derive(Debug)]
 pub enum OpenError {
-    /// The handshake itself failed - denied, absent, timed out.
+    /// The portal denied, is absent, or timed out during the handshake.
     Portal(dbus::PortalError),
-    /// The portal said yes but PipeWire could not deliver.
+    /// The portal approved the request, but PipeWire could not deliver a stream.
     PipeWire(String),
-    /// Consent was granted for nothing this backend can read.
+    /// The user approved no monitor that this backend can read.
     NoMonitors,
 }
 
 impl OpenError {
-    /// The channel-status row (ADR-0006): what is wrong, and the way
-    /// back.
+    /// Returns the channel-status row with the fault and a repair.
     pub fn detail(&self) -> String {
         match self {
             OpenError::Portal(e) => e.detail(),
@@ -122,15 +116,15 @@ impl std::fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
-/// One approved monitor: the node to connect for it, and where it is.
+/// An approved monitor: the node to connect and its placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Monitor {
     pub node_id: u32,
-    /// Its top-left in core's global physical space, when we could
-    /// anchor it against a known output.
+    /// The top-left corner in core's global physical space when the code can
+    /// anchor this monitor to a known output.
     pub anchor: Option<PhysPoint>,
-    /// Its size in stream buffer pixels, as far as the portal and the
-    /// output geometry agree.
+    /// The size in stream buffer pixels. The portal and output geometry agree
+    /// on this size.
     pub size: (i32, i32),
 }
 
@@ -143,14 +137,13 @@ impl Monitor {
     }
 }
 
-/// Place `region` on a stream anchored at `anchor` and `w x h` big.
+/// Places `region` on a stream with top-left `anchor` and size `w x h`.
 ///
-/// Answers the source box inside the stream buffer and where it lands
-/// in the caller's `region`-sized frame, or `None` when the region and
-/// the stream do not overlap at all. Clipping here rather than in the
-/// blit is what lets a box that hangs off the monitor still yield the
-/// pixels that exist, with the rest of the frame left black - the same
-/// bargain the screencopy rung strikes (`capture::geometry`).
+/// Returns the source box inside the stream buffer and the destination point
+/// in the caller's frame. Returns `None` when the region and stream do not
+/// overlap. The code clips here instead of in the blit. A box beyond the
+/// monitor returns its available pixels, and the rest of the frame stays
+/// black. The screencopy rung uses the same rule (`capture::geometry`).
 pub fn cut(region: PhysRect, anchor: PhysPoint, w: i32, h: i32) -> Option<(PhysRect, PhysPoint)> {
     if region.w <= 0 || region.h <= 0 || w <= 0 || h <= 0 {
         return None;
@@ -167,31 +160,32 @@ pub fn cut(region: PhysRect, anchor: PhysPoint, w: i32, h: i32) -> Option<(PhysR
     Some((src, dest))
 }
 
-/// The granted session: the consent, the monitors it covers, the one
-/// PipeWire connection, and the one stream currently on it.
+/// The consent session, its approved monitors, its PipeWire connection, and
+/// its one connected stream.
 pub struct PortalSession {
-    /// Held for its lifetime: dropping it closes the portal session
-    /// and revokes the grant.
+    /// The code holds this handle for the session. `Drop` closes the portal
+    /// session and revokes the grant.
     session: dbus::Session,
     monitors: Vec<Monitor>,
-    /// Outlives every stream, because it owns the descriptor
-    /// `OpenPipeWireRemote` handed over (see [`pipewire::Remote`]).
+    /// This connection outlives every stream because it owns the descriptor that
+    /// `OpenPipeWireRemote` returned. See [`pipewire::Remote`].
     remote: Arc<pipewire::Remote>,
     stream: pipewire::Stream,
-    /// Rebuilt on every monitor swap, because the anchor changes.
+    /// The code rebuilds this sink after each monitor change because the anchor
+    /// changes.
     cursor: Option<CursorSink>,
-    /// Whatever output geometry the daemon had at startup; used to
-    /// bound tiling when a region is on no approved monitor.
+    /// Output geometry from startup. The code uses it to bound tiling when a
+    /// region lies on no approved monitor.
     outputs: Vec<OutputGeometry>,
 }
 
 impl PortalSession {
-    /// ADR-0002's eager startup consent, end to end.
+    /// Runs the startup consent handshake from start to finish.
     ///
-    /// `state_dir` holds the rotating restore token that makes the
-    /// second launch silent. `at` is where the cursor is now, which
-    /// decides the one monitor whose stream gets connected. A denial
-    /// comes back as [`OpenError`], never a panic and never an exit.
+    /// `state_dir` holds the restore token that changes after each fresh token.
+    /// This removes the dialog on the second launch. `at` is the current cursor
+    /// position. It selects the monitor whose stream the code connects. A denial
+    /// returns [`OpenError`]. It never panics or exits the daemon.
     pub fn open(
         state_dir: &Path,
         outputs: &[OutputGeometry],
@@ -211,11 +205,9 @@ impl PortalSession {
         let consent = match dbus::open(stored.as_deref(), want_cursor, CONSENT_TIMEOUT) {
             Ok(consent) => consent,
             Err(e) if stored.is_some() && e.retry_needs_fresh_consent() => {
-                // A token the portal no longer honours is indis-
-                // tinguishable from a denial in the reply, so the
-                // stored one is dropped and the user gets the dialog
-                // they would have got on a first launch. Exactly one
-                // retry: two dialogs is already one too many.
+                // The portal uses the same reply for an invalid token and a denial. The code
+                // clears the stored token, so the next call shows a first-launch dialog. The
+                // code retries once because two dialogs would delay startup twice.
                 diagnostic(format!("portal: stored restore token rejected ({e}); prompting once"));
                 let _ = store.clear();
                 dbus::open(None, want_cursor, CONSENT_TIMEOUT).map_err(OpenError::Portal)?
@@ -231,12 +223,12 @@ impl PortalSession {
                     "portal: restore token rotated into {} - the next launch is silent",
                     store.path().display()
                 )),
-                // A token we cannot persist costs one dialog next
-                // launch. It is not worth failing a granted session.
+                // If the code cannot store a token, the next launch shows one dialog. This
+                // must not fail a session that already has consent.
                 Err(e) => diagnostic(format!("portal: could not persist the restore token: {e:#}")),
             },
-            // Two different facts, and conflating them would send
-            // somebody hunting a bug that is not there.
+            // These cases have different causes. One message for both would make a
+            // reader investigate a fault that does not exist.
             None if !persists => diagnostic(format!(
                 "portal: ScreenCast v{version} cannot remember a grant (persist_mode needs v{}), \
                  so every launch shows the dialog on this portal",
@@ -283,27 +275,27 @@ impl PortalSession {
         &self.monitors
     }
 
-    /// What the connected stream is doing, for the status registry.
+    /// The state of the connected stream, for the status registry.
     pub fn health(&self) -> pipewire::Health {
         self.stream.health()
     }
 
-    /// The node currently connected.
+    /// The node that is connected now.
     pub fn node_id(&self) -> u32 {
         self.stream.node_id()
     }
 
-    /// The portal session object path, for the startup log: it is what
-    /// `busctl` and the portal's own logs name a grant by.
+    /// The portal session object path for the startup log. `busctl` and the
+    /// portal logs identify a grant with this path.
     pub fn session_path(&self) -> &str {
         self.session.path()
     }
 
-    /// Connect the monitor `region` lives on, if it is not the one
-    /// already connected.
+    /// Connects the monitor that contains `region` when that monitor is not
+    /// connected.
     ///
-    /// Answers whether a swap happened, so the caller knows to wait
-    /// for a first frame.
+    /// Returns whether the code changed the stream. The caller must then wait for
+    /// the first frame.
     fn ensure_monitor_for(&mut self, region: PhysRect) -> anyhow::Result<bool> {
         let centre =
             PhysPoint { x: region.x + region.w / 2, y: region.y + region.h / 2 };
@@ -311,24 +303,24 @@ impl PortalSession {
         if wanted.node_id == self.stream.node_id() {
             return Ok(false);
         }
-        // The old stream goes first: two connected streams is the
-        // multi-monitor cost ADR-0002 declines to pay. The connection
-        // underneath survives, so the swap costs a frame, not a
+        // The code replaces the old stream before it connects the new one. Two
+        // connected streams would add the multi-monitor cost that this rung rejects.
+        // The connection remains active, so the change needs one frame, not a
         // handshake.
         let replacement = connect(&self.remote, wanted, self.cursor.as_ref())?;
         self.stream = replacement;
         Ok(true)
     }
 
-    /// The anchor the connected stream's pixels are measured from.
+    /// The anchor for the pixels of the connected stream.
     fn anchor(&self) -> Option<PhysPoint> {
         self.monitors.iter().find(|m| m.node_id == self.stream.node_id())?.anchor
     }
 }
 
-/// Which approved monitor `p` is on, else the first: an answer always
-/// beats an error here, exactly as `RegionCapture::bounds_containing`
-/// argues.
+/// Returns the approved monitor that contains `p`, or the first monitor. This
+/// function returns an answer instead of an error, as
+/// `RegionCapture::bounds_containing` requires.
 fn pick(monitors: &[Monitor], p: PhysPoint) -> usize {
     monitors
         .iter()
@@ -336,8 +328,8 @@ fn pick(monitors: &[Monitor], p: PhysPoint) -> usize {
         .unwrap_or(0)
 }
 
-/// Turn the portal's stream list into monitors anchored in core's
-/// global physical space.
+/// Converts the portal stream list to monitors with anchors in core's global
+/// physical space.
 fn monitors_of(streams: &[dbus::StreamInfo], outputs: &[OutputGeometry]) -> Vec<Monitor> {
     streams
         .iter()
@@ -345,17 +337,15 @@ fn monitors_of(streams: &[dbus::StreamInfo], outputs: &[OutputGeometry]) -> Vec<
             let placement = StreamPlacement {
                 logical_origin: s.position,
                 logical_size: s.size,
-                // The negotiated video size is not known until the
-                // format fixates; the matched output's physical size is
-                // the same number on every compositor that scales its
-                // capture to the mode, and it only bounds the cursor
-                // sample.
+                // The code must fixate the format before it knows the negotiated video size.
+                // A matched output's physical size gives the same value on compositors that
+                // scale capture to the mode. This value only bounds cursor samples.
                 buffer_size: (0, 0),
             };
             let size = match metadata::match_output(&placement, outputs) {
                 Some(i) => (outputs[i].physical_w(), physical_h(&outputs[i])),
-                // Unmatched: take the portal's own logical size, which
-                // is right at scale 1 and least-wrong elsewhere.
+                // No output matched. Use the portal's logical size. It is correct at scale 1
+                // and the closest available value at other scales.
                 None => s.size.unwrap_or((0, 0)),
             };
             Monitor { node_id: s.node_id, anchor: metadata::anchor(&placement, outputs), size }
@@ -363,8 +353,8 @@ fn monitors_of(streams: &[dbus::StreamInfo], outputs: &[OutputGeometry]) -> Vec<
         .collect()
 }
 
-/// An output's physical height, mirroring `capture::geometry`'s own
-/// transform handling without exposing it.
+/// Returns an output's physical height. This matches the transform rule in
+/// `capture::geometry` without exposing that code.
 fn physical_h(g: &OutputGeometry) -> i32 {
     if g.transform_swaps {
         g.mode_w
@@ -373,8 +363,8 @@ fn physical_h(g: &OutputGeometry) -> i32 {
     }
 }
 
-/// Open one PipeWire stream for `monitor`, wiring the cursor sink to
-/// that monitor's anchor.
+/// Opens one PipeWire stream for `monitor`. It binds the cursor sink to the
+/// monitor's anchor.
 fn connect(
     remote: &Arc<pipewire::Remote>,
     monitor: Monitor,
@@ -390,32 +380,32 @@ fn connect(
                 }
             }))
         }
-        // Without an anchor a sample cannot be placed, and a cursor
-        // placed wrong is worse than no cursor rung at all.
+        // Without an anchor, the code cannot place a sample. A wrong cursor position
+        // is worse than no cursor rung.
         _ => None,
     };
     pipewire::Stream::connect(remote, monitor.node_id, sink)
 }
 
-/// Pixels served for one region, so a dwell on unchanged content has
-/// something honest to answer with.
+/// Pixels that the code served for one region. A dwell on unchanged content
+/// can then return the correct answer.
 struct Held {
     region: PhysRect,
-    /// The content counter those pixels came from.
+    /// The value of the content counter for those pixels.
     seq: u64,
     buf: Vec<u8>,
 }
 
 /// The portal rung's `RegionCapture`.
 ///
-/// It owns the session, because the session owns the stream and the
-/// stream is what a grab reads. The daemon opens one at startup (the
-/// eager consent) and the Worker thread reads through it.
+/// It owns the session, which owns the stream. A grab reads the stream. The
+/// daemon opens one session at startup, so consent occurs early. The Worker
+/// thread reads through this capture.
 pub struct PortalCapture {
     session: PortalSession,
-    /// This read's pixels, and the previous read's: two generations,
-    /// so one read's tiles cannot evict each other. Same arrangement
-    /// as the screencopy rung.
+    /// Pixels from this read and the previous read. Two generations keep tiles
+    /// from one read apart, so one read cannot evict the other. The screencopy rung
+    /// uses the same arrangement.
     held: Vec<Held>,
     previous: Vec<Held>,
 }
@@ -425,7 +415,8 @@ impl PortalCapture {
         PortalCapture { session, held: Vec::new(), previous: Vec::new() }
     }
 
-    /// Pixels held for `region`, promoted into this read.
+    /// Returns pixels that the code holds for `region` and promotes them into
+    /// this read.
     fn take_held(&mut self, region: PhysRect) -> Option<&Held> {
         if let Some(i) = self.held.iter().position(|h| h.region == region) {
             return Some(&self.held[i]);
@@ -468,10 +459,9 @@ impl RegionCapture for PortalCapture {
         let seq = store.content_seq();
         if let Some(held) = self.take_held(region) {
             if held.seq == seq {
-                // Nothing on this monitor has damaged since these
-                // pixels were served, so they are still the screen's -
-                // and the pipeline can skip an OCR pass it has paid
-                // for (core's `Frame::unchanged`).
+                // No damage reached this monitor after the code served these pixels. They
+                // still match the screen, so the pipeline can skip one OCR pass
+                // (core's `Frame::unchanged`).
                 return Ok(Frame {
                     buf: held.buf.clone(),
                     w: region.w,
@@ -492,9 +482,9 @@ impl RegionCapture for PortalCapture {
             .context_or("the portal stream has not negotiated a format yet")?;
         let len = usize::try_from(i64::from(region.w) * i64::from(region.h) * 4)
             .map_err(|_| anyhow::anyhow!("a {}x{} region is too large", region.w, region.h))?;
-        // Black where the stream does not reach: off-monitor has no
-        // pixels, and blank costs one hover nothing where failing
-        // costs every hover near an edge.
+        // The buffer stays black where the stream has no pixels. An off-monitor area
+        // has no content. This blank area affects one hover, but a failure would
+        // affect every hover near an edge.
         let mut buf = vec![0u8; len];
         let served = match cut(region, anchor, shape.w, shape.h) {
             Some((src, dest)) => store.crop_into(src, dest, &mut buf, region.w, region.h),
@@ -514,8 +504,8 @@ impl RegionCapture for PortalCapture {
         {
             return bounds;
         }
-        // No approved monitor holds it: fall back to the same output
-        // arithmetic the screencopy rung uses, which always answers.
+        // No approved monitor contains the point. Use the same output arithmetic as
+        // the screencopy rung, which always returns a bound.
         geometry::bounds_containing(&self.session.outputs, p)
     }
 
@@ -545,8 +535,8 @@ mod tests {
         PhysPoint { x, y }
     }
 
-    /// A box wholly inside the stream is a straight translation into
-    /// stream coordinates, landing at the frame's origin.
+    /// A region inside the stream needs only translation into stream coordinates.
+    /// It reaches the frame origin.
     #[test]
     fn a_region_inside_the_stream_translates_by_the_anchor() {
         let region = PhysRect { x: 2660, y: 300, w: 400, h: 200 };
@@ -555,9 +545,9 @@ mod tests {
         assert_eq!(at(0, 0), dest);
     }
 
-    /// A box hanging off the left edge yields only the pixels that
-    /// exist, placed where they belong in the frame; the caller's
-    /// black stays put over the rest.
+    /// A region can extend beyond the stream. The function returns only pixels
+    /// that the stream has and places them at the correct frame positions. The
+    /// caller's black buffer remains elsewhere.
     #[test]
     fn a_region_overhanging_the_stream_is_clipped_and_offset() {
         let region = PhysRect { x: -50, y: -20, w: 200, h: 100 };
@@ -574,8 +564,8 @@ mod tests {
         assert_eq!(at(0, 0), dest);
     }
 
-    /// No overlap is not a clip of size zero: there is nothing to
-    /// blit, and the caller must know.
+    /// No overlap is not a zero-size clip. The function has no pixels to blit, so
+    /// the caller must receive `None`.
     #[test]
     fn a_region_on_another_monitor_does_not_cut() {
         assert_eq!(None, cut(PhysRect { x: 3000, y: 0, w: 100, h: 100 }, at(0, 0), 2560, 1440));
@@ -583,7 +573,7 @@ mod tests {
         assert_eq!(None, cut(PhysRect { x: 0, y: 0, w: 10, h: 10 }, at(0, 0), 0, 1440));
     }
 
-    /// Picking a monitor is what keeps exactly one stream connected.
+    /// One monitor choice keeps exactly one stream connected.
     #[test]
     fn the_monitor_under_the_point_is_the_one_connected() {
         let left = Monitor { node_id: 11, anchor: Some(at(0, 0)), size: (2560, 1440) };
@@ -591,12 +581,12 @@ mod tests {
         let monitors = [left, right];
         assert_eq!(0, pick(&monitors, at(10, 10)));
         assert_eq!(1, pick(&monitors, at(3000, 500)));
-        // Off every monitor: an answer beats an error.
+        // The point is outside every monitor. The function returns the first monitor.
         assert_eq!(0, pick(&monitors, at(-500, -500)));
     }
 
-    /// A monitor we could not anchor has no box, and must never be
-    /// treated as covering the origin.
+    /// A monitor without an anchor has no bounds. The code must not treat it as a
+    /// cover of the origin.
     #[test]
     fn an_unanchored_monitor_has_no_bounds() {
         let unplaced = Monitor { node_id: 5, anchor: None, size: (1920, 1080) };
@@ -605,7 +595,7 @@ mod tests {
         assert_eq!(None, zero.bounds());
     }
 
-    /// The tray row must name the way back, whatever went wrong.
+    /// The tray row must identify a repair for every error.
     #[test]
     fn every_failure_names_something_to_do_about_it() {
         for error in [
@@ -622,9 +612,9 @@ mod tests {
         }
     }
 
-    /// The rule `PortalSession::open` acts on: a refusal or a token the
-    /// portal no longer honours must drop the stored token, so the next
-    /// attempt shows a dialog instead of silently failing forever.
+    /// `PortalSession::open` must clear the stored token after a refusal or a
+    /// token rejection. The next attempt shows a dialog instead of failing
+    /// without a message.
     #[test]
     fn a_refusal_drops_the_stored_token_and_a_stream_failure_does_not() {
         assert!(dbus::PortalError::Denied.retry_needs_fresh_consent());

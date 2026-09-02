@@ -3,10 +3,10 @@
 #
 # The release workflow calls this; so can you. Everything in the asset
 # comes from this repo or from a binary you already built, and nothing is
-# downloaded - ADR-0009's offline-first contract is a property of this
-# script, not of the workflow wrapped around it. That is also why the
-# script exists rather than a wall of `run:` steps: the only way to be
-# sure the asset is right is to build it on a dev box and extract it.
+# downloaded - the offline-first contract is a property of this script,
+# not of the workflow wrapped around it. That is also why the script
+# exists rather than a wall of `run:` steps: the only way to be sure the
+# asset is right is to build it on a dev box and extract it.
 #
 #   scripts/package-linux.sh v0.8.2                    # target/release/chibipop
 #   scripts/package-linux.sh v0.8.2 path/to/chibipop   # or a named binary
@@ -25,10 +25,11 @@ die() {
 	exit 1
 }
 
-# The asset name is a forever contract (ADR-0007): every shipped binary's
-# update check parses `chibipop-v<semver>-linux-x64.tar.gz` off
-# releases/latest, so a malformed version here misleads every install that
-# ever sees this release, not just this one.
+# The asset name is a forever contract (ARCHITECTURE.md#packaging-and-ci):
+# every shipped binary's update check parses
+# `chibipop-v<semver>-linux-x64.tar.gz` off releases/latest, so a malformed
+# version here misleads every install that ever sees this release, not just
+# this one.
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] ||
 	die "version must look like v1.2.3, got '$version'"
 
@@ -62,14 +63,14 @@ install -m644 -- "$repo/README.md" "$repo/LICENSE" "$stage/"
 # here and asserts the binary's own search resolves inside it.
 #
 # LICENSE.md rides along because the weights are LGPL-3.0 and shipping
-# them without it would be a licence violation (ADR-0009).
+# them without it would be a licence violation.
 models=$repo/crates/chibipop-linux/models/meiki
 install -m644 -- "$models"/*.onnx "$models/LICENSE.md" "$models/SHA256SUMS.txt" "$stage/models/meiki/"
 
-# Build-time hash verification (ADR-0009: bundled, hash-pinned, no
-# first-run download). Deliberately run over the *staged* copies - the
-# exact bytes the tarball carries - and not over the source tree: a
-# truncated install or a bad disk then fails the release instead of
+# Build-time hash verification (ARCHITECTURE.md#ocr-engine: bundled,
+# hash-pinned, no first-run download). Deliberately run over the *staged*
+# copies - the exact bytes the tarball carries - and not over the source
+# tree: a truncated install or a bad disk then fails the release instead of
 # shipping a binary that refuses its own models on the user's machine.
 # `models.rs` re-checks these same digests at runtime, and a unit test
 # asserts this file and those constants agree.
@@ -81,7 +82,7 @@ for f in README.md chibipop.desktop chibipop.service hyprland.conf; do
 	install -m644 -- "$repo/extras/$f" "$stage/extras/$f"
 done
 
-# gzip over zstd deliberately (ADR-0007): boring, universal `tar xzf`.
+# gzip over zstd deliberately: boring, universal `tar xzf`.
 #
 # Reproducible by construction - sorted names, no owner, one timestamp for
 # every entry, and `gzip -n` drops gzip's own mtime header too. Repackaging

@@ -1,46 +1,48 @@
-//! How `GlossDoc` should be laid out in memory, measured before ticket 02
-//! writes it.
+//! This benchmark compares memory layouts for `GlossDoc` before an arena rewrite.
 //!
-//! Three representations of the same Yomitan structured-content tree, over the
-//! real glossary payloads `tools/hover-parse-bench/payload.py` extracted:
+//! It compares three representations of the same Yomitan structured-content tree.
+//! The payloads come from `tools/hover-parse-bench/payload.py`:
 //!
-//! 1. **`serde_json::Value` + a recursive walk** - what
-//!    [hover-parse-cost.md](../docs/research/hover-parse-cost.md) measured, so
-//!    it anchors the comparison.
-//! 2. **Box tree** - an enum with `Vec<Node>` children, `String` text, and a
-//!    `HashMap<String, _>` `data` map. The implementation ticket 02 produces if
-//!    nobody thinks about layout.
-//! 3. **Arena** - one flat `Vec<ANode>` per entry, children as a
-//!    first-child/next-sibling index pair, every byte of text in one `String`
-//!    addressed by `(u32, u32)` spans, `data`/attribute keys interned into a
-//!    side table and stored as `(u32, u32)` ranges into flat key-value vectors.
-//!    One pass, no per-node allocation, walked by index.
+//! 1. **`serde_json::Value` with a recursive walk**: This is the baseline measured in
+//!    [hover-parse-cost.md](../docs/research/hover-parse-cost.md). It anchors the comparison.
+//! 2. **Box tree**: This enum stores `Vec<Node>` children, `String` text, and a
+//!    `HashMap<String, _>` `data` map. A rewrite produces this shape when it does not
+//!    consider memory layout.
+//! 3. **Arena**: This representation stores one flat `Vec<ANode>` for each entry.
+//!    Children link through a first-child/next-sibling index pair.
+//!    One `String` stores all text for an entry, and `(u32, u32)` spans address that text.
+//!    The build interns `data` keys and attribute keys into a side table.
+//!    It stores `(u32, u32)` ranges into flat key-value vectors.
+//!    One pass builds the arena without an allocation for each node.
+//!    The code walks the arena by index.
 //!
-//! Both typed parsers are hand-written `serde::de::Visitor`/`DeserializeSeed`
-//! trees over the *same* `serde_json` tokenizer, so the only thing that differs
-//! is what gets built - not the JSON scanner underneath.
+//! Both typed parsers are hand-written `serde::de::Visitor`/`DeserializeSeed` trees.
+//! They use the *same* `serde_json` tokenizer.
+//! Each parser builds a different structure, but both use the same JSON scanner.
 //!
-//! All three are held to the same node model and the same metrics, and the
-//! bench asserts their walk results are byte-identical on every payload. A
-//! faster-but-wrong variant cannot win.
+//! The benchmark gives all three representations the same node model and metrics.
+//! It asserts byte-identical walk results for every payload.
+//! A faster variant cannot win when its result differs.
 //!
 //! ```sh
 //! cargo run -p chibipop --release --example gloss_arena_bench          # all 550 headwords
 //! cargo run -p chibipop --release --example gloss_arena_bench -- 40    # first 40, for a smoke run
 //! ```
 //!
-//! Release mode is mandatory: a debug-profile serde number is off by an order
-//! of magnitude and answers the question backwards.
+//! Release mode is mandatory. A debug-profile serde number is off by an order of magnitude.
+//! This result does not answer the intended question.
 //!
-//! A hover-equivalent is the first `MAX_RESULTS` payloads of a headword, which
-//! is what `LookupEngine::run` leaves after `ranked.truncate(MAX_RESULTS)`
-//! (`src/lookup/engine.rs:175-179`).
+//! A hover-equivalent contains the first `MAX_RESULTS` payloads for a headword.
+//! `LookupEngine::run` leaves this set after
+//! `ranked.truncate(MAX_RESULTS)` (`src/lookup/engine.rs:175-179`).
 //!
-//! Allocation counting is a real counting global allocator wrapping
-//! `std::alloc::System`, not an estimate. It is gated on a relaxed
-//! `AtomicBool` load - a plain `mov`, no locked instruction - so timing passes
-//! run with the counters off and are not distorted by the instrumentation;
-//! allocation passes turn them on and their timings are discarded.
+//! The benchmark counts allocations with a real global allocator that wraps
+//! `std::alloc::System`.
+//! It is not an estimate.
+//! A relaxed `AtomicBool` load gates the counter.
+//! This load compiles to a plain `mov` with no locked instruction.
+//! Timed passes run with the counters off, so instrumentation does not distort them.
+//! Allocation passes turn the counters on, and the benchmark discards their time results.
 
 use anyhow::{Context, Result};
 use chibipop::lookup::engine::MAX_RESULTS;
@@ -58,7 +60,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
-// counting global allocator
+// allocation counter
 // ---------------------------------------------------------------------------
 
 static COUNT_ON: AtomicBool = AtomicBool::new(false);
@@ -69,13 +71,12 @@ static FREED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
-/// `System`, plus counters behind one relaxed load.
+/// `Counting` wraps `System` and adds counters behind one relaxed load.
 ///
-/// `realloc` delegates to `System::realloc` rather than falling back to the
-/// trait's alloc-copy-dealloc default: without that, every `Vec` growth would
-/// become a full copy even when the allocator could have extended in place,
-/// which would penalise the arena (which grows a handful of big vectors) for no
-/// reason of its own.
+/// `realloc` delegates to `System::realloc` instead of the trait default.
+/// The default allocates, copies, and deallocates.
+/// It copies every `Vec` during growth, even when the allocator can extend the block in place.
+/// This behavior penalizes the arena because it grows only a few large vectors.
 struct Counting;
 
 impl Counting {
@@ -163,10 +164,10 @@ fn alloc_snapshot() -> AllocStat {
 }
 
 // ---------------------------------------------------------------------------
-// the node model all three representations are held to
+// the shared node model
 // ---------------------------------------------------------------------------
 
-/// The node kinds ticket 02 names.
+/// `Kind` names the node kinds in this model.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum Kind {
@@ -184,14 +185,16 @@ enum Kind {
     Unknown,
 }
 
-/// The exact tag, kept alongside `Kind` because a `div` and a `span` are both
-/// containers and a lossless tree may not forget which one it was.
+/// `Tag` records the exact source tag with `Kind`.
+/// A lossless tree must retain whether a node is a `div` or a `span`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum Tag {
-    /// No `tag` field: a bare string, a `type: text` item, a wrapper.
+    /// `None` applies when the node has no `tag` field.
+    /// Examples include a bare string, a `type: text` item, and a wrapper.
     None,
-    /// Unrecognised: the name is kept in the attribute list.
+    /// `Other` marks an unrecognized tag.
+    /// The parser keeps the tag name in the attribute list.
     Other,
     A,
     B,
@@ -265,7 +268,7 @@ fn tag_for(s: &str) -> Option<Tag> {
     })
 }
 
-/// `type` on a glossary item.
+/// `ItemType` records a glossary item's `type` field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ItemType {
     None,
@@ -307,11 +310,11 @@ fn kind_of(tag: Tag, ty: ItemType, has_text: bool) -> Kind {
     }
 }
 
-/// The resolved style record: every `style` property the census found in the
-/// corpus, plus the schema-permitted siblings of those it found. Resolution is
-/// string-to-enum, done once at parse time by both typed representations - and
-/// re-done on every walk by the `Value` baseline, which is one of the things
-/// this bench is measuring.
+/// `StyleKey` lists the resolved style record.
+/// It contains every `style` property found in the corpus.
+/// It also contains every sibling that the schema permits.
+/// The `Value` baseline resolves the string on every walk.
+/// This benchmark measures that cost.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum StyleKey {
@@ -379,9 +382,9 @@ fn style_key_for(s: &str) -> Option<StyleKey> {
     })
 }
 
-/// The editorial role field ticket 02 says to carry now and classify in
-/// ticket 15. One byte, present in both typed representations, never set by
-/// these prototypes.
+/// `Role` stores one byte for the Editorial role field.
+/// The field lets code carry the value now and classify it later.
+/// Both typed representations include this field, but neither prototype sets it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Role(u8);
 
@@ -389,7 +392,8 @@ impl Role {
     const UNCLASSIFIED: Self = Self(0);
 }
 
-/// The five structural fields; everything else on a node is an attribute.
+/// `FieldName` names the six structural fields.
+/// Every other node property is an attribute.
 enum FieldName {
     Tag,
     Type,
@@ -412,14 +416,16 @@ fn field_name(s: &str) -> FieldName {
     }
 }
 
-/// Losslessness counters. Every one of these is a place a prototype would drop
-/// something, so they are reported rather than assumed to be zero.
+/// `Loss` counts failures of losslessness.
+/// Each counter marks a place where a prototype can drop data.
+/// The benchmark reports every counter and does not assume that any counter is zero.
 #[derive(Default)]
 struct Loss {
     unknown_tags: Cell<u64>,
     unknown_types: Cell<u64>,
     unknown_style_keys: Cell<u64>,
-    /// A `data`/attribute/style value that was an object: consumed, not stored.
+    /// `dropped_objects` counts a `data`, attribute, or style value that is an object.
+    /// The parser reads the value but does not keep it.
     dropped_objects: Cell<u64>,
 }
 
@@ -436,8 +442,8 @@ impl Loss {
     }
 }
 
-/// What every walk computes, in every representation. Compared for equality
-/// across all three on every payload.
+/// `Walk` records the result of each walk for every representation.
+/// The benchmark compares these records for equality for every payload.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct Walk {
     nodes: u64,
@@ -475,7 +481,7 @@ fn walk_value(v: &Value, depth: u32, w: &mut Walk) {
             w.max_depth = w.max_depth.max(depth);
             w.text_bytes += s.len() as u64;
         }
-        // Arrays are transparent: a child list, not a node.
+        // Arrays are transparent. An array is a child list, not a node.
         Value::Array(a) => {
             for x in a {
                 walk_value(x, depth, w);
@@ -497,14 +503,15 @@ fn walk_value(v: &Value, depth: u32, w: &mut Walk) {
                 walk_value(c, depth + 1, w);
             }
         }
-        // null / bool / number in a node position: not a node.
+        // A `null`, boolean, or number in a node position is not a node.
         _ => {}
     }
 }
 
-/// Ticket 17's inner loop: does this node's `data` map carry any of the probe
-/// keys? Iterating the node's own keys and binary-searching the (sorted) probe
-/// list is the cheaper of the two obvious spellings, so it is the one measured.
+/// `probe_value` is the inner loop of the style matcher.
+/// It checks whether a node's `data` map contains a probe key.
+/// It iterates the node's own keys and searches the sorted probe list with binary search.
+/// This is the cheaper of the two obvious methods, so the benchmark measures it.
 fn probe_value(v: &Value, probe: &[String], hits: &mut u64) {
     match v {
         Value::Array(a) => {
@@ -543,12 +550,13 @@ struct BoxNode {
     kind: Kind,
     tag: Tag,
     role: Role,
-    /// Text nodes only.
+    /// `text` stores content only for text nodes.
     text: String,
     children: Vec<BoxNode>,
-    /// The naive choice, and the one ticket 17's style matching has to live
-    /// with. `HashMap::new()` does not allocate until the first insert, so an
-    /// unadorned node pays nothing but the 48 inline bytes.
+    /// `data` uses a `HashMap`, the naive choice.
+    /// The style matcher must work with this choice.
+    /// `HashMap::new()` does not allocate until the first insert.
+    /// A plain node without data therefore uses only 48 inline bytes.
     data: HashMap<String, BoxScalar>,
     attrs: Vec<(String, BoxScalar)>,
     style: Vec<(StyleKey, BoxScalar)>,
@@ -576,8 +584,8 @@ impl BoxNode {
     }
 }
 
-/// A string-valued field resolved by a closure, without keeping the string
-/// when the resolution succeeds.
+/// `StrSeed` resolves a string-valued field with a closure.
+/// It does not keep the string when resolution succeeds.
 struct StrSeed<F, R>(F, PhantomData<R>);
 
 impl<F, R> StrSeed<F, R> {
@@ -646,9 +654,10 @@ where
     }
 }
 
-/// A `data`/attribute/style value. Numbers and booleans keep their type rather
-/// than being formatted into a string: formatting would put an f64 printer on
-/// the hot path of both typed representations for no representational reason.
+/// `BoxScalarSeed` resolves a `data`, attribute, or style value.
+/// It keeps a number or boolean in its native type, not as formatted text.
+/// A string format adds an `f64` printer to both typed hot paths.
+/// The data model gains nothing from that printer.
 struct BoxScalarSeed<'a>(&'a Loss);
 
 impl<'de> DeserializeSeed<'de> for BoxScalarSeed<'_> {
@@ -694,11 +703,11 @@ impl<'de> Visitor<'de> for BoxScalarSeed<'_> {
         Ok(BoxScalar::Null)
     }
 
-    /// `textDecorationLine` is a list in the schema; space-join it, the way a
-    /// CSS value would read. The rule is "append each text element then a
-    /// space, then trim back to the last element's end", which is what the
-    /// arena has to do to keep its pieces contiguous - so both spell it that
-    /// way and the losslessness checksum can compare them.
+    /// `visit_seq` handles `textDecorationLine`, which the schema stores as a list.
+    /// It joins the list with spaces, as a CSS value does.
+    /// It appends each text element and one space, then removes the final space.
+    /// The arena uses the same rule so its pieces stay contiguous.
+    /// Both representations use the same spelling, so the losslessness checksum can compare them.
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<BoxScalar, A::Error> {
         let mut out = String::new();
         let mut end = 0;
@@ -720,7 +729,7 @@ impl<'de> Visitor<'de> for BoxScalarSeed<'_> {
     }
 }
 
-/// The `data` object.
+/// `BoxDataSeed` resolves the `data` object.
 struct BoxDataSeed<'a> {
     out: &'a mut HashMap<String, BoxScalar>,
     loss: &'a Loss,
@@ -758,7 +767,7 @@ impl<'de> Visitor<'de> for BoxDataSeed<'_> {
     }
 }
 
-/// The `style` object, resolved to the style record.
+/// `BoxStyleSeed` resolves the `style` object into the style record.
 struct BoxStyleSeed<'a> {
     out: &'a mut Vec<(StyleKey, BoxScalar)>,
     loss: &'a Loss,
@@ -804,7 +813,8 @@ impl<'de> Visitor<'de> for BoxStyleSeed<'_> {
     }
 }
 
-/// Every node in a node position, arrays flattened.
+/// `BoxKids` collects every node in a node position.
+/// It flattens arrays.
 struct BoxKids<'a> {
     out: &'a mut Vec<BoxNode>,
     loss: &'a Loss,
@@ -951,7 +961,7 @@ fn walk_box(nodes: &[BoxNode], depth: u32, w: &mut Walk) {
     }
 }
 
-/// Iterate the node's own keys, binary-search the sorted probe list.
+/// `probe_box` iterates each node's own keys and searches the sorted probe list with binary search.
 fn probe_box(nodes: &[BoxNode], probe: &[String], hits: &mut u64) {
     for n in nodes {
         if !n.data.is_empty()
@@ -965,8 +975,8 @@ fn probe_box(nodes: &[BoxNode], probe: &[String], hits: &mut u64) {
     }
 }
 
-/// The other obvious spelling: ask the map for each probe key. One SipHash of
-/// the key per probe per node.
+/// `probe_box_naive` uses the other obvious method.
+/// It asks the map for each probe key and performs one `SipHash` lookup per probe and node.
 fn probe_box_naive(nodes: &[BoxNode], probe: &[String], hits: &mut u64) {
     for n in nodes {
         if !n.data.is_empty() && probe.iter().any(|k| n.data.contains_key(k.as_str())) {
@@ -1001,21 +1011,22 @@ struct ANode {
     kind: Kind,
     tag: Tag,
     role: Role,
-    /// Into `Arena::text`.
+    /// `text` stores a span into `Arena::text`.
     text: Span,
     first_child: u32,
     next_sibling: u32,
-    /// Into `Arena::data_kv`.
+    /// `data` stores a span into `Arena::data_kv`.
     data: Span,
-    /// Into `Arena::attr_kv`.
+    /// `attrs` stores a span into `Arena::attr_kv`.
     attrs: Span,
-    /// Into `Arena::style_kv`.
+    /// `style` stores a span into `Arena::style_kv`.
     style: Span,
 }
 
-/// One entry's `GlossDoc`, flat. Nothing here is allocated per node: the
-/// vectors grow amortised and the only per-*unique-key* allocation is the
-/// interner's lookup copy.
+/// `Arena` stores one entry's `GlossDoc` as a flat structure.
+/// It does not allocate for individual nodes.
+/// Its vectors grow at an amortized rate.
+/// The interner makes one lookup copy for each *unique* key.
 struct Arena {
     nodes: Vec<ANode>,
     first_root: u32,
@@ -1023,12 +1034,12 @@ struct Arena {
     data_kv: Vec<(u32, AScalar)>,
     attr_kv: Vec<(u32, AScalar)>,
     style_kv: Vec<(StyleKey, AScalar)>,
-    /// Interned key text, by id.
+    /// `keys` stores interned key text, indexed by id.
     keys: Vec<Span>,
     intern: HashMap<Box<str>, u32>,
-    /// A node's own key-value entries have to land contiguously, but its
-    /// children are parsed in between them, so entries are staged here on a
-    /// stack discipline and flushed when the node's object closes.
+    /// A node's key-value entries must occupy contiguous ranges in the final vectors.
+    /// The parser reads child nodes between those entries.
+    /// It stores each entry in stack order and flushes entries when the node object closes.
     s_data: Vec<(u32, AScalar)>,
     s_attr: Vec<(u32, AScalar)>,
     s_style: Vec<(StyleKey, AScalar)>,
@@ -1097,18 +1108,20 @@ impl Arena {
         *last = child;
     }
 
-    /// Drops the parse-time staging vectors. They are builder state, not
-    /// document state, and a cache entry has no business retaining them.
-    /// The content vectors are deliberately *not* shrunk: `shrink_to_fit`
-    /// would trade capacity slack for a full copy of everything.
+    /// `finish` drops parse-time temporary vectors.
+    /// These vectors hold builder state, not document state.
+    /// A cached entry must not retain them.
+    /// The method does not call `shrink_to_fit` on content vectors.
+    /// That call trades spare capacity for a full copy of every vector.
     fn finish(&mut self) {
         self.s_data = Vec::new();
         self.s_attr = Vec::new();
         self.s_style = Vec::new();
     }
 
-    /// Retained bytes the structure holds, by its own accounting - reported
-    /// next to the allocator's number as a cross-check.
+    /// `footprint` returns the retained bytes that this structure holds.
+    /// It uses its own accounting.
+    /// The benchmark reports this number beside the allocator number as a cross-check.
     fn footprint(&self) -> usize {
         self.nodes.capacity() * std::mem::size_of::<ANode>()
             + self.text.capacity()
@@ -1173,8 +1186,8 @@ impl<'de> Visitor<'de> for AScalarSeed<'_> {
         while let Some(v) =
             seq.next_element_seed(AScalarSeed { a: &mut *self.a, loss: self.loss })?
         {
-            // Only a text element put anything in the buffer, so only a text
-            // element earns a separator.
+            // Only a text element adds data to the buffer.
+            // Only a text element therefore receives a separator.
             if matches!(v, AScalar::Text(_)) {
                 end = self.a.text.len() as u32;
                 self.a.text.push(' ');
@@ -1190,7 +1203,8 @@ impl<'de> Visitor<'de> for AScalarSeed<'_> {
     }
 }
 
-/// A map key, interned. Returns the key id, or `None` for a non-string key.
+/// `AInternSeed` interns a map key.
+/// It returns the key id for a string key and `None` for another key type.
 struct AInternSeed<'a>(&'a mut Arena);
 
 impl<'de> DeserializeSeed<'de> for AInternSeed<'_> {
@@ -1394,8 +1408,9 @@ fn arena_object<'de, A: MapAccess<'de>>(
     let mut has_text = false;
     let mut tag = Tag::None;
     while let Some(field) = map.next_key_seed(AInternSeed(&mut *a))? {
-        // The key is interned whether or not it turns out to be structural:
-        // one hash lookup, and the attribute case needs the id anyway.
+        // The code interns each key, whether it names a structural field or an attribute.
+        // This adds one hash lookup.
+        // The attribute case needs the id anyway.
         let Some(key_id) = field else { continue };
         let name = {
             let span = a.keys[key_id as usize];
@@ -1450,9 +1465,9 @@ fn arena_object<'de, A: MapAccess<'de>>(
             }
         }
     }
-    // Flush this node's staged entries contiguously. Descendants already
-    // flushed and truncated back to their own marks, so what is above ours is
-    // exactly ours.
+    // This code flushes the node's staged entries into contiguous ranges in the final vectors.
+    // Each descendant already flushed its entries and shortened the temporary vectors to its marks.
+    // Entries above our marks therefore belong only to this node.
     let data = Span {
         at: a.data_kv.len() as u32,
         len: (a.s_data.len() - d_mark) as u32,
@@ -1512,9 +1527,11 @@ fn walk_arena(a: &Arena, w: &mut Walk) {
 
 const PROBE_MAX: usize = 24;
 
-/// Ticket 17's inner loop on a flat arena: resolve the probe keys to ids once
-/// per document, then sweep the node vector linearly comparing `u32`s. No
-/// hashing and no string comparison per node, and no tree pointer-chasing.
+/// `probe_arena` is the style matcher's inner loop for a flat arena.
+/// It resolves probe keys to ids once for each document.
+/// It then scans the node vector and compares `u32` values.
+/// This method needs no hash operation or string comparison for each node.
+/// It does not follow tree pointers.
 fn probe_arena(a: &Arena, probe: &[String]) -> u64 {
     let mut ids = [u32::MAX; PROBE_MAX];
     let mut n = 0;
@@ -1544,16 +1561,17 @@ fn probe_arena(a: &Arena, probe: &[String]) -> u64 {
 // losslessness checksum
 // ---------------------------------------------------------------------------
 //
-// The walk metrics prove the three representations agree on counts. This
-// proves they agree on *bytes*: every tag, kind, text run, attribute,
-// `data` entry and resolved style property is folded in. It is
-// order-independent within a node's key-value sets - a `HashMap`, a
-// `BTreeMap` and a flat vector do not agree on iteration order - and
-// order-dependent over the tree, where all three must agree.
+// The walk metrics prove that the three representations agree on counts.
+// This checksum proves that they also agree on *bytes*.
+// It includes every tag, kind, text run, attribute, `data` entry, and resolved style property.
 //
-// This runs in the parity pass only, never on a timed path. It also means
-// every stored field is actually read, so nothing here is a field the
-// optimizer may quietly decline to write.
+// The checksum ignores order inside one node's key-value sets.
+// A `HashMap`, a `BTreeMap`, and a flat vector use different iteration orders.
+// The checksum preserves tree order because all three representations must agree on it.
+//
+// This checksum runs only in the parity pass, never on a timed path.
+// It reads every stored field.
+// The optimizer therefore cannot leave a field unwritten.
 
 const FNV_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
@@ -1565,7 +1583,7 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     h
 }
 
-/// A stored scalar, independent of which representation stores it.
+/// `ScalarRef` holds a stored scalar independent of its representation.
 enum ScalarRef<'a> {
     Text(&'a str),
     Num(f64),
@@ -1582,14 +1600,15 @@ fn scalar_sum(h: u64, v: &ScalarRef) -> u64 {
     }
 }
 
-/// One key-value entry. Summed commutatively into a node's accumulator, so
-/// iteration order cannot change the result.
+/// `kv_sum` sums one key-value entry.
+/// It adds the entry to a node accumulator with a commutative sum.
+/// Iteration order therefore cannot change the result.
 fn kv_sum(ns: u64, key: &str, v: &ScalarRef) -> u64 {
     scalar_sum(fnv(FNV_SEED ^ ns, key.as_bytes()), v)
 }
 
-/// Namespaces, so a `data` entry cannot collide with an attribute of the same
-/// name and value.
+/// These constants give each entry kind a namespace.
+/// A `data` entry therefore cannot collide with an attribute that has the same name and value.
 const NS_ATTR: u64 = 0x11;
 const NS_DATA: u64 = 0x22;
 const NS_STYLE: u64 = 0x33;
@@ -1598,7 +1617,7 @@ fn style_sum(k: StyleKey, v: &ScalarRef) -> u64 {
     scalar_sum(fnv(FNV_SEED ^ NS_STYLE, &[k as u8]), v)
 }
 
-/// Folds one node into the document accumulator, in walk order.
+/// `node_sum` adds one node to the document accumulator in walk order.
 fn node_sum(acc: &mut u64, kind: Kind, tag: Tag, role: Role, text: &str, kv: u64) {
     let mut h = fnv(FNV_SEED, &[kind as u8, tag as u8, role.0]);
     h = fnv(h, text.as_bytes());
@@ -1606,9 +1625,10 @@ fn node_sum(acc: &mut u64, kind: Kind, tag: Tag, role: Role, text: &str, kv: u64
     *acc = fnv(*acc, &h.to_le_bytes());
 }
 
-/// Resolves a `Value` to the scalar both parsers would store. Text lands in
-/// `joined` - the array case joined by the same rule the parsers use - and the
-/// return is `None` for the text case.
+/// `value_nontext` resolves a `Value` to the scalar that both parsers store.
+/// Text goes to `joined`.
+/// For an array, it joins text with the parser rule.
+/// It returns `None` for text.
 fn value_nontext(v: &Value, joined: &mut String) -> Option<ScalarRef<'static>> {
     match v {
         Value::String(s) => {
@@ -1630,13 +1650,14 @@ fn value_nontext(v: &Value, joined: &mut String) -> Option<ScalarRef<'static>> {
         }
         Value::Number(n) => Some(ScalarRef::Num(n.as_f64().unwrap_or(f64::NAN))),
         Value::Bool(b) => Some(ScalarRef::Bool(*b)),
-        // `null` stores Null, and an object value is dropped to Null by all
-        // three representations.
+        // A `null` value becomes `Null`.
+        // All three representations also convert object values to `Null`.
         _ => Some(ScalarRef::Null),
     }
 }
 
-/// Resolves a `Value` node's scalar the way both parsers do, then sums it.
+/// `value_kv_sum` resolves a `Value` node scalar as both parsers do.
+/// It then sums that scalar.
 fn value_kv_sum(ns: u64, key: &str, v: &Value) -> u64 {
     let mut joined = String::new();
     match value_nontext(v, &mut joined) {
@@ -1676,8 +1697,8 @@ fn sum_value(v: &Value, acc: &mut u64) {
                     kv = kv.wrapping_add(value_kv_sum(NS_ATTR, k, val));
                 }
             }
-            // An unrecognised tag keeps its name as an attribute in both typed
-            // representations, so the baseline has to count it as one too.
+            // Both typed representations keep an unrecognized tag name as an attribute.
+            // The baseline therefore counts that attribute too.
             if tag == Tag::Other {
                 kv = kv.wrapping_add(kv_sum(
                     NS_ATTR,
@@ -1781,11 +1802,13 @@ fn sum_arena(a: &Arena, acc: &mut u64) {
 #[derive(Deserialize)]
 struct Record {
     term: String,
-    /// `payload.py`'s deliberately over-represented worst-case set: the 50
-    /// heaviest headwords by glossary bytes unioned with the 50 with the most
-    /// term-bank rows. `hover-parse-cost.md` reports it on its own line and
-    /// keeps it out of the frequency sample's percentiles, so this bench can
-    /// reproduce that row's population exactly.
+    /// This field marks `payload.py`'s worst-case set.
+    /// The set has extra members by design.
+    /// It is the union of the 50 headwords with the most glossary bytes and the
+    /// 50 headwords with the most term-bank rows.
+    /// `hover-parse-cost.md` reports this set on its own line.
+    /// It excludes the set from frequency-sample percentiles.
+    /// This benchmark can therefore reproduce that population exactly.
     worst: bool,
     payloads: Vec<String>,
 }
@@ -1805,8 +1828,9 @@ fn load_records() -> Result<Vec<Record>> {
         .collect()
 }
 
-/// The `data` keys ticket 17 would actually match on: the most common ones in
-/// the population being probed, measured here rather than guessed.
+/// `census_probe_keys` returns the `data` keys that the style matcher matches.
+/// It selects the most common keys in the probed population.
+/// The benchmark measures those keys instead of a guess.
 fn census_probe_keys(slices: &[(&str, &[String])], want: usize) -> Vec<String> {
     fn count(v: &Value, out: &mut BTreeMap<String, u64>) {
         match v {
@@ -1850,7 +1874,8 @@ fn census_probe_keys(slices: &[(&str, &[String])], want: usize) -> Vec<String> {
 // statistics
 // ---------------------------------------------------------------------------
 
-/// Nearest-rank percentile, matching `tools/hover-parse-bench`.
+/// `percentile` computes the nearest-rank percentile used by
+/// `tools/hover-parse-bench`.
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -1881,8 +1906,9 @@ fn dist(samples: &[f64]) -> Dist {
 
 const MIN_SAMPLE: Duration = Duration::from_millis(20);
 
-/// Repeats until `MIN_SAMPLE` of wall time has passed, accumulating only the
-/// duration the closure reports, so setup and teardown stay out of the number.
+/// `time_accum` repeats a closure until wall time reaches `MIN_SAMPLE`.
+/// It adds only the duration that the closure reports.
+/// Setup and teardown therefore stay out of the final number.
 fn time_accum(mut f: impl FnMut() -> Duration) -> f64 {
     let start = Instant::now();
     let mut acc = Duration::ZERO;
@@ -1915,8 +1941,9 @@ struct Series {
     alloc_bytes: Vec<f64>,
     retained: Vec<f64>,
     peak: Vec<f64>,
-    /// Allocations the built structure still holds: `allocs - frees`. What an
-    /// `Arc`-shared cache entry would have to keep alive, and free later.
+    /// This field stores allocations that the built structure still owns.
+    /// Its value is `allocs - frees`.
+    /// An `Arc`-shared cache entry must keep this memory alive and free it later.
     blocks: Vec<f64>,
 }
 
@@ -1937,9 +1964,10 @@ fn main() -> Result<()> {
         .take(limit)
         .map(|r| (r.term.as_str(), &r.payloads[..r.payloads.len().min(MAX_RESULTS)]))
         .collect();
-    // `payload.py` writes library archives first, so `payloads[..10]` is the
-    // library top ten for every headword matching ten or more library rows -
-    // the same slice `hover_parse_bench -- parse` calls `top 10`.
+    // `payload.py` writes library archives first.
+    // Therefore, `payloads[..10]` contains the library's first ten rows for each
+    // headword with at least ten library rows.
+    // This is the same slice that `hover_parse_bench -- parse` calls `top 10`.
     let freq_only: Vec<bool> = records.iter().take(limit).map(|r| !r.worst).collect();
     let hover_bytes: Vec<f64> = slices
         .iter()
@@ -1983,8 +2011,8 @@ fn main() -> Result<()> {
             walk_arena(&a, &mut wa);
             assert_eq!(wv, wb, "walk mismatch, Value vs box tree, term {term} payload {i}");
             assert_eq!(wv, wa, "walk mismatch, Value vs arena, term {term} payload {i}");
-            // Makes the arena's flat probe sweep provably equivalent to a tree
-            // walk: every node in the vector is reachable, none is an orphan.
+            // This check proves that the arena's flat probe scan matches a tree walk.
+            // Every node in the vector is reachable, so no node is an orphan.
             assert_eq!(
                 wa.nodes,
                 a.nodes.len() as u64,
@@ -2045,7 +2073,7 @@ fn main() -> Result<()> {
         2 * slices.iter().map(|(_, p)| p.len()).sum::<usize>()
     );
 
-    // ---- timing: counters off ----
+    // ---- timed passes: counters off ----
 
     COUNT_ON.store(false, Relaxed);
     let mut series: [Series; REPS] = Default::default();
@@ -2285,14 +2313,13 @@ fn main() -> Result<()> {
             sink.peak.push(built_stat.peak as f64);
             sink.blocks
                 .push((built_stat.allocs - built_stat.frees) as f64);
-            // Internal consistency of the allocator's own books.
+            // This check confirms the allocator records' internal consistency.
             assert_eq!(
                 built_stat.alloc_bytes - built_stat.freed_bytes,
                 built_stat.live as u64,
                 "allocator accounting disagrees with itself, rep {rep}"
             );
-            // The walk that ran inside the counted window must have seen the
-            // same tree the timing pass measured.
+            // The walk inside the counted window saw the same tree as the timed pass.
             assert_eq!(
                 nodes as f64, node_counts[i],
                 "node count drifted between passes, rep {rep}"
@@ -2402,11 +2429,12 @@ fn main() -> Result<()> {
     );
     println!("residual live bytes after every structure was dropped: {residual} (0 = no leak)");
 
-    // The anchor. `hover-parse-cost.md` quotes "frequency, top 10 rendered",
-    // which is this same `payloads[..10]` slice with the worst-case headwords
-    // held out, timed as one parse plus one walk. Reproducing that population
-    // here is what lets the arena's win be stated against a budget rather than
-    // against itself.
+    // This is the anchor.
+    // `hover-parse-cost.md` quotes "frequency, top 10 rendered".
+    // That number uses this same `payloads[..10]` slice.
+    // It excludes worst-case headwords and times one parse plus one walk.
+    // This benchmark reproduces that population.
+    // It lets the team state the arena's result against a budget, not only against itself.
     let keep = |v: &[f64]| -> Vec<f64> {
         v.iter().zip(&freq_only).filter(|(_, &f)| f).map(|(x, _)| *x).collect()
     };

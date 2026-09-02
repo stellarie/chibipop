@@ -1,29 +1,27 @@
-//! The parse: `serde_json`'s tokenizer straight into the arena.
+//! Parse a dictionary glossary with `serde_json` tokenizer output written directly to the arena.
 //!
-//! Hand-written `DeserializeSeed`/`Visitor` seeds, with **no intermediate
-//! `serde_json::Value`**. The prototype in `examples/gloss_arena_bench.rs`
-//! measures `Value` at 6.5x the walk cost and 6x the retained bytes of this
-//! shape, because a `Value` allocates a map per object and a `String` per key
-//! and then re-resolves every style key on every walk.
+//! Hand-written `DeserializeSeed` and `Visitor` seeds avoid an intermediate
+//! `serde_json::Value`. `examples/gloss_arena_bench.rs` measures `Value` at 6.5
+//! times the walk cost and six times the retained bytes of this shape.
+//! `Value` allocates a map for each object and a `String` for each key.
+//! Each walk then resolves every style key again.
 //!
-//! Two robustness rules, and they are separate on purpose:
+//! The parser has two separate robustness rules:
 //!
-//! - **Per-item isolation.** The glossary is split into its top-level items
-//!   before parsing, and each item is parsed on its own tokenizer. One
-//!   unreadable item costs that item alone; every other item still renders.
-//!   Yomitan and Hoshi Reader both isolate per row for the same reason: a
-//!   depth cap does not cover a bad node. An item that fails keeps every
-//!   node the tokenizer did produce and loses only the wrapper it could not
-//!   finish reading - the same policy [`Kind::Unknown`] applies to a tag this
-//!   build does not know.
-//! - **A depth cap** at [`MAX_DEPTH`], which bounds pathological *nesting*
-//!   rather than pathological syntax.
+//! - **Per-item isolation.** The glossary splits into top-level items before
+//!   the parser reads each item with its own tokenizer. One unreadable item
+//!   affects only that item. Every other item still renders.
+//!   Yomitan and Hoshi Reader isolate each row for the same reason. A depth cap
+//!   does not replace parser recovery for a bad node. A failed item keeps each
+//!   node that the tokenizer read. It loses only the wrapper that parser
+//!   recovery could not finish. The same policy [`Kind::Unknown`] handles an
+//!   unknown tag.
+//! - **A depth cap** at [`MAX_DEPTH`] limits pathological *nest depth*, not syntax.
 //!
-//! Nothing here can panic on input, and nothing here returns an error:
-//! [`GlossDoc::parse`] is total. Every seed accepts every JSON type a
-//! dictionary could put in a field, so a schema-malformed node - `content` as
-//! a number, `text` as an object, `style` as a string - is stored or skipped
-//! rather than failing. Only broken JSON *syntax* reaches the per-item
+//! This parser cannot panic on input, and [`GlossDoc::parse`] returns no error.
+//! Every seed accepts every JSON type that a dictionary can place in a field.
+//! The parser stores or skips a malformed field, such as numeric `content`,
+//! object `text`, or string `style`. Only broken JSON syntax reaches per-item
 //! fallback.
 
 use super::{
@@ -35,12 +33,11 @@ use std::collections::HashMap;
 use std::fmt;
 
 impl GlossDoc {
-    /// Parses a dictionary's raw structured-content glossary.
+    /// Parse a dictionary's raw structured-content glossary.
     ///
-    /// Total by construction - see the module comment. An empty or
-    /// unparseable payload yields an empty document, never an error, because
-    /// the caller is a hover on the frame budget and has nothing useful to do
-    /// with a `Result`.
+    /// `GlossDoc::parse` is total. An empty or unreadable payload returns an
+    /// empty document because a hover has no useful work for a `Result` on its
+    /// frame budget.
     pub fn parse(json: &str) -> GlossDoc {
         let mut b = Builder::new();
         let mut last = NONE;
@@ -51,8 +48,7 @@ impl GlossDoc {
     }
 }
 
-// ---------------------------------------------------------------------------
-// schema vocabulary
+// Schema vocabulary
 // ---------------------------------------------------------------------------
 
 pub(crate) fn tag_for(s: &str) -> Option<Tag> {
@@ -136,9 +132,9 @@ fn style_key_for(s: &str) -> Option<StyleKey> {
     })
 }
 
-/// The six structural fields. Everything else on a node is an attribute, and
-/// is kept as one - `href`, `path`, `colSpan`, an image's `sizeUnits`, and
-/// whatever the schema grows next.
+/// The six structural fields. Every other node field is an attribute.
+/// The parser keeps attributes such as `href`, `path`, `colSpan`, and image
+/// `sizeUnits`. This preserves fields that the schema adds later.
 enum FieldName {
     Tag,
     Type,
@@ -161,11 +157,11 @@ fn field_name(s: &str) -> FieldName {
     }
 }
 
-/// A node's kind, from its tag and its `type`.
+/// Derive a node's kind from its tag, `type`, and text state.
 ///
-/// `div` and `span` are both containers, `table`/`thead`/`tbody`/`tfoot` are
-/// all table scaffolding, and `ruby`/`rt`/`rp` are all ruby parts - the exact
-/// tag stays on the node, so collapsing them here loses nothing.
+/// `div` and `span` use the container kind. `table`, `thead`, `tbody`, and
+/// `tfoot` use table structure. `ruby`, `rt`, and `rp` use ruby parts.
+/// The node keeps each exact tag, so this choice loses no information.
 fn kind_of(tag: Tag, ty: ItemType, has_text: bool) -> Kind {
     match tag {
         Tag::Br => Kind::Break,
@@ -180,8 +176,8 @@ fn kind_of(tag: Tag, ty: ItemType, has_text: bool) -> Kind {
         Tag::Other => Kind::Unknown,
         Tag::None => match ty {
             ItemType::Image => Kind::Image,
-            // A plain string and a `type: text` item both land here, so
-            // downstream code has one shape to handle.
+            // A plain string and a `type: text` item use the same kind, so
+            // later code handles both with one shape.
             ItemType::Text => Kind::Text,
             ItemType::StructuredContent => Kind::Container,
             _ if has_text => Kind::Text,
@@ -191,15 +187,15 @@ fn kind_of(tag: Tag, ty: ItemType, has_text: bool) -> Kind {
     }
 }
 
-// ---------------------------------------------------------------------------
-// editorial role
+// Editorial role
 // ---------------------------------------------------------------------------
 //
-// Every node's role, from its `data` map, on the per-hover parse path. What
-// it costs, over the 30 150 real glossary payloads `tools/hover-parse-bench`
-// extracted - 3 285 630 nodes, 671 969 distinct interned keys, 31% of nodes
-// carrying a `data` map. Release profile, best of seven sweeps, each row
-// against the same build with `hook_of` and `Builder::role_at` stubbed out:
+// The parser derives each node's role from its `data` map on the per-hover path.
+// `tools/hover-parse-bench` extracted 30 150 real glossary payloads.
+// Those payloads contain 3 285 630 nodes and 671 969 distinct interned keys.
+// A `data` map appears on 31% of nodes.
+// The release profile used the best of seven sweeps.
+// Each row used the same build with `hook_of` and `Builder::role_at` as stubs:
 //
 // | shape | sweep | ns/node | vs no classifier |
 // |---|---:|---:|---:|
@@ -209,50 +205,45 @@ fn kind_of(tag: Tag, ty: ItemType, has_text: bool) -> Kind {
 // | + byte-set prune | 576.0 ms | 23.6 | +15.6% |
 // | + byte-window search | **554.8 ms** | **17.2** | **+11.3%** |
 //
-// 17.2 ns per node, and 84 ns per *distinct key* - interning is what makes
-// those different numbers, since the matching runs 0.2 times per node rather
-// than once. The per-node half, `role_at`'s walk over a node's one to three
-// staged entries, is below this measurement's noise floor.
+// The difference comes from interned keys. The matcher runs 0.2 times per node
+// instead of once. `role_at` checks one to three staged entries per node, and
+// that cost stays below this measurement's noise floor.
 //
-// The first row is why the rest exist: the obvious implementation, folding a
-// character at a time inside a hand-written substring scan, re-decodes every
-// key once per needle per start position and costs four and a half times as
-// much as the shape that shipped.
+// The first row explains the other rows. A character-by-character substring
+// scan decodes each key once for every needle and start position. It costs 4.5
+// times more than the shipped shape.
 
-/// The role vocabulary, as needles matched against a *normalised substring*
-/// of a `data` key or of one of [`VALUE_KEYS`]' values.
+/// Role names that the classifier matches as substrings after it folds the text.
+/// It checks a `data` key or a value for one of [`VALUE_KEYS`].
 ///
-/// Every row of `docs/research/dict-shapes.md`'s bilingual table, and nothing
-/// invented beside them. Two properties of the table do the work:
+/// The table in `docs/research/dict-shapes.md` supplies every row.
+/// It adds no other role name. Two table properties guide these rows:
 ///
-/// - **It is bilingual, and Japanese dominates.** 755 264 example nodes
-///   across four dictionaries sit under Japanese keys against roughly 62 000
-///   under ASCII ones, so an ASCII-only match misses twelve example nodes in
-///   thirteen. The same holds for every other role: `出典`, `参照`, `解説`
-///   outweigh their ASCII spellings by an order of magnitude.
-/// - **Substring, not equality.** 旺文社 全訳古語辞典 alone writes eleven
-///   distinct `用例`-prefixed keys - `用例訳`, `用例引用`, `用例活用`,
-///   `用例メタデータ`, `用例囲みG` - and 大辞林 writes `慣用例` and `用例注釈`.
-///   A substring needle covers all thirteen with one row; equality would need
-///   thirteen rows and would still miss the fourteenth spelling.
+/// - **Bilingual input favors Japanese.** Four dictionaries contain 755 264
+///   example nodes under Japanese keys and about 62 000 under ASCII keys.
+///   An ASCII-only match misses twelve of every thirteen example nodes.
+///   The same pattern applies to `出典`, `参照`, and `解説`.
+/// - **The substring rule covers variants.** 旺文社 全訳古語辞典 has eleven
+///   `用例`-prefixed keys, including `用例訳`, `用例引用`, `用例活用`,
+///   `用例メタデータ`, and `用例囲みG`. 大辞林 has `慣用例` and `用例注釈`.
+///   One substring needle covers all thirteen variants. Equality needs
+///   thirteen rows and still misses one spelling.
 ///
-/// So the nine Japanese example keys the table names collapse to two needles:
-/// every one of `用例`, `用例G`, `用例訳`, `用例引用`, `用例活用`, `慣用例`,
-/// `囲み用例` contains `用例`, and `例文`, `識別例文` contain `例文`. The eight
-/// ASCII example spellings - `example-sentence*`, `example-keyword`,
-/// `examples`, `example_N`, `example`, `ExampleG`, `ExampleC` - all collapse
-/// to `example` once case is folded.
+/// Nine Japanese example keys reduce to two needles. `用例`, `用例G`,
+/// `用例訳`, `用例引用`, `用例活用`, `慣用例`, and `囲み用例` contain
+/// `用例`. `例文` and `識別例文` contain `例文`.
+/// The classifier folds case, so the ASCII spellings `example-sentence*`,
+/// `example-keyword`, `examples`, `example_N`, `example`, `ExampleG`, and
+/// `ExampleC` all become `example`.
 ///
-/// Deliberately **not** the bare needle `例`. It would catch four more census
-/// hooks - `語例`, `熟語例G`, `俳句例`, `作品例` - worth 4 221 of 832 543
-/// example occurrences, 0.5%, and would also catch `凡例` (a dictionary's
-/// conventions), `例外` (an exception) and `例え` in any dictionary outside
-/// the corpus. Example is a *droppable* role, so a needle that broad trades a
-/// 0.5% gain for the one failure this classifier must not make: content that
-/// vanishes.
+/// The classifier does not use bare `例`. That needle would catch `語例`,
+/// `熟語例G`, `俳句例`, and `作品例`, which add 4 221 of 832 543
+/// example occurrences, or 0.5%. It would also catch `凡例`, `例外`, and
+/// `例え` outside the corpus. Example is a *droppable* role.
+/// This broad needle could remove content, so the classifier rejects it.
 const NEEDLES: [(&str, Role); 13] = [
-    // Yomitan's own convention, and the only role that moves content rather
-    // than hiding it.
+    // Yomitan's own convention. This is the only role that moves content.
+    // Other roles hide content.
     ("part-of-speech", Role::PartOfSpeech),
     ("attribution", Role::Attribution),
     ("出典", Role::Attribution),
@@ -268,41 +259,42 @@ const NEEDLES: [(&str, Role); 13] = [
     ("語源", Role::Commentary),
 ];
 
-/// The three keys whose *value* carries the role rather than the key.
+/// The three keys whose values can carry a role instead of their key names.
 ///
-/// `content` is Yomitan's own structured-content convention
-/// (`data.content = "example-sentence"`). `name` and `class` are the two HTML
-/// attributes the EPUB-to-Yomitan converters map into `data`, and both carry
-/// the role in the value: 三省堂国語辞典 writes `name=用例`, 旺文社 全訳古語辞典
-/// writes `class=fill 用例 FM`.
+/// `content` follows Yomitan's structured-content convention
+/// (`data.content = "example-sentence"`). `name` and `class` are HTML
+/// attributes that EPUB-to-Yomitan converters place in `data`.
+/// Their values carry the role. 三省堂国語辞典 writes `name=用例`, and
+/// 旺文社 全訳古語辞典 writes `class=fill 用例 FM`.
 ///
-/// Closed at three on purpose. Matching every value would read a role out of
-/// an `alt` text or an `href` - the census has `alt=［例］` on 24 706 gaiji
-/// images, which are *characters* a font lacks, and `href=$yourei` on 91 859
-/// links whose target happens to be an example lookup. Hiding either would
-/// punch a hole in a word or drop a link, so the value side stays on the
-/// three keys that are conventions rather than content.
+/// The classifier checks only these three keys. If it checked every value, an
+/// `alt` text or `href` could set a role. The census has `alt=［例］` on
+/// 24 706 gaiji images. These are characters that a font lacks.
+/// It has `href=$yourei` on 91 859 links whose target happens to be an example
+/// lookup. A role there would hide a word or remove a link.
+/// These three keys are conventions, not content.
 const VALUE_KEYS: [&str; 3] = ["content", "name", "class"];
 
-/// What an interned key name tells us, resolved once per distinct key.
+/// The hook for an interned key name. The parser resolves it once per key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Hook {
-    /// The key name itself names the role.
+    /// The key name supplies the role.
     Named(Role),
-    /// One of [`VALUE_KEYS`]: the role, if any, is in the value.
+    /// A key in [`VALUE_KEYS`] can supply the role in its value.
     InValue,
-    /// Neither. Most keys - `ruby`, `rt`, `img`, `div`, `xmlns` - are here.
+    /// The key supplies no role. Common examples are `ruby`, `rt`, `img`, `div`, and `xmlns`.
     None,
 }
 
-/// A 256-bit set of the bytes a string holds.
+/// A 256-bit set of bytes that a string contains.
 ///
-/// Built during the fold, which already walks every byte, and tested against
-/// [`NEEDLE_LEADS`] before any needle is searched for. The nine bytes a
-/// needle can start with are `a`, `e`, `p`, `x` and five CJK lead bytes;
-/// almost every `data` key holds none of them - `ruby`, `rt`, `img`, `div`,
-/// `body`, `html`, `full`, `rb`, `td` - and is rejected on four machine words
-/// instead of thirteen substring searches.
+/// The fold pass builds this set while it reads each byte.
+/// [`NEEDLE_LEADS`] uses it before the classifier searches for a needle.
+/// Needles start with nine possible bytes: `a`, `e`, `p`, `x`, and five CJK
+/// lead bytes. Most `data` keys contain none of them, including `ruby`, `rt`,
+/// `img`, `div`, `body`, `html`, `full`, `rb`, and `td`.
+/// The classifier rejects those keys with four machine words instead of
+/// thirteen substring searches.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct ByteSet([u64; 4]);
 
@@ -323,10 +315,9 @@ impl ByteSet {
     }
 }
 
-/// The first byte of every needle, derived from [`NEEDLES`] rather than
-/// written out beside it - a hand-kept copy would drift the moment a row is
-/// added, and it would drift *silently*, in the direction of classifying
-/// nothing.
+/// First bytes for all needles, derived from [`NEEDLES`].
+/// Do not duplicate this set beside the table. A duplicate can drift silently
+/// when a row changes and then classify nothing.
 const NEEDLE_LEADS: ByteSet = {
     let mut set = ByteSet([0; 4]);
     let mut i = 0;
@@ -337,27 +328,25 @@ const NEEDLE_LEADS: ByteSet = {
     set
 };
 
-/// One character, normalised for matching.
+/// Normalize one character for role checks.
 ///
-/// Three folds, each answering a spelling difference the corpus actually
-/// contains or that a converter plainly can produce:
+/// The classifier applies three folds that the corpus contains or converters
+/// can produce:
 ///
-/// - **Case**, ASCII only. 旺文社漢字典 writes `ExampleG` and `ExampleC`
-///   where Jitendex writes `example-sentence`; they are one convention spelled
-///   by two converters. Japanese has no case, so this costs nothing there.
-/// - **Width**, full-width ASCII letters and digits to half-width. Eight to
-///   eleven census dictionaries were converted from HTML or EPUB and drag
-///   their source markup through `data.html`/`data.body`/`data.xmlns`; such a
-///   source writes `Ａ` and `１` in a class name as readily as `A` and `1`.
-///   One `char` compare either way.
-/// - **The ideographic space** U+3000 to U+0020, because a Japanese class list
-///   is as likely to be `用例　FM` as `用例 FM`.
+/// - **Case**, ASCII only. 旺文社漢字典 writes `ExampleG` and `ExampleC`,
+///   while Jitendex writes `example-sentence`. Japanese has no case.
+/// - **Width**, full-width ASCII letters and digits to half-width.
+///   Eight to eleven census dictionaries came from HTML or EPUB.
+///   Their source markup can place `Ａ` and `１` in a class name as readily as
+///   `A` and `1`. One `char` compare handles either spelling.
+/// - **The ideographic space**, U+3000 to U+0020. A Japanese class list can
+///   use `用例　FM` as readily as `用例 FM`.
 ///
-/// Not Unicode case folding, not NFKC, not kana width. Full NFKC would fold
-/// half-width katakana and CJK compatibility ideographs, which are *content*
-/// in a Japanese dictionary and never appear in a role hook; it also cannot
-/// be done one `char` at a time, so it would cost an allocation per key on
-/// the per-hover parse path to answer a question no census key asks.
+/// The classifier does not use Unicode case conversion, NFKC, or kana width.
+/// Full NFKC would fold half-width katakana and CJK compatibility ideographs.
+/// A Japanese dictionary uses those characters as content, not role hooks.
+/// Full NFKC also needs more than one `char`, so it would allocate on the
+/// per-hover parse path for no corpus key.
 fn fold(c: char) -> char {
     match c {
         'A'..='Z' => (c as u8 + 32) as char,
@@ -369,17 +358,16 @@ fn fold(c: char) -> char {
     }
 }
 
-/// One pass over `text`'s bytes: the set of bytes it holds, or `None` when
-/// [`fold`] would rewrite one of them.
+/// Read `text` once. Return its byte set, or `None` if [`fold`] changes a byte.
 ///
-/// The fast path, and it is the one nearly every call takes. `fold` rewrites
-/// exactly three things - ASCII uppercase, the full-width ASCII block
-/// U+FF10..U+FF5A, and U+3000 - and the latter two have UTF-8 lead bytes
-/// `0xEF` and `0xE3`. A string holding none of the three is *already* in
-/// folded form, so a needle can be searched for in it directly and the
-/// scratch buffer is never touched. `content`, `sense`, `glossary`,
-/// `example-sentence`, `part-of-speech-info`, `用例`, `出典` all qualify;
-/// only `ExampleG` and `fill 用例 FM` take the slow path.
+/// Most calls use the fast path. [`fold`] changes ASCII uppercase, full-width
+/// ASCII U+FF10..U+FF5A, and U+3000. The latter two have UTF-8 lead bytes
+/// `0xEF` and `0xE3`.
+/// A string with none of those values is already folded. The classifier
+/// searches it directly and never touches the scratch buffer.
+/// `content`, `sense`, `glossary`, `example-sentence`, `part-of-speech-info`,
+/// `用例`, and `出典` use this path. `ExampleG` and `fill 用例 FM` use the slow
+/// path.
 fn scan(text: &str) -> Option<ByteSet> {
     let mut seen = ByteSet::default();
     for &b in text.as_bytes() {
@@ -391,13 +379,13 @@ fn scan(text: &str) -> Option<ByteSet> {
     Some(seen)
 }
 
-/// Folds `text` into `buf`, replacing whatever `buf` held, and reports which
-/// bytes the result holds.
+/// Fold `text` into `buf` and replace its previous content.
+/// Return the byte set of the folded text.
 ///
-/// The slow path, taken only when [`scan`] found a character to rewrite.
-/// `buf` is the builder's one reusable scratch string, so even this
-/// allocates only while the buffer grows to the longest such key or value a
-/// document holds - tens of bytes, once per parse.
+/// [`scan`] selects this slow path only when it finds a character to rewrite.
+/// `buf` is one reusable scratch string in `Builder`. It allocates only when
+/// it grows to the longest key or value in a document.
+/// That allocation holds tens of bytes and occurs once per parse.
 fn fold_into(buf: &mut String, text: &str) -> ByteSet {
     buf.clear();
     buf.reserve(text.len());
@@ -409,26 +397,24 @@ fn fold_into(buf: &mut String, text: &str) -> ByteSet {
     seen
 }
 
-/// The role a folded key name or convention value names, or
-/// [`Role::Content`].
+/// Return the role that a folded key name or convention value names.
+/// Return [`Role::Content`] when no role matches.
 ///
-/// Three filters before any substring search, all reading the byte set the
-/// one normalising pass already built:
+/// The classifier applies three filters before any substring search.
+/// Each filter reads the byte set from the same fold pass:
 ///
-/// 1. The whole table at once. A string holding none of [`NEEDLE_LEADS`]
-///    cannot hold any needle, so `ruby`, `rt`, `img`, `div`, `body`, `html`,
-///    `full`, `rb` and `td` - the corpus's highest-volume keys - return on
-///    four machine words.
-/// 2. Per needle, its own lead byte. A needle whose first byte the string
-///    does not hold cannot occur in it, so `content` searches for `example`
-///    alone rather than for all thirteen: one bit test replaces twelve
-///    substring searches.
-/// 3. Per needle, its role. A row that cannot improve on the best found so
-///    far is skipped, and the loop stops dead once the table's first role is
-///    found because nothing can beat it.
+/// 1. Check [`NEEDLE_LEADS`] once. If `seen` has none, return
+///    [`Role::Content`]. Keys such as `ruby`, `rt`, `img`, `div`, `body`,
+///    `html`, `full`, `rb`, and `td` pass four machine-word checks.
+/// 2. Check each needle's lead byte. If `seen` lacks it, skip the substring
+///    search. Thus `content` checks `example` alone. One bit test replaces
+///    twelve searches.
+/// 3. Compare each needle's role with the current best. Skip a row that cannot
+///    improve the result. Stop when the first table role matches because no
+///    role can outrank it.
 ///
-/// The smallest matching role wins, so the answer does not depend on the
-/// table's row order - see [`Role`]'s note on precedence.
+/// The smallest role that matches wins. Therefore, table row order does not
+/// change the result. See [`Role`]'s precedence note.
 fn role_of_folded(folded: &str, seen: ByteSet) -> Role {
     if !seen.meets(NEEDLE_LEADS) {
         return Role::Content;
@@ -447,19 +433,19 @@ fn role_of_folded(folded: &str, seen: ByteSet) -> Role {
     best
 }
 
-/// Does `hay` hold `needle`, both already folded?
+/// Return true when `hay` contains `needle`. Both inputs are folded.
 ///
-/// A byte-window compare rather than [`str::contains`], which builds a
-/// two-way searcher per call: at four to fourteen bytes of needle against
-/// tens of bytes of key, that setup costs more than the whole search. Both
-/// sides are folded here, so bytes are as good as characters - a needle can
-/// only align with a character boundary because a UTF-8 lead byte never
-/// appears as a continuation byte.
+/// A byte-window compare costs less than [`str::contains`], which builds a
+/// two-way searcher for each call. Needles contain four to fourteen bytes,
+/// while keys contain tens of bytes.
+/// Both inputs are folded, so byte comparison equals character comparison.
+/// UTF-8 never uses a lead byte as a continuation byte, so each match starts
+/// at a character boundary.
 fn holds(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// The role `text` names, normalising it on the way.
+/// Return the role that `text` names after folding.
 fn role_of(buf: &mut String, text: &str) -> Role {
     match scan(text) {
         Some(seen) => role_of_folded(text, seen),
@@ -470,7 +456,7 @@ fn role_of(buf: &mut String, text: &str) -> Role {
     }
 }
 
-/// What a key name is worth, resolved once at intern time.
+/// Resolve the hook for `name` once when the parser interns the key.
 fn hook_of(buf: &mut String, name: &str) -> Hook {
     match scan(name) {
         Some(seen) => hook_of_folded(name, seen),
@@ -481,13 +467,15 @@ fn hook_of(buf: &mut String, name: &str) -> Hook {
     }
 }
 
-/// The value-key test is *equality* on the folded name, not a substring, and
-/// it is the one place in this classifier that is not a substring match.
-/// Nine census keys hold `content`, `name` or `class` without being one:
-/// `contents`, `Contents`, `jukugoitemcontent`, `CampaignName` and five more,
-/// 86 747 nodes. Reading a role out of *their* values would let a
-/// `filename=example.png` hide a node. The three conventions are exact
-/// spellings, so the match is exact.
+/// Resolve a hook from a folded key name and its byte set.
+///
+/// The value-key check uses equality, not substring search. It is the only
+/// classifier check that uses equality.
+/// Nine census keys contain `content`, `name`, or `class` without equal names:
+/// `contents`, `Contents`, `jukugoitemcontent`, `CampaignName`, and five more.
+/// They occur on 86 747 nodes. If their values supplied roles,
+/// `filename=example.png` could hide a node.
+/// The three conventions use exact spellings, so this check uses exact equality.
 fn hook_of_folded(folded: &str, seen: ByteSet) -> Hook {
     match role_of_folded(folded, seen) {
         Role::Content if VALUE_KEYS.contains(&folded) => Hook::InValue,
@@ -496,20 +484,19 @@ fn hook_of_folded(folded: &str, seen: ByteSet) -> Hook {
     }
 }
 
-// ---------------------------------------------------------------------------
-// splitting the glossary into items
+// Split glossary into items
 // ---------------------------------------------------------------------------
 
-/// The glossary's top-level items, as byte slices of the payload.
+/// Return the glossary's top-level items as byte slices of the payload.
 ///
-/// A bracket- and quote-aware scan, not a parse: it exists so that one
-/// unreadable item cannot take the rest of the entry with it, which a single
-/// `serde_json` tokenizer over the whole array cannot offer - a syntax error
-/// leaves the tokenizer's position unrecoverable.
+/// This bracket- and quote-aware scan does not parse JSON.
+/// It supports parser recovery because one unreadable item cannot consume the
+/// rest of the entry. A single `serde_json` tokenizer over the full array
+/// cannot recover after a syntax error because its position is no longer usable.
 ///
-/// A payload that is not an array is returned as one item, which the item
-/// parser then rejects unless it is a string or an object. That matches the
-/// schema: a glossary is an array of strings and objects, and nothing else.
+/// If the payload is not an array, return one item.
+/// The item parser rejects it unless it is a string or an object.
+/// This matches the schema, which allows only an array of strings and objects.
 fn top_level_items(json: &str) -> Vec<&str> {
     let b = json.as_bytes();
     let mut i = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
@@ -548,8 +535,8 @@ fn top_level_items(json: &str) -> Vec<&str> {
                 depth += 1;
             }
             b']' | b'}' if depth == 0 => {
-                // The glossary array's own close. Anything after it is
-                // trailing garbage and is not an item.
+                // The glossary array closes here. Bytes after this close are
+                // trailing input, not an item.
                 push_item(&mut out, json, start, i);
                 closed = true;
                 break;
@@ -565,8 +552,8 @@ fn top_level_items(json: &str) -> Vec<&str> {
         i += 1;
     }
     if !closed {
-        // Unterminated array: whatever is left is one more item, and it
-        // degrades on its own rather than voiding the items before it.
+        // If the array has no close, send the remaining bytes as one item.
+        // This item degrades alone, so earlier items remain available.
         push_item(&mut out, json, start, b.len());
     }
     out
@@ -581,38 +568,38 @@ fn push_item<'a>(out: &mut Vec<&'a str>, json: &'a str, start: Option<usize>, en
     }
 }
 
-// ---------------------------------------------------------------------------
-// the builder
+// Builder
 // ---------------------------------------------------------------------------
 
-/// Parse-time state. The interner and the three staging vectors are builder
-/// state, not document state: they never reach [`GlossDoc`], so a cached
-/// document retains neither a `HashMap` nor a scratch vector.
+/// Parse-time state for `GlossDoc`.
+/// `intern` and the three temporary vectors serve the builder only.
+/// They never reach [`GlossDoc`], so a cached document keeps no `HashMap` or
+/// scratch vector.
 struct Builder {
     doc: GlossDoc,
     intern: HashMap<Box<str>, KeyId>,
-    /// One [`Hook`] per interned key, parallel to `doc.keys`.
+    /// One [`Hook`] for each interned key, parallel with `doc.keys`.
     ///
-    /// **This is the whole of the classifier's interning strategy.** The
-    /// normalised substring scan over the 13-row table runs once per
-    /// *distinct* key name in the document - tens of names, whatever the
-    /// node count - and never once per node. Per node the classifier then
-    /// walks the one to three entries the node staged and indexes this
-    /// vector by [`KeyId`], which is an array load and an integer compare.
+    /// This vector gives the classifier one result for each interned key.
+    /// The folded substring scan over 13 rows runs once for each distinct
+    /// key in a document. It runs for tens of names, not for every node.
+    /// For each node, the classifier checks one to three staged entries and
+    /// indexes this vector with [`KeyId`]. The operation uses an array load and
+    /// an integer compare.
     ///
-    /// Sized by `doc.keys`, so it covers attribute and structural key names
-    /// too. Classifying `href` or `colSpan` costs the same one scan as
-    /// classifying `用例` and yields [`Hook::None`]; keeping the table a
-    /// straight parallel array indexed by `KeyId` is worth more than
-    /// skipping a handful of scans.
+    /// `doc.keys` sets the vector size, so attribute and structural names also
+    /// have entries. `href`, `colSpan`, and `用例` each cost one scan.
+    /// The first two yield [`Hook::None`]. A parallel array indexed by
+    /// [`KeyId`] costs less than special cases for a few scans.
     key_hooks: Vec<Hook>,
-    /// The classifier's one scratch string, holding whatever key or value it
-    /// last folded. Reused across the whole parse, so folding costs no
-    /// allocation past the first key.
+    /// One scratch string for the classifier.
+    /// The classifier stores the last folded key or value here and reuses this
+    /// string for the whole parse. After the first key, a fold needs no new
+    /// allocation.
     s_fold: String,
-    /// A node's own key-value entries must land contiguously, but its
-    /// children are parsed in between them, so entries are staged here on a
-    /// stack discipline and flushed when the node's object closes.
+    /// Temporary vectors keep each node's key-value entries contiguous.
+    /// The parser reads child nodes between parent entries, then flushes these
+    /// entries when the node object closes.
     s_data: Vec<(KeyId, Scalar)>,
     s_attr: Vec<(KeyId, Scalar)>,
     s_style: Vec<(StyleKey, Scalar)>,
@@ -631,8 +618,8 @@ impl Builder {
         }
     }
 
-    /// Parses one glossary item and links it, degrading that item alone if it
-    /// cannot be read.
+    /// Parse one glossary item and link it.
+    /// If the parser cannot read it, degrade only that item.
     fn item(&mut self, json: &str, last: &mut NodeId) {
         let before = self.doc.nodes.len() as NodeId;
         let mut de = serde_json::Deserializer::from_str(json);
@@ -642,15 +629,15 @@ impl Builder {
         });
         match parsed {
             Ok(Some(id)) => self.link(NONE, last, id),
-            // Neither a string nor an object: not a glossary item.
+            // A value that is not a string or object is not a glossary item.
             Ok(None) => {}
             Err(_) => {
                 self.doc.degraded_items += 1;
-                // Whatever the tokenizer did read is already in the arena
-                // and is worth more than nothing: keep it and lose only the
-                // wrapper the parse never finished. The staging vectors are
-                // cleared because the aborted node never flushed them, and
-                // the next item must not adopt its leftovers.
+                // The tokenizer already placed each node it read in the arena.
+                // Keep those nodes and drop only the wrapper that parser
+                // recovery could not finish.
+                // Clear the temporary vectors because the aborted node did not
+                // flush them. The next item must not adopt those entries.
                 self.s_data.clear();
                 self.s_attr.clear();
                 self.s_style.clear();
@@ -667,21 +654,21 @@ impl Builder {
         Span { at, len: s.len() as u32 }
     }
 
-    /// Gives back bytes appended by the immediately preceding [`push_text`].
+    /// Remove bytes that the immediately previous [`push_text`] call appended.
     ///
-    /// A `tag` or `type` name arrives as text, is resolved to an enum, and
-    /// then has no reason to be retained. Handing the bytes back keeps the
-    /// text buffer to actual content: at four bytes a node over a thousand
-    /// nodes per hover, this is a measurable slice of the retained heap the
-    /// arena exists to shrink.
+    /// `tag` and `type` names arrive as text, then become enum values.
+    /// The parser does not need to retain those bytes.
+    /// This preserves the text buffer for actual content.
+    /// This `Span` identifies a source-range in the text buffer.
+    /// A hover can parse more than 1,000 nodes. Four bytes per node then form
+    /// a measurable part of the heap that the arena is meant to reduce.
     fn unpush_text(&mut self, s: Span) {
         if (s.at + s.len) as usize == self.doc.text.len() {
             self.doc.text.truncate(s.at as usize);
         }
     }
 
-    /// Interns a key name and classifies it, both exactly once per distinct
-    /// name.
+    /// Intern a key name and classify it once for each distinct name.
     fn intern(&mut self, s: &str) -> KeyId {
         if let Some(&id) = self.intern.get(s) {
             return id;
@@ -694,25 +681,26 @@ impl Builder {
         id
     }
 
-    /// The editorial role of the node whose `data` entries are staged from
+    /// Return the editorial role for the node whose `data` entries start at
     /// `mark`.
     ///
-    /// The smallest role any of the node's own `data` entries names, and
-    /// [`Role::Content`] when none of them names one. Runs once per node with
-    /// a `data` map, over the one to three entries that map holds.
+    /// Return the smallest role among this node's own `data` entries.
+    /// Return [`Role::Content`] when none names a role.
+    /// Run once for each node with a `data` map. Such a map has one to three
+    /// entries.
     ///
-    /// No inheritance, on purpose: a role marks a *subtree*, and every
-    /// renderer over this tree stops descending at the node the filter
-    /// rejects, so the subtree follows its root without a byte on any
-    /// descendant. That also leaves a descendant addressable on its own -
-    /// `Selection::Nodes` renders a sense a user picked out of an example
-    /// block, which is the Anki half of stories 45 and 46.
+    /// Do not inherit a role. A role marks a *subtree*, and each renderer stops
+    /// at a rejected node. Descendants therefore follow the root without
+    /// another role lookup.
+    /// A descendant remains addressable by itself. `Selection::Nodes` can render
+    /// a sense selected from an example block, which supports the Anki sense
+    /// picker.
     ///
-    /// A fast exit for the overwhelming majority: a node with no `data` map
-    /// stages no entries, so the loop does not run and the node is content.
+    /// A node without a `data` map stages no entries. The loop then has no work,
+    /// and the node keeps the content role.
     fn role_at(&mut self, mark: usize) -> Role {
-        // Disjoint field borrows: the staged entries are read while the fold
-        // buffer is written, which `self.` syntax cannot express.
+        // Read staged entries while the fold buffer changes. Destructure
+        // `Builder` because `self.` syntax cannot express these separate borrows.
         let Builder { doc, key_hooks, s_fold, s_data, .. } = self;
         let mut best = Role::Content;
         for &(key, value) in &s_data[mark..] {
@@ -720,9 +708,9 @@ impl Builder {
                 Hook::Named(role) => role,
                 Hook::InValue => match value {
                     Scalar::Text(span) => role_of(s_fold, doc.span(span)),
-                    // A convention key whose value is a number, a bool or
-                    // null names no role - but it does still mark a block,
-                    // which `GlossDoc::has_marker` answers separately.
+                    // A convention key with a number, bool, or null has no role.
+                    // It still marks a block, which `GlossDoc::has_marker` checks
+                    // separately.
                     _ => Role::Content,
                 },
                 Hook::None => Role::Content,
@@ -772,11 +760,10 @@ impl Builder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// seeds
+// Seeds
 // ---------------------------------------------------------------------------
 
-/// One glossary item: a string, or an object. Anything else is not an item.
+/// A glossary item can be a string or object. Other JSON types are not items.
 struct ItemSeed<'a> {
     b: &'a mut Builder,
 }
@@ -834,7 +821,7 @@ impl<'de> Visitor<'de> for ItemSeed<'_> {
     }
 }
 
-/// A `data`, attribute, or style value.
+/// A scalar value for `data`, an attribute, or a style property.
 struct ScalarSeed<'a> {
     b: &'a mut Builder,
 }
@@ -882,15 +869,14 @@ impl<'de> Visitor<'de> for ScalarSeed<'_> {
         Ok(Scalar::Null)
     }
 
-    /// `textDecorationLine` is the schema's one list-valued property, and a
-    /// space-joined string is exactly what it means. Joining here rather
-    /// than per walk is why the resolved record needs no list variant.
+    /// Read `textDecorationLine` as one space-separated string.
+    /// The schema defines this property as the one list-valued property.
+    /// This join runs at parse time, so the resolved record needs no list variant.
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Scalar, A::Error> {
         let at = self.b.doc.text.len() as u32;
         let mut end = at;
         while let Some(v) = seq.next_element_seed(ScalarSeed { b: &mut *self.b })? {
-            // Only a text element put anything in the buffer, so only a text
-            // element earns a separator.
+            // Add a separator only after a text element. Other elements add no text.
             if matches!(v, Scalar::Text(_)) {
                 end = self.b.doc.text.len() as u32;
                 self.b.doc.text.push(' ');
@@ -899,17 +885,17 @@ impl<'de> Visitor<'de> for ScalarSeed<'_> {
         Ok(Scalar::Text(Span { at, len: end - at }))
     }
 
-    /// An object where the schema admits a scalar. Consumed and recorded as
-    /// null: there is no node position here, so keeping it would need a
-    /// second, nested representation for values.
+    /// Consume an object where the schema expects a scalar and record
+    /// `Scalar::Null`. This position cannot hold a node, so another nested
+    /// representation would add state without useful content.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Scalar, A::Error> {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
         Ok(Scalar::Null)
     }
 }
 
-/// A map key, interned. `None` for a key that is not a string, which JSON
-/// cannot produce but a non-JSON `Deserializer` could.
+/// Intern a map key. Return `None` for a non-string key.
+/// JSON cannot produce a non-string key, but another `Deserializer` can.
 struct InternSeed<'a>(&'a mut Builder);
 
 impl<'de> DeserializeSeed<'de> for InternSeed<'_> {
@@ -936,10 +922,9 @@ impl<'de> Visitor<'de> for InternSeed<'_> {
     }
 }
 
-/// The `data` object, whose keys are per-dictionary and unbounded - which is
-/// why ticket 15 classifies an editorial role out of them rather than
-/// matching a fixed name list, and why ticket 17's stylesheet matcher indexes
-/// on them.
+/// Read the `data` object. Its keys are dictionary-specific and unbounded.
+/// The role classifier therefore reads roles from key names instead of a fixed
+/// list. The stylesheet matcher also indexes these keys.
 struct DataSeed<'a> {
     b: &'a mut Builder,
 }
@@ -1003,9 +988,9 @@ impl<'de> Visitor<'de> for DataSeed<'_> {
     }
 }
 
-/// The `style` object, resolved into the node's style record. An unrecognised
-/// property is dropped: the record is a closed set, and the schema's own
-/// property list is closed with it.
+/// Read the `style` object into the node's style record.
+/// Drop an unrecognized property. The record has a closed set, as does the
+/// schema property list.
 struct StyleSeed<'a> {
     b: &'a mut Builder,
 }
@@ -1075,15 +1060,14 @@ impl<'de> Visitor<'de> for StyleSeed<'_> {
     }
 }
 
-/// Everything in a node position: a string, an object, or an array of either.
-/// Arrays are flattened - a node's children are the concatenation of every
-/// array level under its `content`, which is what Yomitan's own renderer
-/// does with them.
+/// Read any value in a node position: a string, object, or array of either.
+/// Flatten arrays. A node's children then become the concatenation of every
+/// array level under `content`, as in Yomitan's renderer.
 struct Kids<'a> {
     b: &'a mut Builder,
     parent: NodeId,
     last: &'a mut NodeId,
-    /// The depth the node this seed creates would sit at.
+    /// The depth of the node that this seed creates.
     depth: u32,
 }
 
@@ -1127,9 +1111,9 @@ impl<'de> Visitor<'de> for Kids<'_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         if self.depth > MAX_DEPTH {
-            // Consumed, not parsed: the tokenizer still has to walk it, but
-            // nothing below the cap reaches the arena, so the outer levels
-            // render and a pathological tree terminates.
+            // Consume but do not parse this map. The tokenizer must walk it, but
+            // no value below the cap reaches the arena.
+            // Outer levels still render, and the parse terminates.
             self.b.doc.truncated_subtrees += 1;
             while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
             return Ok(());
@@ -1164,11 +1148,11 @@ impl<'de> Visitor<'de> for Kids<'_> {
     }
 }
 
-/// One structured-content object into one node.
+/// Read one structured-content object into one node.
 ///
-/// The node is created first and its fields are assigned as they arrive
-/// rather than all at the end, so an object whose JSON breaks part way
-/// through still carries the tag and the children the tokenizer did reach.
+/// Create the node before its fields arrive. Assign fields as the map yields
+/// them. If JSON breaks part way through, the node still keeps the tag and
+/// children that the tokenizer read.
 fn object<'de, A: MapAccess<'de>>(
     b: &mut Builder,
     depth: u32,
@@ -1184,8 +1168,8 @@ fn object<'de, A: MapAccess<'de>>(
     let mut has_text = false;
 
     while let Some(field) = map.next_key_seed(InternSeed(&mut *b))? {
-        // The key is interned whether or not it turns out to be structural:
-        // one hash lookup, and the attribute case needs the id anyway.
+        // Intern every key, including a non-structural key. The parser needs one
+        // hash lookup, and attributes need the key id.
         let Some(key_id) = field else { continue };
         match field_name(b.doc.key(key_id)) {
             FieldName::Tag => {
@@ -1196,16 +1180,15 @@ fn object<'de, A: MapAccess<'de>>(
                             b.unpush_text(span);
                             tag = t;
                         }
-                        // Unrecognised: the name is kept as an attribute, so
-                        // the tree stays lossless, and the node keeps its
-                        // children.
+                        // Keep an unknown name as an attribute. The tree stays
+                        // lossless, and the node keeps its children.
                         None => {
                             tag = Tag::Other;
                             b.s_attr.push((key_id, v));
                         }
                     },
-                    // A `tag` that is not a string names nothing, so there
-                    // is no tag to be unknown - but the value is still kept.
+                    // A non-string `tag` value supplies no tag. Keep its value
+                    // as an attribute.
                     other => b.s_attr.push((key_id, other)),
                 }
                 b.doc.nodes[idx as usize].tag = tag;
@@ -1255,13 +1238,12 @@ fn object<'de, A: MapAccess<'de>>(
         b.doc.nodes[idx as usize].kind = kind_of(tag, ty, has_text);
     }
 
-    // Classify before the drain: `s_data[d_mark..]` is exactly this node's
-    // own map, and its descendants have already drained back to their marks.
+    // Classify before the drain. `s_data[d_mark..]` contains this node's map,
+    // and child nodes have already returned their entries to their marks.
     let role = b.role_at(d_mark);
 
-    // Flush this node's staged entries contiguously. Descendants already
-    // flushed and drained back to their own marks, so what is above ours is
-    // exactly ours.
+    // Flush this node's staged entries as one contiguous range. Child nodes
+    // already flushed their entries, so entries above this mark belong to this node.
     let data = Span { at: b.doc.data_kv.len() as u32, len: (b.s_data.len() - d_mark) as u32 };
     b.doc.data_kv.extend(b.s_data.drain(d_mark..));
     let attrs = Span { at: b.doc.attr_kv.len() as u32, len: (b.s_attr.len() - a_mark) as u32 };
@@ -1282,9 +1264,9 @@ fn object<'de, A: MapAccess<'de>>(
 mod tests {
     use super::*;
 
-    /// The two tables' literals must already be normalised, because
-    /// [`role_of_folded`] folds only the haystack. An unfolded needle would
-    /// silently never match, and an empty one would match everything.
+    /// Keep both tables normalized and non-empty.
+    /// [`role_of_folded`] folds only the haystack. An unfolded needle never
+    /// matches, and an empty needle matches every string.
     #[test]
     fn every_needle_is_written_normalised_and_non_empty() {
         for (needle, role) in NEEDLES {
@@ -1300,8 +1282,8 @@ mod tests {
         }
     }
 
-    /// The table's first row is the highest-precedence role, which is what
-    /// lets [`role_of_folded`] stop scanning the moment it matches.
+    /// Keep the highest-precedence role in the first table row.
+    /// [`role_of_folded`] stops when that role matches.
     #[test]
     fn the_needle_table_leads_with_its_highest_precedence_role() {
         let first = NEEDLES[0].1;
@@ -1310,8 +1292,8 @@ mod tests {
         }
     }
 
-    /// [`fold`] is one `char` in, one `char` out, so a folded key is as long
-    /// in characters as the key and no needle can straddle a fold.
+    /// [`fold`] maps one `char` to one `char`.
+    /// A folded key keeps its character count, so no needle can cross a fold.
     #[test]
     fn folding_is_one_character_in_and_one_out() {
         let mut buf = String::new();
@@ -1321,8 +1303,8 @@ mod tests {
         }
     }
 
-    /// The buffer is reused, so a short key after a long one must not leave
-    /// the long one's tail behind and match on it.
+    /// Clear the reused buffer before each key.
+    /// A shorter key after a longer key must not retain the longer suffix.
     #[test]
     fn the_fold_buffer_does_not_leak_between_keys() {
         let mut buf = String::new();

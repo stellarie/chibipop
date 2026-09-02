@@ -76,7 +76,7 @@ column would quietly overstate support.
 
 It counts shapes; it does not render them. It cannot tell you that a table
 looks wrong, only that 16 dictionaries ship tables. Visual correctness is the
-job of the layout fixtures and the geometry goldens (ADR-0011).
+job of the layout fixtures and the geometry goldens.
 
 It reads a stylesheet; it does not cascade one. It can say that a rule carries
 a border, not that the border is visually a pill. There is no specificity

@@ -1,7 +1,7 @@
-//! The Linux program itself: clap CLI, dispatched to the daemon, the
-//! `ctl` client, the capability probe, or the capture dump. `main.rs`
-//! is a two-line entry that reaches this module on Linux and a stub
-//! everywhere else.
+//! This module runs the Linux program. It dispatches the clap CLI to the
+//! daemon, the `ctl` client, the capability probe, or the capture dump.
+//! `main.rs` has a two-line entry that reaches this module on Linux and a
+//! stub on other platforms.
 
 use crate::control::{self, Verb};
 use crate::paths::{self, Paths};
@@ -14,7 +14,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(name = "chibipop", version, about = "Japanese lookup engine (Wayland)")]
 struct Cli {
-    /// Use this config file; skips portable/XDG config discovery.
+    /// Use this config file. Skip portable/XDG config discovery.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -24,63 +24,65 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the daemon (the default when no subcommand is given).
+    /// Run the daemon. This is the default when no subcommand is given.
     Run,
-    /// Send one verb to the running daemon's control socket.
+    /// Send one verb to the active daemon's control socket.
     ///
-    /// The forever verb set: reload, trigger-down, trigger-up, toggle,
-    /// anki-add, screenshot, ocr-clipboard, static-region. One verb per global
-    /// action, never a scripting API (ADR-0003). Bind these in your compositor,
-    /// e.g. sway:
+    /// The forever verb set contains reload, trigger-down, trigger-up, toggle,
+    /// anki-add, screenshot, ocr-clipboard, and static-region. Each verb names
+    /// one global action. This is not an API for scripts
+    /// (ARCHITECTURE.md#input-ladders). Bind these verbs in your compositor.
+    /// For example, use these sway binds:
     ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
     ///   bindsym --no-repeat Mod4+a exec chibipop ctl anki-add
     ///   bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
     ///   bindsym --no-repeat Mod4+c exec chibipop ctl ocr-clipboard
     ///   bindsym --no-repeat Mod4+r exec chibipop ctl static-region
     Ctl { verb: String },
-    /// Open the settings window: its own process (ADR-0005), so a
-    /// settings crash can never take live-hover down.
+    /// Open the settings window in its own process
+    /// (ARCHITECTURE.md#settings-and-config). A settings crash must not stop
+    /// live hover.
     Settings,
-    /// Connect to the Wayland display, print the capability report, exit.
+    /// Connect to the Wayland display, print the capability report, and exit.
     Probe,
-    /// Grab screen regions with the capture backend and write PNGs.
+    /// Grab screen regions with the capture backend and write PNG files.
     ///
-    /// A diagnostic for whichever ADR-0002 rung this session selects,
-    /// like `probe`: lock-free, socket-free, safe beside a live daemon.
-    /// `CHIBIPOP_CAPTURE_BACKEND=portal` forces the fallback rung (and
-    /// its consent dialog) on a compositor that advertises screencopy.
-    /// Without `--region` it samples every output.
+    /// This diagnostic reports the capture rung that the session selects, like
+    /// `probe`. It uses no lock or socket, so it is safe beside an active daemon.
+    /// `CHIBIPOP_CAPTURE_BACKEND=portal` selects the fallback rung and its consent
+    /// dialog on a compositor that advertises screencopy. Without `--region`, it
+    /// samples every output.
     CaptureDump {
         /// One box in global physical pixels: `x,y,w,h`.
         #[arg(long, value_name = "X,Y,W,H")]
         region: Option<String>,
-        /// Where the PNGs go.
+        /// Directory for PNG files.
         #[arg(long, default_value = "/tmp", value_name = "DIR")]
         out: PathBuf,
-        /// Re-read the first box this many times, to watch the damage
-        /// race pace a dwell (ADR-0010).
+        /// Repeat the first box read this many times. Use it to watch the damage
+        /// race at a dwell pace (ARCHITECTURE.md#hover-cadence).
         #[arg(long, default_value_t = 0, value_name = "N")]
         dwell: u32,
-        /// Grab each output whole instead of a centred sample.
+        /// Grab each output in full instead of a centered sample.
         #[arg(long)]
         full: bool,
     },
     /// Take the clipboard selection with a known string and hold it.
     ///
-    /// The clipboard ladder's diagnostic, the role `probe` plays for the
-    /// capability report and `capture-dump` plays for the capture rungs:
-    /// lock-free, socket-free, safe beside a live daemon, and the only
-    /// way to see - rather than assume - whether this compositor lets a
-    /// focus-less daemon own the selection at all. Reads nothing: a
-    /// session with no data-control protocol prints the same refusal the
-    /// daemon does and exits non-zero.
+    /// This command checks the clipboard ladder. It has the role that `probe` has
+    /// for the capability report and `capture-dump` has for capture rungs. It uses
+    /// no lock or socket, so it is safe beside an active daemon. It is the only
+    /// way to learn whether this compositor lets a focus-less daemon own the
+    /// selection. It reads nothing. A session with no data-control protocol
+    /// prints the same refusal as the daemon and exits with a nonzero status.
     ///
-    /// It replaces whatever is currently on your clipboard.
+    /// It replaces the current clipboard selection.
+    ///
     ClipboardCheck {
-        /// What to put on the clipboard.
+        /// Text to put on the clipboard.
         #[arg(long, default_value = "chibipop clipboard check", value_name = "TEXT")]
         text: String,
-        /// Hold the selection this long so another client can read it.
+        /// Seconds to hold the selection so another client can read it.
         #[arg(long, default_value_t = 3, value_name = "SECS")]
         hold: u64,
     },
@@ -109,13 +111,13 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// The clipboard ladder's diagnostic: take the selection, hold it, say
-/// what happened.
+/// Run the clipboard ladder diagnostic. Take the selection, hold it, and
+/// report the result.
 ///
-/// Lock-free and socket-free like `probe`, and it deliberately does the
-/// real thing rather than reporting the advertised globals: whether a
-/// focus-less client may own the selection here is a fact about the
-/// compositor's data-control implementation, not about its registry.
+/// This function uses no lock or socket, like `probe`. It makes the real
+/// selection handoff instead of the advertised globals. A focus-less
+/// client can own the selection only when the compositor implements data
+/// control. The registry cannot prove this fact.
 fn clipboard_check(text: &str, hold: u64) -> Result<()> {
     let display = wayland::display_name()?;
     let conn =
@@ -123,18 +125,17 @@ fn clipboard_check(text: &str, hold: u64) -> Result<()> {
     let globals = wayland::collect_globals(&conn)?;
     println!("WAYLAND_DISPLAY={display}");
 
-    // The pump's note channel, without a pump: this is a one-shot
-    // process, so the clipboard thread's lines are drained and printed
-    // here instead of being logged there.
+    // This one-shot process has no pump. Drain the thread's notes and print
+    // them here, not in the log.
     let (notes_tx, notes) = calloop::channel::channel::<String>();
     let Some(board) = clipboard::Clipboard::bind(&globals, notes_tx)? else {
         bail!("{}", clipboard::unavailable_line());
     };
     println!("clipboard: rung {} ({})", board.rung().global(), clipboard::TEXT_MIMES[0]);
-    // The line below is what a reader waits for, so the take has to have
-    // settled before it is printed: `wl-paste` spawned the instant it
-    // appears must find a selection the compositor already knows about.
-    // A failed handover prints the thread's own account of it first.
+    // Print this line only after the compositor accepts the selection. `wl-paste`
+    // starts as soon as the line appears, so it must find a selection that the
+    // compositor already knows.
+    // A failed handoff prints the thread's own note first.
     if let Err(e) = board.set_and_settle(text) {
         while let Ok(line) = notes.try_recv() {
             println!("{line}");
@@ -143,8 +144,8 @@ fn clipboard_check(text: &str, hold: u64) -> Result<()> {
     }
     println!("clipboard: selection taken - {} character(s)", text.chars().count());
 
-    // Held on purpose: the offer only answers `send` while this process
-    // lives, so a reader (`wl-paste`) needs a window in which to ask.
+    // Keep this process alive on purpose. The offer answers `send` only while
+    // this process lives, so a reader such as `wl-paste` needs time to ask.
     std::thread::sleep(std::time::Duration::from_secs(hold));
     while let Ok(line) = notes.try_recv() {
         println!("{line}");
@@ -153,7 +154,7 @@ fn clipboard_check(text: &str, hold: u64) -> Result<()> {
     Ok(())
 }
 
-/// One verb over the socket; prints the daemon's reply.
+/// Send one verb through the socket and print the daemon's reply.
 fn ctl(paths: &Paths, verb_text: &str) -> Result<()> {
     let Some(verb) = Verb::parse(verb_text) else {
         bail!("unknown verb {verb_text:?}; expected one of {}", control::verb_list());
@@ -173,8 +174,8 @@ fn ctl(paths: &Paths, verb_text: &str) -> Result<()> {
     Ok(())
 }
 
-/// The startup capability report, on demand and without the lock: safe
-/// to run beside a live daemon.
+/// Print the startup capability report without the lock. This command can
+/// run beside an active daemon.
 fn probe() -> Result<()> {
     let display = wayland::display_name()?;
     let conn =
@@ -186,7 +187,7 @@ fn probe() -> Result<()> {
     Ok(())
 }
 
-/// The capture backend's diagnostic dump, also lock-free.
+/// Write a diagnostic dump from the capture backend without the lock.
 fn capture_dump(
     paths: &Paths,
     region: Option<&str>,

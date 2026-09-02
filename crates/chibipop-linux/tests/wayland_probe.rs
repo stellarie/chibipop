@@ -1,8 +1,9 @@
-//! Against the real compositor, when there is one.
+//! Tests against the real compositor, when a compositor exists.
 //!
-//! CI is headless (ADR-0007): every test here skips without
-//! `WAYLAND_DISPLAY`, so the gate stays compositor-free while a dev box
-//! still exercises the real connect path on `cargo test`.
+//! CI runs headless (ARCHITECTURE.md#packaging-and-ci). Each test here
+//! skips when `WAYLAND_DISPLAY` is unset. The gate therefore needs no
+//! compositor. A development machine still exercises the real connect
+//! path on `cargo test`.
 #![cfg(target_os = "linux")]
 
 /// The real chibipop binary.
@@ -29,8 +30,8 @@ fn probe_reports_the_core_globals_on_a_live_compositor() {
     assert!(stdout.contains("globals advertised"), "{stdout}");
 }
 
-/// `probe` must not take the instance lock or the socket: it runs beside
-/// a live daemon by design.
+/// `probe` must not take the instance lock or the socket. The design
+/// runs `probe` beside a live daemon.
 #[test]
 fn probe_leaves_no_lock_or_socket_behind() {
     if skip() {

@@ -1,41 +1,39 @@
-//! The wlr-screencopy capture backend: ADR-0002's primary Linux
-//! `RegionCapture`.
+//! The wlr-screencopy capture backend is the primary Linux
+//! `RegionCapture` described in `ARCHITECTURE.md#capture-and-masking`.
 //!
-//! It is the only protocol with compositor-side *region* capture and it
-//! prompts for nothing, so on Hyprland/sway/niri a hover works the
-//! instant the daemon starts. Selection is by advertised global
-//! (`available`), never by compositor identity: absence is a rung that
-//! is not there, and the ladder moves on.
+//! This is the only protocol here that captures a region through the
+//! compositor. It needs no prompt, so a hover works as soon as the daemon
+//! starts on Hyprland, sway, or niri. Selection uses the advertised global
+//! from `available`, never the compositor identity. If a capability is
+//! absent, the ladder skips that rung.
 //!
-//! **Shape.** Pull-shaped, as the trait demands: `grab` answers with
-//! the most recent content of the box and never waits for damage. A
-//! plain `copy` is what a changed region gets; a region asked for twice
-//! is a dwell, and dwells run the damage race in [`pacing`] instead -
-//! whose timeout is not a failure but the answer *nothing changed*,
-//! handed up as `Frame::unchanged` so the pipeline can skip an OCR pass
-//! it has already paid for (ADR-0010's dwell re-check).
+//! **Shape.** This backend follows the pull shape of `RegionCapture`.
+//! `grab` returns the newest content for the box and never waits for
+//! damage. The backend uses a plain `copy` for a changed region. A repeated region
+//! is a dwell. [`pacing`] runs the damage race for a dwell. Its timeout
+//! means that nothing changed, not a failure. The backend reports this
+//! as `Frame::unchanged`, so the pipeline skips an OCR pass it already
+//! paid for. This is the dwell re-check.
 //!
-//! **Threading.** Thread-affine by construction: the connection, the
-//! queue, the loop and the shm pools are all made in `open`, which the
-//! core Worker runs on its own thread. The daemon's queue is never
-//! touched, so a copy can never stall cursor events and two threads
-//! never dispatch one queue.
+//! **Threading.** `open` creates the connection, queue, event loop, and
+//! shm pools. The core Worker runs them on its own thread.
+//! This backend does not touch the daemon queue. A copy therefore cannot
+//! delay cursor events, and two threads never dispatch one queue.
 //!
-//! **Layers.** [`geometry`] decides which output and which box (three
-//! coordinate spaces, all pure arithmetic), [`crop`] moves the pixels,
-//! [`pacing`] decides plain-copy versus race, [`session`] owns the
-//! Wayland plumbing, [`shm`] the buffers. Only this file needs all
-//! five, and only this file blocks.
+//! **Layers.** [`geometry`] selects each output and box with pure
+//! arithmetic across three coordinate spaces. [`crop`] moves pixels.
+//! [`pacing`] selects a plain copy or a damage race. [`session`] owns
+//! Wayland protocol objects, and [`shm`] owns buffers. This file uses all five
+//! modules and is the only one that blocks.
 //!
-//! **The other rung.** [`backend`] is the ladder itself: which of
-//! ADR-0002's two backends this session gets, by advertised
-//! capability. [`portal`] is rung 2, the xdg-desktop-portal ScreenCast
-//! + PipeWire fallback for the compositors with no screencopy at all.
+//! **The other rung.** [`backend`] selects one of two backends from the
+//! advertised capability. [`portal`] is rung 2, the xdg-desktop-portal
+//! ScreenCast + PipeWire fallback for compositors without screencopy.
 //!
-//! **What no rung can do.** [`software_cursor`] is the one cursor fact
-//! that is not a request: a compositor drawing a software pointer into
-//! its framebuffer hands it to every backend here, so that condition is
-//! detected and said out loud rather than silently OCR'd (ticket 52).
+//! **What no rung can do.** [`software_cursor`] detects and reports the
+//! cursor fact that no request can change. A compositor can draw a
+//! software pointer into its framebuffer for every backend. [`software_cursor`]
+//! reports that condition and does not send the pointer to OCR.
 
 pub mod backend;
 pub mod crop;
@@ -64,60 +62,57 @@ use wayland_client::Connection;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
-/// What `Frame::source` says: the rung, for logs and `probe`.
+/// The value for `Frame::source`: the rung name used by logs and `probe`.
 pub const SOURCE: &str = "wlr-screencopy";
 
-/// Pixels held for one region, so an unchanged grab has something
-/// honest to answer with.
+/// The backend holds pixels for one region. An unchanged grab can then return them.
 struct Held {
     region: PhysRect,
     buf: Vec<u8>,
 }
 
-/// Advertised globals enough for this rung.
+/// Return whether the advertised globals support this rung.
 pub fn available(globals: &[Advertised]) -> bool {
     session::available(globals)
 }
 
-/// What opening a capture backend *outside* the Worker needs.
+/// Inputs to open a capture backend outside the Worker.
 ///
-/// Deliberately not [`crate::worker::Setup`]: that one carries the
-/// dictionary path and no state dir, and a one-shot grab opens no
-/// dictionary. What the two share is the only two inputs ADR-0002's
-/// ladder has: what this session advertises, and which rung it picked.
-/// Both are read from the same startup probe, so neither re-runs
-/// [`backend::select`] behind the daemon's back.
+/// This is not [`crate::worker::Setup`]. That type carries a dictionary path
+/// but no state directory. A one-shot grab opens no dictionary. Both types
+/// share the ladder's two inputs: the advertised session globals and the
+/// selected rung. The same startup probe supplies both, so neither path calls
+/// [`backend::select`] again behind the daemon.
 #[derive(Debug, Clone)]
 pub struct Setup {
-    /// The startup capability probe.
+    /// Globals from the startup capability probe.
     pub globals: Vec<Advertised>,
-    /// Which rung the ladder picked (ADR-0002). `None` is a session
-    /// with no capture protocol at all, which is a state and not a
-    /// crash.
+    /// The rung selected by the ladder. `None` means no capture protocol is available.
+    /// This is a state, not a crash.
     pub backend: Option<Backend>,
-    /// Where the portal rung's restore token lives, so a second
-    /// session on rung 2 is silent instead of prompting again.
+    /// Directory that stores the portal rung's restore token. A second session on rung 2
+    /// can then avoid another prompt.
     pub state_dir: PathBuf,
 }
 
-/// A backend and the output layout it reads through.
+/// A backend and the output layout that it reads.
 pub struct Opened {
     pub backend: Box<dyn RegionCapture>,
-    /// The outputs, in the cursor channel's convention: what a caller
-    /// with no explicit box has to pick one from.
+    /// Outputs in the cursor channel's convention. A caller without an explicit box
+    /// chooses from this list.
     pub outputs: Vec<OutputGeometry>,
 }
 
-/// Open the rung the ladder picked, on the calling thread.
+/// Open the rung that the ladder selected on the caller's thread.
 ///
-/// The Worker's backend is thread-affine by construction (see the
-/// module doc), so nothing outside the Worker may borrow it: everything
-/// else opens its own here. Both rungs are reachable, which is the
-/// whole reason this is not a `grim` shell-out (spec D2).
+/// The Worker's backend is thread-affine by construction. See the module doc.
+/// Code outside the Worker cannot borrow it, so each other caller opens its own
+/// backend. The caller can reach both rungs. This is why this code is not a `grim`
+/// shell-out.
 ///
-/// `log` carries the portal rung's consent steps, which are the only
-/// part of an open a user ever needs to see. The screencopy rung says
-/// nothing: it prompts for nothing.
+/// `log` carries consent steps from the portal rung. These are the only open
+/// steps that a user needs to see. The screencopy rung emits no log because it
+/// needs no prompt.
 pub fn open(setup: &Setup, log: &mut dyn FnMut(&str)) -> Result<Opened> {
     match setup.backend {
         Some(Backend::WlrScreencopy) => {
@@ -145,14 +140,13 @@ pub fn open(setup: &Setup, log: &mut dyn FnMut(&str)) -> Result<Opened> {
             ));
             Ok(Opened { backend: Box::new(portal::PortalCapture::new(session)), outputs })
         }
-        // ADR-0002: an absent rung is a rung the ladder skips, and a
-        // ladder with no rungs left is a named state.
+        // The ladder skips an absent rung. A ladder with no rung left is a named state.
         None => anyhow::bail!("this compositor advertises no capture protocol chibipop can use"),
     }
 }
 
-/// One whole read - bracket included, exactly as the Worker reads - so
-/// the pacing a caller sees is the pacing a hover gets.
+/// Read one complete region with the bracket that the Worker uses.
+/// This gives a caller the same hover cadence.
 pub fn read(backend: &mut dyn RegionCapture, region: PhysRect) -> Result<Frame> {
     anyhow::ensure!(
         region.w > 0 && region.h > 0,
@@ -177,14 +171,13 @@ pub fn read(backend: &mut dyn RegionCapture, region: PhysRect) -> Result<Frame> 
     Ok(frame)
 }
 
-/// One arbitrary-rect grab with a backend of its own (spec D6).
+/// Grab one arbitrary rect with a separate backend.
 ///
-/// **The caller owns the thread.** This blocks - a screencopy round
-/// trip, or a whole portal handshake on rung 2 - so the daemon must
-/// never call it on the calloop pump. The shape it is written for is
-/// `spawn_anki`'s: clone a [`Setup`], move it into a
-/// `std::thread::Builder::spawn`, and answer the pump over a
-/// `calloop::channel` the way an AnkiConnect call answers it.
+/// **The caller owns the thread.** This function blocks on a screencopy
+/// roundtrip or a portal handshake on rung 2. The daemon must not call it on
+/// the calloop pump. The intended caller is `spawn_anki`: clone a [`Setup`],
+/// move it into a `std::thread::Builder::spawn`, and answer the pump through a
+/// `calloop::channel`, as an AnkiConnect call does.
 ///
 /// ```ignore
 /// let setup = self.capture_setup();
@@ -194,50 +187,49 @@ pub fn read(backend: &mut dyn RegionCapture, region: PhysRect) -> Result<Frame> 
 /// })?;
 /// ```
 ///
-/// A backend per grab rather than a shared one is the point: the
-/// Worker's is thread-affine and a second reader on it would have two
-/// threads dispatching one queue.
+/// A separate backend per grab prevents shared access. The Worker's backend is
+/// thread-affine, so a second reader makes two threads dispatch one queue.
 pub fn oneshot(setup: &Setup, region: PhysRect) -> Result<Frame> {
-    // A one-shot has nowhere to put the portal's consent chatter: the
-    // log lives on the pump thread, and this function may be running on
-    // a thread of its own. A refusal still travels, as the error.
+    // A one-shot has no place for portal consent output. The log lives on the pump
+    // thread, but this function can run on another thread. A refusal still reaches
+    // the caller as an error.
     let mut opened = open(setup, &mut |_| {})?;
     read(opened.backend.as_mut(), region)
 }
 
-/// wlr-screencopy region capture, on this thread's own connection.
+/// wlr-screencopy region capture on the caller's own connection.
 pub struct WlrScreencopy {
     conn: Connection,
     events: EventLoop<'static, State>,
     session: Session,
     st: State,
     manager: ZwlrScreencopyManagerV1,
-    /// `copy_with_damage` exists (screencopy v2+).
+    /// `copy_with_damage` exists in screencopy v2 and later.
     damage_capable: bool,
-    /// `buffer_done` exists (screencopy v3).
+    /// `buffer_done` exists in screencopy v3.
     sends_buffer_done: bool,
     copy_pool: shm::Pool,
     watch_pool: shm::Pool,
-    /// The damage race in flight between reads, if any.
+    /// Damage race that runs between reads, if present.
     watch_frame: Option<ZwlrScreencopyFrameV1>,
     pacer: Pacer,
-    /// This read's pixels, and the previous read's: two generations, so
-    /// one read's tiles cannot evict each other.
+    /// The backend holds pixels for this read and the prior read. Two generations
+    /// keep tiles from one read separate from tiles in the other.
     held: Vec<Held>,
     previous: Vec<Held>,
-    /// Reused across grabs; a hover must not allocate to think.
+    /// Reused across grabs. A hover must not allocate to decide.
     pieces: Vec<Piece>,
     geoms: Vec<OutputGeometry>,
     bytes: Vec<u8>,
-    /// A missing damage race is said once, not once per grab.
+    /// Report an absent damage race once, not once per grab.
     said_no_race: bool,
 }
 
 impl WlrScreencopy {
-    /// Bind the backend on the calling thread.
+    /// Bind the backend on the caller's thread.
     ///
-    /// `globals` is the daemon's startup probe: this rung is chosen
-    /// from what the compositor advertises and nothing else.
+    /// `globals` is the daemon's startup probe. The selected rung comes from
+    /// advertised compositor capabilities and nothing else.
     pub fn open(globals: &[Advertised]) -> Result<WlrScreencopy> {
         let bound = session::bind(globals)?;
         let damage_capable = bound.damage_capable();
@@ -272,16 +264,16 @@ impl WlrScreencopy {
         })
     }
 
-    /// How many outputs the backend knows; for the dump hook.
+    /// Return the number of outputs known to the backend for the dump hook.
     pub fn outputs(&self) -> Vec<OutputGeometry> {
         self.st.outputs.iter().map(|o| o.geom).collect()
     }
 
-    /// Dispatch until `done`, or until `deadline`. Never longer.
+    /// Dispatch until `done` returns true or `deadline` arrives. Do not dispatch
+    /// after the deadline.
     ///
-    /// This is the whole never-block contract in one place: every wait
-    /// in this backend has a deadline, so no compositor behaviour -
-    /// silence included - can hang a lookup.
+    /// Every wait in this backend has a deadline. Compositor silence cannot block
+    /// a lookup.
     fn pump(&mut self, deadline: Instant, done: impl Fn(&State) -> bool) -> Result<()> {
         self.conn.flush().context("flushing the capture connection")?;
         while !done(&self.st) {
@@ -296,7 +288,7 @@ impl WlrScreencopy {
         Ok(())
     }
 
-    /// Pixels held for `region`, promoted into this read.
+    /// Return pixels held for `region` and promote them into this read.
     fn take_held(&mut self, region: PhysRect) -> Option<&[u8]> {
         if let Some(i) = self.held.iter().position(|h| h.region == region) {
             return Some(&self.held[i].buf);
@@ -307,7 +299,7 @@ impl WlrScreencopy {
         self.held.last().map(|h| h.buf.as_slice())
     }
 
-    /// Keep these pixels for the next read.
+    /// Keep the pixels for the next read.
     fn hold(&mut self, region: PhysRect, buf: &[u8]) {
         match self.held.iter_mut().find(|h| h.region == region) {
             Some(slot) => {
@@ -318,10 +310,10 @@ impl WlrScreencopy {
         }
     }
 
-    /// Settle the damage race: did anything change?
+    /// Settle the damage race and report whether the screen changed.
     ///
-    /// No race in flight means no evidence, and no evidence means
-    /// copy - never a stale answer.
+    /// If no race is active, there is no evidence. Copy the region instead.
+    /// Do not return stale pixels.
     fn settle(&mut self) -> Result<Verdict> {
         let Some(frame) = self.watch_frame.clone() else {
             self.pacer.disarmed();
@@ -329,9 +321,8 @@ impl WlrScreencopy {
         };
         self.pump(Instant::now() + DWELL_DEADLINE, |st| st.watch.outcome.is_some())?;
         if self.st.watch.outcome.is_none() {
-            // The deadline won: nothing has damaged the watched box, so
-            // the pixels we hold are still the screen's. The race stays
-            // in flight, which is why a static dwell costs no copies.
+            // The deadline won. No damage reached the watched box, so the held pixels
+            // still match the screen. Keep the race active. A static dwell then needs no copies.
             return Ok(Verdict::Static);
         }
         frame.destroy();
@@ -340,13 +331,13 @@ impl WlrScreencopy {
         Ok(Verdict::Damaged)
     }
 
-    /// Arm a damage race on `watch` for the next read to settle.
+    /// Arm a damage race on `watch` for the next read.
     fn arm(&mut self, watch: PhysRect) -> Result<()> {
         anyhow::ensure!(self.damage_capable, "this compositor's screencopy has no copy_with_damage");
         self.st.geometries(&mut self.geoms);
         geometry::split(&self.geoms, watch, &mut self.pieces);
-        // One race, one output: a box spanning two outputs has two
-        // damage streams, and a single verdict could not honour both.
+        // Use one race for one output. A box across two outputs has two damage
+        // streams, so one verdict cannot cover both.
         anyhow::ensure!(self.pieces.len() == 1, "the watched box spans {} outputs", self.pieces.len());
         let piece = self.pieces[0];
         let output = self.st.outputs[piece.output].output.clone();
@@ -375,18 +366,17 @@ impl WlrScreencopy {
         }
     }
 
-    /// Drop the race in flight, if any.
+    /// Drop the active damage race, if one exists.
     fn disarm(&mut self) {
         if let Some(frame) = self.watch_frame.take() {
-            // Destroying before the next copy request is what keeps a
-            // retired race from writing into a buffer the next grab is
-            // reading: the compositor handles our requests in order.
+            // Destroy the old race before the next copy request. The old race then cannot
+            // write to a buffer that the next grab reads. The compositor handles requests
+            // in order.
             frame.destroy();
         }
     }
 
-    /// Wait for the buffer enumeration a frame opens with, no longer
-    /// than `deadline` allows.
+    /// Wait for a frame's buffer enumeration for no more than `within`.
     fn enumerate(&mut self, slot: Slot, within: Duration) -> Result<session::Shape> {
         let buffer_done = self.sends_buffer_done;
         self.pump(Instant::now() + within, move |st| {
@@ -402,7 +392,7 @@ impl WlrScreencopy {
         })
     }
 
-    /// Copy `region` fresh, over however many outputs it covers.
+    /// Copy `region` from every output that it covers.
     fn copy_region(&mut self, region: PhysRect) -> Result<Vec<u8>> {
         self.st.geometries(&mut self.geoms);
         geometry::split(&self.geoms, region, &mut self.pieces);
@@ -416,9 +406,8 @@ impl WlrScreencopy {
         );
         let len = i64::from(region.w) * i64::from(region.h) * 4;
         let len = usize::try_from(len).with_context(|| format!("a {}x{} region", region.w, region.h))?;
-        // Black where no output reaches: off-screen has no pixels, and
-        // blank costs one hover nothing where failing costs every hover
-        // near an edge.
+        // Fill areas outside outputs with black. Off-screen areas have no pixels.
+        // Blank pixels cost nothing for one hover, but a failed grab costs every edge hover.
         let mut out = vec![0u8; len];
         for i in 0..self.pieces.len() {
             let piece = self.pieces[i];
@@ -427,13 +416,13 @@ impl WlrScreencopy {
         Ok(out)
     }
 
-    /// One output's share of one region.
+    /// Copy one output's share of a region.
     fn copy_piece(&mut self, piece: Piece, region: PhysRect, out: &mut [u8]) -> Result<()> {
         let output = self.st.outputs[piece.output].output.clone();
         self.st.copy = session::FrameSlot::default();
         let frame = self.session.capture(&self.manager, &output, piece.logical, Slot::Copy);
         let copied = self.copy_into(&frame, piece, region, out);
-        // Single-use by protocol: ready or failed, it is spent.
+        // The protocol allows one use. A ready or failed frame is spent.
         frame.destroy();
         copied
     }
@@ -468,15 +457,13 @@ impl WlrScreencopy {
         match self.st.copy.outcome {
             Some(Outcome::Ready) => {}
             Some(Outcome::Failed) => anyhow::bail!("the compositor failed the copy"),
-            // The protocol leaves no third answer: `copy` is followed by
-            // `flags` and `ready`, or by `failed`
-            // (wlr-screencopy-unstable-v1, the `copy` request). Silence is
-            // neither, and it is what a compositor does for an output it is
-            // not repainting - measured on Hyprland 0.55.4 with the display
-            // DPMS-off, where the very grab that answers in 2 ms awake is
-            // still unanswered at 10 s. So the refusal names that condition
-            // rather than the timer, which is already 85x the cost of a copy
-            // this compositor does answer.
+            // The protocol has no third answer. `copy` is followed by `flags` and
+            // `ready`, or by `failed` (`wlr-screencopy-unstable-v1`, the `copy`
+            // request). Silence means neither answer. A compositor shows this
+            // behavior for an output that it does not repaint. Hyprland 0.55.4
+            // left a DPMS-off display unanswered, although the same awake
+            // display answered in 2 ms. `COPY_DEADLINE` is 400 ms. Report that
+            // condition, not the timer.
             None => anyhow::bail!(
                 "the copy went unanswered for {COPY_DEADLINE:?}: the compositor owes ready \
                  or failed and sent neither, which is what an output nothing is repainting \
@@ -537,16 +524,16 @@ impl RegionCapture for WlrScreencopy {
         geometry::bounds_containing(&geoms, p)
     }
 
-    /// Open a read: this read's pacing verdict is not in yet, and last
-    /// read's pixels become the generation a dwell may reuse.
+    /// Start a read. Clear the prior pacing verdict and move its pixels into the
+    /// generation that a dwell can reuse.
     fn begin_read(&mut self) {
         self.pacer.begin_read();
         self.previous = std::mem::take(&mut self.held);
     }
 
-    /// Close a read: leave a damage race watching exactly what this
-    /// read looked at, so the next one can tell static from changed
-    /// without copying anything.
+    /// End a read. Leave a damage race that watches exactly the read's regions.
+    /// The next read can then distinguish static content from changed content
+    /// without another copy.
     fn end_read(&mut self) {
         match self.pacer.end_read(self.watch_frame.is_some()) {
             Arm::Keep => {}
@@ -589,7 +576,7 @@ mod tests {
         assert!(!available(&[advertised("wl_shm"), advertised("wl_output")]));
     }
 
-    /// Absence must fall through the ladder, not crash it (ADR-0002).
+    /// The ladder must skip an absent global without a panic.
     #[test]
     fn opening_without_the_global_is_an_error_not_a_panic() {
         let Err(err) = WlrScreencopy::open(&[advertised("wl_compositor")]) else {

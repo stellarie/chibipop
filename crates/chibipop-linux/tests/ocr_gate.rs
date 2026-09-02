@@ -1,25 +1,25 @@
-//! ADR-0009's standing quality gate for the Linux OCR engine.
+//! Run the Linux OCR quality gate (ARCHITECTURE.md#ocr-engine).
 //!
-//! The 152-crop ground-truthed corpus under `tests/fixtures/ocr-corpus/`
-//! is the same one the Python benchmark harness (`tools/ocr-bench/`)
-//! measured every candidate engine on, manifest and all. This runs the
-//! ported pipeline over it and holds the result to two things at once:
+//! The corpus has verified results for 152 crops under
+//! `tests/fixtures/ocr-corpus/`. It is the same corpus that the Python
+//! benchmark harness (`tools/ocr-bench/`) used to measure every candidate
+//! engine. This test runs the ported pipeline on the full manifest and checks
+//! two conditions:
 //!
-//! - **Absolute floors**, from the ADR: horizontal CER <= 5 % with
-//!   hit-scan >= 90 %, vertical CER <= 20 % with hit-scan >= 75 %.
-//! - **Parity** with the harness's 1x numbers to within +-3 pp, so a
-//!   silent drift in the port - a resize rounding rule, an overlap
-//!   threshold, an ONNX Runtime upgrade - reds the gate even while the
-//!   absolute floors still hold.
+//! - **Absolute floors** (ARCHITECTURE.md#ocr-engine): horizontal CER <= 5 %
+//!   with hit-scan >= 90 %, vertical CER <= 20 % with hit-scan >= 75 %.
+//! - **Parity** with the harness's 1x values within +-3 pp. A resize rule, an
+//!   overlap threshold, or an ONNX Runtime upgrade can cause silent drift. The
+//!   gate catches that drift even when the absolute floors still pass.
 //!
-//! Every metric below is computed the way `bench/common.py` computes it,
-//! down to picking the *smallest* box containing the cursor point and
-//! scoring masked crops after dropping predictions that touch the mask.
-//! A metric that drifts from the harness makes the parity band meaningless.
+//! Each metric uses the method from `bench/common.py`. It selects the *smallest*
+//! box that contains the cursor point. It drops predictions that touch the mask
+//! before it scores masked crops. A metric that differs from the harness makes
+//! the parity band meaningless.
 //!
-//! Latency is asserted only as a generous ceiling: runners vary, and the
-//! product bar (warm p50 <= 100 ms on developer hardware) is not something
-//! a shared CI machine can speak to.
+//! The gate checks latency only against a generous ceiling. Runner speed differs.
+//! A shared CI machine cannot represent the product bar of warm p50 <= 100 ms
+//! on developer hardware.
 #![cfg(target_os = "linux")]
 
 use chibipop::text::layout::OcrLine;
@@ -33,33 +33,34 @@ use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------- reference
 //
-// Measured by `python -m bench.run_one --config meiki` on 2026-08-23 and
-// stored in `tools/ocr-bench/results/meiki.json`; the aggregation below is
-// `bench/report.py`'s (CER averaged per crop, hit-scan pooled over
-// characters). Quoted in docs/research/ocr-benchmark-results.md and
-// ADR-0009. These are the 1x numbers - ADR-0009's amendment made 1x the
-// only thing the Linux adapter feeds.
+// The benchmark measured these values with `python -m bench.run_one --config meiki`
+// on 2026-08-23 and stored them in `tools/ocr-bench/results/meiki.json`.
+// The aggregation below follows `bench/report.py`: it averages CER per crop and
+// pools hit-scan over characters. The values appear in
+// `docs/research/ocr-benchmark-results.md`. These are 1x values. The Linux
+// adapter uses 1x in production.
 
-/// Slices `smoke`, `horizontal`, `mixed` and `small` at 1x: 7 crops.
+/// Reference CER for the `smoke`, `horizontal`, `mixed`, and `small` slices at
+/// 1x. The set has 7 crops.
 const REF_HORIZONTAL_CER: f64 = 0.0181;
-/// 116 of 122 characters.
+/// The harness hit 116 of 122 characters.
 const REF_HORIZONTAL_HIT: f64 = 0.9508;
-/// The `vertical` slice at 1x: one 16-glyph column.
+/// Reference CER for the `vertical` slice at 1x. The slice has one 16-glyph
+/// column.
 const REF_VERTICAL_CER: f64 = 0.1250;
-/// 13 of 16 characters.
+/// The harness hit 13 of 16 characters.
 const REF_VERTICAL_HIT: f64 = 0.8125;
-/// All 136 ADR-0008 masked variants, scored after dropping predictions
-/// whose boxes touch the mask - what chibipop's layout actually keeps.
+/// Reference CER for all 136 masked variants. Drop predictions whose boxes
+/// touch the mask before score comparison, as chibipop's layout does.
 const REF_MASKED_CER_DROPPED: f64 = 0.1410;
-/// 1435 of 1542 characters.
+/// The harness hit 1435 of 1542 characters.
 const REF_MASKED_HIT: f64 = 0.9306;
 
-/// The band the port must stay inside, in proportion (3 pp).
+/// The allowed difference from the port to the reference, as a proportion.
 ///
-/// Worth knowing when this trips: the vertical slice is a single 16-glyph
-/// crop, so its CER moves in 6.25 pp steps. Vertical parity is therefore an
-/// exact-match assertion in practice, which is the point - ADR-0009 asks
-/// for the vertical slice to be re-measured on any upstream model change.
+/// The vertical slice has one 16-glyph crop. Its CER changes in 6.25 pp steps.
+/// Therefore, vertical parity requires an exact result in practice. Re-measure
+/// the vertical slice after every upstream model change.
 const PARITY_BAND: f64 = 0.03;
 
 // -------------------------------------------------------------------- gate
@@ -68,15 +69,14 @@ const HORIZONTAL_CER_CEILING: f64 = 0.05;
 const HORIZONTAL_HIT_FLOOR: f64 = 0.90;
 const VERTICAL_CER_CEILING: f64 = 0.20;
 const VERTICAL_HIT_FLOOR: f64 = 0.75;
-/// Generous on purpose. This catches a pathological regression, not a slow
-/// runner: measured 20.8 ms release and 37 ms debug on developer hardware,
-/// then 88.0, 129.3 and 132.5 ms across three debug runs on ubuntu-24.04.
-/// The runner class alone swings by half again between runs, which is
-/// exactly why the product bar (warm p50 <= 100 ms on developer hardware)
-/// is not asserted here.
+/// Set a generous limit. This catches a severe regression, not a slow runner.
+/// Release measured 20.8 ms and debug measured 37 ms on developer hardware.
+/// Three debug runs on ubuntu-24.04 measured 88.0, 129.3, and 132.5 ms.
+/// Runner class alone changes the result by about half. The product bar
+/// (warm p50 <= 100 ms on developer hardware) does not apply here.
 const LATENCY_P50_CEILING_MS: f64 = 250.0;
 
-/// Slices that are not the vertical one. ADR-0009 gates them together.
+/// The non-vertical slices that the gate scores together.
 const HORIZONTAL_SLICES: [&str; 4] = ["smoke", "horizontal", "mixed", "small"];
 
 // ------------------------------------------------------------------ corpus
@@ -112,8 +112,8 @@ fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr-corpus")
 }
 
-/// The PNG as the capture layer would hand it over: tightly packed BGRA,
-/// top-down, alpha junk. Every corpus crop is 8-bit RGB.
+/// Convert a PNG to the capture layer's input: tightly packed, top-down BGRA
+/// with unused alpha. Every corpus crop uses 8-bit RGB.
 fn load_bgra(path: &Path) -> (Vec<u8>, i32, i32) {
     let file = std::io::BufReader::new(std::fs::File::open(path).expect("opening a corpus crop"));
     let decoder = png::Decoder::new(file);
@@ -183,9 +183,9 @@ fn load_corpus() -> Vec<Crop> {
 
 // ------------------------------------------------------------------ metrics
 //
-// `bench/common.py`, transcribed. The hyphen rule is chibipop's own
-// `layout.rs normalise()`; NFKC and whitespace-stripping are the benchmark
-// protocol from docs/research/linux-japanese-ocr.md.
+// This code follows `bench/common.py`. The hyphen rule comes from chibipop's
+// `layout.rs normalise()`. NFKC and whitespace removal come from the benchmark
+// protocol in `docs/research/linux-japanese-ocr.md`.
 
 fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
@@ -205,8 +205,8 @@ fn normalise(text: &str) -> String {
     out
 }
 
-/// Edit distance in characters - the sum of the substitutions, deletions
-/// and insertions the harness reports separately.
+/// Return edit distance in characters. The harness counts substitutions, deletions,
+/// and insertions as parts of this distance.
 fn edit_distance(gt: &[char], pred: &[char]) -> usize {
     let mut prev: Vec<usize> = (0..=pred.len()).collect();
     let mut cur = vec![0usize; pred.len() + 1];
@@ -233,7 +233,7 @@ fn cer(gt: &str, pred: &str) -> f64 {
     edit_distance(&g, &p) as f64 / g.len() as f64
 }
 
-/// One predicted chunk, in crop pixels - the harness's `Box`.
+/// A predicted chunk in crop pixels. This matches the harness's `Box`.
 struct PredBox {
     text: String,
     x: f64,
@@ -257,8 +257,8 @@ impl PredBox {
     }
 }
 
-/// Flattens engine output into the harness's two views: reading-order text
-/// and the per-chunk boxes hit-scan resolves against.
+/// Convert engine output into the two views that the harness uses: text in line
+/// order and per-chunk boxes for `hit_scan`.
 fn flatten(lines: &[OcrLine]) -> (String, Vec<PredBox>) {
     let mut text = String::new();
     let mut boxes = Vec::new();
@@ -277,13 +277,12 @@ fn flatten(lines: &[OcrLine]) -> (String, Vec<PredBox>) {
     (text, boxes)
 }
 
-/// The cursor at every ground-truth character centre. A hit is the
-/// *smallest* box containing that point carrying that character.
+/// Check the cursor at each ground-truth character centre. A hit is the *smallest*
+/// box that contains that point and carries that character.
 ///
-/// An engine that returned no geometry at all scores neither hits nor
-/// misses - it leaves the pool, exactly as the harness treats a
-/// geometry-less engine. Counting its characters as misses would quietly
-/// change the denominator and make the parity band meaningless.
+/// If an engine returns no geometry, score neither hits nor misses. Leave those
+/// characters out of the pool, as the harness does. Do not count them as misses.
+/// That would change the denominator and make the parity band meaningless.
 fn hit_scan(chars: &[GtChar], boxes: &[PredBox]) -> (u32, u32) {
     if boxes.is_empty() {
         return (0, 0);
@@ -292,7 +291,7 @@ fn hit_scan(chars: &[GtChar], boxes: &[PredBox]) -> (u32, u32) {
     for ch in chars {
         let want = normalise(&ch.c);
         if want.is_empty() {
-            continue; // whitespace ground truth is not hoverable
+            continue; // Ignore whitespace because it has no hover target.
         }
         total += 1;
         let (px, py) = (ch.x + ch.w / 2.0, ch.y + ch.h / 2.0);
@@ -367,10 +366,10 @@ fn run() -> Report {
         let crop_cer = cer(&gt, &pred);
         let (hits, total) = hit_scan(&crop.chars, &boxes);
 
-        // The harness's production-equivalent score for a masked crop:
-        // chibipop's layout drops words whose rects touch the mask
-        // (ADR-0008 "the mask boundary is a capture edge"), so boundary
-        // garbage with honest geometry never reaches the lookup.
+        // Use the harness score for a masked crop.
+        // chibipop's layout drops words whose rects touch the mask.
+        // (ARCHITECTURE.md#capture-and-masking) calls the mask boundary a capture edge.
+        // Boundary garbage with valid geometry therefore does not reach the lookup.
         let mut cer_dropped = crop_cer;
         if let Some(mask) = &crop.mask {
             if mask.pos != "outside" && !boxes.is_empty() {
@@ -391,8 +390,8 @@ fn run() -> Report {
         } else {
             &mut horizontal
         };
-        // Only 1x feeds the parity aggregates; the masked variants are all
-        // 2x renders and are gated on their own numbers.
+        // Add only 1x crops to parity totals. Score masked variants with their own totals.
+        // All masked variants use 2x renders.
         if crop.mask.is_some() || crop.scale == 1 {
             bucket.crops += 1;
             bucket.cer_sum += crop_cer;
@@ -414,8 +413,8 @@ fn run() -> Report {
         }
     }
 
-    // Warm p50 on the representative horizontal crop, the same one the
-    // harness times as `j1_1x`.
+    // Measure warm p50 on the representative horizontal crop. The harness calls this
+    // crop `j1_1x`.
     let bench = corpus.iter().find(|c| c.id == "j1_1x").expect("j1_1x");
     for _ in 0..3 {
         engine.recognise(&bench.pixels, bench.pw, bench.ph).expect("warm-up");
@@ -522,17 +521,17 @@ fn vertical_accuracy_matches_the_python_harness() {
     near(REPORT.vertical.hit(), REF_VERTICAL_HIT, "vertical hit-scan");
 }
 
-/// ADR-0008's masked sweep, the robustness half of ticket 31: the engine
-/// must not fall apart when part of the crop is painted over, once the
-/// boundary words chibipop already discards are discarded.
+/// Check the masked sweep, the robustness part of this gate. The engine must keep
+/// its quality when a mask covers part of a crop. The layout already drops
+/// boundary words.
 #[test]
 fn masked_crops_match_the_python_harness() {
     near(REPORT.masked.cer_dropped(), REF_MASKED_CER_DROPPED, "masked CER after dropping clipped words");
     near(REPORT.masked.hit(), REF_MASKED_HIT, "masked hit-scan");
 }
 
-/// The sparse fixture is the cursor-at-crop-edge case that eliminated
-/// PP-OCRv5 (ADR-0009): three glyphs, nothing else in the frame.
+/// Check the sparse fixture at the cursor and crop edge. This case eliminated
+/// PP-OCRv5. The frame contains only three glyphs.
 #[test]
 fn the_sparse_fixture_is_read_exactly() {
     assert_eq!(REPORT.smoke_gt, REPORT.smoke_pred, "the three-glyph smoke crop must come back verbatim{}", REPORT.table);
@@ -540,8 +539,8 @@ fn the_sparse_fixture_is_read_exactly() {
     assert_eq!(smoke.hits, smoke.total, "every smoke glyph must be hoverable{}", REPORT.table);
 }
 
-/// A ceiling, not a measurement: runners vary by an order of magnitude and
-/// the product bar lives on developer hardware.
+/// Apply a ceiling, not a measurement. Runner speed varies by an order of
+/// magnitude. The product bar applies only to developer hardware.
 #[test]
 fn one_crop_stays_under_the_ci_latency_ceiling() {
     assert!(
@@ -552,7 +551,7 @@ fn one_crop_stays_under_the_ci_latency_ceiling() {
     );
 }
 
-/// Prints the measured-vs-reference table. Run with `-- --nocapture`.
+/// Print the measured and reference table. Run with `-- --nocapture`.
 #[test]
 fn the_gate_covers_every_slice_of_the_committed_corpus() {
     print!("{}", REPORT.table);

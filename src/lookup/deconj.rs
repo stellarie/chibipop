@@ -1,15 +1,16 @@
-//! Rule-based deconjugation: a BFS fixpoint over the rule set.
+//! The deconjugator applies the rule set with a breadth-first search (BFS) to a
+//! fixpoint.
 //!
-//! Faithful port of weikipop's `src/dictionary/deconjugator.py`. Two inherited
-//! behaviours are preserved deliberately:
+//! This code ports weikipop's `src/dictionary/deconjugator.py`. It preserves
+//! two inherited behaviors:
 //!
-//! 1. `max_len` is driven by `dec_end` alone, so the mizenkei rule's sixth
-//!    `dec_tag` (`vs-i`) is unreachable and that path tags `する` as `vk`.
-//!    A parallel rule still reaches `vs-i`, so the quirk is harmless.
-//! 2. `contextrule` predicates are ignored, so those two rules over-match.
+//! 1. `max_len` uses only `dec_end`. The sixth `dec_tag` in the mizenkei rule
+//!    (`vs-i`) stays unreachable, so that path tags `する` as `vk`.
+//!    The correct `vs-i` form also appears, so this quirk is harmless in practical lookup.
+//! 2. The code ignores `contextrule` predicates. Those two rules match too much.
 //!
-//! Both are pinned by tests. Changing either is a semantic change, not a
-//! refactor.
+//! Tests pin both behaviors. A change to either behavior changes the semantics.
+//! It is not a refactor.
 
 use crate::lookup::rules::Rule;
 use std::collections::HashSet;
@@ -79,8 +80,8 @@ impl Deconjugator {
             novel = new_novel;
         }
 
-        // The reference discards the frontier on iteration-cap break and
-        // unconditionally re-adds the seed. Preserved.
+        // The reference discards the frontier when the iteration cap stops the loop.
+        // It always adds the seed again. Keep this behavior.
         processed.insert(Form::seed(clean));
         processed
     }
@@ -92,7 +93,7 @@ impl Deconjugator {
         let dec_tags = rule.dec_tag.as_ref().map(|t| t.as_slice()).unwrap_or(empty);
         let con_tags = rule.con_tag.as_ref().map(|t| t.as_slice()).unwrap_or(empty);
 
-        // Inherited quirk #1: iteration count comes from dec_end alone.
+        // Inherited quirk #1: `dec_end` alone sets the iteration count.
         let max_len = dec_ends.len().max(1);
 
         let is_starter = matches!(
@@ -140,7 +141,7 @@ impl Deconjugator {
                 continue;
             }
 
-            // `ends_with` guarantees a char boundary, so byte slicing is safe.
+            // The `ends_with` check guarantees a character boundary. Byte slices are safe.
             let new_text = if con_end.is_empty() {
                 format!("{}{}", form.text, dec_end)
             } else {
@@ -232,18 +233,18 @@ mod tests {
         assert_eq!(Some(&"v1".to_string()), f.tags.last());
     }
 
-    /// Pins inherited quirk #1: `max_len` is driven by `dec_end` alone, so the
-    /// mizenkei rule's sixth `dec_tag` (`vs-i`) is unreachable and する arrives
-    /// tagged `vk` down that path.
+    /// This test pins inherited quirk #1. `max_len` uses `dec_end` alone.
+    /// Therefore, the sixth `dec_tag` in the mizenkei rule (`vs-i`) stays
+    /// unreachable, and that path tags する as `vk`.
     ///
-    /// Verified against the unmodified Python reference: deconjugating しない
-    /// yields する twice — once via ('negative', '(mizenkei)') tagged `vk`, and
-    /// once via ('negative',) tagged `vs-i`. That parallel correct tagging is
-    /// why the quirk has no practical effect. Bare し never reaches this rule,
-    /// which needs a form already tagged `stem-mizenkei`.
+    /// The unmodified Python reference also produces these two forms. The input しない
+    /// yields する twice: ('negative', '(mizenkei)') tags it `vk`, and
+    /// ('negative',) tags it `vs-i`. The correct `vs-i` form also appears, so the
+    /// quirk is harmless in practical lookup. Bare し never reaches this rule
+    /// because it needs a form with the `stem-mizenkei` tag.
     ///
-    /// If this test ever needs changing, that is a deliberate semantic change
-    /// to deconjugation - not a refactor.
+    /// A change to this test means a deliberate semantic change to deconjugation.
+    /// It is not a refactor.
     #[test]
     fn known_quirk_mizenkei_path_tags_suru_as_vk() {
         let d = deconjugator();
@@ -264,8 +265,8 @@ mod tests {
             "quirk resolved upstream - update this test and the note in the module docs"
         );
 
-        // The correct vs-i tagging is reachable in parallel; this is why the
-        // quirk is harmless in practice.
+        // The correct `vs-i` form also appears, so the quirk is harmless in practical
+        // lookup.
         assert!(forms
             .iter()
             .any(|f| f.text == "する" && f.tags.last().map(String::as_str) == Some("vs-i")));

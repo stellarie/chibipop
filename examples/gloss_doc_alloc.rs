@@ -1,35 +1,36 @@
-//! What one cached `GlossDoc` costs, measured with a counting allocator.
+//! This benchmark measures the cost of one cached `GlossDoc` with an allocation counter.
 //!
-//! Ticket 02 chose a flat arena over a box tree on two axes that latency
-//! cannot decide: allocation count and retained heap, because the parsed tree
-//! is *cached*. `examples/gloss_arena_bench.rs` prototyped all three
-//! candidates and set the bar this harness has to clear, over the same real
-//! payloads:
+//! `GlossDoc` uses a flat arena instead of a box tree.
+//! Parse time alone does not select between them because the parsed tree stays in the cache.
+//! Allocation count and retained heap also affect the choice.
 //!
-//! | per hover-worth of cached entries | live blocks | retained |
+//! `examples/gloss_arena_bench.rs` compared three candidates with the same real payloads.
+//! It set these limits:
+//!
+//! | per hover set of cached entries | live blocks | retained |
 //! |---|---:|---:|
 //! | box tree (`Vec<Node>`, `String`, `HashMap`) | 1 817 | 384 KB |
 //! | arena prototype | 186 | 84 KB |
 //!
-//! This measures the shipped `chibipop::dict::gloss::GlossDoc` the same way,
-//! so the claim in the ticket is a measurement of the real type rather than of
-//! a prototype that resembles it.
+//! This benchmark applies the same measurement to the shipped
+//! `chibipop::dict::gloss::GlossDoc`.
+//! The result measures the actual type, not a similar prototype.
 //!
 //! ```sh
 //! cargo run -p chibipop --release --example gloss_doc_alloc          # every headword
 //! cargo run -p chibipop --release --example gloss_doc_alloc -- 40    # first 40
 //! ```
 //!
-//! Release mode is mandatory: a debug-profile `serde` number is off by an
-//! order of magnitude.
+//! Release mode is required. A debug-profile `serde` result differs by one order of magnitude.
 //!
-//! A hover-worth is the first `MAX_RESULTS` payloads of a headword, which is
-//! what `LookupEngine::run` leaves after `ranked.truncate(MAX_RESULTS)`.
+//! A hover set contains the first `MAX_RESULTS` payloads of a headword.
+//! `LookupEngine::run` leaves this set after `ranked.truncate(MAX_RESULTS)`.
 //!
-//! The allocator is a real counting global allocator wrapping
-//! `std::alloc::System`, gated on a relaxed `AtomicBool` - a plain `mov`, no
-//! locked instruction - so the timed free pass runs with the counters off and
-//! is not distorted by the instrumentation.
+//! The global allocator wraps `std::alloc::System`.
+//! A relaxed `AtomicBool` controls the counters.
+//! The load compiles to a plain `mov` instruction with no locked instruction.
+//! The timed free pass disables the counters.
+//! The instrumentation does not affect that pass.
 
 use anyhow::{Context, Result};
 use chibipop::dict::gloss::{plain_items, GlossDoc};
@@ -42,8 +43,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
-// counting global allocator - the one in gloss_arena_bench.rs, unchanged, so
-// the two harnesses' numbers are comparable by construction
+// Allocation counter from `gloss_arena_bench.rs`.
+// The shared implementation makes the two results comparable.
 // ---------------------------------------------------------------------------
 
 static COUNT_ON: AtomicBool = AtomicBool::new(false);
@@ -54,13 +55,12 @@ static FREED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
-/// `System`, plus counters behind one relaxed load.
+/// `Counting` adds counters to `System`. One relaxed load controls the counters.
 ///
-/// `realloc` delegates to `System::realloc` rather than falling back to the
-/// trait's alloc-copy-dealloc default: without that, every `Vec` growth would
-/// become a full copy even when the allocator could have extended in place,
-/// which would penalise the arena - which grows a handful of big vectors - for
-/// no reason of its own.
+/// `realloc` calls `System::realloc` instead of the trait default.
+/// The default allocates, copies, and deallocates.
+/// It copies each `Vec` during growth, even when the allocator can extend the block in place.
+/// This behavior penalizes the arena because it grows a few large vectors.
 struct Counting;
 
 impl Counting {
@@ -151,8 +151,8 @@ fn alloc_snapshot() -> AllocStat {
 // fixture
 // ---------------------------------------------------------------------------
 
-/// One line of `hover-payloads.jsonl`. Unknown fields are ignored, so this
-/// declares only what the measurement reads.
+/// `Record` stores the fields that the measurement reads from one line of
+/// `hover-payloads.jsonl`. Serde ignores fields that it does not need.
 #[derive(Deserialize)]
 struct Record {
     term: String,
@@ -179,7 +179,7 @@ fn load_records() -> Result<Vec<Record>> {
 // statistics
 // ---------------------------------------------------------------------------
 
-/// Nearest-rank percentile, matching `tools/hover-parse-bench`.
+/// `percentile` uses the nearest-rank percentile from `tools/hover-parse-bench`.
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -212,21 +212,21 @@ fn dist(samples: &[f64]) -> Dist {
 
 #[derive(Default)]
 struct Series {
-    /// Allocations made while building one hover-worth.
+    /// This field stores the number of allocations for one hover set.
     allocs: Vec<f64>,
-    /// Bytes requested while building one hover-worth.
+    /// This field stores the bytes requested for one hover set.
     alloc_bytes: Vec<f64>,
-    /// Bytes the built documents still hold: what a cache entry retains.
+    /// This field stores the bytes that built documents retain in a cache entry.
     retained: Vec<f64>,
-    /// Peak live bytes during the build.
+    /// This field stores the peak live bytes during the build.
     peak: Vec<f64>,
-    /// Allocations the built documents still hold: `allocs - frees`. What an
-    /// `Arc`-shared cache entry keeps alive, and frees later.
+    /// This field stores allocations that built documents still own.
+    /// Its value is `allocs - frees`.
+    /// An `Arc` cache entry retains these allocations and frees them later.
     blocks: Vec<f64>,
-    /// Microseconds to drop one hover-worth.
+    /// This field stores the time in microseconds to drop one hover set.
     free: Vec<f64>,
-    /// The documents' own footprint accounting, as a cross-check on the
-    /// allocator's.
+    /// This field stores the document footprint for comparison with allocator results.
     footprint: Vec<f64>,
     nodes: Vec<f64>,
     entries: Vec<f64>,
@@ -244,9 +244,9 @@ fn main() -> Result<()> {
         anyhow::bail!("hover-payloads.jsonl is empty");
     }
 
-    // A hover-worth per headword, worst-case headwords kept out of the
-    // percentiles for the same reason the other harnesses keep them out:
-    // they are deliberately over-represented in the retained file.
+    // Each headword supplies one hover set.
+    // Percentiles exclude worst-case headwords.
+    // The retained file contains too many such headwords for a frequency sample.
     let slices: Vec<(&str, &[String])> = records
         .iter()
         .filter(|r| !r.worst)
@@ -269,17 +269,17 @@ fn main() -> Result<()> {
     let mut rendered = 0usize;
 
     for (_, payloads) in &slices {
-        // Counted pass. The drop stays inside the counted window, so the
-        // residual check below actually proves the documents freed what they
-        // took; timing it here would measure the instrumentation instead, so
-        // the free is timed separately below.
+        // The counted pass includes the drop.
+        // The residual check confirms that the documents free their allocations.
+        // A timed drop here includes the instrumentation cost.
+        // The separate pass measures the drop with counters disabled.
         COUNT_ON.store(true, Relaxed);
         alloc_reset();
         let built: Vec<GlossDoc> = payloads.iter().map(|p| GlossDoc::parse(p)).collect();
         let stat = alloc_snapshot();
-        // Read every stored field inside the counted window, so nothing here
-        // is a field the optimizer may quietly decline to write, and the
-        // documents are provably still alive at the snapshot above.
+        // Read every stored field while the counters are active.
+        // The optimizer must keep the field writes because this pass reads every field.
+        // It also keeps the documents alive at the snapshot above.
         let mut nodes = 0usize;
         let mut footprint = 0usize;
         for doc in &built {
@@ -292,8 +292,8 @@ fn main() -> Result<()> {
         COUNT_ON.store(false, Relaxed);
         residual = residual.max(after.live);
 
-        // Timed pass, counters off: one uninstrumented build, then the drop
-        // this harness is reporting.
+        // The timed pass disables counters.
+        // It builds the documents without instrumentation and then measures the drop.
         let built: Vec<GlossDoc> = payloads.iter().map(|p| GlossDoc::parse(p)).collect();
         black_box(&built);
         let started = Instant::now();

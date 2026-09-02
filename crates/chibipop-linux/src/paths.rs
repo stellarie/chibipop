@@ -1,27 +1,31 @@
-//! XDG path mapping with portable mode (ADR-0006).
+//! XDG path mapping with portable mode.
+//! See ARCHITECTURE.md#platform-integration.
 //!
-//! Discovery order, first match wins, never dual-read:
+//! The discovery order follows. The first match wins. The daemon never
+//! reads two layouts:
 //!
-//! 1. `--config <path>` — that exact file is the config; every other
-//!    directory resolves by XDG below. An explicit flag is a config
-//!    override, not a relayout (matches the Windows bin, where `--config`
-//!    moves only the config file).
-//! 2. Portable mode — `chibipop.toml` beside the exe ⇒ everything beside
-//!    the exe, preserving the Windows portable identity and the AppImage
-//!    convention.
-//! 3. XDG — `$XDG_CONFIG_HOME/chibipop/chibipop.toml` and friends.
+//! 1. `--config <path>` — this exact file is the config. Every other
+//!    directory resolves by XDG below. An explicit flag overrides the
+//!    config file and does not change the layout. The Windows binary
+//!    does the same, where `--config` moves only the config file.
+//! 2. Portable mode — a `chibipop.toml` beside the exe puts every
+//!    directory beside the exe. This keeps the Windows portable identity
+//!    and the AppImage convention.
+//! 3. XDG — `$XDG_CONFIG_HOME/chibipop/chibipop.toml` and the matching
+//!    XDG directories.
 //!
-//! The runtime dir (lock + control socket) is `$XDG_RUNTIME_DIR/chibipop`
-//! in every mode: sockets don't belong beside an exe — the portable dir
-//! may be a read-only AppImage mount, and flock/socket semantics on
-//! network mounts are exactly the trouble XDG_RUNTIME_DIR exists to avoid.
+//! The runtime directory holds the lock and the control socket. This
+//! directory is `$XDG_RUNTIME_DIR/chibipop` in every mode. A socket does
+//! not belong beside an exe. The portable directory can be a read-only
+//! AppImage mount. Also, flock and socket semantics on network mounts
+//! are the exact trouble that XDG_RUNTIME_DIR prevents.
 
 use std::path::{Path, PathBuf};
 
-/// The config file name every mode looks for.
+/// The config file name that every mode reads.
 pub const CONFIG_FILE: &str = "chibipop.toml";
 
-/// Which rung of the discovery ladder chose the layout.
+/// The rung of the discovery ladder that chose the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Explicit,
@@ -39,23 +43,24 @@ impl Mode {
     }
 }
 
-/// Everywhere the daemon reads or writes, resolved once at startup.
+/// Every path that the daemon reads or writes. Startup resolves them once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub mode: Mode,
     pub config_file: PathBuf,
-    /// Library archives + built DB (data, not cache — rebuilds are expensive).
+    /// Library archives and the built database. A rebuild costs time.
+    /// Therefore, these files are data and not cache.
     pub data_dir: PathBuf,
-    /// The truncate-on-start logfile.
+    /// The log file that truncates at start.
     pub state_dir: PathBuf,
-    /// Update downloads / OCR scratch.
+    /// Update downloads and OCR scratch files.
     pub cache_dir: PathBuf,
-    /// Lock + control socket; `None` when `$XDG_RUNTIME_DIR` is unset.
+    /// The lock and the control socket. `None` when `$XDG_RUNTIME_DIR` is unset.
     pub runtime_dir: Option<PathBuf>,
 }
 
 impl Paths {
-    /// The lock/socket directory, or the one clear error about it.
+    /// The lock and socket directory, or one clear error about it.
     pub fn runtime_dir(&self) -> anyhow::Result<&Path> {
         self.runtime_dir.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -70,37 +75,39 @@ impl Paths {
         self.state_dir.join("chibipop.log")
     }
 
-    /// Where `actions.screenshot.save_dir` resolves to.
+    /// The directory that `actions.screenshot.save_dir` resolves to.
     ///
-    /// An absolute value is taken as-is — a user who typed a path meant
-    /// that path. A relative one resolves **beside the exe in portable
-    /// mode** and **under `data_dir` otherwise**.
+    /// This function keeps an absolute value without a change. A user
+    /// who typed a path meant that path. A relative value resolves
+    /// **beside the exe in portable mode** and **under `data_dir` in
+    /// every other mode**.
     ///
-    /// The portable half is a deliberate divergence from XDG, kept for
-    /// parity: Windows always joins a relative `save_dir` onto the exe
-    /// directory (`crates/chibipop-windows/src/app.rs:1479-1483`,
-    /// documented in `README.md`), and portable mode's whole promise
-    /// (ADR-0006) is that a copied folder carries everything with it —
-    /// screenshots landing in `~/.local/share` would leave part of the
-    /// user's data behind on the machine. Under XDG the default
-    /// `screenshots` is user *data*, not cache: it is the picture a card
-    /// points at, and losing it breaks the card.
+    /// The portable half diverges from XDG on purpose, for parity.
+    /// Windows always joins a relative `save_dir` onto the exe
+    /// directory. See `crates/chibipop-windows/src/app.rs:1479-1483` and
+    /// `README.md`. Portable mode promises that a copied folder carries
+    /// every file with it. See ARCHITECTURE.md#platform-integration.
+    /// Screenshots in `~/.local/share` would leave part of the data of
+    /// the user on the machine. Under XDG, the default `screenshots`
+    /// directory holds user *data* and not cache. A screenshot is the
+    /// picture that a card names. The loss of the picture breaks the
+    /// card.
     pub fn screenshots_dir(&self, save_dir: &str) -> PathBuf {
         let save_dir = Path::new(save_dir);
         if save_dir.is_absolute() {
             return save_dir.to_path_buf();
         }
         match self.mode {
-            // Portable mode *is* "the config file sits beside the exe"
-            // (see the module header), so the config's parent is the
-            // exe directory by definition - no second probe of the
-            // environment, and no dependence on where the log went.
+            // Portable mode means that the config file sits beside the
+            // exe. See the module header. Therefore, the parent of the
+            // config is the exe directory. This code needs no second
+            // probe of the environment and no knowledge of the log path.
             Mode::Portable => match self.config_file.parent() {
                 Some(exe_dir) => exe_dir.join(save_dir),
-                // Unreachable: `resolve` only reaches Portable through
-                // `exe_dir.join(CONFIG_FILE)`. Relative rather than
-                // panicking, because a screenshot path is not worth a
-                // crash.
+                // No caller reaches this arm. `resolve` selects
+                // Portable only through `exe_dir.join(CONFIG_FILE)`.
+                // Return a relative path and not a panic, because a
+                // screenshot path does not justify a crash.
                 None => save_dir.to_path_buf(),
             },
             Mode::Explicit | Mode::Xdg => self.data_dir.join(save_dir),
@@ -108,8 +115,8 @@ impl Paths {
     }
 }
 
-/// The environment snapshot resolution reads: a plain struct so tests
-/// inject values instead of racing over process-global env vars.
+/// The environment snapshot that resolution reads. This plain struct
+/// lets a test inject values and not race over process-global env vars.
 #[derive(Debug, Clone, Default)]
 pub struct Env {
     pub exe_dir: Option<PathBuf>,
@@ -137,8 +144,8 @@ impl Env {
     }
 }
 
-/// Resolve the whole layout. Reads the filesystem only to probe for a
-/// beside-exe `chibipop.toml` (the portable trigger).
+/// Resolve the whole layout. This function reads the filesystem only to
+/// probe for a `chibipop.toml` beside the exe, the portable trigger.
 pub fn resolve(env: &Env, explicit_config: Option<PathBuf>) -> Paths {
     let runtime_dir = xdg(env.xdg_runtime_dir.as_deref()).map(|d| d.join("chibipop"));
 
@@ -209,7 +216,7 @@ pub const COMMAND: &str = "chibipop";
 /// need the same answer: the autostart entry's `Exec`, and every
 /// compositor bind snippet the settings window hands out. Under
 /// `cargo run` the binary is `target/debug/chibipop` and is not on
-/// PATH, so a snippet naming the bare command execs nothing (ticket 51).
+/// PATH, so a snippet naming the bare command execs nothing.
 pub fn exec_path() -> std::io::Result<PathBuf> {
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
         let appimage = PathBuf::from(appimage);

@@ -1,4 +1,4 @@
-//! AnkiConnect v6 client.
+//! This module sends requests to AnkiConnect v6.
 
 use crate::dict::gloss::{render_html, RoleFilter, Selection};
 use crate::dict::pitch::marked_morae;
@@ -26,7 +26,7 @@ fn post(url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     Ok(json)
 }
 
-/// True if Anki answers.
+/// Returns `true` when AnkiConnect answers the version request.
 pub fn check_connection(url: &str) -> Result<bool> {
     let body = serde_json::json!({
         "action": "version",
@@ -45,7 +45,7 @@ fn string_list(resp: &serde_json::Value) -> Result<Vec<String>> {
     Ok(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
 }
 
-/// All deck names.
+/// Returns all deck names from AnkiConnect.
 pub fn deck_names(url: &str) -> Result<Vec<String>> {
     let body = serde_json::json!({
         "action": "deckNames",
@@ -54,7 +54,7 @@ pub fn deck_names(url: &str) -> Result<Vec<String>> {
     string_list(&post(url, &body)?)
 }
 
-/// All note-type names.
+/// Returns all note-type names from AnkiConnect.
 pub fn model_names(url: &str) -> Result<Vec<String>> {
     let body = serde_json::json!({
         "action": "modelNames",
@@ -63,7 +63,7 @@ pub fn model_names(url: &str) -> Result<Vec<String>> {
     string_list(&post(url, &body)?)
 }
 
-/// A note-type's field names.
+/// Returns the field names for a note type.
 pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
     let body = serde_json::json!({
         "action": "modelFieldNames",
@@ -73,12 +73,11 @@ pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
     string_list(&post(url, &body)?)
 }
 
-/// Expressions already in Anki.
+/// Finds expressions that already exist in Anki.
 ///
-/// The probe notes carry the word routed through `field_map`, exactly
-/// as an add would: `canAddNotes` answers `false` for *any* reason a
-/// note cannot be filed, and a note built from field names the note
-/// type does not have is empty, not a duplicate.
+/// The probe routes each word through `field_map`, as the add operation does.
+/// The `canAddNotes` result is `false` for *any* rejection reason.
+/// A note with unknown field names is empty, not a duplicate.
 pub fn find_duplicates(
     url: &str,
     deck: &str,
@@ -99,10 +98,10 @@ pub fn find_duplicates(
     Ok(collect_dupes(expressions, arr))
 }
 
-/// Builds a canAddNotes probe.
+/// Builds a `canAddNotes` probe.
 ///
-/// One note per word, through the same `mapped_fields` router the add
-/// uses, so Anki judges the note this word would really be filed as.
+/// Each note contains one word and uses the same `mapped_fields` route as an add.
+/// Anki then judges the note that this word receives.
 fn build_can_add_notes_body(
     deck: &str,
     model: &str,
@@ -130,7 +129,7 @@ fn build_can_add_notes_body(
     })
 }
 
-/// Inverts canAddNotes booleans.
+/// Returns expressions for which `canAddNotes` returns `false`.
 fn collect_dupes(
     expressions: &[&str],
     can_add: &[serde_json::Value],
@@ -146,7 +145,7 @@ fn collect_dupes(
 }
 
 #[cfg(test)]
-/// Escapes for Anki search.
+/// Escapes a value for an Anki search query.
 fn quote_search(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -155,7 +154,7 @@ fn quote_search(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Maps sources to Anki fields.
+/// Maps source values to Anki fields.
 fn mapped_fields(
     fields: &HashMap<String, String>,
     field_map: &[crate::config::FieldMapping],
@@ -169,17 +168,15 @@ fn mapped_fields(
     out
 }
 
-/// True if some row sends source
+/// Returns `true` when a field-map row sends the specified source.
 fn field_map_routes(field_map: &[crate::config::FieldMapping], source: &str) -> bool {
     field_map.iter().any(|m| m.source == source)
 }
 
-/// Refuses a map that never sends the word.
+/// Rejects a map that does not send the expression.
 ///
-/// Every AnkiConnect call about a looked-up word - the add and the
-/// dupe probe alike - is meaningless without it: an add would file a
-/// note with no word in it, and a probe would ask Anki about an empty
-/// note.
+/// The add and duplicate probe both need the looked-up word in the note.
+/// Without that word, the add creates an empty note and the probe cannot report a duplicate.
 fn require_expression_route(field_map: &[crate::config::FieldMapping]) -> Result<()> {
     if field_map_routes(field_map, "expression") {
         return Ok(());
@@ -191,7 +188,7 @@ fn require_expression_route(field_map: &[crate::config::FieldMapping]) -> Result
     )
 }
 
-/// Adds a note, returns its id.
+/// Adds a note and returns its ID.
 pub fn add_note(
     url: &str,
     deck: &str,
@@ -220,15 +217,15 @@ pub fn add_note(
         .context("addNote did not return a note ID")
 }
 
-/// One image to attach.
+/// An image to attach to a note.
 pub struct NotePicture {
     pub data_base64: String,
     pub filename: String,
-    /// Anki fields to embed it in.
+    /// Anki fields that embed the image.
     pub fields: Vec<String>,
 }
 
-/// Builds an addNote request.
+/// Builds an `addNote` request.
 fn build_add_note_body(
     deck: &str,
     model: &str,
@@ -273,17 +270,15 @@ pub fn add_note_with_picture(
         .context("addNote did not return a note ID")
 }
 
-/// Minimal escaping for text placed into an HTML-destined Anki field
-/// (currently just the dictionary name, which is arbitrary text pulled from
-/// the Yomitan archive's index.json).
+/// Escapes Dictionary text before it enters an Anki HTML field.
+/// The text comes from the Yomitan archive's `index.json` and can contain arbitrary characters.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// One dict's glosses, numbered.
+/// Numbers all glosses from one Dictionary.
 ///
-/// Flattened across the dictionary's matched term-bank rows, so the field a
-/// one-row block produces is unchanged.
+/// The numbers span all matched term-bank rows, so one row keeps its current output.
 fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
     let numbered = b.glosses()
         .enumerate()
@@ -293,7 +288,7 @@ fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
     format!("[{}]\n{numbered}", b.dict_name)
 }
 
-/// Fields from a card.
+/// Builds field values from a card.
 pub fn fields_from_card(
     card: &crate::present::Card,
     blocks: &[crate::present::GlossBlock],
@@ -309,9 +304,8 @@ pub fn fields_from_card(
         .map(plain_dict_group)
         .collect::<Vec<_>>()
         .join("\n\n");
-    // \n is a no-op; use <li> tags. Rendered here rather than carried on the
-    // block: HTML is wanted when a card is mined, which is once, and every
-    // hover was paying for it.
+    // A newline has no effect in HTML, so use <li> tags.
+    // Build this field here because card mining occurs once. This avoids work during each hover.
     let glossary_html = blocks.iter()
         .map(|b| {
             let items: String = b.entries.iter()
@@ -334,28 +328,26 @@ pub fn fields_from_card(
     if let Some(freq) = card.freq {
         fields.insert("frequency".to_string(), freq.to_string());
     }
-    // The HTML field only, and never a plain-text one: marked kana *is*
-    // markup, and a plain-text field would have to spell the notation out
-    // in words or drop it.
+    // Put marked kana in the HTML field only. Marked kana *is* markup.
+    // A plain-text field cannot preserve the notation without extra words.
     if let Some(pitch) = pitch_html(card) {
         fields.insert("pitch_html".to_string(), pitch);
     }
     fields
 }
 
-/// One card's accents in the Anki community's marked-kana shape.
+/// Builds the card's pitch accents in the marked-kana format used by Anki communities.
 ///
-/// `<span>`s carrying `border-top` over the high moras and `border-right`
-/// on the mora the pitch falls after, which is what every community pitch
-/// template already styles and what Yomitan's own popup emits - so a note
-/// mined here renders in a deck built for Yomitan with no new template.
+/// A `<span>` uses `border-top` for high moras and `border-right` after the mora where pitch falls.
+/// Current community templates style this format, and Yomitan emits the same format.
+/// A note mined here therefore renders in a Yomitan deck without a new template.
 ///
-/// The moras are [`marked_morae`]'s answer, the same one the card header
-/// drew, so the field cannot disagree with the panel the user read it off.
-/// One `<li>` per accent in the pitch list's order, each naming the
-/// dictionaries that gave it - the deduplicated rows and not the raw claims.
+/// The function uses the same `marked_morae` result as the card header.
+/// This keeps the field consistent with the panel that the user reads.
+/// It adds one `<li>` for each accent in pitch-list order. Each item names its source Dictionaries.
+/// The rows are deduplicated, not the raw claims.
 ///
-/// `None` when the card has no accent, so a note carries no empty field.
+/// It returns `None` when the card has no accent, so the note has no empty field.
 fn pitch_html(card: &crate::present::Card) -> Option<String> {
     let reading = card.reading.as_deref().filter(|r| !r.is_empty())?;
     if card.pitch.is_empty() {
@@ -404,15 +396,14 @@ mod tests {
     use crate::present::GlossBlock;
     use serde_json::json;
 
-    /// One block from a glossary payload in the form the record stores, so
-    /// the field builder is fed by the real parser and the real renderers
-    /// rather than by hand-written strings that no dictionary could produce.
+    /// Builds one `GlossBlock` from a glossary payload in the stored format.
+    /// Tests then use the real parser and renderers, not strings that a Dictionary cannot produce.
     fn block(dict: &str, glossary: serde_json::Value) -> GlossBlock {
         GlossBlock::parse(dict, &glossary.to_string())
     }
 
-    /// One dictionary's block over several matched term-bank rows, which is
-    /// what a headword with more than one row now produces.
+    /// Builds one Dictionary block from two matched term-bank rows.
+    /// A headword with multiple rows produces this shape.
     fn rows(dict: &str, glossaries: [serde_json::Value; 2]) -> GlossBlock {
         let entries = glossaries
             .into_iter()
@@ -425,9 +416,9 @@ mod tests {
         }
     }
 
-    /// The headword half of a card. The blocks are passed to
-    /// `fields_from_card` separately, so the field builder never reads this
-    /// one's own `blocks`.
+    /// Builds the headword part of a card.
+    /// The test passes blocks separately to `fields_from_card`.
+    /// This keeps the field builder from reading the card's own `blocks`.
     fn card(
         written: Option<&str>,
         reading: Option<&str>,
@@ -539,10 +530,9 @@ mod tests {
         assert_eq!(None, f.get("frequency"));
     }
 
-    /// Story 42: popup density and card completeness are separate choices.
-    /// Both fields come off one parsed tree in one call, so the disagreement
-    /// here is two filters, not two configurations - the popup's plain-text
-    /// summary still drops what the card keeps.
+    /// Popup density and card completeness are separate choices.
+    /// Both outputs use one parsed tree and two filters.
+    /// The popup plain-text summary can omit content that the card keeps.
     #[test]
     fn an_example_the_popup_summary_drops_still_reaches_the_html_field() {
         let blocks = vec![block(
@@ -560,9 +550,9 @@ mod tests {
         assert!(html.contains("ご飯を食べる"), "the card keeps the example: {html}");
     }
 
-    /// Anki has no copy of the dictionary's assets - `src/anki.rs` sends a
-    /// screenshot and nothing else - so an image mines as the character it
-    /// stands for rather than as a picture the note can never load.
+    /// Anki has no copy of a Dictionary's assets.
+    /// `src/anki.rs` sends a screenshot only.
+    /// An image therefore mines as its character instead of an unusable note picture.
     #[test]
     fn an_image_mines_as_its_alt_text_and_no_field_carries_a_src() {
         let blocks = vec![block(
@@ -582,9 +572,9 @@ mod tests {
         }
     }
 
-    /// A block is one dictionary, not one matched term-bank row, so both
-    /// fields number across the rows it holds: a reader wants "sense 3 of
-    /// 大辞林", never "sense 1 of row 2" under a repeated heading.
+    /// One block represents one Dictionary, not one matched term-bank row.
+    /// Both fields number across all rows in the block.
+    /// A reader needs "sense 3 of 大辞林", not "sense 1 of row 2" under a repeated label.
     #[test]
     fn both_fields_number_a_dictionarys_matched_rows_continuously() {
         let blocks = vec![rows("大辞林", [json!(["to run"]), json!(["to flow", "to stream"])])];
@@ -619,7 +609,7 @@ mod tests {
         assert_eq!("\"a\\\\b\"", quote_search("a\\b"));
     }
 
-    /// Bare spaces split into terms.
+    /// Keeps spaces inside the quoted search value.
     #[test]
     fn quote_search_keeps_a_space_as_one_value() {
         assert_eq!("\"AT & T\"", quote_search("AT & T"));
@@ -664,7 +654,7 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// Shorter response: extras safe.
+    /// A short response leaves expressions without a response unmarked.
     #[test]
     fn collect_dupes_short_response() {
         use serde_json::json;
@@ -726,7 +716,7 @@ mod tests {
 
     #[test]
     fn field_map_routes_is_false_without_a_match() {
-        // Mirrors the live-config bug.
+        // Reproduces the live configuration bug.
         let map = vec![crate::config::FieldMapping {
             anki_field: "Expression".into(),
             source: "frequency".into(),
@@ -739,7 +729,7 @@ mod tests {
         assert!(!field_map_routes(&[], "expression"));
     }
 
-    /// No network before the check.
+    /// Confirms that the field-map check runs before network access.
     #[test]
     fn add_note_rejects_a_field_map_that_drops_the_word() {
         let fields = HashMap::from([
@@ -787,10 +777,10 @@ mod tests {
         assert!(note.get("picture").is_none());
     }
 
-    // -- the dupe probe (upstream-merge-fallout 03) --
+    // Tests for the duplicate probe.
 
-    /// The Lapis default, plus a JP Mining Note-shaped map: the same
-    /// sources, none of the same Anki field names.
+    /// Uses the Lapis default sources with a map shaped like JP Mining Note.
+    /// The map uses different Anki field names.
     fn mining_note_map() -> Vec<crate::config::FieldMapping> {
         vec![
             crate::config::FieldMapping {
@@ -808,9 +798,9 @@ mod tests {
         ]
     }
 
-    /// The probe must name the field the map names, or AnkiConnect
-    /// judges a note the note type has no fields for - which it
-    /// refuses as empty, and `collect_dupes` reads as a duplicate.
+    /// The probe must use the fields that the map names.
+    /// Otherwise AnkiConnect rejects the note as empty because the note type lacks those fields.
+    /// `collect_dupes` then treats every rejected note as a duplicate.
     #[test]
     fn the_dupe_probe_routes_the_word_through_the_field_map() {
         let body = build_can_add_notes_body(
@@ -831,9 +821,8 @@ mod tests {
         );
     }
 
-    /// Only the word: the probe has no reading and no glossary to send,
-    /// and a blank in a field would be a lie about the note an add
-    /// would file.
+    /// Sends only the word. The probe has no reading or glossary.
+    /// Empty fields do not match the note that the add operation files.
     #[test]
     fn the_dupe_probe_sends_the_word_and_nothing_else() {
         let body = build_can_add_notes_body("Mining", "JP Mining Note", &["猫"], &mining_note_map());
@@ -844,9 +833,9 @@ mod tests {
         assert_eq!(Some("猫"), fields["VocabKanji"].as_str());
     }
 
-    /// One source, two Anki fields: the add sends both, so must the
-    /// probe - Anki dupe-checks the note type's first field, and which
-    /// of the two that is is not ours to guess.
+    /// One source can map to two Anki fields.
+    /// The add sends both fields, so the probe must send both.
+    /// Anki checks the note type's first field, and the code cannot choose between the two fields.
     #[test]
     fn the_dupe_probe_fills_every_field_the_word_is_routed_to() {
         let map = vec![
@@ -859,7 +848,7 @@ mod tests {
         assert_eq!(Some("猫"), fields["Key"].as_str());
     }
 
-    /// No network before the check, as with the add.
+    /// Confirms that the field-map check runs before network access, as the add test does.
     #[test]
     fn find_duplicates_rejects_a_field_map_that_drops_the_word() {
         let field_map = vec![crate::config::FieldMapping {
@@ -878,22 +867,21 @@ mod tests {
             .is_empty());
     }
 
-    /// A fake AnkiConnect that judges `canAddNotes` the way Anki does.
+    /// A fake AnkiConnect server applies Anki's `canAddNotes` rule.
     ///
-    /// Anki's own answer is `duplicate_or_empty` over the note type's
-    /// **first field**: blank is Empty, a repeat of an existing note's
-    /// is Duplicate, and `canAddNotes` reports both as a bare `false`.
-    /// So the fake needs the first field's name and what is already in
-    /// the collection, and nothing else - and a probe that names some
-    /// other field gets `false` for every word, which is the bug this
-    /// reproduces.
+    /// Anki checks `duplicate_or_empty` on the note type's **first field**.
+    /// A blank value means Empty. A value that already exists means Duplicate.
+    /// `canAddNotes` reports both cases as `false`.
+    /// The fake therefore needs the first field name and the stored collection values.
+    /// A probe that names another field returns `false` for every word.
+    /// This test reproduces that bug.
     struct FakeAnki {
         url: String,
         seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     }
 
     impl FakeAnki {
-        /// Answers one request, then closes.
+        /// Answers one request and then closes the connection.
         fn start(first_field: &str, collection: &[&str]) -> FakeAnki {
             use std::io::Write;
             let listener =
@@ -924,13 +912,12 @@ mod tests {
         }
     }
 
-    /// One HTTP request's body, by its `Content-Length`.
+    /// Reads one HTTP request body from its `Content-Length` header.
     fn read_body(stream: &mut std::net::TcpStream) -> String {
         use std::io::Read;
         let mut raw = Vec::new();
         let mut byte = [0u8; 1];
-        // Headers first, one byte at a time, so the body is not
-        // swallowed into a buffer this function cannot give back.
+        // Read headers one byte at a time. This keeps body bytes available for the next read.
         while !raw.ends_with(b"\r\n\r\n") {
             match stream.read(&mut byte) {
                 Ok(1) => raw.push(byte[0]),
@@ -950,8 +937,8 @@ mod tests {
         String::from_utf8_lossy(&body).to_string()
     }
 
-    /// `canAddNotes`, per note: false when the first field is blank
-    /// (Anki's Empty) or already in the collection (its Duplicate).
+    /// Returns `false` for a note when its first field is blank or already in the collection.
+    /// Anki calls these cases Empty and Duplicate.
     fn can_add_reply(
         request: &serde_json::Value,
         first_field: &str,
@@ -969,10 +956,11 @@ mod tests {
         format!("{{\"result\":[{}],\"error\":null}}", flags.join(","))
     }
 
-    /// The bug, end to end: with a note type whose word field is not
-    /// called `Expression`, every word came back a duplicate - the
-    /// popup flagged words that were nowhere in the collection, while
-    /// the add itself (routed through the same map) filed them fine.
+    /// Reproduces the full bug.
+    /// If a note type names its word field something other than `Expression`,
+    /// the probe marks every word as a duplicate.
+    /// The popup then flags words absent from the collection.
+    /// The add uses the same map and files those words correctly.
     #[test]
     fn a_word_not_in_the_collection_is_no_dupe_for_a_note_type_of_its_own_naming() {
         let anki = FakeAnki::start("VocabKanji", &["猫"]);
@@ -1011,9 +999,9 @@ mod tests {
         );
     }
 
-    // ---- pitch (ticket 02) ----
+    // Tests for pitch fields.
 
-    /// One pitch row: an accent and the dictionaries that gave it.
+    /// Builds one pitch row with an accent and its source Dictionaries.
     fn pitch_row(fall: u32, dicts: &[&str]) -> crate::present::PitchRow {
         crate::present::PitchRow {
             accent: crate::dict::pitch::Accent {
@@ -1026,9 +1014,9 @@ mod tests {
         }
     }
 
-    /// The community's marked-kana shape: `border-top` over the high moras
-    /// and `border-right` on the mora the pitch falls after. `ねこ` with an
-    /// atamadaka accent is one high mora that also ticks, and one bare one.
+    /// Uses the community's marked-kana shape.
+    /// `border-top` marks high moras, and `border-right` marks the mora after the fall.
+    /// For `ねこ`, an atamadaka accent marks the first mora and leaves the second unmarked.
     #[test]
     fn a_mined_note_carries_the_html_pitch_field_in_the_community_shape() {
         let mut mined = card(Some("猫"), Some("ねこ"), None);
@@ -1046,9 +1034,9 @@ mod tests {
         assert_eq!(Some(&want), f.get("pitch_html"));
     }
 
-    /// One row per accent in the pitch list's order, each naming its own
-    /// dictionaries - the deduplicated rows the card header drew, not the raw
-    /// claims behind them.
+    /// Adds one row for each accent in pitch-list order.
+    /// Each row names its Dictionaries from the deduplicated card-header rows.
+    /// It does not list the raw claims behind those rows.
     #[test]
     fn the_pitch_field_holds_one_item_per_accent_naming_its_dictionaries() {
         let mut mined = card(Some("白目"), Some("しろめ"), None);
@@ -1067,8 +1055,8 @@ mod tests {
         );
     }
 
-    /// No accent, no field - a note carries no empty one. And the plain-text
-    /// fields never learn that pitch exists: marked kana *is* markup.
+    /// Returns no pitch field when the card has no accent.
+    /// The plain-text fields stay unchanged because marked kana *is* markup.
     #[test]
     fn a_card_with_no_accent_mines_no_pitch_field_and_no_plain_text_one() {
         let f = fields_from_card(&card(Some("猫"), Some("ねこ"), None), &[]);
@@ -1078,8 +1066,8 @@ mod tests {
         assert!(!f.get("glossary").unwrap().contains("ね"), "{:?}", f.get("glossary"));
     }
 
-    /// A card with an accent still mines the plain-text fields unchanged:
-    /// pitch reaches the HTML field only.
+    /// An accented card keeps its plain-text fields unchanged.
+    /// Only the HTML field receives pitch markup.
     #[test]
     fn an_accent_never_reaches_a_plain_text_field() {
         let blocks = vec![block("Jitendex", json!(["cat"]))];
@@ -1100,8 +1088,8 @@ mod tests {
         assert!(!without.contains_key("pitch_html"));
     }
 
-    /// A dictionary name is arbitrary text out of an archive's index.json, so
-    /// it is escaped here exactly as it is in the glossary field.
+    /// A Dictionary name is arbitrary text from an archive's `index.json`.
+    /// Escape it here in the same way as the glossary field.
     #[test]
     fn a_dictionary_name_with_markup_in_it_is_escaped_in_the_pitch_field() {
         let mut mined = card(Some("猫"), Some("ねこ"), None);

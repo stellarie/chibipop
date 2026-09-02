@@ -1,10 +1,12 @@
-//! Times one dictionary build, end to end.
+//! This benchmark measures one Dictionary build from start to finish.
 //!
-//! The measuring stick behind `dict::build`'s parallel bank pipeline, kept
-//! because a performance claim nobody can re-run is a performance claim that
-//! rots. It builds into a throwaway file and prints every progress line the
-//! settings window would show, each stamped with the time since the line
-//! before it, so a regression names the phase it landed in.
+//! `dict::build` runs the bank pipeline in parallel. This benchmark measures that pipeline.
+//! The fixed progress output reports each phase in the same form.
+//!
+//! The benchmark writes the Dictionary to a temporary file.
+//! It prints each progress line that the settings window shows.
+//! Each line includes the time since the previous line.
+//! The report identifies the phase that takes more time.
 //!
 //! ```text
 //! cargo run --release --example dictbench -- <term.zip>… [-- <freq.zip>…]
@@ -12,8 +14,9 @@
 //! BENCH_VERBOSE=1             keep the per-5000-entry progress lines
 //! ```
 //!
-//! `BENCH_OUT` matters: a temp dir is often a tmpfs, and a build that never
-//! touches a disk is not the build a user waits for.
+//! Set `BENCH_OUT` to a disk path to measure disk work.
+//! A temporary directory often uses `tmpfs`.
+//! A build on `tmpfs` excludes the disk work that a user waits for.
 
 use std::cell::Cell;
 use std::path::PathBuf;

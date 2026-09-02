@@ -1,7 +1,6 @@
 //! The popup window shell.
 //!
-//! Const alpha, not per-pixel.
-//! Per-pixel breaks WDA exclude.
+//! Use constant alpha. Per-pixel alpha breaks WDA exclusion.
 
 use crate::geom::PhysRect;
 use crate::ui::theme::Theme;
@@ -17,17 +16,17 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Corner radius, in pixels.
+/// Popup corner radius in pixels.
 const CORNER_RADIUS: i32 = 12;
 
-/// Constant alpha, 0-255.
+/// Constant alpha value from 0 through 255.
 const LAYERED_ALPHA: u8 = 230;
 
 fn class_name() -> PCWSTR {
     w!("ChibipopPopupClass")
 }
 
-/// The WM_PAINT work itself.
+/// Complete the WM_PAINT cycle without paint output.
 unsafe fn validate_paint_region(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     unsafe {
@@ -36,9 +35,9 @@ unsafe fn validate_paint_region(hwnd: HWND) {
     }
 }
 
-/// Validates; draws nothing.
+/// Validate WM_PAINT without paint output.
 ///
-/// Unwinding here would be UB.
+/// Do not let a panic cross the system callback.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_PAINT {
         let _ = catch_unwind(|| unsafe { validate_paint_region(hwnd) });
@@ -47,7 +46,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Registers the class once.
+/// Register the popup class once for this process.
 unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
@@ -69,29 +68,29 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
         }
     }
 
-    // Latch only after it succeeds.
+    // Mark the class registered only after registration succeeds.
     REGISTERED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
-/// Outcome of the affinity call.
+/// Result of a capture affinity request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureExclusion {
-    /// The OS accepted exclusion.
+    /// The OS accepted the exclusion request.
     Excluded,
-    /// Never attempted, by request.
+    /// The caller made no capture exclusion request. This is the `DeliberatelyNotExcluded` state.
     DeliberatelyNotExcluded,
-    /// Attempted; the OS refused.
+    /// The caller requested exclusion, but the OS refused it.
     AttemptFailed,
 }
 
 impl CaptureExclusion {
-    /// True unless truly excluded.
+    /// Report whether the capture guard must protect the popup.
     pub fn needs_capture_guard(self) -> bool {
         !matches!(self, CaptureExclusion::Excluded)
     }
 
-    /// Wanted, and what the OS said.
+    /// Convert the request and OS result into a capture state.
     pub fn from_attempt(on: bool, ok: bool) -> CaptureExclusion {
         match (on, ok) {
             (false, _) => CaptureExclusion::DeliberatelyNotExcluded,
@@ -101,14 +100,14 @@ impl CaptureExclusion {
     }
 }
 
-/// The popup window.
+/// The popup window and its capture state.
 pub struct Popup {
     hwnd: HWND,
     capture_exclusion: Cell<CaptureExclusion>,
 }
 
 impl Popup {
-    /// Creates the window, hidden.
+    /// Create the hidden popup window.
     pub fn create(exclude: bool) -> Result<Popup> {
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
@@ -141,7 +140,7 @@ impl Popup {
                 .context("SetLayeredWindowAttributes(LWA_ALPHA)")?;
 
             let capture_exclusion = if exclude {
-                // Not `?`: the outcome is data.
+                // Treat the result as state data, not as an error.
                 if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() {
                     CaptureExclusion::Excluded
                 } else {
@@ -158,7 +157,7 @@ impl Popup {
         }
     }
 
-    /// Moves, shapes, and shows.
+    /// Show the popup at `r` with a rounded shape.
     pub fn show_at(&self, r: PhysRect) -> Result<()> {
         unsafe {
             let region = CreateRoundRectRgn(0, 0, r.w, r.h, CORNER_RADIUS, CORNER_RADIUS);
@@ -169,7 +168,8 @@ impl Popup {
                     r.h
                 );
             }
-            // Ours only if it failed.
+            // SetWindowRgn owns the region after success.
+            // Delete the region only after failure.
             if SetWindowRgn(self.hwnd, Some(region), true) == 0 {
                 let _ = DeleteObject(region.into());
                 anyhow::bail!("SetWindowRgn failed to apply the rounded silhouette");
@@ -186,13 +186,14 @@ impl Popup {
             )
             .context("SetWindowPos to show the popup")?;
 
-            // WM_PAINT is posted; force it.
+            // WM_PAINT is posted first.
+            // UpdateWindow forces the paint now.
             let _ = UpdateWindow(self.hwnd);
         }
         Ok(())
     }
 
-    /// Hides without destroying.
+    /// Hide the popup while its window stays alive.
     pub fn hide(&self) -> Result<()> {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -200,7 +201,7 @@ impl Popup {
         Ok(())
     }
 
-    /// Re-shows after a guard hide.
+    /// Show the popup after the capture guard hides it.
     pub fn show_without_activating(&self) -> Result<()> {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -208,7 +209,7 @@ impl Popup {
         Ok(())
     }
 
-    /// Asked fresh, never cached.
+    /// Query visibility from the window instead of a cached value.
     pub fn is_visible(&self) -> bool {
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
@@ -217,43 +218,42 @@ impl Popup {
         self.hwnd
     }
 
-    /// Whether it is excluded.
+    /// Return the current capture exclusion state.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion.get()
     }
 
-    /// Update the popup's alpha.
+    /// Set the popup alpha.
     pub fn set_alpha(&self, alpha: u8) {
-        // SAFETY: `self.hwnd` is live.
+        // SAFETY: `create` keeps `self.hwnd` live for the lifetime of `self`.
         unsafe {
             let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha, LWA_ALPHA);
         }
     }
 
-    /// Re-applies live; may refuse.
+    /// Apply the capture exclusion state again. The OS can refuse the request.
     pub fn set_capture_exclusion(&self, on: bool) {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
-        // SAFETY: `self.hwnd` was created by `create` and is owned by
-        // this `Popup`, so it is valid for `&self`'s lifetime. Refusal
-        // is an accepted, non-fatal outcome, exactly as in `create` -
-        // here it is also recorded, because it is the new state.
+        // SAFETY: `create` made `self.hwnd`, and `Popup` owns it for
+        // `&self`'s lifetime. The OS can refuse this non-fatal request.
+        // Record the result as the new state.
         let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
         self.capture_exclusion
             .set(CaptureExclusion::from_attempt(on, ok));
     }
 }
 
-/// Fixed height, 96-DPI px.
+/// Fixed button height at 96 DPI in pixels.
 const BTN_HEIGHT: i32 = 36;
 
-/// One button click, banked.
+/// Store one button click until `take_click` reads and clears it.
 static BTN_CLICKED: AtomicBool = AtomicBool::new(false);
 
 fn btn_class_name() -> PCWSTR {
     w!("ChibipopBtnClass")
 }
 
-/// What WM_PAINT redraws from.
+/// Keep the state that WM_PAINT needs to draw the button.
 struct BtnPaint {
     hwnd: HWND,
     text: String,
@@ -271,19 +271,18 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
-/// Scale a 96-DPI value.
+/// Scale a 96-DPI value for this window.
 ///
-/// We are PER_MONITOR_AWARE_V2.
+/// The process uses PER_MONITOR_AWARE_V2.
 fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
-    // SAFETY: FFI call on a live window handle; returns 96 for an
-    // invalid one, which degrades to no scaling rather than a wrong
-    // size.
+    // SAFETY: The owner supplies a live `hwnd`.
+    // If GetDpiForWindow returns 0, this function does not scale the value.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let dpi = if dpi == 0 { 96 } else { dpi };
     (v as i64 * dpi as i64 / 96) as i32
 }
 
-/// Ends the paint on drop.
+/// End the button paint cycle when the scope drops.
 struct BtnPaintScope {
     hwnd: HWND,
     ps: PAINTSTRUCT,
@@ -297,11 +296,11 @@ impl Drop for BtnPaintScope {
     }
 }
 
-/// Fill plus centered text.
+/// Fill the button and center its label.
 unsafe fn paint_button(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    // SAFETY: `btn_wndproc` calls this only for its own `hwnd` on
-    // `WM_PAINT`, the OS contract `BeginPaint`/`EndPaint` requires.
+    // SAFETY: `btn_wndproc` calls this function for its own `hwnd`
+    // on `WM_PAINT`. The OS requires the BeginPaint and EndPaint pair.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
     let _scope = BtnPaintScope { hwnd, ps };
     if hdc.is_invalid() {
@@ -316,7 +315,7 @@ unsafe fn paint_button(hwnd: HWND) {
         }
 
         let mut rc = RECT::default();
-        // SAFETY: `hwnd` is the same live window as above.
+        // SAFETY: `hwnd` is the same live window handle.
         let _ = unsafe { GetClientRect(hwnd, &mut rc) };
 
         let px = dpi_scale(hwnd, state.font_size as i32);
@@ -327,10 +326,9 @@ unsafe fn paint_button(hwnd: HWND) {
             .collect();
         let mut text: Vec<u16> = state.text.encode_utf16().collect();
 
-        // SAFETY: `hdc` was checked non-invalid above; `face` and
-        // `text` outlive every call below that reads their pointers;
-        // every GDI handle created here (`bg_brush`, `font`) is
-        // deleted before this closure returns.
+        // SAFETY: The code checked `hdc` above. `face` and `text` stay alive
+        // while the calls read their pointers. The code deletes `bg_brush` and
+        // `font` before this closure returns.
         unsafe {
             let bg_brush = CreateSolidBrush(colorref(state.bg));
             FillRect(hdc, &rc, bg_brush);
@@ -367,9 +365,9 @@ unsafe fn paint_button(hwnd: HWND) {
     });
 }
 
-/// Paints; also tracks clicks.
+/// Handle button paint and clicks without panic propagation.
 ///
-/// Unwinding here would be UB.
+/// Do not let a panic cross the system callback.
 unsafe extern "system" fn btn_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -378,10 +376,8 @@ unsafe extern "system" fn btn_wndproc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            // SAFETY: `hwnd` is the live handle the OS just supplied
-            // to this `wndproc` for its own `WM_PAINT`, exactly the
-            // precondition `paint_button`'s own `BeginPaint` note
-            // relies on.
+            // SAFETY: The OS supplies this live `hwnd` for `WM_PAINT`.
+            // `paint_button` uses the same precondition for BeginPaint.
             let _ = catch_unwind(|| unsafe { paint_button(hwnd) });
             LRESULT(0)
         }
@@ -390,7 +386,7 @@ unsafe extern "system" fn btn_wndproc(
             LRESULT(0)
         }
         WM_SETCURSOR => {
-            // SAFETY: system cursor, always valid.
+            // SAFETY: `IDC_HAND` names a system cursor.
             if let Ok(cur) = unsafe { LoadCursorW(None, IDC_HAND) } {
                 unsafe { SetCursor(Some(cur)) };
             }
@@ -400,18 +396,17 @@ unsafe extern "system" fn btn_wndproc(
     }
 }
 
-/// Registers the class once.
+/// Register the button class once for this process.
 unsafe fn register_btn_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    // SAFETY: `wc` is a fully-initialised `WNDCLASSEXW` (the
-    // `..Default` spread zeroes every field this module does not
-    // set); `lpfnWndProc` points to `btn_wndproc`, a `'static
-    // extern "system" fn` valid for the process lifetime, exactly
-    // what the OS requires it to be.
+    // SAFETY: `wc` has all required fields. `..Default` sets each other
+    // field to zero. `lpfnWndProc` points to `btn_wndproc`, a `'static`
+    // `extern "system" fn` that stays valid for the process lifetime.
+    // The OS requires this callback lifetime.
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -431,26 +426,22 @@ unsafe fn register_btn_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// The "Add to Anki" button.
+/// The "Add to Anki" button uses alpha 230.
 ///
-/// Real and opaque: it catches
-/// its own clicks, no overlay
-/// trick needed.
+/// The button receives its own clicks, so the outline overlay does not need to.
 pub struct AnkiButton {
     hwnd: HWND,
     capture_exclusion: Cell<CaptureExclusion>,
 }
 
 impl AnkiButton {
-    /// Creates the window, hidden.
+    /// Create the hidden button window.
     pub fn create(exclude: bool) -> Result<AnkiButton> {
-        // SAFETY: mirrors `Popup::create` - `hinstance` comes from
-        // `GetModuleHandleW(None)`, always valid for this process;
-        // `register_btn_class` only registers one well-formed class;
-        // `CreateWindowExW`'s and `SetLayeredWindowAttributes`'s
-        // results are checked via `?`; `SetWindowDisplayAffinity`'s
-        // failure is an accepted, non-fatal outcome, exactly as
-        // `Popup::create` treats it.
+        // SAFETY: `GetModuleHandleW(None)` returns a process-valid instance handle.
+        // `register_btn_class` creates one valid class.
+        // The code checks `CreateWindowExW` and `SetLayeredWindowAttributes`.
+        // `SetWindowDisplayAffinity` can fail and does not stop creation, as in
+        // `Popup::create`.
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
                 .context("GetModuleHandleW(None)")?
@@ -478,7 +469,7 @@ impl AnkiButton {
                 .context("SetLayeredWindowAttributes for the Anki button")?;
 
             let capture_exclusion = if exclude {
-                // Not `?`: the outcome is data.
+                // Treat the result as state data, not as an error.
                 if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok() {
                     CaptureExclusion::Excluded
                 } else {
@@ -495,13 +486,12 @@ impl AnkiButton {
         }
     }
 
-    /// Moves, shapes, and shows.
+    /// Show the button at `r` with a rounded shape.
     pub fn show_at(&self, r: PhysRect) -> Result<()> {
-        // SAFETY: mirrors `Popup::show_at` — `self.hwnd` was created
-        // by `create` and lives for `&self`'s lifetime; the GDI region
-        // is consumed by a successful `SetWindowRgn` (which then owns
-        // it — deleted only on failure); `SetWindowPos`'s result is
-        // checked via `?`.
+        // SAFETY: `create` made `self.hwnd`, and `AnkiButton` owns it for
+        // `&self`'s lifetime. A successful `SetWindowRgn` takes ownership of
+        // the GDI region. The code deletes it only on failure.
+        // The code checks `SetWindowPos`.
         unsafe {
             let rgn = CreateRoundRectRgn(0, 0, r.w, r.h, CORNER_RADIUS, CORNER_RADIUS);
             if rgn.is_invalid() {
@@ -530,7 +520,7 @@ impl AnkiButton {
         Ok(())
     }
 
-    /// Sets the label, repaints now.
+    /// Set the label and repaint the button immediately.
     pub fn render(&self, text: &str, text_color: (u8, u8, u8), theme: &Theme) {
         BTN_PAINT.with(|cell| {
             *cell.borrow_mut() = Some(BtnPaint {
@@ -542,37 +532,35 @@ impl AnkiButton {
                 font_size: theme.collapsed_size,
             });
         });
-        // SAFETY: `self.hwnd` is valid for `&self`'s lifetime; the
-        // paint state above was just stored under this same hwnd, so
-        // the WM_PAINT this triggers finds it. Both calls' failures
-        // are ignored - worst case is a stale repaint.
+        // SAFETY: `self.hwnd` stays valid for `&self`'s lifetime. The code stores
+        // the same paint state first, so WM_PAINT can read it.
+        // Both calls can fail and leave stale paint output.
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
             let _ = UpdateWindow(self.hwnd);
         }
     }
 
-    /// Hides without destroying.
+    /// Hide the button while its window stays alive.
     pub fn hide(&self) {
-        // SAFETY: `self.hwnd` is valid for `&self`'s lifetime (see
-        // `create`); `ShowWindow`'s failure is intentionally ignored,
-        // mirroring `Popup::hide`.
+        // SAFETY: `create` keeps `self.hwnd` valid for `&self`'s lifetime.
+        // The code ignores ShowWindow failure, as `Popup::hide` does.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 
-    /// Re-shows after a guard hide.
+    /// Show the button after the capture guard hides it.
     pub fn show_without_activating(&self) {
-        // SAFETY: same guarantee as `hide`, above.
+        // SAFETY: `create` keeps `self.hwnd` valid for `&self`'s lifetime.
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
     }
 
-    /// Asked fresh, never cached.
+    /// Query visibility from the window instead of a cached value.
     pub fn is_visible(&self) -> bool {
-        // SAFETY: same guarantee as `hide`, above.
+        // SAFETY: `create` keeps `self.hwnd` valid for `&self`'s lifetime.
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 
@@ -580,29 +568,28 @@ impl AnkiButton {
         self.hwnd
     }
 
-    /// Whether it is excluded.
+    /// Return the current capture exclusion state.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.capture_exclusion.get()
     }
 
-    /// Re-applies live; may refuse.
+    /// Apply the capture exclusion state again. The OS can refuse the request.
     pub fn set_capture_exclusion(&self, on: bool) {
         let affinity = if on { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
-        // SAFETY: `self.hwnd` was created by `create` and is owned by
-        // this `AnkiButton`, so it is valid for `&self`'s lifetime.
-        // Refusal is an accepted outcome, exactly as in `create` -
-        // here it is also recorded, because it is the new state.
+        // SAFETY: `create` made `self.hwnd`, and `AnkiButton` owns it for
+        // `&self`'s lifetime. The OS can refuse this non-fatal request.
+        // Record the result as the new state.
         let ok = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.is_ok();
         self.capture_exclusion
             .set(CaptureExclusion::from_attempt(on, ok));
     }
 
-    /// Fixed height, DPI-scaled.
+    /// Return the button height after DPI conversion, in physical pixels.
     pub fn height_phys(&self) -> i32 {
         dpi_scale(self.hwnd, BTN_HEIGHT)
     }
 
-    /// Takes the click, once.
+    /// Take the stored click and clear it.
     pub fn take_click(&self) -> bool {
         BTN_CLICKED.swap(false, Ordering::SeqCst)
     }

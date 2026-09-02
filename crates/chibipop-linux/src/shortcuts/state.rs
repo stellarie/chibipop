@@ -1,25 +1,22 @@
-//! What the settings window is allowed to say about the trigger binding:
-//! a tiny file in the XDG state dir, written by the daemon, read by
-//! `chibipop settings`.
+//! The daemon publishes trigger binding state in an XDG state file.
+//! `chibipop settings` reads this file.
 //!
-//! **Why a file and not a probe.** The settings process is a separate
-//! process (ADR-0005) and cannot see the daemon's portal session — and
-//! the session is where the truth lives. Probing the bus from the
-//! settings window would answer a *different* question ("could a portal
-//! be used?") and would let the UI claim the portal owns a binding on a
-//! session where the bind actually failed, which is the one thing
-//! ADR-0005 forbids: the hotkey control never lies about who owns the
-//! key. So the daemon publishes what its own handshake resolved, and the
-//! window renders that or falls back to the native snippet.
+//! **Why a file instead of a probe.** The settings process is separate
+//! (ARCHITECTURE.md#settings-and-config). It cannot access the daemon's
+//! portal session, which contains the binding state. A bus probe answers
+//! whether a portal can serve, not whether the portal owns a binding.
+//! The settings window must show the owner of the key. The daemon publishes
+//! the result of its own session setup. The window renders that result or
+//! shows the native binding snippet.
 //!
-//! **Why not the control socket.** The verb set is trigger transport, not
-//! a scripting API (ADR-0003), and it is deliberately closed. A status
-//! read is not a trigger, so it does not belong there.
+//! **Why not the control socket.** The control socket carries trigger
+//! transport, not a scripting API (ARCHITECTURE.md#input-ladders), and its
+//! verb set is closed. A status read is not a trigger, so it does not belong
+//! on that socket.
 //!
-//! Absent is the normal case, not an error: it is what a fresh install
-//! and a never-started daemon look like, and both mean "assume the
-//! compositor owns the key", which is the answer that shows the user a
-//! snippet they can act on.
+//! An absent file is normal. It means that no daemon has published state.
+//! The settings window then assumes that the compositor owns the key and
+//! shows a snippet that the user can apply.
 
 use super::{Binding, ShortcutId};
 use std::io::Write;
@@ -28,36 +25,34 @@ use std::path::{Path, PathBuf};
 /// The file name inside `Paths::state_dir`.
 const FILE: &str = "trigger-channel";
 
-/// What the daemon resolved for the trigger channel.
+/// State that the daemon resolved for the trigger channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
-    /// Does the GlobalShortcuts portal own the binding right now?
+    /// True when the GlobalShortcuts portal owns the binding.
     pub portal: bool,
-    /// What the portal says is bound. Empty on the native rung, and also
-    /// on a portal that bound nothing.
+    /// Bindings that the portal reports. This list is empty on the native rung
+    /// and when the portal binds no shortcut.
     pub bindings: Vec<Binding>,
 }
 
 impl Published {
-    /// The native rung: the compositor bind is the only truth there is.
+    /// Return state for the native rung. The compositor bind is the only
+    /// binding source.
     pub fn native() -> Published {
         Published { portal: false, bindings: Vec::new() }
     }
 
-    /// The portal rung, with whatever it reported.
+    /// Return state for the portal rung with its reported bindings.
     pub fn portal(bindings: Vec<Binding>) -> Published {
         Published { portal: true, bindings }
     }
 
-    /// The key the settings window shows as "the current binding" for
-    /// one action: the portal's own description of that shortcut, when
-    /// it has one.
+    /// Return the key that the settings window shows for one action.
+    /// Use the portal's description when it reports one.
     ///
-    /// `None` is the honest absence and covers three real cases — the
-    /// native rung (no bindings at all), a portal that bound the id but
-    /// reported no key, and an id the portal never answered for. All
-    /// three mean the same thing to a row: we were not told a key, so
-    /// do not name one.
+    /// `None` means that no key was reported. This covers the native rung, a
+    /// portal that bound the id without a key, and an id that the portal did not
+    /// return. The row must not name a key in any of these cases.
     pub fn description(&self, id: ShortcutId) -> Option<String> {
         self.bindings
             .iter()
@@ -65,9 +60,8 @@ impl Published {
             .and_then(|binding| binding.trigger.clone())
     }
 
-    /// One line per fact, `key value`. A hand-editable format for a
-    /// file nobody should hand-edit is the point: this is a diagnostic
-    /// as much as an IPC, and a human reading it should need no tool.
+    /// Render one line for each fact as `key value`. The format stays readable
+    /// for a person and carries diagnostic state between processes.
     fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(if self.portal { "channel portal\n" } else { "channel native\n" });
@@ -82,9 +76,8 @@ impl Published {
         out
     }
 
-    /// The reverse. Unknown lines and unknown ids are skipped: a newer
-    /// daemon writing a key this reader does not know must not turn the
-    /// hotkey control into an error.
+    /// Parse the file. Skip unknown lines and ids so a newer daemon does not
+    /// turn the settings window into an error.
     fn parse(text: &str) -> Published {
         let mut portal = false;
         let mut bindings = Vec::new();
@@ -101,8 +94,8 @@ impl Published {
                 _ => {}
             }
         }
-        // A bind line without the portal rung is nonsense; the channel
-        // line is the authority.
+        // A bind line without the portal rung is invalid. The channel line is
+        // authoritative.
         if !portal {
             bindings.clear();
         }
@@ -114,13 +107,12 @@ pub fn path(state_dir: &Path) -> PathBuf {
     state_dir.join(FILE)
 }
 
-/// Publish, replacing whatever was there.
+/// Publish a new state and replace the old file.
 ///
-/// Written to a sibling temp file and renamed, so a settings window
-/// reading while the daemon writes sees either the old file or the new
-/// one, never half of one. Failure is returned rather than logged here:
-/// the caller owns the log, and a status file that could not be written
-/// is a diagnostic, never a reason to stop serving triggers.
+/// Write a sibling temporary file and rename it. A settings window that
+/// reads during the write sees the old file or the new file, never a partial
+/// file. Return failures to the caller. The caller owns the log. A failed
+/// state write is diagnostic and must not stop trigger service.
 pub fn publish(state_dir: &Path, published: &Published) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let final_path = path(state_dir);
@@ -133,7 +125,7 @@ pub fn publish(state_dir: &Path, published: &Published) -> std::io::Result<()> {
     std::fs::rename(&temp, &final_path)
 }
 
-/// What the last daemon run published, or `None` when nothing has.
+/// Read the state from the last daemon run. Return `None` when no file exists.
 pub fn read(state_dir: &Path) -> Option<Published> {
     let text = std::fs::read_to_string(path(state_dir)).ok()?;
     Some(Published::parse(&text))
@@ -151,8 +143,8 @@ mod tests {
         dir
     }
 
-    /// The whole contract: what the daemon knows is what the window
-    /// reads, keys and all.
+    /// This test checks the full contract. The settings window reads every
+    /// binding that the daemon publishes.
     #[test]
     fn a_portal_binding_round_trips_to_the_settings_window() {
         let dir = scratch("portal");
@@ -168,10 +160,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Both published ids answer for themselves, and an id the portal
-    /// never named answers with the honest absence rather than with the
-    /// other row's key — the add-card row borrowing the trigger's key
-    /// is exactly the lie ADR-0005 forbids this window.
+    /// Each id returns its own description. An id that the portal did not name
+    /// returns `None` instead of another id's key.
     #[test]
     fn each_id_gets_its_own_description_and_an_unbound_id_gets_none() {
         let published = Published::portal(vec![
@@ -181,8 +171,8 @@ mod tests {
         assert_eq!(Some("Alt+F".to_string()), published.description(ShortcutId::Trigger));
         assert_eq!(Some("Alt+A".to_string()), published.description(ShortcutId::AnkiAdd));
 
-        // Bound but unnamed (every xdph session), and never answered
-        // for at all: one row shape, one answer.
+        // A bound id can have no key, and the portal can omit an id.
+        // Both cases return `None`.
         let partial = Published::portal(vec![Binding {
             id: ShortcutId::Trigger,
             trigger: Some("Alt+F".into()),
@@ -193,7 +183,7 @@ mod tests {
         assert_eq!(None, unnamed.description(ShortcutId::AnkiAdd));
     }
 
-    /// A key with spaces in it (KDE spells chords that way) survives.
+    /// Preserve a key that contains spaces. KDE uses this spelling for chords.
     #[test]
     fn a_multi_word_key_survives_the_round_trip() {
         let dir = scratch("spaces");
@@ -212,8 +202,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The native rung publishes that it is native, and the window shows
-    /// a snippet rather than claiming a portal binding.
+    /// The native rung publishes native state. The settings window shows a
+    /// snippet instead of a portal binding.
     #[test]
     fn the_native_rung_publishes_no_binding() {
         let dir = scratch("native");
@@ -225,8 +215,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A rewrite replaces: a daemon that loses the portal rung must not
-    /// leave yesterday's binding on screen.
+    /// A later publish replaces the previous state. A daemon that loses the
+    /// portal rung must not leave the old binding on screen.
     #[test]
     fn publishing_again_replaces_the_previous_answer() {
         let dir = scratch("replace");
@@ -243,7 +233,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No daemon has ever run here: the window falls back, not fails.
+    /// An absent file means that no daemon has published state. The settings
+    /// window uses the native fallback.
     #[test]
     fn an_absent_file_is_no_answer_at_all() {
         let dir = scratch("absent");
@@ -251,8 +242,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Garbage, a future key, and an id this build does not know are all
-    /// survivable; the channel line is what decides.
+    /// Unknown lines and ids do not stop parsing. The channel line controls
+    /// whether bindings remain.
     #[test]
     fn unknown_lines_and_ids_are_skipped() {
         let parsed = Published::parse(concat!(
@@ -270,9 +261,8 @@ mod tests {
         );
     }
 
-    /// A file claiming bindings on the native rung is inconsistent, and
-    /// the channel line wins: the UI must not show a portal key while
-    /// telling the user to paste a compositor bind.
+    /// Bindings without the portal channel are invalid. The channel line wins.
+    /// The window must not show a portal key with a native bind snippet.
     #[test]
     fn bindings_without_the_portal_channel_are_dropped() {
         let parsed = Published::parse("channel native\nbind trigger ALT+F\n");

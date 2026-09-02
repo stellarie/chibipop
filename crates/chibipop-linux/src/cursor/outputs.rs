@@ -1,46 +1,48 @@
-//! Per-output geometry, and the conversions both rungs share.
+//! This module provides per-output geometry and conversions for both cursor rungs.
 //!
-//! Core speaks *physical* pixels (`PhysPoint`). Cursor-session
-//! positions arrive in transformed buffer pixels relative to one
-//! output; hyprctl positions arrive in the compositor's logical layout
-//! space. Both convert here.
+//! Core uses *physical* pixels (`PhysPoint`). The protocol defines
+//! cursor-session positions as transformed buffer pixels relative to one
+//! output. Affected Hyprland versions can send logical units instead.
+//! `hyprctl` positions arrive in the compositor's logical layout space.
+//! This module converts both forms.
 //!
-//! The global physical space is anchored by scaling each output's
-//! logical origin by that output's own scale. Exact for single-output
-//! and uniform-scale layouts; for mixed-scale layouts a global
-//! physical space is not well-defined, and this is the documented
-//! approximation until a ticket needs better.
+//! This module builds global physical space by multiplying each output's
+//! logical origin by that output's scale. The result is exact for one
+//! output or uniform-scale layouts. Mixed-scale layouts do not define
+//! one global physical space. This documented approximation remains until
+//! a caller needs a better model.
 
 use chibipop::geom::PhysPoint;
 
-/// One output's layout facts, accumulated from `wl_output` and
-/// `zxdg_output_v1` events. Zero until the first roundtrip delivers
-/// them; conversions guard against the empty state.
+/// `OutputGeometry` stores layout facts for one output. `wl_output` and
+/// `zxdg_output_v1` events fill these fields. Fields can remain zero before
+/// the first roundtrip. Conversions support default and fallback geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutputGeometry {
-    /// Logical layout origin (`zxdg_output_v1.logical_position`, with
-    /// `wl_output.geometry` x/y as the fallback).
+    /// Store the logical layout origin from `zxdg_output_v1.logical_position`.
+    /// `wl_output.geometry` supplies fallback x/y values.
     pub logical_x: i32,
     pub logical_y: i32,
-    /// Logical layout size (`zxdg_output_v1.logical_size`).
+    /// Store the logical layout size from `zxdg_output_v1.logical_size`.
     pub logical_w: i32,
     pub logical_h: i32,
-    /// Current-mode size, hardware pixels, untransformed.
+    /// Store the current-mode size in untransformed hardware pixels.
     pub mode_w: i32,
     pub mode_h: i32,
-    /// The output transform rotates 90/270: buffer w/h swap.
+    /// `transform_swaps` is true for `_90`, `_270`, `Flipped90`, and `Flipped270`.
+    /// These transforms swap the buffer width and height.
     pub transform_swaps: bool,
 }
 
 impl OutputGeometry {
-    /// Buffer width after the output transform — the space cursor
-    /// session positions live in.
+    /// Return the buffer width after the output transform. Cursor-session
+    /// positions use this space.
     pub fn physical_w(&self) -> i32 {
         if self.transform_swaps { self.mode_h } else { self.mode_w }
     }
 
-    /// Physical pixels per logical unit. 1.0 until both sizes are
-    /// known — an identity fallback, never a crash.
+    /// Calculate physical pixels per logical unit from the transformed physical
+    /// width and logical width. Return 1.0 until both widths are positive.
     pub fn scale(&self) -> f64 {
         if self.logical_w > 0 && self.physical_w() > 0 {
             f64::from(self.physical_w()) / f64::from(self.logical_w)
@@ -49,7 +51,7 @@ impl OutputGeometry {
         }
     }
 
-    /// This output's origin in the global physical space.
+    /// Return this output's origin in global physical space.
     pub fn physical_origin(&self) -> (i32, i32) {
         let s = self.scale();
         (
@@ -58,23 +60,23 @@ impl OutputGeometry {
         )
     }
 
-    /// A cursor-session position (buffer pixels, this output) to
-    /// global physical.
+    /// Add this output's global physical origin to buffer-local coordinates.
+    /// The buffer-local x and y values stay unchanged before this translation.
     pub fn buffer_to_global(&self, x: i32, y: i32) -> PhysPoint {
         let (ox, oy) = self.physical_origin();
         PhysPoint { x: ox + x, y: oy + y }
     }
 
-    /// A cursor-session `position` event to global physical.
+    /// Convert a cursor-session `position` event to global physical pixels.
     ///
-    /// The protocol says these are transformed buffer pixel
-    /// coordinates, and wlroots complies (output cursor x/y are
-    /// stored pre-multiplied by scale — wlroots
-    /// `types/output/cursor.c`). Hyprland <= 0.55 deviates: it sends
-    /// output-local *logical* units (`ImageCopyCapture.cpp` subtracts
-    /// the source's `logicalBox()` origin from the layout position,
-    /// v0.55.4 lines 317-335), so under Hyprland the sample scales
-    /// first. Verified live on Hyprland 0.55.4 at scale 1.5.
+    /// The protocol defines transformed buffer pixel coordinates. wlroots
+    /// complies with this rule. It stores output cursor x/y pre-multiplied
+    /// by scale in wlroots `types/output/cursor.c`. Affected Hyprland versions
+    /// can send output-local logical units. `ImageCopyCapture.cpp` subtracts
+    /// the source `logicalBox()` origin from the layout position. See v0.55.4
+    /// lines 317-335. For those samples, scale the sample before
+    /// global-origin translation.
+    /// Live verification used Hyprland 0.55.4 at scale 1.5.
     pub fn session_to_global(&self, x: i32, y: i32, logical: bool) -> PhysPoint {
         if logical {
             let s = self.scale();
@@ -87,7 +89,7 @@ impl OutputGeometry {
         }
     }
 
-    /// A logical layout point to global physical.
+    /// Convert a logical layout point to global physical pixels.
     pub fn logical_to_global(&self, x: f64, y: f64) -> PhysPoint {
         let s = self.scale();
         let (ox, oy) = self.physical_origin();
@@ -105,8 +107,9 @@ impl OutputGeometry {
     }
 }
 
-/// Convert a logical layout point using the output that contains it;
-/// `None` while no output geometry is known yet.
+/// Convert a logical layout point with a containing output when one exists.
+/// Use the first output's origin and scale for a layout gap.
+/// Return `None` only when no output exists.
 pub fn logical_to_global<'a>(
     geometries: impl Iterator<Item = &'a OutputGeometry>,
     x: f64,
@@ -119,8 +122,8 @@ pub fn logical_to_global<'a>(
         }
         first.get_or_insert(geo);
     }
-    // Off every known output (mid-layout gap): the first output's
-    // scale is the least-wrong anchor.
+    // Extrapolate a point in a layout gap from the first output's origin and scale.
+    // This is the least-wrong anchor available.
     first.map(|geo| geo.logical_to_global(x, y))
 }
 
@@ -128,7 +131,8 @@ pub fn logical_to_global<'a>(
 mod tests {
     use super::*;
 
-    /// This box: 3840x2160 at scale 1.5 -> 2560x1440 logical.
+    /// This box has 3840x2160 physical pixels at scale 1.5.
+    /// It has 2560x1440 logical pixels.
     const DP1: OutputGeometry = OutputGeometry {
         logical_x: 0,
         logical_y: 0,
@@ -156,8 +160,9 @@ mod tests {
         assert_eq!(PhysPoint { x: 3840 + 100, y: 200 }, second.buffer_to_global(100, 200));
     }
 
-    /// The Hyprland deviation: logical in, physical out; spec-conform
-    /// buffer pixels pass through.
+    /// Affected Hyprland versions can send logical units, so the conversion
+    /// scales them before it adds the global origin.
+    /// The protocol's buffer pixels stay unchanged before that translation.
     #[test]
     fn session_positions_scale_only_under_the_hyprland_quirk() {
         assert_eq!(PhysPoint { x: 3000, y: 1800 }, DP1.session_to_global(2000, 1200, true));
@@ -192,8 +197,7 @@ mod tests {
         assert_eq!(1.5, rotated.scale());
     }
 
-    /// Before any events arrive the conversion must not divide by
-    /// zero or invent an offset.
+    /// Before events arrive, conversion must not divide by zero or invent an offset.
     #[test]
     fn the_empty_geometry_is_identity() {
         let empty = OutputGeometry::default();

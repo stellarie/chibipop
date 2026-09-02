@@ -1,18 +1,15 @@
-//! The block geometry pass: how pieces stack, and how a box closes around
-//! them.
+//! The block geometry pass measures how block pieces stack and how a box surrounds them.
 //!
-//! **One reason to change:** the block box model - what a container puts
-//! between the width it was offered and the width its content is measured
-//! at, and what it reports back up.
+//! **One reason to change:** the block box model.
+//! A container subtracts its box from the offered width, measures its content, and reports its width demand.
 //!
-//! [`Pass`] is the pass's whole state, held together because a gloss
-//! paragraph is laid out from the panel's own element stream *and* from
-//! inside a table cell: the code doing it has to be callable twice, and a
-//! free function would have carried eight arguments, six of which never
-//! change over a whole panel.
+//! [`Pass`] stores the scene and reusable buffers for one popup.
+//! A gloss paragraph can start in the panel stream or inside a table cell.
+//! The same layout path handles both cases.
+//! A free function would need eight arguments. Six arguments would stay constant across one panel.
 //!
-//! The grid half of the same pass is in [`table`](super::table), with the
-//! table structure it measures.
+//! The grid half uses the same pass in [`table`](super::table).
+//! That module measures the table structure.
 
 use crate::dict::gloss::NodePath;
 use crate::ui::theme::Theme;
@@ -28,68 +25,47 @@ use super::scene::{
 use super::style::{shift_on, Block, BoxStyle, Edges, Inline};
 use super::table::Grid;
 
-/// One popup's layout, in progress.
+/// The layout state for one popup during the pass.
 ///
-/// Two things at once, and
-/// deliberately: the scene being
-/// filled, and every buffer filling
-/// it reuses. A gloss paragraph is
-/// laid out from the panel's own
-/// element stream *and* from inside a
-/// table cell, so the code that does
-/// it has to be callable twice - and
-/// a free function would have carried
-/// eight arguments, six of which
-/// never change over a whole panel.
+/// [`Pass`] stores the scene that the pass fills and the buffers that it reuses.
+/// A gloss paragraph can start in the panel stream or inside a table cell.
+/// The same layout path handles both cases.
+/// A free function would need eight arguments. Six arguments would stay constant across one panel.
 ///
-/// `'a` is the element stream's: the
-/// spans handed to the seam borrow a
-/// paragraph's own text, so the
-/// scratch run cannot outlive the
-/// paragraphs it was filled from.
+/// The lifetime `'a` belongs to the element stream.
+/// The pass sends spans to the measurer, and each span borrows text from a paragraph.
+/// Therefore, the scratch run cannot outlive those paragraphs.
 pub(super) struct Pass<'a> {
     pub(super) font: &'a str,
     pub(super) theme: &'a Theme,
     /// One paragraph's measured lines
     /// and span boxes.
     pub(super) measured: Measured,
-    /// One paragraph's spans, as the
-    /// seam takes them.
+    /// Spans for one paragraph, in the form that the measurer accepts.
     pub(super) run: Vec<StyledSpan<'a>>,
-    /// The per-line boxes one run of
-    /// spans covers - a link's, for
-    /// its hit targets, and a pill's,
-    /// for its box.
+    /// Per-line boxes that one span run covers.
+    /// A link uses them for hit targets. A pill uses them for its box.
     pub(super) cover: Vec<Cover>,
-    /// The scene so far, in draw
-    /// order.
+    /// Scene elements in draw order.
     pub(super) out: Vec<SceneElem>,
-    /// The targets it has earned.
+    /// Hit targets that this pass has added.
     pub(super) hits: Vec<HitTarget>,
 }
 
-/// The block half of the geometry pass: a paragraph, a box, and a run of
-/// pieces stacked inside one.
+/// The block half of the geometry pass.
+/// It lays out paragraphs, boxes, and stacked pieces.
 ///
-/// The grid half is the second `impl` block, in
-/// [`table`](super::table).
+/// The grid half uses a second `impl` block in [`table`](super::table).
 impl<'a> Pass<'a> {
-    /// One gloss paragraph, measured,
-    /// placed and pushed.
+    /// Measures and places one gloss paragraph, then pushes it into the scene.
     ///
-    /// `at` is the paragraph's own
-    /// top-left, before its `top_gap`,
-    /// and `avail_w` is what the
-    /// container around it offers -
-    /// already narrowed by any box
-    /// that container is. Two answers
-    /// come back: the width the
-    /// paragraph would like, its ink
-    /// plus the gutter its list
-    /// reserved, which is what a table
-    /// column's demand is built from -
-    /// and the y the walk advances by,
-    /// its gap included.
+    /// `at` gives the paragraph's top-left point before the pass adds `top_gap`.
+    /// `avail_w` gives the width that the parent container offers.
+    /// If the parent container is a box, it has already reduced `avail_w`.
+    ///
+    /// The function returns the width demand and the vertical advance.
+    /// The width includes paragraph ink and the list gutter.
+    /// The advance includes the paragraph's own gap.
     pub(super) fn gloss(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -98,30 +74,15 @@ impl<'a> Pass<'a> {
         avail_w: f32,
     ) -> Result<(f32, f32), MeasureError> {
         let (font, theme) = (self.font, self.theme);
-        // A paragraph carries no box.
-        // A block's box wraps *every*
-        // paragraph the block emits
-        // rather than the first one, so
-        // it is a container of its own
-        // ([`Boxed`], placed by
-        // [`Pass::boxed`]) and the
-        // paragraphs inside it are
-        // measured at the width that
-        // container has already
-        // narrowed.
+        // A paragraph never carries a box.
+        // A block's box surrounds every paragraph that the block emits, not only its first paragraph.
+        // The separate container [`Boxed`] owns that box, and [`Pass::boxed`] measures its paragraphs.
+        // The container already narrows their width.
         //
-        // What is left for a paragraph
-        // to pay is the list indent:
-        // the list's own
-        // `--list-padding1`, inherited
-        // rather than declared
-        // ([`Block::indent`]). It
-        // shifts the pen and narrows
-        // the wrap, because every line
-        // of a wrapped item - the first
-        // and each continuation -
-        // starts at the item's own
-        // indent.
+        // A paragraph still adds the list indent.
+        // The list owns the `--list-padding1` value, and [`Block::indent`] carries it to the paragraph.
+        // The indent shifts the pen and narrows the wrap.
+        // Every line in a wrapped list item starts at the item's indent.
         debug_assert!(
             !flow.block.style.exists(),
             "a block's box belongs to its container, never to one of its paragraphs"
@@ -129,92 +90,51 @@ impl<'a> Pass<'a> {
         let indent = flow.block.indent;
         let wrap_w = (avail_w - indent).max(1.0);
 
-        // The whole paragraph in one
-        // request: its spans wrap
-        // together, so a bold word and
-        // a normal one beside it in the
-        // source share a line and the
-        // paragraph rewraps as one unit
-        // (ADR-0013).
+        // The pass measures the whole paragraph in one request.
+        // Its spans wrap as one group, so words with different styles can share a line.
+        // The paragraph rewraps as one unit.
         self.run.clear();
         self.run.extend(flow.styled_spans(font));
-        // The images first, because an
-        // image occupies inline space
-        // and grows the line it sits
-        // on, and the only thing that
-        // can do either is a span the
-        // measurer is charged for.
+        // The pass measures images first because each image uses inline space.
+        // Each image also increases its line's height.
+        // Only a span that the pass sends to the measurer can provide both effects.
         measure_images(m, font, flow, wrap_w, &mut self.run)?;
-        // The readings next, by the same
-        // rule: what a reading measures
-        // to is what sizes the filler
-        // span that buys it its slot, so
-        // the paragraph below is
-        // measured with the taller lines
-        // already asked for, and `met.h`
-        // counts the readings without
-        // anything after the fact
-        // touching it. A bin re-measuring
-        // these same spans gets the same
-        // lines.
+        // The pass measures readings after images.
+        // A reading sets the size of its filler span, which reserves its slot.
+        // The paragraph measurement therefore includes the taller line.
+        // `met.h` includes this height. A bin that measures the same spans for paint gets the same lines.
         //
-        // After the images and not
-        // before, because a reading over
-        // a gaiji adds its slot on top of
-        // the rise that image already
-        // asked for, and reads that rise
-        // back off the run.
+        // A reading over gaiji adds its slot after the image rise.
+        // The pass reads that rise from the run.
         let read = measure_readings(m, font, flow, wrap_w, &mut self.run)?;
-        // Then the inline boxes, for the
-        // third time on the same rule: an
-        // inline box's own margin, border
-        // and padding occupy inline space,
-        // and the only thing that can is
-        // a span the measurer is charged
-        // for. Its spacers touch no
-        // reading's and no image's, so
-        // the three passes are
-        // independent - each writes only
-        // the sizes of spans it put in
-        // the paragraph itself.
+        // The pass measures inline boxes after readings.
+        // Each inline box uses its margin, border, and padding as inline space.
+        // Only a span that the pass sends to the measurer can reserve that space.
+        // A pill's spacer spans do not touch reading or image spacer spans.
+        // Therefore, each measurement pass changes only the spans that it adds.
         measure_pills(m, flow, wrap_w, &mut self.run)?;
         m.measure(MeasureRun { spans: &self.run, max_w: wrap_w }, &mut self.measured)?;
-        // The markers last, and after
-        // the paragraph rather than
-        // before it, which is the
-        // difference between a marker
-        // and a reading: a reading
-        // grows the line it sits over
-        // and so has to be priced into
-        // the run, while a marker hangs
-        // in a gutter the list's indent
-        // already reserved and changes
-        // nothing about the wrap. Its
-        // own run, its own width.
+        // The pass measures markers after the paragraph.
+        // A reading increases the height of its line, so the pass measures it before the paragraph.
+        // A marker uses the gutter that the list indent reserves.
+        // It does not change the wrap. It has its own run and width.
         let marks = measure_markers(m, font, flow, wrap_w)?;
         let met = self.measured.metrics;
         let top = at.1 + flow.top_gap;
         let h = met.h;
         let pen = (at.0 + indent, top);
-        // One offset per line, so a
-        // centred paragraph that
-        // wrapped centres each of its
-        // lines and not just its ink
-        // box.
+        // This closure gives each line an x offset.
+        // A centered paragraph centers each wrapped line, not only its overall ink box.
         let slack = flow.block.align.slack_before();
         let line_at = |line: LineBox| pen.0 + (wrap_w - line.w).max(0.0) * slack;
-        // Each reading over the base
-        // it belongs to, in the slot
-        // the lines already carry.
+        // `place_ruby` puts each reading over its base text.
+        // Each reading uses the slot that the line already reserves.
         let ruby = place_ruby(flow, &read, &self.measured, wrap_w, slack);
-        // Each marker in the gutter of
-        // the list that owed it, beside
-        // the item's first line.
+        // `place_markers` puts each marker in the list gutter.
+        // Each marker sits beside the item's first line.
         let marker = place_markers(flow, &marks, &self.measured, indent, pen.0);
-        // Each image over the spacer
-        // run that bought its room, and
-        // capped at the room the block
-        // itself was given (ticket 24).
+        // `place_images` puts each image over the spacer run that reserves its room.
+        // It caps each image at the room that the block receives.
         let images = place_images(flow, &self.measured, pen, wrap_w, line_at);
 
         let spans = flow
@@ -223,23 +143,15 @@ impl<'a> Pass<'a> {
             .zip(self.run.iter())
             .enumerate()
             .map(|(i, (s, asked))| {
-                // A span that wrapped is
-                // placed against the
-                // first line it touches;
-                // one that measured to
-                // nothing keeps the
-                // shift its em alone
-                // decided.
+                // The pass places a wrapped span against its first line.
+                // If measurement returns no box, the span keeps the shift from its own em size.
                 let (line, span_h) = first_box(&self.measured, i as u32);
                 ElemSpan {
                     at: s.at,
                     len: s.len,
                     color: s.style.color,
-                    // The size the seam was
-                    // handed, which for a
-                    // ruby filler is not
-                    // the size the walk
-                    // resolved.
+                    // This is the size that the pass sends to the measurer.
+                    // For a ruby filler, it differs from the size that the walk resolves.
                     size: asked.size,
                     weight: s.style.weight,
                     italic: s.style.italic,
@@ -248,10 +160,8 @@ impl<'a> Pass<'a> {
             })
             .collect();
 
-        // One target per line a link
-        // touches, so a cross-reference
-        // that wrapped is clickable on
-        // both halves of itself.
+        // The loop creates one hit target for each line that a link touches.
+        // A wrapped cross-reference therefore stays clickable on both parts.
         for (i, action) in flow.links.iter().enumerate() {
             span_cover(&self.measured, &mut self.cover, |b| {
                 flow.spans.get(b as usize).is_some_and(|s| s.link == i as u32)
@@ -268,69 +178,46 @@ impl<'a> Pass<'a> {
             }
         }
 
-        // A pill per line its run
-        // touches, in the room its own
-        // spacer spans already bought
-        // ([`place_pills`]).
+        // [`place_pills`] draws one pill for each line that its run touches.
+        // Each pill uses the space that its spacer spans reserve.
         //
         // [`place_pills`]: super::pill::place_pills
         let inline_boxes =
             place_pills(flow, &self.measured, &mut self.cover, pen, line_at);
 
         let base = flow.base(theme);
-        // Where the ink starts once the
-        // block's own `text-align` has
-        // moved its lines: the widest
-        // line's leading edge, which is
-        // the pen for an unaligned
-        // paragraph ([`Align::Leading`]
-        // has no slack).
+        // `ink_x` marks the start of the ink after `text-align` shifts its lines.
+        // It is the leading edge of the widest line.
+        // For an unaligned paragraph, it equals the pen because [`Align::Leading`] adds no slack.
         //
         // [`Align::Leading`]: super::scene::Align::Leading
         let ink_x = pen.0 + (wrap_w - met.w).max(0.0) * slack;
-        // A reading wider than its base
-        // overhangs it, and the ink box
-        // is the ink: without this an
-        // element would report a width
-        // its own furigana exceeds.
+        // A reading can extend beyond its base text.
+        // The ink box must include that overhang, or the element reports too little width.
         //
-        // Measured from `ink_x` rather
-        // than from `pen.0`, because
-        // [`RubyBox::x`] is run-relative
-        // and [`place_ruby`] has already
-        // put its line's own alignment
-        // slack into it. Folding it
-        // against `met.w` and then
-        // spending the answer as a width
-        // from `ink_x` charged that slack
-        // twice: a right-aligned poet's
-        // name with five readings claimed
-        // 380px of ink where it draws 41,
-        // and 319px of the claim hung off
-        // the panel.
+        // Measure the overhang from `ink_x`, not from `pen.0`.
+        // [`RubyBox::x`] uses coordinates relative to the run.
+        // [`place_ruby`] already adds each line's alignment slack.
+        // If code folds the reading width into `met.w` and measures it from `ink_x`, it counts that slack twice.
+        //
+        // One case exposed this bug.
+        // A right-aligned poet's name had five readings.
+        // The name used 41 pixels of ink, but the old code reported 380 pixels.
+        // The old code placed 319 pixels of the wrong claim beside the panel.
         //
         // Only the right edge grows.
-        // [`place_ruby`] clamps a reading
-        // into the *wrap* box, which is
-        // this box exactly when the
-        // paragraph is unaligned; the
-        // leading edge is an aligned run's
-        // own origin and may not move
-        // ([`SceneElem::rect`]).
+        // [`place_ruby`] clamps each reading to the wrap box.
+        // The wrap box equals this ink box only when the paragraph has no alignment.
+        // The leading edge anchors an aligned run and must not move. See [`SceneElem::rect`].
         //
         // [`RubyBox::x`]: super::scene::RubyBox::x
         // [`SceneElem::rect`]: super::scene::SceneElem::rect
         let ink_w = ruby.iter().fold(met.w, |a, r| a.max(pen.0 + r.x + r.w - ink_x));
-        // A marker adds nothing to it,
-        // although it hangs left of
-        // `pen.0`: the room it sits in
-        // is the list's own
-        // `--list-padding1`, already
-        // counted in `lead.left` and so
-        // already in the width demand
-        // this returns. Charging for it
-        // again would make a table
-        // column ask for two gutters.
+        // A marker does not add to `ink_w`, even when it hangs left of `pen.0`.
+        // The list's `--list-padding1` reserves its space.
+        // `lead.left` already counts that space.
+        // The returned width demand therefore includes it.
+        // A second charge would give a table column two gutters.
         self.out.push(SceneElem {
             kind: ElemKind::Text,
             text: flow.text.clone(),
@@ -357,37 +244,22 @@ impl<'a> Pass<'a> {
             }),
             image: None,
         });
-        // After the paragraph, so an
-        // asset composites over the
-        // spacer run it stands on
-        // rather than under it. Each
-        // advances nothing: the line
-        // the riser grew is already
-        // in `h`.
+        // The pass adds images after the paragraph.
+        // Each image therefore composites over its spacer run, not under it.
+        // Each image advances the walk by zero because the riser already increases the line height.
+        // `h` already includes that increase.
         self.out.extend(images);
         Ok((indent + ink_w, flow.top_gap + h))
     }
 
-    /// One block's box, around every
-    /// piece inside it.
+    /// Builds one block's box around every piece in that block.
     ///
-    /// Ticket 08's own arithmetic with
-    /// the body's total advance where a
-    /// paragraph's height used to be,
-    /// which is what makes one box
-    /// around three paragraphs the same
-    /// code as one box around one.
+    /// The box uses the body's total advance, not one paragraph's height.
+    /// This lets one box surround one paragraph or three paragraphs.
     ///
-    /// Three lines, because a `div` and
-    /// a `table` differ in what they
-    /// put *inside* the box and in
-    /// nothing about the box itself:
-    /// [`Pass::open_box`] resolves the
-    /// lead, [`Pass::close_box`] fills
-    /// the geometry in, and what is
-    /// left here is the body and the
-    /// one rect a block box has that a
-    /// grid's has not.
+    /// A `div` and a `table` differ only in their box contents.
+    /// [`Pass::open_box`] resolves the lead, and [`Pass::close_box`] fills the geometry.
+    /// This function lays out the body and supplies the rect that a block box has but a grid does not.
     pub(super) fn boxed(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -397,51 +269,28 @@ impl<'a> Pass<'a> {
     ) -> Result<(f32, f32), MeasureError> {
         let lead = self.open_box(ElemKind::Block, boxed.header(), at, avail_w);
         let (want, body_h) = self.block(m, &boxed.body, lead.pen, lead.avail)?;
-        // Full width, and not the
-        // shrink-to-fit a grid gets:
-        // `div` is `display: block`.
+        // This rect uses the full offered width, not the grid's shrink-to-fit width.
+        // A `div` uses `display: block`.
         let rect = lead.border_box(lead.offered_w(), body_h);
-        // Unconditional, where a
-        // paragraph's was conditional:
-        // only a block that declared a
-        // box becomes one of these
-        // ([`Boxed::block`]).
+        // This box always exists here.
+        // A paragraph has a box only when its block declares one.
+        // That block becomes a `Boxed` piece through [`Boxed::block`].
         let advance =
             self.close_box(&lead, rect, Some(ElemBox { rect, style: lead.style }), body_h);
         Ok((lead.demand(want), advance))
     }
 
-    /// Opens one block container: its
-    /// lead resolved and its own
-    /// element pushed, ahead of
-    /// everything it frames.
+    /// Opens one block container and pushes its element before the framed content.
     ///
-    /// `at` is the top-left of the
-    /// margin box before its own
-    /// `top_gap`, and `avail_w` is what
-    /// the container around it offers -
-    /// the same two arguments a
-    /// paragraph takes, so a box nests
-    /// inside a box without either
-    /// knowing.
+    /// `at` gives the margin box's top-left before `top_gap`.
+    /// `avail_w` gives the width that the parent container offers.
+    /// These match the arguments for a paragraph, so boxes can nest.
     ///
-    /// The box is resolved **before**
-    /// anything in it is measured, and
-    /// this is the whole of why it has
-    /// to be: a box spanning several
-    /// paragraphs must inset every one
-    /// of them, so it narrows the width
-    /// once, here, and its body never
-    /// learns it is inside one. The
-    /// element leads that body in draw
-    /// order, so a declared background
-    /// sits under every paragraph the
-    /// box frames, and its geometry is
-    /// filled in afterwards by
-    /// [`Pass::close_box`], because a
-    /// box is as tall as content
-    /// measured at a width the box
-    /// itself decided.
+    /// The box resolves before the pass measures its content.
+    /// One box can contain several paragraphs. It narrows their width once.
+    /// The element comes first in draw order, so its background stays below the content.
+    /// [`Pass::close_box`] fills its geometry after the pass measures the content.
+    /// The pass measures content at that width, then uses its height for the box.
     pub(super) fn open_box(
         &mut self,
         kind: ElemKind,
@@ -451,13 +300,8 @@ impl<'a> Pass<'a> {
     ) -> BoxLead {
         let style = head.block.style;
         let (margin, border, padding) = (style.margin, style.border_used(), style.padding);
-        // Outside the box, as it is for
-        // a paragraph and for a grid:
-        // the indent is the list's own
-        // padding, so it shifts this
-        // box where the box's own
-        // padding insets the content
-        // inside it.
+        // The list indent stays outside the box for paragraphs and grids.
+        // It shifts the box, while the box's padding insets the content.
         let indent = head.block.indent;
         let lead = Edges {
             top: margin.top + border.top + padding.top,
@@ -482,25 +326,15 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// Closes one block container, and
-    /// reports what the walk advances
-    /// by.
+    /// Closes one block container and returns its vertical advance.
     ///
-    /// `rect` is the element's own
-    /// extent - a `div`'s border box, a
-    /// table's grid - and `block_box`
-    /// is what a bin fills and strokes,
-    /// which a table draws only when it
-    /// declared one. `content_h` is the
-    /// total advance of everything
-    /// inside.
+    /// `rect` gives the element's extent: a `div` border box or a table grid.
+    /// `block_box` gives the box that a bin fills and strokes.
+    /// A table has this box only when its style declares one.
+    /// `content_h` gives the total advance of its content.
     ///
-    /// The five field writes are the
-    /// same five in both places, and
-    /// the height arithmetic is
-    /// [`BoxLead::advance`]'s: what the
-    /// two containers disagree about is
-    /// the two rects, and nothing else.
+    /// Both callers update the same five fields, and [`BoxLead::advance`] supplies the height.
+    /// The callers differ only in their rect values.
     pub(super) fn close_box(
         &mut self,
         lead: &BoxLead,
@@ -519,14 +353,10 @@ impl<'a> Pass<'a> {
         lead.top_gap + h
     }
 
-    /// A run of pieces, stacked.
+    /// Lays out a stacked run of pieces.
     ///
-    /// What a table cell is: a block
-    /// container holding paragraphs
-    /// and, where a dictionary nested
-    /// one, another table. Reports the
-    /// widest piece and the total
-    /// advance.
+    /// A table cell is a block container with paragraphs and any nested table.
+    /// The function returns the widest piece and the total advance.
     pub(super) fn block(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -547,23 +377,11 @@ impl<'a> Pass<'a> {
         Ok((want, y))
     }
 
-    /// How wide `pieces` would like to
-    /// be, without keeping the layout
-    /// that found out.
+    /// Measures how wide `pieces` need to be without keeping the layout.
     ///
-    /// A column's width comes from its
-    /// cells' content and a cell's
-    /// content cannot be measured
-    /// without a width, so the grid
-    /// lays each cell out once at the
-    /// width every column shares,
-    /// reads the extent, and rolls the
-    /// elements and targets back off
-    /// the scene. Truncating two
-    /// vectors is the whole of the
-    /// rollback, and it hands their
-    /// capacity straight to the real
-    /// pass.
+    /// A grid must measure each cell at the shared column width before it knows each column's width.
+    /// The trial reads each extent, then removes temporary elements and targets from the scene.
+    /// It truncates two vectors and keeps their capacity for the real pass.
     pub(super) fn trial(
         &mut self,
         m: &mut dyn TextMeasure,
@@ -580,17 +398,9 @@ impl<'a> Pass<'a> {
 
 /// One piece of a row's gloss.
 ///
-/// A small tree rather than a flat
-/// list of paragraphs, because two of
-/// the three shapes are containers. A
-/// table's cells sit on a grid and
-/// each has to be measured
-/// separately, and a block's box
-/// wraps *every* paragraph the block
-/// emits rather than its first - so
-/// the block half of the inline pass
-/// emits this sum type and
-/// [`Pass::block`] walks it.
+/// The layout uses a small tree instead of a flat paragraph list because two of three shapes are containers.
+/// Table cells need separate measurement, and a block's box surrounds *every* paragraph it emits.
+/// [`Pass::block`] walks this sum type.
 pub(super) enum Piece {
     Flow(Flow),
     Table(Grid),
@@ -600,17 +410,12 @@ pub(super) enum Piece {
 }
 
 impl Piece {
-    /// Sets the gap owed above it.
+    /// Sets the gap above a piece.
     ///
-    /// It stops at a box rather than
-    /// descending into one: the gap
-    /// above a box goes *outside* it,
-    /// and [`Paragraphs::wrap`] has
-    /// already spaced the body inside
-    /// it - whose first paragraph is
-    /// separated from the border by
-    /// the box's padding and by
-    /// nothing else.
+    /// It stops at a box and does not enter it.
+    /// The gap above a box stays outside it.
+    /// [`Paragraphs::wrap`] already spaces its body inside the box.
+    /// The box's padding alone separates the first paragraph from the border.
     ///
     /// [`Paragraphs::wrap`]: super::gloss::Paragraphs::wrap
     pub(super) fn top_gap(&mut self, gap: f32) {
@@ -621,17 +426,12 @@ impl Piece {
         }
     }
 
-    /// Stamps the term-bank row behind
-    /// every paragraph of it, the ones
-    /// inside cells included.
+    /// Stamps the term-bank row on every paragraph.
+    /// This includes paragraphs inside cells.
     ///
-    /// The tree itself does not know
-    /// which row stored it, so this is
-    /// [`build_elements`]' job - and a
-    /// cell's paragraph needs the same
-    /// address as any other, or a hit
-    /// inside a conjugation table
-    /// resolves to no sense at all.
+    /// The tree cannot identify the stored row, so [`build_elements`] adds the address.
+    /// A paragraph in a conjugation table needs the same address as any other paragraph.
+    /// Without that address, a hit resolves to no sense.
     ///
     /// [`build_elements`]: super::chrome::build_elements
     pub(super) fn stamp(&mut self, dict_id: i64, entry_id: i64) {
@@ -660,75 +460,48 @@ impl Piece {
     }
 }
 
-/// One block's box, and every piece
-/// inside it.
+/// One block's box and every piece inside it.
 ///
-/// **Where a block's box belongs.** A
-/// box wraps all of its block's
-/// content, exactly as a browser
-/// draws it: a bordered `div` holding
-/// three paragraphs draws one border
-/// around all three - not one around
-/// each, and not one around the
-/// first. So a block that declares a
-/// box becomes a container, and the
-/// paragraphs it emits become the
-/// container's body.
+/// **Where a block's box belongs.** A box surrounds all content from its block.
+/// A bordered `div` with three paragraphs therefore has one border around all three.
+/// It does not have one border per paragraph.
 ///
-/// Two invariants make a container
-/// the *only* shape that can hold
-/// such a box. The box has to be
-/// resolved **before** anything
-/// inside it is measured, because its
-/// left and right lead decide the
-/// wrap width (`wrap_w = avail_w -
-/// lead.horizontal()`) - so it cannot
-/// be discovered afterwards from
-/// where its content landed. And
-/// **nothing may edit a line box
-/// after the wrap**, because both
-/// bins re-measure an element's own
-/// spans to paint it - so a box
-/// cannot be grown later by
-/// rewriting the paragraph that first
-/// claimed it. A container satisfies
-/// both: it narrows the width on the
-/// way in and reads only the total
-/// advance on the way out
-/// ([`Pass::boxed`]).
+/// A block that declares a box becomes a container.
+/// Its paragraphs become the container's body.
 ///
-/// The shape a table already is, for
-/// the same reason: [`Cell::body`] is
-/// a `Vec<Piece>` too, because a cell
-/// is a block container as well.
+/// Two invariants make a container the *only* shape that can hold this box.
+/// The pass must resolve the box before it measures the content.
+/// Its left and right lead set `wrap_w = avail_w - lead.horizontal()`.
+/// The pass cannot discover that width from content after layout.
+///
+/// **the pass must not edit a line box after the wrap**.
+/// Both bins measure an element's spans again for paint.
+/// Therefore, the pass cannot grow the box by changing the first paragraph later.
+///
+/// A container satisfies both rules.
+/// It narrows the width before it measures content and reads only total advance after it measures content.
+/// See [`Pass::boxed`].
+///
+/// A table already has this shape.
+/// [`Cell::body`] is a `Vec<Piece>`, so a cell is also a block container.
 ///
 /// [`Cell::body`]: super::table::Cell::body
 pub(super) struct Boxed {
-    /// Gap owed above it, outside its
-    /// own margin.
+    /// Gap above the box, outside its margin.
     pub(super) top_gap: f32,
-    /// Its own box, the list indent
-    /// outside that box, and what its
-    /// body inherits.
+    /// The box, the list indent outside it, and the values that its body inherits.
     ///
-    /// `style.exists()` always holds:
-    /// [`Paragraphs::wrap`] builds one
-    /// of these only for a block that
-    /// declared a box, so a gloss
-    /// carrying no box style produces
-    /// no container at all and
-    /// measures byte for byte as it
-    /// did before this pass existed.
+    /// `style.exists()` always holds.
+    /// [`Paragraphs::wrap`] creates a `Boxed` value only for a block that declares a box.
+    /// A gloss without box style creates no container.
+    /// Its measurement remains byte for byte as before this pass.
     ///
     /// [`Paragraphs::wrap`]: super::gloss::Paragraphs::wrap
     pub(super) block: Block,
-    /// What the box wraps, in draw
-    /// order: paragraphs, tables, and
-    /// nested boxes.
+    /// The box contents in draw order: paragraphs, tables, and nested boxes.
     pub(super) body: Vec<Piece>,
-    /// The style its own element draws
-    /// in. It carries no text, so only
-    /// the cull slack rides on this.
+    /// The style for the box element.
+    /// The element has no text, so only the cull slack uses this style.
     pub(super) base: Inline,
     pub(super) path: Option<NodePath>,
     pub(super) dict_id: i64,
@@ -736,15 +509,12 @@ pub(super) struct Boxed {
 }
 
 impl Boxed {
-    /// Where in its dictionary it came
-    /// from.
+    /// Returns this element's `GlossOrigin` in the Dictionary.
     pub(super) fn origin(&self) -> GlossOrigin {
         GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
     }
 
-    /// What every block container
-    /// shares, as [`Pass::open_box`]
-    /// takes it.
+    /// Returns the header that every block container shares with [`Pass::open_box`].
     pub(super) fn header(&self) -> BoxHeader {
         BoxHeader {
             top_gap: self.top_gap,
@@ -755,106 +525,69 @@ impl Boxed {
     }
 }
 
-/// What every block container has
-/// before it is measured.
+/// The data that every block container has before measurement.
 ///
-/// The four facts [`Pass::open_box`]
-/// needs and the only four a [`Boxed`]
-/// and a [`Grid`] hold alike, bundled
-/// so that opening a box is four
-/// arguments rather than seven - which
-/// is where an argument gets passed in
-/// the wrong slot, and where two
-/// `(f32, f32)` origins in a row get
-/// swapped.
+/// [`Pass::open_box`] needs four facts.
+/// [`Boxed`] and [`Grid`] hold the same four facts.
+/// One header keeps these facts together instead of seven arguments.
+/// It prevents wrong-slot errors, such as swapped `(f32, f32)` origins.
 #[derive(Clone, Copy)]
 pub(super) struct BoxHeader {
-    /// Gap owed above it, outside its
-    /// own margin.
+    /// Gap above the box, outside its margin.
     pub(super) top_gap: f32,
-    /// Its own box, the list indent
-    /// outside that box, and what its
-    /// body inherits.
+    /// The box, the list indent outside it, and the values that its body inherits.
     pub(super) block: Block,
-    /// The style its own element draws
-    /// in. It carries no text, so only
-    /// the cull slack rides on this.
+    /// The style for the box element.
+    /// The element has no text, so only the cull slack uses this style.
     pub(super) base: Inline,
-    /// Where in its dictionary it came
-    /// from.
+    /// The element's `GlossOrigin` in the Dictionary.
     pub(super) origin: GlossOrigin,
 }
 
-/// One opened block container: its
-/// lead resolved, its element pushed,
-/// and everything closing it needs.
+/// The state of one open block container.
 ///
-/// A `div` and a `table` differ in
-/// what they put inside the box and in
-/// nothing about the box itself, so
-/// this is the box itself: the
-/// arithmetic between the width a
-/// container was offered and the width
-/// its content is measured at, and
-/// back again. Both sites had it
-/// written out, and a margin honoured
-/// on one of them and not the other
-/// would be a border drawn in the
-/// wrong place on exactly the
-/// dictionaries that draw borders.
+/// It stores the resolved lead, the element index, and the values that `close_box` needs.
+///
+/// A `div` and a `table` differ only in their contents.
+/// This struct shares one box calculation between both containers.
+/// One shared calculation keeps margin handling consistent for dictionaries that draw borders.
 #[derive(Clone, Copy)]
 pub(super) struct BoxLead {
-    /// Where the box's own element sits
-    /// in the scene, so the close can
-    /// fill its geometry in.
+    /// Index of the box element in the scene.
+    /// `close_box` fills this element's geometry.
     pub(super) elem: usize,
-    /// The declared box, as a bin
-    /// fills and strokes it.
+    /// The declared box style that a bin fills and strokes.
     pub(super) style: BoxStyle,
-    /// Used border widths: an edge
-    /// whose style is `none` is zero
-    /// however wide it was declared.
-    /// Resolved once here, because
-    /// closing the box reads it four
-    /// more times.
+    /// Border widths after style resolution.
+    /// An edge with style `none` has width zero.
+    /// `close_box` reads all four values, so the pass resolves them once.
     pub(super) border: Edges<f32>,
-    /// Margin plus border plus padding
-    /// per edge, with the block's own
-    /// list indent folded into `left`.
+    /// Margin, border, and padding for each edge.
+    /// The block's list indent is part of `left`.
     pub(super) lead: Edges<f32>,
-    /// That list indent alone, which
-    /// the border box's own x still
-    /// needs: the indent sits *outside*
-    /// the box.
+    /// The list indent alone.
+    /// It stays outside the border box and affects its x coordinate.
     pub(super) indent: f32,
-    /// What the container offered,
-    /// before the lead came off it.
+    /// Width that the container offers before the pass removes the lead.
     pub(super) offer: f32,
-    /// The border box's own top-left.
+    /// Top-left point of the border box.
     pub(super) corner: (f32, f32),
-    /// The content box's top-left: the
-    /// pen every piece inside is laid
-    /// out from.
+    /// Top-left point of the content box.
+    /// Each piece uses this point as its layout origin.
     pub(super) pen: (f32, f32),
-    /// The width every piece inside is
-    /// measured at.
+    /// Width that the pass gives to each piece.
     pub(super) avail: f32,
-    /// The gap above this box, already
-    /// spent into `corner` and `pen`
-    /// and owed back to the walk.
+    /// Gap above the box.
+    /// The pass adds it to `corner` and `pen`, then returns it to the walk.
     pub(super) top_gap: f32,
 }
 
 impl BoxLead {
-    /// This box's border box, with
-    /// `content_h` pixels of content
-    /// inside it.
+    /// Returns the border box with `content_h` pixels inside.
     ///
-    /// `w` is the border box's own
-    /// width, which is the one thing
-    /// the two containers disagree
-    /// about: see [`BoxLead::offered_w`]
-    /// and [`BoxLead::fitted_w`].
+    /// `w` gives the border-box width.
+    /// The block and grid containers use different width rules.
+    /// See [`BoxLead::offered_w`] and [`BoxLead::fitted_w`].
     pub(super) fn border_box(&self, w: f32, content_h: f32) -> SceneRect {
         SceneRect {
             x: self.corner.0,
@@ -864,35 +597,23 @@ impl BoxLead {
         }
     }
 
-    /// The border-box width a
-    /// `display: block` container
-    /// takes: everything its container
-    /// offered, less the list indent
-    /// outside the box and its own
-    /// margins.
+    /// Returns the border-box width for a `display: block` container.
+    /// It subtracts the list indent outside the box and the box's margins from the offered width.
     pub(super) fn offered_w(&self) -> f32 {
         (self.offer - self.indent - self.style.margin.horizontal()).max(0.0)
     }
 
-    /// The border-box width a
-    /// shrink-to-fit container takes:
-    /// its content, plus the border and
-    /// padding around it. What a table
-    /// with no declared width is in a
-    /// browser.
+    /// Returns the border-box width for a shrink-to-fit container.
+    /// It adds content, border, and padding.
+    /// A table with no declared width uses this rule in a browser.
     pub(super) fn fitted_w(&self, content_w: f32) -> f32 {
         self.border.horizontal() + self.style.padding.horizontal() + content_w
     }
 
-    /// What the walk advances by, once
-    /// the content is `content_h` tall.
+    /// Returns the distance that the walk advances after the content reaches `content_h`.
     ///
-    /// Not the border box's own height:
-    /// the margin below the box is part
-    /// of what the next block starts
-    /// after, and the gap above it was
-    /// already spent when the box
-    /// opened.
+    /// The distance exceeds the border box height because the next block starts after the bottom margin.
+    /// The box already spent its top gap when it opened.
     pub(super) fn advance(&self, content_h: f32) -> f32 {
         self.lead.top
             + content_h
@@ -901,25 +622,17 @@ impl BoxLead {
             + self.style.margin.bottom
     }
 
-    /// The width this container asks
-    /// its own container for: what its
-    /// content wanted, plus the lead
-    /// around it.
+    /// Returns the width that this container requests from its parent.
+    /// It adds `content_w` to the lead around the content.
     pub(super) fn demand(&self, content_w: f32) -> f32 {
         self.lead.horizontal() + content_w
     }
 }
 
-/// The line a span first landed on,
-/// and the advance it asked that line
-/// for.
+/// Returns the first line that holds a span and the advance that it requests.
 ///
-/// A degenerate `(0, 0)` for a span
-/// the measurer reported no box for -
-/// an empty run, or one whose glyphs
-/// all fell outside it - which
-/// [`shift_on`] reads as "no line to
-/// align against".
+/// If the measurer reports no box, this function returns `(0, 0)` for an empty run or a run whose glyphs fall outside it.
+/// [`shift_on`] reads that result as no line for alignment.
 pub(super) fn first_box(measured: &Measured, span: u32) -> (LineBox, f32) {
     match measured.spans.iter().find(|b| b.span == span) {
         Some(b) => (
@@ -930,30 +643,19 @@ pub(super) fn first_box(measured: &Measured, span: u32) -> (LineBox, f32) {
     }
 }
 
-/// One run of spans, on one line.
+/// One run of spans on one line.
 ///
-/// `(line, left, right, height)`, all
-/// run-relative: the line index, the
-/// run's horizontal extent on it, and
-/// the tallest span box in it - which
-/// is what a hit target's rect and an
-/// inline box's rect are each built
-/// from.
+/// `(line, left, right, height)` stores run-relative data: the line index, horizontal extent, and tallest span box.
+/// Hit target and inline box rects use this data.
 pub(super) type Cover = (u32, f32, f32, f32);
 
-/// Where a run of spans landed, one
-/// entry per line it touches.
+/// Builds one `span-cover` entry for each line that a run touches.
 ///
-/// A span that wrapped has one box
-/// per line, and a run of them has
-/// several per line, so this unions
-/// them: a cross-reference broken
-/// across two lines is clickable on
-/// both halves and a pill that
-/// wrapped is drawn on both. `out` is
-/// refilled rather than returned,
-/// because the walk does this twice
-/// per paragraph.
+/// A span that wraps has one box per line.
+/// A run can have several boxes per line, so this function unions their extents.
+/// A cross-reference across two lines stays clickable on both parts.
+/// A wrapped pill draws on both lines.
+/// `out` receives the result because the walk calls this twice per paragraph.
 pub(super) fn span_cover(measured: &Measured, out: &mut Vec<Cover>, wanted: impl Fn(u32) -> bool) {
     out.clear();
     for b in &measured.spans {

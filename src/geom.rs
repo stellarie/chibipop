@@ -1,4 +1,4 @@
-//! Physical pixel geometry.
+//! Core geometry uses physical pixels.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysPoint {
@@ -15,12 +15,13 @@ pub struct PhysRect {
 }
 
 impl PhysRect {
-    /// Half-open: top-left in.
+    /// The rectangle uses half-open bounds. It includes the top and left edges and
+    /// excludes the bottom and right edges.
     pub fn contains(&self, p: PhysPoint) -> bool {
         p.x >= self.x && p.x < self.x + self.w && p.y >= self.y && p.y < self.y + self.h
     }
 
-    /// 0.0 when `p` is inside.
+    /// Return `0.0` when `p` is inside the rectangle.
     pub fn edge_distance_to(&self, p: PhysPoint) -> f64 {
         let dx = (self.x - p.x).max(0).max(p.x - (self.x + self.w - 1));
         let dy = (self.y - p.y).max(0).max(p.y - (self.y + self.h - 1));
@@ -35,7 +36,7 @@ impl PhysRect {
         PhysRect { x: self.x + dx, y: self.y + dy, w: self.w, h: self.h }
     }
 
-    /// Negative amounts shrink.
+    /// A negative value shrinks the rectangle.
     pub fn inflated(&self, dx: i32, dy: i32) -> PhysRect {
         PhysRect {
             x: self.x - dx,
@@ -45,10 +46,10 @@ impl PhysRect {
         }
     }
 
-    /// Overlap of two boxes.
+    /// Return the overlap of two rectangles.
     ///
-    /// Half-open like `contains`: boxes that merely share an edge do not
-    /// intersect.
+    /// The bounds are half-open, like `contains`. Rectangles that share only an
+    /// edge do not intersect.
     pub fn intersection(&self, other: PhysRect) -> Option<PhysRect> {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
@@ -60,7 +61,7 @@ impl PhysRect {
         Some(PhysRect { x, y, w: right - x, h: bottom - y })
     }
 
-    /// Truncates toward zero.
+    /// Division truncates each value toward zero.
     pub fn scaled_down(&self, factor: i32) -> PhysRect {
         PhysRect {
             x: self.x / factor,
@@ -71,50 +72,50 @@ impl PhysRect {
     }
 }
 
-/// Origin of a drawn rect.
+/// The kind identifies the source of a drawn rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanKind {
-    /// Pass 1's capture box.
+    /// This is the Pass 1 capture rectangle.
     Pass1,
-    /// One forward tile.
+    /// This is a tile that follows Pass 1.
     Tile,
-    /// The resolved word's box.
+    /// This is the rectangle of the resolved word.
     Anchor,
-    /// The characters defined.
+    /// This is the rectangle of the matched characters.
     Match,
 }
 
-/// A rect the overlay draws.
+/// A rectangle that the overlay draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanRect {
     pub rect: PhysRect,
     pub kind: ScanKind,
 }
 
-/// What one hover may show.
+/// This is the overlay content for one hover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanDisplay {
-    /// Captures; inert when off.
+    /// This value shows capture rectangles when it is `true`.
     pub captures: bool,
-    /// `Match`.
+    /// Show the `Match` rectangle when this value is `true`.
     pub highlight: bool,
 }
 
 impl ScanDisplay {
-    /// Is any overlay needed?
+    /// Return `true` when the overlay has content.
     pub fn any(self) -> bool {
         self.captures || self.highlight
     }
 }
 
-/// Freeze rect, popup, corridor.
+/// Return the freeze rectangle, the popup rectangle, and the corridor.
 pub fn sticky_region(freeze: PhysRect, reach: PhysRect, popup: PhysRect) -> [PhysRect; 3] {
-    // Flush to freeze, reach-wide.
+    // Set the bridge source to the freeze row and the full reach width.
     let bridge_src = PhysRect { x: reach.x, w: reach.w, y: freeze.y, h: freeze.h };
     [freeze, popup, bridge_between(bridge_src, popup)]
 }
 
-/// The gap band between two.
+/// Return the gap band between two rectangles.
 fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
     let (upper, lower) = if a.y <= b.y { (a, b) } else { (b, a) };
     let top = upper.y + upper.h;
@@ -123,14 +124,14 @@ fn bridge_between(a: PhysRect, b: PhysRect) -> PhysRect {
     PhysRect { x: left, y: top, w: right - left, h: lower.y - top }
 }
 
-/// On freeze, popup, or gap.
+/// Return `true` when `p` is in the freeze rectangle, popup, or corridor.
 pub fn in_sticky(p: PhysPoint, freeze: PhysRect, reach: PhysRect, popup: PhysRect) -> bool {
     sticky_region(freeze, reach, popup)
         .iter()
         .any(|r| r.w > 0 && r.h > 0 && r.contains(p))
 }
 
-/// Bounds plus local rects.
+/// Return the bounds and rectangles with local coordinates.
 pub fn overlay_layout(rects: &[ScanRect]) -> Option<(PhysRect, Vec<ScanRect>)> {
     let first = rects.first()?;
     let mut left = first.rect.x;
@@ -153,7 +154,7 @@ pub fn overlay_layout(rects: &[ScanRect]) -> Option<(PhysRect, Vec<ScanRect>)> {
     Some((bounds, local))
 }
 
-/// `None` when nothing is left.
+/// Return `None` when no interior remains.
 pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
     let w = rect.w - 2 * thickness;
     let h = rect.h - 2 * thickness;
@@ -163,7 +164,7 @@ pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
     Some(PhysRect { x: rect.x + thickness, y: rect.y + thickness, w, h })
 }
 
-/// Never covers `anchor`.
+/// Place the popup so it does not cover `anchor`.
 pub fn place_popup(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, gap: i32) -> PhysRect {
     let (w, h) = size;
 
@@ -223,13 +224,13 @@ mod tests {
 
     #[test]
     fn edge_distance_is_diagonal_at_a_corner() {
-        // 3-4-5 triangle.
+        // The distances form a 3-4-5 triangle.
         assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(7, 6)));
     }
 
     #[test]
     fn edge_distance_is_orthogonal_to_the_right() {
-        // Occupied span is 10..=29.
+        // The occupied span is 10..=29.
         assert_eq!(6.0, r(10, 10, 20, 20).edge_distance_to(p(35, 15)));
     }
 
@@ -240,13 +241,14 @@ mod tests {
 
     #[test]
     fn edge_distance_is_diagonal_off_the_bottom_right_corner() {
-        // 3-4-5 off the far corner.
+        // The point is 3 units right and 4 units below the far corner. Its distance
+        // is 5.
         assert_eq!(5.0, r(10, 10, 20, 20).edge_distance_to(p(32, 33)));
     }
 
     #[test]
     fn edge_distance_degrades_correctly_when_near_and_far_edges_coincide() {
-        // Near and far edge coincide.
+        // The near and far edges have the same position.
         assert_eq!(5.0, r(10, 10, 1, 1).edge_distance_to(p(13, 14)));
     }
 
@@ -265,7 +267,7 @@ mod tests {
         assert_eq!(None, r(0, 0, 10, 10).intersection(r(20, 20, 10, 10)));
     }
 
-    /// Half-open, like `contains`.
+    /// The intersection uses half-open bounds, like `contains`.
     #[test]
     fn boxes_sharing_only_an_edge_do_not_intersect() {
         assert_eq!(None, r(0, 0, 10, 10).intersection(r(10, 0, 10, 10)), "right edge");
@@ -291,7 +293,7 @@ mod tests {
         assert_eq!(Some(r(0, 3, 3, 2)), a.intersection(b));
     }
 
-    /// A zero-area box overlaps nothing, itself included.
+    /// A zero-area rectangle does not intersect another rectangle or itself.
     #[test]
     fn a_degenerate_box_intersects_nothing() {
         assert_eq!(None, r(5, 5, 0, 0).intersection(r(0, 0, 10, 10)));
@@ -305,13 +307,13 @@ mod tests {
 
     #[test]
     fn scaled_down_truncates_toward_zero_for_odd_values() {
-        // Truncation, not rounding.
+        // The operation truncates rather than rounds.
         assert_eq!(r(5, 10, 15, 20), r(11, 21, 31, 41).scaled_down(2));
     }
 
     #[test]
     fn scaled_down_truncates_toward_zero_for_negative_origin() {
-        // Truncates toward zero.
+        // The operation truncates toward zero.
         assert_eq!(r(-5, -10, 15, 20), r(-11, -21, 30, 40).scaled_down(2));
     }
 
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn popup_respects_a_monitor_with_a_non_zero_origin() {
-        // Secondary starts at x=2560.
+        // The secondary monitor starts at x=2560.
         let mon = r(2560, 0, 1080, 1920);
         let got = place_popup(r(3500, 100, 20, 20), (300, 200), mon, 12);
         assert!(got.x >= mon.x, "must not spill onto the primary monitor");
@@ -399,7 +401,7 @@ mod tests {
         assert_eq!(ScanKind::Tile, local[1].kind);
     }
 
-    /// Highlight only: one box.
+    /// Highlight only: one rectangle.
     #[test]
     fn the_capture_kinds_are_not_shown_when_only_the_highlight_is_on() {
         let d = ScanDisplay { captures: false, highlight: true };
@@ -415,7 +417,7 @@ mod tests {
         assert!(d.highlight);
     }
 
-    /// Off means no window.
+    /// No overlay window is needed when both values are `false`.
     #[test]
     fn both_settings_off_needs_no_overlay_window() {
         assert!(!ScanDisplay { captures: false, highlight: false }.any());
@@ -429,7 +431,7 @@ mod tests {
         assert!(d.any());
     }
 
-    /// Tiles overlap pass 1.
+    /// The tiles overlap Pass 1.
     #[test]
     fn overlapping_rects_still_produce_one_covering_bounds() {
         let (bounds, _) = overlay_layout(&[
@@ -446,7 +448,7 @@ mod tests {
         assert_eq!(PhysRect { x: 12, y: 12, w: 96, h: 36 }, inner);
     }
 
-    /// A real box measures 17x3.
+    /// The test rectangle measures 17x3.
     #[test]
     fn inset_of_a_rect_thinner_than_its_border_has_no_interior() {
         assert!(inset(PhysRect { x: 0, y: 0, w: 17, h: 3 }, 2).is_none());
@@ -454,7 +456,7 @@ mod tests {
         assert!(inset(PhysRect { x: 0, y: 0, w: 4, h: 4 }, 2).is_none());
     }
 
-    /// Flush left, 12px below.
+    /// The popup starts at the anchor's left edge, 12px below its bottom edge.
     fn anchor_and_popup() -> (PhysRect, PhysRect) {
         (r(100, 100, 26, 27), r(100, 139, 420, 300))
     }
@@ -476,7 +478,7 @@ mod tests {
         }
     }
 
-    /// No missed row at a seam.
+    /// The three rectangles cover every row at the seam.
     #[test]
     fn the_three_rects_tile_without_a_seam() {
         let (a, pop) = anchor_and_popup();
@@ -485,7 +487,7 @@ mod tests {
         }
     }
 
-    /// D2a: straight down.
+    /// D2a: the path goes straight down.
     #[test]
     fn the_vertical_path_into_the_popup_never_leaves_the_region() {
         for ax in [-900, 0, 2560, 3400] {
@@ -505,7 +507,7 @@ mod tests {
         }
     }
 
-    /// Popup may sit above.
+    /// The popup can sit above the anchor.
     #[test]
     fn the_bridge_works_with_the_popup_above_the_anchor() {
         let a = r(100, 900, 26, 27);
@@ -516,7 +518,7 @@ mod tests {
         assert!(in_sticky(p(310, 700), a, a, pop), "popup centre");
     }
 
-    /// Fails on a bounding box.
+    /// An outer box would fail this test.
     #[test]
     fn the_next_character_along_the_line_is_not_sticky() {
         let (a, pop) = anchor_and_popup();
@@ -524,7 +526,7 @@ mod tests {
         assert!(!in_sticky(p(300, 113), a, a, pop), "far along the same line");
     }
 
-    /// Leaving is on purpose.
+    /// The path leaves the region by design.
     #[test]
     fn a_shallow_diagonal_leaves_the_region_on_purpose() {
         let (a, pop) = anchor_and_popup();
@@ -541,7 +543,7 @@ mod tests {
         assert!(!in_sticky(p(1000, 1000), a, a, pop));
     }
 
-    /// Zero-height bridge is nil.
+    /// A zero-height bridge has no area.
     #[test]
     fn a_zero_gap_needs_no_bridge_and_still_tiles() {
         let a = r(100, 100, 26, 27);
@@ -582,7 +584,7 @@ mod tests {
         assert!(!in_sticky(next_char, freeze, freeze, popup), "next char is not frozen");
     }
 
-    /// Tategaki 経験, one char held.
+    /// Tategaki 経験: the freeze holds one character.
     #[test]
     fn a_vertical_char_freeze_still_bridges_down_to_the_popup() {
         let freeze = r(987, 500, 52, 26);
@@ -593,7 +595,7 @@ mod tests {
         }
     }
 
-    /// HIGHLIGHT_PAD is 3px.
+    /// The `HIGHLIGHT_PAD` value is 3px.
     #[test]
     fn a_single_character_vertical_match_leaves_no_pad_gap() {
         let freeze = r(987, 500, 52, 26);
@@ -604,7 +606,7 @@ mod tests {
         }
     }
 
-    /// Horizontal must not shift.
+    /// The horizontal character must not shift the corridor.
     #[test]
     fn a_horizontal_char_freeze_leaves_the_corridor_untouched() {
         let freeze = r(3010, 244, 27, 52);
@@ -613,7 +615,7 @@ mod tests {
         assert_eq!(bridge_between(reach, popup), sticky_region(freeze, reach, popup)[2]);
     }
 
-    /// Toggle off must not shift.
+    /// The toggle-off path must not shift the corridor.
     #[test]
     fn an_equal_freeze_and_reach_bridges_exactly_as_before() {
         let popup = r(1000, 538, 420, 300);

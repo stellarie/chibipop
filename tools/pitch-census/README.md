@@ -17,8 +17,8 @@ by what the schema *permits* sizes it wrong, in exactly the way
 
 The pitch role is detected from bank content, never from the filename: an
 archive has the pitch role when a `term_meta_bank_` row carries `"pitch"` in
-field 1. That is the predicate the dictionary-roles spec uses, and in this
-library it disagrees with the filename for one archive.
+field 1. In this library that predicate disagrees with the filename for
+one archive.
 
 Stdlib Python only. No setup step, no downloads, nothing installed on the host.
 

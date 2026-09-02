@@ -1,24 +1,22 @@
-//! The per-channel status registry behind the tray's disabled menu rows
-//! (ADR-0006): what each input channel is doing right now, and the one
-//! mapping from those states to menu-row text and the SNI `Status`.
+//! This module stores each channel state for the tray's disabled menu rows
+//! (ARCHITECTURE.md#platform-integration). It maps each state to menu-row
+//! text and the SNI `Status`.
 //!
-//! The registry is daemon-owned and works with or without a tray — it is
-//! fed from what the daemon already knows (the ticket-34 capture backend
-//! selection and the consent it resolved before publishing, the
-//! ticket-33 cursor rung selection and its live health, the
-//! always-bound control socket), and later channel tickets flip states
-//! as their backends land. Nothing here touches D-Bus, so all of it is
-//! testable without a tray host.
+//! The daemon owns this registry, which works with or without a tray.
+//! The daemon supplies the capture backend and its resolved consent, the
+//! cursor rung and its live health, and the always-bound control socket.
+//! Later channel code updates states when its backends become available.
+//! This module does not use D-Bus, so tests can run without a tray host.
 
 use crate::capture::backend::{Backend, Selection as CaptureSelection};
 use crate::cursor::{Rung, Selection};
 
-/// One monitored channel, in menu order: the three input channels, plus
-/// the popup surface that shows what they produce. The popup earns a row
-/// for the stock-GNOME case (ticket 49): a session with no layer shell
-/// has three perfectly healthy input channels and still cannot show a
-/// definition, and a tray that reads all-green there is the "silently
-/// half-works" failure this app refuses.
+/// One monitored channel in menu order. The list has three input channels
+/// and the popup surface that shows their output.
+///
+/// The popup has its own row for stock GNOME. A session without a layer shell
+/// can have healthy input channels but cannot show a definition. An icon that
+/// reports every channel as healthy would hide this failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelId {
     Capture,
@@ -50,28 +48,25 @@ impl ChannelId {
     }
 }
 
-/// What one channel is doing. `detail` is the human half of the menu
-/// row — short, honest, and naming the mechanism or the exact gap.
+/// State for one channel. `detail` supplies the human-readable part of the
+/// menu row. It names the mechanism or the exact capability that is not available.
 ///
-/// Three states. Two of them resolve at startup for every channel the
-/// daemon tracks (the ADR-0002 capture ladder including the portal's
-/// eager consent, the ADR-0003 cursor ladder, the always-bound control
-/// socket), so there is no channel left for a "not built yet"
-/// placeholder to describe. The third is for the failure this app
-/// refuses to hide: a channel that serves pixels *and* is known to
-/// serve them spoiled - a compositor painting the pointer into the
-/// frames we OCR (ticket 52). Reporting that as Up would be a lie the
-/// user pays for in wrong readings; reporting it as Down would be a lie
-/// they could not act on, because lookups do work.
+/// The daemon resolves two states at startup for every channel it tracks.
+/// These states cover the capture ladder and the portal's eager consent, the
+/// cursor ladder, and the always-bound control socket. The third state reports
+/// a channel that supplies pixels with a known defect, such as a compositor
+/// that paints the pointer into frames that OCR reads. `Up` would mislead the
+/// user with wrong readings. `Down` would hide that lookups still work and
+/// give the user no useful action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
-    /// Working; `detail` names what serves it ("control socket").
+    /// The channel works. `detail` names its source, such as "control socket".
     Up { detail: String },
-    /// Serving, with a named defect the user can fix; `detail` names
-    /// what serves it *and* what to change.
+    /// The channel remains available but has a named defect that the user can fix.
+    /// `detail` names the source and the required change.
     Degraded { detail: String },
-    /// Down; `detail` names exactly what is missing or denied, per the
-    /// ADR-0006 example row "Cursor: portal denied — see settings".
+    /// The channel is down. `detail` names the absent capability or denial. For
+    /// example: "Cursor: portal denied — see settings".
     Down { detail: String },
 }
 
@@ -84,13 +79,11 @@ impl ChannelState {
         ChannelState::Down { detail: detail.into() }
     }
 
-    /// This state, with `defect` appended and the row demoted to
-    /// [`ChannelState::Degraded`]: the row keeps naming what serves the
-    /// channel and gains what is wrong with it.
+    /// Append `defect` to this state and change the row to
+    /// [`ChannelState::Degraded`]. The row keeps the source and adds the defect.
     ///
-    /// A channel that is already down stays down - "unsupported, and
-    /// also spoiled" is not a distinction a user can act on, and the
-    /// missing capability is the thing to fix first.
+    /// A channel that is down stays down. A capability that is not available has
+    /// priority over a defect, so this method does not change `Down`.
     pub fn degraded_by(self, defect: &str) -> ChannelState {
         match self {
             ChannelState::Down { .. } => self,
@@ -109,9 +102,9 @@ impl ChannelState {
     }
 }
 
-/// How a live cursor rung reads in a menu row. Deliberately not a method
-/// on `Rung`: the ladder's own startup diagnostic is a paragraph naming
-/// protocol globals (ADR-0003), and a menu row has one line.
+/// Return the menu text for a live cursor rung. Keep this function separate
+/// from `Rung`. The ladder startup diagnostic names protocol globals in a
+/// paragraph (ARCHITECTURE.md#input-ladders), while a menu row has one line.
 pub fn rung_detail(rung: Rung) -> &'static str {
     match rung {
         Rung::ImageCopyCapture => "ext-image-copy-capture cursor session",
@@ -120,8 +113,8 @@ pub fn rung_detail(rung: Rung) -> &'static str {
     }
 }
 
-/// The cursor channel's state, straight from the ticket-33 rung
-/// selection the daemon already made.
+/// Build the cursor channel state from the rung selection that the daemon
+/// already made.
 pub fn cursor_state(selection: &Selection) -> ChannelState {
     match selection {
         Selection::Rung(rung) => ChannelState::up(rung_detail(*rung)),
@@ -131,11 +124,10 @@ pub fn cursor_state(selection: &Selection) -> ChannelState {
     }
 }
 
-/// The capture channel's state, straight from the ADR-0002 backend
-/// selection. A portal backend that has been selected but whose
-/// consent has not been answered yet is *not* reported here — the
-/// daemon overwrites this row with the consent outcome before the tray
-/// is ever published.
+/// Build the capture channel state from the backend selection. If the portal
+/// backend has no consent result, do not report that interim state here. The
+/// daemon replaces this row with the consent result before it publishes the
+/// tray.
 pub fn capture_state(selection: &CaptureSelection) -> ChannelState {
     match selection {
         CaptureSelection::Backend(Backend::WlrScreencopy) => {
@@ -150,12 +142,12 @@ pub fn capture_state(selection: &CaptureSelection) -> ChannelState {
     }
 }
 
-/// The popup channel's state. `advertised` is whether this session
-/// advertises `zwlr_layer_shell_v1` at all, which is the honest verdict
-/// available at startup - a bind that then fails anyway overwrites this
-/// row through [`ChannelStatuses::set`] with what actually went wrong.
-/// The down row names the global, because on stock GNOME that name is
-/// the whole answer to "why is nothing appearing".
+/// Build the popup channel state. `advertised` says whether this session
+/// advertises `zwlr_layer_shell_v1`. This startup result comes before a bind
+/// can fail. [`ChannelStatuses::set`] replaces the row if the bind fails.
+///
+/// The down row names the global. On stock GNOME, this name explains why
+/// nothing appears.
 pub fn popup_state(advertised: bool) -> ChannelState {
     if advertised {
         ChannelState::up("wlr-layer-shell overlay surface")
@@ -164,30 +156,28 @@ pub fn popup_state(advertised: bool) -> ChannelState {
     }
 }
 
-/// Every channel. Fixed-size — the set of channels is the app's shape,
-/// not data.
+/// Store every channel in a fixed-size array. The channel set is part of the
+/// application shape, not input data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelStatuses {
     states: [ChannelState; 4],
 }
 
 impl ChannelStatuses {
-    /// What the daemon knows once startup is done: `capture` is the
-    /// already-resolved capture state (the daemon runs ADR-0002's
-    /// selection and, for the portal backend, its eager consent before
-    /// publishing the tray), the cursor rung was just selected, the
-    /// trigger is the always-bound control socket, and `popup` is
-    /// whether the layer shell this session advertises can carry a
-    /// panel at all.
+    /// Create channel states from the daemon's startup results. `capture`
+    /// already includes the backend selection and eager consent for the
+    /// portal backend. The daemon publishes the tray only after it resolves
+    /// that consent. The daemon has selected the cursor rung. The trigger
+    /// uses the always-bound control socket. `popup` says whether the
+    /// session's advertised layer shell can carry a panel.
     pub fn startup(capture: ChannelState, cursor: &Selection, popup: ChannelState) -> ChannelStatuses {
         ChannelStatuses {
             states: [capture, cursor_state(cursor), ChannelState::up("control socket"), popup],
         }
     }
 
-    /// A channel came up or went down; the tray re-renders from here.
-    /// Returns whether this actually changed anything, so callers can
-    /// log transitions rather than repeats.
+    /// Replace one channel state and report whether it changed. The tray
+    /// re-renders after a change. Callers can log transitions and skip repeats.
     pub fn set(&mut self, id: ChannelId, state: ChannelState) -> bool {
         let slot = &mut self.states[id.index()];
         if *slot == state {
@@ -201,20 +191,20 @@ impl ChannelStatuses {
         &self.states[id.index()]
     }
 
-    /// One disabled menu row: "Cursor: unsupported - missing …".
+    /// Return one disabled menu row, such as "Cursor: unsupported - missing …".
     pub fn row(&self, id: ChannelId) -> String {
         format!("{}: {}", id.label(), self.get(id).detail())
     }
 
-    /// All rows, in `ChannelId::ALL` order.
+    /// Return all rows in `ChannelId::ALL` order.
     pub fn rows(&self) -> Vec<String> {
         ChannelId::ALL.iter().map(|&id| self.row(id)).collect()
     }
 
-    /// The SNI `Status`: NeedsAttention exactly when a channel is down
-    /// or serving spoiled (ticket 52's software cursor). Nothing else
-    /// raises it - an icon parked on NeedsAttention teaches the user to
-    /// ignore it, and both of those states name a fix in their row.
+    /// Return the SNI `Status`. Use `NeedsAttention` when a channel is down or
+    /// has a known defect, such as a software cursor. Use `Active` for all other
+    /// states. Users can ignore an icon that always shows `NeedsAttention`.
+    /// Each attention row identifies the affected channel and its failure.
     pub fn sni_status(&self) -> ksni::Status {
         let wants_attention = |s: &ChannelState| {
             matches!(s, ChannelState::Down { .. } | ChannelState::Degraded { .. })
@@ -232,20 +222,20 @@ mod tests {
     use super::*;
     use crate::capture::software_cursor;
 
-    /// The common case: the promptless capture backend was selected.
+    /// The common case uses the promptless capture backend.
     fn screencopy() -> ChannelState {
         capture_state(&CaptureSelection::Backend(Backend::WlrScreencopy))
     }
 
-    /// A wlr session: the layer shell is right there.
+    /// A wlr session provides the layer shell.
     fn shell() -> ChannelState {
         popup_state(true)
     }
 
-    /// The daemon's startup knowledge, verbatim: the capture row names
-    /// the resolved backend, the trigger is the control socket, the
-    /// cursor row names the selected rung's mechanism, and the popup row
-    /// names the shell that will carry the panel.
+    /// The rows show the daemon's startup state. The capture row names the
+    /// resolved backend. The trigger row names the control socket. The cursor
+    /// row names the selected rung mechanism. The popup row names the shell that
+    /// carries the panel.
     #[test]
     fn startup_rows_name_what_the_daemon_knows() {
         let statuses =
@@ -261,11 +251,11 @@ mod tests {
         );
     }
 
-    /// Stock GNOME, as a tray host with the AppIndicator extension sees
-    /// it (ticket 49): capture, cursor and trigger can all be perfectly
-    /// healthy through the portals while the popup has nowhere to be
-    /// drawn, and an all-Active icon there would be a lie. The row names
-    /// the missing global, so the fix is legible without the log.
+    /// Stock GNOME with the AppIndicator extension can provide healthy capture,
+    /// cursor, and trigger channels through the portals. It cannot draw the popup
+    /// without a layer shell. An icon that shows `Active` for every channel would
+    /// hide the problem. The row names the unavailable global, so the user can fix
+    /// it without the log.
     #[test]
     fn a_session_without_the_layer_shell_shows_a_down_popup_row() {
         let statuses = ChannelStatuses::startup(
@@ -283,10 +273,9 @@ mod tests {
         assert_eq!("Trigger: control socket", statuses.row(ChannelId::Trigger));
     }
 
-    /// Ticket 52: the compositor paints the pointer into the frames the
-    /// backend copies. Lookups work, so the row still names the
-    /// backend - and it names the option to change, and the icon asks
-    /// to be looked at.
+    /// The compositor paints the pointer into frames that the backend copies.
+    /// Lookups still work. The row names the backend and the setting to change.
+    /// The icon reports the defect.
     #[test]
     fn a_capture_row_can_serve_and_still_name_a_defect() {
         let defect = software_cursor::PointerInFrames::Always
@@ -305,16 +294,16 @@ mod tests {
         assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status(), "spoiled is not healthy");
     }
 
-    /// A missing capability is the thing to fix first, so a defect
-    /// cannot promote a dead channel into a serving one.
+    /// Fix the capability that is not available first. A defect must not change a
+    /// down channel into a channel that supplies data.
     #[test]
     fn a_down_channel_stays_down_when_a_defect_is_added() {
         let down = ChannelState::down("unsupported - missing zwlr_screencopy_manager_v1");
         assert_eq!(down.clone(), down.clone().degraded_by("pointer painted into frames"));
     }
 
-    /// The ticket's headline contract: a down channel flips the SNI
-    /// status to NeedsAttention, and recovery clears it.
+    /// A down channel sets the SNI status to `NeedsAttention`. Recovery clears
+    /// that status.
     #[test]
     fn any_down_channel_needs_attention() {
         let mut statuses = ChannelStatuses::startup(
@@ -332,8 +321,8 @@ mod tests {
         assert_eq!(ksni::Status::Active, statuses.sni_status(), "recovery must clear it");
     }
 
-    /// ADR-0002's denial path as the tray sees it: a refused portal is
-    /// a capture row with the way back in it, and the icon says so.
+    /// A refused portal must leave a retry path in the capture row. The icon
+    /// must also report `NeedsAttention`.
     #[test]
     fn a_refused_capture_channel_shows_the_retry_and_needs_attention() {
         let mut statuses = ChannelStatuses::startup(
@@ -350,9 +339,9 @@ mod tests {
         assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
     }
 
-    /// Today's real down case: the ticket-33 selection came back
-    /// Unsupported, and the row names the exact missing capability so a
-    /// compositor upgrade is an obvious fix.
+    /// The cursor selection can return `Unsupported`. The row names the exact
+    /// capability that is not available, so a compositor upgrade gives the user
+    /// a clear fix.
     #[test]
     fn unsupported_cursor_selection_maps_to_a_down_row() {
         let selection =
@@ -365,8 +354,8 @@ mod tests {
         assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
     }
 
-    /// `set` replaces exactly the addressed channel, and reports whether
-    /// anything moved so the daemon logs transitions only.
+    /// `set` replaces only the addressed channel and reports whether the state
+    /// changed. The daemon can log transitions without repeat entries.
     #[test]
     fn set_replaces_only_the_addressed_channel_and_reports_change() {
         let mut statuses =
@@ -384,8 +373,8 @@ mod tests {
         );
     }
 
-    /// Every rung has a one-line row text; a new rung must not silently
-    /// inherit another's description.
+    /// Give each rung its own one-line row text. A new rung must not inherit
+    /// another rung's description.
     #[test]
     fn every_rung_has_its_own_row_text() {
         let details =
@@ -399,8 +388,9 @@ mod tests {
         }
     }
 
-    /// The ADR-0002 selection maps onto three honest rows: either
-    /// backend names its mechanism, and no backend names the gap.
+    /// Map each backend selection to an honest row. Each backend names its
+    /// mechanism. An unsupported selection names the capability that is not
+    /// available.
     #[test]
     fn every_capture_selection_maps_to_its_own_row() {
         assert_eq!(ChannelState::up("wlr-screencopy region capture"), screencopy());
@@ -421,8 +411,7 @@ mod tests {
         );
     }
 
-    /// A session with no capture at all is a real alarm: hover cannot
-    /// work, so the icon must say so.
+    /// No capture capability blocks hover. The icon must report the problem.
     #[test]
     fn an_unsupported_capture_selection_needs_attention() {
         let capture = capture_state(&CaptureSelection::Unsupported {
@@ -437,8 +426,8 @@ mod tests {
         );
     }
 
-    /// The row is read by a human in a menu, so it has to parse as one:
-    /// no punctuation soup, no protocol dump.
+    /// A user reads this row in a menu. Keep it to one line without excess
+    /// punctuation or a protocol dump.
     #[test]
     fn the_capture_row_reads_as_a_sentence() {
         for selection in [

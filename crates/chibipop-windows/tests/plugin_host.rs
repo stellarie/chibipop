@@ -1,7 +1,7 @@
-//! Plugin host lifecycle, against a real child process.
+//! This test checks the plugin host lifecycle with a real child process.
 //!
-//! Windows-only: it spawns the real chibipop.exe and watches pids with
-//! Win32 process APIs. Elsewhere this file compiles to zero tests.
+//! Windows-only: it starts the real chibipop.exe and watches process IDs with
+//! Win32 process APIs. Elsewhere, this file compiles to zero tests.
 #![cfg(windows)]
 
 use chibipop_windows::plugin::{host, manifest};
@@ -11,16 +11,17 @@ use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// Watches a pid across a kill.
+/// Tracks one process ID across a process kill.
 struct Probe(HANDLE);
 
 impl Probe {
     fn open(pid: u32) -> Probe {
-        // SAFETY: `OpenProcess` reads nothing through a pointer - it takes the
-        // pid by value - so it has no memory precondition. The handle it
-        // returns is owned by this struct and closed exactly once, in `Drop`.
-        // Holding it open is also what stops Windows recycling the pid, so
-        // `alive` keeps meaning *this* process and not a later namesake.
+        // SAFETY: `OpenProcess` reads no pointer data.
+        // It takes the pid by value, so it has no memory precondition.
+        // This struct owns the returned handle and closes it exactly once in `Drop`.
+        // Keep the process handle open during the identity check.
+        // Windows then cannot recycle the pid.
+        // Therefore, `alive` refers to this process, not a later process with the same pid.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             .expect("OpenProcess on the grandchild");
         Probe(handle)
@@ -28,10 +29,10 @@ impl Probe {
 
     fn alive(&self) -> bool {
         let mut code = 0u32;
-        // SAFETY: `self.0` is open for the whole life of `self` and carries
-        // PROCESS_QUERY_LIMITED_INFORMATION, which is the access this call
-        // needs. `code` is a live, initialised `u32` that outlives the call,
-        // and the call writes exactly one `u32` through that pointer.
+        // SAFETY: `self.0` stays open for the whole life of `self`.
+        // It carries PROCESS_QUERY_LIMITED_INFORMATION, the access that this call needs.
+        // `code` is an initialized `u32` that outlives the call.
+        // The call writes exactly one `u32` through that pointer.
         unsafe { GetExitCodeProcess(self.0, &mut code) }.expect("GetExitCodeProcess");
         code == STILL_ACTIVE.0 as u32
     }
@@ -39,8 +40,8 @@ impl Probe {
 
 impl Drop for Probe {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `OpenProcess` in `open`, is owned by this
-        // struct alone, and `Drop` runs exactly once.
+        // SAFETY: `self.0` came from `OpenProcess` in `open`.
+        // This struct alone owns the handle, and `Drop` runs exactly once.
         unsafe {
             let _ = CloseHandle(self.0);
         }
@@ -126,7 +127,7 @@ fn dropping_the_host_kills_the_grandchild_too() {
     assert!(!probe.alive(), "the grandchild {pid} outlived its host");
 }
 
-/// It runs on a worker thread.
+/// This check needs the host to move to a worker thread.
 #[test]
 fn a_host_can_still_move_between_threads() {
     fn needs_send<T: Send>() {}

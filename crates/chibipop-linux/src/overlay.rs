@@ -1,42 +1,41 @@
-//! The outline overlay: click-through, frame-only rectangles on their
-//! own `zwlr_layer_shell_v1` surfaces.
+//! The outline overlay draws frame-only rectangles on click-through
+//! `zwlr_layer_shell_v1` surfaces.
 //!
-//! The Linux counterpart of two Windows windows at once - the static
-//! region's border (`ui/static_overlay.rs`, a frame-only window region)
-//! and the scan-rect overlay (`ui/overlay.rs`). Both draw the same
-//! thing: N rectangles as border strips with nothing in the middle, on
-//! top of everything, taking no input and no focus. So this takes
-//! `&[Mark]` and never assumes one rect - and a [`Mark`] carries a
-//! colour, because the scan overlay's four [`ScanKind`]s mean four
-//! different things and Windows paints them in four theme colours. The
-//! static region passes one colour and one rect; nothing here knows
-//! which caller it is serving.
+//! Linux uses this module for two roles of layer surfaces that match Windows roles.
+//! It draws the scan-rect outline in Windows `ui/overlay.rs` and the
+//! static-region border in Windows `ui/static_overlay.rs`. Both roles draw N
+//! border strips with transparent centers above all other surfaces.
+//! Neither surface accepts input or focus.
+//! This module accepts `&[Mark]` and supports any number of rects.
+//! Each [`Mark`] carries a color because the four [`ScanKind`] values
+//! represent the pass-1 capture, forward tile, resolved word, and defined
+//! characters. Windows assigns each kind a theme color. The static region
+//! supplies one rectangle with one color. This module does not identify
+//! its caller.
 //!
-//! **Nothing here can be interacted with.** The input region is empty
-//! on every commit, so a pointer falls straight through to whatever is
-//! underneath, and `keyboard_interactivity` is `None` - the popup's
-//! inviolable setting (ADR-0004), and for the same reason: an outline
-//! that stole focus would be a bug in every possible use of it.
+//! **Nothing here can be interacted with.** Each commit sets an empty
+//! input region. A pointer then reaches the surface below.
+//! `keyboard_interactivity` is `None`, which keeps the popup rule for this surface too.
+//! Focus on an outline would break every use of this module.
 //!
-//! **Sized to the rects, not to the screen.** A full-output surface
-//! would mean a 33 MB buffer per output at 4K, repainted on every hover
-//! for a scan overlay. Instead each output's surface is sized to the
-//! bounding box of the rects that land on it and positioned by margins,
-//! exactly as the popup positions its panel - so the buffer is as small
-//! as the thing being outlined, and a rect spanning two monitors is
-//! outlined on both, each surface drawing its own half.
+//! **Sized to the rects, not to the screen.**
+//! A full-output surface would require a 33 MB buffer per output at 4K.
+//! It would also repaint on every hover for a scan overlay.
+//! This module sizes each output surface to the
+//! box around its rects and places it with offsets. The buffer
+//! then matches only the outlined area. A rect across two monitors gets
+//! one surface per monitor, and each surface draws its clipped half.
 //!
-//! The raster path is the popup's, not a second one: the same
-//! `wl_compositor` and `wl_shm` this process already bound (borrowed off
-//! [`Popup`]), an `wl_shm` `SlotPool`, `Argb8888` buffers written as
-//! premultiplied `[B, G, R, A]` words, and the popup's own
-//! `wp_viewporter` carrying the logical size while `buffer_scale` stays
-//! at one. It binds no `wp_fractional_scale_v1` of its own either: the
-//! popup has a surface on every output and its `preferred_scale` is the
-//! one source of scale truth, read back through [`Screen`] on every
-//! show, so the scale is still never latched. Physical pixels stay
-//! authoritative all the way down ([`crate::popup::derive`] is the one
-//! derivation, shared).
+//! The raster path matches the popup path. It reuses the
+//! `wl_compositor` and `wl_shm` already bound by this process and borrowed
+//! from [`Popup`]. It uses an `wl_shm` `SlotPool` and `Argb8888` buffers
+//! with premultiplied `[B, G, R, A]` words. The popup's `wp_viewporter`
+//! carries logical size while `buffer_scale` remains one.
+//! This module does not bind `wp_fractional_scale_v1`. The popup has one
+//! surface on each output, and its `preferred_scale` is the only scale
+//! source. [`Screen`] provides that value on every show, so no scale is
+//! fixed between shows. Physical pixels remain authoritative
+//! ([`crate::popup::derive`] performs the only shared derivation).
 
 use crate::daemon::App;
 use crate::popup::{derive, Popup, Screen};
@@ -54,52 +53,50 @@ use wayland_client::QueueHandle;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-/// `hyprctl layers` and `layerrule` see this.
+/// `hyprctl layers` and `layerrule` inspect this namespace.
 const NAMESPACE: &str = "chibipop-outline";
 
-/// One premultiplied `Argb8888` pixel as `wl_shm` stores it: a
-/// little-endian `0xAARRGGBB` word, i.e. B, G, R, A in memory. Same
-/// convention the popup's `to_argb` converts *into*.
+/// One premultiplied `Argb8888` pixel as `wl_shm` stores it.
+/// The little-endian `0xAARRGGBB` word has B, G, R, A in memory.
+/// This matches the order that the popup's `to_argb` function uses.
 pub type Px = [u8; 4];
 
-/// Nothing: fully transparent, so the middle of a frame shows the
-/// screen through it.
+/// A fully transparent pixel. The frame center shows the screen through it.
 pub const CLEAR: Px = [0, 0, 0, 0];
 
-/// Outline thickness, physical px. The Windows bin's `BORDER_PX`, so
-/// the two platforms draw the same weight of line.
+/// Physical outline thickness in pixels. The Windows bin uses `BORDER_PX`,
+/// so both platforms use the same line width.
 pub const BORDER_PX: i32 = 2;
 
-/// The outline's colour: the Windows bin's teal `BORDER_COLOR`
-/// (R 0xC0, G 0xE0, B 0xE0), fully opaque.
+/// Opaque outline color. The Windows bin uses teal `BORDER_COLOR`
+/// with R 0xC0, G 0xE0, and B 0xE0.
 pub const BORDER: Px = [0xE0, 0xE0, 0xC0, 0xFF];
 
-/// One rectangle and the colour that says what it means.
+/// One rectangle and the color that identifies its purpose.
 ///
-/// A bare rect is not enough for the scan overlay: core hands over four
-/// kinds of box at once ([`ScanKind`]) and they mean four different
-/// things to the person looking at the screen - the pass-1 capture, a
-/// forward tile, the resolved word, and the characters actually being
-/// defined. Windows paints each in its own theme colour
-/// (`ui/overlay.rs`); flattening them into one border would say less.
-/// The static region uses one colour and passes one.
+/// A rectangle alone cannot describe the scan overlay. Core passes four
+/// box kinds at once ([`ScanKind`]). Each kind has a separate purpose:
+/// pass-1 capture, forward tile, resolved word, and defined characters.
+/// Windows gives each kind its own theme color (`ui/overlay.rs`).
+/// One border for all kinds would lose this distinction.
+/// The static region passes one rectangle with one color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mark {
     pub rect: PhysRect,
     pub colour: Px,
 }
 
-/// A theme's `(r, g, b)` as an opaque premultiplied `Argb8888` word.
-/// At full alpha premultiplication is the identity, so this is only the
-/// channel swap [`Px`] documents.
+/// Convert `(r, g, b)` to an opaque premultiplied `Argb8888` word.
+/// At full alpha, premultiplication changes no channel.
+/// This function only swaps channels as [`Px`] documents.
 pub fn opaque((r, g, b): (u8, u8, u8)) -> Px {
     [b, g, r, 0xFF]
 }
 
-/// One scan rect's colour, from the theme the popup resolved.
+/// Get one scan rect color from the resolved theme.
 ///
-/// The same four fields Windows' overlay paints from, so a user who
-/// themed `.scan-match` sees the same box on both platforms.
+/// The Windows overlay uses the same four theme fields. A user who sets
+/// `.scan-match` then sees the same box color on both platforms.
 pub fn scan_colour(kind: ScanKind, theme: &Theme) -> Px {
     match kind {
         ScanKind::Pass1 => opaque(theme.scan_pass1),
@@ -109,14 +106,15 @@ pub fn scan_colour(kind: ScanKind, theme: &Theme) -> Px {
     }
 }
 
-/// Core's scan rects as marks: outset by the border thickness, coloured
-/// by kind.
+/// Convert core scan rects to marks. Place each mark outside the rect by
+/// the border thickness and assign its color by kind.
 ///
-/// **Outset, never inset** - the Windows overlay's rule and for its
-/// reason (ADR-0008): a stroke drawn *inside* a scan rect would land in
-/// the very pixels the next grab reads, so chibipop would OCR its own
-/// furniture. Inflating by the thickness puts the whole frame in the
-/// band around the rect and leaves the rect itself untouched.
+/// **Outset, never inset**.
+/// This follows the Windows overlay rule and the capture rule in
+/// `ARCHITECTURE.md#capture-and-masking`.
+/// A stroke inside a scan rect would touch pixels that the next grab reads.
+/// chibipop would then OCR its own furniture. The border thickness puts the whole
+/// frame in the band around the rect and leaves the rect itself untouched.
 pub fn scan_marks(rects: &[ScanRect], theme: &Theme) -> Vec<Mark> {
     rects
         .iter()
@@ -127,14 +125,13 @@ pub fn scan_marks(rects: &[ScanRect], theme: &Theme) -> Vec<Mark> {
         .collect()
 }
 
-/// One rect's four border strips, surface-local physical pixels.
+/// Return four border strips for one rect in surface-local physical pixels.
 ///
-/// The Windows bin's `edge_strips`, with its degenerate case kept and
-/// tightened from `<` to `<=`: a rect exactly two borders tall has no
-/// middle left, so it is drawn solid rather than as two touching bands
-/// plus two zero-height slivers. Windows gets away with the slivers
-/// because `FillRect` ignores an empty rect; nothing here should be
-/// asked to.
+/// Keep the Windows bin's `edge_strips` rule for degenerate rects.
+/// Use `<=` instead of `<`. A rect exactly two borders tall has no middle.
+/// Draw it solid instead of two adjacent bands and two zero-height slivers.
+/// Windows `FillRect` ignores an empty rect. The returned strips cannot contain
+/// empty rectangles.
 pub fn strips(rect: PhysRect, t: i32) -> Vec<PhysRect> {
     let t = t.max(1);
     if rect.w <= 0 || rect.h <= 0 {
@@ -151,12 +148,13 @@ pub fn strips(rect: PhysRect, t: i32) -> Vec<PhysRect> {
     ]
 }
 
-/// The smallest box holding all of them, or `None` for none.
+/// Return the smallest box that contains all marks, or `None` when no mark exists.
 ///
-/// This is the surface's size: an outline of three scan rects is one
-/// surface as wide as the three together, not three surfaces and not
-/// the whole screen. Colour plays no part - a mark's rect is all the
-/// geometry it has.
+/// `bounds` needs at least one mark with a non-empty rectangle.
+/// It ignores marks with zero or negative width or height.
+/// This box sets the surface size. Three scan rects use one surface whose
+/// width covers all three. They do not use three surfaces or the whole screen.
+/// Color does not affect geometry. Each mark contributes only its rect.
 pub fn bounds(marks: &[Mark]) -> Option<PhysRect> {
     let mut it = marks.iter().map(|m| m.rect).filter(|r| r.w > 0 && r.h > 0);
     let first = it.next()?;
@@ -171,9 +169,9 @@ pub fn bounds(marks: &[Mark]) -> Option<PhysRect> {
     Some(PhysRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
-/// Which of these marks touch this output, clipped to it. The colour
-/// survives the clip: the half of a match rect that lands on the second
-/// monitor is still the match colour.
+/// Return marks that touch this output, clipped to its bounds.
+/// Keep each mark's color after the clip. A match rect split at a monitor
+/// boundary remains match color on the second monitor.
 pub fn on_screen(marks: &[Mark], monitor: PhysRect) -> Vec<Mark> {
     marks
         .iter()
@@ -181,7 +179,7 @@ pub fn on_screen(marks: &[Mark], monitor: PhysRect) -> Vec<Mark> {
         .collect()
 }
 
-/// `rect` ∩ `bounds`, or `None` when they do not overlap.
+/// Return `rect` ∩ `bounds`, or `None` when they do not overlap.
 pub fn clip(rect: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
     let x0 = rect.x.max(bounds.x);
     let y0 = rect.y.max(bounds.y);
@@ -190,12 +188,11 @@ pub fn clip(rect: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
     (x1 > x0 && y1 > y0).then_some(PhysRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
-/// Fill one axis-aligned box into a premultiplied `Argb8888` buffer.
+/// Fill one axis-aligned box in a premultiplied `Argb8888` buffer.
 ///
-/// Row-wise slice fills rather than a tiny-skia pass: every box these
-/// two overlays draw is axis-aligned and opaque, so there is nothing to
-/// blend and nothing to antialias - and this way the geometry is a pure
-/// function a test can read back pixel by pixel.
+/// Use row-wise slice fills instead of a tiny-skia pass. Both overlays draw
+/// axis-aligned opaque boxes, so no blend or antialias operation is needed.
+/// This keeps geometry as a pure function that tests can inspect pixel by pixel.
 pub fn fill(px: &mut [Px], w: i32, h: i32, box_: PhysRect, colour: Px) {
     let Some(box_) = clip(box_, PhysRect { x: 0, y: 0, w, h }) else { return };
     for row in box_.y..box_.y + box_.h {
@@ -206,13 +203,12 @@ pub fn fill(px: &mut [Px], w: i32, h: i32, box_: PhysRect, colour: Px) {
     }
 }
 
-/// Paint one surface's frame: transparent everywhere, border strips in
-/// each mark's own colour.
+/// Paint one surface frame. Clear all pixels, then draw each mark's border
+/// strips in its color.
 ///
-/// `marks` are surface-local physical pixels - the caller has already
-/// subtracted the bounding box's origin. They are drawn in the order
-/// given, so the `Match` box core appends last (`worker.rs`) paints
-/// over any capture box it overlaps, exactly as on Windows.
+/// `marks` contains surface-local physical pixels. The caller subtracts the origin
+/// of the box around all rects. Paint marks in the supplied order. Core appends the
+/// `Match` box last in `worker.rs`, so it covers a capture box below it as on Windows.
 pub fn paint(px: &mut [Px], w: i32, h: i32, marks: &[Mark]) {
     px.fill(CLEAR);
     for mark in marks {
@@ -222,65 +218,61 @@ pub fn paint(px: &mut [Px], w: i32, h: i32, marks: &[Mark]) {
     }
 }
 
-/// A frame waiting for the configure that will size it.
+/// A frame that awaits the configure message that sets its size.
 struct Pending {
-    /// Device pixels to raster.
+    /// Device-pixel dimensions for raster output.
     buffer: (i32, i32),
-    /// `set_size` and the viewport destination, logical units.
+    /// The logical dimensions for `set_size` and the viewport destination.
     logical: (i32, i32),
-    /// Surface-local marks, ready to paint.
+    /// Surface-local marks to paint.
     marks: Vec<Mark>,
 }
 
-/// One output's outline surface.
+/// The outline surface for one output.
 struct Pane {
-    /// The popup's stable surface id for this output, so both write the
-    /// same monitor number.
+    /// Stable popup surface ID for this output. Both surfaces then use
+    /// the same monitor number.
     id: usize,
     layer: LayerSurface,
     viewport: Option<WpViewport>,
-    /// The logical size the compositor last configured.
+    /// Logical size from the most recent compositor configure.
     configured: Option<(i32, i32)>,
-    /// The frame this surface owes once its configure lands. Not
-    /// coalesced against a frame callback: an outline changes at hover
-    /// cadence at worst and is hidden the rest of the time, so there is
-    /// no cursor-event rate here to bound.
+    /// Frame data for the next configure message. Do not coalesce it with
+    /// a frame callback. Outline changes occur at hover cadence at most and
+    /// remain hidden otherwise. No cursor-event rate needs a bound.
     pending: Option<Pending>,
 }
 
-/// The outline overlay.
+/// State for the outline overlay.
 pub struct Outline {
     qh: QueueHandle<App>,
-    /// The popup's own `wl_compositor` handle, cloned: a factory global
-    /// with no state, and one per process is one fewer proxy to reason
-    /// about.
+    /// Clone the popup's `wl_compositor` handle.
+    /// This global creates surfaces and has no state. One handle per process
+    /// reduces the number of proxies that need review.
     compositor: CompositorState,
     shell: LayerShell,
-    /// The popup's `wp_viewporter`, cloned. See the module doc for why
-    /// there is no fractional-scale object here.
+    /// Clone the popup's `wp_viewporter`. The module docs explain why this
+    /// state has no fractional-scale object.
     viewporter: Option<WpViewporter>,
     pool: SlotPool,
     panes: Vec<Pane>,
-    /// What is on screen, global physical - so a diagnostic can say
-    /// what is outlined, and a re-show at a new scale has something to
-    /// re-derive from.
+    /// Global physical marks that are on screen.
+    /// A diagnostic can report them. A show at a new scale can derive them again.
     shown: Vec<Mark>,
     notes: Vec<String>,
 }
 
 impl Outline {
-    /// Bind the outline's globals. Surfaces come with the first
-    /// [`Outline::show`], because there is nothing to size them to
-    /// before that.
+    /// Bind globals for the outline. Create surfaces at the first
+    /// [`Outline::show`] because no size exists before that.
     ///
-    /// `None` means this compositor advertises no `zwlr_layer_shell_v1`:
-    /// the same *state, not error* rule `Popup::bind` follows (ADR-0004,
-    /// ticket 49), so the caller reports the outline unavailable through
-    /// the channel it already has and every other channel keeps
-    /// running.
+    /// `None` means that the compositor lacks `zwlr_layer_shell_v1`.
+    /// Apply the same *state, not error* rule as `Popup::bind`.
+    /// The caller reports an unavailable outline through its current channel.
+    /// Other channels continue.
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, popup: &Popup) -> Option<Outline> {
         let shell = LayerShell::bind(globals, qh).ok()?;
-        // One modest outline's worth; the pool grows on demand.
+        // Start with space for one modest outline. The pool grows as needed.
         let pool = SlotPool::new(256 * 256 * 4, popup.shm()).ok()?;
         Some(Outline {
             qh: qh.clone(),
@@ -294,13 +286,13 @@ impl Outline {
         })
     }
 
-    /// Diagnostics accumulated since the last drain. The outline owns no
-    /// log; the daemon thread does.
+    /// Diagnostics since the last drain. The outline has no log.
+    /// The daemon thread owns the log.
     pub fn drain_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
     }
 
-    /// What is outlined right now, global physical.
+    /// Return the global physical marks that the outline shows now.
     pub fn marks(&self) -> &[Mark] {
         &self.shown
     }
@@ -309,15 +301,15 @@ impl Outline {
         self.panes.len()
     }
 
-    /// Does one layer surface belong to the outline? The routing
-    /// question every shared SCTK handler now asks. There is no
-    /// `wl_surface` twin: the outline requests no frame callbacks, so a
-    /// `wl_surface` event never names one of these.
+    /// Test whether a layer surface belongs to the outline.
+    /// Shared SCTK handlers use this check.
+    /// The outline requests no frame callbacks, so no `wl_surface` twin exists.
+    /// A `wl_surface` event therefore cannot name an outline surface.
     pub fn owns_layer(&self, layer: &LayerSurface) -> bool {
         self.panes.iter().any(|p| &p.layer == layer)
     }
 
-    /// Outline these marks. An empty slice is a [`Outline::hide`].
+    /// Show these marks. An empty slice calls [`Outline::hide`].
     pub fn show(&mut self, marks: &[Mark], screens: &[Screen]) {
         self.shown = marks.to_vec();
         if marks.is_empty() {
@@ -328,15 +320,14 @@ impl Outline {
         for screen in screens {
             let mine = on_screen(marks, screen.rect);
             let Some(box_) = bounds(&mine) else {
-                // Nothing on this monitor: whatever it was outlining
-                // last time must come off it.
+                // No mark touches this output. Clear any surface that showed one before.
                 self.clear(screen.id);
                 continue;
             };
             drawn += mine.len();
             let placement = derive(box_, screen.rect, screen.scale);
-            // Surface-local: the strips are drawn against the bounding
-            // box's own origin, never the global one.
+            // Use surface-local coordinates. Draw strips from the box origin,
+            // not the global origin.
             let local: Vec<Mark> = mine
                 .iter()
                 .map(|m| Mark {
@@ -359,10 +350,9 @@ impl Outline {
         ));
     }
 
-    /// Take the outline down: a transparent buffer on every surface,
-    /// never an unmap - Hyprland animates layer surfaces, and an
-    /// outline that flew in and out on every hover would be worse than
-    /// no outline at all.
+    /// Hide the outline with a transparent buffer on every surface.
+    /// Never unmap it. Hyprland animates layer surfaces after an unmap.
+    /// This motion is worse than no outline.
     pub fn hide(&mut self) {
         self.shown.clear();
         let ids: Vec<usize> = self.panes.iter().map(|p| p.id).collect();
@@ -371,8 +361,8 @@ impl Outline {
         }
     }
 
-    /// An output went away, or the compositor closed its surface:
-    /// routine, and the next show maps a fresh one.
+    /// Remove a surface after its output disappears or the compositor closes it.
+    /// This is routine. The next show maps a new surface.
     pub fn drop_layer(&mut self, layer: &LayerSurface) {
         let Some(slot) = self.panes.iter().position(|p| &p.layer == layer) else { return };
         let id = self.panes[slot].id;
@@ -380,7 +370,7 @@ impl Outline {
         self.notes.push(format!("outline: surface {id} closed; {} left", self.panes.len()));
     }
 
-    /// A configure landed: paint the frame it was asked for.
+    /// Paint the requested frame after a configure message arrives.
     pub fn configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         let Some(idx) = self.panes.iter().position(|p| &p.layer == layer) else { return };
         self.panes[idx].configured = Some((size.0 as i32, size.1 as i32));
@@ -389,9 +379,9 @@ impl Outline {
         }
     }
 
-    /// Map this output's surface if it has none, then size and draw. A
-    /// resize costs a configure round-trip; the intermediate commit
-    /// carries no buffer, so nothing flickers.
+    /// Map this output surface when needed, then size and paint it.
+    /// A resize needs one configure round trip. The intermediate commit has
+    /// no buffer, so the surface does not flicker.
     fn commit(&mut self, screen: &Screen, margin: (i32, i32), pending: Pending) {
         let idx = match self.panes.iter().position(|p| p.id == screen.id) {
             Some(idx) => idx,
@@ -408,9 +398,8 @@ impl Outline {
         pane.pending = Some(pending);
     }
 
-    /// Create one output's surface. The initial commit carries no
-    /// buffer, so the compositor answers with a configure and the frame
-    /// follows it.
+    /// Create one output surface. The first commit has no buffer.
+    /// The compositor then sends configure, and this module paints the frame after it.
     fn map(&mut self, screen: &Screen) -> usize {
         let qh = self.qh.clone();
         let surface = self.compositor.create_surface(&qh);
@@ -422,9 +411,8 @@ impl Outline {
             Some(NAMESPACE),
             Some(&screen.output),
         );
-        // Above fullscreen readers like the popup, never reserving
-        // space, and never focusable: an outline is a mark on the screen
-        // and nothing else.
+        // Place it above fullscreen readers such as the popup.
+        // Reserve no space and accept no focus. An outline only marks the screen.
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -445,7 +433,7 @@ impl Outline {
         self.panes.len() - 1
     }
 
-    /// Raster one frame and commit it.
+    /// Raster and commit one frame.
     fn draw(&mut self, idx: usize, pending: Pending) {
         let (bw, bh) = pending.buffer;
         let surface = self.panes[idx].layer.wl_surface().clone();
@@ -464,8 +452,8 @@ impl Outline {
         if let Some(viewport) = &pane.viewport {
             viewport.set_destination(pending.logical.0.max(1), pending.logical.1.max(1));
         }
-        // Empty on every commit: an outline is never a hit target, so
-        // the pointer belongs to whatever is underneath it.
+        // Set an empty input region on every commit. An outline is never a hit target.
+        // The pointer then reaches the surface below.
         if let Ok(region) = Region::new(&self.compositor) {
             surface.set_input_region(Some(region.wl_region()));
         }
@@ -477,17 +465,16 @@ impl Outline {
         pane.layer.commit();
     }
 
-    /// Hand one surface a fully transparent buffer at its current size.
-    /// Not gated on a frame callback: a hidden surface gets none, so
-    /// waiting for one would never let it hide.
+    /// Give one surface a fully transparent buffer at its current size.
+    /// Do not wait for a frame callback. A hidden surface receives no callback,
+    /// so that wait could never hide it.
     ///
-    /// A surface the compositor has not configured yet gets *nothing*.
-    /// Attaching a buffer before the first configure is a protocol error
-    /// (`layer_surface has never been configured`) that kills the whole
-    /// connection, and it is reachable in one step: show then hide
-    /// before the configure has come back. Dropping the pending frame is
-    /// the correct hide anyway - a layer surface with no buffer attached
-    /// is not mapped.
+    /// Give an unconfigured surface no buffer.
+    /// A buffer before the first configure violates protocol
+    /// (`layer_surface has never been configured`) and kills the connection.
+    /// This case occurs if show and hide happen before configure returns.
+    /// Discard the stored frame to hide the surface. A layer surface without
+    /// an attached buffer is not mapped.
     fn clear(&mut self, id: usize) {
         let Some(idx) = self.panes.iter().position(|p| p.id == id) else { return };
         self.panes[idx].pending = None;
@@ -505,8 +492,7 @@ mod tests {
         PhysRect { x, y, w, h }
     }
 
-    /// A mark in the default colour, for the tests that are about
-    /// geometry and not about which of the four kinds it is.
+    /// Use the default color for tests about geometry, not the four kinds.
     fn mark(x: i32, y: i32, w: i32, h: i32) -> Mark {
         Mark { rect: rect(x, y, w, h), colour: BORDER }
     }
@@ -517,15 +503,15 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                rect(10, 20, 100, 2), // top
-                rect(10, 68, 100, 2), // bottom
-                rect(10, 22, 2, 46),  // left
-                rect(108, 22, 2, 46), // right
+                rect(10, 20, 100, 2), // top edge
+                rect(10, 68, 100, 2), // bottom edge
+                rect(10, 22, 2, 46),  // left edge
+                rect(108, 22, 2, 46), // right edge
             ],
             "the strips must tile the frame and nothing else"
         );
-        // The frame's area is the outline's whole cost: a 100x50 box
-        // costs its border, never 5000 px of fill.
+        // The frame area is the outline's total cost. A 100x50 box costs only
+        // its border, not 5000 px of fill.
         let painted: i32 = got.iter().map(|s| s.w * s.h).sum();
         assert_eq!(painted, 100 * 2 * 2 + 46 * 2 * 2);
     }
@@ -547,7 +533,7 @@ mod tests {
 
     #[test]
     fn n_rects_paint_n_frames_and_never_fill_between_them() {
-        // Two 8x8 boxes side by side in a 20x8 surface.
+        // Two 8x8 boxes sit side by side in a 20x8 surface.
         let (w, h) = (20, 8);
         let mut px = vec![CLEAR; (w * h) as usize];
         paint(&mut px, w, h, &[mark(0, 0, 8, 8), mark(12, 0, 8, 8)]);
@@ -562,7 +548,7 @@ mod tests {
         for (x, y) in [(9, 0), (10, 4), (11, 7)] {
             assert_eq!(at(x, y), CLEAR, "the gap between two frames at {x},{y} is not painted");
         }
-        // The border is 2 px thick, so row 1 is border and row 2 is not.
+        // The border is 2 px thick. Row 1 has border, and row 2 has none.
         assert_eq!(at(4, 1), BORDER);
         assert_eq!(at(4, 2), CLEAR);
     }
@@ -571,7 +557,7 @@ mod tests {
     fn a_rect_hanging_off_the_surface_is_clipped_instead_of_writing_past_the_buffer() {
         let (w, h) = (10, 10);
         let mut px = vec![CLEAR; (w * h) as usize];
-        // Half off every edge; the fill must survive and stay in bounds.
+        // Half the rect lies outside every edge. The fill must remain in bounds.
         paint(&mut px, w, h, &[mark(-5, -5, 20, 20)]);
         assert_eq!(px.len(), 100, "the buffer must not have been resized");
         assert!(px.iter().all(|p| *p == CLEAR || *p == BORDER));
@@ -600,14 +586,13 @@ mod tests {
         ] {
             assert_eq!(scan_colour(kind, &t), opaque(want), "{kind:?} paints its own theme field");
         }
-        // The point of carrying the kind at all: the word being defined
-        // must not look like the box it was found in.
+        // Carry the kind because the defined word must not use the capture box color.
         assert_ne!(
             scan_colour(ScanKind::Match, &t),
             scan_colour(ScanKind::Pass1, &t),
             "a match that looked like a capture box would tell the user nothing"
         );
-        // And the palette follows the theme rather than the binary.
+        // The palette follows the theme, not the binary.
         assert_ne!(
             scan_colour(ScanKind::Match, &Theme::light()),
             scan_colour(ScanKind::Match, &Theme::dark()),
@@ -617,8 +602,8 @@ mod tests {
 
     #[test]
     fn a_theme_colour_becomes_an_opaque_premultiplied_argb_word() {
-        // `Px` is B, G, R, A in memory - the order `wl_shm`'s
-        // little-endian 0xAARRGGBB puts them in.
+        // `Px` stores B, G, R, A in memory. This order matches the
+        // little-endian `0xAARRGGBB` word from `wl_shm`.
         assert_eq!(opaque((0x11, 0x22, 0x33)), [0x33, 0x22, 0x11, 0xFF]);
     }
 
@@ -631,9 +616,9 @@ mod tests {
         assert_eq!(
             rect(100 - BORDER_PX, 200 - BORDER_PX, 60 + 2 * BORDER_PX, 30 + 2 * BORDER_PX),
             marks[0].rect,
-            "the frame lands in the band around the rect, never in the pixels OCR reads (ADR-0008)"
+            "the frame lands in the band around the rect, never in the pixels OCR reads"
         );
-        // Every painted strip is outside the scanned box.
+        // Every painted strip stays outside the scanned box.
         for strip in strips(marks[0].rect, BORDER_PX) {
             assert_eq!(
                 None,
@@ -646,8 +631,8 @@ mod tests {
     #[test]
     fn the_four_kinds_of_one_hover_paint_four_colours_into_one_frame() {
         let t = Theme::dark();
-        // What a real hover hands over: the pass-1 box, a tile, the
-        // anchor, and the match last (core's order, `worker.rs`).
+        // A real hover provides the pass-1 box, a tile, the anchor, and the
+        // match last. Core sets this order in `worker.rs`.
         let hover = [
             ScanRect { rect: rect(2, 2, 20, 20), kind: ScanKind::Pass1 },
             ScanRect { rect: rect(32, 2, 20, 20), kind: ScanKind::Tile },
@@ -660,8 +645,8 @@ mod tests {
         paint(&mut px, w, h, &marks);
         let at = |x: i32, y: i32| px[(y * w + x) as usize];
 
-        // Each frame's top-left corner, which the outset put two px up
-        // and left of the scanned box.
+        // The outset puts each frame's top-left corner two px above and left
+        // of its scanned box.
         for (x, kind) in [(0, ScanKind::Pass1), (30, ScanKind::Tile), (60, ScanKind::Anchor), (90, ScanKind::Match)] {
             assert_eq!(at(x, 0), scan_colour(kind, &t), "the {kind:?} frame at x={x}");
         }

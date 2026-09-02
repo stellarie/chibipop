@@ -1,60 +1,50 @@
-//! The portal capture rung against a real session, when there is one.
+//! This module tests the portal ScreenCast capture rung against a real Wayland session.
 //!
-//! CI is headless (ADR-0007), so everything here skips without
-//! `WAYLAND_DISPLAY` - and skips again when no
-//! `org.freedesktop.portal.ScreenCast` answers on the session bus,
-//! because an absent rung is a rung the ladder walks past (ADR-0002),
-//! not a failure.
+//! CI has no display. The tests skip when `WAYLAND_DISPLAY` is not set.
+//! The tests also skip when the session bus does not provide
+//! `org.freedesktop.portal.ScreenCast`. A missing rung is a ladder state, not a failure.
 //!
-//! The assertions that read a *frame* skip once more when this session's
-//! outputs are not being repainted - an unattended dev box whose panel
-//! has powered off is the ordinary case - because a copy the compositor
-//! will never answer measures the display's power state and not this
-//! rung. Which rung was *chosen* is asserted either way: that line is
-//! printed at selection, before any frame exists, so it neither needs a
-//! lit screen nor is ever evidence that capture works. See
-//! [`skip_unless_painting`].
+//! Frame assertions skip when the compositor does not repaint an output.
+//! This condition occurs when an unattended computer loses panel power.
+//! An unanswered copy tests display power, not this capture rung.
+//! The tests still check the selected rung. The daemon writes that line before it requests
+//! a frame, so the line does not prove that capture works. See [`skip_unless_painting`].
 //!
-//! **Nothing here opens a consent dialog by default.** A test suite
-//! that puts a permission prompt on a developer's screen every time it
-//! runs is a test suite people stop running, and the one dialog
-//! ADR-0002 budgets for belongs in a launch, not in `cargo test`. So
-//! the tests below exercise everything reachable without consent - the
-//! ladder's choice, the override, the refusal path - and the single
-//! test that really does prompt is behind
-//! `CHIBIPOP_PORTAL_CONSENT_TEST=1`:
+//! **The default tests never open a consent dialog.** Frequent dialogs can prevent developer
+//! test runs. The portal rung reserves consent for a launch, not for `cargo test`.
+//! The default tests check ladder selection, the override, and refusal. Set
+//! `CHIBIPOP_PORTAL_CONSENT_TEST=1` to enable the test that opens a dialog:
 //!
 //! ```text
 //! CHIBIPOP_PORTAL_CONSENT_TEST=1 \
 //!   cargo test -p chibipop-linux --test portal_capture_live -- --nocapture
 //! ```
 //!
-//! That is the smoke this ticket's Comments record, and it is the only
-//! way to see frames actually flow over PipeWire.
+//! This command runs the only test that receives frames through PipeWire.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// The real chibipop binary.
+/// The chibipop binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The env hook the daemon and the dump both read.
+/// Both the daemon and `capture-dump` read this Capture backend override.
 const BACKEND: &str = "CHIBIPOP_CAPTURE_BACKEND";
 
-/// The opt-in that allows a real consent dialog.
+/// This opt-in lets the test open a portal consent dialog.
 const CONSENT_OPT_IN: &str = "CHIBIPOP_PORTAL_CONSENT_TEST";
 
-/// The refusal a copy earns when the compositor took it and then said
-/// nothing at all: neither `ready` nor `failed`, which
-/// `wlr-screencopy-unstable-v1`'s `copy` request names as its only two
-/// answers. The measured cause on this box is an output nothing is
-/// repainting, and rung 1 here *is* that protocol -
-/// `wlr_capture_live.rs`'s `UNANSWERED` pins the measurement.
+/// The compositor emits this error when a `copy` request receives neither `ready` nor
+/// `failed`. The `wlr-screencopy-unstable-v1` protocol defines only these two replies.
+/// Tests saw this result when no process repainted an output whose power was off.
+/// Rung 1 in this file uses that protocol.
+/// `wlr_capture_live.rs` records the same result with `UNANSWERED`.
 const UNANSWERED: &str = "the copy went unanswered";
 
-/// Only skip on the two honest reasons: no session, or no portal.
+/// The test needs a Wayland session and a ScreenCast portal.
+/// Skip when either resource does not exist.
 fn skip() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("skipping: WAYLAND_DISPLAY is unset (headless)");
@@ -67,8 +57,7 @@ fn skip() -> bool {
     false
 }
 
-/// Ask the bus directly rather than through our own code, so a broken
-/// probe cannot make these tests silently vacuous.
+/// Query the session bus directly. An internal probe failure must not hide a test failure.
 fn portal_on_the_bus() -> bool {
     Command::new("busctl")
         .args([
@@ -83,20 +72,17 @@ fn portal_on_the_bus() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Whether the grab `out` records went unanswered, which makes the frame
-/// it never produced a measurement of the display's power state and not
-/// of this file's rung.
+/// Skip when the compositor does not answer the grab in `out`.
+/// Without a frame, the grab tests display power instead of this capture rung.
 ///
-/// Mirrors `wlr_capture_live.rs`'s `skip_unless_painting`, and is narrow
-/// for the same reason: only [`UNANSWERED`] skips, so a wrong size, a
-/// `failed` frame or a bad format still falls through and fails the
-/// assertion it guards. It reads the dump the caller already ran instead
-/// of probing with a grab of its own, because down *this* file's ladder
-/// a probe is not free - a session advertising no screencopy would
-/// answer it from the portal rung, and the module doc budgets no dialog
-/// for a default run. Duplicated rather than shared because these two
-/// test binaries have no module to share: `tests/` here holds data
-/// fixtures and nothing else.
+/// This rule matches `skip_unless_painting` in `wlr_capture_live.rs`.
+/// Only [`UNANSWERED`] causes a skip. A wrong size, a `failed` frame, or a bad format
+/// still fails the assertion.
+/// Read the completed dump instead of a new probe. A new probe can select the portal rung
+/// when the session lacks screencopy. That probe can open the dialog forbidden by the
+/// module default.
+/// The `tests/` directory contains data fixtures only. It has no shared module, so this
+/// file defines the function here.
 fn skip_unless_painting(out: &std::process::Output) -> bool {
     let refused = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() && refused.contains(UNANSWERED) {
@@ -106,8 +92,8 @@ fn skip_unless_painting(out: &std::process::Output) -> bool {
     false
 }
 
-/// A scratch state dir, so a test never reads or rotates the real
-/// restore token.
+/// Give each test a scratch state directory.
+/// The test does not read or rotate the developer's restore token.
 fn scratch(tag: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("chibipop-portal-test-{tag}-{}", std::process::id()));
@@ -115,8 +101,8 @@ fn scratch(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("creating the scratch directory");
     dir
 }
-/// `capture-dump` in its own XDG world: its own config, data, state and
-/// cache, so nothing here touches the developer's install.
+/// Give `capture-dump` separate XDG directories for configuration, data, state, and cache.
+/// This keeps the developer's installation separate.
 fn dump(state: &Path, backend: Option<&str>, region: &str) -> std::process::Output {
     let out = state.join("dump");
     std::fs::create_dir_all(&out).expect("creating the dump directory");
@@ -136,7 +122,7 @@ fn dump(state: &Path, backend: Option<&str>, region: &str) -> std::process::Outp
     command.output().expect("spawning chibipop capture-dump")
 }
 
-/// `width x height` out of a PNG's IHDR.
+/// Read `width x height` from the `IHDR` chunk of a PNG file.
 fn png_size(path: &Path) -> (u32, u32) {
     let bytes = std::fs::read(path).expect("reading the dumped PNG");
     assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a], "not a PNG");
@@ -147,15 +133,13 @@ fn png_size(path: &Path) -> (u32, u32) {
     )
 }
 
-/// The ticket's headline selection rule, on the machine that can
-/// actually contradict it: Hyprland advertises screencopy *and* runs a
-/// ScreenCast portal, and the promptless rung must still win. If this
-/// ever regresses, a wlr user gets a permission dialog they never had.
+/// Hyprland advertises screencopy and runs a ScreenCast portal.
+/// Make sure that the promptless screencopy rung has priority.
+/// Otherwise, wlr users can receive a consent dialog that they do not need.
 ///
-/// And the rung it prefers has to *deliver*, which is a separate claim
-/// from having been chosen: the `capture:` line below is printed at
-/// selection, before the copy is even requested, so a grab that then
-/// produced nothing prints it just the same.
+/// The selected rung must also provide a frame. Selection and frame delivery are separate
+/// claims. The daemon writes the `capture:` line before it requests a copy, so an
+/// unanswered grab can still contain that line.
 #[test]
 fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     if skip() {
@@ -173,17 +157,17 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
         return;
     }
     assert!(
-        stdout.contains("capture: wlr-screencopy region capture (promptless - ADR-0002 rung 1)"),
+        stdout.contains("capture: wlr-screencopy region capture (promptless - ladder rung 1)"),
         "auto must pick rung 1 while screencopy is advertised: {stdout}"
     );
     assert!(
         !stdout.contains("portal ScreenCast + PipeWire"),
         "auto must not reach the portal here: {stdout}"
     );
-    // No dialog can have appeared, because the portal was never asked.
+    // No restore token exists because the daemon never asked the portal.
     assert!(!state.join("state/chibipop/portal-restore-token").exists());
-    // Everything above reads the choice. This reads the frame, so it is
-    // the one part a display nothing is repainting can honestly refuse.
+    // The earlier assertions check the selected rung. This assertion checks frame delivery.
+    // A compositor can refuse frame delivery when it does not repaint the display.
     if skip_unless_painting(&out) {
         let _ = std::fs::remove_dir_all(&state);
         return;
@@ -193,8 +177,7 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// The empty ladder is a status, not a crash (ADR-0002): the daemon
-/// stays up and the diagnostic names both rungs.
+/// An empty ladder is a status, not a crash. The diagnostic must name both rungs.
 #[test]
 fn an_empty_ladder_names_both_rungs_and_fails_cleanly() {
     if skip() {
@@ -209,14 +192,14 @@ fn an_empty_ladder_names_both_rungs_and_fails_cleanly() {
     assert!(stdout.contains("zwlr_screencopy_manager_v1"), "{stdout}");
     assert!(stdout.contains("org.freedesktop.portal.ScreenCast"), "{stdout}");
     assert!(!stderr.contains("panicked"), "{stderr}");
-    // "Cleanly" cuts both ways: a ladder with no rung must not leave a
-    // half-written frame behind pretending it had one.
+    // A clean failure creates no partial frame.
+    // A partial frame would falsely report capture success.
     assert!(!state.join("dump/chibipop-capture-0.png").exists(), "{stdout}");
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// A bad override value is ignored with a diagnostic, never obeyed and
-/// never fatal - the hook is a test hook, not a config surface.
+/// The test hook reports and ignores an invalid override.
+/// The override is not a configuration field, so it must not stop the process.
 #[test]
 fn an_unknown_backend_override_is_reported_and_ignored() {
     if skip() {
@@ -229,10 +212,8 @@ fn an_unknown_backend_override_is_reported_and_ignored() {
     assert!(stdout.contains("ignoring CHIBIPOP_CAPTURE_BACKEND=\"evdev\""), "{stdout}");
     assert!(stdout.contains("expected auto|screencopy|portal|none"), "{stdout}");
     assert!(!stderr.contains("panicked"), "{stderr}");
-    // "Ignored, never fatal" is a claim about what the ladder did next,
-    // and the diagnostic above would read exactly the same if the dump
-    // had died on the value: the run has to have gone on to finish the
-    // grab an unset hook would have taken.
+    // The diagnostic alone cannot prove that the daemon ignored the value.
+    // The daemon must complete the same grab as it does without the hook.
     if skip_unless_painting(&out) {
         let _ = std::fs::remove_dir_all(&state);
         return;
@@ -242,16 +223,15 @@ fn an_unknown_backend_override_is_reported_and_ignored() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// The whole rung, end to end, dialog and all. Opt-in: see the module
-/// doc.
+/// This opt-in test covers the complete portal rung and its consent dialog.
+/// See the module documentation.
 ///
-/// Up to two runs. The second one proves ADR-0002's "silent launches
-/// after" by reusing the restore token the first rotated in - but only
-/// where a restore token can exist at all. `persist_mode` is a
-/// ScreenCast v4 key, and a v3 portal (xdg-desktop-portal-hyprland
-/// today) cannot remember a grant, so a second run there would open a
-/// second dialog and prove nothing. That case asserts the honest
-/// diagnostic instead and stops.
+/// The test runs at most two times. The second run reuses the restore token from the first
+/// run. It checks that later launches do not open a dialog.
+/// `persist_mode` is a ScreenCast v4 key. Only ScreenCast v4 or later can store a restore
+/// token. A ScreenCast v3 portal, such as xdg-desktop-portal-hyprland, cannot remember a
+/// grant. A second run on version 3 would open another dialog and prove nothing. The test
+/// checks the version 3 diagnostic and then stops.
 #[test]
 fn the_portal_rung_streams_frames_and_makes_the_next_launch_silent() {
     if skip() {
@@ -272,9 +252,9 @@ fn the_portal_rung_streams_frames_and_makes_the_next_launch_silent() {
     eprintln!("--- first run ({:?}) ---\n{stdout}{stderr}", started.elapsed());
 
     if !first.status.success() {
-        // The denial/timeout path is a first-class outcome, not a test
-        // failure: ADR-0002 says a refusal is an actionable state and
-        // the app keeps running. Assert *that*, and say so loudly.
+        // Portal denial or timeout is a Capture channel state, not a test failure.
+        // The daemon must report a retry action and continue to run.
+        // These assertions check both rules.
         assert!(
             stderr.contains("retry") || stderr.contains("settings"),
             "a refusal must name the way back: {stderr}"
@@ -295,9 +275,8 @@ fn the_portal_rung_streams_frames_and_makes_the_next_launch_silent() {
         let stored = std::fs::read_to_string(&token).expect("reading the restore token");
         assert!(!stored.trim().is_empty());
 
-        // Second run: same state dir, so the stored token is offered.
-        // It must not prompt, which shows up as speed - a dialog cannot
-        // be answered in a second.
+        // The second run uses the same state directory, so it supplies the stored token.
+        // The time limit makes any consent dialog fail.
         let started = std::time::Instant::now();
         let second = dump(&state, Some("portal"), "16,16,320,240");
         let elapsed = started.elapsed();
@@ -309,8 +288,9 @@ fn the_portal_rung_streams_frames_and_makes_the_next_launch_silent() {
         let rotated = std::fs::read_to_string(&token).expect("reading the rotated token");
         assert!(!rotated.trim().is_empty());
     } else {
-        // A portal that cannot persist must say so and must not leave a
-        // token behind pretending otherwise.
+        // A portal that cannot persist a grant must report this limit.
+        // It must not create a restore token.
+        // Such a token would falsely report persistence.
         assert!(stdout.contains("persist_mode needs v4"), "{stdout}");
         assert!(!token.exists(), "a v3 portal cannot have issued a token: {stdout}");
         eprintln!(

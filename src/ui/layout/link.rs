@@ -1,35 +1,27 @@
-//! What following a glossary link does.
+//! Resolves actions for a glossary link.
 //!
-//! **One reason to change:** the allow-list, or the URL grammar a
-//! dictionary's own cross-references are written in. Kept out of
-//! [`style`](super::style) because an `href` is not a declaration and out
-//! of [`gloss`](super::gloss) because the walk only asks the question - and
-//! kept in core rather than in a bin because the same allow-list has to
-//! hold for the Anki HTML renderer, which is not a bin at all.
+//! **One reason to change:** change the allow-list or URL grammar for a dictionary cross-reference.
+//! This module stays separate from [`style`](super::style).
+//! `href` is not a style declaration.
+//! It stays separate from [`gloss`](super::gloss) because the walk only asks for the result.
+//! Core owns this module.
+//! All renderers use one allow-list, and this includes the Anki HTML renderer.
 
 use crate::controller::HitAction;
 use super::style::hex_pair;
 
-/// What following a glossary link
-/// does.
+/// Resolves a glossary link to an allowed action.
 ///
-/// A dictionary's own cross-references
-/// carry no scheme and name their
-/// target in a `query` parameter
-/// (`?query=見出し語&wildcards=off`),
-/// so they drill down in the panel
-/// exactly as a headword's kanji does.
-/// Its citations are `http` or
-/// `https` and belong in a browser.
-/// Anything else - `javascript:`,
-/// `data:` - arrives from a file
-/// chibipop did not write and earns no
-/// target at all, which is the same
-/// allow-list the Anki HTML renderer
-/// applies. Whitespace and control
-/// characters go first, because a URL
-/// parser ignores them inside a URL
-/// and a naive scheme check would not.
+/// A dictionary cross-reference has no scheme.
+/// It names its target in a `query` parameter (`?query=見出し語&wildcards=off`).
+/// The action uses the panel, like a headword's kanji.
+/// A citation uses `http` or `https`, so the action opens a browser.
+/// The function rejects every other scheme, such as `javascript:` and `data:`.
+/// A dictionary can contain a file that chibipop did not write.
+/// Therefore, the function uses the allow-list of the Anki HTML renderer.
+///
+/// The function removes whitespace and control characters first.
+/// A URL parser ignores these characters inside a URL, but a simple scheme check does not.
 pub(super) fn link_action(href: &str) -> Option<HitAction> {
     let clean: String =
         href.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
@@ -41,16 +33,13 @@ pub(super) fn link_action(href: &str) -> Option<HitAction> {
             let scheme = &clean[..at];
             scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
         }
-        // No scheme, so relative to a
-        // dictionary archive nothing
-        // here can serve.
+        // A relative path cannot identify a useful target in a dictionary archive.
         _ => false,
     };
     followable.then_some(HitAction::OpenUrl(clean))
 }
 
-/// A cross-reference's `query`
-/// parameter, percent-decoded.
+/// Returns the percent-decoded `query` parameter of a cross-reference.
 pub(super) fn query_param(url: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     let raw = query
@@ -59,14 +48,10 @@ pub(super) fn query_param(url: &str) -> Option<String> {
     Some(percent_decode(raw))
 }
 
-/// `%XX` back to bytes, leaving
-/// anything malformed as written.
+/// Decodes `%XX` sequences to bytes and preserves malformed sequences.
 ///
-/// Yomitan writes these with
-/// `encodeURIComponent`, which spells
-/// a space `%20` and never `+`, so `+`
-/// is left alone: in a headword it is
-/// a character rather than a space.
+/// Yomitan uses `encodeURIComponent`, which writes a space as `%20` and never writes `+`.
+/// The function preserves `+` as a headword character, not a space.
 pub(super) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

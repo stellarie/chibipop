@@ -1,4 +1,6 @@
-//! Plugin text helpers.
+//! Adapt plugin text providers to the core OCR seam.
+//!
+//! This module keeps plugin OCR on the same path as the built-in engine.
 use crate::geom::PhysRect;
 use crate::plugin::host::Host;
 use crate::plugin::manifest::Manifest;
@@ -10,7 +12,9 @@ use base64::Engine;
 use std::cell::RefCell;
 use std::time::Duration;
 
-/// Wire rects are image-local.
+/// Map wire rectangles to OCR words. Do not add an offset.
+///
+/// The wire rectangles already use image-local coordinates.
 fn to_ocr_lines(r: &RecogniseResult) -> Vec<OcrLine> {
     r.lines
         .iter()
@@ -74,7 +78,7 @@ impl PluginText {
         let png = crate::image::encode_bgra_to_png(buf, w, h)?;
         let params = RecogniseParams {
             image_png: base64::engine::general_purpose::STANDARD.encode(&png),
-            // The image is its own frame.
+            // The request image defines its own frame, so the region starts at the origin.
             region: Rect { x: 0, y: 0, w, h },
             scale: 1,
             language: self.language.clone(),
@@ -88,9 +92,9 @@ impl PluginText {
     }
 }
 
-/// The core worker seam: a plugin serves hovers exactly like the
-/// built-in engine, strikes and all, and answers the same metadata
-/// (ADR-0001).
+/// `PluginText` supplies plugin OCR through the core `OcrEngine` seam.
+///
+/// The downstream handling applies the normal hover and strike rules.
 impl chibipop::text::OcrEngine for PluginText {
     fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         if self.disabled() {
@@ -114,8 +118,8 @@ impl chibipop::text::OcrEngine for PluginText {
     }
 
     fn set_language(&mut self, tag: &str) {
-        // A plugin's languages come from its manifest; honour a reload
-        // only if the manifest listed the tag, and say so if not.
+        // Keep the first language from the manifest. Report a reload request when
+        // its tag differs because this adapter does not change the manifest choice.
         if self.language.eq_ignore_ascii_case(tag) {
             return;
         }

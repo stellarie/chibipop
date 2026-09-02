@@ -385,9 +385,9 @@ your frequency lists there and Apply.
   because drawing the box is how you decide to switch to Static. The chord
   (`anki.static_region_key_linux`, unset by default) is **native-channel only**:
   it gets no GlobalShortcuts portal id, so the portal consent dialog stays at
-  two entries (ADR-0003's 2026-08-26 addendum) and the compositor bind is the
-  only way to reach it. The settings window renders the bind for whatever chord
-  you type, e.g.
+  two entries — the portal shortcut id set is frozen at exactly two — and the
+  compositor bind is the only way to reach it. The settings window renders the
+  bind for whatever chord you type, e.g.
 
   ```
   bind = ALT, R, exec, chibipop ctl static-region
@@ -431,7 +431,7 @@ your frequency lists there and Apply.
   recognised line, words butted together, because the recogniser's word split
   is an artefact and a space between them would be text the screen never had.
   Nothing is upscaled: meikiocr reads native-resolution crops better than 2x
-  ones (ADR-0009), which is where the Windows twin differs. Its chord
+  ones, which is where the Windows twin differs. Its chord
   (`actions.ocr_clipboard.hotkey_linux`, unset by default) is native-channel
   only for the same reason `static-region`'s is:
 

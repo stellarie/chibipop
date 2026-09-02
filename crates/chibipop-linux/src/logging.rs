@@ -1,10 +1,13 @@
-//! Diagnostics and the lookup log (ADR-0006).
+//! Diagnostics and the lookup log.
+//! See ARCHITECTURE.md#platform-integration.
 //!
-//! Diagnostics go to stderr always (terminal; journal under a systemd
-//! unit) plus a logfile truncated on start — bounded without rotation
-//! machinery. Lookup lines — actual words read off the user's screen —
-//! are written only when `debug.show_lookup_log` is on; screen content
-//! never touches disk un-opted-in.
+//! Diagnostics go to stderr always.
+//! Examples are a terminal or a journal under a systemd unit.
+//! Diagnostics also go to a log file that truncates at startup.
+//! Therefore, the file is bounded without rotation mechanisms.
+//! Lookup lines record words read from the screen of the user.
+//! The system writes lookup lines only when `debug.show_lookup_log` is active.
+//! Screen content never touches disk without an opt-in.
 
 use std::fs::File;
 use std::io::Write;
@@ -13,17 +16,17 @@ use std::time::Instant;
 
 pub struct Log {
     start: Instant,
-    /// `None` when the state dir was unwritable — stderr still works.
+    /// `None` when the state directory cannot be written. Stderr still works.
     file: Option<File>,
     file_path: Option<PathBuf>,
     show_lookup: bool,
 }
 
 impl Log {
-    /// Truncates `<state_dir>/chibipop.log` and starts logging.
+    /// Truncate `<state_dir>/chibipop.log` and start the log.
     ///
-    /// A logfile failure is itself only a diagnostic: a read-only state
-    /// dir must not keep the daemon from running.
+    /// A log file failure is only a diagnostic.
+    /// A read-only state directory must not stop the daemon.
     pub fn open(log_file: &Path, show_lookup: bool) -> Log {
         let file = log_file
             .parent()
@@ -43,12 +46,12 @@ impl Log {
         log
     }
 
-    /// Where diagnostics persist, when they do.
+    /// Get the path where diagnostics persist, when a path exists.
     pub fn path(&self) -> Option<&Path> {
         self.file_path.as_deref()
     }
 
-    /// A diagnostic: stderr and the logfile, always.
+    /// Write a diagnostic line to stderr and to the log file.
     pub fn diag(&mut self, msg: &str) {
         let line = format!("[{:9.3}] {msg}", self.start.elapsed().as_secs_f64());
         eprintln!("{line}");
@@ -57,15 +60,15 @@ impl Log {
         }
     }
 
-    /// Screen content. Dropped entirely unless the user opted in —
-    /// never written anywhere, not even redacted.
+    /// Write screen content. Drop the message if the user did not opt in.
+    /// Never write screen content anywhere without an opt-in.
     pub fn lookup(&mut self, msg: &str) {
         if self.show_lookup {
             self.diag(&format!("lookup: {msg}"));
         }
     }
 
-    /// `reload` re-reads the config; the gate follows it live.
+    /// `reload` reads the configuration again. The gate changes immediately.
     pub fn set_show_lookup(&mut self, on: bool) {
         self.show_lookup = on;
     }
@@ -95,7 +98,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The gate for actual screen content: off means not on disk at all.
+    /// The gate for screen content. Off means not on disk.
     #[test]
     fn lookup_content_stays_off_disk_until_opted_in() {
         let path = tmp("gate");
@@ -111,7 +114,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// Bounded without rotation machinery.
+    /// Bounded without file rotation mechanisms.
     #[test]
     fn a_restart_truncates_the_previous_log() {
         let path = tmp("trunc");
@@ -124,7 +127,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// A read-only state dir must not kill the daemon.
+    /// A read-only state directory must not stop the daemon.
     #[test]
     fn an_unwritable_logfile_degrades_to_stderr() {
         let mut log = Log::open(Path::new("/proc/definitely/not/writable/x.log"), false);

@@ -1,7 +1,7 @@
-//! PNG encode cost, on the WinRT encoder the screenshot action uses.
+//! This test measures PNG encode cost for the WinRT encoder that the screenshot action uses.
 //!
-//! Windows-only: it exercises the WinRT imaging stack. Elsewhere this
-//! file compiles to zero tests.
+//! Windows-only: this test calls WinRT image APIs.
+//! Elsewhere, this file compiles to zero tests.
 #![cfg(windows)]
 
 use std::time::Instant;
@@ -67,9 +67,9 @@ fn encode_png(bgra: &[u8], w: i32, h: i32) -> windows::core::Result<u64> {
 #[test]
 #[ignore = "timing, run by hand"]
 fn png_encode_cost() {
-    // SAFETY: this test thread has not initialised an apartment, and
-    // BitmapEncoder needs one. The process is a test harness, so no other
-    // code has established a conflicting apartment on this thread.
+    // SAFETY: This test thread starts without an initialized apartment.
+    // `BitmapEncoder` needs an apartment.
+    // No other test-harness code sets an apartment on this thread.
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.unwrap();
 
     let cases = [

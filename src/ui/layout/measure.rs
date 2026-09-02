@@ -1,31 +1,30 @@
-//! The measurement seam: what core asks a text engine for, and what comes
-//! back (ADR-0004, widened by ADR-0013).
+//! This module defines the measurement seam between core and a platform text
+//! engine.
 //!
-//! **One reason to change:** the contract between core and a platform text
-//! engine. Nothing here knows what a popup is - it is styled spans, a wrap
-//! width, and the line and span geometry that answers them - so a bin
-//! implementing [`TextMeasure`] reads this file and no other.
+//! **One reason to change:** Change this module when the [`TextMeasure`] contract
+//! changes. The contract has no popup concept. It covers styled spans, a wrap
+//! width, and line and span geometry. A platform bin that implements
+//! [`TextMeasure`] reads this file and no other.
 //!
-//! Measure-only by construction, and that is what makes every other module
-//! here testable against fixed metrics: no type in this file can paint.
+//! This seam only measures text. Other layout modules can test with fixed metrics.
+//! No type in this module can paint.
 
 use std::fmt;
 use super::scene::Rgb;
 
-/// One run of text with one style.
+/// One styled span.
 ///
-/// The finest unit the seam addresses
-/// (ADR-0013). Colour rides along for
-/// the bin's paint walk, which shapes
-/// the same spans; no measurer reads
-/// it and no geometry depends on it.
+/// This is the finest unit that the seam addresses.
+/// The bin's paint walk uses the color in each span.
+/// The paint walk uses the same spans. The measurer does not read color.
+/// Geometry does not depend on color.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyledSpan<'a> {
     pub text: &'a str,
-    /// Family name, from the theme.
+    /// Font family name from the Theme.
     pub font: &'a str,
     pub size: f32,
-    /// DirectWrite weight, 100-900.
+    /// DirectWrite text weight from 100 to 900.
     pub weight: u16,
     pub italic: bool,
     pub color: Rgb,
@@ -33,119 +32,100 @@ pub struct StyledSpan<'a> {
 
 /// One run to measure.
 ///
-/// Its spans wrap as one paragraph, so
-/// a span boundary is not a line
-/// boundary. That is the whole of what
-/// ADR-0013 widened: before it, bold
-/// text and normal text could not
-/// share a wrapped line.
+/// The measurer wraps all its spans as one paragraph.
+/// A span boundary does not create a line boundary.
+/// Bold and normal spans can share one wrapped line.
 #[derive(Debug, Clone, Copy)]
 pub struct MeasureRun<'a> {
-    /// In reading order.
+    /// Span order in the text.
     pub spans: &'a [StyledSpan<'a>],
-    /// Wrap width. A measurer that
-    /// cannot wrap at zero clamps it
-    /// itself; the scene reports the
-    /// width it asked for.
+    /// Maximum wrap width.
+    ///
+    /// If a measurer cannot wrap at zero, it clamps the width itself.
+    /// The scene reports the width that it requested.
     pub max_w: f32,
 }
 
-/// What one wrapped run measures.
+/// The measured values for one wrapped run.
 ///
-/// The engine's own aggregate for the
-/// whole run, which is what the block
-/// walk stacks and what the geometry
-/// goldens pin. [`Measured`] carries
-/// the detail beside it.
+/// This is the text engine's aggregate for the whole run.
+/// The block pass stacks this aggregate, and the geometry goldens pin it.
+/// [`Measured`] carries the line and span detail.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Metrics {
-    /// Widest line's width.
+    /// Width of the widest line.
     pub w: f32,
-    /// All lines' height.
+    /// Combined height of all lines.
     pub h: f32,
-    /// Wrapped line count.
+    /// Number of wrapped lines.
     pub lines: u32,
 }
 
-/// One wrapped line's geometry.
+/// Geometry for one wrapped line.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LineBox {
-    /// Top edge, run-relative.
+    /// Top edge relative to the run.
     pub y: f32,
-    /// Inked width.
+    /// Width of the ink.
     pub w: f32,
-    /// Top edge to the next line's.
+    /// Distance from this top edge to the next line's top edge.
     ///
-    /// As tall as the tallest span on
-    /// it, which is why mixed styling
-    /// ended the old `lines × size ×
-    /// LINE_HEIGHT` arithmetic.
+    /// A line is as tall as its tallest span.
+    /// Mixed styles therefore need per-line height instead of
+    /// `lines × size × LINE_HEIGHT` arithmetic.
     pub h: f32,
-    /// Baseline, down from `y`.
+    /// Baseline offset below `y`.
     ///
-    /// The one thing `{ w, h, lines }`
-    /// could never say. A superscript,
-    /// a subscript and a gaiji image at
-    /// text size are all positions
-    /// relative to this, so without it
-    /// there is no arithmetic to place
-    /// them, only a guess (ADR-0013).
+    /// The values `{ w, h, lines }` cannot provide this offset.
+    /// A superscript, a subscript, and a gaiji image at text size use this
+    /// baseline. Without it, layout can only guess their positions.
     pub baseline: f32,
 }
 
-/// One span's piece of one line.
+/// One piece of a span on one line.
 ///
-/// A span that wraps gets one of these
-/// per line it touches, in line order
-/// then span order.
+/// A wrapped span has one box for each line that it touches.
+/// The boxes appear in line order, then span order.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SpanBox {
-    /// Index into the run's spans.
+    /// Span index in the run.
     pub span: u32,
-    /// Index into `Measured::lines`.
+    /// Line index in `Measured::lines`.
     pub line: u32,
-    /// Leading edge, run-relative,
-    /// like the line it sits on.
+    /// Leading edge relative to the run.
     pub x: f32,
     /// Advance across the line.
     pub w: f32,
-    /// The line advance this span asks
-    /// for on its own.
+    /// Line advance for this span alone.
     ///
-    /// Its line's `h` is at least this
-    /// much: a line is as tall as its
-    /// tallest span, so a half-size
-    /// superscript never shrinks the
-    /// line it rides on, and this is
-    /// what says how much shorter than
-    /// the line the span itself is.
+    /// The line height is at least this value.
+    /// A line uses the tallest span height.
+    /// A half-size superscript does not reduce the line height.
+    /// This value shows how much shorter the span is than its line.
     pub h: f32,
 }
 
-/// What one measured run is.
+/// Results for one measured run.
 ///
-/// Handed in and refilled rather than
-/// returned: the walk measures every
-/// element in a panel and the inline
-/// pass measures a paragraph per
-/// block, so one buffer serves them
-/// all instead of two allocations per
-/// element per frame.
+/// The caller supplies and reuses this buffer.
+/// The layout pass measures every element in a panel.
+/// The inline pass measures one paragraph per block.
+/// One buffer serves both passes and avoids two allocations per element per
+/// frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Measured {
-    /// The whole run's box.
+    /// Box for the whole run.
     pub metrics: Metrics,
-    /// Each wrapped line, top down.
+    /// Wrapped lines from top to bottom.
     pub lines: Vec<LineBox>,
-    /// Each span's piece of each line.
+    /// One box for each span piece on each line.
     pub spans: Vec<SpanBox>,
 }
 
 impl Measured {
-    /// Empties it for the next run.
+    /// Clear the results before the next run.
     ///
-    /// Keeps the capacity: that is the
-    /// point of handing it in.
+    /// Keep vector capacity so the caller can reuse this buffer.
     pub fn clear(&mut self) {
         self.metrics = Metrics::default();
         self.lines.clear();
@@ -153,10 +133,9 @@ impl Measured {
     }
 }
 
-/// One caret's box inside a run.
+/// One caret box inside a run.
 ///
-/// Run-relative, like the layout box
-/// the measurer wrapped.
+/// Coordinates are relative to the run and use its layout box.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GlyphBox {
     pub x: f32,
@@ -165,15 +144,13 @@ pub struct GlyphBox {
     pub h: f32,
 }
 
-/// The text engine refused a run.
+/// An error from the text engine for one run.
 ///
-/// Opaque: layout cannot interpret a
-/// platform failure, only abandon the
-/// walk. The bin re-attaches its own
-/// error on the way out.
+/// Layout cannot interpret a platform error. It can only stop the layout pass.
+/// The platform bin adds its own error context before it returns the error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasureError {
-    /// What the engine reported.
+    /// Text from the engine.
     pub what: String,
 }
 
@@ -191,35 +168,28 @@ impl fmt::Display for MeasureError {
 
 impl std::error::Error for MeasureError {}
 
-/// Text measurement, and nothing else.
+/// The measure-only text engine contract.
 ///
-/// Measure-only by construction: wrap
-/// styled spans at a width, report
-/// line and span geometry. It never
-/// paints, and the scene it feeds
-/// carries positioned runs as plain
-/// data, so layout is testable against
-/// fixed metrics (ADR-0004, amended by
-/// ADR-0013).
+/// This contract wraps styled spans at a width and reports line and span geometry.
+/// It never paints. The scene stores positioned runs as plain data.
+/// Layout can therefore use fixed metrics in tests.
 pub trait TextMeasure {
-    /// Wrap `run` and measure it.
+    /// Wrap and measure `run`.
     ///
-    /// `out` is emptied first, so one
-    /// buffer measures a whole panel.
+    /// The implementation empties `out` first, so one buffer can hold a whole
+    /// panel.
     fn measure(
         &mut self,
         run: MeasureRun<'_>,
         out: &mut Measured,
     ) -> Result<(), MeasureError>;
 
-    /// Caret boxes inside a run.
+    /// Return caret boxes inside a run.
     ///
-    /// `at` are UTF-16 offsets into the
-    /// run's spans end to end; one box
-    /// per offset is pushed to `out`,
-    /// in order. Per-character hit
-    /// targets need shaped geometry,
-    /// which only the measurer has.
+    /// The UTF-16 offsets in `at` run end to end across the concatenated spans.
+    /// Write one box to `out` for each offset, in the same order.
+    /// Per-character hit targets need shaped geometry. Only the measurer has
+    /// that geometry.
     fn caret_boxes(
         &mut self,
         run: MeasureRun<'_>,
@@ -228,15 +198,11 @@ pub trait TextMeasure {
     ) -> Result<(), MeasureError>;
 }
 
-/// Measures one styled span's box.
+/// Measure one styled span and return its aggregate `Metrics`.
 ///
-/// The block walk stacks whole
-/// elements and never looks inside a
-/// line, so it keeps the aggregate and
-/// drops the per-line and per-span
-/// detail. `scratch` is what keeps
-/// dropping it from costing an
-/// allocation per element per frame.
+/// The block pass stacks whole elements and does not inspect line details.
+/// This function keeps the aggregate and discards per-line and per-span details.
+/// Reuse `scratch` to avoid an allocation for each element per frame.
 pub(super) fn measure_text(
     m: &mut dyn TextMeasure,
     span: StyledSpan<'_>,

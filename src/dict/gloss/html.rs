@@ -1,45 +1,52 @@
-//! The HTML renderer, for the Anki `glossary_html` field.
+//! The HTML renderer for the Anki `glossary_html` field.
 //!
-//! The second of three renderers over [`GlossDoc`]. Before ticket 02 this was
-//! an independent recursion over the raw JSON that mirrored the plain-text
-//! walk's drop rules by hand - two views of one tree, which is the bug class
-//! the spec set out to close. It now reads the same parsed tree, so the card
-//! and the popup cannot disagree about what an entry *contains*.
+//! This module is the second of three renderers over [`GlossDoc`].
+//! Before the arena rewrite, it walked raw JSON on its own.
+//! It copied the plain-text walk's rules for dropped nodes.
+//! That duplicate tree walk caused inconsistent views of one Entry.
+//! This renderer reads the parsed tree.
+//! The card and the popup therefore agree about Entry content.
 //!
-//! What they may disagree about, on purpose, is what to *show*. The popup is
-//! a hover panel and the card is a permanent record, so this renderer takes
-//! its own [`RoleFilter`] rather than the popup's: hiding examples on screen
-//! must not strip them from a mined card (spec story 42).
+//! The card and the popup can choose different content.
+//! The popup is a hover panel.
+//! The card is a permanent record.
+//! This renderer therefore uses its own [`RoleFilter`].
+//! The popup can hide an example on screen.
+//! The mined card keeps that example.
 //!
-//! It also takes a [`Selection`], so it can render an arbitrary set of
-//! subtrees and not only a whole document. That is the Anki half of stories
-//! 45 and 46 - a sense picker built on it hands over formatted markup for the
-//! senses a user chose, never a flattened text range.
+//! This renderer also accepts a [`Selection`].
+//! It can render any set of subtrees, not only a whole document.
+//! This is the Anki half of the sense picker.
+//! It returns formatted markup for the selected senses.
+//! It never returns one flattened text range.
 //!
-//! Structured content is untrusted input from a dictionary file rather than
-//! from chibipop, so tags, attributes, and link schemes are allow-listed
-//! rather than passed through: an unrecognised tag keeps its text and drops
-//! the wrapper, the same way [`Kind::Unknown`](super::Kind) does in the tree
-//! itself.
+//! Structured content comes from a Dictionary file, not from chibipop.
+//! It is untrusted input.
+//! The renderer accepts only known tags, attributes, and link schemes.
+//! It checks each value before output.
+//! An unrecognized tag keeps its text and drops its wrapper.
+//! [`Kind::Unknown`](super::Kind) uses the same rule in the tree.
 //!
-//! This runs when a card is mined, not per hover, so it builds owned strings
-//! rather than threading a buffer.
+//! This code runs when a card is mined, not on every hover.
+//! It therefore builds owned strings.
+//! It does not pass a scratch buffer through the recursion.
 
 use super::{GlossDoc, ItemType, Kind, NodeId, NodePath, Role, Scalar, Selection, StyleKey, Tag};
 
-/// Which editorial roles reach a rendering.
+/// The editorial roles that reach the output.
 ///
-/// Deliberately a value the caller passes rather than a rule this module
-/// knows, because the whole point is that the card's answer and the popup's
-/// are separate: ticket 14 gives the popup its own settings and this stays
-/// untouched by them.
+/// The caller supplies this value.
+/// This module does not choose it.
+/// The card answer and the popup answer stay separate.
+/// The popup has its own settings.
+/// Those settings do not change this value.
 ///
-/// Three knobs against six [`Role`]s, because three of the six are not
-/// droppable - [`Role::Reference`] and [`Role::Commentary`] are classified so
-/// a later ticket can add a knob without touching the classifier, and
-/// [`Role::Content`] is what a node with no recognised hook gets. So
-/// [`allows`](Self::allows) is total over the enum and keeps everything it
-/// has no knob for, which is the failure direction the evidence demands.
+/// This struct has three controls for six [`Role`] values.
+/// Three roles cannot be dropped.
+/// The parser already classifies [`Role::Reference`] and [`Role::Commentary`].
+/// A later filter can add controls for them without a classifier change.
+/// [`Role::Content`] is the role for a node with no recognized hook.
+/// [`allows`](Self::allows) covers every role and keeps roles without controls.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RoleFilter {
     pub examples: bool,
@@ -48,41 +55,39 @@ pub struct RoleFilter {
 }
 
 impl RoleFilter {
-    /// What a mined card keeps: everything the entry says, except the
-    /// part-of-speech labels.
+    /// Content that a mined card keeps: all Entry content except part-of-speech labels.
     ///
-    /// A card is a record rather than a panel, so density is not a reason to
-    /// drop anything from it. The labels are the one exception because they
-    /// are already the card's *own* field - `Card::pos`, rendered above the
-    /// glosses - so leaving them inline would print them twice.
+    /// A card is a record, not a panel.
+    /// Card density does not justify a drop.
+    /// Part-of-speech labels are the only exception because the card has a separate field.
+    /// `Card::pos` renders above the glosses.
+    /// An inline label appears twice.
     pub const CARD: RoleFilter =
         RoleFilter { examples: true, attributions: true, part_of_speech: false };
 
-    /// What a one-line summary keeps: the gloss, and nothing editorial.
+    /// What a one-line summary keeps: gloss content without optional editorial roles.
     ///
-    /// The plain-text renderer's policy, and the *whole* of what the deleted
-    /// name-matched drop list used to do - its six `data.content` spellings
-    /// were three example roles and two attribution ones, plus the
-    /// part-of-speech marker beside them. So this const is that behaviour,
-    /// now given to every dictionary rather than to the one whose spellings
-    /// the list happened to hold.
+    /// This is the plain-text renderer's policy.
+    /// It replaces the deleted list of roles that matched names.
+    /// That list checked six `data.content` values: three example roles,
+    /// two attribution roles, and the part-of-speech marker.
+    /// This constant gives that policy to every Dictionary.
+    /// It does not depend on the spellings in one Dictionary.
     ///
-    /// Its two consumers are a summary by construction: the collapsed row,
-    /// which is one truncated line, and the Anki plain-text `glossary` field,
-    /// which sits beside `glossary_html` - and *that* field takes
-    /// [`CARD`](Self::CARD) and keeps every example. Story 42's "keep them on
-    /// the card" is answered there, in markup, rather than by pushing three
-    /// sentences per sense into a numbered plain-text list.
+    /// Both consumers are summaries by construction.
+    /// The collapsed row is one truncated line.
+    /// The Anki plain-text `glossary` field sits beside `glossary_html`.
+    /// That field uses [`CARD`](Self::CARD) instead and keeps every example.
+    /// The card keeps examples through its markup field.
+    /// It does not place three sentences per sense in a numbered plain-text list.
     pub const SUMMARY: RoleFilter =
         RoleFilter { examples: false, attributions: false, part_of_speech: false };
 
-    /// Does this filter keep a node with `role`?
+    /// Returns true when this filter keeps a node with `role`.
     ///
-    /// Public because there are three callers and always were going to be:
-    /// this renderer, the plain-text one, and the popup's own filter in
-    /// `ui::layout`. One predicate over one enum is what keeps the card's
-    /// answer and the panel's from drifting into two different ideas of what
-    /// an example is.
+    /// This method serves the HTML renderer, the plain-text renderer, and the popup filter in
+    /// `ui::layout`.
+    /// One predicate over one enum gives the card and the panel the same rule for examples.
     pub fn allows(self, role: Role) -> bool {
         match role {
             Role::Example => self.examples,
@@ -99,11 +104,13 @@ impl Default for RoleFilter {
     }
 }
 
-/// Tags this renderer emits. `details`, `summary` and `tfoot` are absent
-/// because Anki's note templates predate them here and a wrapper this
-/// renderer drops still keeps its text; `img` is absent because `src/anki.rs`
-/// has no media upload path, so an image has nothing to point at and renders
-/// its `alt` text instead - see [`image_html`].
+/// HTML tags that this renderer emits.
+///
+/// `details`, `summary`, and `tfoot` are absent because Anki note templates predate them.
+/// A wrapper that this renderer drops still keeps its text.
+/// `img` is absent because `src/anki.rs` has no media upload path.
+/// An image has no file to reference, so it emits its `alt` text instead.
+/// See [`image_html`].
 fn html_tag(tag: Tag) -> Option<&'static str> {
     matches!(
         tag,
@@ -139,20 +146,20 @@ fn html_tag(tag: Tag) -> Option<&'static str> {
     .then(|| tag.as_str())
 }
 
-/// A resolved style property as its CSS name.
+/// Returns the CSS name for a resolved style property.
 ///
-/// The whole record is emitted, not a chosen subset: ticket 17 folds a
-/// dictionary's `styles.css` into this same record, and the 13 css-only
-/// dictionaries in the census draw their pills with box properties alone. A
-/// subset here would mine those dictionaries as unstyled text while the popup
-/// drew their pills.
+/// This method emits the full record, not a subset.
+/// A Dictionary's `styles.css` folds into this record.
+/// The census has 13 CSS-only Dictionaries.
+/// Their pills use only box properties.
+/// A subset leaves those Dictionaries as unstyled text while the popup draws their pills.
 fn css_name(key: StyleKey) -> &'static str {
     match key {
         StyleKey::FontStyle => "font-style",
         StyleKey::FontWeight => "font-weight",
         StyleKey::FontSize => "font-size",
-        // The shorthand, not `text-decoration-line`: the longhand is younger
-        // than some of the renderers an Anki note template runs in.
+        // Use the shorthand, not `text-decoration-line`.
+        // Some Anki note templates do not support the newer longhand.
         StyleKey::TextDecorationLine => "text-decoration",
         StyleKey::TextDecorationStyle => "text-decoration-style",
         StyleKey::TextDecorationColor => "text-decoration-color",
@@ -181,14 +188,14 @@ fn css_name(key: StyleKey) -> &'static str {
     }
 }
 
-/// One HTML fragment per selected node - parallel to
-/// [`plain_items`](super::plain_items), which renders the whole document.
+/// Returns one HTML fragment for each selected node.
 ///
-/// [`Selection::Whole`] gives one fragment per top-level glossary item, which
-/// is what `src/anki.rs` turns into one `<li>` each.
-/// [`Selection::Nodes`] gives one fragment per selected node, in document
-/// order, and each is byte-for-byte the markup the whole document produced
-/// for that subtree.
+/// [`plain_items`](super::plain_items) uses a whole-document walk.
+///
+/// [`Selection::Whole`] gives one fragment per top-level glossary item.
+/// `src/anki.rs` puts each fragment in one `<li>` element.
+/// [`Selection::Nodes`] gives one fragment per selected node in document order.
+/// Each fragment is byte-for-byte the markup that the whole document emits for that subtree.
 pub fn render_html(doc: &GlossDoc, select: Selection<'_>, roles: RoleFilter) -> Vec<String> {
     let mut out = Vec::new();
     match select {
@@ -199,8 +206,8 @@ pub fn render_html(doc: &GlossDoc, select: Selection<'_>, roles: RoleFilter) -> 
         }
         Selection::Nodes(wanted) => {
             for (i, id) in doc.items().enumerate() {
-                // A step that does not fit addresses nothing, so nothing
-                // under it can have been selected.
+                // A path step that does not fit addresses no node.
+                // No descendant can match that path.
                 let Some(path) = NodePath::ROOT.child(i) else { continue };
                 collect(doc, id, path, wanted, roles, &mut out);
             }
@@ -209,10 +216,10 @@ pub fn render_html(doc: &GlossDoc, select: Selection<'_>, roles: RoleFilter) -> 
     out
 }
 
-/// Emits every selected node at or under `id`, in document order.
+/// Emits each selected node at or under `id` in document order.
 ///
-/// A selected node ends the descent, so a picker that hands over both a sense
-/// and something inside it renders the sense once rather than twice.
+/// A selected node stops descent.
+/// If a picker selects a sense and a descendant, this method emits the sense once.
 fn collect(
     doc: &GlossDoc,
     id: NodeId,
@@ -222,11 +229,11 @@ fn collect(
     out: &mut Vec<String>,
 ) {
     if wanted.contains(&path) {
-        // A top-level item and a node inside one are rendered by different
-        // rules - a bare glossary string is emitted unwrapped, a
-        // structured-content item is its children - so the fragment for a
-        // selected item has to be the item's, or selecting the whole entry
-        // would not reproduce the whole entry.
+        // A top-level item and an inner node use different rules.
+        // This renderer emits a bare glossary string without a wrapper.
+        // It emits the children of a structured-content item.
+        // The fragment for a selected item must match the item's own fragment.
+        // Otherwise, a selection for the whole Entry does not reproduce the Entry.
         let html =
             if path.len() == 1 { item_html(doc, id, roles) } else { node_html(doc, id, roles) };
         push(html, out);
@@ -238,8 +245,8 @@ fn collect(
     }
 }
 
-/// Whitespace-only content is no content: an item whose every node was
-/// dropped contributes no `<li>` rather than an empty one.
+/// Whitespace-only output is empty.
+/// An item whose filter drops every node produces no `<li>` element.
 fn push(html: String, out: &mut Vec<String>) {
     let trimmed = html.trim();
     if !trimmed.is_empty() {
@@ -247,7 +254,7 @@ fn push(html: String, out: &mut Vec<String>) {
     }
 }
 
-/// One top-level glossary item to HTML.
+/// Converts one top-level glossary item to HTML.
 fn item_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     if !roles.allows(doc.role(id)) {
         return String::new();
@@ -260,7 +267,7 @@ fn item_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     }
 }
 
-/// One node to HTML.
+/// Converts one node to HTML.
 fn node_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     let node = doc.node(id);
     if !roles.allows(doc.role(id)) {
@@ -277,14 +284,14 @@ fn node_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
         Some(tag) => {
             let inner = children_html(doc, id, roles);
             if inner.trim().is_empty() {
-                // Nothing left after drops (e.g. an image-only wrapper): no
-                // point in an empty tag shell.
+                // A filter can remove all children, such as an image-only wrapper.
+                // An empty tag shell has no content, so this method drops it.
                 return inner;
             }
             let attrs = html_attrs(doc, id, node.tag);
             format!("<{tag}{attrs}>{inner}</{tag}>")
         }
-        // Not a tag we emit: keep the text, drop the wrapper.
+        // This renderer does not emit the tag. It keeps the text and drops the wrapper.
         None => children_html(doc, id, roles),
     }
 }
@@ -293,13 +300,15 @@ fn children_html(doc: &GlossDoc, id: NodeId, roles: RoleFilter) -> String {
     doc.children(id).map(|child| node_html(doc, child, roles)).collect()
 }
 
-/// An image as text.
+/// Returns image content as text.
 ///
-/// The tree carries image nodes the old flattener dropped, and `src/anki.rs`
-/// has no `storeMediaFile` path, so an `<img>` here would name a file Anki
-/// does not have. The `alt` text is the character the image stands for and
-/// `title` is the next best label; with neither, the node contributes
-/// nothing, which is what it did before this renderer could reach it.
+/// The tree keeps image nodes that the old flattener dropped.
+/// `src/anki.rs` has no `storeMediaFile` path.
+/// An `<img>` tag names a file that Anki does not have.
+/// The `alt` text identifies the character that the image represents.
+/// The `title` value is the fallback label.
+/// If neither value exists, this method emits nothing.
+/// This matches the behavior before this renderer handled image nodes.
 fn image_html(doc: &GlossDoc, id: NodeId) -> String {
     for key in ["alt", "title"] {
         match doc.attr_of(id, key).and_then(|v| doc.scalar_str(v)) {
@@ -310,8 +319,12 @@ fn image_html(doc: &GlossDoc, id: NodeId) -> String {
     String::new()
 }
 
-/// `href` on `<a>`, `colSpan`/`rowSpan` on cells, and the resolved style
-/// record on anything - a leading-space-prefixed attribute string, or empty.
+/// Returns an HTML attribute string for a node.
+///
+/// It includes `href` on `<a>`, `colSpan` and `rowSpan` on cells, and the resolved style record
+/// on any tag.
+/// The result starts with one space when it has an attribute.
+/// It is empty when no attribute applies.
 fn html_attrs(doc: &GlossDoc, id: NodeId, tag: Tag) -> String {
     let mut attrs = String::new();
     if tag == Tag::A {
@@ -335,19 +348,19 @@ fn html_attrs(doc: &GlossDoc, id: NodeId, tag: Tag) -> String {
     attrs
 }
 
-/// The resolved style record as one CSS declaration list.
+/// Converts the resolved style record to one CSS declaration list.
 ///
-/// Emitted in [`StyleKey`] declaration order rather than in the record's own
-/// order, so that a card's markup does not depend on which order a dictionary
-/// happened to write its properties in. That order also puts each shorthand
-/// ahead of its longhands, which is the one ordering CSS cares about here:
-/// `margin` written after `marginTop` would silently erase it.
+/// This method emits properties in [`StyleKey`] declaration order, not record order.
+/// Card markup therefore does not depend on source property order in a Dictionary.
+/// This order places each shorthand before its longhands.
+/// CSS uses this order to preserve the intended value.
+/// If `margin` follows `marginTop`, it silently erases that property.
 fn style_attr(doc: &GlossDoc, id: NodeId) -> String {
     let record = doc.style(id);
     let mut decls: Vec<(u8, String)> = Vec::with_capacity(record.len());
     for (i, (key, value)) in record.iter().enumerate() {
-        // First occurrence wins, which is the answer `GlossDoc::style_of`
-        // gives every other reader of the record.
+        // Keep the first occurrence.
+        // This matches the value that `GlossDoc::style_of` returns to every other reader.
         if record[..i].iter().any(|(seen, _)| seen == key) {
             continue;
         }
@@ -359,7 +372,7 @@ fn style_attr(doc: &GlossDoc, id: NodeId) -> String {
     decls.iter().map(|(_, decl)| decl.as_str()).collect::<Vec<_>>().join(";")
 }
 
-/// A span count: a non-negative whole number, or nothing.
+/// Returns a non-negative whole-number span count, or `None`.
 fn count(v: Scalar) -> Option<u64> {
     match v {
         Scalar::Num(n) if n >= 0.0 && n.fract() == 0.0 => Some(n as u64),
@@ -367,12 +380,13 @@ fn count(v: Scalar) -> Option<u64> {
     }
 }
 
-/// A style value as CSS, or nothing when the schema's value cannot be one.
+/// Converts a style value to CSS, or returns `None` when the schema rejects it.
 ///
-/// Numbers are Yomitan's em-multiplier convention; a list-valued property
-/// such as `textDecorationLine` was space-joined at parse time, so it arrives
-/// as one string. A boolean, a null, or a blank string is not a declaration
-/// and is dropped rather than emitted as a property with no value.
+/// Yomitan uses numbers as em multipliers.
+/// The parser joins list values, such as `textDecorationLine`, with spaces.
+/// This method receives that result as one string.
+/// A boolean, null, or blank string is not a declaration.
+/// It therefore drops the value and emits no property.
 fn style_value(doc: &GlossDoc, v: Scalar) -> Option<String> {
     match v {
         Scalar::Num(n) => Some(format!("{n}em")),
@@ -384,30 +398,34 @@ fn style_value(doc: &GlossDoc, v: Scalar) -> Option<String> {
     }
 }
 
-/// May a card follow this link?
+/// Returns true when a card can follow this link.
 ///
-/// A dictionary's own cross-references carry no scheme (`?query=見出し語`)
-/// and its citations are `http` or `https`. Anything else - `javascript:`,
-/// `data:`, `vbscript:` - is a script vector inside Anki's webview, arriving
-/// from a file chibipop did not write, so the `<a>` keeps its text and loses
-/// its `href`. Whitespace and control characters are stripped before the
-/// scheme is read, because an HTML parser ignores them inside a URL and a
-/// naive check would not.
+/// A Dictionary's cross-references have no scheme, for example `?query=見出し語`.
+/// Citations use `http` or `https`.
+/// Other schemes, such as `javascript:`, `data:`, or `vbscript:`, can execute script
+/// in Anki's webview.
+/// The value comes from a file that chibipop did not write.
+/// The `<a>` tag therefore keeps its text but loses its `href`.
+/// This method removes whitespace and control characters before it reads the scheme.
+/// An HTML parser ignores those characters inside a URL.
+/// A direct check can miss a hidden scheme.
 fn safe_href(url: &str) -> bool {
     let cleaned: String =
         url.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
     match cleaned.find([':', '/', '?', '#']) {
-        // A scheme: it ends at the first `:`, and only two are followable.
+        // A scheme ends at the first `:`.
+        // Only `http` and `https` pass this check.
         Some(at) if cleaned.as_bytes()[at] == b':' => {
             let scheme = &cleaned[..at];
             scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
         }
-        // No scheme, so relative to the dictionary itself.
+        // No scheme means a relative link.
         _ => true,
     }
 }
 
-/// Escapes text content. Not attribute-safe on its own - see [`escape_attr`].
+/// Escapes text content.
+/// This result is not safe inside an attribute value. See [`escape_attr`].
 fn escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -421,7 +439,7 @@ fn escape_text(s: &str) -> String {
     out
 }
 
-/// [`escape_text`] plus quotes, for use inside a `"..."` attribute value.
+/// Escapes text content and quotes for a `"..."` attribute value.
 fn escape_attr(s: &str) -> String {
     escape_text(s).replace('"', "&quot;")
 }
@@ -463,10 +481,9 @@ mod tests {
         json!([{"type": "structured-content", "content": spans}])
     }
 
-    /// A Jitendex-shaped entry: a gloss, then an example, then an
-    /// attribution, each under the real `data.content` hook the census
-    /// records for it - so the parser classifies them and no test needs to
-    /// say what they are.
+    /// A Jitendex-shaped Entry has a gloss, an example, and an attribution.
+    /// Each node uses the `data.content` hook that the census records for its role.
+    /// The parser classifies the nodes, so the test does not define their roles.
     fn gloss_with_editorial_matter() -> Value {
         json!([{"type": "structured-content", "content": [
             {"tag": "span", "content": "to eat"},
@@ -479,8 +496,9 @@ mod tests {
         ]}])
     }
 
-    /// Two senses as sibling blocks inside one glossary item - the shape 64
-    /// of 72 census dictionaries use, and the one a sense picker selects in.
+    /// Two senses are sibling blocks inside one glossary item.
+    /// Sixty-four of the 72 census Dictionaries use this shape.
+    /// The sense picker uses this shape.
     fn two_senses() -> Value {
         json!([{"type": "structured-content", "content": [
             {"tag": "div", "data": {"content": "sense"}, "content": [
@@ -496,7 +514,7 @@ mod tests {
 
     const SENSE_TWO: &str = "<div><span>to flow</span><i> (of liquid)</i></div>";
 
-    // -- shape that existed before this ticket, unchanged --
+    // -- cases from before the arena rewrite --
 
     #[test]
     fn a_plain_string_gloss_is_escaped_but_unwrapped() {
@@ -519,9 +537,8 @@ mod tests {
         assert_eq!(vec!["<b>bold</b><span> and </span><i>italic</i>".to_string()], html(&g));
     }
 
-    /// A card gets real ruby markup, which is the one thing the plain-text
-    /// renderer cannot give it: it writes the reading in parentheses after
-    /// its base instead.
+    /// A card uses ruby markup.
+    /// The plain-text renderer puts the pronunciation in parentheses after its base instead.
     #[test]
     fn ruby_and_rt_keep_their_own_markup() {
         let g = json!([{"type": "structured-content", "content": [
@@ -623,8 +640,8 @@ mod tests {
         assert!(html(&g).is_empty());
     }
 
-    /// A list-valued style property was space-joined at parse time, so it
-    /// reaches CSS as one declaration rather than as an array literal.
+    /// The parser joins a list-valued style property with spaces.
+    /// The HTML renderer therefore receives one declaration value, not an array literal.
     #[test]
     fn a_list_valued_style_property_joins_with_a_space() {
         let g = json!([{"type": "structured-content", "content": [
@@ -637,7 +654,7 @@ mod tests {
         );
     }
 
-    // -- images: alt text, never a src Anki cannot resolve --
+    // -- image output: alt text, no Anki src --
 
     #[test]
     fn an_image_renders_its_alt_text() {
@@ -664,8 +681,8 @@ mod tests {
         assert_eq!(vec!["&lt;b&gt;&amp;&lt;/b&gt;".to_string()], html(&g));
     }
 
-    /// The card has no copy of the asset, so a `src` would be a broken image
-    /// in every note this ever mines.
+    /// The card has no copy of the asset.
+    /// A `src` can reference a broken image in every note.
     #[test]
     fn an_image_never_emits_a_tag_or_a_src() {
         let g = json!([{"type": "structured-content", "content": [
@@ -700,11 +717,11 @@ mod tests {
         assert!(html(&json!([{"type": "image", "path": "x.png"}])).is_empty());
     }
 
-    // -- editorial roles, filtered independently of the popup --
+    // -- editorial roles: filters differ from popup settings --
 
-    /// Story 42: popup density and card completeness are separate choices.
-    /// The popup's plain-text renderer drops both, from the same tree, in
-    /// the same process, while the card keeps both.
+    /// Popup density and card completeness are separate choices.
+    /// The popup plain-text renderer drops both roles from the same tree.
+    /// The card keeps both roles.
     #[test]
     fn an_example_the_popup_drops_still_reaches_the_card() {
         let d = doc(&gloss_with_editorial_matter());
@@ -749,7 +766,7 @@ mod tests {
         );
     }
 
-    /// Ticket 15's acceptance, through the role the parser classified.
+    /// The test checks the role that the parser classified.
     #[test]
     fn a_part_of_speech_role_stays_out_of_the_card_body() {
         let d = doc(&json!([{"type": "structured-content", "content": [
@@ -770,7 +787,7 @@ mod tests {
         );
     }
 
-    // -- rendering a selection --
+    // -- selected nodes --
 
     #[test]
     fn the_default_selection_is_the_whole_document() {
@@ -781,8 +798,8 @@ mod tests {
         );
     }
 
-    /// Stories 45 and 46 on the Anki side: a selected sense reaches the card
-    /// as markup, with its formatting, and without its neighbour.
+    /// A selected sense reaches the card as markup with its style.
+    /// The card does not include its neighbor.
     #[test]
     fn a_subtree_selection_renders_exactly_what_the_document_rendered_for_it() {
         let d = doc(&two_senses());
@@ -821,8 +838,8 @@ mod tests {
         assert!(picked[1].contains("to flow"));
     }
 
-    /// A picker may hand over whatever the user clicked; a sense and
-    /// something inside it is one sense, not two.
+    /// A picker can select any node that the user clicks.
+    /// A sense and a descendant inside it count as one sense, not two.
     #[test]
     fn a_selected_node_subsumes_a_selected_descendant() {
         let d = doc(&two_senses());
@@ -848,8 +865,8 @@ mod tests {
         assert!(render_html(&d, Selection::Nodes(&[]), RoleFilter::CARD).is_empty());
     }
 
-    /// A path from another entry's tree addresses nothing here rather than
-    /// whatever node happens to sit at that index.
+    /// A path from another Entry addresses no node in this tree.
+    /// It must not select the node at the same index.
     #[test]
     fn a_path_the_document_does_not_have_renders_nothing() {
         let d = doc(&json!(["cat"]));
@@ -877,8 +894,8 @@ mod tests {
 
     // -- untrusted input --
 
-    /// Every hostile shape at once: a script element, a script-scheme link,
-    /// and a style value that tries to close its own attribute.
+    /// This case combines a script element, a script-scheme link, and a style value that closes
+    /// its own attribute.
     #[test]
     fn a_hostile_entry_neither_scripts_nor_breaks_out_of_an_attribute() {
         let g = json!([{"type": "structured-content", "content": [
@@ -933,12 +950,12 @@ mod tests {
         }
     }
 
-    // -- the resolved style record --
+    // -- resolved style record --
 
-    /// A css-only dictionary draws its pill entirely with box properties.
-    /// Ticket 17 folds `styles.css` into the same resolved record inline
-    /// `style` writes into, so what this asserts is that the whole record
-    /// reaches the card, not just the six properties the old subset knew.
+    /// A CSS-only Dictionary draws its pill with box properties.
+    /// `styles.css` folds into the same resolved record as an inline `style` attribute.
+    /// This test checks that the full record reaches the card, not only the six properties that
+    /// the old subset handled.
     #[test]
     fn a_pill_reaches_the_card_as_one_inline_style() {
         let g = json!([{"type": "structured-content", "content": [
@@ -961,10 +978,9 @@ mod tests {
         );
     }
 
-    /// Emission order is fixed, not the order the dictionary wrote, so a
-    /// shorthand can never land after the longhand it would erase. Parsed
-    /// from raw text because `json!` sorts its keys and cannot express the
-    /// hostile order.
+    /// Emission order is fixed, not source order.
+    /// A shorthand never follows a longhand that erases its value.
+    /// This test parses raw text because `json!` sorts keys and cannot express that order.
     #[test]
     fn a_shorthand_is_emitted_before_the_longhand_it_would_erase() {
         let d = GlossDoc::parse(concat!(

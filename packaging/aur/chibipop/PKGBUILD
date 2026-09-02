@@ -1,6 +1,7 @@
 # Maintainer: unusualcrow <unusualcrow@protonmail.com>
 #
-# Built from the release tag (ADR-0007), against the distro's ONNX Runtime.
+# Built from the release tag (ARCHITECTURE.md#packaging-and-ci), against
+# the distro's ONNX Runtime.
 #
 # The one thing that makes this package different from a `cargo build`:
 # `--no-default-features --features system-onnxruntime`. The default
@@ -11,12 +12,12 @@
 # dlopening `libonnxruntime.so` at runtime instead: nothing is downloaded,
 # nothing is linked against onnxruntime at build time, and the `onnxruntime`
 # dependency below is what has to be present when the OCR engine opens
-# (ADR-0009).
+# (ARCHITECTURE.md#ocr-engine).
 #
 # The OCR models are *not* downloaded either: they are committed, so the
-# tag archive already carries them. ADR-0009 planned a Hugging Face fetch
-# here; it is unnecessary, and the digests are checked from the same
-# SHA256SUMS.txt the tarball ships.
+# tag archive already carries them. A Hugging Face fetch here would be
+# unnecessary, and the digests are checked from the same SHA256SUMS.txt
+# the tarball ships.
 #
 # Update this file with `packaging/aur/bump.sh vX.Y.Z`, never by hand. The
 # checked-in pkgver/checksum are a rehearsal's - v0.8.2 has no tag yet, so
@@ -61,10 +62,10 @@ prepare() {
 	export RUSTUP_TOOLCHAIN=stable
 	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 
-	# The models are hash-pinned (ADR-0009) and `models::verify` re-checks
-	# these same digests when the engine opens. Checking here turns a
-	# truncated archive into a build failure instead of an engine that
-	# refuses itself on the user's machine.
+	# The models are hash-pinned and `models::verify` re-checks these same
+	# digests when the engine opens. Checking here turns a truncated
+	# archive into a build failure instead of an engine that refuses itself
+	# on the user's machine.
 	(cd crates/chibipop-linux/models/meiki && sha256sum --check --strict SHA256SUMS.txt)
 }
 

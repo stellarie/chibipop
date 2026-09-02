@@ -1,7 +1,9 @@
-//! Screen text: shared vocabulary, the two acquisition seams, and the
-//! layout/hit-scan logic that composes them. The seams' implementations
-//! (DXGI/GDI, WinRT OCR, wlr-screencopy, ...) are platform code and live in
-//! the bin crates; everything here is platform-neutral.
+//! This module defines the vocabulary for screen text.
+//! It defines the `RegionCapture` and `OcrEngine` seams.
+//! It also contains layout and hit-scan logic that joins these seams.
+//! Platform code implements the seams with DXGI, GDI, WinRT OCR, or wlr-screencopy.
+//! Each platform bin crate contains its implementation.
+//! This module contains no platform code.
 
 pub mod layout;
 pub mod mask;
@@ -15,111 +17,127 @@ use crate::geom::{PhysPoint, PhysRect};
 use crate::text::layout::{OcrLine, TextGeom};
 use anyhow::Result;
 
-/// Text plus a cursor position.
+/// `TextSpan` stores text and the cursor position within that text.
 #[derive(Debug)]
 pub struct TextSpan {
     pub text: String,
-    /// Char-boundary byte offset.
+    /// `cursor_byte_offset` stores the cursor byte offset.
+    /// It always falls on a character boundary.
     pub cursor_byte_offset: usize,
-    /// The hovered char's rect.
+    /// `anchor` stores the rect of the hovered character.
     pub anchor: PhysRect,
-    /// Word boxes; may be empty.
+    /// `geom` stores word boxes. The list can be empty.
     pub geom: Vec<TextGeom>,
 }
 
-/// Pixels of one screen region, and how they were obtained.
+/// `Frame` stores pixels for one screen region and names the backend that produced them.
 pub struct Frame {
-    /// BGRA8, `w * h * 4` bytes, top-down, no row padding. Alpha is junk.
+    /// The format is BGRA8 and top-down, with no padding between rows.
+    /// Each pixel uses 4 bytes, so the buffer holds `w * h * 4` bytes.
+    /// The alpha channel has no meaningful value.
     pub buf: Vec<u8>,
     pub w: i32,
     pub h: i32,
-    /// Which backend path produced them; for logs and `probe`.
+    /// `source` names the backend path that produced the pixels.
+    /// Logs and the `probe` tool use this name.
     pub source: &'static str,
-    /// Why the preferred path was not used, if it was not.
+    /// `fallback` records why the code did not use the preferred backend path.
+    /// The field is empty when the code used the preferred path.
     pub fallback: Option<String>,
-    /// These pixels are the ones the previous grab of *this same
-    /// region* returned.
+    /// `unchanged` is true when this grab returns the same pixels as the previous grab for the same region.
     ///
-    /// An optimisation hint, never a data-absence marker: `buf` is
-    /// always the region's real content. A damage-paced backend
-    /// (wlr-screencopy, ADR-0002) learns this for free from the race
-    /// it already runs, so the pipeline can reuse the OCR it already
-    /// paid for; a backend that cannot tell says `false`, which is
-    /// always correct and merely costs a pass.
+    /// This field only hints that the pipeline can reuse OCR.
+    /// It never means that `buf` lacks data.
+    /// The field `buf` always holds the real content of the region.
+    /// A damage-paced backend, such as wlr-screencopy
+    /// (ARCHITECTURE.md#capture-and-masking), already tracks damage.
+    /// This backend can set the field at no extra cost.
+    /// The pipeline can then reuse its existing OCR result.
+    /// A backend that cannot tell must report `false`.
+    /// This answer is always correct, but it costs one extra OCR pass.
     pub unchanged: bool,
 }
 
-/// Pixels of a screen region, on demand.
+/// This trait provides pixels for a screen region when the caller requests them.
 ///
-/// **Pull-shaped, by contract.** `grab` answers with the most recent content
-/// the backend has and never blocks waiting for damage or for a fresh frame:
-/// a still desktop must answer as fast as a busy one, because hover latency
-/// is the product. A push-shaped backend - a portal/PipeWire stream that
-/// only delivers on change - keeps its newest buffer internally and serves
-/// `grab` out of that buffer, so one weird backend absorbs the mismatch
-/// rather than every caller (ADR-0001).
+/// **This trait uses a pull contract.** `grab` always returns the newest content that the backend has.
+/// `grab` never waits for damage or a fresh frame.
+/// The trait must answer for a still desktop as fast as for a busy desktop because hover latency matters most to the user.
+/// Some backends use a push model.
+/// A portal or PipeWire stream, for example, delivers a new frame only when the screen changes.
+/// Such a backend must keep its newest buffer internally.
+/// It must serve `grab` from that buffer.
+/// This rule keeps the mismatch inside one unusual backend instead of every caller.
+/// (ARCHITECTURE.md#workspace-and-seams).
 ///
-/// The returned [`Frame`] is exactly `region.w x region.h` pixels: word
-/// geometry is mapped back to the desktop by offsetting against the region's
-/// origin, so a backend that cannot honour the requested box must fail the
-/// grab rather than return a different one.
+/// The returned [`Frame`] holds exactly `region.w x region.h` pixels.
+/// Code maps word geometry back to desktop coordinates with an offset from the region's origin.
+/// A backend that cannot fill the exact requested box must fail the grab.
+/// The backend must not return a frame of a different size.
 ///
-/// Regions and results are physical pixels throughout; logical coordinates
-/// and fractional scale are the bin's business, converted before they reach
-/// here.
+/// Regions and results always use physical pixels.
+/// The platform bin converts logical coordinates and the fractional scale before a value reaches this trait.
 pub trait RegionCapture {
-    /// The most recent content of `region`.
+    /// Return the newest content of `region`.
     fn grab(&mut self, region: PhysRect) -> Result<Frame>;
 
-    /// The display area containing `p`.
+    /// `bounds_containing` returns the bounds of the display that contains `p`.
     ///
-    /// Bounds multi-pass tiling, so one read never walks off the display the
-    /// text is on. A backend that cannot say answers with something
-    /// plausible rather than failing - a wrong bound costs a tile, an error
-    /// costs the hover.
+    /// The layout code uses this bound to stop tile passes at the display edge.
+    /// A backend that cannot find the exact bound must return an estimated bound instead of an error.
+    /// A wrong bound wastes one tile.
+    /// An error costs the whole hover.
     fn bounds_containing(&self, p: PhysPoint) -> PhysRect;
 
-    /// Opens a read: the several `grab`s that make up one logical scan.
+    /// `begin_read` starts one logical read.
+    /// The read consists of `grab` calls.
     ///
-    /// A backend whose own surfaces would land in the pixels hides them here
-    /// and may block doing it; one with an expensive session may open it
-    /// here and hold it for the read. Always paired with `end_read`.
+    /// If a backend's own surfaces can appear in the pixels, the backend must hide them here.
+    /// This hide step can block.
+    /// A backend with an expensive session, such as a portal session, can open that session here.
+    /// The backend then holds the session open for the whole read.
+    /// Each call to `begin_read` must pair with one call to `end_read`.
     fn begin_read(&mut self) {}
 
-    /// Closes the read `begin_read` opened.
+    /// `end_read` closes the read that `begin_read` opened.
     fn end_read(&mut self) {}
 }
 
-/// Recognised text, with geometry per word.
+/// An `OcrEngine` recognizes text and returns geometry for each word.
 pub trait OcrEngine {
-    /// Lines of words, each word carrying its box in image pixels.
+    /// `recognise` returns lines of words.
+    /// Each word has a box in image pixels.
     ///
-    /// `bgra` is `w * h * 4` bytes in [`Frame`]'s format. Word boxes are what
-    /// hit-scan resolves against, so an engine that cannot box a word must
-    /// drop it rather than invent a rect. Lines with no words are dropped, so
-    /// an empty result means "nothing recognised".
+    /// The `bgra` argument holds `w * h * 4` bytes in the format of [`Frame`].
+    /// Hit-scan resolves a point against these word boxes.
+    /// If an engine cannot find a box for a word, it must drop that word.
+    /// The engine must not invent a box.
+    /// The engine must also drop a line that has no words.
+    /// An empty result therefore means that the engine recognized nothing.
     fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>>;
 
-    /// Best-effort language swap, for a reload.
+    /// `set_language` changes the engine language when possible, for example on reload.
     ///
-    /// An engine that cannot serve `tag` keeps the language it has and says
-    /// so on stderr: a hover in the wrong language still beats no hover.
+    /// If an engine cannot serve `tag`, it must keep its current language and report the failure on stderr.
+    /// A hover in the wrong language is better than no hover at all.
     fn set_language(&mut self, tag: &str);
 
-    /// Which engine this is: a stable id, not a display name.
+    /// `name` returns a stable engine id.
+    /// The id is not a display name.
     ///
-    /// The built-in engines name themselves ("windows-ocr", "meiki-ocr")
-    /// and a plugin answers with its manifest name, so a log line or a
-    /// `probe` report names what actually read the pixels rather than
-    /// which platform it ran on.
+    /// A built-in engine names itself, for example `"windows-ocr"` or `"meiki-ocr"`.
+    /// A plugin returns the name from its manifest.
+    /// A log line or a `probe` report can name the exact engine that read the pixels, not only the platform.
     fn name(&self) -> &str;
 
-    /// Does `recognise` box its words?
+    /// `provides_geometry` answers whether `recognise` returns a box for each word.
     ///
-    /// Hit-scan resolves against those boxes, so an engine that reads text
-    /// without geometry answers `false` here rather than inventing rects.
-    /// Both built-in engines box every word; a plugin answers with the
-    /// claim in its manifest, which is what `plugin check` holds it to.
+    /// Hit-scan needs these boxes to work.
+    /// An engine that reads text without geometry must answer `false` here.
+    /// The engine must not invent boxes.
+    /// Both built-in engines box every word.
+    /// A plugin answers with the claim in its manifest.
+    /// The `plugin check` tool holds the plugin to that claim.
     fn provides_geometry(&self) -> bool;
 }
 
@@ -127,8 +145,8 @@ pub trait OcrEngine {
 mod tests {
     use super::*;
 
-    /// A plugin that reads text but cannot box it - the honest shape of a
-    /// geometry-less engine.
+    /// `TextOnly` reads text but cannot box it.
+    /// It shows the honest shape of an engine without geometry.
     struct TextOnly;
 
     impl OcrEngine for TextOnly {
@@ -147,8 +165,8 @@ mod tests {
         }
     }
 
-    /// The metadata rides the same trait object the pipeline holds, so no
-    /// caller needs to know which concrete engine it was handed.
+    /// The metadata travels with the trait object that the pipeline holds.
+    /// No caller needs to know the concrete engine behind it.
     #[test]
     fn a_geometry_less_engine_says_so_through_the_seam() {
         let engine: Box<dyn OcrEngine> = Box::new(TextOnly);

@@ -1,8 +1,8 @@
 # OCR candidate benchmark results
 
 Executes the benchmark protocol from [Research: Japanese OCR engines on Linux](./linux-japanese-ocr.md)
-("Benchmark shortlist"), plus the ADR-0008 masked-fixture sweep
-([popup capture exclusion](../adr/0008-popup-capture-exclusion.md)).
+("Benchmark shortlist"), plus the masked-fixture sweep
+([popup capture exclusion](../../ARCHITECTURE.md#capture-and-masking)).
 Run date: 2026-08-24. **Numbers only — no engine choice is made here.**
 
 Harness: [`tools/ocr-bench/`](../../tools/ocr-bench/README.md) (fully
@@ -41,7 +41,7 @@ reproducible: `setup.sh` → `gen_corpus` → `run_all`; models hash-recorded in
    interior masks trigger fluent bridging hallucinations (+128 pp CER,
    ~12 inserted chars/crop).
 
-ADR-0008 headline: **masking is viable for the box engines, and fill color
+Masked-sweep headline: **masking is viable for the box engines, and fill color
 matters enormously for some engines.** After chibipop's clipped-word exclusion
 (dropping predicted boxes that intersect the mask), meikiocr keeps the interior-
 mask penalty at +11.6 pp and PP-OCRv5 at +1.9 pp — but black/gray fills poison
@@ -74,12 +74,12 @@ for box-engine pipelines on this evidence.
   verified.
 - Every crop also exists at 2× via **nearest-neighbour** upscale, mirroring
   `src/text/capture.rs upscale_by` (production OCRs the 2× image).
-- **Masked variants** (ADR-0008), on every 2× base crop: popup-sized flat rect
-  ≈ ⅓ of crop area at three positions (straddling one crop edge / fully
-  interior / adjacent-but-outside as a no-op control) × four fills (black,
-  white, mid-gray 128, per-crop mean color) × two edges (hard, 1 px 50 %
-  feather ring). Masked ground truth = characters whose boxes do not intersect
-  the mask (chibipop drops mask-intersecting words per ADR-0008).
+- **Masked variants**, on every 2× base crop: popup-sized flat rect ≈ ⅓ of
+  crop area at three positions (straddling one crop edge / fully interior /
+  adjacent-but-outside as a no-op control) × four fills (black, white,
+  mid-gray 128, per-crop mean color) × two edges (hard, 1 px 50 % feather
+  ring). Masked ground truth = characters whose boxes do not intersect the
+  mask (chibipop drops mask-intersecting words).
 
 **Engines** (one process per configuration; models pinned + hashed):
 
@@ -221,7 +221,7 @@ because every crop is squish-resized to 224×224.
 All construction times are compatible with `OcrTextSource::new`'s
 build-at-worker-start-and-reload-on-settings-change shape (R8).
 
-## ADR-0008 masked variants — ΔCER vs unmasked 2× base (pp)
+## Masked variants — ΔCER vs unmasked 2× base (pp)
 
 Cell format: **raw ΔCER (ΔCER after drop-filtering)** — the parenthesised
 number removes predicted boxes that intersect the mask before scoring, i.e.

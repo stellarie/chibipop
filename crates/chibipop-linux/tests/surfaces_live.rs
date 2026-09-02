@@ -1,33 +1,28 @@
-//! The region selector and the outline overlay against a real
-//! compositor, when there is one.
+//! This test checks the region selector and outline overlay with a real compositor.
 //!
-//! Sibling of `popup_live.rs` and the same shape: CI is headless
-//! (ADR-0007), so this skips without `WAYLAND_DISPLAY` - and skips again
-//! on a compositor advertising no layer shell, fractional scale or
-//! viewporter, because those are the globals ADR-0004 makes mandatory
-//! and their absence is a compositor verdict, not a test failure.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci). The test skips without
+//! `WAYLAND_DISPLAY`.
+//! It also skips when the compositor lacks layer shell, fractional scale, or viewporter.
+//! These globals are required. Their absence is a compositor state, not a test failure.
 //!
-//! It drives a whole daemon through `CHIBIPOP_SURFACE_PROBE=1`, which
-//! feeds two known scan rects through the shipped
-//! `Command::ShowScanOverlay` consumer, runs one region pick, and takes
-//! both down. Everything asserted is read back out of the daemon's
-//! own log and out of `hyprctl`; it synthesizes no input and never
-//! touches the seat.
+//! The test drives one daemon with `CHIBIPOP_SURFACE_PROBE=1`.
+//! The probe sends two known scan rects through the shipped
+//! `Command::ShowScanOverlay` consumer, runs one region pick, and removes both surfaces.
+//! The assertions read the daemon log and `hyprctl` output.
+//! The test synthesizes no input and never touches the seat.
 //!
-//! **What this cannot prove.** A drag needs a press, a motion and a
-//! release from the seat, and this crate's rule is that no test
-//! synthesizes seat input (`popup_live.rs`: "it synthesizes no input and
-//! never touches the seat" - the pointer script exists precisely so the
-//! popup's handlers can be driven without one). There is no equivalent
-//! hook here, because a script would be driving the drag arithmetic
-//! rather than the compositor. So the drag itself is pinned by the unit
-//! tests in `select.rs` (`Drag`/`Ask`, in physical pixels, negative
-//! directions, the threshold, both cancels), and what is pinned *here*
-//! is everything a compositor has to agree to: that the surfaces map on
-//! the right layer with the right keyboard interactivity, that their
-//! geometry converts through the output's fractional scale exactly as
-//! the compositor computes it, that the pick's deadline gets the daemon
-//! out with no decision, and that the surfaces are gone afterwards.
+//! **What this cannot prove.** A drag needs a seat press, motion, and release.
+//! This crate does not synthesize seat input (`popup_live.rs`: "it synthesizes no input and
+//! never touches the seat").
+//! The pointer script exists so popup handlers can run without seat input.
+//! This file has no equivalent hook. A script would test the drag arithmetic instead of the
+//! compositor.
+//! Unit tests in `select.rs` pin the drag itself (`Drag`/`Ask`, physical pixels, negative
+//! directions, the threshold, and both cancels).
+//! The behavior pinned *here* belongs to the compositor.
+//! The surfaces use the correct layer and keyboard interactivity.
+//! Geometry follows output fractional scale as the compositor computes it.
+//! The pick deadline ends without a decision, and the surfaces disappear.
 
 #![cfg(target_os = "linux")]
 
@@ -38,23 +33,23 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The globals ADR-0004 requires for a crisp surface.
+/// Globals required for the surface protocol.
 const NEEDED: [&str; 3] =
     ["zwlr_layer_shell_v1", "wp_fractional_scale_manager_v1", "wp_viewporter"];
 
-/// The two scan rects `App::probe_surfaces` sends, as output-local
-/// physical pixels. Kept in step with the daemon on purpose: the whole
-/// point is checking the compositor's logical answer against this.
+/// The two scan rects that `App::probe_surfaces` sends in output-local physical pixels.
+/// Keep these values equal to the daemon values. The test compares the compositor's logical
+/// result against them.
 const OUTLINED: [(i32, i32, i32, i32); 2] = [(100, 100, 240, 60), (500, 300, 80, 80)];
 
-/// Each frame is drawn *outside* the rect it marks - a stroke inside
-/// would land in the very pixels the next grab reads (ADR-0008,
-/// `overlay::scan_marks`) - so the box the compositor is asked to size
-/// its surface to is the outset one, two physical px bigger on every
+/// Draw each frame outside the rect that it marks.
+/// A stroke inside the rect would enter the pixels that the next grab reads
+/// (ARCHITECTURE.md#capture-and-masking, `overlay::scan_marks`).
+/// The compositor therefore receives an outset box that is two physical px larger on each
 /// side.
 const OUTSET: i32 = 2;
 
-/// A private XDG environment plus the daemon running inside it.
+/// A private XDG environment with a daemon.
 struct Session {
     dir: PathBuf,
     log: PathBuf,
@@ -80,10 +75,9 @@ impl Session {
             .expect("linking the compositor socket into the scratch tree");
         }
 
-        // A protocol error is the failure mode these two surfaces are
-        // most exposed to - attaching before a configure, asking a
-        // device-less seat for a keyboard - and it lands on stderr, not
-        // in the log, so it is captured too.
+        // These two surfaces can fail with protocol errors when they attach a buffer before
+        // configure or ask a device-less seat for a keyboard.
+        // The compositor writes these errors to stderr, not the log, so capture stderr too.
         let stderr = dir.join("stderr.txt");
         let sink = std::fs::File::create(&stderr).expect("creating the stderr capture");
 
@@ -91,8 +85,7 @@ impl Session {
         xdg(&mut cmd, &dir);
         let daemon = cmd
             .env("CHIBIPOP_SURFACE_PROBE", "1")
-            // The probe needs no pixels, and skipping the ladder keeps
-            // the run off the portal's consent dialog.
+            // The probe needs no pixels. The `none` override prevents a portal consent dialog.
             .env("CHIBIPOP_CAPTURE_BACKEND", "none")
             .arg("run")
             .stderr(Stdio::from(sink))
@@ -109,7 +102,7 @@ impl Session {
         std::fs::read_to_string(&self.stderr).unwrap_or_default()
     }
 
-    /// Wait for a line containing `needle`, and answer it.
+    /// Wait for a log line that contains `needle`, then return it.
     fn wait_for(&self, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
@@ -172,13 +165,13 @@ fn skip() -> bool {
     false
 }
 
-/// One `hyprctl` subcommand's output, or `None` off Hyprland.
+/// Return one `hyprctl` subcommand's output, or `None` outside Hyprland.
 fn hyprctl(sub: &str) -> Option<String> {
     let out = Command::new("hyprctl").args(["-i", "0", sub]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// `probe: ... on NAME (WxH at S.SSSx)` unpacked.
+/// Parse `probe: ... on NAME (WxH at S.SSSx)`.
 fn probe_screen(line: &str) -> (i32, i32, f64) {
     let inside = line.split_once('(').and_then(|(_, r)| r.split_once(')')).expect("a (…) clause").0;
     let (size, scale) = inside.split_once(" at ").expect("`WxH at S.SSSx`");
@@ -200,7 +193,7 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
     assert!(scale >= 1.0, "a scale of {scale} is not a scale: {screen}");
     assert!(out_w > 0 && out_h > 0, "the probe must name a real output: {screen}");
 
-    // The outline: click-through and focus-proof, on the overlay layer.
+    // The outline accepts clicks through itself and never takes focus on the overlay layer.
     let mapped = session.wait_for("outline: layer surface ");
     assert!(mapped.contains("overlay layer"), "{mapped}");
     assert!(mapped.contains("keyboard none"), "{mapped}");
@@ -209,11 +202,9 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
     assert!(shown.contains("2 drawn after clipping"), "both rects land on this output: {shown}");
     session.wait_for("probe: outline shown on 1 surface(s)");
 
-    // The compositor's own view of the outline surface, in logical
-    // units: the surface is sized to the *bounding box* of the rects,
-    // never to the screen, and the physical->logical derivation is
-    // checked against the other side of the protocol rather than
-    // against itself.
+        // Read the compositor's logical outline surface.
+        // The surface uses the rects' *bounding box*, not the screen.
+        // Check physical-to-logical conversion against the compositor's result, not itself.
     let bbox = {
         let x0 = OUTLINED.iter().map(|r| r.0).min().unwrap() - OUTSET;
         let y0 = OUTLINED.iter().map(|r| r.1).min().unwrap() - OUTSET;
@@ -228,8 +219,8 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
             .find(|l| l.contains("namespace: chibipop-outline") && l.contains(&pid))
             .unwrap_or_else(|| panic!("no chibipop-outline layer in:\n{layers}"))
             .to_string();
-        // `hyprctl` prints `xywh: X Y W H`, every number logical:
-        // margins are `round(physical / scale)`, sizes `ceil(...)`.
+        // `hyprctl` prints `xywh: X Y W H` in logical units.
+        // Margins use `round(physical / scale)`, and sizes use `ceil(...)`.
         let want = format!(
             "xywh: {} {} {} {}",
             (f64::from(bbox.0) / scale).round() as i32,
@@ -244,18 +235,16 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
         );
     }
 
-    // The selector: the exception to ADR-0004's keyboard rule, and the
-    // only surface here that asks for focus.
+    // The selector is the one exception to the popup keyboard rule.
+    // It is the only surface here that can take focus.
     let picker = session.wait_for("select: 1 full-output surface(s) mapped");
     assert!(picker.contains("overlay layer"), "{picker}");
     assert!(picker.contains("keyboard exclusive"), "{picker}");
 
-    // And the compositor's own answer to "the whole output": the
-    // selector asks for `0x0` on four anchors rather than computing a
-    // size, so this is the number it must have been handed, checked
-    // against the output the probe named. Read from the log rather than
-    // `hyprctl` on purpose - the selector's surfaces are destroyed when
-    // the pick ends, so polling for them would be a race.
+    // The selector asks for `0x0` on four anchors instead of a size calculation.
+    // The compositor reports the whole output size in the log.
+    // Read the log instead of `hyprctl` because the selector surfaces disappear when the pick
+    // ends. A `hyprctl` poll could race with that removal.
     let configured = session.wait_for("select: surface 0 configured ");
     let want = format!(
         "configured {}x{} logical",
@@ -268,9 +257,9 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
          {out_w}x{out_h} physical at {scale}x)"
     );
 
-    // The wedge guard: nothing decided, so the deadline gets the daemon
-    // out. On a seat with no pointer there is nothing to drag with and
-    // the pick says so instead of waiting - both are the same answer.
+    // No decision arrives, so the deadline ends the pick.
+    // A seat without a pointer cannot support a drag. The pick reports the same cancellation
+    // instead of a wait.
     let out = session.wait_for("select: 1 surface(s) down, outcome ");
     assert!(out.contains("outcome cancelled"), "an undriven pick must cancel: {out}");
     let why = session.log();
@@ -282,20 +271,19 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
     session.wait_for("probe: pick answered false");
     session.wait_for("probe: outline hidden, 0 rect(s) left");
 
-    // ADR-0004's inviolable setting is untouched: the popup still takes
-    // no keyboard, whatever the selector asked for.
+    // The popup keeps its strict keyboard rule.
+    // The selector's keyboard mode must not change it.
     let popup = session.wait_for("popup: layer surface 0 on ");
     assert!(popup.contains("keyboard none"), "the popup must never take focus: {popup}");
 
-    // The two most likely ways these surfaces break a session are both
-    // protocol errors - attaching a buffer before the first configure,
-    // and asking a device-less seat for a keyboard - and either one
-    // kills the whole connection.
+    // Two protocol errors can end the session: a buffer attach before the first configure, or
+    // a keyboard request from a device-less seat.
+    // Either error can close the whole connection.
     session.wait_for("ready: pump running");
     let stderr = session.stderr();
     assert!(!stderr.contains("Protocol error"), "the probe raised a protocol error:\n{stderr}");
 
-    // And nothing is left behind: the surfaces go with the process.
+    // Process exit must remove both surfaces.
     session.terminate();
     assert!(session.wait_exit(), "the daemon ignored SIGTERM");
     if let Some(layers) = hyprctl("layers") {

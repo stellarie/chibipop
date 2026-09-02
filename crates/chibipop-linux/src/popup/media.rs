@@ -1,35 +1,35 @@
-//! The popup's decoded-surface cache (ADR-0004's paint side).
+//! This module caches decoded surfaces for popup paint.
 //!
-//! One `MediaStore` connection of its own plus a bounded map of decoded
-//! pixmaps. Its own connection because the worker owns the dictionary on
-//! its own thread and a `rusqlite::Connection` is not `Sync`; the painter
-//! wants nothing the dictionary carries anyway - not the term index, not
-//! the parsed-tree cache.
+//! It keeps one `MediaStore` connection and a bounded map of decoded pixmaps.
+//! It needs its own connection because the Worker owns the Dictionary on another thread,
+//! and `rusqlite::Connection` is not `Sync`.
+//! The painter needs neither the term index nor the parsed-tree cache.
 //!
-//! What it buys is that a hover over 字通, which averages more than four
-//! image nodes per term row, decodes each distinct gaiji once for the
-//! session instead of once per frame. Frame gating already coalesces
-//! commits (`super::surface`), so without a cache a scroll would re-decode
-//! the same forty PNGs at the refresh rate.
+//! The cache prevents repeated decodes.
+//! A hover over 字通 can contain more than four image nodes per term row.
+//! The cache decodes each distinct gaiji once per session instead of once per frame.
+//! The frame gate coalesces commits (`super::surface`).
+//! Without the cache, a scroll would decode the same forty PNGs at the refresh rate.
 //!
-//! Every refusal is cached too. An asset this build cannot rasterize, or
-//! one the archive never shipped, is a permanent answer, and re-asking
-//! SQLite for it once per frame would be the same waste with none of the
-//! pixels.
+//! The cache stores every refusal.
+//! An asset that this build cannot rasterize, or that the archive does not contain,
+//! gives the same answer on every request.
+//! A new SQLite query for each frame would waste work and return no pixels.
 //!
-//! The Windows twin is `crates/chibipop-windows/src/ui/media.rs`. The two
-//! differ in exactly one thing, and it is not the bookkeeping: tiny-skia's
-//! pixmap is premultiplied RGBA8, which is core's own surface layout, so
-//! this side stores what core hands it and Direct2D's side swaps two
-//! channels.
+//! The Windows equivalent is `crates/chibipop-windows/src/ui/media.rs`.
+//! The files differ only in pixel format.
+//! tiny-skia uses premultiplied RGBA8 pixmaps, which match Core's surface layout.
+//! Linux therefore stores the Core layout directly.
+//! Direct2D on Windows swaps two channels.
 //!
-//! The bookkeeping is not duplicated, then: the budget, the FIFO eviction
-//! and the rounded premultiply live once in core as
-//! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`] and
-//! [`chibipop::dict::media::premultiplied`]. None of the three carries a
-//! pixel format, which is what lets them be shared while painting stays
-//! per-platform (ADR-0001). What stays here is the decode, the channel
-//! order, and the diagnostics.
+//! Core owns cache state.
+//! The byte budget, FIFO eviction, and rounded premultiply calculations live in
+//! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`], and
+//! [`chibipop::dict::media::premultiplied`].
+//! None of these items uses a specific pixel format.
+//! Both platforms share them, and each platform keeps its own paint code
+//! (ARCHITECTURE.md#workspace-and-seams).
+//! This module owns decode, channel order, and diagnostics.
 
 use chibipop::dict::media::{premultiplied, ByteBudget, MediaKey, Missing, SURFACE_BUDGET};
 use chibipop::lookup::sqlite::MediaStore;
@@ -37,22 +37,22 @@ use chibipop::ui::layout::{Rgb, Tint};
 use std::path::Path;
 use tiny_skia::{IntSize, Pixmap};
 
-/// One cache slot: the asset, the colour it was tinted with, and the pixel
-/// size a vector was rasterized at.
+/// One cache slot contains an asset, a tint color, and a raster pixel size for vectors.
 ///
-/// The colour is part of the key because a monochrome asset is a *mask*:
-/// two nodes can share one blob and want two different pixmaps, and a theme
-/// change wants a third. `None` is the untinted asset, which is what all but
-/// 15 of the census's 72 dictionaries ask for.
+/// The color forms part of the key because a monochrome asset is a mask.
+/// Two nodes can share one blob but need different pixmaps.
+/// A theme change needs another pixmap.
+/// `None` means an untinted asset.
+/// Most Dictionaries in the census use untinted assets.
 ///
-/// The raster size is part of it for the same reason one axis further out:
-/// `Tint::Raster` exists because a vector has no pixels until something
-/// picks a size, so one SVG at two font sizes is two masks. `None` is a
-/// raster asset, or a vector at its own intrinsic size.
+/// The raster size forms part of the key for vectors.
+/// `Tint::Raster` exists because a vector has no pixels until code selects a size.
+/// One SVG at two font sizes therefore needs two masks.
+/// `None` means a raster asset or a vector at its intrinsic size.
 type Slot = (MediaKey, Option<Rgb>, Option<(u32, u32)>);
 
-/// Decoded assets, keyed by media key, under core's own byte budget and its
-/// insertion-order eviction ([`ByteBudget`]).
+/// Stores decoded assets under Core's byte budget, keyed by media key.
+/// [`ByteBudget`] evicts entries in insertion order to bound memory use.
 pub struct MediaSurfaces {
     store: MediaStore,
     slots: ByteBudget<Slot, Result<Pixmap, Missing>>,
@@ -60,11 +60,12 @@ pub struct MediaSurfaces {
 }
 
 impl MediaSurfaces {
-    /// Opens the media store beside the dictionary.
+    /// Opens the media store beside the Dictionary.
     ///
-    /// There is no `invalidate`: a rebuild renames a new database over the
-    /// old path and this read-only connection keeps the old inode, so a
-    /// reload replaces the whole cache rather than clearing it.
+    /// No `invalidate` function exists.
+    /// A rebuild renames a new database over the old path.
+    /// This read-only connection keeps the old inode.
+    /// A reload therefore replaces the whole cache instead of a clear operation.
     pub fn open(db: &Path) -> anyhow::Result<MediaSurfaces> {
         MediaSurfaces::with_budget(db, SURFACE_BUDGET)
     }
@@ -77,18 +78,18 @@ impl MediaSurfaces {
         })
     }
 
-    /// The pixmap for one asset, tinted as the scene asked.
+    /// Gets the pixmap for one asset with the requested scene tint.
     ///
-    /// `Err` is not a failure to handle - it is the `alt`-text fallback's
-    /// cue, and it says which of the three reasons applies so a diagnostic
-    /// can be honest.
+    /// `Err` is an expected result, not an unhandled failure. It tells the caller to draw
+    /// the `alt` text and gives the diagnostic log its specific reason.
     ///
-    /// The tint is applied once, on the way into the cache, rather than per
-    /// frame: a scroll re-paints the same asset at the refresh rate and a
-    /// mask's whole surface would be rewritten each time. `Tint::Raster`
-    /// also *is* the rasterization size - core quantised the resolved box
-    /// so both bins ask their decoder for the same pixels - so it is read
-    /// out here and handed to the store rather than dropped.
+    /// This function applies the tint when it admits an entry.
+    /// It does not apply the tint on each frame.
+    /// A scroll repaints the asset at the refresh rate.
+    /// Without a cache, each repaint would rewrite the mask surface.
+    /// `Tint::Raster` also gives the raster size.
+    /// Core quantizes the resolved box, so both platform bins request the same pixels.
+    /// This function reads that size and passes it to the store.
     pub fn surface(
         &mut self,
         key: &MediaKey,
@@ -110,21 +111,21 @@ impl MediaSurfaces {
         match self.slots.get(&slot) {
             Some(Ok(pixmap)) => Ok(pixmap),
             Some(Err(why)) => Err(why.clone()),
-            // Unreachable: `admit` never evicts the entry it just added.
+            // This arm is unreachable because `admit` never evicts the newest entry.
             None => Err(Missing::NotStored),
         }
     }
 
-    /// Diagnostics since the last drain, for the daemon's log.
+    /// Returns diagnostics collected since the last drain for the daemon log.
     ///
-    /// A real store fault is worth one line; a dictionary shipping an AVIF
-    /// this build cannot rasterize is not, and neither is repeated - the
-    /// cache answers from its own map after the first ask.
+    /// A database store fault generates one log line.
+    /// An unsupported image format such as AVIF does not log repeated errors.
+    /// The cache answers repeated requests from its map after the first query.
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
     }
 
-    /// Decoded pixels currently held.
+    /// Returns the count of decoded pixels currently stored in memory.
     pub fn footprint(&self) -> usize {
         self.slots.footprint()
     }
@@ -134,45 +135,42 @@ impl MediaSurfaces {
         let (w, h) = (surface.w, surface.h);
         IntSize::from_wh(w, h)
             .and_then(|size| Pixmap::from_vec(surface.rgba, size))
-            // Core validated `w * h * 4` on decode, so the only way here
-            // is a dimension tiny-skia itself refuses.
+            // Core checks `w * h * 4` during decode.
+            // This branch runs only if tiny-skia refuses a dimension.
             .ok_or_else(|| {
                 Missing::Unavailable(format!("media {key}: tiny-skia refused {w}x{h}"))
             })
     }
 
     fn admit(&mut self, slot: Slot, pixels: Result<Pixmap, Missing>) {
-        // Only a real store fault is worth a line. A dictionary shipping
-        // an AVIF is not, and it would repeat per key per session.
+        // A store fault generates one line.
+        // An unsupported format such as AVIF does not generate one line for each key.
         if let Err(Missing::Unavailable(why)) = &pixels {
             self.notes.push(why.clone());
         }
-        // A refusal retains nothing, which is what keeps a dictionary's
-        // broken assets from spending the budget. Core's `admit` does the
-        // eviction, including the rule that never drops what it just took.
+        // A refusal keeps zero bytes, so broken assets do not consume the budget.
+        // Core's `admit` handles eviction and never drops the newest entry.
         let bytes = pixels.as_ref().map_or(0, |p| p.data().len());
         self.slots.admit(slot, pixels, bytes);
     }
 }
 
-/// A mask's pixels, in the colour it stands in for.
+/// Fills mask pixels with the replacement color.
 ///
-/// Premultiplied RGBA8 in, premultiplied RGBA8 out: the asset's own colour
-/// is discarded and its alpha becomes the coverage of `color`, which is
-/// what a monochrome asset *is* - black ink authored for a light page, and
-/// invisible on a dark panel if composited as it was drawn.
+/// Input and output use premultiplied RGBA8.
+/// This function discards the asset color and uses alpha as coverage for `color`.
+/// A monochrome asset is authored as black ink for a light background.
+/// Without a tint, that asset is invisible on a dark panel.
 ///
-/// Multiplying rather than filtering, because chibipop has no filter stack:
-/// Yomitan's and Hoshi Reader's `brightness(0) invert(1)` shortcut needs
-/// one, and it also cannot reach a colour that is neither black nor white -
-/// which the theme's body text usually is.
+/// This code multiplies channels because chibipop has no filter stack.
+/// Yomitan and Hoshi Reader use CSS `brightness(0) invert(1)`.
+/// That CSS approach needs a filter stack and cannot produce arbitrary colors.
 fn tint_alpha(rgba: &mut [u8], color: Rgb) {
     for px in rgba.as_chunks_mut::<4>().0 {
-        // Premultiplied, so every channel is already scaled by the alpha
-        // and the new ones have to be scaled the same way - which is what
-        // `premultiplied` does and what keeps `r <= a`, the invariant
-        // tiny-skia's own pixel type enforces. RGBA order, because that is
-        // core's own surface layout and tiny-skia's.
+        // Each channel is premultiplied by alpha.
+        // This code must scale the new color channels by the same alpha value.
+        // `premultiplied` scales each channel and enforces the invariant `r <= a`.
+        // Memory uses RGBA order to match Core and tiny-skia.
         let a = px[3];
         px[0] = premultiplied(color.0, a);
         px[1] = premultiplied(color.1, a);
@@ -185,7 +183,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Removes the file on drop, as every other database test here does.
+    /// Removes the temporary database file when the guard drops.
+    /// Other database tests use the same guard pattern.
     struct TempDbGuard(PathBuf);
 
     impl Drop for TempDbGuard {
@@ -194,11 +193,11 @@ mod tests {
         }
     }
 
-    /// A database built from the committed media fixture archive.
+    /// Builds a database from the committed media fixture archive.
     ///
-    /// The real builder, not a hand-written schema: the cache's whole job
-    /// is to read what a build wrote, so a fixture that skipped the build
-    /// would be testing the test.
+    /// This helper uses the project builder instead of a static schema.
+    /// The cache must read the exact output of a build.
+    /// A test with hand-written tables would not check actual behavior.
     fn built(test_name: &str) -> (PathBuf, TempDbGuard) {
         let dir = std::env::temp_dir().join("chibipop_linux_media_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -211,8 +210,7 @@ mod tests {
         (out, guard)
     }
 
-    /// The asset as it was drawn, which is what all but 15 of the census's
-    /// 72 dictionaries ask for.
+    /// The untinted asset matches most Dictionaries in the census.
     const AS_DRAWN: (Tint, Rgb) = (Tint::None, (0, 0, 0));
 
     #[test]
@@ -227,16 +225,15 @@ mod tests {
         let held = cache.footprint();
         assert_eq!(12 * 7 * 4, held, "the budget counts decoded pixels");
 
-        // Premultiplied, and identical on the second ask: nothing re-reads
-        // and nothing re-decodes.
+        // The pixmap is premultiplied and identical on the second request.
+        // The cache does not reread the file or decode it again.
         let second = cache.surface(&key, AS_DRAWN.0, AS_DRAWN.1).expect("still paints");
         assert_eq!(first.data(), second.data());
         assert_eq!(held, cache.footprint(), "a hit admits nothing");
     }
 
-    /// Every format the census found now reaches pixels, so the cache's
-    /// subject is a decoded surface rather than a refusal. AVIF and SVG are
-    /// the two that matter: 201 and 35 of this library's 236 assets.
+    /// Checks that every stored census format decodes into the cache.
+    /// AVIF and SVG are the two primary formats in this test set.
     #[test]
     fn every_stored_census_format_decodes_into_the_cache() {
         let (db, _guard) = built("formats");
@@ -267,8 +264,8 @@ mod tests {
                 cache.surface(&key, AS_DRAWN.0, AS_DRAWN.1).map(|_| ()),
                 "{path}",
             );
-            // Cached: a permanent answer must not go back to SQLite once
-            // per frame, and it costs no pixels.
+            // The cache stores the refusal, so the code does not query SQLite for each frame.
+            // A refusal stores zero pixels.
             assert!(cache.surface(&key, AS_DRAWN.0, AS_DRAWN.1).is_err(), "{path}");
         }
         assert_eq!(0, cache.footprint(), "a refusal costs no pixels");
@@ -276,9 +273,9 @@ mod tests {
 
     #[test]
     fn two_paths_sharing_one_blob_still_decode_to_their_own_surfaces() {
-        // The dedup is in the store, not in the painter: a monochrome asset
-        // is tinted to the body text colour, so two nodes drawing one blob
-        // can want two different pixmaps.
+        // The store removes duplicate blobs, but the painter does not.
+        // The cache tints a monochrome asset to the body text color.
+        // Two nodes that share one blob can request different pixmaps.
         let (db, _guard) = built("shared_blob");
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
         assert!(cache.surface(&MediaKey::new(1, "gaiji/one.png"), Tint::None, (0, 0, 0)).is_ok());
@@ -288,10 +285,10 @@ mod tests {
 
     #[test]
     fn the_budget_evicts_the_oldest_and_never_the_entry_just_admitted() {
-        // One surface's worth of budget, so admitting the second must drop
-        // the first - and admitting one *larger* than the whole budget must
-        // still keep it, or the caller is told an asset it can see is
-        // absent.
+        // The budget allows one surface.
+        // A second surface must evict the first.
+        // A surface larger than the whole budget must stay in the cache,
+        // so visible assets remain available.
         let (db, _guard) = built("evicts");
         let mut cache = MediaSurfaces::with_budget(&db, 12 * 7 * 4).expect("the store opens");
         let one = MediaKey::new(1, "gaiji/one.png");
@@ -310,13 +307,12 @@ mod tests {
         );
     }
 
-    /// Story 17, at the level the tint is reachable: a monochrome asset's
-    /// alpha becomes the coverage of the body text colour, so a gaiji
-    /// authored as black ink is legible on a dark theme and on a light one.
+    /// Checks the monochrome tint and the premultiply step.
+    /// The alpha of a monochrome asset provides coverage for the text color.
+    /// This step keeps black-ink gaiji legible on dark and light themes.
     ///
-    /// Asserted on real decoded pixels from the real builder, because the
-    /// premultiplication invariant is the thing that would break: a tinted
-    /// channel above its own alpha is a pixel tiny-skia refuses to blend.
+    /// This test checks decoded pixels from the project builder.
+    /// A channel value larger than its alpha breaks tiny-skia alpha composition.
     #[test]
     fn a_monochrome_asset_is_tinted_to_the_text_colour_and_stays_premultiplied() {
         let (db, _guard) = built("tint");
@@ -324,7 +320,7 @@ mod tests {
         let key = MediaKey::new(1, "gaiji/one.png");
 
         let plain = cache.surface(&key, Tint::None, (0, 0, 0)).expect("it paints").clone();
-        // The dark theme's body text, and the light theme's.
+        // Body text colors for dark theme and light theme.
         for ink in [(230u8, 230, 230), (24, 24, 24)] {
             let tinted = cache.surface(&key, Tint::Alpha, ink).expect("it paints").clone();
             assert_eq!(plain.width(), tinted.width(), "the same pixels, recoloured");
@@ -344,27 +340,25 @@ mod tests {
             }
             assert!(opaque > 0, "the fixture has ink to tint");
         }
-        // Three slots, not one: the asset as drawn plus one per colour, so
-        // a theme change does not silently keep the old ink.
+        // The cache uses three slots: one untinted asset and two tinted variants.
+        // A theme change must not use the previous color.
         assert_eq!(3 * 12 * 7 * 4, cache.footprint());
     }
 
-    /// Story 17 on the assets story 17 is about: a monochrome SVG is a mask
-    /// with no pixels until something picks a size, `SceneImage::tint`
-    /// picks it out of the resolved box, and this is where that number
-    /// becomes a pixmap. All 35 of this library's gaiji are exactly this
-    /// shape - `appearance: "monochrome"`, `height: 1em`, an SVG glyph
-    /// outline - and the theme's body text colour is what makes them
-    /// legible on a dark panel and on a light one.
+    /// Checks monochrome tint for vector assets.
+    /// A monochrome SVG mask has no pixels until code selects a size.
+    /// `SceneImage::tint` selects the size from the resolved box.
+    /// The painter rasterizes the SVG to a pixmap at that size.
+    /// The text color keeps the mask legible on dark and light panels.
     #[test]
     fn a_monochrome_vector_rasterizes_at_the_size_the_tint_asked_for() {
         let (db, _guard) = built("vector");
         let mut cache = MediaSurfaces::open(&db).expect("the store opens");
         let svg = MediaKey::new(1, "gaiji/two.svg");
 
-        // The dark theme's body text, and the light theme's. A mask
-        // composited as drawn would be one of them and invisible on the
-        // other; the tint is what makes it both.
+        // Body text colors for dark and light themes.
+        // An untinted mask would be invisible on one theme.
+        // A tint makes it visible on both themes.
         for ink in [(210u8, 212u8, 218u8), (40, 42, 48)] {
             let mask = cache.surface(&svg, Tint::Raster(30, 30), ink).expect("it paints").clone();
             assert_eq!((30, 30), (mask.width(), mask.height()), "the tint's own size");
@@ -379,34 +373,30 @@ mod tests {
             }
             assert!(inked > 0, "a mask with no coverage would tint nothing");
         }
-        // Two colours, two pixmaps: a theme change must not silently keep
-        // the old ink.
+        // Two colors produce two pixmaps.
+        // A theme change must not use the previous color.
         assert_eq!(2 * 30 * 30 * 4, cache.footprint(), "one mask per theme");
 
-        // A second size is a second mask too, because a vector's pixels are
-        // the size somebody asked for - not a property of its bytes.
+        // A second size creates an additional mask.
+        // Vector pixels depend on the requested size, not the intrinsic file size.
         cache.surface(&svg, Tint::Raster(12, 12), (40, 42, 48)).expect("it paints");
         assert_eq!(2 * 30 * 30 * 4 + 12 * 12 * 4, cache.footprint(), "two sizes, two pixmaps");
 
-        // And an untinted vector still rasterizes, at its own intrinsic
-        // size, which is the size the media row recorded.
+        // An untinted vector rasterizes at its intrinsic size.
+        // The media table stores this intrinsic size.
         let plain = cache.surface(&svg, Tint::None, (0, 0, 0)).expect("it paints");
         assert_eq!((64, 32), (plain.width(), plain.height()));
     }
 
-    /// The contract `Popup::reconfigure` exists to honour: **a rebuild is
-    /// only visible to a handle that reopens.**
+    /// Checks that a rebuild is visible only to handles that reopen.
     ///
-    /// A rebuild renames a new file over the dictionary's path, so this
-    /// read-only connection keeps the replaced inode for as long as it is
-    /// held - and a rebuild also re-numbers `dict_id`, which is half of the
-    /// key this cache is built on. A popup holding the old handle therefore
-    /// draws the *previous* dictionary's gaiji for the new dictionary's
-    /// entries, and nothing about the picture says so.
+    /// A rebuild renames a new file over the Dictionary path.
+    /// Current read-only connections keep the replaced file inode.
+    /// A rebuild also renumbers `dict_id`, which forms part of the cache key.
+    /// A popup with an old handle draws gaiji from the previous Dictionary.
     ///
-    /// The worker has always reopened its own handle on `reload`
-    /// (`worker::ReopenDict`). This one arrived with ticket 03 and is the
-    /// second handle in the process, so the reload has two to do.
+    /// The Worker reopens its handle on `reload` (`worker::ReopenDict`).
+    /// This cache is the second handle in the process, so it must also reopen.
     #[test]
     fn a_rebuild_is_invisible_to_a_handle_that_did_not_reopen() {
         let (db, _guard) = built("reopen_after_rebuild");
@@ -414,8 +404,7 @@ mod tests {
         let key = MediaKey::new(1, "gaiji/one.png");
         assert!(stale.surface(&key, AS_DRAWN.0, AS_DRAWN.1).is_ok(), "the asset is there");
 
-        // A rebuild from an archive that ships no media at all, over the
-        // same path.
+        // The rebuild uses an archive without media and replaces the same path.
         let terms = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/yomitan/terms.zip");
         chibipop::dict::build::build(&[terms], &[], &db, &|_| {}).expect("the rebuild promotes");
@@ -427,8 +416,7 @@ mod tests {
                 .is_err(),
             "a reopened handle reads the dictionary that is actually there now",
         );
-        // A fresh key, so the answer comes off the new file and not out of
-        // the cache the first ask filled.
+        // This test uses a fresh key, so the result comes from the new file rather than a cache entry.
         let other = MediaKey::new(1, "gaiji/three.jpg");
         assert!(
             stale.surface(&other, AS_DRAWN.0, AS_DRAWN.1).is_ok(),

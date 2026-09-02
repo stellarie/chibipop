@@ -1,4 +1,4 @@
-//! Finds plugins under a root.
+//! Finds plugins under a root directory.
 
 use crate::plugin::manifest::{self, Manifest};
 use anyhow::Result;
@@ -28,7 +28,7 @@ pub fn discover(root: &Path) -> Vec<(PathBuf, Result<Manifest>)> {
     found
 }
 
-/// Names discovered text-providers.
+/// Returns the names of discovered text providers.
 pub fn text_provider_names(found: &[(PathBuf, Result<Manifest>)]) -> Vec<String> {
     let mut names = Vec::new();
     for (_, parsed) in found {

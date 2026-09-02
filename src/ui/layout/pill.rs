@@ -1,52 +1,53 @@
-//! One inline box: how its own edges take room on a line, and where the
-//! rect drawn around them lands.
+//! This module reserves line space for inline box edges.
+//! It places each box rect in that reserved space.
 //!
-//! **One reason to change:** what an inline box's margin, border and
-//! padding do to the line they sit on.
+//! **One reason to change:** Change this module when an inline box edge
+//! changes its line.
 //!
-//! Both halves are here because they are one decision made twice, exactly
-//! as a reading's are ([`ruby`](super::ruby)) and an image's are
-//! ([`image`](super::image)). The room comes from the same trick and for
-//! the same reason: the measurement seam takes styled spans and no boxes
-//! (ADR-0013), so an inline box's own edges can only occupy a line by
-//! *being* spans the measurer charges for. The rect is then read back off
-//! the very spans that bought the room, so the background a bin paints and
-//! the advance the text took cannot disagree. Change either and the other
-//! is wrong.
+//! These operations make one layout decision in two places.
+//! A reading ([`ruby`](super::ruby)) and an image ([`image`](super::image))
+//! use the same decision.
+//! The measurement seam accepts styled spans, but it does not accept boxes
+//! (ARCHITECTURE.md#popup-and-measurement).
+//! Therefore, spans must reserve line space for box edges.
+//! The code gets each box rect from those spans.
+//! This method keeps the painted background equal to the text advance.
+//! Change both operations when one operation changes.
 //!
-//! Ticket 08 shipped the drawn rect alone and recorded the room as
-//! impossible; two tickets later it was not. Ticket 11 buys a reading
-//! *vertical* room with a zero-advance filler and ticket 12 buys an image
-//! *horizontal* room with a run of no-break spaces solved from one probe.
-//! This is ticket 12's mechanism over a box's four edges instead of one
-//! replaced element's width.
+//! An earlier pass supplied only the drawn rect and treated line space as
+//! unavailable.
+//! Later work showed that spans can reserve the space.
+//! A reading uses a zero-advance filler for vertical space.
+//! An image uses no-break spaces for horizontal space after one probe.
+//! This module applies the image spacer method to four box edges.
 //!
-//! # The horizontal axis only, and that is CSS
+//! # Only the horizontal axis
 //!
-//! An inline box's vertical margin, border and padding paint but do not
-//! affect line height, which is what this renderer already did and still
-//! does: the rect [`place_pills`] draws is outset vertically over its
-//! neighbours' lines and the paragraph stacks as though the box were not
-//! there. Only the horizontal axis reserves, because only the horizontal
-//! axis is what CSS says an inline box takes from the line it sits on.
+//! CSS lets vertical margin, border, and padding paint without a line-height
+//! change.
+//! [`place_pills`] makes each rect extend vertically across nearby lines.
+//! The paragraph keeps the same stack as a paragraph without the inline box.
+//! Only horizontal edges reserve line space.
 //!
-//! # What the reservation costs
+//! # Reservation costs
 //!
-//! Two things, both of them invisible and neither of them a glyph out of
-//! place.
+//! The reservation has two costs.
+//! Both costs add invisible space, but neither moves a glyph.
 //!
-//! A box whose `margin-right` lands at the end of a paragraph reserves it
-//! anyway, so the run reports that much more width than its ink. A
-//! browser's line box does the same; DirectWrite drops trailing
-//! whitespace from a line's own width and cosmic-text keeps it, so the
-//! two bins differ by one margin on a paragraph that ends in a pill.
-//!
-//! And an inline box holding a *block* draws nothing at all
-//! ([`Paragraphs::pill`]): the block opens a paragraph, which sends the
-//! one the box was being measured against out from under it, and the room
-//! already written goes with it. It is whitespace with no ink, so the
-//! paragraph it leaves in either draws it as a few pixels of trailing gap
-//! or - being whitespace-only - is dropped whole.
+//! 1. A `margin-right` at a paragraph end reserves its space.
+//!    The run width is then larger than its ink width.
+//!    A browser line box has the same result.
+//!    DirectWrite removes whitespace at the end from line width, but
+//!    cosmic-text keeps it.
+//!    Thus, the platform bins differ by one margin when a paragraph ends
+//!    in a pill.
+//! 2. An inline box that contains a block draws nothing
+//!    ([`Paragraphs::pill`]).
+//!    The block starts a new paragraph and ends the paragraph that measured
+//!    the box.
+//!    The reserved space stays in the old paragraph and has no ink.
+//!    Thus, the old paragraph has a small gap at its end.
+//!    The pass removes the paragraph when it contains only whitespace.
 //!
 //! [`Paragraphs::pill`]: super::gloss::Paragraphs::pill
 
@@ -58,119 +59,82 @@ use super::pass::{span_cover, Cover};
 use super::scene::{ElemBox, SceneRect};
 use super::style::{shift_on, BoxStyle};
 
-/// What an inline box's room is bought
-/// with: U+00A0 NO-BREAK SPACE, and it
-/// is [`IMAGE_SPACER`]'s character for
-/// [`IMAGE_SPACER`]'s reasons.
+/// The pill spacer reserves space for an inline box.
+/// It is U+00A0 NO-BREAK SPACE, which [`IMAGE_SPACER`] also uses.
 ///
-/// It carries no ink, so a box's own
-/// background is all that shows in the
-/// room it reserves. It has an
-/// advance, which is the whole point.
-/// And it is *non-breaking glue* in
-/// UAX #14 - a break is forbidden both
-/// before and after it - so no wrap
-/// can split a pill from its own
-/// padding, and none can put the word
-/// a `margin-right` separates from the
-/// pill on the next line while the gap
-/// stays behind on this one. A
-/// breakable space would have done the
-/// second thing on any panel narrow
-/// enough, which is the failure the
-/// image spacer already refuses.
+/// This character has no ink.
+/// Only the box background appears in the reserved space.
+/// Its advance supplies the needed width.
+/// UAX #14 also defines it as nonbreaking glue.
+/// A line break cannot occur before or after it.
+/// Therefore, a line wrap cannot separate a pill spacer from its padding.
+/// A `margin-right` can separate a word from its pill.
+/// A wrap cannot move the word to the next line and leave the margin on this
+/// line.
+/// A normal space can permit this result on a narrow panel.
+/// The image spacer and the pill spacer prevent this result.
 ///
-/// The glue cuts the other way too,
-/// and deliberately: a pill and the
-/// one word after it wrap as a unit.
-/// The space *before* a pill is
-/// ordinarily a real space, and
-/// `SP × GL` is a break opportunity,
-/// so a run of pills still wraps
-/// between them.
+/// The glue also affects the next word by design.
+/// A pill and the next word wrap as one unit.
+/// An ordinary space before a pill can break.
+/// UAX #14 makes `SP × GL` a break opportunity.
+/// Therefore, a pill sequence can wrap between pills.
 ///
 /// [`IMAGE_SPACER`]: super::image::IMAGE_SPACER
 pub(super) const PILL_SPACER: &str = "\u{a0}";
 
-/// No-break spaces per em of room, and
-/// it is [`IMAGE_SPACERS_PER_ASPECT`]'s
-/// number for that constant's reason.
+/// This constant sets the no-break space count for each em of space.
+/// It uses the value and rationale of [`IMAGE_SPACERS_PER_ASPECT`].
 ///
-/// The count is fixed while the
-/// paragraph is built, because it is
-/// *text* and both bins re-measure an
-/// element's own text to paint it; the
-/// *size* is solved once the measurer
-/// has been asked, because only it
-/// knows what one of these advances
-/// ([`measure_pills`]). The count has
-/// to be generous enough that the
-/// solved size stays under the em the
-/// box sits in - otherwise the spacer,
-/// and not the text, would decide its
-/// line's height.
+/// The paragraph build fixes the count because a no-break space is text.
+/// Both bins measure an element's text again before paint.
+/// The paragraph build does not fix the size.
+/// Only the measurer knows the advance of one no-break space.
+/// Therefore, [`measure_pills`] calculates the size.
+/// The count must keep the calculated size below the box em.
+/// Otherwise, the pill spacer sets the line height instead of the text.
 ///
-/// Four is that bound for every real
-/// face: a no-break space is a space,
-/// and a space is between a quarter and
-/// a third of an em, so four of them
-/// reserve one em at no more than one
-/// em of size. Where a face does go
-/// narrower, [`measure_pills`] clamps
-/// the size instead of letting the line
-/// grow, and the reservation comes out
-/// a few percent short - which costs
-/// the box a sliver of its declared
-/// padding and costs the line nothing,
-/// because the rect is read back off
-/// the room that was actually bought.
+/// A count of four meets this limit for every real font.
+/// A no-break space is one-quarter to one-third of an em wide.
+/// Thus, four no-break spaces reserve one em at a maximum size of one em.
+/// If a font uses a narrower space, [`measure_pills`] limits the size.
+/// The line height does not increase.
+/// The reservation is then a few percent short.
+/// This reduces the declared padding by a small amount.
+/// The code gets the drawn rect from the reserved space, so the line does not
+/// change.
 ///
 /// [`IMAGE_SPACERS_PER_ASPECT`]: super::image::IMAGE_SPACERS_PER_ASPECT
 pub(super) const PILL_SPACERS_PER_EM: f32 = 4.0;
 
-/// The most no-break spaces one edge
-/// may reserve with.
+/// This constant sets the maximum pill spacer count for one edge.
 ///
-/// A declared length is arbitrary
-/// author input, so the ratio of room
-/// to em is too, and 64 spans per edge
-/// is already far past any pill a
-/// dictionary draws - Jitendex's own
-/// widest edge is `margin-right: 0.5em`,
-/// which is two. Beyond the cap the
-/// reservation is short, which costs the
-/// box some of its padding and costs the
-/// panel nothing.
+/// An author can declare any length, so the space-to-em ratio has no fixed
+/// maximum.
+/// A limit of 64 spans for each edge exceeds all pills in the Dictionary
+/// census.
+/// The widest Jitendex edge is `margin-right: 0.5em` and needs two spans.
+/// Above the limit, the reservation is short.
+/// This reduces the padding but does not affect the panel.
 pub(super) const PILL_SPACER_MAX: usize = 64;
 
-/// The four rooms an inline box's own
-/// edges owe its line, in the order the
-/// paragraph writes them: the left
-/// margin, the left border plus
-/// padding, the right padding plus
-/// border, the right margin.
+/// Returns the four spaces that inline box edges reserve on the line.
+/// The paragraph uses this order: left margin, left border plus padding,
+/// right padding plus border, and right margin.
 ///
-/// Two spans per side rather than one,
-/// because the margin is the one edge
-/// that is *outside* the box: the rect
-/// drawn is the run from the left
-/// border to the right one, so the
-/// margins have to sit where a cover of
-/// that run cannot reach them.
+/// Each side uses two spans because the margin stays outside the box.
+/// The drawn rect extends from the left border to the right border.
+/// Therefore, a cover query for this inner run cannot include the margins.
 ///
-/// A negative margin buys nothing. CSS
-/// allows one and [`box_len`] keeps it,
-/// but a span cannot advance backwards
-/// and pulling the following text over
-/// the box would need the seam to place
-/// glyphs rather than runs (ADR-0013) -
-/// so a negative margin still draws
-/// where it always did and reserves
-/// what it always reserved, nothing.
-/// No census dictionary writes one.
-/// Padding and border widths are
-/// already non-negative: [`apply_box`]
-/// clamps exactly what CSS clamps.
+/// A negative margin reserves no space.
+/// CSS permits negative margins, and [`box_len`] keeps the value.
+/// A span cannot have a negative advance.
+/// The measurement seam needs glyph placement, not run placement, to move
+/// later text across the box.
+/// Therefore, a negative margin keeps its paint position, but reserves no
+/// space.
+/// No Dictionary in the census uses a negative margin.
+/// [`apply_box`] already clamps padding and border widths to CSS limits.
 ///
 /// [`box_len`]: super::style::box_len
 /// [`apply_box`]: super::style::apply_box
@@ -180,42 +144,27 @@ pub(super) fn rooms(style: BoxStyle) -> [f32; 4] {
         .map(|room| if room > 0.0 && room.is_finite() { room } else { 0.0 })
 }
 
-/// Does this box take horizontal room
-/// its content does not?
+/// Reports whether an inline box reserves horizontal space beyond its content.
 ///
-/// The gate on an inline box existing
-/// at all, beside `BoxStyle::paints`:
-/// before this a margin with nothing to
-/// draw resolved to nothing, because
-/// nothing could have spent it.
-/// Jitendex's pill is both - a fill and
-/// a `margin-right` - but a dictionary
-/// spacing two inline labels apart with
-/// margins alone is a box that paints
-/// no pixel and still has to be built.
+/// This function and `BoxStyle::paints` decide whether an inline box exists.
+/// Before this function, a margin without paint had no way to reserve space.
+/// A Jitendex pill has both a fill and a `margin-right`.
+/// A Dictionary can use margins alone to separate two inline labels.
+/// Such a box paints no pixel, but the code must build it.
 pub(super) fn reserves(style: BoxStyle) -> bool {
     rooms(style).iter().any(|&room| room > 0.0)
 }
 
-/// How many [`PILL_SPACER`]s one edge
-/// reserves with.
+/// Returns the [`PILL_SPACER`] count that one edge uses.
 ///
-/// From the ratio of room to em alone,
-/// so it is decided while the paragraph
-/// is built and is the same number in
-/// every font - the *size* of them is
-/// what [`measure_pills`] solves
-/// against the face that is actually
-/// installed.
+/// The space-to-em ratio alone sets this count.
+/// Therefore, the paragraph build can set one count for all fonts.
+/// [`measure_pills`] calculates the pill spacer size for the installed face.
 ///
-/// One is the floor for any room at
-/// all: an edge narrower than a quarter
-/// of an em still gets a span, sized
-/// down to it. No room, or a room a
-/// declaration overflowed to infinity,
-/// gets none - and a NaN em falls
-/// through to `max`, which returns the
-/// finite operand.
+/// Any positive space gets at least one pill spacer.
+/// A space narrower than one-quarter of an em gets one span that shrinks to fit.
+/// Zero space or an infinite declaration gets no pill spacer.
+/// For a NaN em, `max` returns the finite operand.
 pub(super) fn spacers(room: f32, em: f32) -> usize {
     if room <= 0.0 || !room.is_finite() {
         return 0;
@@ -227,25 +176,19 @@ pub(super) fn spacers(room: f32, em: f32) -> usize {
     (want.max(1.0) as usize).min(PILL_SPACER_MAX)
 }
 
-/// Every span of a paragraph that buys
-/// an inline box room, with the room it
-/// owes.
+/// Returns each pill spacer span in a paragraph with its needed space.
 ///
-/// Found from the box's own two indices
-/// rather than a marker per span,
-/// because the positions are structural
-/// and the style says which of them
-/// exist: [`Paragraphs::pill`] writes
-/// the left margin immediately before
-/// `from`, the left border and padding
-/// *at* `from`, the right padding and
-/// border at `to - 1` and the right
-/// margin at `to`, and writes each one
-/// exactly when [`rooms`] is positive
-/// there. So a pill nested inside
-/// another still finds its own four,
-/// and no span has to carry a fourth
-/// side-table index.
+/// This function finds spans from the box indices, `from` and `to`.
+/// It does not store a marker on each span.
+/// The four pill spacer positions follow the paragraph structure.
+/// The box style identifies the positions that exist.
+/// [`Paragraphs::pill`] writes the left margin immediately before `from`.
+/// It writes the left border and padding at `from`.
+/// It writes the right padding and border at `to - 1`.
+/// It writes the right margin at `to`.
+/// It writes a span only when [`rooms`] reports positive space there.
+/// Therefore, a nested pill finds its own four positions without an extra
+/// index.
 ///
 /// [`Paragraphs::pill`]: super::gloss::Paragraphs::pill
 fn spacer_spans(pill: &InlineBox) -> impl Iterator<Item = (usize, f32)> {
@@ -258,48 +201,33 @@ fn spacer_spans(pill: &InlineBox) -> impl Iterator<Item = (usize, f32)> {
     })
 }
 
-/// Every inline box of a paragraph,
-/// given the room its edges need.
+/// Sets the pill spacer sizes for all inline boxes in a paragraph.
 ///
-/// Called *before* the paragraph is
-/// measured, and it is the whole of how
-/// an inline box's horizontal margin,
-/// border and padding occupy a line.
-/// The measurement seam takes styled
-/// spans and no boxes (ADR-0013), so a
-/// box's edges can only take room by
-/// *being* spans the measurer charges
-/// for - and growing the line boxes
-/// afterwards would fool nobody,
-/// because both bins re-measure an
-/// element's own spans to paint it and
-/// would get the ungrown lines back.
-/// Ticket 11's ruby filler and ticket
-/// 12's image spacer are the same trick
-/// for the same reason.
+/// The code calls this function before it measures the paragraph.
+/// This function makes each horizontal margin, border, and padding reserve
+/// line space.
+/// The measurement seam accepts styled spans, but not boxes.
+/// Therefore, box edges can reserve space only through spans that the measurer
+/// measures.
+/// The code cannot increase line boxes after measurement.
+/// Both bins measure the element spans again for paint and get the original
+/// lines.
+/// The ruby filler and image spacer use the same method for the same reason.
 ///
-/// So the run asks, and this decides
-/// what it asks for. One ratio is
-/// needed and only a measurer knows it:
-/// what one [`PILL_SPACER`] advances
-/// per unit of size. One probe per box
-/// answers it, since all four of a
-/// box's spacers carry one style.
+/// The code needs the advance of one [`PILL_SPACER`] for each size unit.
+/// Only a measurer can supply this ratio.
+/// One probe per box supplies the ratio because all four pill spacers use one
+/// style.
 ///
-/// Then the arithmetic. `n` spacers at
-/// size `s` advance `n * u * s`, so the
-/// room the edge declared fixes `s`
-/// exactly. It is capped at the em the
-/// box sits in, which is what keeps a
-/// wide margin from making its line
-/// taller than its text: past that cap
-/// the reservation comes out a few
-/// percent narrow instead
-/// ([`PILL_SPACERS_PER_EM`]), and
-/// [`place_pills`] draws the rect the
-/// room that was bought describes
-/// rather than the one that was asked
-/// for.
+/// The equation is `n * u * s` for `n` spacers, unit advance `u`, and size `s`.
+/// The declared edge space determines `s`.
+/// The code limits `s` to the box em.
+/// This limit keeps the line height at or below the text height when a margin
+/// is wide.
+/// Above this limit, the reservation is a few percent narrow
+/// ([`PILL_SPACERS_PER_EM`]).
+/// [`place_pills`] uses the reserved space, not the declared edge space, for
+/// the rect.
 pub(super) fn measure_pills(
     m: &mut dyn TextMeasure,
     flow: &Flow,
@@ -309,58 +237,45 @@ pub(super) fn measure_pills(
     if flow.inline.is_empty() {
         return Ok(());
     }
-    // Only a paragraph holding an
-    // inline box pays for this buffer,
-    // which is why it is not one of the
-    // walk's.
+    // Allocate this buffer only for a paragraph with an inline box.
+    // The paragraph walk does not store it.
     let mut scratch = Measured::default();
     for pill in &flow.inline {
-        // One probe per box, not per
-        // edge: all four of a box's
-        // spacers carry the one style
-        // its node resolved, and a
-        // no-break space's advance is
-        // proportional to its size.
+        // Probe once for each box, not for each edge.
+        // All four pill spacers use the style that the node resolves.
+        // The advance of a no-break space changes in direct proportion to its
+        // size.
         let mut unit: Option<f32> = None;
         for (at, room) in spacer_spans(pill) {
             let (Some(span), Some(&asked)) = (flow.spans.get(at), run.get(at)) else {
                 continue;
             };
-            // The size the walk resolved,
-            // which for a spacer is the em
-            // its box sits in.
+            // The paragraph walk resolves this size.
+            // A pill spacer uses the em of its box.
             let em = span.style.size;
             let per_size = match unit {
                 Some(per_size) => per_size,
                 None => {
                     let probe = StyledSpan { text: PILL_SPACER, size: em, ..asked };
                     m.measure(MeasureRun { spans: &[probe], max_w }, &mut scratch)?;
-                    // The span's own box, not
-                    // `metrics.w`: DirectWrite's
-                    // aggregate width excludes
-                    // trailing whitespace, and a
-                    // lone no-break space is
-                    // nothing but that.
+                    // Read the span box instead of `metrics.w`.
+                    // DirectWrite excludes whitespace at the end from the
+                    // total width.
+                    // One no-break space contains only this whitespace.
                     let px = scratch.spans.first().map_or(0.0, |b| b.w);
                     *unit.insert(if em > 0.0 { px / em } else { 0.0 })
                 }
             };
-            // A measurer that charges
-            // nothing for a no-break space
-            // can reserve nothing exactly,
-            // so the spacer keeps the em it
-            // was built with rather than
-            // dividing by zero.
+            // A measurer can report zero advance for a no-break space.
+            // Keep the original em size in that case.
+            // Do not divide by zero.
             if per_size <= 0.0 {
                 continue;
             }
-            // However many the walk wrote,
-            // and not what `spacers` would
-            // answer again: the text is
-            // what both bins re-measure,
-            // so the count in it is the
-            // one the size has to solve
-            // against.
+            // The paragraph count, not a new result from `spacers`, determines
+            // the size.
+            // Both bins measure the paragraph text again, so this count must
+            // stay exact.
             let n = (span.len as usize / PILL_SPACER.len()).max(1) as f32;
             run[at].size = (room / (n * per_size)).min(em);
         }
@@ -368,42 +283,30 @@ pub(super) fn measure_pills(
     Ok(())
 }
 
-/// The paragraph's inline boxes, as
-/// rects.
+/// Returns the paragraph inline boxes as rects.
 ///
-/// Pure: the lines already carry the
-/// room [`measure_pills`] bought, so
-/// this only reads back where each box's
-/// own run landed.
+/// This pure function reads the space that [`measure_pills`] reserves.
+/// It gets each box rect from the final position of the box run.
 ///
-/// **The rect is the run.** Horizontally
-/// it is exactly the cover of the spans
-/// from the box's left border to its
-/// right one - no outset - because those
-/// spans *are* its border and padding.
-/// So the drawn background cannot reach
-/// past the advance that was reserved
-/// for it, whatever the face charged for
-/// a no-break space, and a box that
-/// wrapped draws its left padding on the
-/// first fragment and its right padding
-/// on the last, which is what CSS says a
-/// broken inline box does.
+/// **The rect equals the run.**
+/// Horizontally, the rect covers spans from the left border through the right
+/// border.
+/// It has no outset because these spans are the border and padding.
+/// Therefore, the background cannot extend past the reserved advance.
+/// This remains true for any no-break space advance that the font face supplies.
+/// A wrapped box paints left padding on its first fragment and right padding
+/// on its last fragment.
+/// CSS defines this result for a broken inline box.
 ///
-/// Vertically it *is* an outset, and
-/// that is CSS too: an inline box's
-/// vertical padding and border paint but
-/// do not affect line height, so the
-/// rect grows over its neighbours'
-/// lines rather than pushing them apart.
+/// Vertically, CSS defines the rect as an outset.
+/// Vertical padding and borders paint, but do not change line height.
+/// The rect extends across nearby lines, but does not move them.
 ///
-/// One rect per line the run touches, so
-/// a pill broken across two lines is
-/// drawn on both. Only a box with ink
-/// reaches the scene: `inline_boxes` is
-/// decoration, and a box that spaces its
-/// content out has already spent
-/// everything it had on the spans above.
+/// The code creates one rect for each line that the run touches.
+/// Therefore, a pill that wraps across two lines paints on both lines.
+/// Only a box with ink enters the scene.
+/// `inline_boxes` contains only decoration.
+/// A box that only reserves space already has its full effect in the spans.
 pub(super) fn place_pills(
     flow: &Flow,
     measured: &Measured,
@@ -424,12 +327,8 @@ pub(super) fn place_pills(
                 .spans
                 .get(pill.from as usize)
                 .map_or(0.0, |s| shift_on(s.style, line, span_h));
-            // The run's own text box on
-            // this line, from the two
-            // facts the seam reports about
-            // a line: how tall it is and
-            // how far down it the baseline
-            // sits.
+            // Get the text box for the run on this line.
+            // The line-height and baseline metrics locate the run top.
             let ascent = if line.h > 0.0 {
                 span_h * line.baseline / line.h
             } else {

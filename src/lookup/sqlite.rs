@@ -1,4 +1,4 @@
-//! Read-only mmap'd SQLite.
+//! Read-only SQLite access with a memory map.
 
 use crate::dict::gloss::{GlossDoc, Kind, NodeId};
 use crate::dict::media::{self, Intrinsic, MediaFormat, MediaKey, Missing, Surface};
@@ -18,60 +18,61 @@ use std::sync::Arc;
 pub struct SqliteDictionary {
     conn: Connection,
     gloss: RefCell<GlossCache>,
-    /// One dictionary's compiled `styles.css`, compiled on first use.
+    /// One Dictionary's compiled `styles.css`, created on first use.
     ///
-    /// Per process, not per hover and not on disk. The corpus carries 174 KB
-    /// of CSS across 14 dictionaries, so caching a compiled form in the
-    /// database would buy a millisecond once per process and cost every
-    /// matcher fix a dictionary rebuild - the same trade ticket 02 made for
-    /// the tree itself. `None` records "this dictionary ships none", so a
-    /// dictionary without a stylesheet costs one query for the whole
-    /// process rather than one per hover.
+    /// The cache stays in memory. It serves one process, not one hover. The corpus
+    /// has 174 KB of CSS across 14 Dictionaries. A compiled form in the database
+    /// would save about one millisecond per process but force every matcher fix
+    /// to rebuild a Dictionary. This cache uses the same choice as the tree cache.
+    /// The cache stores `None` when a Dictionary has no stylesheet or when reading
+    /// or setting up the stylesheet fails. It costs one query for the whole process,
+    /// not one query per hover.
     sheets: RefCell<HashMap<i64, Option<Rc<Sheet>>>>,
-    /// The enabled frequency dictionaries, highest priority first, exactly as
-    /// the database records the reduction its Frequency ranks came from
+    /// Enabled frequency Dictionaries in highest-priority order. The database
+    /// stores the reduction that produced their Frequency ranks
     /// ([`reindex::Reduction`]).
     ///
-    /// Read from the file rather than from config, so the Reported frequency
-    /// the popup prints comes from a dictionary the ranking in this file
-    /// actually consulted. Read once: it is a handful of ids, and a reindex
-    /// commits and the daemon reloads, so it cannot change under an open
-    /// reader. Empty means no frequency dictionary is enabled, and then no
-    /// Reported frequency is looked up at all.
+    /// The constructor reads this order from the database, not config. The popup
+    /// therefore prints a Reported frequency from a Dictionary that the stored
+    /// rank order used for its Frequency ranks. The constructor reads only a few
+    /// Dictionary IDs. A reindex commits the data and the daemon reloads, so the
+    /// order cannot change for an open reader. An empty list means that no
+    /// frequency Dictionary is enabled. The reader then skips Reported frequency
+    /// lookup.
     freq_order: Vec<i64>,
 }
 
-/// Must match `dict::build::SCHEMA_VERSION`.
+/// This value must match `dict::build::SCHEMA_VERSION`.
 const EXPECTED_SCHEMA_VERSION: i64 = 4;
 
-/// Parsed trees the cache keeps.
+/// Parsed trees that the cache keeps.
 ///
-/// A hover renders at most `MAX_RESULTS` = 10 entries, so this holds roughly
-/// the last 25 hovers - enough that a dwell re-check, a drill-down, and a
-/// collapsed-row swap all reparse nothing, and small enough that the retained
-/// heap stays in the low megabytes. `examples/gloss_doc_alloc.rs` measures
-/// what one cached entry costs.
+/// A hover renders at most `MAX_RESULTS` = 10 entries. The cache therefore
+/// covers about the last 25 hovers. It lets a dwell re-check, a drill-down, and
+/// a collapsed-row swap reuse each parse. The retained heap stays in the low
+/// megabytes. `examples/gloss_doc_alloc.rs` measures the cost of one cached
+/// entry.
 const GLOSS_CACHE_ENTRIES: usize = 256;
 
-/// The parsed-tree cache the spec asks for: the record stores raw glossary
-/// JSON and the tree is parsed per hover, so a parser fix ships as a patch
-/// rather than as a dictionary rebuild.
+/// The database stores raw glossary JSON. The cache parses a tree as needed for a
+/// hover. A parser fix can therefore ship as a patch instead of a Dictionary
+/// rebuild.
 ///
-/// Insertion order, not recency. The access pattern is a sliding window of
-/// recent hovers, so the two orders very nearly coincide, and FIFO costs one
-/// push per miss instead of a touch per hit.
+/// The cache uses insertion order, not recency. Hovers use a recent-entry window,
+/// so the orders nearly match. FIFO adds one item per miss instead of one change
+/// per hit.
 #[derive(Default)]
 struct GlossCache {
     by_id: HashMap<i64, Cached>,
     order: VecDeque<i64>,
 }
 
-/// One cached record: the dictionary it belongs to, its headword's Reported
-/// frequency, and the tree.
+/// One cached record: its Dictionary, its headword's Reported frequency, and its
+/// tree.
 ///
-/// The Reported frequency rides along because it is read with the record and
-/// is as stable as the record is: it changes when a reindex commits, and a
-/// reindex is followed by a reload.
+/// The query reads Reported frequency with the record, so the record stores it.
+/// The value has the same lifetime as the record. A reindex changes the value,
+/// and a reload follows each reindex.
 #[derive(Clone)]
 struct Cached {
     dict_id: i64,
@@ -108,34 +109,32 @@ impl SqliteDictionary {
         })
     }
 
-    /// One asset's recorded intrinsic size, for the sizing pass.
+    /// One asset's recorded intrinsic size for the size pass.
     ///
-    /// The whole point of recording width, height and aspect at extraction
-    /// time: this is a `WITHOUT ROWID` primary-key probe that reads four
-    /// small columns and never touches a blob page, so laying out an image
-    /// costs no decode and no seek into the asset bytes. 99 807 census
-    /// image nodes declare no size of their own, and 字通 averages more
-    /// than four image nodes per term row, so this runs tens of times per
-    /// hover.
+    /// The build records width, height, and aspect at extraction time. This method
+    /// uses a `WITHOUT ROWID` primary-key probe to read four small columns. It
+    /// never reads a blob page or seeks into asset bytes, so image layout needs no
+    /// decode. The census has 99 807 image nodes with no size of their own. 字通
+    /// averages more than four image nodes per term row, so this method runs many
+    /// times per hover.
     ///
-    /// `None` is the honest answer for an asset the build could not store,
-    /// and it is what makes the `alt`-text fallback fire.
+    /// `None` is the correct result when the build could not store an asset. It
+    /// makes the `alt`-text fallback run.
     pub fn media_size(&self, key: &MediaKey) -> Result<Option<Intrinsic>> {
         read_media_size(&self.conn, key)
     }
 
-    /// Every image asset one parsed tree names, sized.
+    /// Size every image asset that one parsed tree names.
     ///
-    /// A flat sweep of the arena rather than a tree descent
-    /// (`GlossDoc::all_nodes`), because an image node's depth is irrelevant
-    /// here and a sweep cannot recurse. Distinct paths only: 三省堂 repeats
-    /// one gaiji several times in a row, and a duplicate would be a second
-    /// query for an answer already in hand.
+    /// Use a flat sweep of the arena instead of a tree descent
+    /// (`GlossDoc::all_nodes`). Image depth does not matter here, and a sweep
+    /// cannot recurse. Keep distinct paths only. 三省堂 repeats one gaiji several
+    /// times in a row, and a duplicate would issue a second query for the same
+    /// result.
     ///
-    /// Total: a store fault sizes no image rather than failing the lookup.
-    /// That is the same ladder a missing row takes - `alt` text, then a
-    /// placeholder box - and losing a hover over one unreadable asset would
-    /// be the worse answer.
+    /// This method is total. A store fault returns no image size and no lookup
+    /// error. The missing-row path uses `alt` text and then a placeholder box. A
+    /// hover can survive one unreadable asset.
     fn media_sizes(&self, dict_id: i64, doc: &GlossDoc) -> Vec<(String, Intrinsic)> {
         let mut out: Vec<(String, Intrinsic)> = Vec::new();
         for (id, node) in doc.all_nodes().iter().enumerate() {
@@ -160,18 +159,17 @@ impl SqliteDictionary {
         out
     }
 
-    /// Folds the dictionary's own `styles.css` into one freshly parsed tree.
+    /// Merge the Dictionary's `styles.css` into one parsed tree.
     ///
-    /// Between the parse and the cache, so a cache hit pays nothing: the
-    /// stored record is the merged one, and every reader downstream - the
-    /// popup's layout pass, the plain-text walk, the HTML renderer - sees one
-    /// style record per node and never learns that CSS exists.
+    /// Apply the sheet between the parse and the cache, so a cache hit does no
+    /// extra work. The stored record is already merged. Downstream readers
+    /// include the popup layout pass, plain-text walk, and HTML renderer. Each
+    /// reader sees one style record per node. No reader needs to know about CSS.
     ///
-    /// Total. A store fault, or a stylesheet the matcher makes nothing of,
-    /// costs the entry its boxes and never the lookup. That is the same
-    /// ladder a missing asset takes, for the same reason: 13 of 52 corpus
-    /// dictionaries draw every box here, and none of them is worth a lost
-    /// hover.
+    /// This method is total. A store fault or a sheet that matches no nodes
+    /// leaves the Entry without boxes, not the lookup. The missing-asset path
+    /// uses the same rule. 13 of 52 census Dictionaries draw every box here. No
+    /// such case justifies a lost hover.
     fn style(&self, dict_id: i64, doc: &mut GlossDoc) {
         let cached = self.sheets.borrow().get(&dict_id).cloned();
         let sheet = match cached {
@@ -188,13 +186,12 @@ impl SqliteDictionary {
     }
 }
 
-/// A read-only handle onto the media store alone.
+/// A read-only handle for the media store.
 ///
-/// Separate from [`SqliteDictionary`] because the two are read from
-/// different threads: the worker owns the dictionary and the bin's painter
-/// owns this. A `Connection` is not `Sync`, so the painter needs its own -
-/// and it wants nothing else the dictionary carries, neither the term index
-/// nor the parsed-tree cache.
+/// Keep this handle separate from [`SqliteDictionary`]. The Worker owns the
+/// Dictionary, and the bin's painter owns this handle on another thread.
+/// `Connection` is not `Sync`, so the painter needs its own connection. It needs
+/// no term index or parsed-tree cache.
 pub struct MediaStore {
     conn: Connection,
 }
@@ -204,17 +201,16 @@ impl MediaStore {
         Ok(MediaStore { conn: open_checked(path)? })
     }
 
-    /// One asset's recorded intrinsic size.
+    /// Return the recorded intrinsic size for one asset.
     pub fn size(&self, key: &MediaKey) -> Result<Option<Intrinsic>> {
         read_media_size(&self.conn, key)
     }
 
-    /// One asset's encoded bytes and format, for a decode at paint time.
+    /// Return one asset's encoded bytes and format for a paint-time decode.
     ///
-    /// The blobs live in their own table so that this - and only this - is
-    /// the query that pages them in. `size` above reads the same row's
-    /// small columns and joins nothing, so laying an image out never
-    /// touches an asset's bytes.
+    /// The blobs have a separate table. This is the only query that reads them.
+    /// `size` reads the same row's small columns without a join. Image layout
+    /// never reads asset bytes.
     pub fn blob(&self, key: &MediaKey) -> Result<Option<(MediaFormat, Vec<u8>)>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT m.format, b.bytes FROM media m \
@@ -230,17 +226,17 @@ impl MediaStore {
         Ok(row.and_then(|(format, bytes)| Some((MediaFormat::parse(&format)?, bytes))))
     }
 
-    /// One asset's pixels, decoded.
+    /// Return one asset's decoded pixels.
     ///
-    /// `at` is the pixel size a **vector** rasterizes at, straight through
-    /// to [`media::decode`] - `Tint::Raster`'s pair when the scene asked
-    /// for a tinted mask, and `None` otherwise, which takes the asset's
-    /// own intrinsic size.
+    /// `at` gives the pixel size for a **vector** asset. This method passes it
+    /// directly to [`media::decode`]. `Tint::Raster` provides the pair when the
+    /// scene requests a tinted mask. `None` makes the decoder use the asset's
+    /// intrinsic size.
     ///
-    /// Total: every way this can fail is a [`Missing`] arm, because a
-    /// dictionary's broken asset must cost the popup its `alt` text and
-    /// never a frame. The bin caches the answer either way - a key that
-    /// cannot paint must not be re-read and re-decoded once per frame.
+    /// This method is total. Every failure becomes a [`Missing`] variant. A
+    /// broken Dictionary asset makes the popup use its `alt` text. It does not
+    /// cost a frame. The bin caches both results. It must not read and decode a
+    /// key that cannot paint once per frame.
     pub fn surface(&self, key: &MediaKey, at: Option<(u32, u32)>) -> Result<Surface, Missing> {
         match self.blob(key) {
             Err(e) => Err(Missing::Unavailable(format!("{e:#}"))),
@@ -252,21 +248,22 @@ impl MediaStore {
     }
 }
 
-/// Opens read-only and refuses a database this build does not understand.
+/// Open a read-only connection and reject a database that this build does not
+/// understand.
 ///
-/// The version gate is the whole contract: `schema_version` 4 means the
-/// `entry` record holds raw glossary JSON, the media tables exist,
-/// `dict_style` holds the `styles.css` of each dictionary that ships one,
-/// `reported_freq` holds each frequency dictionary's own claims, *and*
-/// `pitch` holds each pitch dictionary's own accents. So a store that
-/// passes here has all five, and no reader below has to ask.
+/// The version gate defines the contract. `schema_version` 4 means that the
+/// `entry` record has raw glossary JSON and that the media tables exist.
+/// `dict_style` holds each Dictionary's `styles.css` when present.
+/// `reported_freq` holds each frequency Dictionary's claims. `pitch` holds each
+/// pitch Dictionary's accents. A store that passes the gate has all five. Readers
+/// below need no extra checks.
 fn open_checked(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening dictionary {}", path.display()))?;
-    // 256MB window; OS pages it.
+    // The OS pages a 256 MB memory window.
     conn.pragma_update(None, "mmap_size", 268_435_456i64)?;
 
     let found_version: Option<String> = conn
@@ -313,12 +310,12 @@ fn read_media_size(conn: &Connection, key: &MediaKey) -> Result<Option<Intrinsic
     }))
 }
 
-/// One dictionary's stylesheet, compiled.
+/// One Dictionary's compiled stylesheet.
 ///
-/// `None` for a dictionary that ships none, and also for a store fault:
-/// there is no ladder below "draw no boxes", and the caller caches the
-/// answer either way so a fault costs one query rather than one per hover.
-/// The compile itself is total and cannot fail.
+/// Return `None` when a Dictionary has no stylesheet or when reading or setting up
+/// the stylesheet fails. The fallback draws no boxes. The caller caches either
+/// result, so one fault costs one query for the process, not one query per hover.
+/// Sheet compilation cannot fail.
 fn read_sheet(conn: &Connection, dict_id: i64) -> Option<Sheet> {
     let mut stmt = conn.prepare_cached("SELECT css FROM dict_style WHERE dict_id = ?1").ok()?;
     let css: Option<String> =
@@ -326,26 +323,26 @@ fn read_sheet(conn: &Connection, dict_id: i64) -> Option<Sheet> {
     Some(Sheet::compile(&css?))
 }
 
-/// One headword's Reported frequency, found from the entry that records it.
+/// Read one headword's Reported frequency from the Entry record.
 ///
-/// Priority-first-wins over what the enabled frequency dictionaries stored:
-/// among the ones that have this headword, whichever the frequency list puts
-/// first, and within one dictionary its reading-scoped claim ahead of its
-/// reading-agnostic one - `dict::frequency::lookup_freq`'s own rule, spelled
-/// in SQL rather than in a `HashMap`. It is that rule whichever ranking
-/// strategy the Frequency ranks were reduced under, because the popup's job
-/// is to report a number a reader can look up, and a median of three sources
-/// is not one (ADR-0015).
+/// The frequency list gives priority to its first enabled Dictionary. Among
+/// Dictionaries that have the headword, the first one in that list wins. Within
+/// one Dictionary, a reading-specific claim wins over a reading-agnostic claim.
+/// This matches `dict::frequency::lookup_freq`, but SQL applies the rule here
+/// instead of a `HashMap`. The rule stays the same after a Ranking strategy
+/// reduces Frequency ranks. The popup reports a number that a reader can look
+/// up. The displayed number comes from one Dictionary, not a value computed from
+/// several Dictionaries (ARCHITECTURE.md#dictionary-and-lookup).
 ///
-/// One query per rendered entry, both sides of it index probes, and cached
-/// beside the tree it belongs to - so a repeated hover costs nothing and a
-/// fresh entry costs this next to a glossary parse. The term path itself is
-/// untouched: the rank `score` orders by is still read off the hot `term` row
-/// with no join, which is the whole reason it is denormalised there.
+/// The method runs one query per rendered Entry. Both sides use index probes, and
+/// the result is cached with its parsed tree. A repeated hover then does no work.
+/// The term path stays unchanged. The hot `term` row supplies `freq`, from which
+/// the ranker computes `score`. The query uses no join because `term.freq` is
+/// denormalized.
 ///
-/// `None` for a headword no enabled dictionary ranks, and for a database with
-/// no frequency dictionary enabled - which is asked first, so a library with
-/// no frequency data runs no query at all.
+/// Return `None` when no enabled Dictionary ranks the headword. Return it also
+/// when no frequency Dictionary is enabled. This check lets a Dictionary without
+/// frequency data run no query.
 fn read_reported_freq(conn: &Connection, order: &[i64], entry_id: i64) -> Result<Option<i64>> {
     if order.is_empty() {
         return Ok(None);
@@ -366,8 +363,8 @@ fn read_reported_freq(conn: &Connection, order: &[i64], entry_id: i64) -> Result
     for claim in claims {
         let (dict_id, agnostic, rank) = claim
             .with_context(|| format!("reading a reported frequency of entry {entry_id}"))?;
-        // A dictionary the frequency list does not name is disabled, and a
-        // disabled dictionary is not a data point.
+        // A Dictionary absent from the frequency list is disabled. A disabled
+        // Dictionary is not a data point.
         let Some(position) = order.iter().position(|id| *id == dict_id) else { continue };
         let ranked_by = (position, agnostic);
         if best.as_ref().is_none_or(|(seen, _)| ranked_by < *seen) {
@@ -377,18 +374,18 @@ fn read_reported_freq(conn: &Connection, order: &[i64], entry_id: i64) -> Result
     Ok(best.map(|(_, rank)| rank))
 }
 
-/// Every stored Pitch pattern for one headword and reading.
+/// Return every stored Pitch pattern for one headword and reading.
 ///
-/// One index probe per shown card, on `(term, reading)`, and every claim
-/// this database holds for that reading whichever dictionary made it: which
-/// of them are enabled and in what order is the pitch list's question, and
-/// the pitch list is config's (ADR-0014). A handful of rows come back - the
-/// census bounds a reading at four distinct accents over five dictionaries -
-/// so the reduction costs less than a second query would.
+/// Use one index probe per shown card on `(term, reading)`. Return every claim
+/// that this database has for that reading, from each Dictionary. The pitch list
+/// in config decides which Dictionaries are enabled and how it orders them
+/// (ARCHITECTURE.md#dictionary-and-lookup). The query returns a few rows. The
+/// census finds at most four distinct accents across five Dictionaries, so the
+/// reduction costs less than another query.
 ///
-/// The hot term statement is untouched and cannot come here: pitch is per
-/// reading, and a `term` row is per surface. This is read once per card the
-/// popup builds, not once per entry and not once per surface probe.
+/// Keep this query off the hot term statement. Pitch belongs to a reading, but a
+/// `term` row belongs to a surface. Read it once for each card that the popup
+/// builds, not once for each Entry or surface probe.
 fn read_pitch(conn: &Connection, term: &str, reading: &str) -> Result<Vec<PitchClaim>> {
     let mut stmt = conn.prepare_cached(
         "SELECT dict_id, downstep, pattern, nasal, devoice, tags \
@@ -411,9 +408,8 @@ fn read_pitch(conn: &Connection, term: &str, reading: &str) -> Result<Vec<PitchC
     for row in rows {
         let (dict_id, downstep, pattern, nasal, devoice, tags) =
             row.with_context(|| format!("reading a pitch pattern of {term} / {reading}"))?;
-        // Exactly one of the two position columns is written, so a row with
-        // neither is a row no mora can be indexed by and there is nothing to
-        // draw from it.
+        // The database writes exactly one of the two position columns. A row with
+        // neither value has no indexable mora and supplies nothing to draw.
         let position = match (downstep, pattern) {
             (Some(fall), _) => Position::Downstep(u32::try_from(fall).unwrap_or(0)),
             (None, Some(levels)) => Position::Pattern(levels),
@@ -432,11 +428,11 @@ fn read_pitch(conn: &Connection, term: &str, reading: &str) -> Result<Vec<PitchC
     Ok(out)
 }
 
-/// One stored mora list, as the indices it names.
+/// Convert one stored mora list to its indices.
 ///
-/// Total, like the rest of this read: a column this build cannot decode
-/// costs the accent its markers - which this ticket does not draw anyway -
-/// and never the card.
+/// This conversion is total. If this build cannot decode the column, the accent
+/// loses its markers. This build does not draw those markers, and the card stays
+/// visible.
 fn mora_list(json: &str) -> Vec<u32> {
     serde_json::from_str(json).unwrap_or_default()
 }
@@ -461,10 +457,9 @@ impl Dictionary for SqliteDictionary {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The parse is per hover, behind the cache, and the raw TEXT is borrowed
-    /// out of SQLite rather than copied into a `String` first: the parser
-    /// reads a `&str`, so the owned copy the old `Vec<Sense>` path made had
-    /// nothing to do.
+    /// The cache handles the glossary parse on the hover path. SQLite provides raw
+    /// TEXT as `&str`, so this path does not first copy it to a `String`. The old
+    /// `Vec<Sense>` path copied it without need.
     fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -516,10 +511,9 @@ impl Dictionary for SqliteDictionary {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Total, and that is the ladder the trait states: a store fault costs
-    /// the card its pitch row and never the hover. Nothing below the header
-    /// depends on it, so there is nothing to fall back to and nothing worth
-    /// losing a lookup over.
+    /// This method is total. A store fault returns no Pitch pattern, not an error
+    /// for the hover. Nothing below the card header depends on this value, so the
+    /// lookup can continue.
     fn pitch_for(&self, term: &str, reading: &str) -> Vec<PitchClaim> {
         read_pitch(&self.conn, term, reading).unwrap_or_default()
     }
@@ -531,7 +525,7 @@ mod tests {
     use crate::lookup::model::Dictionary;
     use std::path::{Path, PathBuf};
 
-    /// Removes the file on drop.
+    /// Removes the temporary database file when the guard drops.
     struct TempDbGuard(PathBuf);
 
     impl Drop for TempDbGuard {
@@ -540,7 +534,7 @@ mod tests {
         }
     }
 
-    /// Unique per process+test.
+    /// Returns a path that is unique for each process and test.
     fn fixture_path(test_name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("chibipop_sqlite_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -549,7 +543,7 @@ mod tests {
         path
     }
 
-    /// Real schema, then seeds.
+    /// Creates the real schema and then inserts seed data.
     fn seed_fixture_db(path: &Path, seed_sql: &str) {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch(
@@ -606,8 +600,8 @@ mod tests {
         assert!(d.entries(&[]).unwrap().is_empty());
     }
 
-    /// The cache is what makes per-hover parsing affordable, so a second
-    /// read must hand back the same parse rather than a second one.
+    /// The cache prevents a second parse on a second read. The test must receive
+    /// the same parsed tree.
     #[test]
     fn a_second_read_of_one_entry_reuses_the_parsed_tree() {
         let path = fixture_path("a_second_read_of_one_entry_reuses_the_parsed_tree");
@@ -629,7 +623,7 @@ mod tests {
         );
     }
 
-    /// Common in the real data.
+    /// Real data often has null columns.
     #[test]
     fn nullable_columns_come_back_as_none() {
         let path = fixture_path("nullable_columns_come_back_as_none");
@@ -655,9 +649,9 @@ mod tests {
         assert_eq!(2, rows[0].dict_id);
     }
 
-    /// A version-3 database is the one every existing user has, and it must
-    /// fail loudly with the rebuild message rather than reading a file that
-    /// has neither a `reported_freq` nor a `pitch` table in it.
+    /// Users with version-3 databases need a rebuild. The reader rejects the
+    /// file and returns the rebuild message. The file lacks `reported_freq` and
+    /// `pitch` tables.
     #[test]
     fn opening_a_version_three_database_fails_with_the_rebuild_message() {
         let path = fixture_path("opening_a_version_three_database_fails");
@@ -665,7 +659,7 @@ mod tests {
 
         seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','3');");
 
-        // No Debug on the Ok type.
+        // The Ok type does not implement Debug.
         let err = SqliteDictionary::open(&path)
             .err()
             .expect("opening a version-3 database should fail");
@@ -675,7 +669,7 @@ mod tests {
         assert!(msg.to_lowercase().contains("rebuild"), "{msg}");
     }
 
-    /// Must fail loudly.
+    /// The reader must reject this database.
     #[test]
     fn open_fails_when_schema_version_does_not_match() {
         let path = fixture_path("open_fails_when_schema_version_does_not_match");
@@ -684,7 +678,7 @@ mod tests {
         seed_fixture_db(&path, "INSERT INTO meta VALUES ('schema_version','1');");
 
 
-        // No Debug on the Ok type.
+        // The Ok type does not implement Debug.
         let err = SqliteDictionary::open(&path)
             .err()
             .expect("opening a dictionary with the wrong schema_version should fail");
@@ -703,10 +697,10 @@ mod tests {
         );
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- the media store ----
 
-    /// A real built database, because the media read path exists to read
-    /// what a build wrote.
+    /// Creates a real built database. The media read path must read data that the
+    /// build wrote.
     fn built_media_db(test_name: &str) -> (PathBuf, TempDbGuard) {
         let path = fixture_path(test_name);
         let guard = TempDbGuard(path.clone());
@@ -716,8 +710,8 @@ mod tests {
         (path, guard)
     }
 
-    /// The sizing path: what ticket 12 asks during measurement, and the
-    /// reason width, height and aspect are columns at all.
+    /// This is the size path that measurement asks for. It explains why width,
+    /// height, and aspect are columns.
     #[test]
     fn the_dictionary_answers_an_assets_recorded_size_without_reading_its_bytes() {
         let (path, _guard) = built_media_db("media_size");
@@ -731,13 +725,13 @@ mod tests {
         assert_eq!((9.0, 5.0), (gif.width, gif.height));
         assert_eq!(9.0 / 5.0, gif.aspect);
 
-        // No row means fall back to `alt`, and it must not be an error.
+        // No row means that the caller uses `alt`. This case is not an error.
         assert_eq!(None, dict.media_size(&MediaKey::new(1, "gaiji/unused.png")).unwrap());
         assert_eq!(None, dict.media_size(&MediaKey::new(9, "gaiji/four.gif")).unwrap());
     }
 
-    /// The bin's own handle, on the painting thread. Same rows, no term
-    /// index and no parsed-tree cache.
+    /// The bin owns this handle on the paint thread. It reads the same rows
+    /// without the term index or parsed-tree cache.
     #[test]
     fn the_store_hands_out_bytes_and_the_format_they_are_in() {
         let (path, _guard) = built_media_db("media_blob");
@@ -757,17 +751,16 @@ mod tests {
 
         assert!(store.blob(&MediaKey::new(1, "gaiji/missing.png")).unwrap().is_none());
 
-        // And the store answers the size too, so a bin can lay out the
+        // The store also returns the size. The bin can then lay out the
         // placeholder box for an asset it cannot paint.
         let svg = store.size(&MediaKey::new(1, "gaiji/ratio.svg")).unwrap().unwrap();
         assert_eq!((MediaFormat::Svg, 100.0, 40.0), (svg.format, svg.width, svg.height));
         assert!(store.size(&MediaKey::new(1, "gaiji/missing.png")).unwrap().is_none());
     }
 
-    /// Every way a paint-time lookup can come up empty is a `Missing` arm,
-    /// because a broken asset must cost the popup its `alt` text and never
-    /// a frame - and every census format now reaches pixels, so a stored
-    /// JPEG is a surface rather than a refusal.
+    /// Every empty paint-time lookup produces a `Missing` variant. A broken
+    /// asset makes the popup use its `alt` text. It does not cost a frame. Every
+    /// census format now reaches pixels, so a stored JPEG must return a surface.
     #[test]
     fn a_paint_time_surface_lookup_is_total() {
         let (path, _guard) = built_media_db("media_surface");
@@ -782,8 +775,8 @@ mod tests {
             store.surface(&MediaKey::new(1, "gaiji/three.jpg"), None).expect("a JPEG decodes");
         assert_eq!((23, 11), (jpeg.w, jpeg.h));
 
-        // The vector is the one asset whose pixels are a size the caller
-        // picks, and `MediaStore` is the wire that carries it.
+        // The vector is the one asset whose pixel size the caller chooses. `MediaStore`
+        // carries that size to the decoder.
         let svg = store
             .surface(&MediaKey::new(1, "gaiji/ratio.svg"), Some((24, 10)))
             .expect("an SVG rasterizes");
@@ -795,9 +788,9 @@ mod tests {
         );
     }
 
-    /// The version gate is the contract that a store which opens has the
-    /// media tables in it: ticket 02 took `schema_version` to 3 to cover
-    /// both its record change and these tables.
+    /// The version gate guarantees that an opened store has its media tables. The
+    /// current schema is version 4. This test confirms that version 2 fails before
+    /// the reader uses those tables.
     #[test]
     fn the_media_store_refuses_a_database_this_build_does_not_understand() {
         let path = fixture_path("media_store_version");
@@ -808,13 +801,13 @@ mod tests {
         assert!(err.to_string().contains("schema_version is 2"), "got: {err}");
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a dictionary's own styles.css ----
 
-    /// The whole of the hover path for a stylesheet: the text comes out of
-    /// `dict_style`, the matcher compiles it on first use, and the winners
-    /// land in the resolved style record the renderer already reads. This is
-    /// 明鏡国語辞典's own shape - a box in CSS and not one inline `style`
-    /// anywhere - so before this ticket the entry drew no box at all.
+    /// This test covers the stylesheet path. The reader gets CSS from `dict_style`,
+    /// compiles it on first use, and writes matched properties to the resolved
+    /// style record that the renderer already reads. 明鏡国語辞典 uses a CSS box
+    /// instead of an inline `style`, so before this support, the renderer drew no
+    /// box for the Entry.
     #[test]
     fn a_stored_stylesheet_reaches_the_resolved_style_record() {
         let path = fixture_path("stored_stylesheet_folds");
@@ -856,8 +849,8 @@ mod tests {
         );
     }
 
-    /// A dictionary that ships none is untouched, and the tree it hands back
-    /// is byte for byte the one the parser produced.
+    /// A Dictionary without a stylesheet stays unchanged. The returned tree matches
+    /// the parser output byte for byte.
     #[test]
     fn a_dictionary_without_a_stylesheet_folds_nothing() {
         let path = fixture_path("no_stylesheet_folds_nothing");
@@ -877,12 +870,10 @@ mod tests {
         assert_eq!(GlossDoc::parse(glossary), *entries[0].gloss);
     }
 
-    /// The compile happens once per dictionary per process, which is the
-    /// whole reason the sheet is cached rather than the tree's boxes. A
-    /// second entry off the same dictionary must still be styled, and a
-    /// dictionary the cache has already answered "none" for must not be
-    /// queried again - both of which this asserts by observing that the
-    /// second entry comes out styled after the first has warmed the cache.
+    /// The cache compiles one sheet per Dictionary, not per tree. A second Entry
+    /// from the same Dictionary must still get styles. This test checks the
+    /// second Entry after the first Entry fills the cache and confirms one cached
+    /// sheet.
     #[test]
     fn the_compiled_sheet_is_reused_across_entries() {
         let path = fixture_path("sheet_cache_reused");
@@ -915,12 +906,11 @@ mod tests {
         assert_eq!(1, d.sheets.borrow().len(), "one compile for one dictionary");
     }
 
-    // ---- pitch (ticket 02) ----
+    // ---- pitch ----
 
-    /// Every field the table holds comes back, markers included, and the
-    /// claims come back with the dictionary that made them rather than
-    /// filtered or ordered: which are enabled and in what order is the pitch
-    /// list's question, and the pitch list is config's (ADR-0014).
+    /// This read returns every table field with markers. Each claim keeps its
+    /// Dictionary. The read does not filter or order claims. The pitch list owns
+    /// those choices (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn a_pitch_read_returns_every_claim_with_its_dictionary_and_its_markers() {
         let path = fixture_path("a_pitch_read_returns_every_claim");
@@ -949,9 +939,9 @@ mod tests {
         assert!(claims[1].accent.nasal.is_empty());
     }
 
-    /// The `^[HL]+$` form, which the schema permits and no archive in either
-    /// of ticket 01's corpora writes. Stored in its own column because the
-    /// two forms of `position` share no indexing origin.
+    /// The schema permits the `^[HL]+$` form, but no archive in either corpus writes
+    /// it. The database stores it in a separate column because the two `position`
+    /// forms use different index origins.
     #[test]
     fn a_stored_pattern_comes_back_as_a_pattern_and_not_as_a_downstep() {
         let path = fixture_path("a_stored_pattern_comes_back");
@@ -970,9 +960,9 @@ mod tests {
         assert_eq!(Position::Pattern("LHHL".to_string()), claims[0].accent.position);
     }
 
-    /// The reading has to match: Yomitan skips a payload whose reading is
-    /// not the headword's, and 122 rows in the census carry a reading no
-    /// term dictionary emits.
+    /// The reading must match. Yomitan skips a payload with a different reading.
+    /// The census has 122 rows with a reading that no Dictionary in the terms list
+    /// emits.
     #[test]
     fn a_pitch_read_for_another_reading_finds_nothing() {
         let path = fixture_path("a_pitch_read_for_another_reading");
@@ -991,12 +981,13 @@ mod tests {
         assert_eq!(1, d.pitch_for("扱い", "〜あつかい").len(), "the odd row is still there");
     }
 
-    /// The hot term statement must not grow a join or a column for pitch:
-    /// it runs roughly 25 times per hover and a Pitch pattern is per
-    /// reading, read once per shown card instead. Asserted as the plan
-    /// SQLite makes of it, which is what "no join" actually means - one
-    /// table, one index probe, and neither of the two per-dictionary tables
-    /// anywhere in it (ADR-0014).
+    /// Keep Pitch out of the hot term statement. The statement runs about 25 times
+    /// per hover, but a Pitch pattern belongs to one reading. Read it once per
+    /// shown card.
+    ///
+    /// This test checks SQLite's query plan. One table and one index probe prove
+    /// "no join", and neither per-Dictionary table appears
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn the_term_statement_still_plans_as_one_index_probe_with_no_join() {
         let path = fixture_path("the_term_statement_still_plans");

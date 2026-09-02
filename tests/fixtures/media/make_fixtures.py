@@ -105,10 +105,11 @@ TERM_BANK = [
 # `copy.png` is `one.png`'s bytes at a second path: two media rows, one
 # blob. `broken.png` is a PNG signature with no IHDR behind it - present,
 # sniffed, and unsizeable, which is the skip-with-a-diagnostic case.
-# `torn.png` is the opposite and the only asset that reaches ticket 12's
-# last rung: a valid IHDR over an IDAT that is not a zlib stream, so the
-# build records a real 12x7 row and the *painter* is the one that cannot
-# decode it. `gaiji/missing.png` is referenced and absent on purpose.
+# `torn.png` is the opposite and the only asset that reaches the last rung
+# of the media fallback ladder: a valid IHDR over an IDAT that is not a
+# zlib stream, so the build records a real 12x7 row and the *painter* is
+# the one that cannot decode it. `gaiji/missing.png` is referenced and
+# absent on purpose.
 ARCHIVE_MEDIA = {
     "gaiji/one.png": "one.png",
     "gaiji/copy.png": "one.png",
@@ -160,7 +161,7 @@ def rasters():
     # A 12x7 RGBA8 IHDR with correct CRCs over an IDAT that is not a zlib
     # stream. The build sizes it from the header and stores a real row; the
     # *painter* is the one that cannot decode it, which is the only way to
-    # reach the last rung of ticket 12's fallback ladder.
+    # reach the last rung of the media fallback ladder.
     (HERE / "torn.png").write_bytes(
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 12, 7, 8, 6, 0, 0, 0))

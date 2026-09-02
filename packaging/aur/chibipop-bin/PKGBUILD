@@ -1,12 +1,12 @@
 # Maintainer: unusualcrow <unusualcrow@protonmail.com>
 #
-# The release asset, repacked (ADR-0007). This package compiles nothing:
-# `scripts/package-linux.sh` already produced one executable plus its data
-# files, and on linux-x64 that executable carries ONNX Runtime inside it -
-# `ort`'s pinned prebuilt is a static archive, so there is no
-# `libonnxruntime.so` to bundle here and no rpath to preserve (ADR-0009's
-# 2026-08-26 addendum). `ldd` on the shipped binary names the whole
-# runtime floor, and it is what `depends` below says.
+# The release asset, repacked (ARCHITECTURE.md#packaging-and-ci). This
+# package compiles nothing: `scripts/package-linux.sh` already produced one
+# executable plus its data files, and on linux-x64 that executable carries
+# ONNX Runtime inside it - `ort`'s pinned prebuilt is a static archive, so
+# there is no `libonnxruntime.so` to bundle here and no rpath to preserve.
+# `ldd` on the shipped binary names the whole runtime floor, and it is what
+# `depends` below says.
 #
 # Update this file with `packaging/aur/bump.sh vX.Y.Z`, never by hand: it
 # rewrites pkgver, resets pkgrel, re-hashes every source and regenerates
@@ -48,11 +48,11 @@ conflicts=('chibipop')
 # `!debug`: there is no source tree here to build a debug package from, so
 # the default would produce an empty `chibipop-bin-debug`.
 options=('!strip' '!debug')
-# The tarball's name is a forever contract (ADR-0007): every shipped
-# binary's update check parses `chibipop-v<semver>-linux-x64.tar.gz` off
-# releases/latest. The icon is not in the asset - the tarball is what a
-# user extracts into one directory, and a hicolor icon only means anything
-# to a distro install - so it comes from the tag alongside it.
+# The tarball's name is a forever contract: every shipped binary's update
+# check parses `chibipop-v<semver>-linux-x64.tar.gz` off releases/latest.
+# The icon is not in the asset - the tarball is what a user extracts into
+# one directory, and a hicolor icon only means anything to a distro
+# install - so it comes from the tag alongside it.
 source=("https://github.com/unusualcrow/chibipop/releases/download/v$pkgver/chibipop-v$pkgver-linux-x64.tar.gz"
         "$_pkgname-$pkgver.svg::https://raw.githubusercontent.com/unusualcrow/chibipop/v$pkgver/crates/chibipop-windows/assets/chibipop.svg")
 sha256sums=('01cd3ffc53e3e104fb6f506b3970cc56cb3cd6719d9a50a0734792892e2bae8e'
@@ -73,9 +73,9 @@ package() {
 	install -Dm644 -t "$pkgdir/usr/share/$_pkgname/models/meiki" \
 		models/meiki/*.onnx models/meiki/SHA256SUMS.txt models/meiki/LICENSE.md
 
-	# The models are hash-pinned (ADR-0009) and the binary re-checks them
-	# when the engine opens, so a bad download must fail here rather than
-	# become a runtime refusal on the user's machine.
+	# The models are hash-pinned (ARCHITECTURE.md#ocr-engine) and the
+	# binary re-checks them when the engine opens, so a bad download must
+	# fail here rather than become a runtime refusal on the user's machine.
 	(cd "$pkgdir/usr/share/$_pkgname/models/meiki" && sha256sum --check --strict SHA256SUMS.txt)
 
 	# Session integration. The systemd unit is the packaged one - it

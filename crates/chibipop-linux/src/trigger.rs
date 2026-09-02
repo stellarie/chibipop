@@ -1,49 +1,50 @@
-//! Trigger mode's hold: what the control socket's three trigger verbs do
-//! to it, and when it needs a fresh press-time grab (ADR-0003's verb set,
-//! ADR-0010's freeze).
+//! This module defines trigger hold transitions and requests for a new frozen grab.
 //!
-//! All decision, no effect: the daemon owns the cursor, the Worker and the
-//! popup, and this owns the rules about them. That is what makes "a
-//! release must not undo a toggle" and "crossing outputs re-grabs" things
-//! a test can pin on a single-head machine.
+//! The control socket has three trigger verbs.
+//! See ARCHITECTURE.md#input-ladders.
+//! Trigger mode gets its frozen grab at key press.
+//! See ARCHITECTURE.md#hover-cadence.
+//!
+//! This module returns decisions and causes no platform effect.
+//! The daemon owns the cursor, the Worker, and the popup.
+//! Tests can check the transition rules on a system with one output.
 
 use crate::capture::geometry;
 use crate::cursor::outputs::OutputGeometry;
 use chibipop::geom::{PhysPoint, PhysRect};
 
-/// One trigger hold, while it lasts.
+/// One active trigger hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hold {
-    /// The box the press-time grab covers. A cursor leaving it has
-    /// crossed onto another output, which is the one thing mid-hold that
-    /// takes a fresh grab (ADR-0010).
+    /// The press-time frozen grab covers this output.
+    /// A cursor on another output needs a new frozen grab.
+    /// See ARCHITECTURE.md#hover-cadence.
     pub output: PhysRect,
-    /// Started by `toggle`, so a key release must not end it.
+    /// A `toggle` started this hold, so `trigger-up` must not end it.
     pub latched: bool,
 }
 
-/// What a verb does to the hold.
+/// One change to the trigger hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Grab the output under the cursor and hold it. `latched` carries
-    /// through: a press during a toggle-hold re-grabs without dropping
-    /// the latch.
+    /// Get a new frozen grab of the output under the cursor.
+    /// A press while a latched hold keeps the latch.
     Freeze { latched: bool },
-    /// Drop the frozen frame and retract the popup.
+    /// Drop the frozen grab and retract the popup.
     Release,
-    /// Nothing, and why - the log says which.
+    /// Keep the hold unchanged. The value gives the log reason.
     Nothing(&'static str),
 }
 
-/// `trigger-down`: every press grabs fresh (ADR-0010).
+/// `trigger-down` always requests a new frozen grab.
 pub fn down(hold: Option<Hold>) -> Step {
     Step::Freeze { latched: hold.is_some_and(|h| h.latched) }
 }
 
-/// `trigger-up`: ends the hold, unless a `toggle` latched it.
+/// `trigger-up` ends an unlatched hold.
 ///
-/// A latched freeze outliving the key is the whole point of `toggle`:
-/// the user pressed the bind once to stop holding it.
+/// It does not end a hold that `toggle` latched.
+/// The latch lets the user release the key and keep the frozen grab.
 pub fn up(hold: Option<Hold>) -> Step {
     match hold {
         Some(h) if h.latched => Step::Nothing("a toggle holds the freeze; toggle again to end it"),
@@ -52,7 +53,7 @@ pub fn up(hold: Option<Hold>) -> Step {
     }
 }
 
-/// `toggle`: freeze at toggle-on, stay frozen until toggle-off.
+/// `toggle` gets a frozen grab at toggle-on and drops it at toggle-off.
 pub fn toggle(hold: Option<Hold>) -> Step {
     match hold {
         Some(_) => Step::Release,
@@ -60,19 +61,18 @@ pub fn toggle(hold: Option<Hold>) -> Step {
     }
 }
 
-/// The fresh grab a moved cursor needs, or `None` while it is still on
-/// the output the hold already froze.
+/// Return a new output when the cursor leaves the output of the frozen grab.
 ///
-/// ADR-0010: crossing outputs mid-hold takes one fresh full grab of the
-/// entered output - "hold and glance at the other monitor" works, and a
-/// dead second monitor would read as a bug. Staying put costs nothing,
-/// which is what keeps a hold at one copy.
+/// A different output needs one fresh full frozen grab while the hold lasts.
+/// See ARCHITECTURE.md#hover-cadence.
+/// This rule lets the user hold the trigger and inspect another monitor.
+/// The current frozen grab remains when the cursor stays on the same output.
 pub fn regrab(hold: Hold, geoms: &[OutputGeometry], pos: PhysPoint) -> Option<PhysRect> {
     if hold.output.contains(pos) {
         return None;
     }
-    // Off every output: `bounds_containing` answers with the nearest, so
-    // a cursor in a gap between monitors is still the output we hold.
+    // `bounds_containing` returns the nearest output for a cursor outside all outputs.
+    // Therefore, a cursor in a monitor gap can stay on the output of the frozen grab.
     let entered = geometry::bounds_containing(geoms, pos);
     (entered != hold.output).then_some(entered)
 }
@@ -88,8 +88,8 @@ mod tests {
         Some(Hold { output, latched })
     }
 
-    /// Two 1920x1080 outputs side by side at scale 1. This box has one
-    /// monitor, so the crossing rule is pinned here rather than live.
+    /// Return two adjacent 1920x1080 outputs at scale 1.
+    /// This test data checks output changes without a second physical monitor.
     fn two_outputs() -> Vec<OutputGeometry> {
         [0, 1920]
             .into_iter()
@@ -111,8 +111,8 @@ mod tests {
         assert_eq!(Step::Release, up(held(LEFT, false)));
     }
 
-    /// Each press grabs fresh, so a press during a hold is a new grab -
-    /// but it must not silently cancel a toggle.
+    /// Each press requests a new frozen grab.
+    /// A press while a latched hold must preserve the latch.
     #[test]
     fn a_press_during_a_latched_hold_keeps_the_latch() {
         assert_eq!(Step::Freeze { latched: true }, down(held(LEFT, true)));
@@ -129,14 +129,14 @@ mod tests {
         assert!(matches!(up(None), Step::Nothing(_)));
     }
 
-    /// The latch: toggle on, stay frozen, toggle off.
+    /// A latch starts at toggle-on and ends at toggle-off.
     #[test]
     fn toggle_freezes_until_it_is_toggled_off() {
         assert_eq!(Step::Freeze { latched: true }, toggle(None));
         assert_eq!(Step::Release, toggle(held(LEFT, true)));
     }
 
-    /// A toggle also ends a plain hold: one verb, one visible state.
+    /// `toggle` also ends an unlatched hold, so one verb has one visible result.
     #[test]
     fn toggle_ends_a_hold_a_press_started() {
         assert_eq!(Step::Release, toggle(held(LEFT, false)));
@@ -156,8 +156,8 @@ mod tests {
         assert_eq!(Some(RIGHT), regrab(hold, &geoms, PhysPoint { x: 1920, y: 500 }));
     }
 
-    /// A cursor off every output resolves to the nearest one, so a gap
-    /// between monitors is not a reason to re-copy what we hold.
+    /// A cursor outside every output resolves to the nearest output.
+    /// A monitor gap does not need another frozen grab.
     #[test]
     fn a_cursor_off_every_output_keeps_the_grab_it_has() {
         let geoms = two_outputs();

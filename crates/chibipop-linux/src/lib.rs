@@ -1,31 +1,33 @@
-// Allow-by-default lints, matching the bin (src/main.rs).
+// Allow-by-default lints, to match the binary (src/main.rs).
 #![warn(missing_unsafe_on_extern)]
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-//! The library face of the Linux adapter.
+//! The library face of the Linux platform adapter.
 //!
-//! The adapter *is* the bin (ADR-0001) and everything it does is reachable
-//! from `src/main.rs`. This lib exists for one reason: the OCR engine
-//! carries a standing 152-crop fixture gate (ADR-0009) and cargo cannot
-//! link an integration test against a bin target. So the modules with
-//! their own `tests/` gate live here and the bin uses them; nothing else
-//! moves.
+//! The platform adapter is the binary. See ARCHITECTURE.md#workspace-and-seams.
+//! `src/main.rs` can reach all actions of the adapter.
+//! This library exists for one reason.
+//! The OCR engine has a standing 152-crop fixture gate.
+//! See ARCHITECTURE.md#ocr-engine.
+//! Cargo cannot link an integration test against a binary target.
+//! Therefore, the modules that have their own `tests/` gate stay here.
+//! The binary uses these modules, and nothing else moves.
 //!
-//! Foreign targets get an empty crate, exactly as the bin gets a two-line
-//! refusal: `cargo clippy --workspace` still lints every member on both CI
+//! Foreign targets get an empty crate, as the binary gets an exit message.
+//! Therefore, `cargo clippy --workspace` lints every member on both CI
 //! runners without pulling in the Linux stack.
 
 #[cfg(target_os = "linux")]
 pub mod ocr;
 
-/// The popup's decoded-surface cache (ticket 03).
+/// The decoded-surface cache of the popup.
 ///
-/// Here rather than in the bin's own `popup` tree for the reason above:
-/// the module carries its own tests against a database the real builder
-/// wrote, and cargo cannot link a test target against a bin. `#[path]`
-/// keeps the file beside the rest of the popup, which is where a reader
-/// looks for it. The bin reaches it as `chibipop_linux::media`.
+/// This module lives here rather than in the `popup` tree of the binary
+/// for the reason above. The module has its own tests against a database
+/// that the builder wrote. Cargo cannot link a test target against a binary.
+/// `#[path]` keeps the file beside the other popup files.
+/// The binary reaches it as `chibipop_linux::media`.
 #[cfg(target_os = "linux")]
 #[path = "popup/media.rs"]
 pub mod media;

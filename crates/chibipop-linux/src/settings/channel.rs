@@ -1,61 +1,55 @@
-//! Channel-aware hotkey controls (ADR-0005): the UI never lies about
-//! who owns a global binding.
+//! Channel-aware hotkey controls
+//! (ARCHITECTURE.md#settings-and-config).
+//! The interface shows the true owner of each global binding.
 //!
-//! Both rungs of ADR-0003's trigger ladder are real here. On the native
-//! rung the compositor bind is the truth and the config chord is
-//! advisory, so the only honest control is the snippet to paste. On the
-//! portal rung the GlobalShortcuts session owns the binding and reports
-//! it, so the control names the key the portal gave and points at the
-//! desktop's own editor — the daemon publishes which of the two it
-//! resolved (`shortcuts::state`), because a bus probe cannot tell them
-//! apart.
+//! Both rungs of the trigger ladder (ARCHITECTURE.md#input-ladders) operate here.
+//! On the native rung, the compositor binding is the authority and the configuration
+//! chord is advisory. The control shows the snippet to copy. On the portal rung,
+//! the GlobalShortcuts session owns and reports the binding. The control shows
+//! the key from the portal and points to the desktop editor. The daemon publishes
+//! the resolved channel (`shortcuts::state`), because bus inspection cannot
+//! differentiate the two rungs.
 //!
-//! The same two rungs answer for every global action, not just the
-//! trigger: since ADR-0003's 2026-08-26 addendum each one has its own
-//! control-socket verb, so one row shape serves them all and the only
-//! difference is which [`Bind`] the native rung pastes.
+//! The same two rungs serve every global action. Each action has a control-socket
+//! verb. One row structure serves all actions. The native rung selects the
+//! corresponding [`Bind`] variant.
 
 use super::snippets::{self, Bind, Compositor};
 use std::path::Path;
 
-/// Who owns the trigger binding.
+/// The owner of the trigger binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyChannel {
-    /// The compositor bind invokes `chibipop ctl`; we can only show the
-    /// snippet to paste.
+    /// The compositor binding executes `chibipop ctl`. The control displays
+    /// the snippet to copy.
     Native,
-    /// The XDG GlobalShortcuts portal owns the binding and reports it.
-    /// `current_binding` is the portal's own `trigger_description` for
-    /// *this row's* action (`shortcuts::state::Published::description`),
-    /// and `None` where the implementation reports no key (xdph does
-    /// not: on Hyprland the key lives in the compositor's config) or
-    /// where the portal never answered for that id at all.
+    /// The XDG GlobalShortcuts portal owns and reports the binding.
+    /// `current_binding` contains the portal description for this action
+    /// (`shortcuts::state::Published::description`). The field is `None` when
+    /// the backend reports no key or when the portal did not register the identifier.
     Portal { current_binding: Option<String> },
 }
 
-/// What a hotkey row renders. One control per channel; `view` matches on
-/// this and nothing else.
+/// The rendered hotkey control. The `view` function matches on this enum.
+/// Each channel provides one control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotkeyControl {
-    /// Copyable native-bind lines plus the advisory note.
+    /// Copyable native binding lines and the advisory note.
     Snippet { text: String },
-    /// The portal's binding, and where the user changes it.
+    /// The portal binding and the change target for the user.
     Rebind { current: Option<String> },
-    /// The chord field is blank, so there is no bind to build: a
-    /// snippet for it would be a syntactically invalid `bind = , F, …`
-    /// line, which is exactly the kind of thing ADR-0005 forbids this
-    /// window from handing a user. The row says so instead.
+    /// The chord field is empty, so no binding exists.
+    /// A snippet for an empty chord is invalid syntax. The row displays this state.
     NoChord,
 }
 
 impl HotkeyChannel {
-    /// The control for one chord row. `bind` is the shape the native
-    /// rung would paste — the trigger's press/release pair, or one
-    /// press of one verb.
+    /// Return the control for one chord row. `bind` is the configuration for
+    /// the native rung: a press and release pair for the trigger, or one press
+    /// for an action.
     ///
-    /// `exe` is the binary a pasted bind must exec, resolved by the
-    /// caller (`paths::exec_name`) rather than assumed to be on PATH
-    /// (ticket 51).
+    /// `exe` is the binary path that the binding executes. The caller resolves
+    /// this path with `paths::exec_name`.
     pub fn control(
         &self,
         compositor: Compositor,
@@ -70,11 +64,9 @@ impl HotkeyChannel {
             HotkeyChannel::Native => HotkeyControl::Snippet {
                 text: snippets::bind_snippet(compositor, chord, exe, bind),
             },
-            // `current_binding` is this action's own published key: a
-            // channel is resolved per portal id (`hotkey_channel`), so
-            // a row can only ever name the key it was told. Borrowing
-            // another row's key is the one thing ADR-0005 forbids here,
-            // and the type is what prevents it.
+            // `current_binding` is the published key for this action.
+            // The channel resolves for each portal identifier (`hotkey_channel`).
+            // The row shows only its assigned key.
             HotkeyChannel::Portal { current_binding } => {
                 HotkeyControl::Rebind { current: current_binding.clone() }
             }
@@ -86,8 +78,8 @@ impl HotkeyChannel {
 mod tests {
     use super::*;
 
-    /// The snippet must name the running binary, not the bare command:
-    /// under `cargo run` there is no `chibipop` on PATH to exec.
+    /// The snippet must contain the running binary path instead of a bare name.
+    /// Under `cargo run`, the binary is not in PATH.
     #[test]
     fn native_channel_renders_the_snippet_for_the_running_binary() {
         let exe = Path::new("/home/u/chibipop/target/debug/chibipop");
@@ -99,8 +91,8 @@ mod tests {
         assert!(!text.contains(", chibipop ctl"), "the bare command name must not survive: {text}");
     }
 
-    /// The add-card row is the same row: on the native rung it is the
-    /// only way that chord can be bound at all (ADR-0003 rung 2).
+    /// The add-card row uses the same structure. On the native rung, this snippet
+    /// is the only method to bind the chord (ARCHITECTURE.md#input-ladders, rung 2).
     #[test]
     fn native_channel_renders_a_press_snippet_for_a_one_shot_action() {
         let control = HotkeyChannel::Native.control(
@@ -125,11 +117,9 @@ mod tests {
         );
     }
 
-    /// Each row is handed the channel resolved for its *own* portal id
-    /// (ticket 09), so the add-card row names the add-card key and an
-    /// id the portal never answered for names nothing at all. The row
-    /// shape cannot borrow another action's key because it never sees
-    /// one.
+    /// Each row receives the channel for its portal identifier.
+    /// The add-card row shows the add-card key. An unregistered identifier
+    /// shows no key. The type prevents using keys from other actions.
     #[test]
     fn a_one_shot_row_names_the_key_published_for_its_own_action() {
         let add = Bind::Press(crate::control::Verb::AnkiAdd);
@@ -145,8 +135,8 @@ mod tests {
         );
     }
 
-    /// An unset chord has no bind on either rung. Whitespace is unset
-    /// too: a text entry a user cleared often keeps a space.
+    /// An empty chord provides no binding on either rung.
+    /// Whitespace strings also count as empty.
     #[test]
     fn a_blank_chord_offers_no_bind_on_either_channel() {
         let add = Bind::Press(crate::control::Verb::AnkiAdd);

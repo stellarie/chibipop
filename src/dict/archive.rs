@@ -1,4 +1,4 @@
-//! Yomitan archive reading.
+//! This module reads Yomitan archives.
 
 use anyhow::{Context, Result};
 use serde::de::{DeserializeSeed, IgnoredAny, SeqAccess, Visitor};
@@ -15,48 +15,47 @@ use zip::ZipArchive;
 
 const MAX_BANK: usize = 256 << 20;
 
-/// The largest single asset the build will extract.
+/// The largest single asset that the build extracts.
 ///
-/// A declared uncompressed size is third-party bytes, so the cap is what
-/// keeps a zip bomb from deciding the build's peak RSS. 16 MiB is far above
-/// any dictionary asset the census found - the gaiji that dominate the
-/// corpus are about a kilobyte each - so it refuses corruption and never
-/// content.
+/// The declared uncompressed size comes from third-party bytes. The cap limits
+/// peak RSS from a zip bomb. The census found no dictionary asset near 16 MiB.
+/// Most corpus assets are gaiji of about one kilobyte. The cap rejects data above
+/// the limit, including valid data.
 const MAX_ASSET: u64 = 16 << 20;
 
-/// The largest stylesheet the build will store.
+/// The largest stylesheet that the build stores.
 ///
-/// Same reasoning as [`MAX_ASSET`], and a much wider margin: the corpus's
-/// largest `styles.css` is 37 048 bytes, so 4 MiB refuses only corruption.
+/// This cap uses the same safety rule as [`MAX_ASSET`]. It leaves more space than
+/// the corpus needs. The largest `styles.css` has 37 048 bytes. The cap rejects
+/// data above the limit, including valid data.
 const MAX_STYLESHEET: u64 = 4 << 20;
 
-/// One row from a term bank, borrowed from the bank's own text.
+/// One row from a term bank. The row borrows text from the bank when possible.
 ///
-/// Nothing here is copied that the bank did not already spell out: the
-/// three short fields borrow unless the JSON escaped them, and `glossary`
-/// is the archive's own bytes. The builder stores those bytes, so a term
-/// row costs one parse of the bank and no round trip through a
-/// `serde_json::Value` tree and a serializer - which on jitendex is two of
-/// every six seconds an import used to spend.
+/// The bank already contains the three short fields. The parser borrows them unless
+/// JSON escape sequences require a copy. The `glossary` field gives the callback the
+/// archive bytes. The builder minifies those bytes before it stores them. The builder
+/// parses each bank once and streams its rows. It parses each glossary to test for
+/// visible text. On Jitendex, this saved two seconds from a six-second import.
 pub struct TermRow<'a> {
     pub term: Cow<'a, str>,
     pub reading: Cow<'a, str>,
     pub rules: Cow<'a, str>,
-    /// The structured-content glossary, verbatim JSON.
+    /// The glossary from structured content, as verbatim JSON.
     pub glossary: &'a str,
 }
 
-/// An archive's index.json.
+/// Read the `index.json` file from an archive.
 pub fn read_index(zip: &Path) -> Result<Value> {
     let mut archive = open_archive(zip)?;
     read_json(&mut archive, "index.json")
 }
 
-/// Streams term bank rows.
+/// Read term bank rows in bank order.
 ///
-/// One archive, one thread, banks in order. The builder drives
-/// [`TermBanks`] directly instead, because the per-row work parallelises
-/// and this does not; this is the shape every other reader wants.
+/// This function uses one archive and one thread. The builder uses [`TermBanks`]
+/// directly because it can parallelize per-row work, but this function does not.
+/// Other readers use this simpler form.
 pub fn for_each_term(
     zip: &Path,
     mut on_term: impl FnMut(TermRow) -> Result<()>,
@@ -69,14 +68,13 @@ pub fn for_each_term(
     Ok(())
 }
 
-/// One archive's term banks, in order, readable one at a time.
+/// One archive's term banks in order. Read one bank at a time.
 ///
-/// Split out of [`for_each_term`] so the builder can hand banks to a pool
-/// of threads: a bank is the natural unit of parallel work, because it is
-/// self-contained JSON and the expensive part of an import - the row
-/// parse, the glossary parse, the emptiness test - is per row and shares
-/// nothing. Each thread opens its own handle, so the central directory is
-/// read once per thread and never contended.
+/// The builder uses this type to send each bank to a thread pool. A bank is
+/// self-contained JSON and an independent work unit. The costly work occurs per
+/// row: parse the row, parse the glossary, and test for emptiness. Each thread
+/// opens its own archive handle. Each thread reads the central directory once, so
+/// threads do not contend.
 pub struct TermBanks {
     archive: ZipArchive<File>,
     names: Vec<String>,
@@ -101,18 +99,18 @@ impl TermBanks {
         &self.names[i]
     }
 
-    /// The `i`th bank's text.
+    /// Read the text of bank `i`.
     pub fn read(&mut self, i: usize) -> Result<String> {
         let name = self.names[i].clone();
         read_entry(&mut self.archive, &name)
     }
 }
 
-/// Streams one already-read bank's rows.
+/// Read rows from bank text that the caller already loaded.
 ///
-/// A row that is not an array, or whose first field is not a string, is
-/// skipped - the same tolerance the `Value` reader had, for the same
-/// reason: an archive is third-party bytes.
+/// Skip a row when it is not an array or its first field is not a string. This
+/// matches the `Value` reader's tolerance because archive data comes from a third
+/// party.
 pub fn for_each_row(
     text: &str,
     name: &str,
@@ -125,27 +123,25 @@ pub fn for_each_row(
     .map(|_| ())
 }
 
-/// Streams term-meta bank rows.
+/// Read rows from term-meta banks.
 ///
-/// Every row of every `term_meta_bank_`, whatever mode it is tagged with:
-/// the frequency loader keeps the `"freq"` rows and the pitch loader keeps
-/// the `"pitch"` ones, and an archive carrying both is read once by each.
+/// Read every row in every `term_meta_bank_` member, regardless of its mode. The
+/// frequency loader keeps the `"freq"` rows. The pitch loader keeps the `"pitch"`
+/// rows. An archive with both modes gets one read per loader.
 pub fn for_each_meta_row(zip: &Path, mut on_row: impl FnMut(Value) -> Result<()>) -> Result<()> {
     for_each_bank_row(zip, "term_meta_bank_", &mut |row| on_row(row).map(|()| true))
         .map(|_| ())
 }
 
-/// Does any term-meta row satisfy `pred`?
+/// Return whether any term-meta row satisfies `pred`.
 ///
-/// The same walk [`for_each_meta_row`] takes, stopped at the first row that
-/// answers yes - which is what makes a role predicate affordable. A pitch
-/// archive answers from the first row of its first bank instead of being
-/// read whole: ticket 01's census measured 48.7 MB of bank JSON across the
-/// five pitch archives in one library.
+/// Use the same walk as [`for_each_meta_row`]. Stop after the first match. This
+/// makes role detection affordable. A pitch archive can answer from the first row
+/// of its first bank instead of a full read of all banks. The census measured 48.7 MB
+/// bank JSON across five pitch archives in one library.
 ///
-/// `false` for an archive with no matching row, and an `Err` for one this
-/// build cannot open or parse - the caller decides what an unreadable
-/// archive supplies.
+/// Return `false` when no row matches. Return an `Err` when this build cannot open
+/// or parse an archive. The caller decides what an unreadable archive supplies.
 pub fn any_meta_row(zip: &Path, mut pred: impl FnMut(&Value) -> bool) -> Result<bool> {
     let mut found = false;
     for_each_bank_row(zip, "term_meta_bank_", &mut |row| {
@@ -155,20 +151,20 @@ pub fn any_meta_row(zip: &Path, mut pred: impl FnMut(&Value) -> bool) -> Result<
     Ok(found)
 }
 
-/// The dictionary's own `styles.css`, or `None` when it ships none.
+/// Return the Dictionary's own `styles.css`, or `None` when it has no file.
 ///
-/// Yomitan scopes such a stylesheet to that dictionary's own entries, and it
-/// is the second place a dictionary draws a box - the only place, for the 13
-/// `css-only` dictionaries the census found
+/// Yomitan applies this stylesheet only to entries from the same Dictionary. This
+/// stylesheet is the second source of a Dictionary's boxes. It is the only source
+/// for the 13 `css-only` Dictionaries in the census
 /// (`docs/research/dict-shapes.md`).
 ///
-/// Root, or one directory deep: the census found it in both places, because
-/// some archives are zipped with a wrapper folder. The shallowest wins, so a
-/// root stylesheet is never shadowed by one inside a subdirectory.
+/// Find the file at the archive root or one directory deep. The census found both
+/// forms because some archives use a wrapper folder. Prefer the shallowest file.
+/// A root stylesheet then cannot lose to one in a subdirectory.
 ///
-/// Read whole or not at all, and never streamed: the whole corpus carries
-/// 174 KB of CSS across 14 dictionaries, and 173 964 of those bytes are what
-/// [`MAX_STYLESHEET`] is a hundredfold above.
+/// Read the stylesheet as a whole. Do not stream it. The corpus has 174 KB of CSS
+/// across 14 Dictionaries. The largest file has 37 048 bytes. [`MAX_STYLESHEET`]
+/// is more than one hundred times larger.
 pub fn read_styles_css(zip: &Path) -> Result<Option<String>> {
     let mut archive = open_archive(zip)?;
     let names = archive_names(&archive);
@@ -184,14 +180,13 @@ pub fn read_styles_css(zip: &Path) -> Result<Option<String>> {
         .take(MAX_STYLESHEET + 1)
         .read_to_end(&mut raw)
         .with_context(|| format!("reading {name} from {}", zip.display()))?;
-    // A lying declared size is the zip-bomb shape, so the cap is enforced
-    // against what was actually read as well.
+    // A declared size can lie, so enforce the cap against bytes that the reader actually reads.
     if raw.len() as u64 > MAX_STYLESHEET {
         return Ok(None);
     }
-    // Lossy, and deliberately: a stylesheet that is not clean UTF-8 still
-    // holds readable rules, and the compiler drops what it cannot read. A
-    // decode error here would cost a whole dictionary its boxes.
+    // Decode with replacement on purpose. `from_utf8_lossy` replaces invalid bytes.
+    // A stylesheet with invalid UTF-8 can still contain rules that a reader can use.
+    // A decode error here would discard a whole Dictionary's boxes.
     let mut text = String::from_utf8_lossy(&raw).into_owned();
     if text.starts_with('\u{feff}') {
         text.remove(0);
@@ -199,8 +194,8 @@ pub fn read_styles_css(zip: &Path) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
-/// The shallowest archive entry with this file name, at most one directory
-/// deep.
+/// Find the shallowest archive entry with this file name. Search no more than one
+/// directory deep.
 fn shallowest<'a>(names: &'a [String], want: &str) -> Option<&'a str> {
     let mut best: Option<(usize, &'a str)> = None;
     for name in names {
@@ -219,22 +214,19 @@ fn shallowest<'a>(names: &'a [String], want: &str) -> Option<&'a str> {
     best.map(|(_, name)| name)
 }
 
-/// Reads the referenced assets out of an archive, in archive order.
+/// Read referenced assets in archive order.
 ///
-/// Only the referenced ones: an image dictionary ships every glyph its
-/// author had, and the census's heaviest, 字通, references a few thousand
-/// distinct gaiji across 139 138 image nodes. So the caller hands over the
-/// set its parsed trees actually named, and everything else in the zip is
-/// never decompressed.
+/// Read only paths that parsed nodes name. An image Dictionary can ship every glyph
+/// its author has. The census's heaviest example, 字通, names a few thousand
+/// distinct gaiji across 139 138 image nodes. Do not decompress other zip entries.
 ///
-/// Archive order rather than the caller's, because the local headers are
-/// laid out in it: one pass, in the order the file stores its entries,
-/// instead of a seek per wanted path. The central directory is already in
-/// memory, so skipping an unwanted entry costs a name comparison.
+/// Use archive order instead of caller order. Local headers follow archive order, so
+/// one pass avoids a seek for each wanted path. The central directory is already in
+/// memory, so an unwanted entry needs only a name comparison.
 ///
-/// Returns the wanted paths this archive holds no usable bytes for -
-/// absent, or over [`MAX_ASSET`]. The build reports the count and writes no
-/// row for them, which is what makes ticket 12's `alt`-text fallback fire.
+/// Return wanted paths with no usable bytes. A path is unusable when it is absent or
+/// its archive entry exceeds [`MAX_ASSET`]. The build reports the count and writes no
+/// row for each path. This activates the `alt`-text fallback.
 pub fn for_each_media<'a>(
     zip: &Path,
     wanted: &'a BTreeSet<String>,
@@ -243,9 +235,8 @@ pub fn for_each_media<'a>(
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    // Several authored paths can normalise to one archive entry (`./x` and
-    // `x`), and each still deserves its own media row, so the value is a
-    // list rather than a single path.
+    // Several authored paths can normalize to one archive entry, such as `./x` and
+    // `x`. Keep a list because each path form needs its own media row.
     let mut by_entry: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
     for path in wanted {
         by_entry.entry(archive_relative(path)).or_default().push(path);
@@ -272,8 +263,7 @@ pub fn for_each_media<'a>(
                 .read_to_end(&mut buf)
                 .with_context(|| format!("reading {name} from {}", zip.display()))?;
         }
-        // A lying declared size is the zip-bomb shape, so the cap is
-        // enforced against what was actually read as well.
+        // A declared size can lie, so enforce the cap against bytes that the reader actually reads.
         if buf.len() as u64 > MAX_ASSET {
             unusable.extend(paths);
             continue;
@@ -287,13 +277,12 @@ pub fn for_each_media<'a>(
     Ok(unusable)
 }
 
-/// An authored `path` as the archive stores it.
+/// Return an authored `path` as the archive stores it.
 ///
-/// Yomitan resolves an image node's `path` against the archive root, and a
-/// dictionary that writes `./gaiji/x.svg` or `/gaiji/x.svg` means the same
-/// entry. Normalising here and only here is deliberate: the media key keeps
-/// the authored string verbatim, so the key a scene element carries and the
-/// key the build wrote can never disagree.
+/// Yomitan resolves an image node's `path` from the archive root. Thus, `./gaiji/x.svg`
+/// and `/gaiji/x.svg` select the same entry. Normalize paths only here. Keep the
+/// media key's authored string verbatim, so a scene element's key and the key that
+/// the build writes always agree.
 fn archive_relative(path: &str) -> &str {
     let mut at = path.trim_start_matches('/');
     while let Some(rest) = at.strip_prefix("./") {
@@ -302,63 +291,61 @@ fn archive_relative(path: &str) -> &str {
     at
 }
 
-/// Does this archive supply the terms role?
+/// Return whether this archive supplies the terms role.
 ///
-/// Its own banks, never its filename: a `term_bank_` member is what a
-/// glossary lives in, and an archive that ships none supplies no
-/// definitions whatever it is called. The same question
-/// [`crate::dict::frequency::supplies_frequency`] and
-/// [`crate::dict::pitch::supplies_pitch`] answer for the other two roles,
-/// asked the same way (ADR-0014).
+/// Inspect its banks, not its filename. A `term_bank_` member contains glossary
+/// data. An archive without that member supplies no definitions, regardless of its
+/// filename. [`crate::dict::frequency::supplies_frequency`] and
+/// [`crate::dict::pitch::supplies_pitch`] use the same test for the other roles.
+/// All three functions follow `ARCHITECTURE.md#dictionary-and-lookup`.
 ///
-/// The central directory answers it, so this costs one open and no
-/// inflation: a term bank is present or it is not, and a bank member with
-/// no readable row in it is a broken archive rather than a different role.
+/// The central directory answers this question. This needs one open and no
+/// inflation. A present term bank supplies the role. The function does not inspect
+/// the bank rows.
 ///
-/// `false` for an archive this build cannot open - unreadable supplies no
-/// role at all, which is the answer [`crate::library::roles_of`] gives such
-/// an archive for every one of the three.
+/// Return `false` when this build cannot open an archive. An unreadable archive
+/// supplies no role. [`crate::library::roles_of`] returns that result for all three
+/// roles.
 pub fn supplies_terms(zip: &Path) -> bool {
     TermBanks::open(zip).is_ok_and(|banks| !banks.is_empty())
 }
 
-/// Opens a zip for reading.
+/// Open a zip archive.
 fn open_archive(zip: &Path) -> Result<ZipArchive<File>> {
     let file = File::open(zip).with_context(|| format!("opening {}", zip.display()))?;
     ZipArchive::new(file).with_context(|| format!("reading zip {}", zip.display()))
 }
 
-/// Every entry name in a zip.
+/// Return every entry name in a zip archive.
 fn archive_names(archive: &ZipArchive<File>) -> Vec<String> {
     archive.file_names().map(String::from).collect()
 }
 
-/// One member of an open zip, read without checking its CRC-32.
+/// Read one member from an open zip without a CRC-32 check.
 ///
-/// The one place a member's bytes are reached, so the reasoning lives once.
-/// **The check is off deliberately.** Every one of the five pitch archives
-/// ticket 01 censused stores CRC-32 values that do not match its own
-/// payload - 48 of their 54 members - and this reader refused every one of
-/// them with `Invalid checksum` while Yomitan imported them cleanly, never
-/// passing `checkSignature` or `checkCrc32` to its own zip reader. So the
-/// check was not defending a user against corruption; it was refusing five
-/// working dictionaries (`docs/research/pitch-accent-shapes.md`).
+/// Most archive readers use this function for indexed members. `read_styles_css` reads
+/// its entry directly and applies its own cap.
+/// **Disable the check deliberately.** The census found mismatched CRC-32 values in
+/// all five pitch archives. The mismatch affects 48 of their 54 members.
+/// This reader returned `Invalid checksum` for every member, but Yomitan imported
+/// the archives. Yomitan did not pass `checkSignature` or `checkCrc32` to its own
+/// zip reader. The check did not protect users from corruption. It rejected five
+/// usable Dictionaries (`docs/research/pitch-accent-shapes.md`).
 ///
-/// What still holds is what actually catches a damaged archive: a member
-/// has to inflate, it has to stay under the caller's own cap, and a bank
-/// has to parse as the JSON its schema says. A truncated member fails all
-/// three.
+/// A damaged archive still fails the checks that matter. A member must inflate and
+/// stay under the caller's cap. A bank must parse as the JSON that its schema
+/// defines. A truncated member fails all three checks.
 fn member(archive: &mut ZipArchive<File>, index: usize) -> Result<ZipFile<'_, File>> {
     Ok(archive.by_index_with_options(index, ZipReadOptions::new().ignore_crc32(true))?)
 }
 
-/// One zip entry as JSON.
+/// Read one zip entry as JSON.
 fn read_json(archive: &mut ZipArchive<File>, name: &str) -> Result<Value> {
     let text = read_entry(archive, name)?;
     serde_json::from_str(&text).with_context(|| format!("parsing {name}"))
 }
 
-/// One zip entry's text.
+/// Read one zip entry as text.
 fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
     let index = archive
         .index_for_name(name)
@@ -375,11 +362,11 @@ fn read_entry(archive: &mut ZipArchive<File>, name: &str) -> Result<String> {
     String::from_utf8(buf).with_context(|| format!("decoding {name}"))
 }
 
-/// Streams one archive's rows, until a caller says stop.
+/// Read rows from one archive until the caller stops.
 ///
-/// `on_row` returning `false` ends the walk, and the return value says
-/// whether every row was read: a predicate over the rows can answer from
-/// the first bank instead of inflating all sixteen of them.
+/// When `on_row` returns `false`, stop the walk. Return `true` only when the walk
+/// reads every row. A predicate can answer from the first bank instead of a full
+/// read of all sixteen.
 fn for_each_bank_row(
     zip: &Path,
     prefix: &str,
@@ -395,13 +382,12 @@ fn for_each_bank_row(
     Ok(true)
 }
 
-/// Streams one bank's rows, until a caller says stop.
+/// Read rows from one bank until the caller stops.
 ///
-/// Generic in the row type so the meta reader keeps its `Value` and the
-/// term reader can take a [`TermRow`] that borrows straight out of `text`.
-/// `false` means `on_row` stopped the walk, in which case the rest of the
-/// bank is never parsed - and neither is the array's own tail, so the
-/// trailing-bytes check is skipped along with it.
+/// Use a generic row type so the meta reader keeps its `Value` and the term reader
+/// can borrow a [`TermRow`] directly from `text`.
+/// When `on_row` returns `false`, stop the walk. Do not parse the rest of the bank
+/// or the array tail. Skip the extra-byte check in this case.
 fn stream_rows<'de, T, F>(text: &'de str, name: &str, on_row: &mut F) -> Result<bool>
 where
     T: serde::Deserialize<'de>,
@@ -423,13 +409,12 @@ where
     Ok(true)
 }
 
-/// Visits array elements.
+/// Visit array elements.
 ///
-/// `failed` and `stopped` are two different things and the difference is
-/// the caller's answer: a callback that returned an error abandons the walk
-/// *and* the read, and one that returned `false` abandons only the walk.
-/// Both leave the array part-consumed, which serde can only express as an
-/// error, so both come back out through one.
+/// Treat `failed` and `stopped` as different states. A callback error abandons the
+/// walk and the read. A callback that returns `false` abandons only the walk.
+/// Both states leave the array partly consumed. Serde can report either state only
+/// as an error, so this type returns both through one error path.
 struct Rows<'a, T, F> {
     on_row: &'a mut F,
     failed: &'a mut Option<anyhow::Error>,
@@ -484,11 +469,10 @@ where
     }
 }
 
-/// One term-bank row, or nothing this build can read as one.
+/// One term-bank row, or no row that this build can read.
 ///
-/// The wrapper exists because a row that is not an array, or whose first
-/// field is not a string, is *skipped* rather than fatal - and a
-/// `Deserialize` impl has to return something.
+/// The parser skips a non-array row or a row whose first field is not a string.
+/// A `Deserialize` implementation must return a value.
 struct MaybeRow<'a>(Option<TermRow<'a>>);
 
 impl<'de> serde::Deserialize<'de> for MaybeRow<'de> {
@@ -509,10 +493,11 @@ impl<'de> Visitor<'de> for RowVisitor {
         f.write_str("a term-bank row")
     }
 
-    /// Yomitan's positional row: term, reading, definition tags, rules,
-    /// score, glossary, sequence, term tags. Only four are read, and every
-    /// one is captured as raw JSON first so that a field of the wrong type
-    /// costs that field and never the row.
+    /// Parse Yomitan's positional row. Its fields are term, reading, definition tags,
+    /// rules, score, glossary, sequence, and term tags. Read only four fields. Parse
+    /// each selected field as raw JSON first. A wrong type in `term` drops the row.
+    /// A wrong type in `reading` or `rules` uses an empty value. The `glossary` keeps
+    /// its raw JSON.
     fn visit_seq<A>(self, mut seq: A) -> std::result::Result<MaybeRow<'de>, A::Error>
     where
         A: SeqAccess<'de>,
@@ -525,13 +510,13 @@ impl<'de> Visitor<'de> for RowVisitor {
         let glossary: Option<&'de RawValue> = seq.next_element()?;
         while seq.next_element::<IgnoredAny>()?.is_some() {}
 
-        // No term, no row - exactly what the `Value` reader did.
+        // No term means no row. This matches the `Value` reader.
         let Some(term) = term.and_then(text_field) else { return Ok(MaybeRow(None)) };
         Ok(MaybeRow(Some(TermRow {
             term,
             reading: reading.and_then(text_field).unwrap_or(Cow::Borrowed("")),
             rules: rules.and_then(text_field).unwrap_or(Cow::Borrowed("")),
-            // An absent glossary is an empty one, as `Value::take` made it.
+            // An absent glossary becomes an empty one, as `Value::take` did.
             glossary: glossary.map_or("[]", RawValue::get),
         })))
     }
@@ -569,10 +554,10 @@ impl<'de> Visitor<'de> for RowVisitor {
     }
 }
 
-/// A raw field as text, borrowed unless the JSON escaped it.
+/// Return a raw field as text. Borrow it unless JSON escapes require a copy.
 ///
-/// `None` for anything that is not a JSON string, which is what makes a
-/// numeric `reading` cost the reading and not the entry.
+/// Return `None` for a value that is not a JSON string. A numeric `reading` then
+/// loses only the reading, not the entry.
 fn text_field(raw: &RawValue) -> Option<Cow<'_, str>> {
     let json = raw.get();
     if let Ok(borrowed) = serde_json::from_str::<&str>(json) {
@@ -581,7 +566,7 @@ fn text_field(raw: &RawValue) -> Option<Cow<'_, str>> {
     serde_json::from_str::<String>(json).ok().map(Cow::Owned)
 }
 
-/// Matching banks, sorted.
+/// Return matching banks in sorted order.
 fn sorted_banks(names: &[String], prefix: &str) -> Vec<String> {
     let mut picked: Vec<String> =
         names.iter().filter(|n| n.starts_with(prefix) && n.ends_with(".json")).cloned().collect();
@@ -589,18 +574,18 @@ fn sorted_banks(names: &[String], prefix: &str) -> Vec<String> {
     picked
 }
 
-/// Sorts bank names numerically.
+/// Sort bank names by their numeric suffix.
 fn sort_banks(names: &mut [String], prefix: &str) {
     names.sort_by_key(|n| bank_number(n, prefix));
 }
 
-/// A bank name's numeric key.
+/// Return the numeric key from a bank name.
 fn bank_number(name: &str, prefix: &str) -> u64 {
     let rest = name.strip_prefix(prefix).unwrap_or(name);
     first_digit_run(rest).unwrap_or(0)
 }
 
-/// First run of digits.
+/// Return the first run of digits.
 fn first_digit_run(s: &str) -> Option<u64> {
     let start = s.find(|c: char| c.is_ascii_digit())?;
     let digits: String = s[start..].chars().take_while(char::is_ascii_digit).collect();
@@ -636,9 +621,9 @@ mod tests {
         assert_eq!("v1", taberu.2);
     }
 
-    /// The role a filename cannot answer: `freq.zip` and `pitch.zip` carry
-    /// nothing but a term-meta bank, so neither supplies definitions, and
-    /// `terms.zip` does whatever its name says.
+    /// A file name cannot define this role. The banks decide it. `freq.zip` and
+    /// `pitch.zip` contain only term-meta banks, so neither supplies terms. `terms.zip`
+    /// supplies terms because its banks contain terms.
     #[test]
     fn the_terms_role_is_read_from_the_banks_and_not_from_the_name() {
         assert!(supplies_terms(&fixture("terms.zip")));
@@ -689,8 +674,8 @@ mod tests {
         assert_eq!(0, seen);
     }
 
-    /// The whole point of the stop: a predicate over the rows must not
-    /// inflate every bank of an archive to answer from the first row.
+    /// The predicate stops after its first match. Otherwise, this test would inflate
+    /// every bank before it answers.
     #[test]
     fn a_satisfied_predicate_stops_the_walk_at_the_row_that_answered_it() {
         let mut seen = 0;
@@ -717,8 +702,8 @@ mod tests {
         assert_eq!(3, seen);
     }
 
-    /// An archive with no term-meta bank has no row to satisfy anything,
-    /// and answering that costs its central directory and no inflate.
+    /// An archive without a term-meta bank has no row that can satisfy a predicate.
+    /// The central directory answers this without inflation.
     #[test]
     fn an_archive_with_no_term_meta_bank_answers_no_to_every_predicate() {
         assert!(!any_meta_row(&fixture("terms.zip"), |_| true).unwrap());
@@ -738,7 +723,7 @@ mod tests {
         );
     }
 
-    /// The four fields a row is read for, defaults included.
+    /// Return the four fields that the reader accepts, with defaults.
     fn fields(bank: &str) -> Vec<(String, String, String, String)> {
         let mut out = Vec::new();
         for_each_row(bank, "term_bank_1.json", |t| {
@@ -794,23 +779,22 @@ mod tests {
         );
     }
 
-    /// A row this build cannot read as one is skipped, never fatal: an
-    /// archive is third-party bytes and one bad row must not cost the
-    /// dictionary.
+    /// Skip a row that this build cannot read. Do not fail the Dictionary because one
+    /// row contains bad third-party data. One bad row must not discard the Dictionary.
     #[test]
     fn a_row_that_is_not_an_array_of_a_term_is_skipped() {
         assert!(fields(r#"[null,42,"x",{"a":1},[123],[]]"#).is_empty());
     }
 
-    /// The glossary reaches the builder exactly as the archive spelled it -
-    /// key order and all - because that is what the `entry` record stores.
+    /// Pass glossary bytes to the callback exactly as the archive stores them, with
+    /// key order preserved. The builder minifies these bytes before it stores them.
     #[test]
     fn the_glossary_is_the_archives_own_bytes() {
         let bank = r#"[["語","ご","","",0,[{"type": "text", "text": "hi"}]]]"#;
         assert_eq!(r#"[{"type": "text", "text": "hi"}]"#, fields(bank)[0].3);
     }
 
-    /// An escaped field cannot borrow, and must still come out decoded.
+    /// An escaped field cannot borrow text. The parser must still decode it.
     #[test]
     fn an_escaped_field_is_unescaped() {
         assert_eq!("a\"b\nc", fields(r#"[["a\"b\nc"]]"#)[0].0);
@@ -821,7 +805,7 @@ mod tests {
         assert_eq!("[]", fields(r#"[["書く","かく","","v5"]]"#)[0].3);
     }
 
-    // ---- media extraction (ticket 03) ----
+    // ---- media extraction ----
 
     fn media_zip() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
@@ -831,9 +815,8 @@ mod tests {
         paths.iter().map(|p| (*p).to_string()).collect()
     }
 
-    /// The whole point of taking a wanted set: an image dictionary ships
-    /// every glyph its author had, and only the paths its nodes name can
-    /// ever be painted.
+    /// Read only wanted entries. An image Dictionary can ship every glyph its author
+    /// has, but only paths named by its nodes can reach paint.
     #[test]
     fn only_the_wanted_entries_are_read_and_the_rest_are_never_touched() {
         let want = wanted(&["gaiji/one.png", "gaiji/two.svg"]);
@@ -850,9 +833,8 @@ mod tests {
         assert!(missing.is_empty());
     }
 
-    /// A referenced path the archive does not hold is reported, not
-    /// guessed at: it is what makes the build write no media row and the
-    /// `alt`-text fallback fire.
+    /// Report a referenced path that the archive does not hold. Do not guess a path.
+    /// The build writes no media row, so the `alt`-text fallback runs.
     #[test]
     fn a_path_the_archive_does_not_hold_comes_back_as_unusable() {
         let want = wanted(&["gaiji/one.png", "gaiji/nope.png", "elsewhere/x.svg"]);
@@ -867,10 +849,9 @@ mod tests {
         assert_eq!(vec!["elsewhere/x.svg", "gaiji/nope.png"], missing);
     }
 
-    /// Yomitan resolves an image node's `path` against the archive root,
-    /// so a dictionary writing `./x` or `/x` means the same entry - and
-    /// each authored spelling still gets its own media row, because the
-    /// key a scene element carries is the authored string.
+    /// Resolve an authored `path` from the archive root. `./x` and `/x` select the same
+    /// entry. Keep one media row for each path form because the scene element key
+    /// preserves that form.
     #[test]
     fn an_authored_path_is_matched_against_the_archive_root() {
         let want = wanted(&["./gaiji/one.png", "/gaiji/one.png", "gaiji/one.png"]);
@@ -888,9 +869,9 @@ mod tests {
 
     #[test]
     fn an_empty_wanted_set_never_opens_the_archive() {
-        // A path that does not exist: opening it would be an error, so a
-        // build over a dictionary with no image nodes provably costs no
-        // second pass over the zip.
+        // The path does not exist. If the test opened it, the call would return an error.
+        // An empty wanted set therefore avoids a second pass over the zip for a Dictionary
+        // with no image nodes.
         let nothing = BTreeSet::new();
         let missing =
             for_each_media(Path::new("/nonexistent/archive.zip"), &nothing, |_, _| Ok(()))
@@ -898,11 +879,10 @@ mod tests {
         assert!(missing.is_empty());
     }
 
-    /// The peak-RSS bound. A declared uncompressed size is third-party
-    /// bytes, and an archive that deflates 17 MiB of zeros into 17 KB is
-    /// exactly what the cap is for: the entry is refused on its header,
-    /// before anything is read, and reported like any other path with no
-    /// usable bytes.
+    /// Bound peak RSS. The declared uncompressed size comes from third-party bytes.
+    /// This archive can deflate 17 MiB of zeros into 17 KB. The reader rejects the
+    /// entry after it reads the header and before it reads bytes. The build reports the
+    /// referenced path as unusable.
     #[test]
     fn an_asset_over_the_cap_is_refused_before_it_is_read() {
         let zip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -919,23 +899,22 @@ mod tests {
         assert_eq!(vec!["gaiji/huge.png"], missing);
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a dictionary's own styles.css ----
 
-    /// The census found `styles.css` at the archive root and one directory
-    /// deep, because some archives are zipped with a wrapper folder. Two
-    /// directories deep is not a dictionary's stylesheet, and the shallowest
-    /// of two candidates is the real one.
+    /// The census found `styles.css` at the archive root and one directory deep because
+    /// some archives use a wrapper folder. Two directories deep does not provide the
+    /// Dictionary stylesheet. The shallowest candidate is the stylesheet.
     #[test]
     fn the_stylesheet_is_found_at_the_root_or_one_directory_deep() {
         let cases: [(&[&str], Option<&str>); 7] = [
             (&["index.json", "styles.css"], Some("styles.css")),
             (&["dict/index.json", "dict/styles.css"], Some("dict/styles.css")),
-            // The shallowest wins, whichever order the entries arrive in.
+            // Choose the shallowest candidate, regardless of entry order.
             (&["dict/styles.css", "styles.css"], Some("styles.css")),
             (&["styles.css", "dict/styles.css"], Some("styles.css")),
             (&["a/b/styles.css"], None),
             (&["index.json"], None),
-            // A zip written on Windows separates with a backslash.
+            // A zip written on Windows can use a backslash as its separator.
             (&["dict\\styles.css"], Some("dict\\styles.css")),
         ];
         for (names, want) in cases {
@@ -951,9 +930,8 @@ mod tests {
         assert_eq!(None, shallowest(&names, "styles.css"));
     }
 
-    /// One zip, written here, read back through the real reader. A BOM and
-    /// CRLF because a hand-authored stylesheet has both, and neither may
-    /// reach the compiler.
+    /// Write one zip and read it through the real reader. Include a BOM and CRLF.
+    /// The reader removes the BOM but keeps CRLF.
     #[test]
     fn a_stylesheet_reads_back_with_its_bom_stripped() {
         let dir = std::env::temp_dir().join("chibipop_styles_test");
@@ -965,7 +943,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// An archive with none reports none, rather than failing the build.
+    /// An archive without a stylesheet returns `None`. It does not fail the build.
     #[test]
     fn an_archive_without_a_stylesheet_reports_none() {
         assert_eq!(None, read_styles_css(&fixture("terms.zip")).unwrap());

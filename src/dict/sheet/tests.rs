@@ -1,27 +1,26 @@
-//! What the matcher promises, asserted against the shapes the corpus ships.
+//! Test the matcher against CSS shapes that the corpus ships.
 //!
-//! Table-driven wherever the answer is a mapping, because the interesting
-//! failures are one row wrong rather than the whole rule wrong. Every CSS
-//! fixture here is either lifted verbatim from a real stylesheet or built
-//! from a real selector shape, named where it came from.
+//! Use tables when each input maps to one output. A failure then identifies one
+//! wrong row instead of a wrong rule. Each CSS fixture comes from a real stylesheet
+//! or a real selector shape. State its source where needed.
 
 use super::*;
 use crate::dict::gloss::{plain_items, GlossDoc, NodeId, StyleKey, Tag};
 use serde_json::json;
 
-/// One structured-content glossary, parsed.
+/// Parse one structured-content glossary.
 fn doc(content: serde_json::Value) -> GlossDoc {
     GlossDoc::parse(&json!([{"type": "structured-content", "content": content}]).to_string())
 }
 
-/// The first node carrying this tag, in parse order.
+/// Return the first node with this tag in parse order.
 fn find(d: &GlossDoc, tag: Tag) -> NodeId {
     (0..d.all_nodes().len() as NodeId)
         .find(|id| d.node(*id).tag == tag)
         .unwrap_or_else(|| panic!("no {tag:?} node"))
 }
 
-/// One node's resolved record, as `(property, value)` text.
+/// Return one node's resolved record as `(property, value)` text.
 fn record(d: &GlossDoc, id: NodeId) -> Vec<(StyleKey, String)> {
     d.style(id)
         .iter()
@@ -29,13 +28,13 @@ fn record(d: &GlossDoc, id: NodeId) -> Vec<(StyleKey, String)> {
         .collect()
 }
 
-/// One property off a node's record, by the first-occurrence rule every
-/// reader of the record uses.
+/// Return the first value for a property in a node record.
+/// Every reader of a record uses its first occurrence.
 fn prop(d: &GlossDoc, id: NodeId, key: StyleKey) -> Option<String> {
     d.style_of(id, key).and_then(|v| d.scalar_str(v)).map(str::to_string)
 }
 
-/// Parses, compiles, folds.
+/// Parse CSS, compile it, and fold it into the document.
 fn styled(css: &str, content: serde_json::Value) -> GlossDoc {
     let sheet = Sheet::compile(css);
     let mut d = doc(content);
@@ -45,13 +44,12 @@ fn styled(css: &str, content: serde_json::Value) -> GlossDoc {
 
 // ---- the data-key to attribute-name transform ----
 
-/// Every selector in a dictionary's stylesheet depends on this exact
-/// transform, and it is not obvious: the DOM's `dataset` capitalises the
-/// key's own first letter because Yomitan's `sc` prefix puts it in the
-/// middle, then turns every ASCII capital into `-x`, and leaves a CJK key
-/// entirely alone. Ported from `tools/dict-census/census.py`, which verified
-/// it against the corpus; these are the awkward cases the ticket names plus
-/// the four most-selected real keys.
+/// Use this exact transform for every data selector in a Dictionary stylesheet.
+/// The transform has several steps. The DOM `dataset` capitalizes the key's first
+/// letter because Yomitan's `sc` prefix places it in the middle. It then turns
+/// each ASCII capital into `-x` and leaves a CJK key unchanged. The census script
+/// `tools/dict-census/census.py` verified this transform against the corpus. Test
+/// awkward cases and the four most-selected real keys.
 #[test]
 fn a_data_key_becomes_the_attribute_name_yomitan_derives() {
     let cases = [
@@ -64,7 +62,7 @@ fn a_data_key_becomes_the_attribute_name_yomitan_derives() {
         ("常用外マーク", "data-sc常用外マーク"),
         ("親字", "data-sc親字"),
         ("使い分け", "data-sc使い分け"),
-        // A digit is not a capital, so it takes no hyphen of its own.
+        // A digit is not a capital, so it does not get its own hyphen.
         ("l1", "data-sc-l1"),
         ("", "data-sc"),
     ];
@@ -78,10 +76,10 @@ fn a_data_key_becomes_the_attribute_name_yomitan_derives() {
 
 // ---- the property table ----
 
-/// The kebab-case half of the tree parser's camelCase table, and no wider.
-/// The `unmapped` rows are the corpus's highest-volume unsupported
-/// properties: dropping them is the ticket's rule, and a table that quietly
-/// grew past the renderer would put a value in a record nothing can read.
+/// Test the kebab-case half of the tree parser's camelCase table, and no other properties.
+/// The `unmapped` rows exercise properties that `css_key` rejects.
+/// Drop them. A table that grows beyond the renderer would add values that no reader
+/// can use.
 #[test]
 fn only_the_properties_the_renderer_maps_survive() {
     let mapped = [
@@ -121,16 +119,15 @@ fn only_the_properties_the_renderer_maps_survive() {
 
 // ---- the grammar the census scores against ----
 
-/// The two allow-lists `tools/dict-census/census.py` reads out of
-/// `select.rs` have to say what the parser beside them actually does, or the
-/// census's dropped-rule count is a number about nothing. Both directions:
-/// every listed pseudo-class compiles, and a pseudo-class outside the list
-/// drops its rule.
+/// Keep the two allow-lists that `tools/dict-census/census.py` reads from
+/// `sheet/mod.rs` aligned with parser behavior. If the lists and parser differ, the
+/// dropped-rule count has no meaning. Test both directions: every listed
+/// pseudo-class compiles, and an unlisted pseudo-class drops its rule.
 #[test]
 fn the_declared_pseudo_class_list_is_the_one_the_parser_accepts() {
     for name in SUPPORTED_PSEUDO_CLASSES {
-        // `nth-*` needs an argument and the list forms need a selector; each
-        // gets the shape it takes.
+        // `nth-*` needs an argument, and list forms need a selector. Give each
+        // pseudo-class the shape that it accepts.
         let sel = match name {
             "is" | "where" | "not" | "has" => format!("span:{name}(div)"),
             n if n.starts_with("nth-") => format!("span:{name}(2)"),
@@ -145,8 +142,8 @@ fn the_declared_pseudo_class_list_is_the_one_the_parser_accepts() {
     }
 }
 
-/// The selector-kind list, in the census's vocabulary, against one selector
-/// of each kind it names and one of each kind it does not.
+/// Test each selector kind in the census vocabulary. Compile one listed kind and
+/// reject one unlisted kind.
 #[test]
 fn the_declared_selector_kind_list_is_the_one_the_parser_accepts() {
     let by_kind = [
@@ -179,10 +176,9 @@ fn the_declared_selector_kind_list_is_the_one_the_parser_accepts() {
 
 // ---- a css-only dictionary draws its boxes ----
 
-/// 字通's own shape: a `data-sc`-keyed span carrying a full box, and not one
-/// inline `style` anywhere in the entry. This is the test that the mechanism
-/// works at all - before this ticket the box model drew nothing for the 13
-/// dictionaries in the census's `css-only` bucket.
+/// 字通 uses a `data-sc` key on a span and a full box. It has no inline `style` in
+/// the entry. This test proves that the mechanism works. Before this change, the box
+/// model drew nothing for 13 `css-only` Dictionaries in the census.
 #[test]
 fn a_css_only_dictionary_gets_a_box_with_no_inline_style_anywhere() {
     let d = styled(
@@ -209,12 +205,12 @@ fn a_css_only_dictionary_gets_a_box_with_no_inline_style_anywhere() {
         ],
         record(&d, span),
     );
-    // And the tree the renderer reads is otherwise untouched.
+    // The tree that the renderer reads stays otherwise unchanged.
     assert_eq!(vec!["ゴ".to_string()], plain_items(&d));
 }
 
-/// 明鏡国語辞典's own selector shape, `div:has(> span[data-sc-zoomkanji])`,
-/// which is the one relative `:has` in the corpus.
+/// Test 明鏡国語辞典's selector shape, `div:has(> span[data-sc-zoomkanji])`.
+/// The corpus has one relative `:has` selector.
 #[test]
 fn a_has_selector_reaches_a_parent_through_its_child() {
     let css = "div:has(> span[data-sc-zoomkanji]) { border-width: 2px; }";
@@ -226,7 +222,7 @@ fn a_has_selector_reaches_a_parent_through_its_child() {
     );
     assert_eq!(Some("2px".to_string()), prop(&hit, find(&hit, Tag::Div), StyleKey::BorderWidth));
 
-    // A grandchild is not a child, and `:has(> x)` says child.
+    // A grandchild is not a child, and `:has(> x)` requires a child.
     let miss = styled(
         css,
         json!([{"tag": "div", "content": [
@@ -238,8 +234,8 @@ fn a_has_selector_reaches_a_parent_through_its_child() {
     assert_eq!(None, prop(&miss, find(&miss, Tag::Div), StyleKey::BorderWidth));
 }
 
-/// 旺文社漢字典's `td:has([data-sc親字])`, the descendant form the ticket
-/// names, on a real CJK `data` key.
+/// Test 旺文社漢字典's `td:has([data-sc親字])` selector. It uses the descendant
+/// form with a real CJK `data` key.
 #[test]
 fn a_descendant_has_selector_reaches_a_cell_through_a_cjk_data_key() {
     let d = styled(
@@ -258,10 +254,10 @@ fn a_descendant_has_selector_reaches_a_cell_through_a_cjk_data_key() {
 
 // ---- the cascade ----
 
-/// Inline `style` is the dictionary author's last word, whatever the
-/// stylesheet asks for. Asserted at both extremes: against a rule of the
-/// highest specificity this grammar can express, and against `!important`,
-/// which outranks every other stylesheet declaration and still loses here.
+/// Inline `style` has final priority, regardless of the stylesheet. Test it against
+/// the highest specificity that this grammar can express and against `!important`.
+/// `!important` outranks every other stylesheet declaration but still loses to inline
+/// `style`.
 #[test]
 fn inline_style_beats_a_stylesheet_rule_of_any_specificity() {
     let d = styled(
@@ -277,30 +273,28 @@ fn inline_style_beats_a_stylesheet_rule_of_any_specificity() {
     );
     let span = find(&d, Tag::Span);
     assert_eq!(Some("0.8em".to_string()), prop(&d, span, StyleKey::FontSize));
-    // And the losing declarations are not merely outranked, they are absent:
-    // one record entry per property is what keeps the record's own order
-    // from deciding anything.
+    // The overridden declarations are absent, not merely outranked. One record entry per
+    // property prevents record order from deciding the result.
     assert_eq!(1, record(&d, span).len(), "{:?}", record(&d, span));
 }
 
-/// The specificity rule this build implements, stated: no id or class
-/// selector can compile, so specificity is `(b, c)` where **b** counts
-/// attribute tests and pseudo-classes and **c** counts tag names, compared
-/// as one packed number, with source order breaking a tie and the later rule
-/// winning. `:where` contributes nothing; `:is`, `:not` and `:has`
-/// contribute their most specific argument.
+/// This build accepts no id or class selector. Its specificity is `(b, c)`.
+/// `b` counts attribute tests and pseudo-classes. `c` counts tag names.
+/// Compare the pair as one packed number. Use source order to break ties, and let
+/// the later rule win. `:where` adds nothing. `:is`, `:not`, and `:has` provide their
+/// most specific argument.
 #[test]
 fn a_more_specific_rule_beats_a_less_specific_one() {
     let cases: [(&str, &str, &str); 5] = [
-        // (0,1) tag loses to (1,0) attribute.
+        // A (0,1) tag loses to a (1,0) attribute.
         ("span { color: red } [data-sc-content=\"a\"] { color: blue }", "blue", "attr > tag"),
-        // (1,1) beats (1,0), whatever the source order.
+        // A (1,1) beats a (1,0), regardless of source order.
         (
             "span[data-sc-content=\"a\"] { color: blue } [data-sc-content=\"a\"] { color: red }",
             "blue",
             "tag+attr > attr, against source order",
         ),
-        // (2,1) beats (1,1).
+        // A (2,1) beats a (1,1).
         (
             "span[data-sc-content=\"a\"] { color: red }
              div span[data-sc-content=\"a\"] { color: red }
@@ -310,7 +304,7 @@ fn a_more_specific_rule_beats_a_less_specific_one() {
         ),
         // Equal specificity: the later rule wins.
         ("span { color: red } span { color: blue }", "blue", "source order breaks a tie"),
-        // `:where` adds nothing, so this stays (0,1) and loses to (1,0).
+        // `:where` adds nothing, so (0,1) loses to (1,0).
         (
             ":where([data-sc-class=\"b\"]) span { color: red }
              [data-sc-content=\"a\"] { color: blue }",
@@ -330,9 +324,9 @@ fn a_more_specific_rule_beats_a_less_specific_one() {
     }
 }
 
-/// `!important` orders declarations *within* one stylesheet, which is what
-/// its 96 corpus occurrences ask for. It is not a second origin: the test
-/// above already fixes that it loses to inline `style`.
+/// Use `!important` to order declarations inside one stylesheet. The corpus has 96
+/// occurrences. `!important` is not a second origin. The previous test shows that
+/// inline `style` still wins.
 #[test]
 fn an_important_declaration_beats_a_more_specific_normal_one() {
     let d = styled(
@@ -345,9 +339,8 @@ fn an_important_declaration_beats_a_more_specific_normal_one() {
     assert_eq!(Some("blue".to_string()), prop(&d, find(&d, Tag::Span), StyleKey::Color));
 }
 
-/// A descendant selector constrains the ancestor chain, and a node whose
-/// chain fails does not match - which is the whole difference between a
-/// matcher and the census's key-presence count.
+/// A descendant selector constrains the ancestor chain. A node matches only when the
+/// chain satisfies the selector. This differs from a census key-presence count.
 #[test]
 fn a_descendant_selector_does_not_match_a_node_whose_ancestors_fail() {
     let css = "li[data-sc-content=\"sense\"] ul[data-sc-content=\"glossary\"] \
@@ -376,7 +369,7 @@ fn a_descendant_selector_does_not_match_a_node_whose_ancestors_fail() {
     assert_eq!(None, prop(&outside, find(&outside, Tag::Ul), StyleKey::ListStyleType));
 }
 
-/// A child combinator is not a descendant combinator.
+/// A child combinator does not match a descendant.
 #[test]
 fn a_child_combinator_refuses_a_grandchild() {
     let css = "div > span { color: red }";
@@ -392,8 +385,8 @@ fn a_child_combinator_refuses_a_grandchild() {
     assert_eq!(None, prop(&grandchild, find(&grandchild, Tag::Span), StyleKey::Color));
 }
 
-/// Jitendex's `li[data-sc-content="sense-group"]:first-child`, and the
-/// sibling that is not first.
+/// Test Jitendex's `li[data-sc-content="sense-group"]:first-child` selector and
+/// a sibling that is not first.
 #[test]
 fn first_child_and_nth_child_count_siblings_from_one() {
     let d = styled(
@@ -420,8 +413,8 @@ fn first_child_and_nth_child_count_siblings_from_one() {
     );
 }
 
-/// `nth-of-type` counts only siblings sharing the tag, which is what makes
-/// it different from `nth-child` on a mixed list.
+/// `nth-of-type` counts only siblings with the same tag. This differs from
+/// `nth-child` on a mixed list.
 #[test]
 fn of_type_pseudos_count_only_siblings_sharing_the_tag() {
     let d = styled(
@@ -443,9 +436,8 @@ fn of_type_pseudos_count_only_siblings_sharing_the_tag() {
 
 // ---- CSS nesting ----
 
-/// Jitendex writes its marker-suppression rule with native `&` nesting, so
-/// a scanner that flattens blocks without resolving `&` would lose it. The
-/// text here is that rule verbatim.
+/// Jitendex uses native `&` nesting for marker suppression. A scanner that only
+/// flattens blocks would lose this rule. This test uses the rule verbatim.
 #[test]
 fn native_nesting_resolves_against_the_rule_it_sits_in() {
     let d = styled(
@@ -474,8 +466,8 @@ fn native_nesting_resolves_against_the_rule_it_sits_in() {
     );
 }
 
-/// A nested block with no `&` takes an implicit descendant one, which is
-/// what CSS nesting means and what Jitendex's forms rules are written as.
+/// A nested block without `&` uses an implicit descendant combinator. CSS defines
+/// this behavior, and Jitendex uses it for forms rules.
 #[test]
 fn a_nested_block_without_an_ampersand_is_a_descendant() {
     let d = styled(
@@ -492,10 +484,10 @@ fn a_nested_block_without_an_ampersand_is_a_descendant() {
 
 // ---- shorthand expansion ----
 
-/// A `margin`/`padding` shorthand expands into its four longhands at compile
-/// time, so the cascade runs per property. Without that, the shorthand from
-/// a less specific rule would be applied after - and therefore erase - the
-/// longhand from a more specific one, because a record applies in order.
+/// Expand `margin` and `padding` shorthands into four longhands at compile time.
+/// The cascade then runs per property. Without expansion, a less-specific shorthand
+/// applied after a more-specific longhand would erase it because record order controls
+/// application.
 #[test]
 fn a_shorthand_cannot_erase_a_longhand_from_a_more_specific_rule() {
     let d = styled(
@@ -510,7 +502,7 @@ fn a_shorthand_cannot_erase_a_longhand_from_a_more_specific_rule() {
     assert_eq!(Some("1px".to_string()), prop(&d, span, StyleKey::PaddingBottom));
 }
 
-/// The 1/2/3/4-value edge shorthand, each form.
+/// Test edge shorthands with one, two, three, and four values.
 #[test]
 fn an_edge_shorthand_splits_the_way_css_splits_it() {
     let cases = [
@@ -535,9 +527,9 @@ fn an_edge_shorthand_splits_the_way_css_splits_it() {
     }
 }
 
-/// An inline shorthand covers every longhand a stylesheet could set, and an
-/// inline longhand covers only itself - the other three still come from the
-/// stylesheet, which is what CSS does per property.
+/// An inline shorthand covers every longhand that a stylesheet can set. An inline
+/// longhand covers only its own property. The other three still come from the
+/// stylesheet. CSS applies these declarations per property.
 #[test]
 fn an_inline_longhand_leaves_the_other_edges_to_the_stylesheet() {
     let d = styled(
@@ -562,9 +554,9 @@ fn an_inline_longhand_leaves_the_other_edges_to_the_stylesheet() {
 
 // ---- what is dropped, and counted ----
 
-/// The whole rule goes, declarations included, when any of its selectors
-/// leaves the grammar - and the count is what `tools/dict-census` reports as
-/// its progress gauge. Every selector here is a real corpus shape.
+/// Drop the whole rule and its declarations when any selector leaves the grammar.
+/// `tools/dict-census` reports this count as progress. These cases cover unsupported
+/// selector shapes. Some cases are synthetic and do not occur in the corpus.
 #[test]
 fn an_unsupported_selector_drops_its_rule_whole_and_is_counted() {
     let cases: [(&str, &str); 10] = [
@@ -589,10 +581,10 @@ fn an_unsupported_selector_drops_its_rule_whole_and_is_counted() {
     }
 }
 
-/// A selector list is atomic: one unreadable member drops the readable ones
-/// with it, which is what CSS does with an unreadable selector list and the
-/// only answer that never half-applies a rule. Jitendex loses a real
-/// `margin-top` this way, and the ticket's measured cost is that count.
+/// Treat a selector list as one unit. If one member cannot be read, drop every
+/// member. CSS uses this behavior for an unreadable list. It prevents a partial
+/// rule. Jitendex loses a real `margin-top` this way, and the census records that
+/// cost.
 #[test]
 fn one_bad_selector_in_a_list_drops_the_whole_rule() {
     let sheet = Sheet::compile(
@@ -603,10 +595,9 @@ fn one_bad_selector_in_a_list_drops_the_whole_rule() {
     assert_eq!(1, sheet.counts().dropped_selector);
 }
 
-/// An at-rule body is out of scope by measurement: only 4 of the corpus's
-/// 908 box rules sit behind one, always `@media (max-width: 500px)`. The
-/// rules inside are dropped and counted separately, so the two gaps stay
-/// distinguishable.
+/// Keep at-rule bodies outside this scope. Corpus measurements show 4 of its 908 box
+/// rules behind one at-rule. Each uses `@media (max-width: 500px)`. Drop and count
+/// rules inside separately. Keep selector and at-rule gaps distinct.
 #[test]
 fn an_at_rule_body_drops_its_rules_and_counts_them_apart() {
     let sheet = Sheet::compile(
@@ -621,9 +612,9 @@ fn an_at_rule_body_drops_its_rules_and_counts_them_apart() {
     assert_eq!(2, counts.dropped());
 }
 
-/// A `var()` value drops the declaration, not the rule: Jitendex's
-/// `extra-box` carries a `var()` border width beside three lengths that are
-/// perfectly readable, and losing the rule would lose those too.
+/// Drop a `var()` declaration but keep its rule. Jitendex's `extra-box` has a
+/// `var()` border width beside three readable lengths. The rule must stay, or it
+/// would lose those lengths.
 #[test]
 fn a_var_value_drops_its_declaration_and_leaves_the_rule() {
     let d = styled(
@@ -640,10 +631,8 @@ fn a_var_value_drops_its_declaration_and_leaves_the_rule() {
     assert_eq!(None, prop(&d, div, StyleKey::BorderWidth));
 }
 
-/// A rule whose selector compiles but whose every declaration is unmapped is
-/// neither kept nor dropped-for-selector: it is its own count, because the
-/// two mean different things to the census - one is a grammar gap and the
-/// other a property gap.
+/// Count a rule with a valid selector and no mapped declarations separately.
+/// A grammar gap and a property gap mean different things to the census.
 #[test]
 fn a_rule_of_unmapped_properties_only_is_counted_apart() {
     let sheet = Sheet::compile("span { display: grid; grid-column: 1; line-height: 1.4 }");
@@ -654,7 +643,7 @@ fn a_rule_of_unmapped_properties_only_is_counted_apart() {
     assert_eq!(3, counts.dropped_declarations);
 }
 
-/// The invariant the census's arithmetic rests on.
+/// Check the invariant that supports the census arithmetic.
 #[test]
 fn every_scanned_rule_lands_in_exactly_one_count() {
     let sheet = Sheet::compile(
@@ -675,8 +664,7 @@ fn every_scanned_rule_lands_in_exactly_one_count() {
 
 // ---- malformed input ----
 
-/// Malformed CSS drops the rule it is in, records what went wrong, and never
-/// panics. Every case here is one the ticket names.
+/// Drop a malformed CSS rule, record its error, and never panic.
 #[test]
 fn malformed_css_drops_rules_and_never_panics() {
     let cases: [(&str, &str); 8] = [
@@ -694,17 +682,16 @@ fn malformed_css_drops_rules_and_never_panics() {
     ];
     for (css, why) in cases {
         let sheet = Sheet::compile(css);
-        // The point is that it returns: a stylesheet is third-party text and
-        // a build must never fail over one.
+        // These inputs return a sheet instead of an error. CSS is third-party text,
+        // so a build must not fail because one stylesheet is malformed.
         let mut d = doc(json!([{"tag": "span", "content": "x"}]));
         apply(&mut d, &sheet);
         assert_eq!(vec!["x".to_string()], plain_items(&d), "{why}");
     }
 }
 
-/// A brace inside `url(...)` must not end the block, or every rule after it
-/// is lost - which is why the scanner counts parentheses rather than braces
-/// alone.
+/// A brace inside `url(...)` must not close the block. Count parentheses as well as
+/// braces, or the scanner loses every later rule.
 #[test]
 fn a_brace_inside_a_url_does_not_end_the_block() {
     let sheet = Sheet::compile(
@@ -715,8 +702,8 @@ fn a_brace_inside_a_url_does_not_end_the_block() {
     assert_eq!(2, sheet.counts().kept);
 }
 
-/// Nesting deeper than the scanner's cap stops compiling rules and never
-/// recurses without bound. The corpus nests three levels.
+/// Refuse rules deeper than the scanner's cap. Never recurse without a bound. The
+/// corpus nests three levels.
 #[test]
 fn nesting_past_the_cap_is_refused_rather_than_followed() {
     let deep = format!("{}span {{ color: red }}{}", "div { ".repeat(64), "}".repeat(64));
@@ -726,9 +713,8 @@ fn nesting_past_the_cap_is_refused_rather_than_followed() {
 
 // ---- the fold itself ----
 
-/// A document under a sheet that matches nothing keeps its record byte for
-/// byte, so a dictionary with a stylesheet full of chrome selectors pays
-/// nothing.
+/// Keep the document record byte-for-byte when the sheet matches no node. A Dictionary
+/// with a stylesheet full of chrome selectors then pays no fold cost.
 #[test]
 fn a_sheet_that_matches_nothing_leaves_the_record_alone() {
     let content = json!([{"tag": "span", "style": {"fontSize": "0.8em"}, "content": "x"}]);
@@ -737,9 +723,8 @@ fn a_sheet_that_matches_nothing_leaves_the_record_alone() {
     assert_eq!(plain, under);
 }
 
-/// Text and line-break nodes carry no tag and no `data`, so no selector in
-/// this grammar can name one - and the walk skips them rather than probing
-/// the most numerous nodes in a tree.
+/// Text and line-break nodes have no tag or `data`, so no selector can name them.
+/// Skip them instead of probing the most numerous nodes in a tree.
 #[test]
 fn a_text_node_is_never_probed() {
     let d = styled(
@@ -753,9 +738,8 @@ fn a_text_node_is_never_probed() {
     assert_eq!(vec![Tag::Span], styled_nodes);
 }
 
-/// The probe is over the whole tree, so a rule reaches a node at any depth -
-/// and the depth cap is the parser's own, which the walk repeats rather than
-/// assumes.
+/// Probe the whole tree, so a rule reaches a node at any depth. The parser defines
+/// the depth cap. The walk applies the same cap instead of assuming a smaller one.
 #[test]
 fn a_rule_reaches_a_deeply_nested_node() {
     let mut content = json!({"tag": "span", "data": {"content": "leaf"}, "content": "x"});

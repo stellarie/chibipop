@@ -1,2 +1,2 @@
-//! System-wide input hooks.
+//! Provides system-wide input hooks.
 pub mod hooks;

@@ -1,4 +1,7 @@
-//! The rebuild child process.
+//! Run a dictionary rebuild in a child process.
+//!
+//! The child writes a temporary database beside the output. The parent renames
+//! that file into place only after the child succeeds.
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read};
@@ -8,7 +11,10 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
-/// What a rebuild reports.
+/// Report progress or the result of a dictionary rebuild.
+///
+/// `Line` carries child output. `Done` carries the output path. `Failed` carries
+/// the error text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     Line(String),
@@ -16,13 +22,19 @@ pub enum Progress {
     Failed(String),
 }
 
-/// Rebuilds with our own exe.
+/// Start a dictionary rebuild with the current executable.
+///
+/// The returned channel carries child output and the final result. The rebuild
+/// runs on a separate thread so the caller does not block on the child.
 pub fn spawn(library: &Path, out: &Path) -> Result<Receiver<Progress>> {
     let exe = std::env::current_exe().context("locating chibipop.exe")?;
     spawn_with(&exe, library, out)
 }
 
-/// Rebuilds with `exe`.
+/// Start a dictionary rebuild with `exe`.
+///
+/// The returned channel carries child output and the final result. Use this
+/// entry point when the caller supplies the executable path.
 pub fn spawn_with(exe: &Path, library: &Path, out: &Path) -> Result<Receiver<Progress>> {
     let (tx, rx) = mpsc::channel();
     let exe = exe.to_path_buf();
@@ -46,9 +58,9 @@ pub fn spawn_with(exe: &Path, library: &Path, out: &Path) -> Result<Receiver<Pro
     Ok(rx)
 }
 
-/// One build, start to finish.
+/// Run one rebuild and replace the output only after success.
 fn run(exe: &Path, library: &Path, out: &Path, tmp: &Path, tx: &Sender<Progress>) -> Result<()> {
-    // An empty build wipes it.
+    // Reject an empty library before the rebuild can replace the output.
     if archive_count(library)? == 0 {
         bail!("{} holds no dictionary archives", library.display());
     }
@@ -65,14 +77,14 @@ fn run(exe: &Path, library: &Path, out: &Path, tmp: &Path, tx: &Sender<Progress>
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Or a black box flashes up.
+        // Do not show a console window. The child has no visible console window.
         .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .with_context(|| format!("starting {}", exe.display()))?;
 
     let stdout = child.stdout.take().context("the builder gave no stdout")?;
     let lines = tx.clone();
-    // A full pipe deadlocks wait.
+    // Read stdout on another thread. A full pipe can block the child before `wait` returns.
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
             if lines.send(Progress::Line(line)).is_err() {
@@ -96,19 +108,23 @@ fn run(exe: &Path, library: &Path, out: &Path, tmp: &Path, tx: &Sender<Progress>
     Ok(())
 }
 
-/// `<out>` with `.tmp` appended.
+/// Build the temporary path beside `<out>`.
+///
+/// The rebuild writes here before it replaces `<out>`.
 fn tmp_path(out: &Path) -> PathBuf {
     with_suffix(out, ".tmp")
 }
 
-/// `<out>` plus `suffix`.
+/// Return `<out>` with `suffix` appended.
 fn with_suffix(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
 }
 
-/// How many archives are there?
+/// Count the ZIP archives in `library`.
+///
+/// Return an error when the directory cannot be read.
 fn archive_count(library: &Path) -> Result<usize> {
     let listing = std::fs::read_dir(library)
         .with_context(|| format!("reading {}", library.display()))?;
@@ -118,7 +134,9 @@ fn archive_count(library: &Path) -> Result<usize> {
         .count())
 }
 
-/// The innermost cause, if any.
+/// Extract the last non-empty line from child error text.
+///
+/// The rebuild adds this line to its failure message.
 fn last_line(errors: &str) -> String {
     match errors.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(line) => format!(": {}", line.trim()),

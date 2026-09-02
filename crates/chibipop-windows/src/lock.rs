@@ -1,4 +1,4 @@
-//! Cross-process Apply lock.
+//! Provides a cross-process lock for a library Apply.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -6,25 +6,26 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 
-/// Held for one whole Apply.
+/// Holds the library lock for one complete Apply.
 pub struct LibraryLock(HANDLE);
 
 impl LibraryLock {
-    /// Claim `dir`, or refuse.
+    /// Claims the lock for `dir`, or returns an error.
     pub fn acquire(dir: &Path) -> Result<LibraryLock> {
         let name: Vec<u16> = name_for(dir).encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: `name` is a NUL-terminated UTF-16 buffer that outlives the
-        // call, which is all `CreateMutexW` reads through the pointer. A null
-        // security descriptor asks for the default, and the returned handle is
-        // owned by this struct and closed exactly once, in `Drop`.
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer. It stays alive for
+        // this call, and `CreateMutexW` reads only through this pointer. The
+        // null security descriptor selects the default. This struct owns the
+        // returned handle and closes it exactly once in `Drop`.
         let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
             .context("CreateMutexW for the library lock")?;
-        // SAFETY: FFI call with no preconditions, reading this thread's own
-        // last-error value, which the call above just set.
+        // SAFETY: This FFI call has no preconditions. It reads this thread's
+        // own last-error value that the call before it set.
         let taken = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if taken {
-            // SAFETY: `handle` was just returned by `CreateMutexW` and is not
-            // stored anywhere else, so closing it here cannot be a double free.
+            // SAFETY: `CreateMutexW` returned `handle` immediately before this
+            // block. This struct has not stored the handle. This block closes
+            // it once, so no double free occurs.
             unsafe {
                 let _ = CloseHandle(handle);
             }
@@ -36,22 +37,22 @@ impl LibraryLock {
 
 impl Drop for LibraryLock {
     fn drop(&mut self) {
-        // SAFETY: `self.0` came from `CreateMutexW` in `acquire`, is owned by
-        // this struct alone, and `Drop` runs exactly once.
+        // SAFETY: `acquire` received `self.0` from `CreateMutexW`. This struct
+        // owns the handle alone. `Drop` runs once and closes the handle.
         unsafe {
             let _ = CloseHandle(self.0);
         }
     }
 }
 
-/// One name per library folder.
+/// Makes one lock name for each library folder.
 fn name_for(dir: &Path) -> String {
     format!("chibipop-library-{:016x}", fnv1a(&dir.to_string_lossy().to_lowercase()))
 }
 
-/// FNV-1a, 64-bit.
+/// Computes a 64-bit FNV-1a value.
 ///
-/// Stable across builds.
+/// The result stays stable across builds.
 fn fnv1a(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
@@ -77,7 +78,7 @@ mod tests {
         assert_ne!(name_for(Path::new(r"C:\a\library")), name_for(Path::new(r"C:\b\library")));
     }
 
-    /// Paths are case-insensitive.
+    /// Windows treats these paths as case-insensitive.
     #[test]
     fn the_same_folder_named_two_ways_is_one_lock() {
         assert_eq!(name_for(Path::new(r"C:\A\Library")), name_for(Path::new(r"c:\a\library")));
@@ -90,7 +91,7 @@ mod tests {
         assert!(!name.contains('\\'), "{name}");
     }
 
-    /// Refused, never queued.
+    /// Refuses a second lock and does not queue it.
     #[test]
     fn a_second_lock_on_one_folder_is_refused_and_freed_by_dropping_the_first() {
         let dir = std::env::temp_dir().join(format!("chibipop_lock_{}", std::process::id()));

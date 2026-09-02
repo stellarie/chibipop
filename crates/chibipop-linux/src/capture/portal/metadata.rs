@@ -1,79 +1,71 @@
-//! ADR-0003 rung 2's arithmetic: turning a `spa_meta_cursor` sample
-//! into a core cursor position.
+//! This module converts a `spa_meta_cursor` sample into a core cursor position.
 //!
-//! The portal's `cursor_mode=METADATA` rides the PipeWire stream the
-//! capture backend already opened, so the rung costs no extra consent —
-//! but the position it carries is in that stream's *own* buffer pixels,
-//! measured from the stream's top-left. Core speaks global physical
-//! pixels, and the global physical space it means is the one
-//! [`crate::cursor::outputs`] defines: each output's logical origin
-//! scaled by that output's own scale. Both seams must anchor
-//! identically or a hover on the second monitor lands on the first, so
-//! everything here funnels through the same
-//! [`OutputGeometry::physical_origin`] the screencopy path uses.
+//! The portal's `cursor_mode=METADATA` uses the PipeWire stream that the
+//! capture backend already opened, so this rung needs no extra consent. The
+//! sample uses the stream buffer's pixels, with the stream top-left as origin.
+//! Core uses global physical pixels. [`crate::cursor::outputs`] defines this
+//! space after the code scales each output's logical origin with that output's scale.
+//! Both seams must use the same anchor. Otherwise, a hover on the second
+//! monitor lands on the first. This module uses
+//! [`OutputGeometry::physical_origin`], as the screencopy path does.
 //!
-//! Pure arithmetic, no PipeWire and no D-Bus: the interesting cases
-//! (mixed scales, a portal that omits stream placement, an off-stream
-//! sample) are all testable without a compositor.
+//! This module contains pure arithmetic. It uses no PipeWire or D-Bus. Tests
+//! cover mixed scales, a portal without stream placement, and an off-stream
+//! sample without a compositor.
 
 use crate::cursor::outputs::OutputGeometry;
 use chibipop::geom::PhysPoint;
 
-/// One portal stream's placement, as the portal described it.
+/// Placement data for one portal stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamPlacement {
-    /// The portal stream property `position`: the stream's top-left in
-    /// the compositor's logical layout. Absent on backends that do not
-    /// send it.
+    /// The portal stream property `position`: the stream top-left in the
+    /// compositor's logical layout. Some backends do not send this property.
     pub logical_origin: Option<(i32, i32)>,
-    /// The portal stream property `size`, logical units. Absent when
-    /// the backend omits it.
+    /// The portal stream property `size`, in logical units. Some backends omit
+    /// this property.
     pub logical_size: Option<(i32, i32)>,
     /// The negotiated video size, in stream buffer pixels.
     pub buffer_size: (i32, i32),
 }
 
-/// Which output this stream is showing, matched on the layout
-/// rectangle the portal reported. `None` when the portal sent no
-/// placement and there is more than one output to guess between.
+/// Returns the output that matches the portal's layout rectangle. Returns
+/// `None` when the portal gives no placement and several outputs exist.
 ///
-/// The match is exact, not nearest: the portal and `wl_output`/
-/// `zxdg_output_v1` are two views of the same compositor layout, so an
-/// origin that does not line up means this stream is not one of the
-/// outputs we know about (a window or a virtual source), and guessing
-/// would anchor a cursor to the wrong monitor.
+/// The match is exact, not nearest. The portal and `wl_output`/
+/// `zxdg_output_v1` are two views of one compositor layout. An unmatched
+/// origin can describe a window or virtual source. A guess could place the
+/// cursor on the wrong monitor.
 pub fn match_output(placement: &StreamPlacement, outputs: &[OutputGeometry]) -> Option<usize> {
     let Some((lx, ly)) = placement.logical_origin else {
-        // No placement at all. With one output there is nothing to be
-        // ambiguous about; with several, refuse to guess.
+        // No placement exists. One output gives an unambiguous result. With several
+        // outputs, the function does not guess.
         return if outputs.len() == 1 { Some(0) } else { None };
     };
     outputs.iter().position(|o| {
         o.logical_x == lx
             && o.logical_y == ly
-            // The size only tightens the match when the portal sent it;
-            // origins alone are already unique in a valid layout.
+            // A supplied size narrows the match. The origin alone is unique in a valid
+            // layout.
             && placement
                 .logical_size
                 .is_none_or(|(w, h)| o.logical_w == w && o.logical_h == h)
     })
 }
 
-/// The stream's top-left in core's global physical space.
+/// Returns the stream top-left in core's global physical space.
 ///
-/// `None` when there is no output to anchor against at all — before the
-/// first `wl_output` roundtrip, or for a stream whose placement matches
-/// nothing and which the portal did not even position.
+/// Returns `None` when no output can anchor the stream. This can occur before
+/// the first `wl_output` roundtrip or when the portal provides no stream position.
 pub fn anchor(placement: &StreamPlacement, outputs: &[OutputGeometry]) -> Option<PhysPoint> {
     if let Some(index) = match_output(placement, outputs) {
         let (x, y) = outputs[index].physical_origin();
         return Some(PhysPoint { x, y });
     }
-    // Unmatched, but positioned: scale the portal's logical origin by
-    // the first output's scale. This is the same documented
-    // approximation `cursor::outputs` already makes for mixed-scale
-    // layouts, where a single global physical space is not well-defined
-    // — least-wrong beats no cursor at all.
+    // The stream has a position but no exact output match. Scale the portal's
+    // logical origin with the first output's scale. `cursor::outputs` uses this
+    // approximation for mixed-scale layouts, where one global physical space is
+    // not well-defined. This result gives a cursor position instead of none.
     let (lx, ly) = placement.logical_origin?;
     let scale = outputs.first()?.scale();
     Some(PhysPoint {
@@ -82,16 +74,14 @@ pub fn anchor(placement: &StreamPlacement, outputs: &[OutputGeometry]) -> Option
     })
 }
 
-/// A `spa_meta_cursor` sample (stream buffer pixels) as a global
-/// physical position. `None` for a sample outside the stream, which is
-/// how a hidden or off-stream cursor reads.
+/// Converts a `spa_meta_cursor` sample from stream buffer pixels to a global
+/// physical position. Returns `None` for a sample outside the stream.
 ///
-/// Silence rather than a clamp is deliberate: the portal sends
-/// `spa_meta_cursor.id == 0` and stale or out-of-range positions when
-/// the cursor is not on this stream, and clamping such a sample to the
-/// nearest edge would drag hover to a corner of the monitor and keep it
-/// there. A rejected sample simply means "no news", and the previous
-/// position stands.
+/// The portal sends `spa_meta_cursor.id == 0` and stale or out-of-range
+/// positions when the cursor is not on this stream. The code rejects these
+/// samples. It does not move them to an edge. An edge correction would move
+/// hover to a monitor corner and keep it there. A rejected sample means "no
+/// news", so the previous position remains.
 pub fn cursor_to_global(
     anchor: PhysPoint,
     buffer_size: (i32, i32),
@@ -139,8 +129,8 @@ mod tests {
         }
     }
 
-    /// The headline case: a sample on the second monitor's stream must
-    /// land where the screencopy seam would have put it.
+    /// A sample on the second monitor's stream must reach the same global point
+    /// as the screencopy seam.
     #[test]
     fn a_sample_on_the_second_stream_lands_at_the_right_global_point() {
         let outputs = [LEFT, RIGHT];
@@ -154,7 +144,7 @@ mod tests {
             Some(PhysPoint { x: 3940, y: 200 }),
             cursor_to_global(origin, stream.buffer_size, 100, 200)
         );
-        // The two seams must agree exactly, or hover jumps monitors.
+        // Both seams must produce the same point. Otherwise, hover uses the wrong monitor.
         assert_eq!(
             Some(RIGHT.buffer_to_global(100, 200)),
             cursor_to_global(origin, stream.buffer_size, 100, 200)
@@ -169,13 +159,13 @@ mod tests {
         assert_eq!(Some(PhysPoint { x: 0, y: 0 }), anchor(&stream, &outputs));
     }
 
-    /// A size the portal reported must agree too: same origin, wrong
-    /// rectangle, no match.
+    /// A reported size must also match. The same origin with another rectangle
+    /// does not match.
     #[test]
     fn a_reported_size_tightens_the_match() {
         let outputs = [LEFT, RIGHT];
         assert_eq!(None, match_output(&placed((2560, 0), (1280, 720), (1280, 720)), &outputs));
-        // Without a size, the origin alone is enough.
+        // The origin alone is enough without a size.
         let sizeless = StreamPlacement {
             logical_origin: Some((2560, 0)),
             logical_size: None,
@@ -193,7 +183,7 @@ mod tests {
         assert_eq!(Some(PhysPoint { x: 0, y: 0 }), anchor(&bare, &[LEFT]));
     }
 
-    /// With several outputs and nothing to match on, refuse to guess.
+    /// A stream without placement cannot choose among several outputs.
     #[test]
     fn a_placementless_stream_will_not_guess_between_outputs() {
         let bare =
@@ -203,20 +193,20 @@ mod tests {
         assert_eq!(None, anchor(&bare, &[]));
     }
 
-    /// An unmatched but positioned stream falls back to the first
-    /// output's scale — the documented mixed-scale approximation.
+    /// An unmatched but positioned stream uses the first output's scale. This is
+    /// the documented approximation for mixed-scale layouts.
     #[test]
     fn an_unmatched_stream_scales_by_the_first_outputs_scale() {
         let outputs = [RIGHT, LEFT];
         let stream = placed((100, 200), (640, 360), (960, 540));
         assert_eq!(None, match_output(&stream, &outputs));
         assert_eq!(Some(PhysPoint { x: 150, y: 300 }), anchor(&stream, &outputs));
-        // Nothing to scale by at all: no anchor rather than a guess.
+        // Without an output, the function returns no anchor and does not guess.
         assert_eq!(None, anchor(&stream, &[]));
     }
 
-    /// Out-of-range samples are silence, not an edge position: the
-    /// portal sends them whenever the cursor is not on this stream.
+    /// An out-of-range sample returns no position. The portal sends such samples
+    /// when the cursor is not on this stream.
     #[test]
     fn an_off_stream_sample_is_silence_rather_than_a_clamp() {
         let origin = PhysPoint { x: 3840, y: 0 };
@@ -225,15 +215,15 @@ mod tests {
         assert_eq!(None, cursor_to_global(origin, size, 10, -1));
         assert_eq!(None, cursor_to_global(origin, size, 2880, 10));
         assert_eq!(None, cursor_to_global(origin, size, 10, 1620));
-        // The last in-range pixel still counts.
+        // The final in-range pixel remains valid.
         assert_eq!(
             Some(PhysPoint { x: 3840 + 2879, y: 1619 }),
             cursor_to_global(origin, size, 2879, 1619)
         );
     }
 
-    /// Before the format is negotiated the buffer size is zero, and
-    /// every sample against it is meaningless.
+    /// Before format negotiation, the buffer size is zero. Every sample is then
+    /// invalid.
     #[test]
     fn a_degenerate_buffer_size_accepts_nothing() {
         let origin = PhysPoint { x: 0, y: 0 };

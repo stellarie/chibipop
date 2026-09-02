@@ -1,4 +1,4 @@
-//! The schema and the writer.
+//! Dictionary build schema and writer.
 
 use crate::dict::archive::{
     for_each_media, for_each_meta_row, for_each_row, read_index, read_styles_css, TermBanks,
@@ -21,19 +21,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Bumped to 4 by the dictionary-roles work: `reported_freq` keeps each
-/// frequency dictionary's own claims per dictionary instead of merging them
-/// into one build-time global, and ticket 02's pitch table lands under the
-/// same bump. Costs every user one rebuild, once - a rebuild, not a
-/// re-import, because the library directory keeps the archives and the
-/// rebuild flow replays them.
+/// Version 4 adds per-Dictionary claims to `reported_freq` and adds the `pitch` table.
+/// `reported_freq` keeps each frequency Dictionary claim separate. The build does not merge
+/// claims globally.
+/// Version 4 requires one rebuild because the library directory keeps the source archives.
+/// The rebuild reads those archives again. It does not re-import them.
 const SCHEMA_VERSION: i64 = 4;
 #[cfg(test)]
 const BATCH_ROWS: usize = 2;
 #[cfg(not(test))]
 const BATCH_ROWS: usize = 500;
 
-/// One buffered `term` row, as spans into the bank being written.
+/// One buffered `term` row, with spans into the bank.
 #[allow(clippy::type_complexity)]
 type TermBatchRow = (Span, Option<Span>, Span, Span, Option<i64>, i64, i64);
 
@@ -129,7 +128,7 @@ CREATE TABLE reported_freq (     -- one dictionary's own claim, per headword
     -- enabled dictionaries said about one headword and gets a handful of
     -- rows back. `term.freq` is still the reduced Frequency rank
     -- denormalised onto the hot row, so nothing on the term path comes here
-    -- at all (ADR-0015).
+    -- at all (ARCHITECTURE.md#dictionary-and-lookup).
 );
 
 CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
@@ -146,19 +145,19 @@ CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
     reading  TEXT NOT NULL,
     -- Where the pitch falls, in the two forms the schema permits, exactly
     -- one per row. `downstep` is the 1-based count of moras before the fall
-    -- with 0 meaning heiban, which is what all 511 488 accents ticket 01
-    -- censused are; `pattern` is the `^[HL]+$` level-per-mora form, which
-    -- the schema permits and neither corpus uses. Two columns rather than
-    -- one because the two forms share no indexing origin and the string can
-    -- say things no integer can - several falls, or a word that neither
-    -- falls nor starts low.
+    -- with 0 meaning heiban, which is what all 511 488 censused accents
+    -- are; `pattern` is the `^[HL]+$` level-per-mora form, which the schema
+    -- permits and neither corpus uses. Two columns rather than one because
+    -- the two forms share no indexing origin and the string can say things
+    -- no integer can - several falls, or a word that neither falls nor
+    -- starts low.
     downstep INTEGER,
     pattern  TEXT,
     -- The moras this accent marks nasal and devoiced, as JSON arrays of
     -- 1-based mora indices, and the accent's own tags. Stored and not
-    -- drawn: ticket 06 draws the marks, 25.8% of NHK's rows carry one, and
-    -- dropping them here is exactly what would have cost that ticket a
-    -- second schema bump.
+    -- drawn: mark drawing needs them, 25.8% of NHK's rows carry one, and
+    -- dropping them here is exactly what would have cost a second schema
+    -- bump.
     nasal    TEXT NOT NULL,
     devoice  TEXT NOT NULL,
     tags     TEXT NOT NULL
@@ -166,38 +165,34 @@ CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
     -- only read is one probe per shown card, and both columns are always
     -- given. Nothing on the term path comes here at all - pitch is per
     -- reading, so it cannot ride on a `term` row and must not widen one
-    -- (ADR-0014).
+    -- (ARCHITECTURE.md#dictionary-and-lookup).
 );
 ";
 
-/// Every table `dict_id` keys, children before parents, and the one list
-/// [`crate::dict::edit::remove_dictionary`] walks.
+/// Tables that `dict_id` references, in child-to-parent order.
+/// [`crate::dict::edit::remove_dictionary`] walks this list.
 ///
-/// It lives here, next to [`DDL`], because the two have to be read
-/// together. Ticket 17 added `dict_style` above and did not add it to the
-/// removal, and no test noticed for a whole ticket, because every committed
-/// fixture ships no `styles.css` and so leaves `dict_style` empty - a
-/// removal against an empty table passes whatever it forgets. One list read
-/// beside the schema it belongs to is the cheapest thing that cannot drift.
+/// Keep this list beside [`DDL`]. A prior change added `dict_style` to `DDL`
+/// but omitted it here. Empty fixtures hid the defect because they had no
+/// `styles.css` and therefore no `dict_style` rows. The removal then
+/// succeeded and left that table's rows.
 ///
-/// `dict` itself is deliberately absent: it is the parent row the removal
-/// deletes *last*, and it is counted on its own.
+/// This list omits `dict` on purpose. The removal deletes its parent row *last*
+/// and handles that row separately.
 ///
-/// The order is the foreign-key order, and it is the one thing here that
-/// cannot be derived cheaply - `term` references `entry`, and every table
-/// references `dict`, so children have to go first. The *membership* is
-/// checked against the schema of the database in hand
-/// ([`dict_keyed_tables`]), so a table added above and forgotten here
-/// aborts a removal by name instead of orphaning a row.
+/// The order follows the foreign keys. `term` references `entry`, and each
+/// table references `dict`, so the removal deletes child rows first. The
+/// removal compares the *membership* of this list with [`dict_keyed_tables`].
+/// An unknown table then stops removal and prevents orphan rows.
 pub const DICT_KEYED: [&str; 6] =
     ["term", "entry", "media", "dict_style", "reported_freq", "pitch"];
 
-/// Every table in *this* database that carries a `dict_id` column.
+/// Every table in this database with a `dict_id` column.
 ///
-/// Read out of the live schema rather than assumed, because the point of it
-/// is to catch a schema this code has not been taught about. `dict` is in
-/// the answer - its primary key is named `dict_id` - and the caller is what
-/// knows to hold it back to the end.
+/// This function reads the live schema. It must find tables that this code
+/// does not know.
+/// `dict` belongs in the result because its primary key is `dict_id`.
+/// The caller keeps `dict` for the final delete.
 pub fn dict_keyed_tables(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn
         .prepare(
@@ -223,7 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_reported_freq_term ON reported_freq(term);
 CREATE INDEX IF NOT EXISTS idx_pitch_term_reading ON pitch(term, reading);
 ";
 
-/// Row counts a build wrote.
+/// Counts of rows written by a build.
 pub struct BuildCounts {
     pub entries: i64,
     pub terms: i64,
@@ -231,45 +226,43 @@ pub struct BuildCounts {
     pub styles: StyleCounts,
 }
 
-/// What one build made of the dictionaries' own stylesheets.
+/// Counts for one build's Dictionary stylesheets.
 ///
-/// The build stores the text and compiles it once, here, only to record
-/// these numbers - it persists no compiled form, so first use still
-/// compiles. `dropped` is the gauge `tools/dict-census` reports against the
-/// live grammar: it is the count of rules whose selectors this build cannot
-/// read, and it shrinks as the grammar grows.
+/// The build stores stylesheet text and compiles it once to collect these counts.
+/// It does not store compiled data. The matcher compiles the text on first use.
+/// `dropped` counts rules whose selectors the current grammar cannot read.
+/// `tools/dict-census` compares this count with the live grammar.
 ///
-/// `declarations` and `unmapped` are the second half of that gauge, one
-/// axis in: the census counts a stylesheet's declarations too, so a build
-/// that never stated its own property gap would let the two arithmetics
-/// drift with nobody to notice. A rule can survive the grammar and still
-/// draw nothing this renderer has - `display: grid` is the corpus's
-/// commonest declaration - and that is a property gap, not a selector one.
+/// `declarations` and `unmapped` measure a separate property gap.
+/// A rule can pass selector grammar but still use properties that this renderer lacks.
+/// `display: grid` is common in the corpus and shows this property gap.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct StyleCounts {
-    /// Dictionaries that shipped a `styles.css`.
+    /// Dictionaries with a `styles.css` file.
     pub sheets: usize,
-    /// Bytes of CSS stored.
+    /// CSS bytes that the build stores.
     pub bytes: usize,
-    /// Rules compiled into a rule table.
+    /// Rules that the build keeps in its rule table.
     pub kept: usize,
-    /// Rules dropped whole: an unsupported selector, or an at-rule body.
+    /// Rules that the build drops: an unsupported selector or an at-rule body.
     pub dropped: usize,
-    /// Selectors compiled, after expanding selector lists and `&` nesting.
+    /// Selectors that the build compiles after it expands selector lists and
+    /// `&`-nested selectors.
     pub selectors: usize,
-    /// Declarations compiled onto a [`crate::dict::gloss::StyleKey`], after
-    /// expanding every `margin` and `padding` shorthand into its four
-    /// longhands. Only from rules that were kept: a rule whose every
-    /// declaration is unmapped counts none here and is not `dropped`
-    /// either, because it is a property gap rather than a grammar one.
+    /// Declarations that the build compiles onto a
+    /// [`crate::dict::gloss::StyleKey`]. The build expands each `margin` and
+    /// `padding` shorthand into four longhands. This count includes kept rules
+    /// only. A rule with no mapped declaration counts neither here nor in
+    /// `dropped`. It has a property gap, not a grammar gap.
     pub declarations: usize,
-    /// Declarations this build cannot express: a property outside
-    /// `sheet::css_key`'s table, or a `var()` value naming a custom
-    /// property declared on Yomitan's popup chrome, which this renderer has
-    /// no equivalent of.
+    /// Declarations that this build cannot express.
+    /// This includes a property outside `sheet::css_key` and a `var()` value
+    /// that names a custom property from Yomitan's popup chrome.
+    /// This renderer has no equivalent for that chrome.
     pub unmapped: usize,
-    /// Stylesheets that did not scan cleanly. Every rule the scanner did
-    /// recover is still compiled; this counts the sheets, not the losses.
+    /// Stylesheets that the scanner cannot read without errors.
+    /// The build still compiles each rule that the scanner recovers.
+    /// This field counts stylesheets, not lost rules.
     pub malformed: usize,
 }
 
@@ -303,27 +296,26 @@ impl StyleCounts {
     }
 }
 
-/// What extracting one corpus's - or one archive's - media produced.
+/// Counts from media that the build extracts from one corpus or one archive.
 ///
-/// Every field is a diagnostic the acceptance asks for: how many assets the
-/// image nodes named, how many resolved, how much the database grew, and
-/// how many did not resolve. The two failure counts are separate because
-/// they mean different things to a dictionary author: `missing` is an
-/// archive that does not ship what its own nodes reference, `unreadable` is
-/// a file that is there and corrupt.
+/// Each field supports a required diagnostic. The fields count named assets,
+/// stored assets, database bytes, and unresolved assets.
+/// The two failure counts stay separate because they have different causes.
+/// `missing` means an archive lacks referenced bytes.
+/// `unreadable` means the archive has a corrupt file.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct MediaCounts {
-    /// Distinct asset paths the kept rows' image nodes referenced.
+    /// Distinct asset paths that kept rows reference.
     pub referenced: usize,
-    /// Media rows written.
+    /// Media rows written by the build.
     pub stored: usize,
-    /// Blobs newly contributed - the count after content deduplication.
+    /// New blobs that this run adds after it maps equal bytes to one blob.
     pub blobs: usize,
-    /// Bytes those new blobs added to the database.
+    /// Bytes that new blobs add to the database.
     pub bytes: u64,
-    /// Referenced, and no usable bytes in the archive.
+    /// Assets that image nodes reference but archives do not supply.
     pub missing: usize,
-    /// Present, and with no readable intrinsic size.
+    /// Files that archives supply but the build cannot size.
     pub unreadable: usize,
 }
 
@@ -348,7 +340,7 @@ impl MediaCounts {
     }
 }
 
-/// json.dumps's separators.
+/// Separators that `json.dumps` writes.
 #[derive(Default)]
 struct PySpaced;
 
@@ -377,7 +369,7 @@ impl serde_json::ser::Formatter for PySpaced {
     }
 }
 
-/// Matches json.dumps spacing.
+/// Encodes `value` with the separators that `json.dumps` writes.
 fn to_py_json<T: Serialize>(value: &T) -> Result<String> {
     let mut buf = Vec::new();
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, PySpaced);
@@ -396,13 +388,13 @@ pub fn build(
         anyhow::bail!("no term archives to build from");
     }
 
-    // A fresh exe has no data/ yet.
+    // A fresh executable has no data/ directory yet.
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    // Never destroy out on failure.
+    // Never destroy `out` when the build fails.
     let tmp = suffixed(out, ".building");
     if tmp.exists() {
         std::fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
@@ -418,52 +410,41 @@ pub fn build(
     Ok(counts)
 }
 
-/// `out` with `suffix` appended to the whole file name.
+/// Returns `out` with `suffix` appended to the complete file name.
 ///
-/// Appended, not swapped for the extension: `chibipop.sqlite-wal` is the
-/// name SQLite itself derives, and `chibipop.sqlite.building` sorts beside
-/// the file it will become.
+/// This function appends the suffix and keeps the extension. SQLite derives
+/// `chibipop.sqlite-wal`. `chibipop.sqlite.building` stays beside the file
+/// that the build promotes.
 fn suffixed(out: &Path, suffix: &str) -> PathBuf {
     let mut name = out.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
 }
 
-/// Puts a finished build in place of the live database.
+/// Replaces the live database with a checked build.
 ///
-/// Three things happen here, and their order is the whole crash-safety
-/// story:
+/// The order of these steps protects the live database:
 ///
-/// 1. **The built file is read back.** [`build_into`] runs the bulk load
-///    under `synchronous = OFF`, which is the right trade for a load that
-///    writes into a throwaway file - but it means this is the only place a
-///    bad build can still be caught. A `quick_check` here costs one pass
-///    over the new pages and buys the guarantee that a database nobody can
-///    read is thrown away rather than promoted over a working one and
-///    discovered on the next hover.
-/// 2. **The previous database's `-wal` and `-shm` go.** A write-ahead log's
-///    sidecars are keyed to the database's *file name*, never to its inode,
-///    and `rename` replaces only the main file. So a rename on its own
-///    leaves the old database's log sitting beside the new database, under
-///    the name the new one now answers to, and the next reader **recovers
-///    that log into the new file**. That is not a theoretical hazard: it is
-///    `database disk image is malformed`, and it is what a user reported.
-///    The checkpoint before the removal is what makes the removal lossless.
-/// 3. **The rename.** One instant, and the only one.
+/// 1. **Check the built file.** [`build_into`] uses `synchronous = OFF` for
+///    the bulk load. The file is temporary, so lower durability is safe. `quick_check`
+///    is the last check that can reject a bad build before promotion.
+/// 2. **Remove the old `-wal` and `-shm` files.** SQLite keys these sidecars
+///    to the database *file name*, not its inode. A rename replaces only the
+///    main file. If the old sidecars remain, the next reader can recover old
+///    pages into the new database. The checkpoint before removal preserves them.
+/// 3. **Rename.** This is the only instant when the live database changes.
 ///
-/// Every prefix of that sequence leaves a database a reader can open:
+/// Each earlier failure leaves a readable database:
 ///
-/// - died during 1: `out` is untouched and whole. The orphaned `.building`
-///   is removed by the next build, which unlinks it before it starts.
-/// - died during 2: `out` is still the *old* database, and the checkpoint
-///   moved everything its log held into it before the log was unlinked - so
-///   the old database alone is complete. Living readers are unaffected
-///   either way: an unlink drops a name, never an open file.
-/// - died during 3: impossible. A rename is atomic, and both sides of it
-///   are a whole database with no sidecar to recover.
+/// - A failure in step 1 leaves `out` unchanged. The next build removes the
+///   orphaned `.building` file.
+/// - A failure in step 2 leaves the old `out` complete. The checkpoint copied
+///   log pages before removal. An open reader stays safe because unlink removes
+///   a name, not an open file.
+/// - Step 3 uses atomic rename. Both files are complete and have no sidecars.
 ///
-/// The order that is *not* safe is the obvious one - rename first, tidy up
-/// after - because the window between those two steps is exactly the bug.
+/// Do not rename before you remove the sidecars. That order lets old log pages
+/// enter the new database.
 fn promote(tmp: &Path, out: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
     verify_built(tmp, on_progress)?;
     drain_wal(out);
@@ -472,23 +453,22 @@ fn promote(tmp: &Path, out: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
         .with_context(|| format!("replacing {} with {}", out.display(), tmp.display()))
 }
 
-/// Reads the finished build back before anything is allowed to depend on it.
+/// Checks a completed build before promotion.
 ///
-/// The checkpoint first, so `quick_check` reads the pages a fresh reader
-/// would and the promoted file needs no log of its own. Then the `fsync`,
-/// because `synchronous = OFF` means nothing so far has promised the bytes
-/// left the page cache - and `quick_check` reads back *through* that cache,
-/// so it would happily bless a file that is not on the platter. A rename is
-/// only worth as much as the file it publishes.
+/// The checkpoint makes `quick_check` read pages that a fresh reader reads.
+/// It also leaves the file with no WAL frames. The second step calls `fsync`
+/// because `synchronous = OFF` does not flush bytes from the page cache.
+/// `quick_check` reads *through* that cache, so it cannot prove that bytes reached
+/// disk. Rename has value only when it publishes a durable file.
 fn verify_built(built: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
     on_progress("building  checking the new database");
     let conn = Connection::open(built)
         .with_context(|| format!("reopening {} to check it", built.display()))?;
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .with_context(|| format!("checkpointing {}", built.display()))?;
-    // quick_check, not integrity_check: the same page-level structural
-    // check without the index-against-table cross-check, which on a
-    // multi-gigabyte corpus is the difference between seconds and minutes.
+    // Use `quick_check`, not `integrity_check`. It performs the page structure
+    // check but skips the index-to-table check. That check takes minutes on a
+    // multi-gigabyte corpus.
     let verdict: String = conn
         .query_row("PRAGMA quick_check", [], |r| r.get(0))
         .with_context(|| format!("checking {}", built.display()))?;
@@ -499,10 +479,9 @@ fn verify_built(built: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
         );
     }
     drop(conn);
-    // `write(true)`, not `File::open`: Windows' `FlushFileBuffers` needs a
-    // handle with write access and answers a read-only one with
-    // ERROR_ACCESS_DENIED, so a plain read handle turns every build on
-    // Windows into "Access is denied. (os error 5)".
+    // Use `write(true)`, not `File::open`. Windows requires write access for
+    // `FlushFileBuffers`. A read-only handle returns `ERROR_ACCESS_DENIED` and
+    // makes every Windows build fail with "Access is denied. (os error 5)".
     File::options()
         .write(true)
         .open(built)
@@ -511,28 +490,23 @@ fn verify_built(built: &Path, on_progress: &dyn Fn(&str)) -> Result<()> {
     Ok(())
 }
 
-/// Moves everything the live database's log holds into the database itself,
-/// so unlinking the log loses nothing.
+/// Copies WAL pages into the live database before the build removes the log.
 ///
-/// Best effort, and deliberately: a reader mid-transaction can refuse a
-/// truncating checkpoint, a file too damaged to open has nothing worth
-/// draining, and this database is about to be replaced whichever way it
-/// goes. What the attempt buys is the crash window in [`promote`]'s step 2 -
-/// when it succeeds, the old database on its own is complete, so dying
-/// before the rename leaves a whole database rather than a torso.
+/// This function tries to finish the checkpoint. A reader in a transaction can reject a
+/// `TRUNCATE` checkpoint. A file too damaged to open holds no usable pages.
+/// Either case lets the build remove the old database.
+/// This work protects step 2 of [`promote`]. After success, the old database
+/// is complete by itself, so a crash before rename leaves no fragment.
 fn drain_wal(out: &Path) {
     if !out.exists() {
         return;
     }
     if let Ok(conn) = Connection::open(out) {
-        // Never waits. A rebuild happens while the daemon is serving
-        // lookups, so a reader is *expected* to be holding a snapshot, and
-        // the default five-second busy timeout would spend five seconds of
-        // every rebuild waiting for a checkpoint whose failure costs
-        // nothing. `PASSIVE` first because it copies back every frame no
-        // reader still needs and cannot block at all; `TRUNCATE` then
-        // finishes the job whenever the readers happen to be between
-        // transactions.
+        // Do not wait. The daemon serves lookups during a rebuild, and a reader
+        // often holds a snapshot. A five-second busy timeout can delay every rebuild.
+        // A failed checkpoint leaves the database unchanged. `PASSIVE` copies frames
+        // that readers no longer need and does not block. `TRUNCATE` then finishes
+        // when readers sit between transactions.
         let _ = conn.execute_batch(
             "PRAGMA busy_timeout = 0;
              PRAGMA wal_checkpoint(PASSIVE);
@@ -541,12 +515,12 @@ fn drain_wal(out: &Path) {
     }
 }
 
-/// Removes the sidecars the previous database left under this name.
+/// Removes sidecars that the previous database left under this file name.
 ///
-/// A hard error, not a best effort: a sidecar that will not go is a sidecar
-/// the next reader recovers into the new file, so refusing to promote leaves
-/// the user a working dictionary instead of a malformed one. That is also
-/// the honest answer on a platform where an open file cannot be unlinked.
+/// This function returns an error and reports failure. A later reader
+/// can recover any sidecar that remains into the new file. If promotion fails,
+/// the user keeps a sound Dictionary instead of a malformed one.
+/// The error also covers a platform that cannot unlink an open file.
 fn drop_sidecars(out: &Path) -> Result<()> {
     for suffix in ["-wal", "-shm"] {
         let path = suffixed(out, suffix);
@@ -574,34 +548,31 @@ fn build_into(
     on_progress: &dyn Fn(&str),
 ) -> Result<BuildCounts> {
     let sources = load_freqs(freqs)?;
-    // Every frequency dictionary is enabled and in library order in a fresh
-    // build - there is no disabled state to read and no user order yet - so
-    // the reduction is over all of them under the default strategy. A user
-    // who has chosen another one reindexes; that is what a reindex is for,
-    // and it is seconds against this function's minutes.
+    // A fresh build enables every frequency Dictionary in library order. It has
+    // no disabled state or user order, so it applies the default Ranking strategy.
+    // A user who changes the strategy runs Reindex. Reindex handles that change
+    // and costs seconds, while this function costs minutes.
     let strategy = RankingStrategy::default();
     let names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
     let tables: Vec<FreqTable> = sources.into_iter().map(|s| s.table).collect();
     let ranks = frequency::reduce(&tables, strategy);
 
     let mut conn = Connection::open(out).with_context(|| format!("creating {}", out.display()))?;
-    // The bulk load's own settings, and only its own: this is a throwaway
-    // file that `promote` reads back before anything is allowed to depend
-    // on it, so durability here buys nothing a `quick_check` does not.
+    // These settings serve only the bulk load. The file is temporary, and
+    // `promote` checks it before any reader uses it. Extra durability adds no
+    // protection beyond `quick_check` here.
     //
-    // `journal_mode = MEMORY` rather than `WAL`: a write-ahead log makes
-    // every page of a half-gigabyte load hit the disk twice - once into the
-    // log, once when the checkpoint copies it back - and the load has no
-    // concurrent reader to serve. A rollback journal over a file that
-    // starts empty has almost no original pages to save, and in memory it
-    // has none. The finished file is stamped back into WAL below, because
-    // *that* one is read while `edit::add_dictionary` writes to it.
+    // Use `journal_mode = MEMORY`, not `WAL`. A WAL writes each page twice during
+    // a half-gigabyte load: once to the log and once during checkpoint.
+    // The load has no concurrent reader. An empty file gives a rollback journal
+    // almost no original pages to save, and `MEMORY` saves none.
+    // The code below changes the finished file to WAL because
+    // `edit::add_dictionary` writes that file while readers use it.
     //
-    // Nothing else: a bigger `cache_size` and a `temp_store = MEMORY` were
-    // both measured on the jitendex import and both cost peak memory for no
-    // time at all - a load that only ever appends has nothing to re-read,
-    // and the index build's sorter spills to a file the OS keeps in its own
-    // cache anyway. 128 MiB of page cache cost 150 MiB of RSS and 0.08s.
+    // Add no other settings. A larger `cache_size` and `temp_store = MEMORY` add
+    // peak memory, but jitendex import does not become faster. An append-only load
+    // does not read rows again. The index sorter writes to a file that the OS
+    // caches. A 128 MiB page cache added 150 MiB RSS and saved 0.08s.
     conn.execute_batch(
         "PRAGMA page_size = 8192;
          PRAGMA journal_mode = MEMORY;
@@ -616,10 +587,9 @@ fn build_into(
     let mut batches = Batches::new();
 
     let tx = conn.transaction()?;
-    // Each archive with the `dict_id` it was just given, so the pitch pass
-    // below attaches an archive's accents to its own dictionary row and
-    // never finds one by name: `dict.name` is a title and two editions can
-    // share one.
+    // Use the `dict_id` that the build assigns to each archive. The pitch pass
+    // stores each archive's accents under that row, not under a name.
+    // `dict.name` is a title, and two editions can share one title.
     let mut read: Vec<(i64, &Path)> = Vec::with_capacity(terms.len() + freqs.len());
     for (i, archive) in terms.iter().enumerate() {
         let slot =
@@ -632,15 +602,16 @@ fn build_into(
         read.push((slot.dict_id, archive.as_path()));
     }
 
-    // The frequency dictionaries' rows. An archive supplying frequency data
-    // *and* terms is in both lists and is one Dictionary, so its claims go
-    // under the `dict_id` it was already given rather than under a second
-    // row wearing the same name - a role set means one archive can arrive
-    // twice here (ADR-0014). A frequency archive `terms` does not name gets
-    // its own row, after the term dictionaries so that a term archive's
-    // `dict_id` is still its position in `terms`. The reduction the claims
-    // were just reduced by is recorded beside them, so a reader knows which
-    // dictionaries the ranks in `term` actually came from.
+    // Store rows from the frequency archives. One archive can provide frequency
+    // data and terms, so it appears in both lists but remains one Dictionary.
+    // Store its claims under the current `dict_id`, not under a second row.
+    // A role set lets one archive appear twice here
+    // (ARCHITECTURE.md#dictionary-and-lookup).
+    // A frequency archive absent from `terms` gets a new row after term
+    // Dictionaries. This keeps each term archive's `dict_id` equal to its
+    // position in `terms`.
+    // The build stores the reduced rank beside each claim, so a reader knows
+    // which Dictionaries produced each `term` value.
     let mut order = Vec::with_capacity(tables.len());
     let mut appended: i64 = 0;
     for (i, (name, table)) in names.iter().zip(&tables).enumerate() {
@@ -668,12 +639,13 @@ fn build_into(
     on_progress("building  creating index");
     ensure_indexes(&tx)?;
     tx.commit()?;
-    // The mode the promoted database is read in; see the pragma block above.
+    // Readers open the promoted database in this mode. See the pragma block
+    // above.
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-    // `analysis_limit` caps how many index rows each statistic samples. The
-    // planner's choices here turn on orders of magnitude - is `surface`
-    // selective? - and a 400-row sample answers that as well as a full scan
-    // of 660 000 term rows, in a fraction of the time.
+    // `analysis_limit` caps the index rows that each statistic samples. The
+    // planner uses these statistics to choose indexes, such as `surface`.
+    // A 400-row sample gives the planner the same choice as a full scan of 660 000
+    // term rows, but costs much less time.
     conn.execute_batch("PRAGMA analysis_limit = 400; ANALYZE;")?;
 
     if media.referenced > 0 {
@@ -688,19 +660,19 @@ fn build_into(
     Ok(BuildCounts { entries, terms: term_rows, media, styles })
 }
 
-/// Every archive's Pitch patterns, under the dictionary that gave them.
+/// Stores every archive's Pitch patterns under the Dictionary that supplied them.
 ///
-/// Over every archive the build read rather than over a list of its own,
-/// because the pitch role is what an archive's `term_meta_bank_` rows hold
-/// and not which list it arrived in: a pitch-only archive, one that also
-/// carries terms, and one that also carries frequency data all store their
-/// accents here, under the one `dict` row they already have. Which of them a
-/// reader consults and in what order is the enabled pitch list's business,
-/// which is config's and never a build input (ADR-0014) - the same split
-/// `reported_freq` takes, where every dictionary's claims are stored and the
-/// enabled list decides what they mean.
+/// This function visits every archive that the build read. The
+/// `term_meta_bank_` rows define the Pitch role. The archive input list does
+/// not define that role. A pitch-only archive, a term archive, and a frequency
+/// archive can each supply Pitch data. Each uses its current `dict` row.
 ///
-/// Returns the accents stored across every archive, for the progress line.
+/// The enabled Pitch list controls reader order. Config owns that list, so
+/// the build does not read it (ARCHITECTURE.md#dictionary-and-lookup).
+/// The same split applies to `reported_freq`: the build stores every claim,
+/// and the enabled list controls those claims.
+///
+/// Returns the number of stored accents for the progress line.
 fn store_archive_pitch(
     tx: &rusqlite::Transaction,
     read: &[(i64, &Path)],
@@ -708,10 +680,9 @@ fn store_archive_pitch(
 ) -> Result<usize> {
     let mut total = 0;
     for &(dict_id, archive) in read {
-        // The load first and the title second: an archive with no
-        // term-meta bank answers from its central directory, and asking
-        // for its title would cost a second read of its `index.json` for
-        // nothing.
+        // Load Pitch data before the title. An archive without a term-meta
+        // bank gets its title from the central directory. The title path then reads
+        // `index.json` again but finds no result.
         let table = pitch::load_pitch(archive)
             .with_context(|| format!("reading the pitch of {}", archive.display()))?;
         if table.is_empty() {
@@ -728,12 +699,11 @@ fn store_archive_pitch(
     Ok(total)
 }
 
-/// Stores one dictionary's Pitch patterns, one row per accent.
+/// Stores one Dictionary's Pitch patterns, with one row per accent.
 ///
-/// One row per accent rather than one per reading with a list in it: the
-/// accents of one reading are what a card header draws as its own rows, and
-/// a reader that had to split a packed column could not have used the index
-/// to find them.
+/// Store one row per accent, not one row per reading with a packed list.
+/// A card header draws each reading's accents from separate rows.
+/// A reader that splits a packed column cannot use the index to find accents.
 pub(crate) fn store_pitch(
     tx: &rusqlite::Transaction,
     dict_id: i64,
@@ -771,22 +741,22 @@ pub(crate) fn store_pitch(
     Ok(rows)
 }
 
-/// One accent's mora markers or tags, as the JSON array the column holds.
+/// Encodes one accent's mora markers or tags as the JSON array in its column.
 ///
-/// JSON rather than a separated string because a tag is an author's own text
-/// and could hold any separator; one encoding for all three columns is one
-/// reader and one writer rather than three.
+/// Use JSON, not a separated string. An author's tag can contain any
+/// separator. One format for all three columns gives the reader and writer
+/// one implementation each.
 fn to_json_list<T: Serialize>(list: &[T]) -> Result<String> {
     serde_json::to_string(list).context("encoding an accent's mora list")
 }
 
-/// Each frequency archive's own claims, in the order they were given.
+/// Loads each frequency archive's claims in archive order.
 ///
-/// Per archive and no further. `merge_freq_row`'s lowest-rank-wins rule is
-/// right *within* one archive and stays; across archives there is no rule to
-/// apply until a ranking strategy says which one, so this used to end in
-/// `table.extend(one)` and the last archive read silently won every key it
-/// named.
+/// This function groups rows by archive and does not merge archives.
+/// `merge_freq_row` keeps the lowest rank within one archive.
+/// A Ranking strategy chooses how to compare claims across archives.
+/// Earlier code ended with `table.extend(one)`. Then the last archive won
+/// every key that it named, and the build gave no diagnostic.
 pub fn load_freqs(freqs: &[PathBuf]) -> Result<Vec<FreqSource>> {
     let mut sources = Vec::with_capacity(freqs.len());
     for fa in freqs {
@@ -816,14 +786,14 @@ pub(crate) struct Loaded {
     pub(crate) styles: StyleCounts,
 }
 
-/// A slice of a [`PreparedBank`]'s buffer: `(start, end)` in bytes.
+/// A `(start, end)` byte slice in a [`PreparedBank`] buffer.
 ///
-/// A pair of `u32` rather than a `String` per field, because a bank holds
-/// tens of thousands of rows and every one of them would otherwise be four
-/// heap allocations the binder immediately copies out of. The buffer they
-/// index is at most one bank's text ([`crate::dict::archive`]'s `MAX_BANK`,
-/// 256 MiB) because every byte pushed into it is a byte the bank already
-/// spelled out, so `u32` cannot overflow.
+/// A pair of `u32` values avoids one `String` per field. A bank holds tens
+/// of thousands of rows, and each `String` allocates four times per row.
+/// The binder copies each span once. The buffer holds at most one bank's text.
+/// [`crate::dict::archive`] sets that limit at `MAX_BANK`, 256 MiB.
+/// The bank already stores every byte that the build pushes into the buffer,
+/// so `u32` cannot overflow.
 type Span = (u32, u32);
 
 /// One kept term-bank row, ready to bind.
@@ -838,24 +808,23 @@ struct PreparedRow {
     same: bool,
 }
 
-/// One bank's kept rows, and the assets they named.
+/// Rows that one bank keeps, plus the asset paths that those rows name.
 ///
-/// Everything a bank contributes lands in one growable buffer, so handing a
-/// bank from the thread that parsed it to the thread that writes it moves
-/// three allocations rather than a hundred thousand.
+/// One growable buffer holds all data from a bank. The parser thread then
+/// gives the writer thread three allocations, not a hundred thousand.
 struct PreparedBank {
     text: String,
     rows: Vec<PreparedRow>,
     assets: BTreeSet<String>,
 }
 
-/// How many threads an import parses banks on.
+/// Maximum number of threads that parse banks during an import.
 ///
-/// Capped, and not by politeness: each thread holds the bank it is reading
-/// and the bank it has prepared, so the ceiling is what bounds a rebuild's
-/// peak memory at roughly `2 * MAX_IMPORT_THREADS` bank-sized buffers. Eight
-/// is past the knee on every corpus measured - the writer thread's SQLite
-/// inserts are the floor from about four onwards.
+/// This limit protects memory. Each thread holds its source bank and its
+/// prepared bank, so the limit bounds peak memory at about
+/// `2 * MAX_IMPORT_THREADS` bank-sized buffers.
+/// The project measured eight threads past the useful point on every corpus.
+/// At about four threads, SQLite inserts in the writer thread become the limit.
 const MAX_IMPORT_THREADS: usize = 8;
 
 fn worker_count(banks: usize) -> usize {
@@ -863,23 +832,20 @@ fn worker_count(banks: usize) -> usize {
     banks.min(cores).clamp(1, MAX_IMPORT_THREADS)
 }
 
-/// Buffers shared by archives.
+/// Buffers that archives share.
 pub(crate) struct Batches {
-    /// Row buffers, reused for every bank of every archive. They hold spans
-    /// into the bank currently being written, so they are always empty
-    /// between banks.
+    /// Row buffers reused by every bank. They hold spans into the current bank,
+    /// so they hold no data between banks.
     entries: Vec<(i64, i64, Span)>,
     terms: Vec<TermBatchRow>,
-    /// The full-batch `INSERT`s, built once. A 500-row insert names 3 500
-    /// placeholders, and a full batch is what almost every one of an
-    /// import's thousands of flushes carries. The odd short batch - a
-    /// bank's last rows, or a term batch that overshot by one because an
-    /// entry contributed two rows - builds its own.
+    /// SQL for full-batch `INSERT`s. The code builds each statement once.
+    /// A 500-row insert names 3 500 placeholders. Most flushes use a full batch.
+    /// A short batch covers a bank's final rows or one extra row from a two-row entry.
     entry_sql: String,
     term_sql: String,
-    /// Content hash to `media_blob.blob_id`, across every archive in one
-    /// build, so an asset shared by two dictionaries is stored once and
-    /// costs one `SELECT` the second time instead of one per path.
+    /// Content hashes mapped to `media_blob.blob_id` across one build.
+    /// The build stores shared asset bytes once. A second Dictionary then needs one
+    /// `SELECT`, not one `SELECT` per path.
     blobs: HashMap<[u8; 32], i64>,
 }
 
@@ -895,12 +861,12 @@ impl Batches {
     }
 }
 
-/// One archive into one slot.
+/// Inserts one archive into one `Slot`.
 ///
-/// `ranks` is the reduced Frequency rank per headword - every enabled
-/// frequency dictionary's claim already put through the ranking strategy
-/// ([`frequency::reduce`]) - because the strategy is applied when
-/// `term.freq` is written and never when it is read.
+/// `ranks` holds the reduced Frequency rank for each headword.
+/// [`frequency::reduce`] combines the enabled frequency Dictionaries with the
+/// selected Ranking strategy. The build writes that result to `term.freq`.
+/// A reader never applies the strategy to that column.
 pub(crate) fn insert_archive(
     tx: &rusqlite::Transaction,
     archive: &Path,
@@ -941,10 +907,10 @@ pub(crate) fn insert_archive(
     })
 }
 
-/// One prepared bank into `entry` and `term`.
+/// Writes one prepared bank to `entry` and `term`.
 ///
-/// The whole bank is written before the next one is touched, so the row
-/// buffers only ever hold spans into `bank.text`.
+/// This function writes a complete bank before it reads the next one.
+/// Row buffers then hold spans only into `bank.text`.
 fn write_bank(
     tx: &rusqlite::Transaction,
     bank: &PreparedBank,
@@ -985,7 +951,7 @@ fn write_bank(
         }
 
         if batches.entries.len() >= BATCH_ROWS || batches.terms.len() >= BATCH_ROWS {
-            // Entries first: a `term` row names the `entry` row it belongs to.
+            // Flush `entry` rows first. Each `term` row names its related `entry` row.
             flush_entries(tx, &bank.text, batches)?;
             flush_terms(tx, &bank.text, batches)?;
         }
@@ -994,19 +960,20 @@ fn write_bank(
     flush_terms(tx, &bank.text, batches)
 }
 
-/// Every term bank of one archive, prepared off the writer's thread and
-/// handed over in archive order.
+/// Processes every term bank in one archive.
+/// Worker threads prepare banks apart from the writer thread.
+/// This function passes prepared banks to the writer in archive order.
 ///
-/// Order is not an aesthetic: `entry_id` is assigned as banks arrive, and a
-/// rebuild that numbered its entries by whichever thread finished first
-/// would write a different database every time. So the workers race and the
-/// results are re-sequenced here, which costs at most one bank of latency
-/// per out-of-order finish.
+/// The order protects stable `entry_id` values. The build assigns an
+/// `entry_id` as each bank arrives. Completion order changes the database
+/// between runs. Workers can finish in any order, so this function restores
+/// archive order. The reorder buffer holds at most one bank of extra latency
+/// for each out-of-order result.
 ///
-/// A bank is the unit of work because it is self-contained JSON: parsing
-/// one, parsing each of its glossaries, and testing them for renderable
-/// text is about four fifths of an import's CPU and shares nothing between
-/// banks. Only the SQLite writes have to be serial, and they are.
+/// A bank is the work unit because it contains complete JSON. The build
+/// parses one bank, parses its glossaries, and tests for renderable text.
+/// That work uses about four fifths of import CPU and shares no state between
+/// banks. SQLite writes alone run in series.
 fn for_each_prepared_bank(
     archive: &Path,
     ranks: &FreqTable,
@@ -1028,9 +995,8 @@ fn for_each_prepared_bank(
     drop(banks);
 
     let next = AtomicUsize::new(0);
-    // A rendezvous channel, so a worker that finishes early blocks instead
-    // of running ahead and buffering banks nobody has asked for yet. That,
-    // plus the reorder buffer below, is what bounds peak memory.
+    // Use a rendezvous channel. An early worker blocks and does not buffer banks
+    // that no caller needs. The channel and the reorder buffer bound memory.
     let (send, recv) = sync_channel::<(usize, Result<PreparedBank>)>(0);
 
     std::thread::scope(|scope| -> Result<()> {
@@ -1053,7 +1019,7 @@ fn for_each_prepared_bank(
                     let made = banks
                         .read(i)
                         .and_then(|text| prepare_bank(&text, banks.name(i), ranks));
-                    // A closed channel means the writer has given up.
+                    // A closed channel means that the writer stopped.
                     if send.send((i, made)).is_err() {
                         return;
                     }
@@ -1078,33 +1044,29 @@ fn for_each_prepared_bank(
     })
 }
 
-/// One bank's text into the rows the writer binds.
+/// Converts one bank's text into rows for the writer.
 ///
-/// The whole per-row cost of an import lives here: the row parse, the
-/// glossary parse, and the emptiness test. Nothing touches the database.
+/// Import work per row occurs here: row parse, glossary parse, and the
+/// empty-content test. This function does not access the database.
 fn prepare_bank(text: &str, name: &str, ranks: &FreqTable) -> Result<PreparedBank> {
     let mut bank =
         PreparedBank { text: String::with_capacity(text.len()), rows: Vec::new(), assets: BTreeSet::new() };
     let mut glossary = String::new();
 
     for_each_row(text, name, |t| {
-        // Minify first, then parse the stored text: the record is what a
-        // hover will read, so a term row that renders nothing here renders
-        // nothing there either, and the emptiness test cannot drift from it.
+        // Minify first, then parse the stored text. A hover reads this same
+        // record, so the render test matches the stored record.
         glossary.clear();
         minify_json(t.glossary, &mut glossary);
-        // An image-only or whitespace-only glossary is not an entry. Same
-        // rule as before the tree existed; it is what keeps a gaiji-only
-        // term row out of the term index.
+        // Reject an image-only or whitespace-only glossary. The earlier builder used
+        // the same rule. This keeps a gaiji-only `term` row out of the term index.
         let doc = GlossDoc::parse(&glossary);
         if !renders_text(&doc) {
             return Ok(());
         }
-        // Only a kept row's images are collected, and from the parse the
-        // emptiness test already ran: a row that renders no text is not an
-        // entry, so no hover can reach it and its assets are unreachable
-        // too. Walking the tree here also means the build never re-scans
-        // the raw JSON for paths.
+        // Collect assets from the parsed document. The empty-content test already
+        // parsed it, so this code avoids a second raw-JSON scan. A row without text
+        // is not an entry, and a hover cannot reach its assets.
         collect_assets(&doc, &mut bank.assets);
 
         let reading: &str = if t.reading.is_empty() { &t.term } else { &t.reading };
@@ -1134,17 +1096,17 @@ fn slice(text: &str, span: Span) -> &str {
     &text[span.0 as usize..span.1 as usize]
 }
 
-/// The archive's own glossary bytes, minus the whitespace between them.
+/// The archive glossary without whitespace outside JSON strings.
 ///
-/// Stored verbatim otherwise, which is what the `entry.glossary` column has
-/// always claimed to hold and what it now actually holds: the previous
-/// writer round-tripped every glossary through a `serde_json::Value` and a
-/// serializer, which cost two of every six seconds a jitendex import spent
-/// and silently re-sorted every object's keys on the way through.
+/// The build stores all other bytes verbatim. The `entry.glossary` column
+/// therefore keeps the original content bytes. The previous writer passed
+/// every glossary through `serde_json::Value` and a serializer. That round
+/// trip used two of every six seconds in a jitendex import and sorted object
+/// keys without a diagnostic.
 ///
-/// The whitespace does have to go: a pretty-printed bank is 9% larger than
-/// its minified form on jitendex, and that is 9% of a half-gigabyte
-/// database for bytes no reader ever looks at.
+/// Remove whitespace because a pretty-printed jitendex bank is 9% larger than
+/// its minified form. That space adds 9% to a half-gigabyte database, and no
+/// reader uses it.
 fn minify_json(json: &str, into: &mut String) {
     let b = json.as_bytes();
     let mut copied = 0usize;
@@ -1163,8 +1125,8 @@ fn minify_json(json: &str, into: &mut String) {
         } else if c == b'"' {
             in_str = true;
         } else if c.is_ascii_whitespace() {
-            // Runs are copied whole, so compact JSON - which is nearly all
-            // of it - is one `push_str` of the entire glossary.
+            // Copy complete runs. Compact JSON contains almost all bytes, so one
+            // `push_str` copies nearly the whole glossary.
             into.push_str(&json[copied..i]);
             copied = i + 1;
         }
@@ -1172,17 +1134,16 @@ fn minify_json(json: &str, into: &mut String) {
     into.push_str(&json[copied..]);
 }
 
-/// One dictionary's own `styles.css`, stored verbatim and counted once.
+/// Stores one Dictionary's `styles.css` text and counts it once.
 ///
-/// Stored, not compiled: the row holds the text and the matcher compiles it
-/// on first use of the dictionary, so a matcher fix ships as a patch exactly
-/// as a parser fix does. The compile here throws its result away and exists
-/// only to fill the build report - the dropped-rule count is the gauge the
-/// census reports against, and a number nobody records is a number that
-/// silently rots.
+/// The build stores stylesheet text and does not compile it for the row.
+/// The matcher compiles text on first use. A matcher fix needs a patch, like a parser
+/// fix. The build discards the compiled result and fills only the build report.
+/// `dropped` gives the census its grammar-gap count.
 ///
-/// Total: an archive whose stylesheet cannot be read stores none and the
-/// build carries on. A dictionary's boxes are worth less than its entries.
+/// The build accepts a stylesheet read failure. An archive with an unreadable
+/// stylesheet stores no CSS and the build continues. The Dictionary entries
+/// matter more than its stylesheet.
 fn insert_style(
     tx: &rusqlite::Transaction,
     archive: &Path,
@@ -1214,12 +1175,12 @@ fn insert_style(
     Ok(one)
 }
 
-/// Every asset path this document's image nodes name.
+/// Collects every asset path named by image nodes in a [`GlossDoc`].
 ///
-/// A linear sweep of the arena rather than a tree walk: `all_nodes` is in
-/// parse order and an image node is a leaf, so there is nothing the tree
-/// shape would add. `Kind::Image` rather than `Tag::Img`, because a
-/// `type: "image"` glossary item is an image with no tag at all.
+/// The function scans `all_nodes` in parse order instead of a tree walk.
+/// An image node is a leaf, so tree shape adds no information.
+/// It checks `Kind::Image`, not `Tag::Img`, because a `type: "image"` glossary
+/// item can be an image without a tag.
 fn collect_assets(doc: &GlossDoc, into: &mut BTreeSet<String>) {
     for (i, node) in doc.all_nodes().iter().enumerate() {
         if node.kind != Kind::Image {
@@ -1232,14 +1193,14 @@ fn collect_assets(doc: &GlossDoc, into: &mut BTreeSet<String>) {
     }
 }
 
-/// Extracts one archive's referenced assets into the media store.
+/// Extracts referenced assets from one archive into the Media store.
 ///
-/// The contract a missing asset gets, and the one ticket 12's `alt`-text
-/// ladder is written against: **a media row exists only when the bytes are
-/// in the store and the intrinsic size is known.** An absent path and an
-/// unsizeable file both produce no row and one diagnostic line, and never a
-/// failed build - an archive is third-party bytes, and one corrupt gaiji
-/// must not cost a user their whole rebuild.
+/// The contract covers absent assets and the `alt`-text ladder:
+/// **a media row exists only when the store has the bytes and the intrinsic
+/// size.**
+/// An absent path or unreadable size creates no row and one diagnostic.
+/// Neither case fails the build. Archives contain third-party bytes, so one
+/// corrupt gaiji must not fail the complete rebuild.
 fn insert_media(
     tx: &rusqlite::Transaction,
     archive: &Path,
@@ -1283,11 +1244,11 @@ fn insert_media(
     Ok(counts)
 }
 
-/// How many named offenders a diagnostic lists before it stops.
+/// Maximum number of names that one diagnostic lists.
 ///
-/// A dictionary that ships none of its own assets would otherwise print one
-/// line per node, and 字通 has 139 138 of them. The count is always
-/// complete; the names are a sample.
+/// Without this limit, a Dictionary with no assets can print one line per image
+/// node. 字通 has 139 138 nodes. The count stays complete, and the names
+/// provide a sample.
 const DIAGNOSTIC_SAMPLE: usize = 10;
 
 fn insert_media_row(
@@ -1314,13 +1275,12 @@ fn insert_media_row(
     Ok(())
 }
 
-/// The blob holding these bytes, inserting it the first time they are seen.
+/// Gets the `media_blob` row for these bytes. The first call inserts the blob.
 ///
-/// `INSERT OR IGNORE` and then a read, rather than a read and then an
-/// insert: `edit::add_dictionary` writes into a live database whose blob
-/// table this process did not fill, so an unseen hash can still already
-/// have a row. The in-memory map in front of it is what keeps the whole
-/// build to one statement pair per *distinct* blob.
+/// Insert with `INSERT OR IGNORE` and then read. Do not read first and then
+/// insert. `edit::add_dictionary` writes to a live database whose blob table
+/// this build did not fill, so the row can already exist.
+/// The in-memory map keeps one statement pair per distinct blob.
 fn blob_id(
     tx: &rusqlite::Transaction,
     blobs: &mut HashMap<[u8; 32], i64>,
@@ -1358,7 +1318,7 @@ const ENTRY_INSERT: &str = "INSERT INTO entry (entry_id, dict_id, glossary) VALU
 const TERM_INSERT: &str =
     "INSERT INTO term (surface, written, reading, pos, freq, entry_id, dict_id) VALUES ";
 
-/// `head` followed by `rows` tuples of `cols` numbered placeholders.
+/// Returns `head` followed by `rows` tuples with `cols` numbered placeholders.
 fn insert_sql(head: &str, cols: usize, rows: usize) -> String {
     use std::fmt::Write;
     let mut sql = String::with_capacity(head.len() + rows * cols * 7);
@@ -1443,9 +1403,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Creates any missing index.
+/// Creates every index that does not exist.
 ///
-/// Needs a writable connection.
+/// The connection must allow writes.
 pub fn ensure_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(INDEXES).context("creating the term indexes")?;
     Ok(())
@@ -1463,7 +1423,7 @@ fn stem(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string()
 }
 
-/// Records provenance in meta.
+/// Records the build's sources and its time in `meta`.
 fn write_meta(conn: &Connection, terms: &[PathBuf], freqs: &[PathBuf]) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO meta (k, v) VALUES ('built_at', ?1)",
@@ -1498,13 +1458,13 @@ pub(crate) fn source_hash(path: &Path) -> Result<SourceHash> {
     Ok(SourceHash { name, bytes, sha256: hash_file(path)? })
 }
 
-/// SHA-256 of a file's bytes, lowercase hex.
+/// Returns the lowercase hexadecimal SHA-256 of a file.
 ///
-/// The one hash in the crate: `meta.source_hashes` records it per archive,
-/// and [`crate::library::Library`] uses it to tell two names for one
-/// dictionary apart from two dictionaries. Streamed in 64 KB reads, which
-/// on this implementation is about 400 MiB/s - the number the library's
-/// gate on it is sized against.
+/// This is the crate's only hash. `meta.source_hashes` records it for every
+/// archive. [`crate::library::Library`] uses it to distinguish two names for
+/// one Dictionary from two different Dictionaries.
+/// This function reads 64 KiB blocks. The library sized its gate for the
+/// measured rate of about 400 MiB per second.
 pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -1545,7 +1505,7 @@ impl Sha256 {
         }
     }
 
-    /// Feeds more bytes in.
+    /// Adds more bytes to the hash.
     fn update(&mut self, mut data: &[u8]) {
         self.total_len = self.total_len.wrapping_add(data.len() as u64);
         if self.buf_len > 0 {
@@ -1572,7 +1532,7 @@ impl Sha256 {
         }
     }
 
-    /// Ends the hash; returns it.
+    /// Ends the hash and returns it.
     fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_len.wrapping_mul(8);
         self.update(&[0x80]);
@@ -1714,7 +1674,7 @@ mod tests {
         to_hex(&hasher.finalize())
     }
 
-    /// The record as stored, and as a hover reads it.
+    /// Returns the glossary record that a hover reads.
     fn stored_glossary(conn: &Connection, surface: &str) -> String {
         conn.query_row(
             "SELECT glossary FROM entry JOIN term USING(entry_id) WHERE surface = ?1",
@@ -1724,7 +1684,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The gloss tree a hover would parse out of the record.
+    /// Returns the `GlossDoc` that a hover parses from the record.
     fn stored_doc(conn: &Connection, surface: &str) -> GlossDoc {
         GlossDoc::parse(&stored_glossary(conn, surface))
     }
@@ -1746,9 +1706,8 @@ mod tests {
         assert_eq!("FixtureTerms", name);
     }
 
-    /// The record keeps the dictionary's own structured content, not a
-    /// rendering of it: that is what makes a renderer or parser fix a patch
-    /// instead of a rebuild.
+    /// The record keeps the Dictionary's structured content, not a rendered form.
+    /// A renderer or parser fix can then reach users through a patch instead of a rebuild.
     #[test]
     fn the_record_stores_the_raw_structured_content() {
         let (conn, _guard) = build_fixture_db("the_record_stores_the_raw_structured_content");
@@ -1936,7 +1895,7 @@ mod tests {
             .join("chibipop_build_test")
             .join(format!("fresh_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // A fresh exe has no data/.
+        // A fresh executable has no `data/` directory.
         let out = dir.join("data").join("chibipop.sqlite");
 
         let counts = build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out, &|_| {})
@@ -1953,10 +1912,10 @@ mod tests {
         assert!(!suffixed(&guard.0, ".building").exists());
     }
 
-    // ---- promoting a finished build over the live database ----
+    // ---- promote a finished build over the live database ----
 
-    /// The named dictionary in a database, which is how these tests tell the
-    /// old file from the new one.
+    /// Gets the named Dictionary from a database. These tests use it to
+    /// distinguish the old file from the new file.
     fn first_dict(db: &Path) -> String {
         let conn = Connection::open(db).unwrap();
         conn.query_row("SELECT name FROM dict WHERE dict_id = 1", [], |r| r.get(0)).unwrap()
@@ -1975,28 +1934,24 @@ mod tests {
             .unwrap()
     }
 
-    /// A database and the log a crashed writer left beside it, with nothing
-    /// holding either.
+    /// Creates a database and a sidecar log that a crashed writer left beside it.
     ///
-    /// Copied under the tested name rather than held open, and the copy is
-    /// the whole trick: a `-wal` is keyed to its database's **file name**,
-    /// so the pair byte-copied under another name *is* that writer's crash.
-    /// A fixture that kept the writer open instead would be testing the
-    /// platform - Windows refuses to unlink or rename over a file any
-    /// handle holds, SQLite opens without `FILE_SHARE_DELETE`, and no
-    /// promote there ever runs beside a live handle (docs/BACKLOG.md,
-    /// "Windows will not rename onto an open file").
+    /// The helper copies both files under the test name. It does not keep the
+    /// copied pair open. SQLite keys `-wal` to the database's **file name**, so
+    /// the pair reproduces that crash state.
+    /// A fixture with an open writer tests a platform rule instead. Windows
+    /// refuses to unlink or rename an open file because SQLite opens without
+    /// `FILE_SHARE_DELETE`. Promotion cannot run beside a live handle
+    /// (docs/BACKLOG.md, "Windows will not rename onto an open file").
     ///
-    /// Grown past one page on purpose. That is what makes a stale-log
-    /// failure the user's failure rather than a merely stale answer: a log
-    /// whose pages are replayed into a file laid out differently leaves the
-    /// header claiming what the file does not hold, which is `database disk
-    /// image is malformed`. A single-page database has nothing to disagree
-    /// about.
+    /// The helper grows the database beyond one page. A stale log can then
+    /// conflict with a differently laid out file and produce
+    /// `database disk image is malformed`. A one-page database has no page layout
+    /// conflict.
     ///
-    /// The marker commit lands *after* the checkpoint, so the log is left
-    /// holding frames nothing has copied back - the only state a stale log
-    /// can do harm from, and the state a killed daemon leaves behind.
+    /// The marker commit occurs after the checkpoint. The log then holds frames
+    /// that the checkpoint did not copy, which is the state that a killed
+    /// daemon leaves behind.
     fn crashed_with_a_log(out: &Path) {
         let source = suffixed(out, ".source");
         let source_guard = TempDbGuard(source.clone());
@@ -2012,8 +1967,8 @@ mod tests {
             )
             .unwrap();
             assert!(suffixed(&source, "-wal").exists(), "the log is what this test is about");
-            // Taken while the writer is idle between commits: what is on
-            // disk at this instant is exactly what killing it leaves.
+            // Copy the files while the writer is idle between commits. Disk then
+            // contains exactly what a killed writer leaves.
             for suffix in ["", "-wal", "-shm"] {
                 let from = suffixed(&source, suffix);
                 if from.exists() {
@@ -2028,19 +1983,14 @@ mod tests {
         assert!(suffixed(out, "-wal").exists(), "the copy keeps the log beside the database");
     }
 
-    /// The same database held the way a running daemon holds it, and left in
-    /// the only state a stale log can actually do harm from: a log whose
-    /// frames are **not yet copied back** into the database.
+    /// Holds the same database state that a daemon leaves behind: a sidecar log
+    /// has frames that the database does not yet contain.
     ///
-    /// Every step of that is load-bearing, so none of it is decoration.
-    /// The reader takes its snapshot *before* the last commit, so no close
-    /// can copy that commit back. The reader is read-only, so it can neither
-    /// drain the log nor delete it. Between them the log outlives the writer
-    /// with live frames in it - which is exactly the state a daemon holding a
-    /// dictionary leaves a rebuild to find, and the state in which replaying
-    /// the log into a different file destroys it. A fully copied-back log is
-    /// harmless: its index says there is nothing to replay, and a reader
-    /// reads straight past it.
+    /// Every step matters. The reader starts its snapshot before the final
+    /// commit. The read-only reader cannot copy that commit, drain the log, or
+    /// delete it. The log outlives the writer with live frames.
+    /// A fully copied log is safe. Its index says that it has no frames to
+    /// replay, and a reader skips it.
     #[cfg(unix)]
     fn held_by_a_reader(out: &Path) -> Connection {
         build(&[fixture("terms.zip")], &[], out, &|_| {}).expect("the first build");
@@ -2063,64 +2013,55 @@ mod tests {
         reader
     }
 
-    /// A promote leaves no sidecar of the database it replaced, on every
-    /// platform.
+
+    /// A call to [`promote`] must leave no sidecar from the replaced database.
     ///
-    /// A write-ahead log's sidecars are keyed to the database's **file
-    /// name**, never to its inode, and `rename` replaces only the main
-    /// file. So a promote that renames and stops leaves the old database's
-    /// log sitting under the new database's name, and the next cold reader
-    /// recovers it straight into the new file - writing the old
-    /// dictionary's pages over the new one's, permanently, on disk. The
-    /// reader does not get a stale answer, it gets
+    /// SQLite keys WAL sidecars to the database **file name**, not its inode.
+    /// `rename` replaces only the main file. If promotion leaves the old log,
+    /// the next cold reader can recover old pages into the new database.
+    /// That recovery can write old pages over new pages and return
     /// `database disk image is malformed`.
-    ///
-    /// A crashed writer's pair with nothing holding it is what a rebuild
-    /// finds on Windows, and [`drain_wal`]'s checkpoint alone already
-    /// empties that log - so this test states the invariant and would not
-    /// red on the removal going. The removal's own red case needs a log a
-    /// checkpoint cannot drain, which means a live handle, which is the
-    /// POSIX-only test below.
+    /// A crashed writer with no open handle is the Windows case. [`drain_wal`]
+    /// already empties that log.
+    /// This test states the invariant but does not exercise the failure.
+    /// The failure uses a log that a checkpoint cannot drain. It requires a live
+    /// handle and appears in the POSIX-only test below.
     #[test]
     fn a_promote_never_leaves_the_previous_databases_log_beside_the_new_one() {
         let out = out_path("stale_log");
         let guard = TempDbGuard(out.clone());
         crashed_with_a_log(&out);
 
-        // A different dictionary built over it with the old log still on
-        // disk - what a rebuild finds after the process that wrote it died.
+        // Build a different Dictionary while the old log remains on disk. This
+        // matches a rebuild after the writer process dies.
         build(&[media_archive()], &[], &out, &|_| {}).expect("the rebuild promotes");
 
         assert!(!suffixed(&out, "-wal").exists(), "the old log must not outlive the promote");
         assert!(!suffixed(&out, "-shm").exists(), "nor its index");
 
-        // Then the symptom, met the way the user met it: something opens
-        // the promoted file cold.
+        // Open the promoted file with a cold reader. This matches the user-visible
+        // symptom.
         assert_eq!("ok", verdict(&out), "a cold reader must find the promoted file sound");
         assert_eq!("FixtureMedia", first_dict(&out), "it is the dictionary just built");
         assert_eq!(None, marker(&out), "with nothing recovered out of the old log");
         drop(guard);
     }
 
-    /// The bug a user hit, and the test [`drop_sidecars`] exists for.
+    /// Reproduces the user's bug and covers [`drop_sidecars`].
     ///
-    /// The old database is *held open* here, which is the shape a Linux
-    /// rebuild has: the daemon is another process, its reader holds a
-    /// snapshot the checkpoint cannot copy back, and the log therefore
-    /// still has live frames in it when the rename lands. Without
-    /// [`drop_sidecars`] this test reports
+    /// The old database stays open. This matches a Linux rebuild.
+    /// The daemon is another process. Its reader holds a snapshot that the
+    /// checkpoint cannot copy. The log has live frames when promotion renames the file.
+    /// Without [`drop_sidecars`], this test reports
     /// `wrong # of entries in index sqlite_autoindex_meta_1` from
-    /// `integrity_check` - the same class of answer as the
-    /// `Tree 3 page 3 cell 0: invalid page number` the user's database
-    /// gave. Which page-level complaint comes out depends on which of the
-    /// new file's pages the old log happens to land on, so the assertion
-    /// that matters is the invariant, not the wording.
+    /// `integrity_check`. The user's database reported
+    /// `Tree 3 page 3 cell 0: invalid page number`.
+    /// The exact page error depends on which new pages receive old log frames.
+    /// The invariant matters more than the error text.
     ///
-    /// POSIX-only, and not a gap on Windows: an unlink and a rename both
-    /// refuse a file any handle holds there, so a promote beside a live
-    /// handle is a state that platform cannot reach - the tray app edits
-    /// the database in place and its rebuild is a fresh process that has
-    /// opened nothing (docs/BACKLOG.md, docs/REGRESSION.md 1.20).
+    /// This test runs on POSIX only. Windows refuses unlink and rename when a
+    /// handle holds the file. The tray app edits its database in place, and its
+    /// rebuild process opens no database (docs/BACKLOG.md, docs/REGRESSION.md 1.20).
     #[cfg(unix)]
     #[test]
     fn a_promote_under_a_live_reader_leaves_no_log_behind_either() {
@@ -2130,7 +2071,7 @@ mod tests {
 
         build(&[media_archive()], &[], &out, &|_| {}).expect("the rebuild promotes");
 
-        // The invariant, checked while the daemon's handle is still there.
+        // Check this invariant while the daemon handle remains open.
         assert!(!suffixed(&out, "-wal").exists(), "the old log must not outlive the promote");
         assert!(!suffixed(&out, "-shm").exists(), "nor its index");
 
@@ -2141,11 +2082,11 @@ mod tests {
         drop(guard);
     }
 
-    /// The crash window [`promote`]'s ordering exists to make safe. Between
-    /// the old log going and the rename landing, the old database has to be
-    /// one a reader can still open whole - which is what the checkpoint
-    /// before the removal buys, and why the removal cannot come after the
-    /// rename instead.
+    /// Checks the crash window that the order in [`promote`] protects.
+    /// Between sidecar removal and rename, the old database must remain complete
+    /// and readable.
+    /// The checkpoint before removal provides that state. Removal after rename
+    /// exposes the new file to the old log.
     #[test]
     fn a_promote_interrupted_before_the_rename_leaves_the_old_database_whole() {
         let out = out_path("interrupted");
@@ -2158,7 +2099,7 @@ mod tests {
         verify_built(&tmp, &|_| {}).expect("the new build checks out");
         drain_wal(&out);
         drop_sidecars(&out).expect("the old log goes");
-        // -- the process dies here, one syscall short of the rename --
+        // The process dies here, one system call before rename.
 
         assert_eq!("ok", verdict(&out), "the old database has to still be readable");
         assert_eq!("FixtureTerms", first_dict(&out), "and still be the old one");
@@ -2172,12 +2113,12 @@ mod tests {
         drop(guard);
     }
 
-    /// The promote gate. `build_into` runs the bulk load under
-    /// `synchronous = OFF`, so a build killed mid-write can leave a file
-    /// that opens and does not read - and promoting that over a working
-    /// dictionary turns one lost rebuild into a lost dictionary. Driven
-    /// through [`promote`] rather than [`build`] on purpose: a torn page is
-    /// not something a successful build can be asked to produce.
+    /// Checks the promotion gate.
+    /// `build_into` uses `synchronous = OFF`, so a killed build can leave a file
+    /// that opens but cannot be read. A promotion of that file replaces a valid
+    /// Dictionary with a damaged one.
+    /// This test calls [`promote`] directly because a completed `build` cannot
+    /// produce a torn page.
     #[test]
     fn a_build_that_does_not_check_out_is_refused_rather_than_promoted() {
         let out = out_path("torn_build");
@@ -2185,10 +2126,9 @@ mod tests {
         build(&[fixture("terms.zip")], &[fixture("freq.zip")], &out, &|_| {}).unwrap();
         let good = std::fs::read(&out).unwrap();
 
-        // A finished build with a page zeroed out of the middle of it. Page
-        // 1 is the header and would fail to open at all, which would prove
-        // only that SQLite reads headers; this is the harder case, a file
-        // that opens cleanly and is not a database.
+        // Zero a page inside a completed build. Page 1 only tests header validation,
+        // because SQLite rejects that file at open. A later page tests a file that
+        // opens but is not a valid database.
         let tmp = suffixed(&out, ".building");
         let tmp_guard = TempDbGuard(tmp.clone());
         let mut torn = good.clone();
@@ -2255,9 +2195,9 @@ mod tests {
         assert_eq!(6, counts.entries);
         assert_eq!(10, counts.terms);
         let conn = Connection::open(&out).unwrap();
-        // Two term archives, then the frequency dictionary: a term archive's
-        // `dict_id` is still its position in `terms`, and `freq.zip` follows
-        // as a dictionary in its own right.
+        // Two term archives come first, then the frequency Dictionary. Each term
+        // archive keeps its `dict_id` at its position in `terms`, and `freq.zip`
+        // follows as a Dictionary of its own.
         assert_eq!(vec![1, 2, 3], ints(&conn, "SELECT dict_id FROM dict ORDER BY dict_id"));
         assert_eq!(vec![0, 1, 2], ints(&conn, "SELECT priority FROM dict ORDER BY dict_id"));
         let freq_name: String =
@@ -2293,17 +2233,15 @@ mod tests {
         );
     }
 
-    /// The one thing threading a build can silently break.
+    /// The concurrency invariant that this test protects.
     ///
-    /// `banks.zip` has twelve term banks and one of them is a hundred times
-    /// the size of the others, so eleven banks finish while bank 3 is still
-    /// being parsed. Every one of those has to wait: `entry_id` is assigned
-    /// in archive order, and a build that numbered by completion order
-    /// would write a different database on every run and break every
-    /// `entry_id` a caller already holds.
+    /// `banks.zip` has twelve term banks. One bank is one hundred times larger
+    /// than the others, so eleven banks finish before bank 3.
+    /// The writer must still process every bank in archive order. It assigns
+    /// `entry_id` in that order. Completion order changes the database on each
+    /// run and breaks every caller that holds an `entry_id`.
     ///
-    /// Asserted as the whole sequence rather than a count, because a count
-    /// passes whatever the order was.
+    /// Assert the full sequence, not only a count. A count passes for any order.
     #[test]
     fn a_many_bank_archive_is_numbered_in_archive_order() {
         let out = out_path("many_banks");
@@ -2311,14 +2249,14 @@ mod tests {
 
         let counts = build(&[fixture("banks.zip")], &[], &out, &|_| {}).unwrap();
 
-        // Eleven banks of four rows, and one of four hundred.
+        // Eleven banks have four rows each. One bank has four hundred rows.
         assert_eq!(11 * 4 + 400, counts.entries);
         let conn = Connection::open(&out).unwrap();
         let mut stmt = conn.prepare("SELECT surface FROM term ORDER BY rowid").unwrap();
         let surfaces: Vec<String> =
             stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        // Two `term` rows per entry, reading first: the headwords here are
-        // all kanji-shaped, so none of them collapses to one row.
+        // Each entry has two `term` rows, with the reading first. These headwords use
+        // kanji, so no entry collapses to one row.
         let expected: Vec<String> = (1..=12)
             .flat_map(|bank| {
                 let rows = if bank == 3 { 400 } else { 4 };
@@ -2330,9 +2268,9 @@ mod tests {
         assert_eq!(expected, surfaces, "banks 10-12 follow 9, and bank 3 holds its place");
     }
 
-    /// Two runs of a threaded build have to agree byte for byte in every
-    /// table a reader touches. The timestamp in `meta` is the one thing that
-    /// may differ, so it is excluded rather than the comparison weakened.
+    /// Two threaded builds must produce identical rows in every table that a
+    /// reader uses. `meta` contains a timestamp, so this test excludes that value
+    /// rather than change the comparison.
     #[test]
     fn a_many_bank_build_is_reproducible() {
         let one = out_path("many_banks_a");
@@ -2353,10 +2291,10 @@ mod tests {
         assert_eq!(cells(&a, terms), cells(&b, terms));
     }
 
-    /// The stored glossary is the archive's own bytes, minus the whitespace
-    /// between them. Key order included: the writer used to round-trip every
-    /// glossary through a `serde_json::Value`, whose map is sorted, and
-    /// nothing about that was ever wanted.
+    /// The stored glossary keeps the archive's JSON bytes without whitespace
+    /// between tokens. It also keeps key order.
+    /// The old writer passed each glossary through `serde_json::Value`, which
+    /// sorted map keys. The build never needed that sort.
     #[test]
     fn the_stored_glossary_is_the_archives_own_json_minified() {
         assert_eq!(
@@ -2374,7 +2312,7 @@ mod tests {
     fn minified(json: &str) -> String {
         let mut out = String::new();
         minify_json(json, &mut out);
-        // Minifying must never change what the JSON means.
+        // Minification must never change the meaning of JSON.
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(json).unwrap(),
             serde_json::from_str::<serde_json::Value>(&out).unwrap(),
@@ -2417,7 +2355,7 @@ mod tests {
         assert_eq!(after, index_names(&conn), "a second ensure must change nothing");
     }
 
-    /// Never the lookup connection.
+    /// `ensure_indexes` must not use the lookup connection.
     #[test]
     fn the_ensure_refuses_a_read_only_connection() {
         let (conn, guard) = build_fixture_db("ensure_read_only");
@@ -2434,14 +2372,14 @@ mod tests {
         );
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- the Media store ----
 
     fn media_archive() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
     }
 
-    /// The media fixture archive built by the real builder, plus the
-    /// progress lines it emitted.
+    /// Builds the media fixture with the real builder and records its progress
+    /// lines.
     fn build_media_db(test_name: &str) -> (Connection, TempDbGuard, BuildCounts, Vec<String>) {
         let out = out_path(test_name);
         let guard = TempDbGuard(out.clone());
@@ -2459,10 +2397,9 @@ mod tests {
         rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 
-    /// Extracting every asset in an archive would store an image
-    /// dictionary's whole glyph set: 30 of 52 structured-content
-    /// dictionaries emit images, and only the paths their nodes name can
-    /// ever be painted.
+    /// If the build extracts every archive asset, it stores the full glyph set for
+    /// an image Dictionary. 30 of 52 structured-content Dictionaries emit images,
+    /// but the build can paint only paths that image nodes name.
     #[test]
     fn only_the_assets_an_image_node_references_are_extracted() {
         let (conn, _guard, counts, _lines) = build_media_db("media_only_referenced");
@@ -2474,20 +2411,20 @@ mod tests {
                 "gaiji/one.png",
                 "gaiji/ratio.svg",
                 "gaiji/three.jpg",
-                // Sized from its header and undecodable behind it, which
-                // is a real row and ticket 12's paint-time rung.
+                // Size comes from the header, but the decoder fails. The row supports the
+                // `alt`-text fallback at paint time.
                 "gaiji/torn.png",
                 "gaiji/two.svg",
             ],
             media_paths(&conn),
         );
-        // `unused.png` is in the archive and named by nothing.
+        // The archive contains `unused.png`, but no node names it.
         assert_eq!(8, counts.media.stored);
         assert_eq!(10, counts.media.referenced, "eight stored, one absent, one unsizeable");
     }
 
-    /// A term row whose glossary renders no text is not an entry, so no
-    /// hover can reach it - and neither can its images.
+    /// An image-only glossary does not render text, so it does not create an entry
+    /// or media that a hover can reach.
     #[test]
     fn an_image_only_term_row_contributes_no_media() {
         let (conn, _guard, ..) = build_media_db("media_image_only_row");
@@ -2497,9 +2434,9 @@ mod tests {
         );
     }
 
-    /// 字通 averages more than four image nodes per term row over a few
-    /// thousand distinct gaiji, so sharing bytes across paths is
-    /// load-bearing and not an optimisation.
+    /// 字通 averages more than four image nodes per term row across a few
+    /// thousand distinct gaiji. Shared bytes reduce import cost. This is not an
+    /// optimization.
     #[test]
     fn two_identical_assets_at_different_paths_share_one_blob() {
         let (conn, _guard, counts, _lines) = build_media_db("media_dedup");
@@ -2518,9 +2455,9 @@ mod tests {
         assert_eq!(7, counts.media.blobs);
     }
 
-    /// The load-bearing column set. 99 807 census image nodes declare
-    /// neither `width` nor `height`, so a wrong number here is a
-    /// mis-measured line rather than a mis-drawn picture.
+    /// These columns are part of the schema required for import. 99 807 census
+    /// image nodes declare neither `width` nor `height`. A wrong value mismeasures a
+    /// line. It affects layout, not only the picture.
     #[test]
     fn the_intrinsic_size_of_every_supported_format_is_recorded() {
         let (conn, _guard, ..) = build_media_db("media_intrinsics");
@@ -2535,24 +2472,22 @@ mod tests {
         for (path, format, w, h) in [
             ("gaiji/one.png", "png", 12.0, 7.0),
             ("gaiji/three.jpg", "jpeg", 23.0, 11.0),
-            // The logical screen of a two-frame animation, not its 4x3
-            // frames: that is the canvas a browser lays out.
+            // Record the logical screen of a two-frame animation, not its 4x3 frames.
+            // The screen is the canvas that a browser lays out.
             ("gaiji/four.gif", "gif", 9.0, 5.0),
             ("gaiji/two.svg", "svg", 64.0, 32.0),
-            // No width or height on the root element: the viewBox is the
-            // size, which is the common shape for a gaiji SVG.
+            // The root element has no width or height. The `viewBox` supplies the size,
+            // which is common for a gaiji SVG.
             ("gaiji/ratio.svg", "svg", 100.0, 40.0),
-            // The one format whose size lives in an item property rather
-            // than a header, and the one this build cannot rasterize -
-            // which is exactly why the size has to be recorded here.
+            // The `avif` format stores its size in an item property, not a header. This
+            // build cannot rasterize it, so it must record the size here.
             ("gaiji/five.avif", "avif", 480.0, 120.0),
         ] {
             let (got_format, got_w, got_h, got_aspect) = recorded(path);
             assert_eq!(format, got_format, "{path}");
             assert_eq!((w, h), (got_w, got_h), "{path}");
-            // In `f32`, because that is the type the row is written from
-            // and read back into - the popup's geometry is `f32`
-            // throughout, and `9 / 5` is not exact in either width.
+            // Use `f32` for this comparison because the row uses that type. Popup
+            // geometry also uses `f32`, and `9 / 5` is not exact.
             assert_eq!(
                 w as f32 / h as f32,
                 got_aspect as f32,
@@ -2561,9 +2496,8 @@ mod tests {
         }
     }
 
-    /// The contract ticket 12's `alt`-text ladder is written against: a
-    /// media row exists only when the bytes are stored and the size is
-    /// known, so a lookup that answers nothing means "fall back".
+    /// The `alt`-text ladder creates a media row only when bytes are stored and
+    /// size is known. A lookup with no row therefore means "fall back".
     #[test]
     fn a_missing_or_unreadable_asset_is_counted_and_never_fails_the_build() {
         let (conn, _guard, counts, lines) = build_media_db("media_absent");
@@ -2572,11 +2506,10 @@ mod tests {
         assert!(!paths.iter().any(|p| p == "gaiji/broken.png"), "present and unsizeable");
         assert_eq!(1, counts.media.missing);
         assert_eq!(1, counts.media.unreadable);
-        // And the entry that referenced them is still an entry, with its
-        // own text intact.
+        // The entry that names them remains an entry, with its text intact.
         assert_eq!(vec!["fish".to_string()], plain_items(&stored_doc(&conn, "さかな")));
 
-        // Each one is named, so a dictionary author can act on it.
+        // Name each path so the Dictionary author can act on it.
         let joined = lines.join("\n");
         assert!(joined.contains("gaiji/broken.png"), "the corrupt one is named: {joined}");
         assert!(joined.contains("gaiji/missing.png"), "the absent one is named: {joined}");
@@ -2597,8 +2530,8 @@ mod tests {
         );
     }
 
-    /// An archive with no image nodes must cost nothing: no second pass
-    /// over the zip, no rows, and no diagnostic noise.
+    /// An archive without image nodes costs no media work. It needs no second
+    /// ZIP pass, writes no rows, and emits no diagnostic.
     #[test]
     fn a_dictionary_with_no_image_nodes_writes_no_media_and_says_nothing() {
         let (conn, _guard) = build_fixture_db("media_none");
@@ -2607,13 +2540,13 @@ mod tests {
         assert_eq!(0, rows);
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a Dictionary's own styles.css ----
 
-    /// One archive, written here, built by the real builder.
+    /// Creates one archive with a stylesheet and builds it with the real builder.
     ///
-    /// `index.json` at the root because `read_index` requires it there, and
-    /// the stylesheet one directory deep, which is the other of the two
-    /// places the census found one.
+    /// `index.json` stays at the root because `read_index` requires that path.
+    /// The stylesheet stays one directory deep, which is the second location
+    /// that the census found.
     fn styled_archive(name: &str, css: &str) -> PathBuf {
         use std::io::Write as _;
         let dir = std::env::temp_dir().join("chibipop_build_test");
@@ -2638,12 +2571,11 @@ mod tests {
         path
     }
 
-    /// The build stores the text and reports what compiling it kept and
-    /// dropped. Stores the *text*: nothing compiled is persisted, because the
-    /// matcher runs on first use so that a matcher fix ships as a patch
-    /// rather than as a rebuild. The compile here exists only to fill this
-    /// report, and the dropped count is what `tools/dict-census` scores
-    /// against.
+    /// The build stores stylesheet *text* and reports the rules that compilation
+    /// keeps or drops. It stores no compiled form because the matcher compiles
+    /// text on first use. A matcher fix needs a patch, not a rebuild.
+    /// The compile fills this report only. `dropped` is the grammar-gap count
+    /// that `tools/dict-census` checks.
     #[test]
     fn a_build_stores_the_stylesheet_and_reports_what_it_dropped() {
         let css = "span[data-sc-fbox] { padding: 0.1em }\n\
@@ -2681,18 +2613,16 @@ mod tests {
         let _ = std::fs::remove_file(&archive);
     }
 
-    /// The property gap reaches the report, not just the grammar gap. A rule
-    /// can pass the selector grammar whole and still declare things this
-    /// renderer has no box model for, and `tools/dict-census` counts a
-    /// stylesheet's declarations independently - so a build that recorded
-    /// only its kept and dropped *rules* would let the two arithmetics drift
-    /// unnoticed.
+    /// The report includes property gaps as well as grammar gaps. A rule can pass
+    /// selector grammar but use properties that this renderer cannot map to its
+    /// box model.
+    /// `tools/dict-census` counts declarations separately, so a report with only
+    /// kept and dropped *rules* can hide a difference between the two counts.
     ///
-    /// The numbers are the expansion's, which is why they are asserted and
-    /// not just non-zero: `padding` is one authored declaration and four
-    /// compiled longhands, `display` and `line-height` are outside
-    /// `sheet::css_key`'s table, and the `var()` border width names a custom
-    /// property declared on Yomitan's chrome.
+    /// The test asserts expanded counts. `padding` is one authored declaration but
+    /// four compiled longhands. `display` and `line-height` are outside
+    /// `sheet::css_key`, and the `var()` border width names a custom property from
+    /// Yomitan's popup chrome.
     #[test]
     fn a_build_reports_the_declarations_it_could_not_map() {
         let css = "span[data-sc-fbox] { padding: 0.1em; display: grid; line-height: 1.4;\n\
@@ -2721,8 +2651,8 @@ mod tests {
         let _ = std::fs::remove_file(&archive);
     }
 
-    /// A dictionary that ships none writes no row and reports nothing, and a
-    /// build over such a corpus is unchanged.
+    /// An archive without a stylesheet writes no row and reports nothing.
+    /// A build over that archive remains otherwise unchanged.
     #[test]
     fn an_archive_without_a_stylesheet_writes_no_row() {
         let (conn, _guard) = build_fixture_db("no_stylesheet_row");
@@ -2731,8 +2661,8 @@ mod tests {
         assert_eq!(0, rows);
     }
 
-    /// Malformed CSS is stored, counted, and never fails the build: the
-    /// scanner keeps every rule it did recover.
+    /// The build stores and counts a malformed stylesheet and still succeeds.
+    /// The scanner keeps every rule that it recovers.
     #[test]
     fn a_malformed_stylesheet_still_builds() {
         let archive = styled_archive(
@@ -2750,9 +2680,9 @@ mod tests {
         let _ = std::fs::remove_file(&archive);
     }
 
-    // ---- pitch
+    // ---- Pitch ----
 
-    /// Every accent a pitch dictionary gave, as the table holds them.
+    /// Returns every accent that a Pitch Dictionary supplied, in table form.
     fn stored_pitch(conn: &Connection, term: &str, reading: &str) -> Vec<(i64, Option<i64>)> {
         let mut stmt = conn
             .prepare(
@@ -2766,9 +2696,9 @@ mod tests {
             .unwrap()
     }
 
-    /// The predicate reads banks and not filenames, which is the whole
-    /// reason it exists: one of the six archives named `[Pitch]` in ticket
-    /// 01's census has no `term_meta_bank_` at all.
+    /// This predicate reads bank content, not archive file names.
+    /// That choice matters because one of the six archives named `[Pitch]` in the
+    /// census has no `term_meta_bank_` at all.
     #[test]
     fn a_pitch_only_archive_supplies_the_pitch_role_and_a_term_archive_does_not() {
         assert!(pitch::supplies_pitch(&fixture("pitch.zip")));
@@ -2776,8 +2706,8 @@ mod tests {
         assert!(!pitch::supplies_pitch(&fixture("freq.zip")), "a freq row is the other role");
     }
 
-    /// And a pitch-only archive supplies no terms role: its build
-    /// contributes a dictionary row and its accents, and not one `entry`.
+    /// A Pitch-only archive has no terms role. Its build adds a Dictionary row and
+    /// its accents, but it adds no `entry`.
     #[test]
     fn a_pitch_only_archive_contributes_accents_and_no_entries() {
         let out = out_path("pitch_only");
@@ -2799,9 +2729,9 @@ mod tests {
             "the archive's two rows for one reading merged, in arrival order");
     }
 
-    /// Both roles from one archive, which ticket 01's census has no specimen
-    /// of - 9 frequency-only and 5 pitch-only, none both. Neither role
-    /// suppresses the other and both land under one dictionary row.
+    /// One archive can supply both roles. The census has 9 frequency-only and
+    /// 5 Pitch-only archives, but none with both roles.
+    /// Neither role suppresses the other. Both use one Dictionary row.
     #[test]
     fn an_archive_supplying_terms_and_pitch_contributes_both() {
         let out = out_path("both_roles");
@@ -2820,9 +2750,9 @@ mod tests {
         assert_eq!(vec![(dict_id, Some(2))], stored_pitch(&conn, "犬", "いぬ"));
     }
 
-    /// Every field the schema permits reaches the table, including the two
-    /// this ticket does not draw: dropping them would cost ticket 06 a second
-    /// schema bump.
+    /// The test stores every field that the schema permits, and the two fields that
+    /// the builder does not draw. If the build dropped them, later code could not
+    /// draw marks without a second schema bump.
     #[test]
     fn the_stored_row_carries_the_nasal_and_devoice_markers() {
         let out = out_path("pitch_markers");
@@ -2848,8 +2778,8 @@ mod tests {
         assert_eq!("[3]", devoice);
     }
 
-    /// One row listing an accent twice stores it once (大辞泉's `一体`, 11
-    /// such rows in the census).
+    /// A row that repeats an accent stores it once. 大辞泉 has 11 such rows in the
+    /// census.
     #[test]
     fn a_row_repeating_an_accent_stores_it_once() {
         let out = out_path("pitch_repeat");
@@ -2864,10 +2794,9 @@ mod tests {
         );
     }
 
-    /// The blocker ticket 01 measured, as a fixture: every one of the five
-    /// real pitch archives stores CRC-32 values that do not match its own
-    /// payload, and this reader used to refuse all of them while Yomitan
-    /// imported them cleanly.
+    /// The fixture reproduces a census failure. Each of five real Pitch archives
+    /// stores CRC-32 values that do not match its payload.
+    /// The old reader rejected all five, but Yomitan imported them.
     #[test]
     fn a_bank_whose_stored_checksum_is_wrong_still_reads() {
         let table = pitch::load_pitch(&fixture("badcrc.zip"))
@@ -2882,13 +2811,10 @@ mod tests {
     }
 
 
-    /// End to end, which is the ticket's own goal: a user installs two pitch
-    /// dictionaries, hovers a word, and the card header carries the accents -
-    /// deduplicated where they agree, both rows where they do not.
-    ///
-    /// Build, open, look up, present. The one test that proves the storage,
-    /// the read and the reduction are wired to each other rather than each
-    /// correct alone.
+    /// Tests the complete path: a user installs two Pitch Dictionaries, hovers a
+    /// word, and the card header shows their accents.
+    /// The test builds a database, opens it, looks up a word, and presents a card.
+    /// It proves that storage, reads, and reduction work together.
     #[test]
     fn a_hover_on_a_built_library_carries_the_accents_its_dictionaries_gave() {
         use crate::lookup::deconj::Deconjugator;
@@ -2909,9 +2835,9 @@ mod tests {
 
         let dict = SqliteDictionary::open(&out).expect("the built database opens");
         let installed = dict.dicts().unwrap();
-        // A config naming nothing enables every dictionary it finds, which
-        // is what a fresh install resolves to and what this end-to-end
-        // wants: all three archives in library order.
+        // A default `Config` names no Dictionary, so it enables every installed
+        // Dictionary. This fresh-install behavior gives the card all three archives
+        // in library order.
         let cfg = crate::config::Config::default().present_config(&installed);
         let card = |text: &str| {
             let hits =
@@ -2921,11 +2847,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("no card for {text}"))
         };
 
-        // 猫 / ねこ is the whole story on one card. `pitch.zip` names it
-        // twice - atamadaka in one row and heiban in another, which the
-        // parser merged - and `pitch2.zip` names the atamadaka only. So the
-        // header draws two rows: the shared accent naming both dictionaries,
-        // and the one only the first gave naming one.
+        // `猫` and `ねこ` show the complete card path. `pitch.zip` names the pair
+        // twice, with atamadaka in one row and heiban in another. The parser merges
+        // those rows. `pitch2.zip` names only atamadaka.
+        // The header therefore shows two rows: one shared accent with both
+        // Dictionary names, and one accent that only the first Dictionary supplies.
         let neko = card("猫");
         assert_eq!(
             vec![
@@ -2947,7 +2873,8 @@ mod tests {
             "and the accent only one of them gave names only that one"
         );
 
-        // They disagree about 食べる / たべる, so it draws two rows.
+        // The two Pitch Dictionaries disagree about the `食べる` reading `たべる`, so
+        // the card shows two rows.
         let taberu = card("食べる");
         assert_eq!(
             vec![
@@ -2959,7 +2886,7 @@ mod tests {
             taberu.pitch
         );
 
-        // And the mined note carries the same accents the header drew.
+        // The Anki note carries the same accents that the header shows.
         let fields = crate::anki::fields_from_card(&neko, &neko.blocks);
         let html = fields.get("pitch_html").expect("an HTML pitch field");
         assert!(html.contains("border-top"), "{html}");

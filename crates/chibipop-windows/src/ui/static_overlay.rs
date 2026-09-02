@@ -1,6 +1,6 @@
 //! Static region outline.
 //!
-//! Click-through, topmost border.
+//! A click-through, topmost window draws the border.
 
 use crate::geom::PhysRect;
 use crate::ui::window::CaptureExclusion;
@@ -15,22 +15,22 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Outline thickness, in pixels.
+/// Border width in pixels.
 const BORDER_PX: i32 = 2;
 
-/// Outline colour: teal.
+/// Teal border color.
 const BORDER_COLOR: COLORREF = COLORREF(
     0xC0u32 | (0xE0u32 << 8) | (0xE0u32 << 16),
 );
 
-/// Constant alpha, 0-255.
+/// Constant alpha value from 0 through 255.
 const OVERLAY_ALPHA: u8 = 180;
 
 fn class_name() -> PCWSTR {
     w!("ChibipopStaticRegion")
 }
 
-/// Stored for WM_PAINT.
+/// Keep the window handle and rectangle that the paint callback needs.
 struct PaintState {
     hwnd: HWND,
     rect: PhysRect,
@@ -41,7 +41,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// A rect's four border strips.
+/// Split a rectangle into border strips so the center stays transparent.
 fn edge_strips(r: PhysRect, t: i32) -> Vec<PhysRect> {
     if r.w < 2 * t || r.h < 2 * t {
         return vec![r];
@@ -54,10 +54,10 @@ fn edge_strips(r: PhysRect, t: i32) -> Vec<PhysRect> {
     ]
 }
 
-/// Paints the border strips.
+/// Paint only the border strips so the center remains click-through.
 unsafe fn paint(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    // SAFETY: `hwnd` is live.
+    // SAFETY: The caller passes the live window handle that WM_PAINT supplies.
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
     struct Scope(HWND, PAINTSTRUCT);
     impl Drop for Scope {
@@ -76,7 +76,7 @@ unsafe fn paint(hwnd: HWND) {
         if st.hwnd != hwnd {
             return;
         }
-        // SAFETY: `hdc` is valid.
+        // SAFETY: BeginPaint returned a valid device context.
         unsafe {
             let brush = CreateSolidBrush(BORDER_COLOR);
             if !brush.is_invalid() {
@@ -95,7 +95,7 @@ unsafe fn paint(hwnd: HWND) {
     });
 }
 
-/// Paints on WM_PAINT.
+/// Handle WM_PAINT and stop panic propagation across the system callback.
 unsafe extern "system" fn wndproc(
     hwnd: HWND, msg: u32,
     wp: WPARAM, lp: LPARAM,
@@ -107,7 +107,7 @@ unsafe extern "system" fn wndproc(
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
-/// Registers the class once.
+/// Register the window class once for this process.
 unsafe fn register_class(hi: HINSTANCE) -> Result<()> {
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.load(Ordering::SeqCst) {
@@ -133,7 +133,7 @@ unsafe fn register_class(hi: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Builds the frame-only region.
+/// Build a region that contains only the frame strips.
 unsafe fn build_region(r: PhysRect) -> Result<HRGN> {
     unsafe {
         let outer = CreateRectRgn(0, 0, r.w, r.h);
@@ -161,17 +161,17 @@ unsafe fn build_region(r: PhysRect) -> Result<HRGN> {
     }
 }
 
-/// Static region outline window.
+/// A topmost window that outlines the saved static region.
 pub struct StaticRegionOverlay {
     hwnd: HWND,
     exclusion: Cell<CaptureExclusion>,
 }
 
-/// Only one at a time.
+/// Allow only one static region overlay at a time.
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 impl StaticRegionOverlay {
-    /// Creates the window, hidden.
+    /// Create the hidden overlay that outlines the static region.
     pub fn create(exclude: bool) -> Result<Self> {
         if LIVE.load(Ordering::SeqCst) {
             anyhow::bail!("already exists");
@@ -216,7 +216,7 @@ impl StaticRegionOverlay {
         }
     }
 
-    /// Shows at the given region.
+    /// Show the border at `region` in the click-through window.
     pub fn show(&self, region: PhysRect) -> Result<()> {
         unsafe {
             let rgn = build_region(region)?;
@@ -242,24 +242,24 @@ impl StaticRegionOverlay {
         Ok(())
     }
 
-    /// Hides without destroying.
+    /// Hide the overlay while its window stays alive.
     pub fn hide(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 
-    /// The window handle.
+    /// Return the overlay window handle.
     pub fn hwnd(&self) -> HWND {
         self.hwnd
     }
 
-    /// Whether excluded.
+    /// Return the current capture exclusion state.
     pub fn capture_exclusion(&self) -> CaptureExclusion {
         self.exclusion.get()
     }
 
-    /// Re-applies; may refuse.
+    /// Apply the capture exclusion state again. The OS can refuse the request.
     pub fn set_capture_exclusion(&self, on: bool) {
         let a = if on {
             WDA_EXCLUDEFROMCAPTURE

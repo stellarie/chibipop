@@ -1,19 +1,22 @@
-//! Copyable compositor snippets (ADR-0005/0008).
+//! This module provides copyable compositor snippets
+//! (ARCHITECTURE.md#settings-and-config, ARCHITECTURE.md#capture-and-masking).
 //!
-//! On the wlr-native channel the compositor bind is the truth, so the
-//! settings window never pretends to own the trigger: it shows the bind
-//! lines that shell out to `chibipop ctl`, with a copy button. Capture
-//! exclusion is the same shape — no Wayland client can hide its surface
-//! from third-party capture, so the window offers the compositor's own
-//! rule where one exists and says so where none does.
+//! On the wlr-native channel, the compositor bind is authoritative.
+//! The settings window does not claim the trigger.
+//! It shows bind lines that call `chibipop ctl` and provides a copy button.
+//! Capture exclusion uses the same approach.
+//! No Wayland client can hide its surface from third-party capture.
+//! The window offers the compositor rule when one exists.
+//! It states when no rule exists.
 
 use crate::control::Verb;
 use crate::paths;
 use std::path::Path;
 
-/// Which compositor family the snippets target. Detection is
-/// best-effort env sniffing: a wrong guess still yields a valid snippet
-/// for *some* compositor, clearly labelled.
+/// Identify the compositor family that the snippets target.
+/// Detection uses environment values and can choose the wrong family.
+/// A wrong choice still produces a valid snippet for *some* compositor.
+/// Some generated snippets include a comment that names the syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compositor {
     Hyprland,
@@ -32,7 +35,8 @@ impl Compositor {
     }
 }
 
-/// The pure decision, injectable for tests.
+/// Classify the compositor from supplied signals.
+/// The function stays pure so tests can supply those signals.
 pub fn classify(hyprland: bool, sway: bool, desktop: Option<&str>) -> Compositor {
     if hyprland {
         Compositor::Hyprland
@@ -45,38 +49,38 @@ pub fn classify(hyprland: bool, sway: bool, desktop: Option<&str>) -> Compositor
     }
 }
 
-/// A chord split into its Hyprland/sway halves.
+/// Split a chord into the Hyprland and Sway forms.
 ///
-/// `trigger_key_linux` holds XDG GlobalShortcuts preferred-binding
-/// syntax (`ALT+F`); the native snippet re-spells it per compositor.
+/// `trigger_key_linux` holds the XDG GlobalShortcuts preferred-binding
+/// syntax (`ALT+F`). The native snippet spells it for each compositor.
 fn split_chord(chord: &str) -> (Vec<&str>, &str) {
     let mut parts: Vec<&str> = chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
     let key = parts.pop().unwrap_or("F");
     (parts, key)
 }
 
-/// Which bind shape a chord needs.
+/// Select the bind shape that a chord needs.
 ///
-/// The verb text is never a caller-built string: it comes from
-/// [`Verb::as_str`], so renaming a verb cannot leave a snippet naming a
-/// word the socket no longer answers.
+/// The caller does not build the verb text.
+/// [`Verb::as_str`] supplies it, so a verb rename cannot leave a snippet
+/// with a word that the socket no longer accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bind {
-    /// The trigger: press runs `trigger-down`, release `trigger-up`, and
-    /// the pair carries the Hyprland release caveat.
+    /// The trigger. A press sends `trigger-down`, and a release sends `trigger-up`.
+    /// The pair carries the Hyprland release caveat.
     Hold,
-    /// A one-shot global action: one press, one verb, no release line.
+    /// A one-shot global action. One press sends one verb and no release line.
     Press(Verb),
 }
 
-/// The native-bind snippet for one chord: exactly the verbs the control
-/// socket speaks.
+/// Build the native-bind snippet for one chord.
+/// The snippet contains exactly the verbs that the control socket accepts.
 ///
-/// `exe` is the binary to name, resolved by the caller
-/// (`paths::exec_name`) and never looked up here: a pasted bind must
-/// exec the daemon the user is actually running, which under
-/// `cargo run` is `target/debug/chibipop` and is not on PATH
-/// (ticket 51). Keeping the lookup outside keeps this function pure.
+/// The caller resolves `exe` with `paths::exec_name`.
+/// This function does not look up `exe`.
+/// A pasted bind must execute the daemon that the user runs.
+/// Under `cargo run`, that daemon is `target/debug/chibipop` and is not on PATH.
+/// The external lookup keeps this function pure.
 pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind) -> String {
     let (mods, key) = split_chord(chord);
     let exe = paths::shell_quote(exe);
@@ -84,22 +88,22 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
         Compositor::Hyprland => {
             let mask = mods.join(" ");
             match bind {
-                // The caveat lines are part of the snippet on purpose.
-                // Hyprland (≤ 0.55.4, verified in source and live) can
-                // fire NO release bind when a chord's modifier goes up
-                // before its key: release matching requires the bind's
-                // mod mask to hold at the release instant
-                // (KeybindManager.cpp "Gate A"), and a modifier-keyed
-                // `bindr` is shadowed the moment another key is pressed
-                // during the hold (hyprwm/Hyprland#5032, #7675). Every
-                // rescue was tried and measured — a modifier
-                // `bindr`/`bindir`, an empty-mask `bindr` on the key,
-                // and a submap-scoped `bindri` (which wedges the whole
-                // keymap) — see ticket 53. So the pair is shipped as-is
-                // and the user is told the one habit and the one
-                // recovery that exist. The GlobalShortcuts `global`
-                // dispatcher is immune by design, which is one more
-                // reason the portal rung is rung 1 (ADR-0003).
+                // Keep these caveat lines in the snippet.
+                // Hyprland (≤ 0.55.4, verified in source and live) can fire no release bind
+                // when a chord modifier goes up before its key.
+                // Release checks require the bind's mod mask to remain active at release.
+                // KeybindManager.cpp calls this condition "Gate A".
+                // When the user presses another key during the hold, that key shadows a
+                // modifier-keyed `bindr` (hyprwm/Hyprland#5032, #7675).
+                // We tried and measured every alternative:
+                // a modifier `bindr`/`bindir`, an empty-mask `bindr` on the key,
+                // and a submap-scoped `bindri`, which wedges the whole keymap.
+                // The code ships the pair unchanged.
+                // The snippet states one habit and one recovery:
+                // release the key before the modifier, then repeat the chord if needed.
+                // The GlobalShortcuts `global` dispatcher is immune by design.
+                // This supports the portal rung as rung 1
+                // (ARCHITECTURE.md#input-ladders).
                 Bind::Hold => format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {down}\n\
                      bindr = {mask}, {key}, exec, {exe} ctl {up}\n\
@@ -108,8 +112,8 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                     down = Verb::TriggerDown.as_str(),
                     up = Verb::TriggerUp.as_str(),
                 ),
-                // No release line, so none of the above applies: a
-                // press-only bind cannot be wedged by a lost release.
+                // This bind has no release line.
+                // A lost release cannot wedge a press-only bind.
                 Bind::Press(verb) => format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {verb}",
                     verb = verb.as_str(),
@@ -117,8 +121,9 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
             }
         }
         _ => {
-            // sway syntax; every other wlr compositor documents an
-            // equivalent, and the comment says which dialect this is.
+            // Use Sway syntax.
+            // Every other wlr compositor documents equivalent syntax.
+            // The generated comment names this dialect.
             let chord = mods
                 .iter()
                 .chain(std::iter::once(&key))
@@ -143,9 +148,12 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
     }
 }
 
-/// Hide-from-screen-share, per ADR-0008: a copyable rule on Hyprland, a
-/// pointer on KDE, the honest "not available" elsewhere. `None` means
-/// there is nothing to copy.
+/// Provide screen-share exclusion guidance
+/// (ARCHITECTURE.md#capture-and-masking).
+/// Hyprland gets a copyable rule.
+/// KDE gets a manual instruction.
+/// Other compositors get an honest "not available" message.
+/// `None` means that no text exists to copy.
 pub fn capture_rule(compositor: Compositor) -> (String, Option<String>) {
     match compositor {
         Compositor::Hyprland => (
@@ -172,8 +180,8 @@ pub fn capture_rule(compositor: Compositor) -> (String, Option<String>) {
 mod tests {
     use super::*;
 
-    /// The path a real dev build hands out: not on PATH, and a bare
-    /// word, so it must appear verbatim.
+    /// A development build uses this path, which is not on PATH.
+    /// The path is a bare word, so the snippet must show it verbatim.
     const DEV_EXE: &str = "/home/u/chibipop/target/debug/chibipop";
 
     #[test]
@@ -188,8 +196,8 @@ mod tests {
         );
     }
 
-    /// The wedge caveat names the user's own chord, not the default's:
-    /// a CTRL+SHIFT+K user must be told to release K first.
+    /// The wedge caveat names the user's chord, not the default chord.
+    /// A CTRL+SHIFT+K user must release K first.
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
         let snippet =
@@ -203,8 +211,8 @@ mod tests {
         );
     }
 
-    /// A one-shot action is one line: no release bind, and therefore
-    /// none of the release caveat the hold has to carry.
+    /// A one-shot action uses one line.
+    /// It has no release bind, so it needs no hold-release caveat.
     #[test]
     fn hyprland_press_bind_is_one_line_with_no_release_caveat() {
         let snippet = bind_snippet(
@@ -248,8 +256,9 @@ mod tests {
         assert!(!snippet.contains("--release"), "a press bind has no release line: {snippet}");
     }
 
-    /// The snippet must name the verb the socket answers, not a string
-    /// the caller composed: a renamed verb has to change the snippet.
+    /// The snippet must name a verb that the socket accepts.
+    /// It must not use a string that the caller builds.
+    /// A verb rename must change the snippet.
     #[test]
     fn every_press_bind_names_the_verbs_own_wire_word() {
         for verb in crate::control::VERBS {
@@ -280,9 +289,10 @@ mod tests {
         .starts_with("# sway syntax"));
     }
 
-    /// A path with a space is the everyday case (`~/My Builds/...`, and
-    /// any checkout under a directory a human named), and an unquoted
-    /// one silently execs the wrong word. Both dialects must survive it.
+    /// Paths can contain spaces, for example `~/My Builds/...` or a user-named
+    /// checkout directory.
+    /// An unquoted path can execute the wrong word.
+    /// Both dialects must quote such a path.
     #[test]
     fn a_path_with_a_space_is_quoted_for_both_dialects() {
         let exe = Path::new("/home/u/my builds/chibipop");

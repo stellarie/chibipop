@@ -1,24 +1,26 @@
-//! The "Check for updates" button: check-only, forever (ADR-0007).
+//! The update check control
+//! (ARCHITECTURE.md#packaging-and-ci).
 //!
-//! Windows parity is the whole shape of this module — the check runs on
-//! a click and nowhere else, so there is no startup phone-home — but the
-//! answer stops at a sentence. Core's `chibipop::update` builds no exe
-//! swap on this platform (`download_and_replace` is `#[cfg(windows)]`),
-//! so this module cannot grow one by accident: the only thing it can do
-//! with a newer release is name it, and name the asset to fetch.
+//! This module matches Windows behavior. The system runs the check only
+//! when the user clicks the button. The system does not contact servers at
+//! startup. The check returns one status line. Core `chibipop::update` does
+//! not compile binary replacement on Linux. The module names a newer
+//! release and names the file asset to download.
 //!
-//! Naming the asset is not decoration. A tarball install and an AUR
-//! install update by different means, and the one thing chibipop knows
-//! for certain is which file on the release page is its own.
+//! A tarball installation and an AUR installation update by different
+//! methods. The application identifies which release asset belongs to it.
+//! The checker matches that asset by name. The release asset naming scheme
+//! is a fixed contract. If the project renames an asset, installed clients
+//! cannot find updates.
 
 use chibipop::update::{self, News};
 
-/// What the button reports, having checked.
+/// Return the status text after the update check finishes.
 pub fn report(current: &str) -> String {
     describe(update::news(current))
 }
 
-/// The status line for a finished check.
+/// Build the status line for a finished check.
 fn describe(outcome: anyhow::Result<Option<News>>) -> String {
     match outcome {
         Ok(None) => "You already have the latest version.".to_string(),
@@ -29,8 +31,8 @@ fn describe(outcome: anyhow::Result<Option<News>>) -> String {
                  github.com/stellarie/chibipop/releases.",
                 news.tag, asset.name,
             ),
-            // A release with no linux-x64 asset is still news; saying
-            // "check failed" for one would be a lie about the version.
+            // A release without a linux-x64 asset is valid news.
+            // Do not report a failure when the release exists.
             None => format!(
                 "{} is available, but that release carries no linux-x64 \
                  tarball. Update with your package manager, or see \
@@ -42,20 +44,19 @@ fn describe(outcome: anyhow::Result<Option<News>>) -> String {
     }
 }
 
-/// The button, end to end, against a release endpoint this test owns.
+/// Run the full update button flow against a test release endpoint.
 ///
-/// The claim under test is the negative one: a newer version is found and
-/// reported, and the binary this process is running is untouched
-/// afterwards. There is nothing to stub out to make that true — the swap
-/// is not compiled here — so the test's job is to notice if that ever
-/// stops being the case.
+/// This test verifies negative behavior. When the check reports a newer
+/// release, the process does not modify the running binary. The build on
+/// Linux excludes binary replacement code. This test confirms that binary
+/// replacement code remains excluded.
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
 
-    /// Serves exactly one `releases/latest` response, then closes.
+    /// Serve one response for `releases/latest`, then close the connection.
     fn fake_release_endpoint(body: String) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("binding a loopback port");
         let url = format!("http://{}/releases/latest", listener.local_addr().unwrap());
@@ -67,8 +68,8 @@ mod tests {
     }
 
     fn serve(mut stream: TcpStream, body: &str) {
-        // Drain the request head; ureq will not read a response it has
-        // not finished sending a request for.
+        // Read the request header. The ureq client waits until the server
+        // finishes reading the request.
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
@@ -106,9 +107,8 @@ mod tests {
         .to_string()
     }
 
-    /// What the Windows swap would write beside the binary. On Linux
-    /// nothing builds these names; the test asserts the ground truth
-    /// rather than trusting the `cfg`.
+    /// Files that binary replacement on Windows writes near the executable.
+    /// The Linux build does not create these files. The test verifies this condition.
     const SWAP_LEAVINGS: [&str; 3] = ["chibipop.update.zip", "chibipop.new.exe", "chibipop.old"];
 
     #[test]
@@ -121,11 +121,11 @@ mod tests {
         let msg = describe(update::news_at(&url, "0.8.2"));
 
         assert!(msg.contains("v9.9.9"), "{msg}");
-        // The Linux asset, not the zip the same release also carries.
+        // Verify the Linux tarball asset, not the Windows zip asset.
         assert!(msg.contains("chibipop-v9.9.9-linux-x64.tar.gz"), "{msg}");
         assert!(!msg.contains("windows-x64.zip"), "{msg}");
-        // The report points somewhere a user can act, and never claims
-        // to have done anything.
+        // Verify the message points to an actionable location and does not
+        // report an automatic update.
         assert!(msg.contains("package manager"), "{msg}");
         assert!(!msg.to_lowercase().contains("restart"), "{msg}");
 
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_endpoint_says_so_and_names_nothing() {
-        // Bound and dropped: the port is closed, so the connect fails.
+        // Bind and drop the listener. The closed port causes the connection to fail.
         let dead = {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://{}/releases/latest", l.local_addr().unwrap())
@@ -159,9 +159,8 @@ mod tests {
         assert!(msg.starts_with("Update check failed:"), "{msg}");
     }
 
-    /// v0.9.3 is real: the last Windows-only release. A Linux build
-    /// checking against it must report the version rather than an
-    /// error - the news is true even when the tarball is missing.
+    /// Version v0.9.3 was a Windows-only release. A Linux check against this
+    /// release must report the version instead of an error.
     #[test]
     fn a_windows_only_release_reports_the_version_and_says_what_is_missing() {
         let json = serde_json::json!({

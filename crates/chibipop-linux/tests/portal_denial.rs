@@ -1,40 +1,35 @@
-//! The KDE/GNOME "user clicked Deny" path, end to end, against a portal
-//! that only exists inside this test.
+//! This test checks the KDE and GNOME "user clicked Deny" path end to end with a private portal.
 //!
-//! ADR-0002 makes one promise about its fallback capture rung that no
-//! other test in this tree can check: a refusal is a *named channel
-//! state with a way back*, never an exit and never a silent
-//! half-working daemon. Checking it needs a portal that says no, and
-//! the only portal on a developer's machine says no by putting a
-//! consent dialog on their screen - which is exactly what
-//! `portal_capture_live.rs` refuses to do, and why its one real-dialog
-//! test is opt-in.
+//! The fallback capture rung promises a named channel state and a way back after refusal.
+//! It never exits or leaves the daemon without a status for the failed channel.
+//! This promise needs a portal that returns a refusal.
+//! A developer's portal returns refusal through a consent dialog.
+//! `portal_capture_live.rs` does not open that dialog by default, so its real-dialog test needs
+//! an opt-in.
 //!
-//! So this file brings its own portal.
+//! This file provides a private portal.
 //!
-//! **Nothing here can ever put a dialog on anyone's screen.** The fake
-//! runs on a *private* D-Bus session started by this test
-//! (`dbus-daemon` with a config file carrying no service directories at
-//! all, so nothing on that bus can be activated even in principle), it
-//! owns `org.freedesktop.portal.Desktop` on that bus before the daemon
-//! is spawned, and the daemon child is handed
-//! `DBUS_SESSION_BUS_ADDRESS` pointing at it. The test process never
-//! mutates its own environment - the fake is connected to the private
-//! bus by explicit address - so the real session bus, the real portal
-//! and every test running beside this one are untouched.
+//! The test cannot put a dialog on a screen. It starts `dbus-daemon` with a private D-Bus
+//! session and a config file with no service directories.
+//! No service can activate on that bus.
+//! The fake owns `org.freedesktop.portal.Desktop` before the daemon starts.
+//! The test gives the daemon child a `DBUS_SESSION_BUS_ADDRESS` value for the private bus.
+//! The test process keeps its own environment unchanged.
+//! The fake connects with an explicit address.
+//! The real session bus, real portal, and tests that run beside this one stay untouched.
 //!
-//! The fake speaks only as much `org.freedesktop.portal.ScreenCast` as
-//! `capture::portal::dbus` actually uses: the `version` and
-//! `AvailableCursorModes` properties, `CreateSession`, `SelectSources`
-//! and `Start`, each answering at the `org.freedesktop.portal.Request`
-//! object path the client predicts from our unique name and its
-//! `handle_token`. `CreateSession` and `SelectSources` answer response
-//! code 0; `Start` answers code 1, "the user cancelled" - the wire
-//! shape of somebody clicking Deny. It counts its calls, which is what
-//! turns "the daemon recovered" into "the daemon *asked again*".
+//! The fake implements only the `org.freedesktop.portal.ScreenCast` surface that
+//! `capture::portal::dbus` uses.
+//! That surface includes the `version` and `AvailableCursorModes` properties, plus
+//! `CreateSession`, `SelectSources`, and `Start`.
+//! Each method answers on the `org.freedesktop.portal.Request` object path that the client
+//! predicts from its unique name and `handle_token`.
+//! `CreateSession` and `SelectSources` return response code 0.
+//! `Start` returns code 1, the wire form of a Deny click, with label "the user cancelled".
+//! The fake counts calls.
+//! The count proves that the daemon requested the portal again after recovery.
 //!
-//! Skips, and only for honest reasons: no `WAYLAND_DISPLAY` (CI is
-//! headless - ADR-0007) and no way to start a private bus.
+//! This test skips only when `WAYLAND_DISPLAY` is absent or a private bus cannot start.
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
@@ -52,28 +47,28 @@ use zbus::{Connection, ObjectServer};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The name the fake owns, and the object every portal interface lives
-/// on. Spelled here rather than imported so a rename in the client
-/// cannot silently make the fake agree with itself.
+/// The fake owns this name and places every portal interface at this object.
+/// Do not import the name. A client rename must not make the fake agree
+/// with itself.
 const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 
-/// Where every portal method's deferred answer arrives.
+/// The interface for deferred portal responses.
 const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 
-/// `Response` code 0: carried out. Code 1: the user cancelled - the
-/// only thing a Deny button produces on the wire, and the whole point
-/// of this file.
+/// `Response` code 0 means that the portal completed the request.
+/// Code 1 means that the user cancelled it.
+/// A Deny button produces only code 1 on the wire, which this test must check.
 const RESPONSE_SUCCESS: u32 = 0;
 const RESPONSE_CANCELLED: u32 = 1;
 
-/// How long a `wait_for` may poll the daemon's log. Generous: the
-/// startup this waits on opens the OCR models.
+/// The maximum time that `wait_for` polls the daemon log.
+/// The limit allows time for startup to open the OCR models.
 const PATIENCE: Duration = Duration::from_secs(60);
 
-/// How many times the fake was asked each question. The whole retry
-/// contract rests on `start`: a reload that only re-rendered a status
-/// row would leave it where it was.
+/// The number of requests that the daemon sends to the fake.
+/// The retry contract uses the `start` count.
+/// A reload that only redraws a status row leaves this count unchanged.
 #[derive(Clone, Default)]
 struct Calls {
     create_session: Arc<AtomicUsize>,
@@ -91,18 +86,16 @@ impl Calls {
     }
 }
 
-/// The denying portal.
+/// The fake portal returns a denial.
 struct ScreenCast {
     calls: Calls,
 }
 
 #[zbus::interface(name = "org.freedesktop.portal.ScreenCast")]
 impl ScreenCast {
-    /// v5, like the portals on the desktops this path exists for: new
-    /// enough that the client sends `persist_mode` and a
-    /// `restore_token`, so the refusal being tested is a refusal of a
-    /// *persistable* grant rather than of a portal that could never
-    /// remember one.
+    /// The fake reports version 5, like the real portals for this path.
+    /// Version 5 supports `persist_mode` and `restore_token`.
+    /// The test therefore refuses a persistable grant, not a portal that cannot remember one.
     #[zbus(property, name = "version")]
     fn version(&self) -> u32 {
         5
@@ -126,9 +119,8 @@ impl ScreenCast {
         let request = request_path(&sender, &token(&options, "handle_token")?);
         let session =
             format!("{PORTAL_PATH}/session/{sender}/{}", token(&options, "session_handle_token")?);
-        // The client `Close`s this on the way out of a *granted*
-        // session; serving it costs one line and keeps the fake from
-        // answering NoSuchObject to a legal call.
+        // The client sends `Close` to this object when a granted session ends.
+        // Serve that call to avoid `NoSuchObject` for a legal request.
         serve(server, &session, SessionObject).await?;
         serve(server, &request, RequestObject).await?;
 
@@ -153,9 +145,8 @@ impl ScreenCast {
         path_of(&request)
     }
 
-    /// The Deny. `Start` is where a real portal draws the dialog, so it
-    /// is where a real refusal lands, and answering code 1 anywhere
-    /// earlier would test a path no user can reach.
+    /// This method represents Deny. A real portal shows the dialog at `Start`, so a real
+    /// refusal arrives here. An earlier code 1 would test a path that users cannot reach.
     async fn start(
         &self,
         _session: OwnedObjectPath,
@@ -173,7 +164,7 @@ impl ScreenCast {
     }
 }
 
-/// A Request object, for the `Close` a client is entitled to send.
+/// The client can send `Close` to this Request object.
 struct RequestObject;
 
 #[zbus::interface(name = "org.freedesktop.portal.Request")]
@@ -181,7 +172,7 @@ impl RequestObject {
     fn close(&self) {}
 }
 
-/// A Session object, same reason.
+/// The client can send `Close` to this Session object.
 struct SessionObject;
 
 #[zbus::interface(name = "org.freedesktop.portal.Session")]
@@ -189,8 +180,8 @@ impl SessionObject {
     fn close(&self) {}
 }
 
-/// The caller's unique name as an object-path element, exactly as the
-/// Request documentation specifies and as the client predicts it.
+/// Convert the caller's unique name to an object-path element.
+/// The Request documentation and client use this form.
 fn sender_of(header: &Header<'_>) -> zbus::fdo::Result<String> {
     let sender = header
         .sender()
@@ -198,12 +189,12 @@ fn sender_of(header: &Header<'_>) -> zbus::fdo::Result<String> {
     Ok(sender.as_str().trim_start_matches(':').replace('.', "_"))
 }
 
-/// Where the portal must put the Request object for `token`.
+/// Build the Request object path for `token`.
 fn request_path(sender: &str, token: &str) -> String {
     format!("{PORTAL_PATH}/request/{sender}/{token}")
 }
 
-/// One `s` option, by key.
+/// Get a string token from the portal options by key.
 fn token(options: &HashMap<String, OwnedValue>, key: &str) -> zbus::fdo::Result<String> {
     match options.get(key).map(|value| &**value) {
         Some(Value::Str(s)) => Ok(s.to_string()),
@@ -228,10 +219,9 @@ where
         .map_err(|e| zbus::fdo::Error::Failed(format!("serving {path}: {e}")))
 }
 
-/// The deferred half of a portal method: `Response(u32, a{sv})` on the
-/// Request object. Emitted before the method reply on purpose - the
-/// client registers its match rule *before* it calls, and a portal
-/// restoring a session from a token really does answer this fast.
+/// Send the deferred `Response(u32, a{sv})` signal on the Request object.
+/// Emit the signal before the method reply. The client installs its match rule before
+/// the call, and a portal that restores a session from a token responds quickly.
 async fn respond(
     conn: &Connection,
     request: &str,
@@ -243,16 +233,16 @@ async fn respond(
         .map_err(|e| zbus::fdo::Error::Failed(format!("emitting Response: {e}")))
 }
 
-/// A D-Bus session bus of our own, with no service directories: nothing
-/// on it can be activated, so no real portal can ever appear on it.
+/// A private D-Bus session bus with no service directories.
+/// No real portal can activate on this bus.
 struct PrivateBus {
     daemon: Child,
     address: String,
 }
 
 impl PrivateBus {
-    /// `None` when `dbus-daemon` cannot give us a bus - a skip, not a
-    /// failure.
+    /// Return `None` when `dbus-daemon` cannot provide a bus.
+    /// The test treats that result as a skip, not a failure.
     fn start(dir: &Path) -> Option<PrivateBus> {
         let config = dir.join("bus.conf");
         std::fs::write(
@@ -299,25 +289,24 @@ impl PrivateBus {
 
 impl Drop for PrivateBus {
     fn drop(&mut self) {
-        // Our own bus, with our own clients: nothing here has state
-        // worth flushing, so this is a kill rather than a SIGTERM.
+        // This bus has private clients. It has no state to flush.
+        // Kill the daemon rather than signal it with SIGTERM.
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
 }
 
-/// The scratch world: a private bus, the fake portal on it, a private
-/// XDG tree with the compositor's socket linked in, and the real daemon
-/// on top of all of it.
+/// The test's scratch state includes a private bus, its fake portal, a private XDG tree
+/// with the compositor socket linked, and the real daemon.
 struct Session {
     dir: PathBuf,
     log: PathBuf,
     daemon: Child,
     calls: Calls,
-    /// The fake's connection: dropping it drops the name and the
-    /// objects, so it lives exactly as long as the session.
+    /// Keep the fake's connection for the session lifetime.
+    /// If this field drops, the name and objects also drop.
     _portal: zbus::blocking::Connection,
-    /// Dropped last of all, after the daemon child is reaped.
+    /// Keep the private bus until the daemon child exits.
     _bus: PrivateBus,
 }
 
@@ -328,16 +317,15 @@ impl Session {
             .expect("the private bus address must parse")
             .serve_at(PORTAL_PATH, ScreenCast { calls: calls.clone() })
             .expect("serving the fake ScreenCast interface")
-            // Owned before the daemon starts, which is also what makes
-            // activation of the real portal impossible on this bus.
+            // The fake owns the name before the daemon starts.
+            // This order blocks real portal activation on this bus.
             .name(PORTAL_BUS)
             .expect("requesting the portal bus name")
             .build()
             .expect("connecting the fake portal to the private bus");
 
-        // Hold-key mode: live mode would drive lookups off whoever is
-        // at the machine, and this test is about a channel that is
-        // down, not about hovering.
+        // Use hold-key mode. Live mode would run lookups from the user's cursor.
+        // This test checks a failed channel, not the hover loop.
         let mut config = chibipop::config::Config::default();
         config.trigger.mode = chibipop::config::TriggerMode::HoldKey;
         config.save(&dir.join("config/chibipop/chibipop.toml")).expect("writing the config");
@@ -370,7 +358,7 @@ impl Session {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Wait for a line containing `needle`, and answer it.
+    /// Wait for a log line that contains `needle`, then return it.
     fn wait_for(&self, needle: &str) -> String {
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
@@ -382,7 +370,7 @@ impl Session {
         panic!("waited {PATIENCE:?} for {needle:?}; the log was:\n{}", self.log());
     }
 
-    /// Wait until `done` is satisfied by the log and the call counts.
+    /// Wait until the log and call counts satisfy `done`.
     fn wait_until(&self, what: &str, done: impl Fn(&str, (usize, usize, usize)) -> bool) {
         let deadline = Instant::now() + PATIENCE;
         while Instant::now() < deadline {
@@ -399,13 +387,13 @@ impl Session {
         );
     }
 
-    /// How many lines carry `needle` right now.
+    /// Count the log lines that contain `needle`.
     fn count(&self, needle: &str) -> usize {
         self.log().lines().filter(|l| l.contains(needle)).count()
     }
 
-    /// Whether the daemon child is still running. A denial must never
-    /// answer anything but `true`.
+    /// Report whether the daemon child still runs.
+    /// A denial must leave this result true.
     fn alive(&mut self) -> bool {
         matches!(self.daemon.try_wait(), Ok(None))
     }
@@ -413,16 +401,15 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // SIGTERM, not a kill: the daemon unlinks its socket and drops
-        // its lock on the way out.
+        // Send SIGTERM, not kill. The daemon unlinks its socket and drops its lock before exit.
         let _ = Command::new("kill").arg("-TERM").arg(self.daemon.id().to_string()).status();
         let _ = self.daemon.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-/// A private XDG world plus the private bus, so nothing here reads the
-/// developer's config or rotates their real restore token.
+/// Set a private XDG environment and private bus.
+/// The daemon must not read the developer's config or rotate the real restore token.
 fn xdg(command: &mut Command, dir: &Path, bus: &str) {
     let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
     command
@@ -432,15 +419,14 @@ fn xdg(command: &mut Command, dir: &Path, bus: &str) {
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_CACHE_HOME", dir.join("cache"))
         .env("WAYLAND_DISPLAY", display)
-        // The two hooks this whole file rests on: rung 2 forced (this
-        // box advertises screencopy and would never reach the portal on
-        // its own), talking to the fake and to nothing else.
+        // The first hook forces rung 2 because this box advertises screencopy and would
+        // otherwise never reach the portal. The second hook directs the daemon to the fake.
         .env("CHIBIPOP_CAPTURE_BACKEND", "portal")
         .env("DBUS_SESSION_BUS_ADDRESS", bus);
 }
 
-/// The scratch tree, with the compositor's socket linked in so the
-/// daemon can reach the real display from a private `XDG_RUNTIME_DIR`.
+/// Create the scratch tree and link the compositor socket.
+/// This lets the daemon reach the real display with a private `XDG_RUNTIME_DIR`.
 fn scratch() -> PathBuf {
     let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
     let dir = std::env::temp_dir().join(format!("chibipop-portal-denial-{}", std::process::id()));
@@ -459,11 +445,11 @@ fn scratch() -> PathBuf {
     dir
 }
 
-/// One test, not two, and deliberately: the retry contract is a claim
-/// about *the same daemon* that was refused - that it never exited and
-/// that a `reload` sends it back to the portal - so splitting it would
-/// mean two daemons, two buses, and a second startup consent standing
-/// in for the retry it is supposed to prove.
+/// Keep this test as one test, not two.
+/// The retry contract concerns the same daemon that received the refusal.
+/// That daemon stays alive, and `reload` sends it to the portal again.
+/// Two tests would need two daemons, two buses, and a second startup consent instead of the
+/// retry that this test must prove.
 #[test]
 fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -480,7 +466,7 @@ fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
 
     // -- the refusal --
 
-    // The handshake really ran against the fake, once.
+    // The first handshake uses the fake.
     let asked = session.wait_for("portal: requesting screen capture consent");
     assert!(asked.contains("a dialog will appear"), "the first launch has no token: {asked}");
     session.wait_until("the first consent round", |_, calls| calls == (1, 1, 1));
@@ -492,29 +478,26 @@ fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
     );
     assert!(
         failed.contains("chibipop ctl reload"),
-        "the diagnostic must name the way back (ADR-0002): {failed}"
+        "the diagnostic must name the way back: {failed}"
     );
 
-    // The Capture channel row went down carrying that same detail: this
-    // is what the tray shows and what ADR-0006 calls a named state.
-    // Asserted as a substring of one row, not against the row list -
-    // the set of channels grows.
+    // The Capture channel row reports this detail after it goes down.
+    // The tray shows this row, so the row must name the state.
+    // The test checks a substring of one row because more channels can appear.
     let row = session.wait_for("channel: Capture: ");
     assert!(
         row.contains("screen-capture permission denied") && row.contains("chibipop ctl reload"),
         "the Capture row must name the denial and the retry: {row}"
     );
 
-    // Startup finished anyway, and the process is still there. A
-    // refused permission is a channel that is down, not an install that
-    // is broken.
+    // Startup finishes, and the process remains alive.
+    // Refused permission disables one channel, not the installation.
     let ready = session.wait_for("ready: pump running");
     assert!(ready.contains("capture portal"), "the portal rung is still the selected one: {ready}");
     assert!(session.alive(), "a denial must never exit the daemon");
 
-    // Nothing was persisted: there is no grant to remember, and a token
-    // file left behind would make the next launch silently skip the
-    // dialog it needs.
+    // The refusal persists no grant.
+    // No token must remain, or the next launch could skip the required dialog.
     let token = session.dir.join("state/chibipop/portal-restore-token");
     assert!(!token.exists(), "a refusal must leave no restore token at {}", token.display());
 
@@ -524,9 +507,9 @@ fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
     assert_eq!(1, session.count("capture: portal consent failed"), "exactly one refusal so far");
     session.ctl("reload");
 
-    // The claim under test: `reload` goes back out on the bus. The log
-    // line alone would pass on a daemon that only re-rendered a row, so
-    // the fake's own counter has to move with it.
+    // `reload` must send a new request over the bus.
+    // A log line alone could pass if the daemon only redraws a row.
+    // The fake call count must increase too.
     session.wait_until("the reload to re-request consent", |log, calls| {
         log.contains("capture: retrying the portal consent") && calls.2 > before.2
     });
@@ -537,8 +520,8 @@ fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
         "the retry must be a whole fresh handshake, once"
     );
 
-    // And the second answer is reported exactly like the first, on a
-    // daemon that is still up and still retryable.
+    // The second refusal must match the first.
+    // The daemon must remain alive and ready for another retry.
     session.wait_until("the second refusal", |log, _| {
         log.matches("capture: portal consent failed").count() >= 2
     });

@@ -3,12 +3,14 @@
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-//! The Linux/Wayland platform adapter: this package *is* the adapter
-//! (ADR-0001). Per-platform bins compile everywhere, run on their own OS
-//! (ADR-0007): on a foreign target this bin is a two-line refusal, so
-//! `cargo test --workspace` stays one command on both CI runners with no
-//! cross-compilation. All Wayland/POSIX code sits behind
-//! `cfg(target_os = "linux")` — the stub pulls in none of it.
+//! The Linux platform adapter. This package is the platform adapter.
+//! See ARCHITECTURE.md#workspace-and-seams. Platform binaries compile on
+//! all targets, but run on their own operating system.
+//! See ARCHITECTURE.md#packaging-and-ci. On a foreign target, this
+//! binary prints an error and exits. Therefore, `cargo test --workspace`
+//! stays one command on both CI runners without cross-compilation.
+//! All Wayland and POSIX code sits behind `cfg(target_os = "linux")`.
+//! The stub includes none of that code.
 
 #[cfg(target_os = "linux")]
 mod capture;

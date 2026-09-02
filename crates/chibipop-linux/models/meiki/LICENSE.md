@@ -20,7 +20,7 @@ was reimplemented in `../../src/ocr/`. ONNX Runtime is MIT.
 
 ## Why they are committed
 
-ADR-0009: chibipop is offline-first and has **no first-run download path**,
+chibipop is offline-first and has **no first-run download path**,
 so the models ship everywhere the binary does. `SHA256SUMS.txt` carries the
 same digests as `tools/ocr-bench/models/SHA256SUMS.txt`, the benchmark that
 chose this engine, and `src/ocr/models.rs` pins them in code and verifies

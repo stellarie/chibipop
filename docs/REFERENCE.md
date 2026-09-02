@@ -14,10 +14,11 @@ the limits that were measured rather than assumed.
 - The Linux OCR models ship with the repository too
   (`crates/chibipop-linux/models/meiki/`). Nothing is downloaded.
 
-**One repository, two binaries** (ADR-0001). The core library is the root
-package. One bin crate per platform sits under `crates/`, and both produce a
-binary named `chibipop`, so cargo uplifts both to one path. Any command that
-links must exclude the foreign bin crate:
+**One repository, two binaries**
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#workspace-and-seams)). The core
+library is the root package. One bin crate per platform sits under `crates/`,
+and both produce a binary named `chibipop`, so cargo uplifts both to one path.
+Any command that links must exclude the foreign bin crate:
 
 | Command | Windows | Linux |
 |---|---|---|
@@ -65,7 +66,7 @@ settings process, one control verb, and three diagnostics.
 | Command | What it does |
 |---|---|
 | `chibipop run` | The daemon. The default when no subcommand is given. |
-| `chibipop settings` | The settings window, in its own process (ADR-0005). A settings crash cannot take live hover down. |
+| `chibipop settings` | The settings window, in its own process ([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)). A settings crash cannot take live hover down. |
 | `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. Bind these in your compositor. |
 | `chibipop probe` | Connects to the Wayland display, prints the capability report, exits. |
 | `chibipop capture-dump` | Grabs screen regions with the selected capture backend and writes PNGs. |
@@ -73,11 +74,12 @@ settings process, one control verb, and three diagnostics.
 
 `--config PATH` is global on Linux and skips config discovery entirely.
 
-**The `ctl` verb set is fixed** (ADR-0003): `reload`, `trigger-down`,
-`trigger-up`, `toggle`, `anki-add`, `screenshot`, `ocr-clipboard`,
-`static-region`. One verb per global action, never a scripting API. The
-settings window prints a ready-to-paste compositor bind for each one, naming
-the running binary's real path.
+**The `ctl` verb set is fixed**
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
+`trigger-down`, `trigger-up`, `toggle`, `anki-add`, `screenshot`,
+`ocr-clipboard`, `static-region`. One verb per global action, never a
+scripting API. The settings window prints a ready-to-paste compositor bind for
+each one, naming the running binary's real path.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
 run beside a live daemon. [`LINUX.md`](LINUX.md#command-line) carries the
@@ -299,7 +301,8 @@ that is how a typo quietly erases someone's settings. A value that parses but
 is out of range is **clamped on load and named on stderr**.
 
 This is the whole file, at its defaults, as `Config::default()` serializes it
-on 2026-08-29. Both platforms read the same schema (ADR-0012); the keys that
+on 2026-08-29. Both platforms read the same schema
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)); the keys that
 end in `_linux` are the Linux twin of the key above them, and Windows ignores
 them.
 
@@ -642,7 +645,7 @@ cargo test --workspace --exclude chibipop-windows   # Linux
 
 > [!warning] One Windows target cannot pass off the CI runner image
 > `geometry_golden_full_chrome` asserts DirectWrite metrics with **no
-> tolerance** (ADR-0011), against goldens blessed on `windows-2025`. On this
+> tolerance**, against goldens blessed on `windows-2025`. On this
 > development machine it fails on one field — `variants.default.elements.3.w`,
 > golden `46.43` against measured `47.03`, the reading 「ざつだん」 in Yu
 > Gothic UI. Nothing else in the suite diverges, and CI is green on the same
@@ -704,8 +707,9 @@ One target is deliberately **not** in that sweep:
 cargo test -p chibipop-linux --test ocr_gate -- --nocapture
 ```
 
-the Linux OCR quality gate (ADR-0009), which runs the committed 152-crop
-benchmark corpus through the three bundled ONNX models and prints a
+the Linux OCR quality gate
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#ocr-engine)), which runs the committed
+152-crop benchmark corpus through the three bundled ONNX models and prints a
 measured-vs-reference table. It is deterministic and it is the slowest single
 target in the tree, so CI runs it once in its own step rather than three times
 inside the loop above. Run it after any change under
@@ -728,17 +732,19 @@ covering every option plus dictionary order.
 already selectable) and **M5** (DPI and Magpie polish) are not started.
 
 **Linux ships from v0.9.9**, the first release carrying a Linux asset. One
-shared core, one bin crate per platform (ADR-0001). The Wayland build brings
-its own stack at five seams:
+shared core, one bin crate per platform
+([`ARCHITECTURE.md`](../ARCHITECTURE.md#workspace-and-seams)). The Wayland
+build brings its own stack at five seams:
 
-- the capture ladder — ADR-0002
-- the input ladder — ADR-0003
-- the popup surface and renderer — ADR-0004
-- the settings process — ADR-0005
-- the OCR engine — ADR-0009
+- [the capture ladder](../ARCHITECTURE.md#capture-and-masking)
+- [the input ladder](../ARCHITECTURE.md#input-ladders)
+- [the popup surface and renderer](../ARCHITECTURE.md#popup-and-measurement)
+- [the settings process](../ARCHITECTURE.md#settings-and-config)
+- [the OCR engine](../ARCHITECTURE.md#ocr-engine)
 
-The decisions are in [`adr/`](adr/). The measurements behind them are in
-[`research/`](research/). Vertical text is beta there. See the limits below.
+The decisions are in [`ARCHITECTURE.md`](../ARCHITECTURE.md). The measurements
+behind them are in [`research/`](research/). Vertical text is beta there. See
+the limits below.
 
 ### Known limits, measured rather than assumed
 
@@ -755,7 +761,7 @@ The decisions are in [`adr/`](adr/). The measurements behind them are in
   non-interactive environment with no screen to hover.
 - **Text clipped by a window edge cannot be read** at any capture shape. The
   glyphs are physically incomplete on screen; a ceiling, not a bug.
-- **Vertical text is beta on Linux.** The Linux OCR engine (meikiocr, ADR-0009)
+- **Vertical text is beta on Linux.** The Linux OCR engine (meikiocr)
   reads horizontal text at **1.8 % CER with 95.1 % hit-scan** and vertical text
   at **12.5 % CER with 81.3 % hit-scan** over the 152-crop benchmark corpus.
   Both are enforced as a CI gate — horizontal CER ≤ 5 % / hit-scan ≥ 90 %,

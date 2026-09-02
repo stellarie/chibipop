@@ -1,41 +1,42 @@
-//! Where the popup goes, and in which pixel space (ADR-0004).
+//! Where the popup goes, and in which pixel space.
 //!
-//! Physical pixels are authoritative: core places a known-size popup
-//! with `geom::place_popup` in the global physical space, and the
-//! surface's own geometry is derived back out of that - logical size
-//! `ceil(physical / scale)`, margins `round(physical / scale)`, and the
-//! `wp_viewport` destination equal to the logical size with
-//! `buffer_scale` left at 1. Sub-pixel slack lands in the trailing
-//! panel padding, where it is invisible.
+//! Physical pixels are authoritative. Core places a known-size popup
+//! with `geom::place_popup` in the global physical space. This module
+//! derives the surface geometry from that placement: logical size
+//! `ceil(physical / scale)`, margins `round(physical / scale)`, and a
+//! `wp_viewport` destination equal to the logical size. The code keeps
+//! `buffer_scale` at 1. Sub-pixel slack lands in the trailing panel
+//! padding, where it is invisible.
 //!
-//! A layer surface's output is fixed at creation and its margins are
-//! relative to that output, so placement is always "which output holds
-//! the anchor, and where inside it" - never a global origin the
-//! compositor picked for us.
+//! A layer surface holds one output from creation, and its margins are
+//! relative to that output. Therefore, placement always answers two
+//! questions: which output holds the anchor, and where inside that output.
+//! The compositor never chooses a global origin for the application.
 //!
-//! The scale is never latched. Hyprland may send `preferred_scale = 1.0`
-//! first and correct it later (won't-fix upstream: apps must handle a
-//! scale change at any time), so every `preferred_scale` is a re-render
-//! decision, made by [`Visibility::rescale`], not a one-time fact.
+//! The scale is never latched. Hyprland can send `preferred_scale = 1.0`
+//! first and correct it later. Upstream marked this behavior as will-not-fix.
+//! Applications must handle a scale change at any time. Therefore, every
+//! `preferred_scale` is a re-render decision made by [`Visibility::rescale`].
+//! It is not a one-time fact.
 
 use crate::cursor::outputs::OutputGeometry;
 use chibipop::geom::{place_popup, PhysRect};
 use smithay_client_toolkit::output::OutputInfo;
 use wayland_client::protocol::wl_output::Transform;
 
-/// Gap between anchor and panel, physical px. The Windows bin's
-/// `POPUP_GAP`: the same number, so a hover looks the same on both
-/// platforms.
+/// Gap between the anchor and the panel, in physical pixels.
+/// This value matches the Windows bin's `POPUP_GAP`.
+/// Therefore, a hover looks the same on both platforms.
 pub const POPUP_GAP: i32 = 40;
 
 /// One output's box in the global physical space.
 ///
-/// Same convention as the cursor channel (`cursor::outputs`): each
-/// output's logical origin scaled by that output's own scale. Exact
-/// for single-output and uniform-scale layouts, and the documented
-/// approximation otherwise - the popup and the cursor must agree about
-/// where an anchor is, so they share the convention rather than each
-/// inventing one.
+/// This function uses the same convention as the cursor channel (`cursor::outputs`).
+/// This function scales each output's logical origin by that output's own scale.
+/// This convention is exact for single-output and uniform-scale layouts.
+/// It is the documented approximation otherwise.
+/// The popup and the cursor must agree about where an anchor is.
+/// Therefore, they share one convention. Neither one invents its own.
 pub fn output_physical(geo: &OutputGeometry) -> PhysRect {
     let (x, y) = geo.physical_origin();
     let w = geo.physical_w();
@@ -43,13 +44,14 @@ pub fn output_physical(geo: &OutputGeometry) -> PhysRect {
     PhysRect { x, y, w, h }
 }
 
-/// One SCTK `OutputInfo` as the layout facts the conversions need.
+/// Convert one SCTK `OutputInfo` into the layout facts that placement needs.
 ///
 /// The popup enumerates outputs through SCTK while the cursor channel
-/// binds its own `wl_output`s; both end up in `OutputGeometry` so the
-/// two agree about the global physical space by construction. Logical
-/// geometry comes from xdg-output where the compositor offers it, and
-/// is derived from the mode and the integer scale where it does not.
+/// binds its own `wl_output` objects. Both produce an `OutputGeometry`.
+/// Therefore, the two agree about the global physical space by construction.
+/// Logical geometry comes from xdg-output when the compositor offers it.
+/// Otherwise, this function derives the geometry from the mode and the
+/// integer scale.
 pub fn geometry_of(info: &OutputInfo) -> OutputGeometry {
     let mode = info.modes.iter().find(|m| m.current).or_else(|| info.modes.first());
     let (mode_w, mode_h) = mode.map_or((0, 0), |m| m.dimensions);
@@ -68,11 +70,11 @@ pub fn geometry_of(info: &OutputInfo) -> OutputGeometry {
 
 /// The scale to render at.
 ///
-/// `wp_fractional_scale_v1.preferred_scale` arrives in 120ths, which is
-/// the only source that ever reports 1.5. Until it has spoken, the
-/// output's own physical/logical ratio is the best guess (it is what
-/// the cursor channel uses), and 1.0 is the floor - never zero, which
-/// would divide by nothing on the way back to logical units.
+/// `wp_fractional_scale_v1.preferred_scale` arrives in 120ths.
+/// This protocol is the only source that reports fractional scales such as 1.5.
+/// Before it arrives, the output's own physical-to-logical ratio is the best guess.
+/// The cursor channel uses that ratio.
+/// The floor is 1.0. A zero scale would cause a division by zero.
 pub fn fractional(preferred: Option<u32>, geo: &OutputGeometry) -> f64 {
     let scale = match preferred {
         Some(n) if n > 0 => f64::from(n) / 120.0,
@@ -85,36 +87,35 @@ pub fn fractional(preferred: Option<u32>, geo: &OutputGeometry) -> f64 {
     }
 }
 
-/// One popup's whole geometry, both spaces.
+/// One popup's whole geometry, in both coordinate spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
-    /// Where it sits, global physical: what `Event::PopupPlaced`
-    /// reports and what the capture mask has to blank out.
+    /// Where the popup sits, in global physical coordinates.
+    /// `Event::PopupPlaced` reports this rectangle, and the capture mask blanks it.
     pub rect: PhysRect,
-    /// The buffer to raster, device pixels.
+    /// The buffer to render, in device pixels.
     pub buffer: (i32, i32),
-    /// `set_size` and the viewport destination, logical units.
+    /// `set_size` and the viewport destination, in logical units.
     pub logical: (i32, i32),
-    /// `set_margin` top and left, logical units relative to the output
-    /// the surface was created on. The surface is anchored top-left, so
-    /// these two are the position.
+    /// `set_margin` top and left, in logical units relative to the output.
+    /// This module created the surface on that output.
+    /// Because the surface anchors to its top-left corner, these two margins set the position.
     pub margin: (i32, i32),
 }
 
-/// One physical rect on one output as that surface's own geometry.
+/// Convert one physical rect on one output into that surface's own geometry.
 ///
-/// The whole ADR-0004 derivation in one place, because three surfaces
-/// now need it: physical pixels are authoritative, the buffer is that
-/// many device pixels, the logical size is `ceil(physical / scale)` and
-/// the margins are `round(local / scale)` from the output's top-left
-/// corner - a layer surface's margins being relative to the output it
-/// was created on. Sub-pixel slack lands in the last row and column of
-/// the buffer, which is padding on the popup and one border pixel
-/// everywhere else.
+/// This function holds the whole calculation because three surfaces need it.
+/// Physical pixels are authoritative, and the buffer is that many device pixels.
+/// The logical size is `ceil(physical / scale)`.
+/// The margins are `round(local / scale)` from the output's top-left corner.
+/// A layer surface's margins are relative to the output that holds it.
+/// Sub-pixel slack lands in the last row and column of the buffer.
+/// That slack is padding on the popup and one border pixel on other surfaces.
 pub fn derive(rect: PhysRect, monitor: PhysRect, scale: f64) -> Placement {
     let scale = if scale > 0.0 { scale } else { 1.0 };
 
-    // Output-local, because margins are.
+    // Output-local, because margins are output-local.
     let local_x = f64::from(rect.x - monitor.x);
     let local_y = f64::from(rect.y - monitor.y);
 
@@ -131,41 +132,41 @@ pub fn derive(rect: PhysRect, monitor: PhysRect, scale: f64) -> Placement {
 
 /// Place a measured popup on one output.
 ///
-/// `size` is the panel's physical pixel size (body view plus the Anki
-/// strip - one surface holds both on Linux); `monitor` is that output's
+/// `size` is the panel's physical pixel size. It contains the body view and
+/// the Anki strip. One surface holds both on Linux. `monitor` is that output's
 /// physical box, in the same global space as `anchor`.
 pub fn place(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, scale: f64) -> Placement {
     derive(place_popup(anchor, size, monitor, POPUP_GAP), monitor, scale)
 }
 
-/// One output, as a surface *beside* the popup needs it.
+/// One output, as a surface beside the popup needs it.
 ///
-/// The selector and the outline map their own layer surfaces and must
-/// pin each one to a `wl_output`: an output is fixed at creation and
-/// margins are relative to it (ADR-0004), so `output = NULL` would hand
-/// them an origin nobody chose. They read this list off the popup
-/// rather than binding a second `OutputState`, so all three surfaces
-/// agree about the global physical space by construction.
+/// The selector and the outline map their own layer surfaces.
+/// They must pin each surface to a `wl_output`.
+/// A layer surface holds one output from creation, and its margins are relative to it.
+/// Therefore, `output = NULL` would give them an unchosen origin.
+/// They read this list from the popup. They do not bind a second `OutputState`.
+/// Therefore, all three surfaces agree about the global physical space by construction.
 #[derive(Debug, Clone)]
 pub struct Screen {
-    /// The popup's own stable surface id for this output, so a
-    /// diagnostic naming surface 1 means the same monitor everywhere.
+    /// The popup's stable surface identifier for this output.
+    /// A diagnostic that names surface 1 refers to the same monitor everywhere.
     pub id: usize,
     pub output: wayland_client::protocol::wl_output::WlOutput,
     /// This output's box in the global physical space.
     pub rect: PhysRect,
-    /// The scale to raster at: `preferred_scale` where it has spoken,
-    /// the output's own ratio until then. Never latched.
+    /// The scale to render at: `preferred_scale` when the compositor reports it,
+    /// or the output's own ratio before that. This value is never latched.
     pub scale: f64,
     /// What the log calls this monitor.
     pub name: String,
 }
 
-/// Which output holds an anchor.
+/// Find which output holds an anchor.
 ///
-/// The one containing its top-left, or - for an anchor in a layout gap
-/// or off-screen - the nearest by edge distance. `None` only while no
-/// output geometry has arrived yet.
+/// Returns the output that contains the anchor's top-left point.
+/// For an anchor in a layout gap or off-screen, returns the nearest output by edge distance.
+/// Returns `None` only before the first output geometry arrives.
 pub fn output_at<'a>(outputs: impl Iterator<Item = (usize, &'a OutputGeometry)>, anchor: PhysRect) -> Option<usize> {
     let point = chibipop::geom::PhysPoint { x: anchor.x, y: anchor.y };
     let mut nearest: Option<(usize, f64)> = None;
@@ -185,15 +186,14 @@ pub fn output_at<'a>(outputs: impl Iterator<Item = (usize, &'a OutputGeometry)>,
     nearest.map(|(idx, _)| idx)
 }
 
-/// The show/hide state machine.
+/// The show and hide state machine.
 ///
-/// Hiding attaches a fully transparent buffer and clears the input
-/// region; the surface is never unmapped, because Hyprland animates
-/// layer surfaces by default and a map per lookup would fly the popup
-/// in on every hover - a regression against Windows, where show and
-/// hide are instant (ADR-0004). The state exists so a redundant hide
-/// costs no commit at all: at the hover cadence this runs, "already
-/// hidden" is the common case.
+/// A hide attaches a fully transparent buffer and clears the input region.
+/// The code never unmaps the surface.
+/// Hyprland animates layer surfaces by default.
+/// An unmap and map cycle for each lookup would animate the popup on every hover.
+/// That result is a regression against Windows, where show and hide are instant.
+/// This state machine stops a second hide commit when the popup is already hidden.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Visibility {
     Hidden,
@@ -203,18 +203,18 @@ pub enum Visibility {
 /// What is on screen right now.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shown {
-    /// Which output's surface carries it.
+    /// Which output's surface carries the popup.
     pub output: usize,
     pub placement: Placement,
-    /// The scale that buffer was rastered at.
+    /// The scale of the rendered buffer.
     pub scale: f64,
 }
 
 impl Visibility {
-    /// Show on `output`. Returns the surface that must be cleared
-    /// first, when the popup was up on a *different* output: one
-    /// surface per output means a cross-output move is a hide plus a
-    /// show, and leaving the old one painted would show two popups.
+    /// Show on `output`.
+    /// Returns the surface that the caller must clear when the popup was on another output.
+    /// Because each output has one surface, a cross-output move is a hide and a show.
+    /// An old surface that stays painted would show two popups.
     pub fn show(&mut self, next: Shown) -> Option<usize> {
         let stale = match *self {
             Visibility::Shown(prev) if prev.output != next.output => Some(prev.output),
@@ -224,8 +224,9 @@ impl Visibility {
         stale
     }
 
-    /// Hide. `Some(output)` is the surface to hand a transparent
-    /// buffer; `None` means nothing is up and no commit is owed.
+    /// Hide the popup.
+    /// `Some(output)` is the surface that must receive a transparent buffer.
+    /// `None` means the popup is hidden. The caller commits nothing.
     pub fn hide(&mut self) -> Option<usize> {
         match std::mem::replace(self, Visibility::Hidden) {
             Visibility::Shown(shown) => Some(shown.output),
@@ -240,14 +241,14 @@ impl Visibility {
         }
     }
 
-    /// A `preferred_scale` arrived for `output`: must the frame be
-    /// rastered again?
+    /// Handle a new `preferred_scale` for `output`.
+    /// Returns true when the caller must render the frame again.
     ///
-    /// Only when that output is the one currently showing the popup and
-    /// the number actually moved - a hidden surface's buffer is
-    /// transparent at every scale, and a repeat of the same scale is
-    /// the compositor being chatty. The new scale is recorded either
-    /// way, so the *next* show renders at it.
+    /// Returns true only when that output shows the popup and the scale changed.
+    /// A hidden surface's buffer is transparent at every scale.
+    /// This function ignores a repeat of the same scale.
+    /// This function records the new scale in both cases.
+    /// Therefore, the next show renders at that scale.
     pub fn rescale(&mut self, output: usize, scale: f64) -> bool {
         let Visibility::Shown(shown) = self else { return false };
         if shown.output != output || !scale_moved(shown.scale, scale) {
@@ -258,8 +259,9 @@ impl Visibility {
     }
 }
 
-/// Scale equality, with float slack. 120ths in, so anything under half
-/// a 240th apart is the same scale.
+/// Compare two scales with a float tolerance.
+/// The compositor reports a scale in 120ths.
+/// Two values less than half of a 240th apart are equal.
 pub fn scale_moved(was: f64, now: f64) -> bool {
     (was - now).abs() > 1.0 / 240.0
 }
@@ -268,7 +270,7 @@ pub fn scale_moved(was: f64, now: f64) -> bool {
 mod tests {
     use super::*;
 
-    /// A 2560x1440 panel at 1.5, logical origin 0.
+    /// A 2560x1440 panel at 1.5 scale, logical origin 0.
     fn output(logical_x: i32, logical_w: i32, mode_w: i32) -> OutputGeometry {
         OutputGeometry {
             logical_x,
@@ -283,14 +285,14 @@ mod tests {
 
     #[test]
     fn an_outputs_physical_box_is_its_mode_at_its_own_scaled_origin() {
-        // Second head of a 1.5x pair: 2560 device px shown as 1707
-        // logical, sitting immediately right of the first.
+        // Second head of a 1.5x pair. The output shows 2560 device pixels as
+        // 1707 logical units. It sits directly to the right of the first head.
         let geo = output(1707, 1707, 2560);
         let rect = output_physical(&geo);
-        // The origin lands on the panel edge exactly, because the scale
-        // is this output's own ratio (2560/1707) rather than the 1.5 the
-        // compositor rounded it from - which is the point of deriving it
-        // per output instead of trusting one global number.
+        // The origin lands on the panel edge exactly.
+        // The scale is this output's own ratio (2560/1707) instead of 1.5.
+        // This test verifies that the code derives a scale for each output.
+        // The code does not trust one global number.
         assert_eq!(2560, rect.x);
         assert_eq!(2560, rect.w);
         assert_eq!(1440, rect.h);
@@ -329,7 +331,7 @@ mod tests {
         let anchor = PhysRect { x: 600, y: 300, w: 90, h: 30 };
         let p = place(anchor, (640, 480), monitor, 1.5);
 
-        // place_popup: below the anchor, gap 40.
+        // place_popup: below the anchor, with gap 40.
         assert_eq!(PhysRect { x: 600, y: 370, w: 640, h: 480 }, p.rect);
         assert_eq!((640, 480), p.buffer, "the raster is device pixels");
         assert_eq!((427, 320), p.logical, "ceil(640/1.5)=427, ceil(480/1.5)=320");

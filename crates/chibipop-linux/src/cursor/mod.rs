@@ -1,16 +1,16 @@
-//! The Linux cursor channel (ADR-0003): one ladder, first rung that
-//! probes successfully wins, selected by *advertised capability* at
-//! startup. Every rung feeds the same seam: a global-physical-pixel
-//! position becomes core `Event::CursorMoved` — core vocabulary
-//! unchanged, no evdev anywhere.
+//! The Linux cursor channel (ARCHITECTURE.md#input-ladders) has one ladder.
+//! Startup selects the first available rung in probe order. It uses advertised
+//! globals, portal state, and the Hyprland environment signal.
+//! Every rung feeds the same seam.
+//! A global-physical-pixel position becomes core `Event::CursorMoved`.
 //!
-//! Test hooks (documented, used by the ticket-33 smoke tests):
-//! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|portal|hyprctl|none` forces a
-//!   rung (or the empty ladder, to exercise the unsupported
-//!   diagnostic) instead of the capability-selected one.
-//! - `CHIBIPOP_CURSOR_TRACE=1` logs every position sample, poll
-//!   interval and dwell deadline, so the whole ADR-0010 cadence -
-//!   decay included - is observable in the logfile.
+//! Test hooks are documented and used by cursor-channel smoke tests:
+//! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|portal|hyprctl|none` keeps
+//!   capability selection for `auto` and forces a rung or the empty ladder
+//!   for the other values.
+//! - `CHIBIPOP_CURSOR_TRACE=1` logs every position sample, poll interval,
+//!   and dwell deadline. The logfile shows the full hover cadence.
+//!   The logfile also shows the decay.
 
 pub mod hyprctl;
 pub mod image_copy;
@@ -18,62 +18,63 @@ pub mod outputs;
 
 use crate::wayland::Advertised;
 
-/// The power budget (ADR-0010) — the single home for every hover
-/// cadence number. No settings knobs, matching Windows.
+/// The power budget (ARCHITECTURE.md#hover-cadence) stores every hover
+/// cadence number. No setting controls these numbers. This matches Windows.
 pub mod budget {
     use std::time::Duration;
 
-    /// Event-driven cursor rungs, cursor parked: nothing runs.
+    /// A parked cursor causes no wakeups for event-driven cursor rungs.
     pub const IDLE_WAKEUPS_PER_SEC: u32 = 0;
-    /// Dwell re-check while a popup is shown (the 250 ms deadline).
-    /// Budgeted here per ADR-0010; the capture tickets (30/31) race
-    /// damage on the same deadline, and the daemon's watch fires at it.
+    /// Dwell re-check while a popup is shown. The deadline is 250 ms.
+    /// Keep this budget with the other cadence values. The capture path
+    /// races damage at the same deadline, and the daemon's watch fires then.
     pub const DWELL_MAX_WAKEUPS_PER_SEC: u32 = 4;
-    /// That budget as the deadline itself: one wakeup per period, and
-    /// no second number that could drift from the first.
+    /// Use this budget as the deadline. One period gives one wakeup.
+    /// Do not define a second number that can drift from the first.
     pub const DWELL: Duration =
         Duration::from_millis(1000 / DWELL_MAX_WAKEUPS_PER_SEC as u64);
-    /// hyprctl rung: poll fast while the cursor moves...
+    /// hyprctl rung: poll every 20 ms while the cursor moves.
     pub const POLL_ACTIVE: Duration = Duration::from_millis(20);
-    /// ...and decay to a slow scan once it has been quiet...
+    /// hyprctl rung: poll every 150 ms after the cursor stays still.
     pub const POLL_IDLE: Duration = Duration::from_millis(150);
-    /// ...for this long. The first observed move bursts back to
-    /// `POLL_ACTIVE`.
+    /// Use this quiet period before the idle interval. The first observed
+    /// move returns the cadence to `POLL_ACTIVE`.
     pub const POLL_DECAY_AFTER: Duration = Duration::from_secs(5);
 }
 
-/// Rung 1 needs both capture-source plumbing globals; their names are
-/// what the unsupported diagnostic prints, so a compositor upgrade
-/// self-heals the install (ADR-0003).
+/// Rung 1 needs both capture-source globals. The unsupported diagnostic prints
+/// their names, so a compositor upgrade can restore the rung
+/// (ARCHITECTURE.md#input-ladders).
 pub const IMAGE_COPY_CAPTURE_GLOBAL: &str = "ext_image_copy_capture_manager_v1";
 pub const OUTPUT_CAPTURE_SOURCE_GLOBAL: &str = "ext_output_image_capture_source_manager_v1";
 
-/// The ladder, in ADR-0003 order.
+/// Define the ladder in probe order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     /// Rung 1: ext-image-copy-capture pointer cursor session.
-    /// Event-driven — zero idle wakeups.
+    /// Event-driven operation causes zero idle wakeups.
     ImageCopyCapture,
-    /// Rung 2: portal ScreenCast `cursor_mode=METADATA`, riding the
-    /// PipeWire stream the portal capture backend already opened, so
-    /// cursor tracking costs no extra consent (ADR-0003).
+    /// Rung 2: portal ScreenCast `cursor_mode=METADATA`. The rung uses the
+    /// PipeWire stream that the portal capture backend already opened.
+    /// Cursor positions need no extra consent.
     PortalMetadata,
-    /// Rung 3: `hyprctl cursorpos` adaptive polling, gated on
-    /// HYPRLAND_INSTANCE_SIGNATURE — ADR-0003's one deliberate
-    /// identity-based exception to "never compositor identity".
+    /// Rung 3: `hyprctl cursorpos` uses an adaptive poll.
+    /// A non-empty `HYPRLAND_INSTANCE_SIGNATURE` enables this rung.
+    /// The variable is a signal, not proof of the current compositor identity.
     HyprctlPoll,
 }
 
-/// What the compositor advertises, as far as the cursor ladder cares.
+/// Describe registry globals, portal state, and Hyprland environment state
+/// for the cursor ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub image_copy_capture: bool,
     pub output_capture_source: bool,
-    /// The portal capture backend is the selected one AND its
-    /// `AvailableCursorModes` advertises METADATA — the rung rides that
-    /// stream, so it cannot exist without it.
+    /// `portal_metadata` is true when the selected Portal capture backend provides
+    /// `METADATA` cursor mode. This state does not come from a registry global.
     pub portal_metadata: bool,
-    /// HYPRLAND_INSTANCE_SIGNATURE is set and non-empty.
+    /// `hyprland` is true when `HYPRLAND_INSTANCE_SIGNATURE` is non-empty.
+    /// This value signals Hyprland, but does not prove the current compositor.
     pub hyprland: bool,
 }
 
@@ -89,22 +90,23 @@ impl Capabilities {
     }
 }
 
-/// The `CHIBIPOP_CURSOR_CHANNEL` test hook.
+/// Override the cursor ladder with `CHIBIPOP_CURSOR_CHANNEL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LadderOverride {
+    /// Keep capability-based selection.
     Auto,
-    /// Force rung 1 (fail rather than fall through).
+    /// Force rung 1. Return `Unsupported` instead of selecting a lower rung.
     ImageCopy,
-    /// Force rung 2, pretending rung 1 is absent.
+    /// Force rung 2. Return `Unsupported` when portal `METADATA` is absent.
     Portal,
-    /// Force rung 3, pretending rung 1 is absent.
+    /// Force rung 3. Bypass image-copy and portal rungs.
     Hyprctl,
-    /// Pretend the ladder is empty: exercise the unsupported path.
+    /// Treat the ladder as empty. Exercise the unsupported path.
     None,
 }
 
 impl LadderOverride {
-    /// The environment variable this hook reads:
+    /// Read this environment variable:
     /// `auto|image-copy|portal|hyprctl|none`.
     pub const ENV: &'static str = "CHIBIPOP_CURSOR_CHANNEL";
 
@@ -118,8 +120,7 @@ impl LadderOverride {
             _ => Option::None,
         }
     }
-
-    /// The override and, when the value was unrecognized, a diagnostic.
+    /// Return the override and a diagnostic when the value is unknown.
     pub fn from_env() -> (LadderOverride, Option<String>) {
         match std::env::var(Self::ENV) {
             Err(_) => (LadderOverride::Auto, Option::None),
@@ -137,42 +138,42 @@ impl LadderOverride {
     }
 }
 
-/// What `select` decided: a live rung, or exactly what is missing.
+/// Record the result of `select`: a live rung or the exact missing capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
     Rung(Rung),
-    /// Hover unsupported. The app stays up; `missing` names the exact
-    /// absent capabilities for the startup diagnostic.
+    /// Hover is unsupported. The app stays up. `missing` names each absent
+    /// capability in the startup diagnostic.
     Unsupported { missing: Vec<String> },
 }
 
 impl Selection {
-    /// The one startup line the daemon logs for the cursor channel.
+    /// Return the one startup line that the daemon logs for the cursor channel.
     pub fn startup_line(&self) -> String {
         match self {
             Selection::Rung(Rung::ImageCopyCapture) => format!(
-                "cursor: rung 1 ext-image-copy-capture cursor session (event-driven, {} idle wakeups/s - ADR-0010)",
+                "cursor: rung 1 ext-image-copy-capture cursor session (event-driven, {} idle wakeups/s)",
                 budget::IDLE_WAKEUPS_PER_SEC
             ),
             Selection::Rung(Rung::PortalMetadata) => format!(
-                "cursor: rung 2 portal ScreenCast cursor_mode=METADATA on the capture stream (event-driven, {} idle wakeups/s - ADR-0010; no extra consent - ADR-0003)",
+                "cursor: rung 2 portal ScreenCast cursor_mode=METADATA on the capture stream (event-driven, {} idle wakeups/s; no extra consent)",
                 budget::IDLE_WAKEUPS_PER_SEC
             ),
             Selection::Rung(Rung::HyprctlPoll) => format!(
-                "cursor: rung 3 hyprctl cursorpos adaptive polling ({} ms active -> {} ms after {} s quiet - ADR-0010; Hyprland identity exception - ADR-0003)",
+                "cursor: rung 3 hyprctl cursorpos adaptive polling ({} ms active -> {} ms after {} s quiet; Hyprland identity exception)",
                 budget::POLL_ACTIVE.as_millis(),
                 budget::POLL_IDLE.as_millis(),
                 budget::POLL_DECAY_AFTER.as_secs()
             ),
             Selection::Unsupported { missing } => format!(
-                "cursor: hover unsupported - missing {}; a compositor upgrade advertising the missing capability self-heals this install (ADR-0003)",
+                "cursor: hover unsupported - missing {}; a compositor upgrade advertising the missing capability self-heals this install",
                 missing.join(", ")
             ),
         }
     }
 }
 
-/// The rung-1 globals `caps` lacks, by exact protocol name.
+/// Return rung-1 globals that `caps` lacks, with exact protocol names.
 fn missing_globals(caps: &Capabilities) -> Vec<String> {
     let mut missing = Vec::new();
     if !caps.image_copy_capture {
@@ -184,8 +185,9 @@ fn missing_globals(caps: &Capabilities) -> Vec<String> {
     missing
 }
 
-/// Walk the ladder (ADR-0003). Capability-first; the hyprctl rung's
-/// identity gate is the documented exception.
+/// Select a rung in probe order. `Auto` uses the scanned capabilities.
+/// Missing portal `METADATA` skips only the portal rung.
+/// A forced override checks only its named rung and does not fall through.
 pub fn select(caps: &Capabilities, ov: LadderOverride) -> Selection {
     match ov {
         LadderOverride::Auto => {
@@ -227,8 +229,8 @@ pub fn select(caps: &Capabilities, ov: LadderOverride) -> Selection {
                 }
             }
         }
-        // Simulated empty ladder: report rung 1's needs as if nothing
-        // were advertised.
+        // Simulate an empty ladder. Report rung 1 needs as if nothing were
+        // advertised.
         LadderOverride::None => Selection::Unsupported {
             missing: vec![
                 IMAGE_COPY_CAPTURE_GLOBAL.to_string(),
@@ -268,15 +270,15 @@ mod tests {
     };
 
     #[test]
-    fn the_budget_is_the_adr_0010_one() {
+    fn the_budget_holds_its_documented_numbers() {
         assert_eq!(0, budget::IDLE_WAKEUPS_PER_SEC);
         assert_eq!(4, budget::DWELL_MAX_WAKEUPS_PER_SEC);
         assert_eq!(std::time::Duration::from_millis(250), budget::DWELL);
-        // The daemon's dwell watch and the wlr backend's damage race
-        // are one cadence, not two that happen to agree today.
+        // The daemon's dwell watch and the wlr backend's damage race share one
+        // cadence. They are not two values that happen to agree today.
         assert_eq!(crate::capture::pacing::DWELL_DEADLINE, budget::DWELL);
         assert!(budget::POLL_ACTIVE < budget::POLL_IDLE);
-        // The idle scan stays within ADR-0010's <= 7 wakeups/s.
+        // Keep the idle scan within the <= 7 wakeups/s budget.
         assert!(1000 / budget::POLL_IDLE.as_millis() <= 7);
     }
 
@@ -290,8 +292,8 @@ mod tests {
         assert_eq!(Selection::Rung(Rung::HyprctlPoll), select(&HYPR_ONLY, LadderOverride::Auto));
     }
 
-    /// A portal-only session (GNOME): no capture globals, no Hyprland,
-    /// but the portal capture backend is up with METADATA.
+    /// A portal-only session (GNOME) has neither capture globals nor Hyprland.
+    /// The portal capture backend has METADATA.
     #[test]
     fn a_portal_metadata_stream_is_rung_two() {
         assert_eq!(
@@ -300,21 +302,20 @@ mod tests {
         );
     }
 
-    /// Ladder order, both seams of the new rung: the promptless
-    /// capture session still outranks it, and it still outranks
-    /// polling.
+    /// Ladder order for both seams of the new rung. The promptless capture
+    /// session stays first, and the poll rung stays last.
     #[test]
     fn rung_two_sits_between_the_capture_session_and_polling() {
-        // Every rung available at once: rung 1 is still the answer.
+        // All rungs are available, so rung 1 remains the answer.
         assert_eq!(Selection::Rung(Rung::ImageCopyCapture), select(&ALL, LadderOverride::Auto));
 
-        // Portal METADATA on Hyprland: rung 2 beats the polling rung.
+        // Portal METADATA on Hyprland selects rung 2 instead of the poll rung.
         let caps = Capabilities { portal_metadata: true, ..HYPR_ONLY };
         assert_eq!(Selection::Rung(Rung::PortalMetadata), select(&caps, LadderOverride::Auto));
     }
 
-    /// The diagnostic names the exact missing globals so an upgrade
-    /// self-heals.
+    /// The diagnostic names the exact missing globals. A compositor upgrade
+    /// can then restore the rung.
     #[test]
     fn no_rung_names_both_missing_globals() {
         let Selection::Unsupported { missing } = select(&NOTHING, LadderOverride::Auto) else {
@@ -352,9 +353,8 @@ mod tests {
         assert_eq!(Selection::Rung(Rung::PortalMetadata), select(&ALL, LadderOverride::Portal));
     }
 
-    /// The forced portal rung fails honestly rather than falling
-    /// through: the METADATA stream is the rung, so without it there is
-    /// nothing to pin.
+    /// The forced portal rung fails instead of using a lower rung.
+    /// The METADATA stream defines this rung. Without it, nothing can run.
     #[test]
     fn the_portal_override_names_the_absent_metadata_stream() {
         let Selection::Unsupported { missing } = select(&HYPR_ONLY, LadderOverride::Portal) else {
@@ -368,15 +368,15 @@ mod tests {
         );
     }
 
-    /// The rung-2 line names its mechanism, its zero idle cost and the
-    /// ADR, on one greppable line.
+    /// The rung-2 line names its mechanism, zero idle cost, and zero extra
+    /// consent on one greppable line.
     #[test]
     fn the_rung_two_line_stays_greppable() {
         let line = select(&PORTAL_ONLY, LadderOverride::Auto).startup_line();
         assert!(line.contains("rung 2"), "{line}");
         assert!(line.contains("cursor_mode=METADATA"), "{line}");
         assert!(line.contains("0 idle wakeups/s"), "{line}");
-        assert!(line.contains("ADR-0003"), "{line}");
+        assert!(line.contains("no extra consent"), "{line}");
         assert!(!line.contains('\n'), "{line}");
     }
 

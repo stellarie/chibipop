@@ -1,45 +1,47 @@
-//! The press-time frame trigger mode reads (ADR-0010).
+//! This module stores the frozen frame that trigger mode reads after a key press.
+//! (ARCHITECTURE.md#hover-cadence).
 //!
-//! At trigger press one full grab of the output under the cursor is taken,
-//! before any popup exists, and every lookup in the hold is served out of
-//! it: no capture, no mask, and text the popup later covers stays
-//! readable. That is the read-through property Windows gets from its
-//! capture guard and a live Wayland grab cannot have (ADR-0008). Release
-//! drops the frame; each press grabs fresh.
+//! Trigger mode captures the full output that contains the cursor before it creates a popup.
+//! Each lookup in the key hold reads that frozen frame.
+//! The hold does not capture or mask pixels.
+//! The text stays readable when the popup covers it.
+//! The capture guard gives Windows the same result.
+//! A live Wayland grab cannot give this result.
+//! (ARCHITECTURE.md#capture-and-masking).
+//! A release drops the frozen frame.
+//! Each press creates a new grab.
 //!
-//! Nothing here decides *when* to freeze. The bin owns the trigger and the
-//! output-crossing rule; this owns the pixels and answers boxes out of
-//! them.
+//! The platform bin decides when to freeze the frame and how to handle output changes.
+//! This module stores the pixels and returns requested regions.
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::text::{Frame, RegionCapture};
 use anyhow::{Context, Result};
 
-/// One trigger hold's frozen pixels.
+/// A `FrozenFrame` stores the pixels for one trigger hold.
 pub(crate) struct FrozenFrame {
-    /// The output box these pixels cover, physical.
+    /// This region uses physical pixels and covers every stored pixel.
     region: PhysRect,
-    /// BGRA8, `region.w * region.h * 4`, top-down: [`Frame`]'s format.
+    /// This buffer uses [`Frame`]'s top-down BGRA8 format. It contains `region.w * region.h * 4` bytes.
     buf: Vec<u8>,
-    /// Which backend path produced them, and why it was not the
-    /// preferred one: provenance survives the freeze, so a crop taken
-    /// twenty lookups later still says where its pixels came from.
+    /// This source names the capture backend path.
+    /// The fallback records why the code did not use the preferred path.
+    /// Both values stay with the frozen frame, so later crops report the original path.
     source: &'static str,
     fallback: Option<String>,
-    /// Boxes already served out of this frame. A repeat is the same
-    /// pixels by construction, so it can say `unchanged` honestly and
-    /// the pipeline skips an OCR pass it has already paid for.
+    /// This list records each region that the frozen frame served.
+    /// A repeated region has identical pixels, so the pipeline marks it `unchanged` and skips OCR.
     served: Vec<PhysRect>,
 }
 
 impl FrozenFrame {
-    /// One full grab of the output holding `at`.
+    /// Capture the full output that contains `at`.
     ///
-    /// Bracketed as one read like any other, so a backend that hides
-    /// its own surfaces or holds an expensive session open does it here
-    /// too. The grab is the whole output on purpose: presses arrive at
-    /// human cadence, so the copy is free and no out-of-region edge
-    /// case exists (ADR-0010).
+    /// The function pairs `begin_read` with `end_read`, as it does for a live read.
+    /// A capture backend can hide its surfaces or keep a session open for this read.
+    /// The full-output grab prevents a lookup outside the stored region.
+    /// A trigger press occurs at human speed, so the copy cost stays limited.
+    /// (ARCHITECTURE.md#hover-cadence).
     pub(crate) fn take(capture: &mut dyn RegionCapture, at: PhysPoint) -> Result<FrozenFrame> {
         let region = capture.bounds_containing(at);
         capture.begin_read();
@@ -72,17 +74,16 @@ impl FrozenFrame {
         })
     }
 
-    /// The box these pixels cover.
+    /// Return the box that these pixels cover.
     pub(crate) fn region(&self) -> PhysRect {
         self.region
     }
 
-    /// `region`'s pixels out of the frozen frame.
+    /// Copy `region` from the frozen frame.
     ///
-    /// Black where the frame does not reach: a frozen output has no
-    /// pixels past its own edge, and a blank margin costs one lookup
-    /// nothing where failing the grab would cost every lookup near an
-    /// edge - the same answer the portal rung gives off-monitor.
+    /// Pixels beyond the output edge stay black. This blank margin lets edge lookups continue.
+    /// Without this margin, each lookup near the edge can fail.
+    /// The portal rung gives the same result outside a monitor.
     pub(crate) fn crop(&mut self, region: PhysRect) -> Frame {
         let (w, h) = (region.w.max(0) as usize, region.h.max(0) as usize);
         let mut buf = vec![0u8; w * h * 4];
@@ -119,7 +120,7 @@ mod tests {
 
     const OUT: PhysRect = PhysRect { x: 100, y: 200, w: 4, h: 3 };
 
-    /// One byte per pixel's blue channel, so a crop is readable by eye.
+    /// The blue channel contains one value per pixel. This pattern makes each crop clear.
     struct OneOutput;
 
     impl RegionCapture for OneOutput {
@@ -144,8 +145,8 @@ mod tests {
         }
     }
 
-    /// Pixels short of the promised box are refused: a frozen frame is
-    /// indexed for the whole hold, so a lie here would be a panic later.
+    /// The code rejects a buffer smaller than its promised region.
+    /// The hold indexes the full frozen frame, so acceptance can cause a later panic.
     struct ShortGrab;
 
     impl RegionCapture for ShortGrab {
@@ -186,7 +187,7 @@ mod tests {
         let got = f.crop(PhysRect { x: 101, y: 201, w: 2, h: 2 });
         assert_eq!(2, got.w);
         assert_eq!(2, got.h);
-        // Rows 1 and 2 of a 4-wide frame, second column onward.
+        // Rows 1 and 2 start at the second column of the four-pixel-wide frame.
         assert_eq!(vec![5, 6, 9, 10], blues(&got));
         assert_eq!("fake", got.source);
         assert_eq!(Some("rung 1 was busy".to_string()), got.fallback);
@@ -196,7 +197,7 @@ mod tests {
     fn a_box_past_the_output_edge_is_black_where_the_frame_ends() {
         let mut f = frozen();
         let got = f.crop(PhysRect { x: 103, y: 202, w: 2, h: 2 });
-        // Only the frame's last pixel is real; the rest is off-output.
+        // Only the final frame pixel comes from the output. All other pixels are outside it.
         assert_eq!(vec![11, 0, 0, 0], blues(&got));
     }
 
@@ -207,8 +208,8 @@ mod tests {
         assert_eq!(vec![0, 0], blues(&got));
     }
 
-    /// The pixels cannot change during a hold, so the second serve of a
-    /// box is `unchanged` - which is what lets the OCR cache answer it.
+    /// When the hold is active, pixels do not change.
+    /// A second read of the same region returns `unchanged`, so OCR can reuse its result.
     #[test]
     fn the_second_serve_of_the_same_box_is_unchanged() {
         let mut f = frozen();

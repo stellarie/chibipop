@@ -1,10 +1,8 @@
-//! The hover/popup state machine.
+//! The Controller is the hover and popup state machine.
 //!
-//! `Event` in, `Command` out. Plain
-//! data, physical pixels, no OS: the
-//! platform bin runs its own loop,
-//! synthesizes Events and executes
-//! Commands.
+//! The platform bin sends `Event` values to the Controller and executes the
+//! `Command` values that it returns. The core stores plain data in physical
+//! pixels and makes no OS calls.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,193 +11,187 @@ use crate::geom::{in_sticky, PhysPoint, PhysRect, ScanRect};
 use crate::present::{self, AnkiPopupState, Presentation};
 use crate::text::layout::Orientation;
 
-/// Movement gate, physical px.
+/// The cursor must move more than this many physical pixels on one axis.
 const MOVEMENT_GATE_PX: i64 = 4;
 
-/// Not slop: UPSCALE 2 rounds.
+/// This four-pixel limit accounts for the `UPSCALE` value of 2.
 const ANCHOR_JITTER_PX: i32 = 4;
 
-/// Pixels per wheel notch.
+/// The scroll distance for one wheel notch, in physical pixels.
 const SCROLL_STEP_PX: i32 = 48;
 
-/// Armed ticks before warning.
+/// The number of armed ticks before the Controller warns the user.
 const ARM_WARN_TICKS: u32 = 250;
 
-/// Staleness by id, no sentinel.
+/// A request becomes stale when a newer `RequestId` exists. The Controller
+/// uses request IDs instead of a sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
-/// What a click on a region does.
+/// The action that a click on a region requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HitAction {
     /// Expand collapsed row `i`.
     ExpandEntry(usize),
-    /// Look a term up in the panel.
+    /// Request a term lookup in the popup.
     ///
-    /// A headword's kanji, one
-    /// character at a time, and a
-    /// glossary cross-reference's
-    /// whole `?query=` target.
+    /// A headword lookup uses one kanji character at a time.
+    /// A glossary cross-reference lookup uses the full `?query=` target.
     DrillDown(String),
-    /// Hand an `http`/`https` citation
-    /// to the user's browser.
+    /// Open an `http` or `https` citation in the user's browser.
     OpenUrl(String),
-    /// Navigate back in history.
+    /// Return to the previous history entry.
     Back,
 }
 
-/// One lookup's answer.
+/// The result of one lookup.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LookupOutcome {
-    /// No text, or no hits.
+    /// The lookup has no text or no result.
     Hide,
-    /// Logged; never fatal.
+    /// The Controller logs this error and continues.
     Failed(String),
-    /// `scan` empty without debug.
+    /// The `scan` field is empty when debug output is off.
     Ready {
         presentation: Box<Presentation>,
         anchor: PhysRect,
-        /// Which axis the hold may grow.
+        /// The axis along which the hold can grow.
         orientation: Orientation,
-        /// What the top card matched.
+        /// The rectangle that matched the top card.
         matched: Option<PhysRect>,
         scan: Vec<ScanRect>,
     },
-    /// Kanji drill-down result.
+    /// A Dictionary-only result for a kanji drill-down.
     DrillDown(Box<Presentation>),
 }
 
-/// What the tray menu chose.
+/// The action that the tray menu selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     OpenSettings,
     Quit,
 }
 
-/// One input to the Controller.
+/// An input event for the Controller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// The dispatch tick: live cursor
-    /// plus the Anki button's height
-    /// (0 when it is not visible).
+    /// A dispatch tick with the live cursor and the Anki button height.
+    /// The height is zero when the button is not visible.
     Tick { cursor: PhysPoint, button_h: i32 },
-    /// Whole wheel notches, up is +.
+    /// The number of complete wheel notches. Up is `+`.
     Scrolled { notches: i32 },
-    /// Popup-local click, hit-tested
-    /// by the bin (it owns the paint).
+    /// A click in popup-local coordinates. The platform bin performs the hit
+    /// test because it owns the paint.
     Clicked { local: PhysPoint, hit: Option<HitAction> },
-    /// Anki button or its hotkey.
+    /// A request from the Anki button or its hotkey.
     AddRequested,
-    /// Back button or Escape.
+    /// A request from the Back button or Escape.
     BackRequested,
-    /// The trigger key went down.
+    /// The trigger key changed to the down state.
     TriggerDown,
-    /// The trigger key came up.
+    /// The trigger key changed to the up state.
     TriggerUp,
-    /// A gate-accepted cursor sample.
+    /// A cursor position that passed the movement gate.
     CursorMoved { pos: PhysPoint },
-    /// The dwell deadline passed with
-    /// the cursor still (ADR-0010).
+    /// The dwell deadline passed while the cursor stayed still
+    /// (ARCHITECTURE.md#hover-cadence).
     DwellElapsed,
-    /// The worker answered.
+    /// The Worker returned a lookup result.
     LookupResult { id: RequestId, outcome: LookupOutcome },
-    /// `ShowPopup` landed here.
+    /// The platform bin placed the `ShowPopup` request.
     PopupPlaced { rect: PhysRect, content_h: i32, view_h: i32 },
-    /// `ShowPopup` could not be done.
+    /// The platform bin could not place the `ShowPopup` request.
     PopupPlaceFailed,
-    /// One dupe check's answer;
-    /// `None` = AnkiConnect refused.
+    /// The result of one duplicate check. `None` means AnkiConnect refused
+    /// the request.
     DupesChecked { generation: u64, dupes: Option<HashSet<String>> },
-    /// One add-note's answer.
+    /// The result of one add-note request.
     NoteAdded { expr: String, failed: bool },
-    /// Settings changed under us.
+    /// The platform sent a new Controller configuration.
     ConfigReloaded(Box<ControllerConfig>),
     TrayAction(TrayAction),
     Quit,
 }
 
-/// One instruction for the bin.
+/// The instruction that the Controller returns to the platform bin.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Hover lookup at this point.
+    /// Request a hover lookup at this physical point.
     ///
-    /// `popup` is our own popup's on-screen rect while the lookup runs,
-    /// or `None` when nothing is shown: what a live grab must mask out of
-    /// its own OCR input where the platform cannot exclude the surface
-    /// (ADR-0008). A bin whose platform already excludes it ignores this.
+    /// `popup` is the core popup's on-screen rectangle while the lookup runs.
+    /// It is `None` when no popup is shown.
+    /// A live grab must mask this rectangle when the platform bin cannot
+    /// exclude the surface from its OCR input
+    /// (ARCHITECTURE.md#capture-and-masking).
+    /// A platform bin that already excludes the popup ignores this field.
     RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
-    /// Dictionary-only lookup.
+    /// Request a lookup from the Dictionary data only.
     RequestDrillDown { id: RequestId, text: String },
-    /// Push settings to the worker.
+    /// Send the current settings to the Worker.
     RequestReload { id: RequestId },
-    /// Measure, place, show, paint;
-    /// answer with `PopupPlaced`.
+    /// Measure and place the popup. Show and paint it.
+    /// Return the result as `PopupPlaced`.
     ShowPopup {
         presentation: Box<Presentation>,
         anchor: PhysRect,
         scroll: i32,
         show_back: bool,
     },
-    /// Repaint in place, same rect.
+    /// Repaint the popup in its current rectangle.
     RepaintPopup { scroll: i32, show_back: bool },
-    /// Popup, overlay and button.
+    /// Hide the popup, the scan overlay, and the Anki button.
     HidePopup,
     ShowScanOverlay { rects: Vec<ScanRect> },
-    /// Place/paint/hide the button.
+    /// Update the Anki button's placement, paint, and visibility.
     SyncAnkiButton,
     SetScrollArmed(bool),
     SetClickArmed(bool),
     SetAddArmed(bool),
     SetBackArmed(bool),
-    /// Drop banked wheel delta.
+    /// Discard the stored wheel delta.
     DiscardScroll,
-    /// The cursor sits here, popup-
-    /// local: the bin hit-tests and
-    /// shows the hand when it hits.
+    /// The cursor position in popup-local coordinates.
+    /// The platform bin tests this position and shows the hand cursor on a
+    /// hit.
     SetCursorShape { local: PhysPoint, scroll: i32 },
     CheckDupes { generation: u64, exprs: Vec<String> },
     AddNote { expr: String, fields: HashMap<String, String> },
-    /// Lookup log line, when enabled.
+    /// Write a lookup log line when configuration enables it.
     LogLookup { headword: String, match_len: usize },
     WarnLookupFailed(String),
     WarnScrollCaptured { seconds: u32 },
-    /// Hand a glossary citation to
-    /// the desktop's own browser.
-    ///
-    /// `http` or `https` and nothing
-    /// else: `layout::link_action`
-    /// allow-lists the scheme, since
-    /// the URL comes out of a
-    /// dictionary file chibipop did
+    /// Open a glossary citation in the desktop browser.
+    /// Accept only `http` or `https`. `layout::link_action` allow-lists the
+    /// scheme because the URL comes from a dictionary file that chibipop did
     /// not write.
     OpenUrl(String),
     OpenSettings,
     Exit,
 }
 
-/// What the Controller reads from
-/// the config; refreshed by reload.
+/// Settings that the Controller reads from its configuration. Reload refreshes
+/// these settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControllerConfig {
     pub trigger_mode: TriggerMode,
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
-    /// Send only the first dictionary's glossary block to Anki
-    /// (upstream 0.9.x "first dict only").
+    /// Send only the first Dictionary's glossary block to Anki.
+    /// This matches upstream 0.9.x "first dict only".
     pub first_dict_only: bool,
     pub summary_chars: usize,
     pub log_lookups: bool,
-    /// The bin's dispatch tick, ms.
+    /// The platform bin dispatch interval, in milliseconds.
     pub tick_ms: u32,
 }
 
-/// Live mode only, by design.
+/// This freeze applies only in Live mode.
 pub fn per_char_freeze(on: bool, mode: TriggerMode) -> bool {
     on && matches!(mode, TriggerMode::Live)
 }
 
-/// The span hold and the char.
+/// The hold for the matched span and the hold for one character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoldRects {
     pub hold: PhysRect,
@@ -217,7 +209,7 @@ pub fn hold_regions(
     }
 }
 
-/// Match one axis, slack other.
+/// Match the selected axis and provide extra space on the other axis.
 pub fn hold_region(
     anchor: PhysRect,
     matched: Option<PhysRect>,
@@ -240,17 +232,14 @@ pub fn hold_region(
     }
 }
 
-/// The add-note payload: expr from
-/// written (else reading), the first
-/// dictionary's blocks only when
-/// configured, plus the captured
-/// sentence.
+/// Build the add-note payload.
 ///
-/// One rule, one place: the state
-/// machine and the platform bins
-/// (screenshot fields) both call it.
-/// Empty expr and no fields = no top
-/// card.
+/// `expr` uses `written` when present and `reading` otherwise.
+/// Include blocks from the first Dictionary only when `first_dict_only` is true.
+/// Include the captured sentence when it exists.
+///
+/// The Controller and the platform bins use one rule for screenshot fields.
+/// If no top card exists, return an empty `expr` and no fields.
 pub fn note_payload(
     p: &Presentation,
     first_dict_only: bool,
@@ -276,59 +265,59 @@ pub fn note_payload(
     (expr, fields)
 }
 
-/// Saved for back navigation.
+/// State saved before a drill-down so Back can restore it.
 #[derive(Debug, Clone, PartialEq)]
 struct HistoryEntry {
     presentation: Presentation,
     anki: AnkiPopupState,
 }
 
-/// The popup's measured geometry.
+/// The measured geometry of the popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Placed {
     popup: PhysRect,
-    /// Natural height, unclamped.
+    /// The natural content height before the clamp.
     content_h: i32,
-    /// The window's own height.
+    /// The popup view height.
     view_h: i32,
 }
 
-/// Why a `ShowPopup` is in flight.
+/// The reason that a `ShowPopup` request is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaceKind {
-    /// A new hover's first popup.
+    /// The first popup for a new hover.
     Fresh,
-    /// A drill-down pushed onto it.
+    /// A popup after a drill-down.
     DrillDown,
-    /// Same popup, new content.
+    /// The same popup with new content.
     Reshow,
 }
 
-/// What one popup is showing.
+/// State for one shown popup.
 #[derive(Debug, Clone, PartialEq)]
 struct Surface {
-    /// The hovered glyph's box.
+    /// The rectangle of the hovered glyph.
     anchor: PhysRect,
-    /// Where the cursor may roam.
+    /// The rectangle where the cursor can move without a new lookup.
     hold: PhysRect,
-    /// One character's hold.
+    /// The hold rectangle for one character.
     hold_char: PhysRect,
     presentation: Presentation,
     anki: AnkiPopupState,
-    /// Drill-down stack.
+    /// The drill-down history stack.
     history: Vec<HistoryEntry>,
-    /// Content offset; 0 is the top.
+    /// The content offset. Zero places the content at the top.
     scroll: i32,
-    /// Stale-dupe guard.
+    /// The generation that guards against stale duplicate results.
     generation: u64,
-    /// `None` until `PopupPlaced`.
+    /// The placement result stays `None` until the platform sends `PopupPlaced`.
     placed: Option<Placed>,
 }
 
-/// What the bin may read back.
+/// State that the platform bin can read.
 pub struct PopupView<'a> {
     pub popup: PhysRect,
-    /// The hovered glyph's box, for actions that gate on it.
+    /// The hovered glyph rectangle for actions that use the movement gate.
     pub anchor: PhysRect,
     pub scroll: i32,
     pub content_h: i32,
@@ -338,27 +327,26 @@ pub struct PopupView<'a> {
     pub show_back: bool,
 }
 
-/// The hover/popup state machine.
+/// The Controller state machine for hover and popup events.
 pub struct Controller {
     cfg: ControllerConfig,
-    /// The popup, if there is one.
+    /// The current popup, when one exists.
     surface: Option<Surface>,
-    /// Overlay rects awaiting a place.
+    /// Scan overlay rectangles held until popup placement.
     pending_scan: Vec<ScanRect>,
-    /// Why a place is outstanding.
+    /// The kind of popup placement that awaits a result.
     awaiting: Option<PlaceKind>,
-    /// A move seen while unplaced.
+    /// The latest cursor move received before popup placement.
     pending_cursor: Option<PhysPoint>,
-    /// Last point the gate accepted.
+    /// The latest cursor point that passed the movement gate.
     last_accepted: Option<PhysPoint>,
-    /// Point of the newest lookup:
-    /// what a dwell re-check re-asks.
+    /// The point of the newest lookup. The dwell re-check uses this point.
     last_dispatch: Option<PhysPoint>,
-    /// Trigger key held down.
+    /// Whether the trigger key is down.
     trigger_held: bool,
-    /// The button's height, last tick.
+    /// The Anki button height from the latest tick.
     button_h: i32,
-    /// Consecutive armed ticks.
+    /// The count of consecutive ticks while the scroll action is armed.
     armed_ticks: u32,
     next_id: u64,
     latest: RequestId,
@@ -384,8 +372,7 @@ impl Controller {
         }
     }
 
-    /// The popup on screen, if its
-    /// rect is known.
+    /// The shown popup when its rectangle is known.
     pub fn popup(&self) -> Option<PopupView<'_>> {
         let s = self.surface.as_ref()?;
         let p = s.placed.as_ref()?;
@@ -401,22 +388,21 @@ impl Controller {
         })
     }
 
-    /// The Anki affordance's state, placed or not.
+    /// The Anki state before and after popup placement.
     ///
-    /// [`Controller::popup`] answers only once a rect is known, but a
-    /// bin that paints the affordance *into* the popup rather than
-    /// beside it needs this state to raster the very first frame
-    /// (ADR-0004).
+    /// [`Controller::popup`] returns a value only after the platform knows the
+    /// rectangle. A platform bin that paints Anki inside the popup needs this
+    /// state for the first frame.
     pub fn anki(&self) -> Option<&AnkiPopupState> {
         self.surface.as_ref().map(|s| &s.anki)
     }
 
-    /// A popup exists, placed or not.
+    /// A popup exists whether placement is complete or not.
     pub fn is_shown(&self) -> bool {
         self.surface.is_some()
     }
 
-    /// The one entry point.
+    /// Handle one `Event` through the Controller.
     pub fn handle(&mut self, event: Event) -> Vec<Command> {
         match event {
             Event::Tick { cursor, button_h } => self.tick(cursor, button_h),
@@ -448,7 +434,7 @@ impl Controller {
         }
     }
 
-    /// A fresh id; older answers die.
+    /// Create a new `RequestId`. Older results become stale.
     fn next_request(&mut self) -> RequestId {
         self.next_id += 1;
         self.latest = RequestId(self.next_id);
@@ -458,7 +444,7 @@ impl Controller {
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
         self.button_h = button_h;
         let placed = self.surface.as_ref().and_then(|s| s.placed);
-        // Spec D7: the popup's own rect.
+        // Use the popup's own rectangle.
         let over_popup = placed.is_some_and(|p| p.popup.contains(cursor));
         let over_popup_or_btn = placed.is_some_and(|p| {
             PhysRect { h: p.popup.h + button_h, ..p.popup }.contains(cursor)
@@ -502,7 +488,7 @@ impl Controller {
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
         let span = (p.content_h - p.view_h).max(0);
-        // Wheel-up is positive.
+        // A positive value means wheel up.
         let step = notches.saturating_mul(SCROLL_STEP_PX);
         let next = s.scroll.saturating_sub(step).clamp(0, span);
         if next == s.scroll {
@@ -532,7 +518,7 @@ impl Controller {
             }
             Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
             Some(HitAction::Back) => self.pop_history(),
-            // Below the popup: the button.
+            // A click below the popup targets the button.
             None if local.y >= p.popup.h && self.cfg.anki_enabled => self.start_add(),
             None => Vec::new(),
         }
@@ -545,7 +531,7 @@ impl Controller {
         self.start_add()
     }
 
-    /// Same guard as the click path.
+    /// Apply the same guard as the click path.
     fn start_add(&mut self) -> Vec<Command> {
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
@@ -587,13 +573,13 @@ impl Controller {
 
     fn trigger_up(&mut self) -> Vec<Command> {
         self.trigger_held = false;
-        // Live mode ignores the key.
+        // Live mode ignores this key event.
         if matches!(self.cfg.trigger_mode, TriggerMode::Live) {
             return Vec::new();
         }
         self.last_accepted = None;
         self.pending_cursor = None;
-        // An in-flight hit re-shows it.
+        // Invalidate any lookup that has not returned.
         self.next_request();
         if self.surface.take().is_none() {
             return Vec::new();
@@ -603,7 +589,7 @@ impl Controller {
         vec![Command::HidePopup, Command::SetBackArmed(false)]
     }
 
-    /// Whether a move may count now.
+    /// Whether the current mode accepts a cursor move.
     fn mode_eligible(&self) -> bool {
         match self.cfg.trigger_mode {
             TriggerMode::Live => true,
@@ -626,7 +612,7 @@ impl Controller {
             return Vec::new();
         }
         self.last_accepted = Some(pos);
-        // Rect unknown: decide later.
+        // Wait for the popup rectangle before deciding.
         if self.surface.as_ref().is_some_and(|s| s.placed.is_none()) {
             self.pending_cursor = Some(pos);
             return Vec::new();
@@ -634,7 +620,7 @@ impl Controller {
         self.dispatch_hover(pos)
     }
 
-    /// Spec D3: hold, do not resolve.
+    /// Keep the current result when the cursor remains in the sticky region.
     fn dispatch_hover(&mut self, pos: PhysPoint) -> Vec<Command> {
         if self.frozen(pos) {
             return Vec::new();
@@ -645,15 +631,13 @@ impl Controller {
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
 
-    /// ADR-0010's dwell re-check: re-ask the question the shown popup
-    /// is the answer to, at the point that asked it.
+    /// Re-ask the lookup question at the point that produced the shown popup.
     ///
-    /// Deliberately past the freeze gate - the whole premise is that
-    /// the cursor has *not* moved and the screen under it may have. The
-    /// re-grab is damage-gated below the seams, so unchanged pixels
-    /// cost no OCR pass and come back as the same presentation, which
-    /// `ready` re-presents as nothing; a changed hit updates the popup
-    /// and a miss retracts it.
+    /// This check bypasses the freeze gate because the cursor did not move.
+    /// The screen under the cursor can change. The seams gate the new grab on
+    /// damage, so unchanged pixels skip OCR and return the same presentation.
+    /// `ready` then does nothing. A changed result updates the popup, and a
+    /// miss hides it.
     fn dwell(&mut self) -> Vec<Command> {
         if !self.dwell_armed() {
             return Vec::new();
@@ -664,13 +648,13 @@ impl Controller {
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
 
-    /// Whether a dwell re-check has anything to watch, which is what
-    /// the bin arms its dwell watch from: nothing shown must cost no
-    /// watch at all (ADR-0010's zero idle wakeups).
+    /// Whether the Controller has a dwell re-check to watch. The platform bin
+    /// uses this value to arm its dwell watch. No popup means no watch and no
+    /// idle wakeups.
     ///
-    /// Trigger mode has no re-check by construction - its frozen grab
-    /// cannot change - and a drill-down is not screen content: a
-    /// dialogue advancing behind one must not pop the user's stack.
+    /// Trigger mode has no re-check because its frozen grab cannot change.
+    /// A drill-down is not screen content. A dialogue behind it must not change
+    /// the history stack that the user opened.
     pub fn dwell_armed(&self) -> bool {
         matches!(self.cfg.trigger_mode, TriggerMode::Live)
             && self
@@ -679,10 +663,10 @@ impl Controller {
                 .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
     }
 
-    /// Our own popup, if on screen.
+    /// The core popup rectangle when it is on screen.
     ///
-    /// `None` until `PopupPlaced` says where it landed: an unplaced
-    /// surface occupies no pixels yet, so there is nothing to mask.
+    /// Return `None` until `PopupPlaced` supplies the rectangle. An unplaced
+    /// surface has no pixels, so the grab has nothing to mask.
     fn shown_popup(&self) -> Option<PhysRect> {
         Some(self.surface.as_ref()?.placed?.popup)
     }
@@ -701,7 +685,7 @@ impl Controller {
 
     fn lookup_result(&mut self, id: RequestId, outcome: LookupOutcome) -> Vec<Command> {
         if id < self.latest {
-            // Superseded, not an error.
+            // This result is superseded, not an error.
             return Vec::new();
         }
         match outcome {
@@ -771,7 +755,7 @@ impl Controller {
         out
     }
 
-    /// Pushes current, replaces.
+    /// Save the current state, then replace it with the drill-down result.
     fn push_drilldown(&mut self, presentation: Presentation) -> Vec<Command> {
         let anki_enabled = self.cfg.anki_enabled;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
@@ -788,7 +772,7 @@ impl Controller {
         out
     }
 
-    /// Measure/place/show, again.
+    /// Measure, place, and show the popup again.
     fn begin_place(&mut self, kind: PlaceKind) -> Vec<Command> {
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if matches!(kind, PlaceKind::Fresh) {
@@ -858,7 +842,7 @@ impl Controller {
             }
         }
 
-        // Held back while unplaced.
+        // Hold this cursor move until popup placement completes.
         if let Some(pos) = self.pending_cursor.take() {
             out.extend(self.dispatch_hover(pos));
         }
@@ -868,7 +852,7 @@ impl Controller {
     fn place_failed(&mut self) -> Vec<Command> {
         let Some(kind) = self.awaiting.take() else { return Vec::new() };
         match kind {
-            // Nothing on screen to keep.
+            // No popup exists on screen to keep.
             PlaceKind::Fresh => {
                 self.surface = None;
                 self.pending_scan.clear();
@@ -880,7 +864,7 @@ impl Controller {
                     Command::SetBackArmed(false),
                 ]
             }
-            // The old popup still stands.
+            // Keep the old popup on screen.
             PlaceKind::DrillDown | PlaceKind::Reshow => {
                 let pending = self.pending_cursor.take();
                 match pending {
@@ -926,7 +910,7 @@ impl Controller {
     }
 }
 
-/// Would it redraw the same?
+/// Returns true when the content matches and anchor movement stays within the jitter limit.
 fn same_content(
     prev: &Presentation,
     prev_anchor: PhysRect,
@@ -984,7 +968,7 @@ mod tests {
         ready_id(RequestId(1), written, anchor)
     }
 
-    /// The same, answering one request.
+    /// Build the result for one request with unchanged content.
     fn ready_id(id: RequestId, written: &str, anchor: PhysRect) -> Event {
         Event::LookupResult {
             id,
@@ -1002,12 +986,12 @@ mod tests {
         Event::PopupPlaced { rect, content_h, view_h }
     }
 
-    /// A shown, placed popup.
+    /// Show a placed popup with the default size.
     fn shown(c: &mut Controller) {
         shown_sized(c, 200, 200);
     }
 
-    /// Shown, with this content.
+    /// Show a placed popup with the given content and size.
     fn shown_sized(c: &mut Controller, content_h: i32, view_h: i32) {
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let id = c.latest;
@@ -1024,7 +1008,7 @@ mod tests {
         c.handle(placed(POPUP, content_h, view_h));
     }
 
-    // -- arming --
+    // -- armed controls --
 
     #[test]
     fn nothing_is_armed_without_a_popup() {
@@ -1045,7 +1029,7 @@ mod tests {
     fn the_wheel_arms_only_over_a_scrollable_popup() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        // view == content: nothing to scroll.
+        // view == content: no scroll range exists.
         let out = c.handle(Event::Tick { cursor: PhysPoint { x: 150, y: 200 }, button_h: 0 });
         assert!(out.contains(&Command::SetScrollArmed(false)));
         assert!(out.contains(&Command::SetClickArmed(true)));
@@ -1096,7 +1080,7 @@ mod tests {
         assert_eq!(1, warnings);
     }
 
-    // -- the movement gate --
+    // -- movement gate --
 
     #[test]
     fn the_first_move_always_dispatches() {
@@ -1116,11 +1100,11 @@ mod tests {
     fn the_gate_is_exclusive_at_its_boundary() {
         let mut c = Controller::new(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 0, y: 0 } });
-        // 4 px is not past the gate.
+        // Four physical pixels do not pass the gate.
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 4, y: 4 } })
             .is_empty());
-        // 5 px is.
+        // Five physical pixels pass the gate.
         assert_eq!(
             vec![Command::RequestLookup {
                 id: RequestId(2),
@@ -1136,7 +1120,7 @@ mod tests {
         let mut c = Controller::new(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 0, y: 0 } });
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 3, y: 0 } });
-        // Still measured from x = 0.
+        // The gate still measures from x = 0.
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 4, y: 0 } })
             .is_empty());
@@ -1219,7 +1203,7 @@ mod tests {
         let mut c = Controller::new(cfg());
         shown(&mut c);
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
-        // Inside the anchor's hold.
+        // This point is inside the anchor hold.
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 112, y: 105 } })
             .is_empty());
@@ -1245,8 +1229,7 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(2),
                 point: away,
-                // The shown popup travels with the request: what the
-                // grab must mask out of its own OCR input (ADR-0008).
+                // The request carries the shown popup rectangle for the grab mask.
                 popup: Some(POPUP),
             }],
             c.handle(Event::CursorMoved { pos: away })
@@ -1258,20 +1241,21 @@ mod tests {
         let mut c = Controller::new(cfg());
         shown(&mut c);
         let below = PhysPoint { x: 150, y: POPUP.y + POPUP.h + 10 };
-        // No button: not sticky.
+        // Without the button, the point is not in the sticky region.
         c.handle(Event::Tick { cursor: below, button_h: 0 });
         assert!(!c.handle(Event::CursorMoved { pos: below }).is_empty());
-        // With one: sticky.
+        // With the button, the point is in the sticky region.
         c.handle(Event::Tick { cursor: below, button_h: 40 });
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 151, y: below.y } })
             .is_empty());
     }
 
-    // -- the dwell re-check --
+    // -- dwell re-check --
 
-    /// The divergence in one test: the sticky region silences moves,
-    /// and the dwell re-check still asks (ADR-0010).
+    /// This test covers two separate rules (ARCHITECTURE.md#hover-cadence).
+    /// The sticky region suppresses cursor moves, but the dwell re-check still
+    /// sends a lookup.
     #[test]
     fn a_dwell_re_asks_the_question_the_popup_answers() {
         let mut c = Controller::new(cfg());
@@ -1281,21 +1265,21 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(2),
                 point: PhysPoint { x: 110, y: 110 },
-                // Live grabs mask our own popup out (ADR-0008).
+                // A live grab masks the core popup from its OCR input.
                 popup: Some(POPUP),
             }],
             c.handle(Event::DwellElapsed)
         );
     }
 
-    /// The cursor drifting onto the popup must not become the dwell's
-    /// question: the mask would blank the popup's own text and the
-    /// re-check would retract the popup it is watching.
+    /// A cursor move onto the popup must not change the dwell question.
+    /// The mask removes the popup text, so the re-check hides the popup that
+    /// the dwell watch monitors.
     #[test]
     fn a_dwell_asks_where_the_hover_was_not_where_the_cursor_drifted() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        // Accepted by the movement gate, silenced by the sticky region.
+        // The movement gate accepts this point, but the sticky region suppresses its lookup.
         assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 300, y: 250 } }).is_empty());
         assert_eq!(
             vec![Command::RequestLookup {
@@ -1307,21 +1291,21 @@ mod tests {
         );
     }
 
-    /// A parked cursor over empty screen is fully idle: no popup, no
-    /// re-check, nothing for the bin to keep armed.
+    /// An idle cursor over empty screen needs no dwell watch.
+    /// No popup means no re-check and no watch for the platform bin to arm.
     #[test]
     fn nothing_shown_is_never_re_checked() {
         let mut c = Controller::new(cfg());
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
-        // A hover with no answer yet is not a shown popup either.
+        // A hover without an answer is not a shown popup.
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
     }
 
-    /// Unplaced is not shown: the popup's rect is what the mask needs,
-    /// so a re-check before `PopupPlaced` would grab the wrong question.
+    /// An unplaced popup is not shown. The mask needs its rectangle, so the
+    /// re-check must wait for `PopupPlaced`.
     #[test]
     fn a_popup_awaiting_its_rect_is_never_re_checked() {
         let mut c = Controller::new(cfg());
@@ -1331,8 +1315,9 @@ mod tests {
         assert!(c.handle(Event::DwellElapsed).is_empty());
     }
 
-    /// Trigger mode reads a press-time grab, which cannot change:
-    /// there is no dwell re-check in it by construction (ADR-0010).
+    /// Trigger mode uses a press-time grab that cannot change.
+    /// It has no dwell re-check by construction
+    /// (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn trigger_mode_has_no_dwell_re_check() {
         let mut c = Controller::new(hold_cfg());
@@ -1343,8 +1328,8 @@ mod tests {
         assert!(c.handle(Event::DwellElapsed).is_empty());
     }
 
-    /// A drill-down is not screen content: dialogue advancing behind
-    /// one must not pop the stack the user navigated into.
+    /// A drill-down is not screen content. A dialogue behind it must not change
+    /// the history stack that the user opened.
     #[test]
     fn a_drill_down_is_never_re_checked() {
         let mut c = Controller::new(cfg());
@@ -1360,15 +1345,15 @@ mod tests {
         c.handle(placed(POPUP, 200, 200));
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
-        // Back to the hover's own card: watched again.
+        // Back returns to the hover card, so the dwell watch starts again.
         c.handle(Event::BackRequested);
         c.handle(placed(POPUP, 200, 200));
         assert!(c.dwell_armed());
     }
 
-    /// The three answers a re-check can have. Same content re-presents
-    /// nothing - that is what makes a static screen free above the
-    /// grab; a change updates the popup; a miss retracts it.
+    /// A dwell re-check has three outcomes. Unchanged content does nothing,
+    /// changed content updates the popup, and no result hides it.
+    /// A static screen therefore needs no extra OCR pass.
     #[test]
     fn a_dwell_answer_presents_only_a_change() {
         let mut c = Controller::new(cfg());
@@ -1393,7 +1378,7 @@ mod tests {
         assert!(!c.dwell_armed(), "and the watch has nothing left to do");
     }
 
-    // -- the placement round-trip --
+    // -- popup placement --
 
     #[test]
     fn a_ready_answer_asks_for_a_placement_first() {
@@ -1410,7 +1395,7 @@ mod tests {
             }]
         );
         assert!(c.is_shown());
-        // Rect unknown until placed.
+        // The rectangle is unknown until placement completes.
         assert!(c.popup().is_none());
         let out = c.handle(placed(POPUP, 200, 200));
         assert_eq!(
@@ -1466,13 +1451,12 @@ mod tests {
         let mut c = Controller::new(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
-        // Would land on the popup.
+        // This point lands on the popup.
         assert!(c
             .handle(Event::CursorMoved { pos: PhysPoint { x: 300, y: 250 } })
             .is_empty());
         let out = c.handle(placed(POPUP, 200, 200));
-        // Held back, then held: the
-        // rect turned out to cover it.
+        // The Controller holds this move, then finds that the popup covers the point.
         assert!(!out.iter().any(|cmd| matches!(cmd, Command::RequestLookup { .. })));
     }
 
@@ -1536,7 +1520,7 @@ mod tests {
         assert_eq!(POPUP, c.popup().expect("still placed").popup);
     }
 
-    // -- scrolling --
+    // -- scroll behavior --
 
     #[test]
     fn the_wheel_scrolls_by_whole_notches_and_clamps() {
@@ -1546,13 +1530,13 @@ mod tests {
             vec![Command::RepaintPopup { scroll: SCROLL_STEP_PX, show_back: false }],
             c.handle(Event::Scrolled { notches: -1 })
         );
-        // Down past the end clamps.
+        // A move past the bottom clamps to the end.
         c.handle(Event::Scrolled { notches: -100 });
         assert_eq!(200, c.popup().expect("placed").scroll);
-        // And 0 is the top.
+        // Zero is the top offset.
         c.handle(Event::Scrolled { notches: 100 });
         assert_eq!(0, c.popup().expect("placed").scroll);
-        // No movement, no repaint.
+        // No offset change produces no repaint.
         assert!(c.handle(Event::Scrolled { notches: 5 }).is_empty());
     }
 
@@ -1562,8 +1546,7 @@ mod tests {
         shown_sized(&mut c, 500, 200);
         c.handle(Event::Scrolled { notches: -4 });
         assert_eq!(192, c.popup().expect("placed").scroll);
-        // Dupe markers repaint in place
-        // but the popup re-measures.
+        // Duplicate markers repaint in place, but the popup measures again.
         c.handle(Event::DupesChecked { generation: 1, dupes: Some(HashSet::new()) });
         c.handle(placed(POPUP, 250, 200));
         assert_eq!(50, c.popup().expect("placed").scroll);
@@ -1582,7 +1565,7 @@ mod tests {
         assert_eq!(0, c.popup().expect("placed").scroll);
     }
 
-    // -- clicks --
+    // -- click actions --
 
     #[test]
     fn a_drill_down_click_asks_the_worker() {
@@ -1643,7 +1626,7 @@ mod tests {
         );
         c.handle(placed(POPUP, 200, 200));
         assert!(!c.popup().expect("placed").show_back);
-        // Nothing left to pop.
+        // No history entry remains to remove.
         assert!(c.handle(Event::BackRequested).is_empty());
     }
 
@@ -1658,7 +1641,7 @@ mod tests {
         shown(&mut c);
         let out = c.handle(Event::Clicked { local: below, hit: None });
         assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
-        // One add at a time.
+        // Allow only one add request at a time.
         assert!(c.handle(Event::AddRequested).is_empty());
     }
 
@@ -1673,9 +1656,9 @@ mod tests {
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
     }
 
-    /// A bin that paints the affordance *into* the popup has to know
-    /// the state before the first raster - which is before any rect
-    /// exists, and therefore before `popup()` answers at all.
+    /// A platform bin that paints the Anki control inside the popup needs its
+    /// state before the first frame. This state exists before the platform knows
+    /// the rectangle, so `popup()` returns `None`.
     #[test]
     fn the_anki_state_reads_back_before_the_popup_has_a_rect() {
         let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
@@ -1707,7 +1690,7 @@ mod tests {
             .is_empty());
     }
 
-    // -- dupe checks --
+    // -- duplicate checks --
 
     #[test]
     fn a_new_popup_checks_every_headword_for_dupes() {
@@ -1755,7 +1738,7 @@ mod tests {
         assert!(view.anki.dupes.contains("\u{732B}"));
     }
 
-    // -- worker outcomes --
+    // -- Worker outcomes --
 
     #[test]
     fn a_hide_answer_retracts_the_popup() {
@@ -1814,7 +1797,7 @@ mod tests {
         );
     }
 
-    // -- reload --
+    // -- configuration reload --
 
     #[test]
     fn a_reload_kills_the_answer_in_flight_and_keeps_the_popup() {
@@ -1843,14 +1826,14 @@ mod tests {
                 presentation: Box::new(presentation_of("\u{5BBF}\u{820E}")),
                 anchor: ANCHOR,
                 orientation: Orientation::Horizontal,
-                // A two-glyph span.
+                // The matched span contains two glyphs.
                 matched: Some(PhysRect { x: 100, y: 100, w: 40, h: 20 }),
                 scan: Vec::new(),
             },
         });
         c.handle(placed(POPUP, 200, 200));
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
-        // Second glyph: inside the span hold.
+        // The second glyph is inside the span hold.
         let second = PhysPoint { x: 132, y: 105 };
         assert!(c.handle(Event::CursorMoved { pos: second }).is_empty());
 
@@ -1858,7 +1841,7 @@ mod tests {
             per_character_lookup: true,
             ..cfg()
         })));
-        // The char hold is one glyph wide.
+        // The character hold covers one glyph.
         let third = PhysPoint { x: 138, y: 105 };
         assert!(!c.handle(Event::CursorMoved { pos: third }).is_empty());
     }
@@ -1926,24 +1909,24 @@ mod tests {
         assert_eq!(20, hold_char.w);
     }
 
-    /// One word, one popup.
+    /// Verify the hold for one matched word and one popup.
     #[test]
     fn the_hold_region_covers_the_whole_matched_word() {
         let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
-        // A four-character match.
+        // The match has four characters.
         let matched = PhysRect { x: 3007, y: 254, w: 120, h: 32 };
         let popup = PhysRect { x: 3007, y: 300, w: 420, h: 300 };
 
-        // Same word, later glyphs.
+        // Test later glyphs from the same word.
         assert!(in_sticky(PhysPoint { x: 3051, y: 270 }, matched, matched, popup));
         assert!(in_sticky(PhysPoint { x: 3100, y: 270 }, matched, matched, popup));
-        // Past the match: re-resolve.
+        // A point past the match triggers a new lookup.
         assert!(!in_sticky(PhysPoint { x: 3200, y: 270 }, matched, matched, popup));
-        // The anchor alone releases.
+        // The anchor alone does not keep this point in the sticky region.
         assert!(!in_sticky(PhysPoint { x: 3051, y: 270 }, anchor, anchor, popup));
     }
 
-    /// The freeze/reach seam.
+    /// The boundary between the freeze hold and popup reach.
     #[test]
     fn a_char_freeze_still_reaches_the_popup() {
         let anchor = PhysRect { x: 3010, y: 257, w: 27, h: 26 };
@@ -1960,7 +1943,7 @@ mod tests {
         }
     }
 
-    /// Rect unknown: adds wait too.
+    /// The add hotkey also waits for the popup rectangle.
     #[test]
     fn the_add_hotkey_waits_for_the_rect() {
         let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
@@ -1971,7 +1954,7 @@ mod tests {
         assert!(!c.handle(Event::AddRequested).is_empty());
     }
 
-    /// One rule, three shapes.
+    /// One payload rule covers the expression fallback, block trim, and empty card.
     #[test]
     fn the_note_payload_trims_to_the_first_dict_and_carries_the_sentence() {
         let block = |name: &str, gloss: &str| {
@@ -1989,19 +1972,19 @@ mod tests {
             sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
         };
 
-        // Reading stands in for a missing written form.
+        // The `reading` value replaces the missing `written` value.
         let (expr, fields) = note_payload(&p, false);
         assert_eq!("\u{306D}\u{3053}", expr);
         assert_eq!(Some(&"\u{732B}\u{304C}\u{3044}\u{308B}".to_string()), fields.get("sentence"));
         let both = fields.get("glossary").expect("glossary field");
         assert!(both.contains("cat") && both.contains("feline"), "{both}");
 
-        // First dict only drops the rest.
+        // The first Dictionary excludes all later blocks.
         let (_, trimmed) = note_payload(&p, true);
         let first = trimmed.get("glossary").expect("glossary field");
         assert!(first.contains("cat") && !first.contains("feline"), "{first}");
 
-        // No top card: nothing to add.
+        // Without a top card, the payload has nothing to add.
         p.top = None;
         assert_eq!((String::new(), HashMap::new()), note_payload(&p, false));
     }

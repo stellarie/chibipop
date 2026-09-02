@@ -1,60 +1,61 @@
-//! The region selector: drag a box on a dimmed screen, get a
-//! `PhysRect` back.
+//! This module defines the Linux region selector.
 //!
-//! The Linux answer to the Windows bin's `action/selection.rs`, and it
-//! looks the same on purpose: the live screen dimmed to 40 % black with
-//! the drag rectangle punched clear and a 2 px white frame round it, a
-//! crosshair cursor, `Esc` or right-click to cancel, and drags under
-//! [`MIN_DRAG_PX`] discarded as accidental clicks. One
-//! `zwlr_layer_shell_v1` surface per output on the `Overlay` layer,
-//! anchored to all four edges so the compositor sizes it to the whole
-//! output.
+//! The user drags a box on a dimmed screen, and the selector returns a `PhysRect`.
 //!
-//! **The live screen, not a frozen grab** (spec D5). Nothing is captured
-//! before the drag: the dim is a translucent surface over whatever is
-//! there, so the user drags against what they are actually looking at
-//! and the region is grabbed *after* this surface is down - which is
-//! also the only way the grab cannot capture the selector itself.
-//! [`Selector::pick`] therefore destroys its surfaces and completes a
-//! round trip before it returns.
+//! The Windows bin has `action/selection.rs` for the same function.
+//! The selector dims the live screen to 40 % black.
+//! It clears the drag rectangle and draws a 2 px white frame around it.
+//! It shows a crosshair cursor.
+//! `Esc` or a right-click cancels the pick.
+//! It discards a drag under [`MIN_DRAG_PX`] as an accidental click.
+//! It creates one `zwlr_layer_shell_v1` surface per output on the `Overlay` layer.
+//! Each surface anchors to all four edges, so the compositor sizes it to the whole output.
 //!
-//! **Why this may take keyboard focus and the popup may not.** ADR-0004
-//! makes `keyboard_interactivity = none` inviolable for the popup:
-//! focus-stealing has to be impossible by construction for a surface
-//! that appears on every hover, unasked. The selector is the exact
-//! opposite - it exists only because the user pressed a key to ask for
-//! it, it is modal for as long as it is up, and its whole contract is
-//! "the next drag or `Esc` decides". A picker that could not hear `Esc`
-//! would have no way out but a successful drag. So this surface, and
-//! only this surface, sets `Exclusive` - and gives the focus back by
-//! destroying itself.
+//! **The live screen, not a frozen grab.**
+//! The selector captures no data before the drag.
+//! The dim is a translucent surface over the real screen content.
+//! The user sees that content while the user drags.
+//! The code grabs the region after it destroys this surface.
+//! This order keeps the selector out of the grab.
+//! [`Selector::pick`] therefore destroys its surfaces and completes a round trip before it returns.
 //!
-//! **How it pumps.** [`Selector::pick`] is a blocking nested dispatch
-//! loop on the daemon thread, the analogue of Windows' nested
-//! `GetMessageW` pump. The daemon's own queue lives inside calloop's
-//! `WaylandSource` and cannot be dispatched from within a source
-//! callback, so a pick makes a *second* `EventQueue` on the same
-//! `Connection` for its own objects and runs it in a throwaway
-//! `calloop::EventLoop` with a [`PICK_TIMEOUT`]-length `Timer`. Two
-//! consequences, both wanted: a compositor that delivers a press and
-//! then no release cannot wedge the daemon (the timer cancels the pick),
-//! and this is re-entrant from any callback - including a pointer click
-//! on the popup - because nothing borrows the outer loop.
+//! **Why this surface can take keyboard focus and the popup cannot.**
+//! `keyboard_interactivity = none` is a strict rule for the popup.
+//! A surface that appears on every hover must not take focus.
+//! The selector has the opposite role.
+//! The user requests it with a key press.
+//! It stays modal until it closes.
+//! Its contract accepts the next drag or `Esc`.
+//! Only a successful drag can end a picker that cannot hear `Esc`.
+//! Therefore, only this surface sets `Exclusive`.
+//! It returns focus when it destroys itself.
 //!
-//! Events for the daemon's queue that arrive while a pick has the thread
-//! are not lost: `wayland-client` distributes each read to every queue.
-//! They are, however, only *dispatched* when calloop next sees the
-//! socket readable, so a pick ends with a `wl_display.sync` on the
-//! daemon's queue ([`Wake`]) to guarantee that happens at once.
+//! **How the selector pumps events.**
+//! [`Selector::pick`] runs a nested dispatch loop that blocks the daemon thread.
+//! It is the analog of the nested `GetMessageW` pump in the Windows bin.
+//! The daemon queue lives inside the calloop `WaylandSource`.
+//! No source callback can dispatch that queue.
+//! A pick therefore creates a second `EventQueue` on the same `Connection` for its objects.
+//! It runs that queue in a temporary `calloop::EventLoop` with a `Timer` of [`PICK_TIMEOUT`] length.
+//! This design has two effects.
+//! A compositor that sends a press without a release cannot block the daemon.
+//! The timer cancels the pick.
+//! Any callback can start another pick, even a pointer click on the popup.
+//! The nested pick holds no borrow of the outer loop.
 //!
-//! **The keyboard is bound raw, not through SCTK's `seat::keyboard`.**
-//! That module needs SCTK's `xkbcommon` feature, which is a build-time
-//! `pkg-config` + `libxkbcommon` dependency for the whole workspace
-//! (cargo unifies features), and would be paid by every Linux build for
-//! one key. `Esc` is a physical key with a fixed evdev code
-//! ([`KEY_ESC`]), which is exactly what `wl_keyboard.key` carries, so no
-//! keymap is needed to recognise it - and "the physical Esc key cancels"
-//! is then layout-independent by construction rather than by lookup.
+//! Events for the daemon queue that arrive while a pick runs survive.
+//! `wayland-client` sends each read to every queue.
+//! Calloop dispatches those events when it next sees the socket as readable.
+//! A pick therefore ends with a `wl_display.sync` on the daemon queue ([`Wake`]).
+//! That sync makes those events dispatch at once.
+//!
+//! **The code binds the keyboard protocol directly, not through the SCTK `seat::keyboard` module.**
+//! That module needs the SCTK `xkbcommon` feature.
+//! The feature adds a build-time `pkg-config` and `libxkbcommon` dependency to the workspace.
+//! Cargo unifies features, so every Linux build includes these dependencies for one key.
+//! `Esc` is a physical key with a fixed evdev code ([`KEY_ESC`]).
+//! `wl_keyboard.key` carries exactly that code, so the selector needs no keymap.
+//! The physical Esc key cancels in every keyboard layout.
 
 use crate::daemon::App;
 use crate::overlay::{self, Px};
@@ -86,49 +87,50 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
-/// `hyprctl layers` and `layerrule` see this.
+/// `hyprctl layers` and `layerrule` show this namespace.
 const NAMESPACE: &str = "chibipop-select";
 
-/// Shortest drag that counts, physical px. The Windows bin's
-/// `MIN_DRAG_PX`: a stray click while the selector is up is a cancel,
-/// not a one-pixel screenshot.
+/// The shortest drag that counts, in physical px.
+/// This constant matches the Windows bin's `MIN_DRAG_PX`.
+/// A stray click while the selector is open cancels the pick.
+/// It does not create a one-pixel grab.
 pub const MIN_DRAG_PX: i32 = 5;
 
-/// Selection frame thickness, physical px. The Windows bin's
-/// `BORDER_PX`.
+/// The selection frame thickness, in physical px.
+/// This constant matches the Windows bin's `BORDER_PX`.
 pub const BORDER_PX: i32 = 2;
 
-/// The dim, premultiplied: black at the Windows bin's `DIM_ALPHA` of
-/// 102/255. Premultiplying black leaves the colour channels at zero, so
-/// this value is alpha and nothing else.
+/// Premultiplied black with the Windows bin's `DIM_ALPHA` value of 102/255.
+/// Premultiplied black leaves the color channels at zero.
+/// This value therefore stores alpha only.
 pub const DIM: Px = [0, 0, 0, 102];
 
 /// The selection frame: opaque white, as on Windows.
 pub const FRAME: Px = [0xFF, 0xFF, 0xFF, 0xFF];
 
-/// `KEY_ESC` from `linux/input-event-codes.h`, which is what
-/// `wl_keyboard.key` reports - the evdev code, not an xkb keysym.
+/// `KEY_ESC` from `linux/input-event-codes.h`.
+/// `wl_keyboard.key` reports this evdev code, not an xkb keysym.
 pub const KEY_ESC: u32 = 1;
 
-/// `BTN_RIGHT` from `linux/input-event-codes.h`. SCTK exports
-/// [`BTN_LEFT`] and not this one.
+/// `BTN_RIGHT` from `linux/input-event-codes.h`.
+/// SCTK exports [`BTN_LEFT`] but not this code.
 pub const BTN_RIGHT: u32 = 0x111;
 
-/// How long a pick waits before cancelling itself.
+/// The time before a pick cancels itself.
 ///
-/// The guard the nested pump needs: a compositor that delivers a press
-/// and then no release at all would otherwise hold the daemon's only
-/// thread forever - no cursor samples, no control socket, no popup.
-/// Twenty seconds is far longer than any real drag and short enough that
-/// a wedged session recovers on its own. Passed in rather than read here
-/// so a diagnostic can ask for a pick it knows will expire.
+/// The nested pump needs this guard.
+/// A compositor that sends a press without a release would otherwise hold the daemon thread forever.
+/// The daemon would then have no cursor samples, control socket, or popup.
+/// Twenty seconds exceeds any real drag and still lets a stuck session recover.
+/// The caller supplies the timeout. It does not read this constant.
+/// A diagnostic can therefore request a pick that must expire.
 pub const PICK_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Two drag corners as a rect, in whichever order they came.
+/// Return a rectangle from two drag corners in either order.
 ///
-/// The Windows bin's `normalized_rect`: a drag up-and-left is the same
-/// box as the same drag down-and-right, because a user does not think in
-/// signs.
+/// This function matches the Windows bin's `normalized_rect`.
+/// A drag up and left returns the same box as a drag down and right.
+/// The rectangle uses the smaller coordinate as its origin.
 pub fn normalized(a: PhysPoint, b: PhysPoint) -> PhysRect {
     PhysRect {
         x: a.x.min(b.x),
@@ -138,52 +140,52 @@ pub fn normalized(a: PhysPoint, b: PhysPoint) -> PhysRect {
     }
 }
 
-/// Is this drag a drag, or a click that moved a little?
+/// Return whether this drag meets the threshold.
 ///
-/// The Windows bin's `meets_drag_threshold`, `||` included: a thin
-/// horizontal strip of text is a legitimate selection, so one axis
-/// clearing the floor is enough.
+/// This function matches the Windows bin's `meets_drag_threshold` with `||`.
+/// A thin horizontal strip of text is a valid selection.
+/// One axis at or above the threshold is enough.
 pub fn meets_threshold(r: PhysRect) -> bool {
     r.w >= MIN_DRAG_PX || r.h >= MIN_DRAG_PX
 }
 
-/// What a pick ended as.
+/// The result of a pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Still dragging, or still waiting for the first press.
+    /// The drag continues, or the pick waits for its first press.
     Live,
-    /// A box past the threshold.
+    /// The user selected a box that passes the threshold.
     Picked(PhysRect),
-    /// `Esc`, a right-click, an under-threshold drag, a closed surface or
-    /// the timeout. Every one of them is the same answer to the caller:
-    /// no region, and nothing it has to phrase as an error.
+    /// The pick ends when `Esc`, a right-click, an under-threshold drag, a closed surface, or the timeout occurs.
+    /// Each case returns no region and no error.
     Cancelled,
 }
 
-/// What one input event asks of a live pick.
+/// The action that one input event requests.
 ///
-/// The selector's whole input contract as data, so the routing is
-/// testable without a compositor and the two cancels - `Esc` and
-/// right-click - are visibly the same answer.
+/// This enum stores the selector input contract as data.
+/// A test can check event routes without a compositor.
+/// `Esc` and a right-click both request the same cancel result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
-    /// A left press: the drag starts here.
+    /// A left press starts the drag.
     Start,
     /// The pointer moved.
     Move,
-    /// A left release: the drag ends here.
+    /// A left release ends the drag.
     Finish,
-    /// `Esc`, a right press, a closed surface, or the deadline.
+    /// `Esc`, a right press, a closed surface, or the deadline cancels the pick.
     Cancel,
-    /// Anything else the selector sees and does not act on.
+    /// The selector ignores every other event.
     Ignore,
 }
 
-/// What one pointer button asks.
+/// Return the action for one pointer button.
 ///
-/// Right-click is a cancel exactly as on Windows, and it is decided
-/// before the left button so a right-click *during* a drag still gets
-/// out. A right *release* asks nothing: the press already decided.
+/// A right-click cancels the pick, as on Windows.
+/// This function checks the right button before the left button.
+/// A right-click while a drag runs therefore still cancels.
+/// A right release requests no action because the press already decided.
 pub fn ask_of_button(button: u32, pressed: bool) -> Ask {
     match (button, pressed) {
         (BTN_RIGHT, true) => Ask::Cancel,
@@ -193,8 +195,9 @@ pub fn ask_of_button(button: u32, pressed: bool) -> Ask {
     }
 }
 
-/// What one key asks. Raw evdev codes: see the module doc for why there
-/// is no keymap here.
+/// Return the action for one key.
+/// The codes are raw evdev codes.
+/// The module documentation explains why this file needs no keymap.
 pub fn ask_of_key(code: u32, pressed: bool) -> Ask {
     if pressed && code == KEY_ESC {
         Ask::Cancel
@@ -203,29 +206,28 @@ pub fn ask_of_key(code: u32, pressed: bool) -> Ask {
     }
 }
 
-/// The drag, as a state machine over plain data.
+/// The drag state machine uses plain data.
 ///
-/// Free of Wayland so the arithmetic is testable without a compositor:
-/// the same [`Drag::apply`] serves a real `wl_pointer` frame and a test.
-/// Coordinates in and out are **global physical pixels** - core's only
-/// coordinate space - so the surface-local logical units `wl_pointer`
-/// speaks are converted once, on the way in ([`Surface::global`]).
+/// The struct holds no Wayland types, so a test can check the arithmetic without a compositor.
+/// The same [`Drag::apply`] serves a real `wl_pointer` frame and a test.
+/// Coordinates that enter or leave this state are **global physical pixels**, which is core's only coordinate space.
+/// [`Surface::global`] converts the surface-local logical units of `wl_pointer` once at entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Drag {
-    /// Where the press landed, while a drag is in flight.
+    /// The press position while a drag runs.
     anchor: Option<PhysPoint>,
-    /// The newest position, so a motion has something to draw against.
+    /// The newest position used to paint the drag.
     at: Option<PhysPoint>,
     done: Option<Outcome>,
 }
 
 impl Drag {
-    /// The box to paint right now, if any.
+    /// Return the box to paint, if any.
     pub fn rect(&self) -> Option<PhysRect> {
         Some(normalized(self.anchor?, self.at?))
     }
 
-    /// Has this pick finished, and how?
+    /// Return whether this pick finished and how it finished.
     pub fn outcome(&self) -> Outcome {
         self.done.unwrap_or(Outcome::Live)
     }
@@ -234,11 +236,11 @@ impl Drag {
         self.done.is_some()
     }
 
-    /// One input event applied, at a point in global physical pixels.
+    /// Apply one input event at a point in global physical pixels.
     ///
-    /// Nothing moves after the decision: the first [`Ask::Finish`] or
-    /// [`Ask::Cancel`] is the answer, and a trailing release cannot
-    /// revive a cancelled pick.
+    /// The state does not change after a decision.
+    /// The first [`Ask::Finish`] or [`Ask::Cancel`] decides the result.
+    /// A later release cannot revive a canceled pick.
     pub fn apply(&mut self, ask: Ask, at: PhysPoint) {
         if self.done.is_some() {
             return;
@@ -248,16 +250,16 @@ impl Drag {
                 self.anchor = Some(at);
                 self.at = Some(at);
             }
-            // Ignored before the press, which is what keeps the dim
-            // surface inert until the user commits to a drag.
+            // Ignore motion before the press.
+            // This keeps the dim surface unchanged until the user starts a drag.
             Ask::Move => {
                 if self.anchor.is_some() {
                     self.at = Some(at);
                 }
             }
             Ask::Finish => {
-                // A release with no press of ours behind it - the button
-                // went down before the surface was up - decides nothing.
+                // A release without our press decides no result.
+                // The user pressed the button before this surface appeared.
                 let Some(anchor) = self.anchor else { return };
                 let rect = normalized(anchor, at);
                 self.done = Some(if meets_threshold(rect) {
@@ -271,8 +273,8 @@ impl Drag {
         }
     }
 
-    /// [`Ask::Cancel`] from somewhere with no pointer position behind it:
-    /// a closed surface, or the deadline.
+    /// Apply [`Ask::Cancel`] when the source has no pointer position.
+    /// A closed surface and the deadline use this path.
     pub fn cancel(&mut self) {
         self.apply(Ask::Cancel, PhysPoint { x: 0, y: 0 });
     }
@@ -280,16 +282,16 @@ impl Drag {
 
 /// Paint one output's selector frame.
 ///
-/// Dim everywhere, the selection punched clear, a frame just outside it -
-/// the Windows bin's `punch_through` + `paint_border`, in one pass over
-/// premultiplied `Argb8888`. `sel` is surface-local physical pixels and
-/// may hang off any edge; every fill clips.
+/// The function dims the output, clears the selection, and draws a frame outside it.
+/// It combines the Windows bin's `punch_through` and `paint_border` in one pass over premultiplied `Argb8888`.
+/// `sel` contains surface-local physical pixels and can extend beyond an edge.
+/// Every fill clips to the output.
 pub fn paint(px: &mut [Px], w: i32, h: i32, sel: Option<PhysRect>) {
     px.fill(DIM);
     let Some(sel) = sel.filter(|s| s.w > 0 && s.h > 0) else { return };
-    // Clear first, then frame: the frame sits *outside* the selection,
-    // exactly as on Windows, so the punched box is the box that will be
-    // grabbed and the border never eats a row of it.
+    // Clear first, then draw the frame.
+    // The frame sits outside the selection, as on Windows.
+    // The grab therefore captures the clear box without a border row.
     overlay::fill(px, w, h, sel, overlay::CLEAR);
     for strip in overlay::strips(sel.inflated(BORDER_PX, BORDER_PX), BORDER_PX) {
         overlay::fill(px, w, h, strip, FRAME);
@@ -298,32 +300,32 @@ pub fn paint(px: &mut [Px], w: i32, h: i32, sel: Option<PhysRect>) {
 
 /// One output's selector surface.
 struct Surface {
-    /// The popup's stable surface id for this output, so every
-    /// diagnostic this daemon writes means one monitor by "surface 1".
+    /// The selector surface id for this output.
+    /// Diagnostics use this id to name a monitor, for example, "surface 1".
     id: usize,
-    /// This output's box in the global physical space: what turns a
-    /// surface-local pointer position into core's coordinate space.
+    /// This output's box in global physical space.
+    /// It converts a surface-local pointer position to core's coordinate space.
     monitor: PhysRect,
-    /// The scale to raster at. Read once per pick - a pick is seconds
-    /// long, and a scale change mid-drag would move the box under the
-    /// user's hand.
+    /// The raster scale.
+    /// The code reads it once per pick.
+    /// A scale change cannot move the box under the pointer.
     scale: f64,
     layer: LayerSurface,
     viewport: Option<WpViewport>,
-    /// The logical size the compositor configured. `None` until it has:
-    /// the surface is anchored to all four edges with `set_size(0, 0)`,
-    /// so the compositor - not our own arithmetic - decides what "the
-    /// whole output" is.
+    /// The logical size from the compositor.
+    /// It stays `None` until the compositor replies.
+    /// The surface uses four anchors and `set_size(0, 0)`, so the compositor chooses the whole-output size.
+    /// The selector does not calculate this size.
     configured: Option<(i32, i32)>,
 }
 
 impl Surface {
-    /// Surface-local logical -> global physical.
+    /// Convert a surface-local logical position to a global physical point.
     ///
-    /// Floor, not round, for the popup's `HitScene::local` reason: the
-    /// answer names the pixel the pointer is inside. The output's own
-    /// origin is added because core counts in one global space while a
-    /// layer surface counts from its own corner.
+    /// The function floors instead of rounds for the `HitScene::local` rule.
+    /// The result identifies the physical pixel that contains the pointer.
+    /// It adds the output origin because core uses one global space.
+    /// A layer surface measures positions from its own corner.
     fn global(&self, pos: (f64, f64)) -> PhysPoint {
         PhysPoint {
             x: self.monitor.x + (pos.0 * self.scale).floor() as i32,
@@ -331,8 +333,7 @@ impl Surface {
         }
     }
 
-    /// The buffer to raster and the logical size to advertise, once the
-    /// compositor has configured one.
+    /// Return the buffer size and logical size after the compositor configures the surface.
     fn frame(&self) -> Option<((i32, i32), (i32, i32))> {
         let logical = self.configured?;
         let buffer = (
@@ -343,41 +344,40 @@ impl Surface {
     }
 }
 
-/// The live half of one pick: the surfaces, the drag, and the way out.
+/// The active state for one pick: its surfaces, drag, and exit.
 ///
-/// This lives on [`App`] rather than inside [`Selector`] for one
-/// concrete reason: the SCTK handlers that drive the drag are written on
-/// `App`, so everything they must mutate has to be reachable from
-/// `&mut App` - and the nested pump dispatches `&mut App`, which cannot
-/// simultaneously be borrowing a `&mut Selector` out of it.
+/// This struct lives on [`App`] instead of inside [`Selector`] for one concrete reason.
+/// The SCTK handlers that drive the drag are methods on `App`.
+/// Every field they change must be reachable from `&mut App`.
+/// The nested pump dispatches `&mut App`, so it cannot borrow a `&mut Selector` at the same time.
 pub struct Pick {
     surfaces: Vec<Surface>,
     drag: Drag,
-    /// Stops the nested loop the moment the drag decides. `None` only
-    /// between building the surfaces and starting the loop.
+    /// Stop the nested loop when the drag decides.
+    /// This value is `None` between surface creation and loop start.
     signal: Option<LoopSignal>,
-    /// The pointer and keyboard this pick owns, on its own queue. Both
-    /// are released with it, which is what hands the focus back.
+    /// The pointer and keyboard for this pick on its own queue.
+    /// The pick releases both when it ends, which returns focus.
     pointer: Option<WlPointer>,
     keyboard: Option<WlKeyboard>,
     shape: Option<WpCursorShapeDeviceV1>,
-    /// The last `enter` serial, which `set_shape` has to quote.
+    /// The last `enter` serial. `set_shape` must use this serial.
     serial: Option<u32>,
-    /// A frame is owed because the drag moved.
+    /// A drag change needs a new frame.
     dirty: bool,
     notes: Vec<String>,
 }
 
 impl Pick {
-    /// Does one `wl_surface` belong to this pick? The routing question
-    /// the shared SCTK handlers ask before assuming a surface is the
-    /// popup's.
+    /// Does one `wl_surface` belong to this pick?
+    ///
+    /// The shared SCTK handlers ask this before they treat a surface as the popup's.
     pub fn owns(&self, surface: &WlSurface) -> bool {
         self.surfaces.iter().any(|s| s.layer.wl_surface() == surface)
     }
 
-    /// The same question for a `configure`/`closed`, which name a layer
-    /// surface rather than a `wl_surface`.
+    /// Does a `configure` or `closed` event belong to this pick?
+    /// Those events name a layer surface rather than a `wl_surface`.
     pub fn owns_layer(&self, layer: &LayerSurface) -> bool {
         self.surfaces.iter().any(|s| &s.layer == layer)
     }
@@ -394,11 +394,11 @@ impl Pick {
         self.surfaces.iter().position(|s| s.layer.wl_surface() == surface)
     }
 
-    /// One `wl_pointer` frame, sorted into the drag.
+    /// Apply one `wl_pointer` frame to the drag.
     ///
-    /// A frame batches related events and may carry a leave and an enter
-    /// together when the pointer crosses between two of our surfaces, so
-    /// the order inside it is kept.
+    /// A frame groups related events.
+    /// It can carry a leave and an enter when the pointer crosses between two of our surfaces.
+    /// This loop keeps the event order inside the frame.
     fn pointer_frame(&mut self, events: &[PointerEvent]) {
         for event in events {
             if self.slot_of(&event.surface).is_none() {
@@ -423,7 +423,7 @@ impl Pick {
         }
     }
 
-    /// One input event on one of our surfaces, applied.
+    /// Apply one input event to one selector surface.
     fn ask(&mut self, ask: Ask, surface: &WlSurface, pos: (f64, f64)) {
         let Some(slot) = self.slot_of(surface) else { return };
         let before = self.drag.rect();
@@ -434,8 +434,8 @@ impl Pick {
         }
     }
 
-    /// One `wl_keyboard.key`, which names no surface: `Esc` cancels
-    /// whatever the drag was doing.
+    /// Apply one `wl_keyboard.key` event, which has no surface.
+    /// `Esc` cancels the drag in every state.
     pub fn key(&mut self, code: u32, pressed: bool) {
         if ask_of_key(code, pressed) != Ask::Cancel {
             return;
@@ -445,8 +445,8 @@ impl Pick {
         self.finish();
     }
 
-    /// The compositor closed one of our surfaces mid-pick. There is
-    /// nothing left to drag on, so this is a cancel and not an error.
+    /// Cancel the drag when the compositor closes one selector surface.
+    /// No surface remains for the drag, so this is a cancel and not an error.
     pub fn closed(&mut self, layer: &LayerSurface) {
         if !self.owns_layer(layer) {
             return;
@@ -456,19 +456,20 @@ impl Pick {
         self.finish();
     }
 
-    /// The deadline fired: the guard that keeps a compositor which
-    /// never delivers a release from holding the daemon's only thread.
+    /// Cancel the drag when the deadline fires.
+    /// This guard stops a compositor that never sends a release.
+    /// Without it, that compositor keeps the daemon thread occupied.
     pub fn expired(&mut self) {
         self.notes.push("select: cancelled - the deadline passed with no decision".to_string());
         self.drag.cancel();
         self.finish();
     }
 
-    /// A configure landed: record the size and owe a frame.
+    /// Record a configure size and request a frame.
     ///
-    /// The size is the compositor's own answer to "the whole output",
-    /// which is why the selector asks for `0x0` on four anchors rather
-    /// than computing it - so it is worth a line.
+    /// The compositor's size is its answer for "the whole output".
+    /// That answer is why the selector asks for `0x0` with four anchors.
+    /// The selector does not calculate a size. Keep this reason with the code.
     pub fn configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         let Some(slot) = self.surfaces.iter().position(|s| &s.layer == layer) else { return };
         self.surfaces[slot].configured = Some((size.0 as i32, size.1 as i32));
@@ -479,17 +480,20 @@ impl Pick {
         ));
     }
 
-    /// Arm the way out. Called once, between mapping and pumping.
+    /// Set the loop exit signal.
+    /// The caller calls this once after the map and before the pump.
     pub fn arm(&mut self, signal: LoopSignal) {
         self.signal = Some(signal);
     }
 
-    /// Leave the nested loop. Idempotent: several routes share this
-    /// exit, and a cancel during teardown must not panic.
+    /// Stop the nested loop.
     ///
-    /// `wakeup` as well as `stop`, because `stop` only sets a flag:
-    /// without it the loop would sit in `poll` until its next tick
-    /// before noticing, which is a frame of latency on every release.
+    /// This method is idempotent because several routes share this exit.
+    /// A shutdown cancel must not panic.
+    ///
+    /// It calls `wakeup` as well as `stop` because `stop` only sets a flag.
+    /// Without `wakeup`, the loop would stay in `poll` until its next tick.
+    /// That delay adds one frame of latency to each release.
     fn finish(&mut self) {
         if let Some(signal) = self.signal.as_ref() {
             signal.stop();
@@ -497,25 +501,23 @@ impl Pick {
         }
     }
 
-    /// `IDC_CROSS`'s equivalent, where the compositor offers one.
+    /// The equivalent of `IDC_CROSS` when the compositor offers it.
     ///
-    /// Without `wp_cursor_shape_v1` the cursor is left exactly as it
-    /// was: loading XCursor themes ourselves is what ADR-0004 refused
-    /// for the popup, and a picker is not a reason to change that. The
-    /// absence is said once, at bind.
+    /// Without `wp_cursor_shape_v1`, the pointer keeps its current shape.
+    /// The popup does not load XCursor themes, and the picker does not change that rule.
+    /// The code reports the absent global once at bind.
     fn crosshair(&mut self) {
         let (Some(device), Some(serial)) = (self.shape.as_ref(), self.serial) else { return };
         device.set_shape(serial, Shape::Crosshair);
     }
 
-    /// One pump iteration: draw what the drag changed, then leave if it
-    /// has decided.
+    /// Run one pump iteration.
+    /// Paint changes from the drag, then stop when the drag decides.
     ///
-    /// The decision is re-checked here and not only in the handlers
-    /// because `calloop::EventLoop::run` clears the stop flag as it
-    /// starts - a pick that was already cancelled before the loop began
-    /// (no pointer on the seat, a surface closed during the mapping
-    /// round trip) would otherwise sit until its deadline.
+    /// Check the decision here as well as in the handlers.
+    /// `calloop::EventLoop::run` clears the stop flag at start.
+    /// A pick canceled before the loop starts would otherwise wait until its deadline.
+    /// Two causes exist: no pointer on the seat, or a surface closed while the map roundtrip runs.
     pub fn tick(&mut self, pool: &mut SlotPool) {
         self.repaint(pool);
         if self.drag.finished() {
@@ -523,8 +525,8 @@ impl Pick {
         }
     }
 
-    /// Every surface that owes a frame, drawn. Once per iteration, so a
-    /// burst of motion events costs one commit.
+    /// Paint each surface that needs a frame.
+    /// Run this once per iteration, so a burst of motion events costs one commit.
     fn repaint(&mut self, pool: &mut SlotPool) {
         if !std::mem::take(&mut self.dirty) {
             return;
@@ -546,15 +548,15 @@ impl Pick {
 }
 
 impl Pick {
-    /// Take the selector off the screen and give the focus back.
+    /// Remove the selector from the screen and return focus.
     ///
-    /// Every object this pick created is destroyed here rather than left
-    /// to a `Drop` that does not exist for bare proxies: the pointer and
-    /// keyboard are released (which is what returns focus), the
-    /// viewports destroyed, and the layer surfaces dropped - SCTK
-    /// destroys the role object and the `wl_surface` with them, in that
-    /// order, as the protocol requires. The caller round-trips
-    /// afterwards, so this is *seen* to have happened before any grab.
+    /// This method destroys every object that the pick created.
+    /// Bare proxies have no `Drop` implementation for this work.
+    /// It releases the pointer and keyboard, which returns focus.
+    /// It destroys the viewports.
+    /// It then drops the layer surfaces.
+    /// SCTK destroys the role object and the `wl_surface` with them, in the protocol order.
+    /// The caller runs a roundtrip afterward, so the compositor sees this work before any grab.
     pub fn destroy(mut self) -> usize {
         if let Some(device) = self.shape.take() {
             device.destroy();
@@ -593,9 +595,9 @@ fn draw(
     if let Some(viewport) = &surface.viewport {
         viewport.set_destination(logical.0.max(1), logical.1.max(1));
     }
-    // No `set_input_region`: a layer surface's default region is the
-    // whole surface, which is exactly what a picker wants - every
-    // pointer event on this output belongs to the drag while it is up.
+    // The default input region for a layer surface is the whole surface.
+    // Do not call `set_input_region`. A picker needs pointer events across this output.
+    // Every pointer event on this output belongs to the drag while the selector is visible.
     wl.damage_buffer(0, 0, bw, bh);
     buf.attach_to(&wl).context("attaching the selector's buffer")?;
     surface.layer.commit();
@@ -604,17 +606,18 @@ fn draw(
 
 /// The region selector.
 pub struct Selector {
-    /// The connection every pick makes its own queue on.
+    /// The connection on which each pick creates its own queue.
     conn: Connection,
-    /// The daemon's queue handle, for the one request a pick sends on
-    /// it: the [`Wake`] sync that gets the outer pump moving again.
+    /// The daemon queue handle.
+    /// A pick sends one [`Wake`] sync on this queue to restart the outer pump.
     daemon: QueueHandle<App>,
-    /// The popup's `wl_compositor`, cloned: one per process.
+    /// The popup's `wl_compositor`, cloned once per process.
     compositor: CompositorState,
     shell: LayerShell,
-    /// The popup's `wp_viewporter`, cloned. No fractional-scale object:
-    /// the popup's `preferred_scale` is the one source of scale truth
-    /// and reaches a pick through [`Screen`].
+    /// The popup's `wp_viewporter`, cloned for selector use.
+    /// The selector creates no fractional-scale object.
+    /// The popup's `preferred_scale` is the only scale source.
+    /// [`Screen`] passes that scale to a pick.
     viewporter: Option<WpViewporter>,
     shapes: Option<CursorShapeManager>,
     pool: SlotPool,
@@ -622,16 +625,17 @@ pub struct Selector {
 }
 
 impl Selector {
-    /// Bind the selector's globals. Surfaces are per pick: a full-output
-    /// dim held permanently would be a screenful of buffer per monitor
-    /// for a thing used seconds at a time, which is the permanent
-    /// maximum-size surface ADR-0004 already rejected once.
+    /// Bind the selector globals.
     ///
-    /// `None` means this compositor advertises no `zwlr_layer_shell_v1` -
-    /// the same *state, not error* rule `Popup::bind` follows (ADR-0004,
-    /// ticket 49): the caller reports the selector unavailable through
-    /// the channel it already has, and every other channel keeps
-    /// running.
+    /// Each pick creates its own surfaces.
+    /// A permanent full-output dim would need a full buffer for each monitor.
+    /// The selector runs for seconds, so that permanent surface would waste memory.
+    /// The popup already rejected the same permanent maximum-size surface.
+    ///
+    /// `None` means that this compositor advertises no `zwlr_layer_shell_v1`.
+    /// This follows the *state, not error* rule that `Popup::bind` follows.
+    /// The caller reports the selector as unavailable through its current channel.
+    /// Every other channel stays active.
     pub fn bind(
         conn: &Connection,
         globals: &GlobalList,
@@ -639,9 +643,8 @@ impl Selector {
         popup: &crate::popup::Popup,
     ) -> Option<Selector> {
         let shell = LayerShell::bind(globals, qh).ok()?;
-        // One 1080p screenful; the pool grows on demand for bigger
-        // monitors and keeps the room, which is right for a struct that
-        // lives as long as the daemon.
+        // Reserve space for one 1080p screen.
+        // The pool grows for larger monitors and keeps this capacity for the daemon lifetime.
         let pool = SlotPool::new(1920 * 1080 * 4, popup.shm()).ok()?;
         let shapes = CursorShapeManager::bind(globals, qh).ok();
         let mut notes = Vec::new();
@@ -664,49 +667,47 @@ impl Selector {
         })
     }
 
-    /// Diagnostics accumulated since the last drain. The selector owns no
-    /// log; the daemon thread does.
+    /// Return diagnostics collected since the last drain.
+    /// The selector has no log. The daemon thread owns the log.
     pub fn drain_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
     }
 
-    /// One diagnostic, from the daemon side of the seam.
+    /// Add one diagnostic from the daemon side of the seam.
     pub fn note(&mut self, line: String) {
         self.notes.push(line);
     }
 
-    /// The connection a pick makes its own queue on, and the daemon's
-    /// queue handle for the [`Wake`] it fires on the way out.
+    /// Return the connection for a pick queue and the daemon queue handle for [`Wake`].
+    /// The pick sends [`Wake`] when it exits.
     pub fn handles(&self) -> (Connection, QueueHandle<App>) {
         (self.conn.clone(), self.daemon.clone())
     }
 
-    /// The pool a pick rasters into. Lives on the selector rather than
-    /// the pick so a second pick reuses the mmap instead of paying for
-    /// a screenful again.
+    /// Return the pool for a pick to raster into.
+    /// The selector keeps the pool, so a second pick reuses the mmap instead of a new full-screen buffer.
     pub fn pool(&mut self) -> &mut SlotPool {
         &mut self.pool
     }
 
-    /// Drag a region, blocking until the user decides.
+    /// Let the user drag a region. This call blocks until the user decides.
     ///
-    /// An associated function rather than a `&mut self` method on
-    /// purpose: the drag state has to be reachable from `&mut App` while
-    /// the nested pump dispatches into it (see [`Pick`]), so the selector
-    /// is read out of `app` in short borrows instead of held across the
-    /// loop.
+    /// This is an associated function, not a `&mut self` method.
+    /// The drag state must stay reachable from `&mut App` while the nested pump dispatches into it.
+    /// See [`Pick`].
+    /// The code therefore reads the selector from `app` with short borrows.
+    /// It never holds that borrow across the loop.
     ///
-    /// `deadline` is `None` for the product's own [`PICK_TIMEOUT`]; a
-    /// diagnostic that wants a pick it knows will expire passes its own.
+    /// Pass `deadline` as `None` for the product's own [`PICK_TIMEOUT`].
+    /// A diagnostic that must expire passes its own value.
     ///
-    /// `None` covers every way this can fail to answer with a region -
-    /// cancelled, under the threshold, no output to drag on, no layer
-    /// shell, or the timeout - and none of them is an error the caller
-    /// has to phrase. Diagnostics come out through the notes.
+    /// `None` covers every answer without a region:
+    /// a cancel, a drag under the threshold, no output, no layer shell, or the timeout.
+    /// None is not an error for the caller.
+    /// Diagnostics leave through the notes.
     ///
-    /// On return the surfaces are destroyed and a round trip has
-    /// completed, so a caller that grabs the returned rect cannot
-    /// capture the selector (spec D5).
+    /// On return, the surfaces are gone and one roundtrip is complete.
+    /// A caller that grabs the returned rectangle therefore cannot capture the selector.
     pub fn pick(
         app: &mut App,
         screens: &[Screen],
@@ -721,34 +722,34 @@ impl Selector {
         }
     }
 
-    /// The fallible half, so every early exit still tears the surfaces
-    /// down on the way out.
+    /// Run the fallible half.
+    /// Every early exit destroys the surfaces.
     fn run(app: &mut App, screens: &[Screen], deadline: Duration) -> Result<Option<PhysRect>> {
         anyhow::ensure!(!screens.is_empty(), "no output geometry to drag on");
         let (conn, daemon) = app.selector_handles()?;
 
-        // A queue of this pick's own: the daemon's lives inside
-        // calloop's `WaylandSource` and cannot be dispatched from a
-        // source callback, and a fresh one per pick leaves nothing
-        // listening between picks.
+        // Create a queue for this pick.
+        // The daemon queue lives inside the calloop `WaylandSource`.
+        // No source callback can dispatch it.
+        // A fresh queue per pick leaves no listener between picks.
         let mut queue = conn.new_event_queue::<App>();
         Selector::map(app, &queue.handle(), screens)?;
-        // The surfaces exist but are not configured; this round trip is
-        // what maps them and paints the first dim.
+        // The surfaces exist without configure data.
+        // This roundtrip maps them and paints the first dim.
         let mapped = queue.roundtrip(app);
 
         let outcome = mapped
             .context("mapping the selector's surfaces")
             .and_then(|_| Selector::pump(app, conn.clone(), queue, deadline));
 
-        // Down, and *seen* to be down: the caller's next act is a grab
-        // of the rect this returns, and a selector still on screen would
-        // be in those pixels.
+        // The selector is gone, and the compositor has seen its removal.
+        // The caller next grabs the returned rectangle.
+        // A selector that remains visible would cover those pixels.
         let count = app.pick_finish();
         conn.roundtrip().context("taking the selector down")?;
-        // The daemon's queue collected events while this loop had the
-        // thread; calloop dispatches them the next time the socket is
-        // readable, so make it readable now.
+        // The daemon queue collected events while this loop held the thread.
+        // Calloop dispatches them when the socket becomes readable.
+        // Sync the daemon queue now so the socket becomes readable.
         conn.display().sync(&daemon, Wake);
         let _ = conn.flush();
 
@@ -767,8 +768,8 @@ impl Selector {
         })
     }
 
-    /// One `Exclusive`, full-output surface per screen, plus this pick's
-    /// own pointer and keyboard.
+    /// Map one `Exclusive`, full-output surface per screen.
+    /// Also create this pick's pointer and keyboard.
     fn map(app: &mut App, qh: &QueueHandle<App>, screens: &[Screen]) -> Result<()> {
         let mut pick = {
             let selector = app.selector_mut().context("this compositor has no selector")?;
@@ -783,16 +784,14 @@ impl Selector {
                     Some(NAMESPACE),
                     Some(&screen.output),
                 );
-                // All four edges plus `set_size(0, 0)`: the compositor
-                // decides what the whole output is, which beats trusting
-                // our own logical-size arithmetic for a surface that
-                // must cover every pixel the user can drag over.
+                // All four edges plus `set_size(0, 0)` let the compositor choose the whole output.
+                // This avoids our own logical-size arithmetic and covers every pixel the user can drag over.
                 layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
                 layer.set_exclusive_zone(-1);
                 layer.set_size(0, 0);
                 layer.set_margin(0, 0, 0, 0);
-                // The one surface in this daemon that may take focus.
-                // See the module doc for why the popup may not.
+                // This is the only surface in the daemon that can take focus.
+                // The module documentation explains why the popup cannot.
                 layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
                 layer.commit();
                 surfaces.push(Surface {
@@ -821,17 +820,17 @@ impl Selector {
             }
         };
 
-        // The seat is the popup's - one `SeatState` serves the daemon -
-        // but these two objects are this pick's own, created on this
-        // pick's queue and released with it. Releasing the keyboard is
-        // what hands the focus back.
+        // The seat belongs to the popup because one `SeatState` serves the daemon.
+        // These pointer and keyboard objects belong to this pick.
+        // The code creates them on this pick's queue and releases them with the pick.
+        // The keyboard release returns focus.
         //
-        // Both capabilities are checked first. `wl_seat.get_keyboard` on
-        // a seat with no keyboard is a *protocol error*, which kills the
-        // whole connection and with it the daemon's popup, cursor and
-        // control channels - so a device-less session (a headless
-        // compositor, a seat whose keyboard was unplugged) must be a
-        // note here and never a request.
+        // Check both capabilities before any request.
+        // `wl_seat.get_keyboard` is a *protocol error* when the seat has no keyboard.
+        // That error kills the connection and the daemon's popup, cursor, and control channels.
+        // A session without devices must therefore add a note and send no request.
+        // A headless compositor is one example.
+        // A seat whose keyboard the user unplugged is another.
         match app.seat() {
             Some(seat) => {
                 match app.popup_mut().seats().get_pointer(qh, &seat) {
@@ -860,16 +859,15 @@ impl Selector {
                     pick.shape = selector.shapes.as_ref().map(|m| m.get_shape_device(&pointer, qh));
                 }
             }
-            // No pointer is no drag, and waiting out the deadline to say
-            // so would hold the daemon's thread for nothing.
+            // No pointer means no drag.
+            // Do not hold the daemon thread until the deadline for a result that cannot occur.
             None => pick.drag.cancel(),
         }
         app.pick_start(pick);
         Ok(())
     }
 
-    /// The nested pump: this pick's queue plus a timeout, in a loop of
-    /// their own.
+    /// Run the nested pump for this pick's queue and timeout.
     fn pump(
         app: &mut App,
         conn: Connection,
@@ -890,10 +888,9 @@ impl Selector {
             .map_err(|e| anyhow::anyhow!("registering the selector's timeout: {e}"))?;
 
         app.pick_arm(events.get_signal());
-        // One repaint per iteration rather than per event, capped at a
-        // 16 ms wait: a drag delivers a motion per compositor frame, and
-        // one commit per frame is the pacing the popup gets from its
-        // frame callbacks.
+        // Paint once per iteration instead of once per event, with a 16 ms wait cap.
+        // A drag sends one motion per compositor frame.
+        // One commit per frame matches popup updates from its frame callbacks.
         events
             .run(Some(Duration::from_millis(16)), app, |app| app.pick_tick())
             .context("running the selector's event loop")?;
@@ -901,13 +898,13 @@ impl Selector {
     }
 }
 
-// ---- the dispatch plumbing ----
+// ---- dispatch ----
 
-/// The selector's keyboard, bound raw off the seat.
+/// The selector keyboard, bound from the seat without `seat::keyboard`.
 ///
-/// SCTK's `seat::keyboard` would pull `libxkbcommon` into every Linux
-/// build of the workspace (see the module doc); this needs no keymap, so
-/// it carries no state at all.
+/// The SCTK `seat::keyboard` module would add `libxkbcommon` to every Linux build.
+/// The module documentation explains that cost.
+/// This keyboard needs no keymap, so it carries no state.
 #[derive(Debug)]
 pub struct SelectKeyboard;
 
@@ -921,9 +918,9 @@ impl Dispatch<WlKeyboard, SelectKeyboard> for App {
         _: &QueueHandle<App>,
     ) {
         match event {
-            // The keymap arrives as a file descriptor whether anyone
-            // wants it or not; the `OwnedFd` the event carries closes
-            // when it drops here, which is the whole handling needed.
+            // The keymap arrives as a file descriptor even when the selector does not use it.
+            // The event carries an `OwnedFd`.
+            // The descriptor closes when the event drops, so no other action is required.
             wl_keyboard::Event::Keymap { .. } => {}
             wl_keyboard::Event::Key { key, state, .. } => {
                 app.pick_key(key, state == WEnum::Value(KeyState::Pressed));
@@ -933,10 +930,10 @@ impl Dispatch<WlKeyboard, SelectKeyboard> for App {
     }
 }
 
-/// The `wl_display.sync` a pick fires on the *daemon's* queue on its way
-/// out, so calloop wakes and dispatches whatever piled up there while
-/// the nested loop had the thread. It carries no state and needs no
-/// handling: arriving is the whole point.
+/// The `wl_display.sync` callback that a pick sends on the daemon queue at exit.
+/// Calloop then wakes and dispatches events that arrived while the nested loop held the thread.
+/// This type carries no state and needs no handler.
+/// Its arrival marks the end of the pick.
 #[derive(Debug)]
 pub struct Wake;
 
@@ -952,12 +949,12 @@ impl Dispatch<WlCallback, Wake> for App {
     }
 }
 
-/// One `wl_pointer` frame for a pick, or `false` when none of it was
-/// ours.
+/// Handle one `wl_pointer` frame for a pick.
+/// Return `false` when no event belongs to the pick.
 ///
-/// The routing seam: `PointerHandler for App` serves the popup's pointer
-/// and this pick's at once, so it asks here first and only falls through
-/// to the popup when the answer is no.
+/// This function is the event route.
+/// `PointerHandler for App` serves the popup pointer and this pick pointer.
+/// It checks this pick first and routes to the popup only when no event belongs here.
 pub fn pointer_frame(pick: &mut Pick, events: &[PointerEvent]) -> bool {
     if !events.iter().any(|e| pick.owns(&e.surface)) {
         return false;
@@ -1004,14 +1001,14 @@ mod tests {
 
     #[test]
     fn a_drag_under_the_floor_is_discarded_instead_of_returning_a_sliver() {
-        // Four px on both axes: a click that moved, not a selection.
+        // Four px on both axes means a click that moved, not a selection.
         let mut drag = Drag::default();
         drag.apply(Ask::Start, at(10, 10));
         drag.apply(Ask::Finish, at(14, 14));
         assert_eq!(drag.outcome(), Outcome::Cancelled);
 
-        // One axis clearing the floor is enough: a thin strip of text is
-        // a legitimate box.
+        // One axis above the threshold is enough.
+        // A thin strip of text is a valid box.
         let mut strip = Drag::default();
         strip.apply(Ask::Start, at(10, 10));
         strip.apply(Ask::Finish, at(60, 12));
@@ -1036,8 +1033,8 @@ mod tests {
         drag.apply(Ask::Move, at(400, 400));
         drag.apply(ask_of_button(BTN_RIGHT, true), at(400, 400));
         assert_eq!(drag.outcome(), Outcome::Cancelled, "right-click gets out mid-drag");
-        // The right *release* asks nothing, and a left release after the
-        // decision cannot re-open it.
+        // A right release requests no action.
+        // A later left release cannot reopen the drag.
         assert_eq!(ask_of_button(BTN_RIGHT, false), Ask::Ignore);
         drag.apply(Ask::Finish, at(400, 400));
         assert_eq!(drag.outcome(), Outcome::Cancelled);
@@ -1047,13 +1044,13 @@ mod tests {
     fn only_esc_and_the_right_button_cancel_and_only_the_left_button_drags() {
         assert_eq!(ask_of_key(KEY_ESC, true), Ask::Cancel);
         assert_eq!(ask_of_key(KEY_ESC, false), Ask::Ignore, "the Esc release decides nothing");
-        // Space, Enter and the rest are not the selector's business.
+        // Space, Enter, and the other keys do not affect the selector.
         for code in [28u32, 57, 15, 103] {
             assert_eq!(ask_of_key(code, true), Ask::Ignore, "key {code} must not cancel");
         }
         assert_eq!(ask_of_button(BTN_LEFT, true), Ask::Start);
         assert_eq!(ask_of_button(BTN_LEFT, false), Ask::Finish);
-        // The middle button (BTN_MIDDLE) is neither.
+        // The middle button, `BTN_MIDDLE`, neither starts nor cancels the drag.
         assert_eq!(ask_of_button(0x112, true), Ask::Ignore);
     }
 
@@ -1077,8 +1074,8 @@ mod tests {
 
     #[test]
     fn a_surface_local_logical_position_becomes_a_global_physical_point() {
-        // The conversion `Surface::global` performs, without a
-        // compositor to make one: second monitor at x 1920, 1.5x.
+        // This matches `Surface::global` without a compositor.
+        // It uses the second monitor at x 1920 and scale 1.5.
         let convert = |pos: (f64, f64), monitor: PhysRect, scale: f64| PhysPoint {
             x: monitor.x + (pos.0 * scale).floor() as i32,
             y: monitor.y + (pos.1 * scale).floor() as i32,
@@ -1086,15 +1083,16 @@ mod tests {
         let monitor = rect(1920, 0, 2560, 1440);
         assert_eq!(convert((0.0, 0.0), monitor, 1.5), at(1920, 0));
         assert_eq!(convert((100.0, 50.0), monitor, 1.5), at(2070, 75));
-        // Floor, not round: 0.9 logical px at 1.5x is inside physical 1.
+        // Use floor, not round.
+        // At 1.5x, 0.9 logical px maps inside physical pixel 1.
         assert_eq!(convert((0.9, 0.9), monitor, 1.5), at(1921, 1));
     }
 
     #[test]
     fn a_drag_across_two_outputs_answers_one_box_in_the_global_space() {
-        // Press on the left monitor, release on the right one: each
-        // surface converts through its own origin and scale, and the
-        // box is the union in the one global space core counts in.
+        // The press starts on the left monitor and the release ends on the right.
+        // Each surface uses its own origin and scale.
+        // The result is their union in core's global space.
         let left = |pos: (f64, f64)| PhysPoint { x: (pos.0 * 1.0) as i32, y: (pos.1 * 1.0) as i32 };
         let right = |pos: (f64, f64)| PhysPoint {
             x: 1920 + (pos.0 * 2.0) as i32,
@@ -1117,7 +1115,7 @@ mod tests {
         assert_eq!(at(10, 10), overlay::CLEAR, "the selection itself is punched clear");
         assert_eq!(at(6, 6), overlay::CLEAR, "the selection's own corner is clear");
         assert_eq!(at(13, 13), overlay::CLEAR, "and its far corner too");
-        // The frame is the two px just outside, on every side.
+        // The frame is two px outside the selection on every side.
         for (x, y) in [(4, 10), (5, 10), (10, 4), (10, 5), (14, 10), (15, 10), (10, 14), (10, 15)] {
             assert_eq!(at(x, y), FRAME, "the frame pixel at {x},{y}");
         }
@@ -1136,8 +1134,7 @@ mod tests {
     fn a_selection_hanging_off_the_output_is_clipped_rather_than_written_past_the_buffer() {
         let (w, h) = (10, 10);
         let mut px = vec![overlay::CLEAR; (w * h) as usize];
-        // The drag started on the monitor to the left, so this surface
-        // sees negative coordinates.
+        // The drag starts on the monitor to the left, so this surface sees negative coordinates.
         paint(&mut px, w, h, Some(rect(-40, -40, 45, 45)));
         assert_eq!(px.len(), 100, "the buffer must not have been resized");
         assert_eq!(px[0], overlay::CLEAR, "the part of the selection that reaches here is clear");
@@ -1146,8 +1143,8 @@ mod tests {
 
     #[test]
     fn the_dim_is_a_translucent_black_rather_than_an_opaque_one() {
-        // Spec D5: the selector shows the live screen dimmed, so the
-        // alpha must be partial and premultiplied to match `wl_shm`.
+        // The selector shows the live screen through a dim layer.
+        // Alpha must be partial and premultiplied for `wl_shm`.
         assert_eq!(DIM, [0, 0, 0, 102], "40% black, premultiplied");
         assert!(DIM[3] < 255, "an opaque dim would hide the screen being selected from");
     }

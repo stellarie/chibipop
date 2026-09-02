@@ -1,4 +1,4 @@
-//! Two threads: pump and worker.
+//! The Windows platform bin uses two threads: a pump thread and a worker thread.
 
 use crate::anki;
 use crate::config::{resolve_engine, Config, EngineChoice};
@@ -57,47 +57,47 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_TIMER,
 };
 
-/// Worker pushed a result.
+/// The Worker posts this message after it pushes a result.
 const WM_APP_RESULT: u32 = WM_APP + 1;
 
-/// Dupe check finished.
+/// The duplicate check posts this message after it finishes.
 const WM_APP_ANKI: u32 = WM_APP + 4;
 
-/// Add-note finished.
+/// The add-note operation posts this message after it finishes.
 const WM_APP_ADD_NOTE: u32 = WM_APP + 5;
 
-/// Settings op finished.
+/// The settings operation posts this message after it finishes.
 const WM_APP_SETTINGS: u32 = WM_APP + 6;
 
-/// Anki deck/model detect done.
+/// Anki deck/model detection posts this message after it finishes.
 const WM_APP_ANKI_DETECT: u32 = WM_APP + 7;
 
-/// Background save finished.
+/// A background save posts this message after it finishes.
 const WM_APP_SAVED: u32 = WM_APP + 9;
 
-/// Screenshot worker finished.
+/// The screenshot worker posts this message after it finishes.
 const WM_APP_SCREENSHOT_DONE: u32 = WM_APP + 11;
-/// Pending-cursor poll, ms.
+/// The interval for the cursor poll, in milliseconds.
 const DISPATCH_TICK_MS: u32 = 20;
 
-/// Anchor-to-popup gap.
+/// The gap from the anchor to the popup, in physical pixels.
 const POPUP_GAP: i32 = 40;
 
-/// Rebuild progress poll, ms.
+/// The interval for the rebuild progress poll, in milliseconds.
 const REBUILD_TICK_MS: u32 = 100;
 
-/// Over this, Apply visibly stalls.
+/// The maximum delay before Apply visibly stalls.
 const APPLY_BUDGET_MS: u128 = 50;
 
-/// One dupe check's answer.
+/// The result of one duplicate check.
 struct AnkiDupeResult {
     gen: u64,
     checked: Vec<String>,
-    /// `None` = connection failed.
+    /// `None` means that the connection failed.
     dupes: Option<HashSet<String>>,
 }
 
-/// Partitions dupe refs.
+/// Separates cached duplicate references from references that need a check.
 fn partition_dupes(
     exprs: Vec<String>,
     cache: &HashMap<String, bool>,
@@ -124,7 +124,7 @@ fn partition_dupes(
     (dupes, uncached, cached_any)
 }
 
-/// One add-note's answer.
+/// The result of one add-note operation.
 struct AddNoteResult {
     expr: String,
     err: Option<String>,
@@ -152,7 +152,7 @@ impl SettingsStatus {
     }
 }
 
-/// Settings alone, no tray.
+/// Runs the settings window without a tray.
 pub fn settings_only(
     cfg: Config,
     dicts: &[DictInfo],
@@ -172,14 +172,14 @@ pub fn settings_only(
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
     let mut detect_gen = 0u64;
-    // SAFETY: no preconditions.
+    // SAFETY: This FFI call has no preconditions.
     let tid = unsafe { GetCurrentThreadId() };
 
     let mut msg = MSG::default();
-    // SAFETY: `msg` is this loop's own stack storage, and `window` is alive
-    // for the whole loop - it is dropped only after this function returns.
+    // SAFETY: `msg` is this loop's stack storage, and `window` stays alive for
+    // the whole loop. It drops only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        // No hooks, nothing to disarm.
+        // The settings window has no hooks, so there is nothing to disarm.
         window.pump(|| {});
 
         if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
@@ -202,7 +202,7 @@ pub fn settings_only(
             }
         }
 
-        // Dialog keys first, as in run.
+        // Handle dialog keys first, as `run` does.
         if !unsafe { IsDialogMessageW(window.hwnd(), &msg) }.as_bool() {
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -218,7 +218,7 @@ pub fn settings_only(
             &mut css_editor_so,
         );
 
-        // Tab switch -> detect.
+        // A tab switch starts deck, model, and field detection.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
             if tab == 3 {
@@ -245,16 +245,16 @@ pub fn settings_only(
         }
 
         if rebuild.is_some() {
-            // Not while the child writes.
+            // Ignore window outcomes while the child writes.
             let _ = window.take_outcome();
-            // Taken only when finished.
+            // Read the result only after the child finishes.
             let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
                 continue;
             };
             let Some(flight) = rebuild.take() else {
                 continue;
             };
-            // SAFETY: `tick` is this loop's own timer, set below.
+            // SAFETY: `tick` is this loop's timer, which `SetTimer` sets below.
             unsafe {
                 let _ = KillTimer(None, tick);
             }
@@ -268,7 +268,7 @@ pub fn settings_only(
                         .with_context(|| format!("saving settings to {}", config_path.display()))?;
                     println!("chibipop: rebuilt {}.", dict_path.display());
                     println!("chibipop: settings saved to {}.", config_path.display());
-                    // New dictionary: start it.
+                    // Start the popup process with the new Dictionary.
                     match start_run(config_path, dict_path) {
                         Ok(()) => println!("chibipop: starting."),
                         Err(e) => {
@@ -287,12 +287,12 @@ pub fn settings_only(
         }
 
         match window.take_outcome() {
-            // No tray: X exits like Quit.
+            // Without a tray, the window's X acts like Quit.
             Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
                 let updated = settings::apply_to(&edited, &cfg);
-                // A font is not a rebuild.
+                // A font change does not need a rebuild.
                 if !edited.has_staged() {
                     updated
                         .save(config_path)
@@ -305,8 +305,8 @@ pub fn settings_only(
                     Err(e) => refuse_apply(&window, &e),
                     Ok(flight) => {
                         begin_rebuild(&window);
-                        // SAFETY: a thread timer, killed above on every exit
-                        // from the rebuild - the same shape `run` uses.
+                        // SAFETY: This thread timer is killed after every rebuild exit, as in
+                        // `run`.
                         tick = unsafe { SetTimer(None, 0, REBUILD_TICK_MS, None) };
                         pending = Some(updated);
                         rebuild = Some(flight);
@@ -319,12 +319,12 @@ pub fn settings_only(
     Ok(())
 }
 
-/// The archive folder.
+/// Returns the folder that contains Dictionary archives.
 pub(crate) fn library_dir() -> PathBuf {
     crate::paths::beside_exe("library")
 }
 
-/// The form and the library.
+/// Builds a `SettingsForm` with the current library entries.
 pub(crate) fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) -> SettingsForm {
     let form = settings::from_config(cfg, dicts);
     match Library::load(dir) {
@@ -338,14 +338,14 @@ pub(crate) fn form_with_library(cfg: &Config, dicts: &[DictInfo], dir: &Path) ->
 
 const STATUS_REBUILD_FAILED: &str = "The rebuild failed. Your dictionary is unchanged.";
 
-/// A change and its rebuild.
+/// Stores one staged change, its progress receiver, and its library lock.
 struct InFlight {
     pending: Pending,
     rx: mpsc::Receiver<Progress>,
     _lock: LibraryLock,
 }
 
-/// Lock, update, build.
+/// Acquires the library lock, stages the change, and starts the rebuild.
 fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight> {
     let lock = LibraryLock::acquire(dir)?;
     let (pending, rx) = stage_and_spawn(form, dir, out)?;
@@ -356,7 +356,7 @@ fn start_rebuild(form: &SettingsForm, dir: &Path, out: &Path) -> Result<InFlight
     })
 }
 
-/// Stage, then start the build.
+/// Stages the change, then starts the rebuild.
 fn stage_and_spawn(
     form: &SettingsForm,
     dir: &Path,
@@ -372,12 +372,12 @@ fn stage_and_spawn(
     }
 }
 
-/// Put every archive back.
+/// Restores every archive after a failed Apply.
 fn undo_apply(flight: &InFlight, why: &anyhow::Error) {
     undo_apply_pending(&flight.pending, why);
 }
 
-/// Put every archive back.
+/// Restores every archive after a failed Apply.
 fn undo_apply_pending(pending: &Pending, why: &anyhow::Error) {
     match pending.rollback() {
         Ok(()) => eprintln!("chibipop: {why:#} - your dictionary archives were put back."),
@@ -389,7 +389,7 @@ fn undo_apply_pending(pending: &Pending, why: &anyhow::Error) {
     }
 }
 
-/// Let the removals go.
+/// Commits archive removals after a successful rebuild.
 fn keep_apply(flight: &InFlight, w: &SettingsWindow) {
     if let Err(e) = flight.pending.commit() {
         eprintln!("chibipop: clearing the library's .removed folder failed: {e:#}");
@@ -397,15 +397,15 @@ fn keep_apply(flight: &InFlight, w: &SettingsWindow) {
     w.clear_staged();
 }
 
-/// Progress, never blocking.
+/// Reads rebuild progress with a nonblocking call.
 ///
-/// None while it runs.
+/// Returns `None` while the rebuild is active.
 fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Result<()>> {
     loop {
         match rx.try_recv() {
             Ok(Progress::Line(line)) => {
                 println!("chibipop: {line}");
-                // Never the raw .tmp line.
+                // Do not print the raw .tmp line.
                 if let Some(text) = crate::dict::progress::friendly(&line) {
                     w.set_status(&text);
                 }
@@ -420,25 +420,25 @@ fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Res
     }
 }
 
-/// Lock it and say so.
+/// Starts a rebuild and reports its status.
 fn begin_rebuild(w: &SettingsWindow) {
     w.set_busy(true);
     w.set_status("Rebuilding your dictionary. This can take a few minutes.");
 }
 
-/// Busy while files copy.
+/// Marks the settings window busy while files copy.
 fn begin_apply(w: &SettingsWindow) {
     w.set_busy(true);
     w.set_status("Applying your changes\u{2026}");
 }
 
-/// Say why Apply did nothing.
+/// Reports why Apply did not run.
 fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
     w.set_status(&format!("Not applied: {e}"));
     eprintln!("chibipop: not applied: {e:#}");
 }
 
-/// Names the active OCR engine.
+/// Reports the active OCR engine.
 fn engine_status_line(cfg: &Config) -> String {
     match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
         EngineChoice::Builtin => "Engine: Built-in (Windows OCR)".to_string(),
@@ -449,7 +449,7 @@ fn engine_status_line(cfg: &Config) -> String {
     }
 }
 
-/// Recent plugin stderr lines.
+/// Returns recent plugin stderr lines.
 fn adapter_status_line(cfg: &Config) -> String {
     if !matches!(
         resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled),
@@ -467,7 +467,7 @@ fn adapter_status_line(cfg: &Config) -> String {
     }
 }
 
-/// Say the library disagrees.
+/// Reports when the library and database drift.
 fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
     match drifted(dir, db) {
         Err(e) => eprintln!("chibipop: checking for drift failed: {e:#}"),
@@ -476,14 +476,14 @@ fn notice_drift(w: &SettingsWindow, dir: &Path, db: &Path) {
     }
 }
 
-/// The notice, if it drifted.
+/// Builds a drift notice when the library and database differ.
 fn drifted(dir: &Path, db: &Path) -> Result<Option<String>> {
     let sources = read_source_hashes(db)?;
     let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
     Ok(settings::drift_notice(sources.as_deref(), &lib, dir, db))
 }
 
-/// What built it, if recorded.
+/// Reads the source hashes that the database records, when present.
 fn read_source_hashes(db: &Path) -> Result<Option<String>> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {} to read its source list", db.display()))?;
@@ -494,37 +494,36 @@ fn read_source_hashes(db: &Path) -> Result<Option<String>> {
     .with_context(|| format!("reading source_hashes from {}", db.display()))
 }
 
-/// Say nothing was changed.
+/// Reports that the rebuild failed and left the Dictionary unchanged.
 fn report_failed_rebuild(w: &SettingsWindow, e: &anyhow::Error) {
     w.set_status(STATUS_REBUILD_FAILED);
     eprintln!("chibipop: the rebuild failed: {e:#}");
     eprintln!("chibipop: the dictionary in use was not touched.");
 }
 
-/// What one removal deletes.
+/// Stores the name, Dictionary row, archive file, and roles for one removal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Removal {
     name: String,
     dict_id: Option<i64>,
     file: Option<String>,
-    /// What the library entry supplies; `None` when no entry answers to
-    /// the name, which is a removal with nothing left to delete.
+    /// The roles that the library entry supplies. `None` means that no entry
+    /// has this name, so no archive remains to delete.
     roles: Option<Roles>,
 }
 
-/// What one Apply must edit.
+/// Describes every edit that one Apply must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditPlan {
     removals: Vec<Removal>,
     additions: Vec<crate::settings::StagedAdd>,
 }
 
-/// What one Apply changed.
+/// Reports every change from one Apply.
 #[derive(Debug, Default)]
 struct EditReport {
-    /// The roles travel with the name because registering the import in
-    /// the config needs both: one archive lands in every list its roles
-    /// name.
+    /// Each added name keeps its Roles because configuration registration needs both values.
+    /// One archive can enter each Dictionary list that matches its Roles.
     added: Vec<(String, Roles)>,
     removed: Vec<String>,
     freq_added: Vec<String>,
@@ -533,19 +532,20 @@ struct EditReport {
     dicts: Vec<DictInfo>,
 }
 
-/// One edit's progress channel.
+/// Carries progress or the completed edit report.
 enum EditMsg {
     Status(String),
     Done(Result<Box<EditReport>>),
 }
 
-/// An in-place edit running.
+/// Stores an in-place edit and its library lock.
 struct EditFlight {
     rx: mpsc::Receiver<EditMsg>,
     _lock: LibraryLock,
 }
 
-/// Read-write, WAL asserted.
+/// Opens a read-write connection.
+/// The database must use WAL journal mode.
 fn open_writer(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("opening {} for writing", path.display()))?;
@@ -562,17 +562,14 @@ fn open_writer(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Recomputes every Frequency rank from what is already stored.
+/// Recomputes every Frequency rank from claims already stored in the database.
 ///
-/// The settings-driven half of the frequency story: which frequency
-/// dictionaries are on, in which order, reduced under which strategy, are
-/// all preferences over claims the database already holds, so nothing here
-/// opens an archive. `reapply_frequencies` is the other half, for when the
-/// library itself changed.
+/// This is the settings path for frequency changes. It applies the enabled
+/// frequency Dictionaries, their order, and the selected strategy to stored claims.
+/// It does not open an archive. `reapply_frequencies` handles changes to the library.
 ///
-/// Returns the number of `term` rows restamped. Progress goes straight to
-/// the window because this runs on the pump thread - the settings-only
-/// Apply has no background flight to send it through.
+/// Returns the number of `term` rows that it updates. This function reports progress
+/// directly to the window because the pump thread runs the settings-only Apply.
 fn reindex_ranks(
     db: &Path,
     cfg: &Config,
@@ -590,7 +587,7 @@ fn reindex_ranks(
     )
 }
 
-/// Which rows and files change.
+/// Lists the rows and files that Apply changes.
 fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPlan {
     let removals = form
         .staged_removes
@@ -604,10 +601,9 @@ fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPla
             let roles = entry.as_ref().map(|e| e.roles);
             Removal {
                 name: name.clone(),
-                // Whatever it supplies: one archive is one `dict` row, so
-                // a frequency archive has one to delete like any other and
-                // the name simply finds nothing when it does not
-                // (ADR-0014).
+                // Each archive supplies one `dict` row. A frequency archive therefore has
+                // one row to remove, even when its name has no library entry.
+                // (ARCHITECTURE.md#dictionary-and-lookup).
                 dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
                 file: entry.as_ref().map(|e| e.file.clone()),
                 roles,
@@ -620,9 +616,9 @@ fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPla
     }
 }
 
-/// Count from this dictionary.
+/// Converts progress counts for one Dictionary.
 ///
-/// Builder ids are absolute.
+/// Builder IDs are absolute.
 fn rebased(line: &str, base: i64) -> String {
     let Some(rest) = line.strip_prefix("progress") else {
         return line.to_string();
@@ -636,7 +632,7 @@ fn rebased(line: &str, base: i64) -> String {
     format!("progress  {} / {}", (n - base + 1).max(1), total.trim())
 }
 
-/// What the edit achieved.
+/// Summarizes the result of one edit.
 fn edit_status(report: &EditReport) -> String {
     let mut parts = Vec::new();
     if !report.added.is_empty() {
@@ -664,21 +660,23 @@ fn edit_status(report: &EditReport) -> String {
     parts.join(" ")
 }
 
-/// Reported frequencies and nothing else.
+/// Returns true when an archive reports only Reported frequencies.
 ///
-/// The one archive shape with no banks of its own to insert: anything
-/// supplying terms or pitch owns a `dict` row those rows hang off, while a
-/// frequency-only archive's claims are stored and dropped by the frequency
-/// pass instead (ADR-0015). Roles replaced a single-valued kind, so this
-/// is a question about the whole set - an archive carrying a term bank
-/// beside its frequency data is a term dictionary that also reports.
+/// A Dictionary with the Terms role or the Pitch role also owns a `dict` row for those records.
+/// A frequency-only archive stores its claims separately. The frequency pass
+/// uses those claims and does not add term or Entry rows
+/// (ARCHITECTURE.md#dictionary-and-lookup).
+///
+/// Roles replaced the old single-valued kind. This check therefore tests the
+/// full Role set. An archive with the Terms role and frequency data is a
+/// Dictionary that also reports frequencies.
 fn frequency_only(roles: Roles) -> bool {
     roles == Roles::only(&[Role::Frequency])
 }
 
-/// Edit the live database.
+/// Applies edits to the live database.
 ///
-/// Refuses before it moves.
+/// Refuses before it moves any archive.
 fn apply_edits(
     db: &Path,
     dir: &Path,
@@ -691,7 +689,7 @@ fn apply_edits(
     if settings::terms_after_apply(form, &lib) == 0 {
         anyhow::bail!("that would leave chibipop with no dictionary");
     }
-    // From the file, not a cache.
+    // Read identities from the file, not from a cache.
     let live = reader.dicts().context("reading dictionary identities")?;
     let plan = plan_edits(form, &live, &lib);
 
@@ -732,7 +730,7 @@ fn apply_edits(
     Ok(Box::new(report))
 }
 
-/// Reapplies ranks after edits.
+/// Reapplies Frequency ranks after archive edits.
 fn apply_edits_with_frequencies(
     db: &Path,
     dir: &Path,
@@ -759,7 +757,7 @@ fn apply_edits_with_frequencies(
     Ok(report)
 }
 
-/// Validates frequency archives before edits.
+/// Validates frequency archives before an Apply changes them.
 fn validate_frequency_inputs(dir: &Path, form: &SettingsForm) -> Result<()> {
     let lib = Library::load(dir).with_context(|| format!("reading {}", dir.display()))?;
     let removed = settings::removed_files(form, &lib);
@@ -782,7 +780,7 @@ fn validate_frequency_inputs(dir: &Path, form: &SettingsForm) -> Result<()> {
     crate::dict::build::load_freqs(&freqs).map(|_| ())
 }
 
-/// One dict: rows, then file.
+/// Removes one Dictionary from the database and the library.
 fn remove_one(
     conn: &mut Connection,
     lib: &mut Library,
@@ -812,7 +810,7 @@ fn remove_one(
     Ok(())
 }
 
-/// Imports one archive.
+/// Imports one archive into the database and library.
 fn add_one(
     conn: &mut Connection,
     lib: &mut Library,
@@ -851,9 +849,10 @@ fn add_one(
     }
 }
 
-/// Progress, never blocking.
+/// Reads edit progress with a nonblocking call.
 ///
-/// Never writes to stdout.
+/// Returns `None` while the edit continues.
+/// This function never writes progress to stdout.
 fn pump_edit(rx: &mpsc::Receiver<EditMsg>, w: &SettingsWindow) -> Option<Result<Box<EditReport>>> {
     loop {
         match rx.try_recv() {
@@ -957,11 +956,11 @@ fn apply_anki_detect(w: &SettingsWindow, gen: u64, result: AnkiDetect) {
     }
 }
 
-/// Deck/model/field names, off-thread.
+/// Reads deck, model, and field names on a background thread.
 fn spawn_detect(gen: u64, url: String, model: String, tx: mpsc::Sender<AnkiDetect>, tid: u32) {
     thread::spawn(move || {
         let _ = tx.send(detect_all(gen, url, model));
-        // SAFETY: wakes the main loop.
+        // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
         }
@@ -978,17 +977,15 @@ fn spawn_detect_fields(
     thread::spawn(move || {
         let fields = anki::model_field_names(&url, &model).unwrap_or_default();
         let _ = tx.send(AnkiDetect::fields(gen, url, model, fields));
-        // SAFETY: wakes the main loop.
+        // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
         }
     });
 }
 
-/// Spawns the Anki/update op.
+/// Processes one settings click for Anki, update, or the CSS editor.
 ///
-/// Returns true when a CSS editor
-/// was opened (caller must reload).
 fn service_settings_click(
     w: &SettingsWindow,
     tx: &mpsc::Sender<SettingsStatus>,
@@ -1020,12 +1017,12 @@ fn service_settings_click(
                 let _ = tx.send(SettingsStatus::anki(gen, msg));
                 if let Some(result) = detect {
                     let _ = detect_tx.send(result);
-                    // SAFETY: wakes the main loop.
+                    // SAFETY: This call wakes the main loop.
                     unsafe {
                         let _ = PostThreadMessageW(tid, WM_APP_ANKI_DETECT, WPARAM(0), LPARAM(0));
                     }
                 }
-                // SAFETY: wakes the main loop.
+                // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
@@ -1044,7 +1041,7 @@ fn service_settings_click(
                     Err(e) => format!("Update check failed: {e:#}"),
                 };
                 let _ = tx.send(SettingsStatus::any(msg));
-                // SAFETY: wakes the main loop.
+                // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SETTINGS, WPARAM(0), LPARAM(0));
                 }
@@ -1062,24 +1059,23 @@ fn service_settings_click(
         None => {}
     }
 }
-
-/// The Windows worker parts, built on the worker thread: capture and OCR
-/// backends are thread-affine (COM, per-thread DXGI cache), so nothing is
-/// constructed until the core `Worker`'s thread runs this.
+/// Builds the Windows `WorkerParts` on the Worker thread.
+/// Capture and OCR backends are thread-affine. COM and the per-thread DXGI
+/// cache needs that thread, so the closure creates them when `Worker` starts.
 fn worker_open(
     dict_path: PathBuf,
     rules_path: PathBuf,
     language: String,
     guard: CaptureGuard,
-    // "builtin" or a plugin's name.
+    // The value is "builtin" or a plugin name.
     ocr_engine: String,
-    // Plugins allowed to run.
+    // The plugins that this Worker can run.
     enabled_plugins: Vec<String>,
-    // One-off OCR jobs (OCR-to-clipboard), served between lookups.
+    // One-off OCR jobs (OCR-to-clipboard), handled between lookups.
     ocr_request_rx: mpsc::Receiver<crate::action::OcrRequest>,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
-        // Resolved once, never saved.
+        // Resolve the engine once. Do not save this choice.
         let ocr: Box<dyn chibipop::text::OcrEngine> =
             match resolve_plugin_engine(&ocr_engine, &enabled_plugins) {
                 Some(plugin) => plugin,
@@ -1099,7 +1095,7 @@ fn worker_open(
                     Box::new(WinrtOcr::new(&language).context("creating the OCR text source")?)
                 }
             };
-        // Contract 3: DPI before GDI.
+        // Contract 3 needs DPI before GDI.
         let capture = WinCapture::new(Some(guard)).context("preparing screen capture")?;
         let dict = SqliteDictionary::open(&dict_path).with_context(|| {
             format!(
@@ -1113,15 +1109,14 @@ fn worker_open(
             capture: Box::new(capture),
             ocr,
             dict: Box::new(dict),
-            // A finished rebuild restarts this whole process
-            // (`start_run` on `Progress::Done`), so this worker never
-            // outlives the database it opened and a reload has nothing
-            // to reopen.
+            // A finished rebuild restarts this process through `start_run` on
+            // `Progress::Done`. The Worker never outlives the database it opened,
+            // so a reload does not reopen the database.
             reopen_dict: None,
             engine,
-            // OCR-to-clipboard pixels, answered on this thread because
-            // the engine is thread-affine, and through the facade
-            // because the seam is core's (upstream's OCR request loop).
+            // The OCR-to-clipboard request runs on this thread because the engine is
+            // thread-affine. The closure uses the core facade because the OCR request
+            // loop belongs to the core seam.
             serve: Some(Box::new(move |source| {
                 while let Ok(request) = ocr_request_rx.try_recv() {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1137,7 +1132,7 @@ fn worker_open(
     }
 }
 
-/// Run until the user quits.
+/// Runs the Windows message loop until the user quits.
 pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &Path) -> Result<()> {
     let plugins_root = crate::paths::beside_exe("plugins");
     let found = crate::plugin::discover::discover(&plugins_root);
@@ -1146,8 +1141,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             cfg.plugins.enabled.push(name);
         }
     }
-
-    // Nothing built yet.
+    // The Dictionary or rules file does not exist yet.
     if !dict_path.exists() || !rules_path.exists() {
         return settings_only(cfg, &[], config_path, dict_path);
     }
@@ -1155,22 +1149,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let library = library_dir();
     let db_path = dict_path.to_path_buf();
     let rules_path = rules_path.to_path_buf();
-
-    // One-off OCR pixels for the worker's engine (OCR-to-clipboard);
-    // lookups ride the core Worker's own channels.
+    // One-off OCR pixels for the Worker engine (OCR-to-clipboard).
+    // Lookup requests use the core Worker's channels.
     let (ocr_tx, ocr_request_rx) = mpsc::channel::<crate::action::OcrRequest>();
-    // Unknown until Popup::create.
+    // This state is unknown until `Popup::create`.
     let capture_guard_active = Arc::new(AtomicBool::new(false));
     let (capture_guard_tx, capture_guard_rx) = mpsc::channel::<CaptureGuardMsg>();
 
-    // SAFETY: FFI call with no preconditions - always succeeds, returns the
-    // id of whichever thread calls it.
+    // SAFETY: This FFI call has no preconditions and always succeeds.
+    // It returns the ID of the thread that calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
     let mut live = derive(&cfg);
-
-    // Never joined - join hangs.
+    // Do not join the Worker. `join` hangs.
     let (worker, mut dicts) = Worker::spawn(
-        // Spawn reads the file itself.
+        // `Worker::spawn` reads the file itself.
         worker_settings(&live, &[]),
         worker_open(
             db_path.clone(),
@@ -1185,19 +1177,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             cfg.plugins.enabled.clone(),
             ocr_request_rx,
         ),
-        // Worker pushed a result.
+        // The Worker posts a message after it pushes a result.
         move || unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
         },
     )?;
-
-    // Queueing pixels and waking the worker that reads them are one act
-    // (the worker blocks, it does not poll for jobs).
+    // Queue the pixels and wake the Worker in one operation.
+    // The Worker waits for jobs instead of repeated checks.
     let ocr_jobs = crate::action::OcrJobs::new(ocr_tx, worker.serve_nudge());
 
     let popup = Popup::create(live.exclude_from_capture).context("creating the popup window")?;
 
-    // Contract 2: report all three.
+    // Contract 2 needs a report for all three states.
     match popup.capture_exclusion() {
         CaptureExclusion::Excluded => {
             println!(
@@ -1227,9 +1218,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // Never fatal - spec §5.
+    // A scan overlay failure is never fatal.
     //
-    // Always live; shown on demand.
+    // When it exists, the overlay remains live and appears on demand.
     let overlay = match Overlay::create(live.exclude_from_capture) {
         Ok(o) => Some(o),
         Err(e) => {
@@ -1241,7 +1232,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
-    // Spec D5: can diverge.
+    // The overlay result can differ from the popup result.
     if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion)
     {
         eprintln!("chibipop: ============================================================");
@@ -1256,7 +1247,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         eprintln!("chibipop: ============================================================");
     }
 
-    // Static region outline.
+    // Create the static region outline.
     let static_overlay = match StaticRegionOverlay::create(live.exclude_from_capture) {
         Ok(o) => Some(o),
         Err(e) => {
@@ -1270,9 +1261,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // Never fatal - spec §5.
+    // An Anki button failure is never fatal.
     //
-    // Always live; shown on demand.
+    // When it exists, the button remains live and appears on demand.
     let anki_button = match AnkiButton::create(live.exclude_from_capture) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -1292,7 +1283,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         );
     }
 
-    // Recomputed by `apply_live`.
+    // `apply_live` recomputes this state.
     capture_guard_active.store(
         capture_guard_needed(
             popup.capture_exclusion(),
@@ -1302,8 +1293,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         Ordering::SeqCst,
     );
 
-    // The painter opens its own read-only connection onto the media store:
-    // the worker owns the dictionary on another thread.
+    // The renderer opens its own read-only connection to the media store.
+    // The Worker owns the Dictionary connection on another thread.
     let mut renderer = Renderer::new(popup.hwnd(), &db_path)
         .context("creating the D2D/DirectWrite renderer")?;
     let mut theme = theme_from_config(&live.popup);
@@ -1336,10 +1327,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         Hooks::set_action_hotkey(2, vk, 0);
     }
 
-    // No tray means no control.
+    // The tray provides the control surface for this process.
     let tray = Tray::create(popup.hwnd()).context("creating the tray icon")?;
 
-    // Thread timer, no window.
+    // Use a thread timer without a window.
     let timer_id = unsafe { SetTimer(None, 0, DISPATCH_TICK_MS, None) };
     if timer_id == 0 {
         anyhow::bail!("SetTimer failed to install the dispatch tick");
@@ -1348,30 +1339,30 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     println!("chibipop: running - hover Japanese text anywhere on screen.");
     println!("chibipop: right-click the tray icon to change mode or quit.");
 
-    // Spawned before dicts existed.
+    // The Worker started before the Dictionary identities were known.
     rescope_lookups(&mut live, &cfg, &dicts, worker.trigger());
-    // Visible just before the Hide.
+    // Record visibility immediately before `Hide`.
     //
-    // Cleared by hides elsewhere.
+    // Other hide paths clear these values.
     let capture_guard_prev_visible = std::cell::Cell::new(false);
-    // Overlay's own visibility.
+    // Visibility of the overlay itself.
     let overlay_prev_visible = std::cell::Cell::new(false);
-    // Anki button visibility.
+    // Visibility of the Anki button.
     let btn_prev_visible = std::cell::Cell::new(false);
-    // Event in, Command out.
+    // Send each Event through the state machine and handle each Command.
     let mut controller = Controller::new(controller_config(&live));
-    // OpenSettings, loop-deferred.
+    // Defer OpenSettings to the message loop.
     let mut want_settings = false;
-    // An authorised add waiting on a
-    // region: see PendingShot.
+    // An authorized add that waits for a region.
+    // See `PendingShot`.
     let mut pending_shot: Option<PendingShot> = None;
-    // Rising/falling key edges.
+    // Track each key edge.
     let mut trigger_was_held = false;
-    // Static overlay visibility.
+    // Visibility of the static overlay.
     let sr_prev_visible = std::cell::Cell::new(false);
     let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
-    // Anki dupe answers, by expr.
+    // Cache Anki duplicate answers by `expr`.
     let mut dupe_cache: HashMap<String, bool> = HashMap::new();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
@@ -1393,15 +1384,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         &mut action_registry,
         live.actions_ocr_clipboard_hotkey.as_deref(),
     );
-    // One writer at a time.
+    // Allow one writer at a time.
     let mut save_job: Option<thread::JoinHandle<()>> = None;
-    // BACKLOG 7: no way in but this.
+    // BACKLOG 7: this is the only entry point.
     let mut settings: Option<SettingsWindow> = match SettingsWindow::open(
         &form_with_library(&cfg, &dicts, &library),
         &settings::stale_order_entries(&cfg, &dicts),
         ApplyMode::Live,
     ) {
-        // Never fatal.
+        // A startup settings-window failure is never fatal.
         Err(e) => {
             eprintln!("chibipop: opening settings at startup failed: {e:#}");
             None
@@ -1411,11 +1402,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             Some(w)
         }
     };
-    // An in-place edit in flight.
+    // Store the active in-place edit here.
     let mut edit: Option<EditFlight> = None;
     let mut edit_cfg: Option<Config> = None;
 
-    // I4: kept in one place.
+    // I4: keep all capture-guard code in one place.
     let drain_capture_guard = || {
         while let Ok(req) = capture_guard_rx.try_recv() {
             match req {
@@ -1427,18 +1418,17 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         b.hide();
                     }
                     if let Some(hwnd) = overlay_hwnd {
-                        // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle;
-                        // the `Overlay` that owns it lives in `run`'s local
-                        // `overlay` for this whole loop, so the window is
-                        // still live here. Both calls only read/set
-                        // visibility - no other precondition applies.
+                        // SAFETY: `hwnd` is `Overlay::hwnd()`'s own handle.
+                        // The `Overlay` that owns it lives in `run`'s local `overlay` for this
+                        // whole loop, so the window stays live here. Both calls only read or set
+                        // visibility. No other precondition applies.
                         overlay_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
                         }
                     }
                     if let Some(hwnd) = sr_hwnd {
-                        // SAFETY: same as overlay above.
+                        // SAFETY: `sr_hwnd` stays live for the loop, like `overlay_hwnd`.
                         sr_prev_visible.set(unsafe { IsWindowVisible(hwnd).as_bool() });
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -1457,7 +1447,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                     if let Some(hwnd) = overlay_hwnd {
                         if overlay_prev_visible.get() {
-                            // SAFETY: same handle, same guarantee as above.
+                            // SAFETY: this call uses the same live handle as the hide path above.
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                             }
@@ -1465,7 +1455,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                     if let Some(hwnd) = sr_hwnd {
                         if sr_prev_visible.get() {
-                            // SAFETY: same as overlay.
+                            // SAFETY: this call uses the live `sr_hwnd` handle from the loop state.
                             unsafe {
                                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                             }
@@ -1476,9 +1466,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     };
 
-    // One Event through the state
-    // machine, every Command done;
-    // ShowPopup answers in place.
+    // Drive one Event through the state machine and handle every Command.
+    // Handle `ShowPopup` here so `PopupPlaced` or `PopupPlaceFailed` enters the queue at once.
     macro_rules! drive {
         ($event:expr) => {
             drive(
@@ -1506,11 +1495,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         };
     }
 
-    // The worker spawned before the
-    // dictionaries were known.
+    // The Worker started before the Dictionary identities were known.
     drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
 
-    // The screenshot worker: pure Rust now, so no WinRT apartment.
+    // The screenshot worker uses pure Rust, so it needs no WinRT apartment.
     {
         let rx = screenshot_rx;
         let tx = screenshot_done_tx;
@@ -1519,7 +1507,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             for cmd in rx {
                 let result = handle_screenshot_save(cmd);
                 let _ = tx.send(result);
-                // SAFETY: wakes the main loop.
+                // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(tid, WM_APP_SCREENSHOT_DONE, WPARAM(0), LPARAM(0));
                 }
@@ -1529,15 +1517,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut msg = MSG::default();
 
     loop {
-        // Window and thread messages.
+        // Read window and thread messages.
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
         if got.0 <= 0 {
-            break; // 0 = WM_QUIT, -1 = error. Either way, stop pumping.
+            break; // 0 means WM_QUIT. -1 means an error. Stop the message loop in either case.
         }
 
-        // Modeless routing - spec D2.
+        // Route messages for the modeless settings window.
         if let Some(w) = &settings {
-            // Spec D9: the picker pumps.
+            // The region picker runs a nested message pump.
             w.pump(|| {
                 Hooks::set_scroll_armed(false);
                 Hooks::set_click_armed(false);
@@ -1550,8 +1538,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 continue;
             }
 
-            // SAFETY: `w.hwnd()` is live until the `SettingsWindow` is
-            // dropped, and `msg` is this loop's own stack storage.
+            // SAFETY: `w.hwnd()` stays live until `SettingsWindow` drops.
+            // `msg` is this loop's stack storage.
             let handled = unsafe { IsDialogMessageW(w.hwnd(), &msg) }.as_bool();
             service_settings_click(
                 w,
@@ -1562,7 +1550,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 &mut css_editor,
             );
 
-            // Tab switch -> detect.
+            // Start deck, model, and field detection after a tab switch.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
                 if tab == 3 {
@@ -1594,7 +1582,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
-            // Spec D7: the popup's own rect.
+            // Read the popup's current rect.
             let cursor_pos = cursor_now();
             let button_h = anki_button
                 .as_ref()
@@ -1611,8 +1599,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
 
             if let Some(click) = Hooks::take_click() {
-                // The bin hit-tests: it
-                // owns the painted layout.
+                // The platform bin does hit-tests because it owns the painted layout.
                 let local_hit = controller.popup().map(|view| {
                     let local = PhysPoint {
                         x: click.x - view.popup.x,
@@ -1625,19 +1612,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
 
-            // Fallback: direct WM_LBUTTONDOWN.
+            // Use direct WM_LBUTTONDOWN as a fallback.
             if anki_button.as_ref().is_some_and(|b| b.take_click()) {
                 drive!(Event::AddRequested);
             }
 
-            // Every add route is one event: the state machine decides,
-            // and its `AddNote` is where a screenshot joins in (spec D4).
+            // Every add path sends one Event. The state machine chooses the result,
+            // and `AddNote` handles any screenshot.
             if Hooks::take_add_hotkey() {
                 drive!(Event::AddRequested);
             }
 
-            // Static region hotkey (slot 1).
-            // Works in any sentence mode.
+            // Handle the static-region hotkey in slot 1.
+            // This hotkey works in every sentence mode.
             if Hooks::take_action_hotkey(1) {
                 let had_popup = controller.popup().is_some();
                 let _ = popup.hide();
@@ -1663,8 +1650,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             eprintln!("chibipop: showing static region overlay failed: {e:#}");
                         }
                     }
-                    // Fresh WorkerSettings ride the reload the
-                    // Controller answers this with.
+                    // `Controller` returns a reload with fresh `WorkerSettings`.
                     drive!(Event::ConfigReloaded(Box::new(controller_config(&live))));
                     eprintln!(
                         "chibipop: static region set to ({}, {}, {}x{})",
@@ -1679,10 +1665,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
 
-            // Action hotkey dispatch.
+            // Dispatch action hotkeys.
             for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
                 if slot == 1 {
-                    continue; // Handled above.
+                    continue; // Slot 1 was handled above.
                 }
                 if !Hooks::take_action_hotkey(slot) {
                     continue;
@@ -1720,9 +1706,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         height,
                         save_dir,
                     }) => {
-                        // The mining screenshot files its own card and
-                        // is gated by neither `include_on_add` nor the
-                        // add guards, so it takes the ungated plan.
+                        // The mining screenshot uses its own card path.
+                        // It ignores `include_on_add` and the add guards, so it uses the ungated plan.
                         if let Some(view) = controller.popup() {
                             let cmd = crate::action::ScreenshotCommand {
                                 bgra_buf,
@@ -1751,7 +1736,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     _ => {}
                 }
 
-                // Restore after capture.
+                // Restore the windows after capture.
                 if had_popup {
                     let _ = popup.show_without_activating();
                     if let Some(b) = &anki_button {
@@ -1786,7 +1771,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             if let Some(w) = &settings {
                 if edit.is_some() {
-                    // Not while the db changes.
+                    // Do not read window outcomes while the database changes.
                     let _ = w.take_outcome();
                     let done = edit.as_ref().and_then(|f| pump_edit(&f.rx, w));
                     if let Some(done) = done {
@@ -1801,14 +1786,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 let report = *report;
                                 let status = edit_status(&report);
                                 let mut updated = edit_cfg.take().unwrap_or_else(|| cfg.clone());
-                                // Removals first: keys collide.
+                                // Apply removals first because Dictionary names can collide.
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
                                 }
                                 for (name, roles) in &report.added {
                                     settings::dictionary_added(&mut updated, name, *roles);
                                 }
-                                // Spec §4: the cache was stale.
+                                // Replace the stale Dictionary identity cache.
                                 dicts = report.dicts;
                                 w.clear_staged();
                                 w.reseed_per_language(&updated.dictionaries.per_language);
@@ -1828,7 +1813,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     &mut theme,
                                     &capture_guard_active,
                                 );
-                                // Kills stale results.
+                                // Reload the Controller to discard stale results.
                                 drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
                                 save_in_background(
                                     &mut save_job,
@@ -1843,9 +1828,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                 } else {
                     match w.take_outcome() {
-                        // Tray remains; just hide.
+                        // Keep the tray and hide only the settings window.
                         Some(SettingsOutcome::Cancel) => settings = None,
-                        // Already on the main thread.
+                        // The main thread handles this event directly.
                         Some(SettingsOutcome::Quit) => drive!(Event::Quit),
                         Some(SettingsOutcome::Apply) => {
                             let t0 = std::time::Instant::now();
@@ -1880,9 +1865,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     }
                                 }
                             } else {
-                                // Before `cfg` becomes the new one: what
-                                // the frequency inputs were is half the
-                                // question.
+                                // Read Dictionary work before `cfg` becomes the new value.
+                                // The old and new frequency inputs determine the work.
                                 let work = settings::dictionary_work(&cfg, &updated);
                                 live = derive(&updated);
                                 live.present_cfg = updated.present_config(&dicts);
@@ -1918,12 +1902,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     }
                                     None => status_parts.push("Settings applied.".to_string()),
                                 }
-                                // A strategy, order or checkbox change
-                                // recomputes `term.freq` in place and never
-                                // re-reads an archive: the claims those
-                                // inputs reduce are already stored, so the
-                                // archive-driven pass belongs to a library
-                                // edit and a rebuild belongs to neither.
+                                // A strategy, order, or checkbox change updates `term.freq` in place.
+                                // It never reads an archive. The database already stores the claims.
+                                // An archive edit owns the archive pass, and a rebuild owns neither.
                                 if work == settings::DictionaryWork::Reindex {
                                     w.set_busy(true);
                                     let done = reindex_ranks(&db_path, &cfg, &dicts, w);
@@ -1960,7 +1941,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
 
-            // Shift up retracts it.
+            // A trigger-key release retracts the popup.
             let held = Hooks::trigger_held();
             if held != trigger_was_held {
                 trigger_was_held = held;
@@ -1968,7 +1949,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     drive!(Event::TriggerDown);
                 } else {
                     if !matches!(live.trigger_mode, crate::config::TriggerMode::Live) {
-                        // Restore would re-show it.
+                        // Do not restore visibility because restore would show the popup again.
                         capture_guard_prev_visible.set(false);
                         overlay_prev_visible.set(false);
                         btn_prev_visible.set(false);
@@ -1978,8 +1959,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
 
             let cursor = Hooks::take_pending().unwrap_or_else(|| {
-                // Fallback: poll GetCursorPos when the LL hook
-                // is blocked (e.g. by anti-cheat).
+                // Fallback: poll GetCursorPos when the low-level hook is blocked,
+                // for example, by anti-cheat software.
                 let pos = cursor_pos;
                 let dominated = Hooks::poll_gate(pos);
                 if dominated {
@@ -1995,7 +1976,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::CursorMoved { pos: cursor });
             }
         } else if msg.message == WM_APP_RESULT {
-            // Only the freshest queued.
+            // Use only the newest queued Worker result.
             let mut freshest: Option<WorkerResult> = None;
             while let Ok(r) = worker.results().try_recv() {
                 freshest = Some(r);
@@ -2067,24 +2048,23 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             while let Ok(result) = screenshot_done_rx.try_recv() {
                 match &result.filed {
                     Ok(Some(_)) => {
-                        // The word is in the collection now: teach the
-                        // cache, or a cached `false` outlives the add.
+                        // The word is now in the collection. Mark the cache so a cached `false`
+                        // does not survive the add.
                         dupe_cache.insert(result.expr.clone(), true);
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} added", result.expr));
                         }
                     }
-                    // Nothing was added, so this gets a line rather
-                    // than an "added" notification: the picture on
-                    // disk is the whole of what happened.
+                    // Report the saved PNG instead of an "added" notification.
+                    // The PNG on disk is the complete result.
                     Ok(None) => eprintln!(
                         "chibipop: screenshot saved to {} - no card to file it on",
                         result.dir.display()
                     ),
                     Err(e) => eprintln!("chibipop: screenshot failed: {e}"),
                 }
-                // The failure has to land too - `start_add` marked the
-                // popup in flight before it handed this add over.
+                // Report the failure. `start_add` marked the popup for the add before
+                // it sent this result here.
                 if let Some(failed) = result.add_failed() {
                     drive!(Event::NoteAdded {
                         expr: result.expr,
@@ -2093,10 +2073,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
         } else if msg.message == WM_APP_CAPTURE_GUARD {
-            // Drain, never one per wakeup.
+            // Drain every queued request on each wakeup.
             drain_capture_guard();
         } else if let Some(cmd) = tray.handle_message(msg.message, msg.lParam, || {
-            // The menu swallows WM_TIMER.
+            // The menu consumes WM_TIMER messages.
             Hooks::set_scroll_armed(false);
             Hooks::set_click_armed(false);
             drain_capture_guard();
@@ -2112,7 +2092,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     let form = form_with_library(&cfg, &dicts, &library);
                     let stale = settings::stale_order_entries(&cfg, &dicts);
                     match SettingsWindow::open(&form, &stale, ApplyMode::Live) {
-                        // Never fatal.
+                        // A settings-window failure is never fatal.
                         Err(e) => eprintln!("chibipop: opening settings failed: {e:#}"),
                         Ok(w) => {
                             notice_drift(&w, &library, &db_path);
@@ -2128,15 +2108,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         }
 
-        // The OS half of screenshot-on-add, outside every command batch:
-        // the state machine authorised this add and marked the popup in
-        // flight, and all that is left is picking a region and grabbing
-        // it. The selector pumps messages of its own, which is exactly
-        // why it cannot run where the plan was made.
+        // Handle the OS half of screenshot-on-add outside every Command batch.
+        // The state machine authorized the add and marked the popup for an add.
+        // This code only selects a region and grabs pixels. The selector owns a
+        // nested `GetMessageW` pump, so this code cannot run where the plan is made.
         //
-        // The settings routing above can `continue` past this, but only
-        // for dialog messages - the dispatch tick never is one, so a
-        // parked plan waits at most one DISPATCH_TICK_MS.
+        // Settings code can `continue` past this block for dialog messages.
+        // The dispatch tick is not a dialog message, so a parked plan waits at
+        // most one DISPATCH_TICK_MS.
         if let Some(pending) = pending_shot.take() {
             let _ = popup.hide();
             if let Some(b) = &anki_button {
@@ -2162,9 +2141,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         anki_connected: pending.anki_connected,
                     });
                 }
-                // Cancelled, or the grab failed: the card still goes in,
-                // just without a picture. The popup is already marked
-                // adding, so this is the only way it ever clears.
+                // If the user cancels or the grab fails, send the add without a screenshot.
+                // The popup already marks the add, so this path must clear that state.
                 None => {
                     let PendingShot { plan, .. } = pending;
                     spawn_add_note(plan.expr, plan.fields, &live, &add_tx, main_tid);
@@ -2173,20 +2151,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // Shutdown, decision 5's order.
+    // Shut down in the order from decision 5.
     unsafe {
         let _ = KillTimer(None, timer_id);
     }
-    // No hooks while we block.
+    // Drop the hooks before shutdown can block.
     drop(hooks.take());
-    // No ack while we block.
+    // Disable capture-guard acks before shutdown can block.
     capture_guard_active.store(false, Ordering::SeqCst);
-    // exit(0) kills it mid-write.
+    // Wait for the save before `exit(0)`. Otherwise, the process can stop mid-write.
     join_save(&mut save_job);
     std::process::exit(0)
 }
 
-/// Finds a named text-provider.
+/// Finds a text-provider plugin by name.
 fn find_text_plugin<'a>(
     found: &'a [(PathBuf, Result<Manifest>)],
     name: &str,
@@ -2207,10 +2185,10 @@ fn find_text_plugin<'a>(
     Ok((dir.as_path(), m))
 }
 
-/// Spawns one plugin process.
+/// Starts one plugin process.
 ///
-/// Concrete, so the caller decides whether to box it as the `OcrEngine`
-/// seam.
+/// The function returns a concrete `PluginText`, so the caller chooses whether
+/// to box it at the `OcrEngine` seam.
 fn spawn_plugin_engine(name: &str) -> Result<Box<PluginText>> {
     let root = crate::paths::beside_exe("plugins");
     let found = discover::discover(&root);
@@ -2219,9 +2197,9 @@ fn spawn_plugin_engine(name: &str) -> Result<Box<PluginText>> {
     Ok(Box::new(PluginText::new(h, m)))
 }
 
-/// Picks and spawns the engine.
+/// Selects and starts the configured engine.
 ///
-/// `None` picks the built-in.
+/// `None` selects the built-in engine.
 fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<PluginText>> {
     match resolve_engine(ocr_engine, enabled) {
         EngineChoice::Builtin => None,
@@ -2238,7 +2216,7 @@ fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<Plu
         }
     }
 }
-/// Measure, place, show, paint.
+/// Measures, places, shows, and paints the popup.
 #[allow(clippy::too_many_arguments)]
 fn show_presentation(
     popup: &Popup,
@@ -2257,7 +2235,7 @@ fn show_presentation(
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
 
-    // view_h, not content_h, below.
+    // Use `view_h` below, not `content_h`.
     let (w, view_h, content_h) = renderer
         .measure(presentation, theme, (max_w, max_h), show_back, side_panel, render)
         .context("measuring popup content")?;
@@ -2270,9 +2248,9 @@ fn show_presentation(
     Ok((rect, content_h, view_h))
 }
 
-/// The `[anki]` section as the pump reads it: the config's own, with
-/// `derive`'s empty-field-map fallback applied so a screenshot add
-/// routes its fields exactly like a plain one.
+/// Returns the `[anki]` section that the pump uses.
+/// It starts with the config values and applies `derive`'s empty-field-map fallback.
+/// A screenshot add therefore uses the same fields as a plain add.
 fn anki_snapshot(cfg: &Config, live: &LiveSettings) -> crate::config::AnkiConfig {
     crate::config::AnkiConfig {
         field_map: live.anki_field_map.clone(),
@@ -2280,7 +2258,7 @@ fn anki_snapshot(cfg: &Config, live: &LiveSettings) -> crate::config::AnkiConfig
     }
 }
 
-/// One add, off main loop.
+/// Adds one note on a background thread.
 fn spawn_add_note(
     expr: String,
     fields: HashMap<String, String>,
@@ -2298,16 +2276,15 @@ fn spawn_add_note(
             .err()
             .map(|e| format!("{e:#}"));
         let _ = tx.send(AddNoteResult { expr, err });
-        // SAFETY: wakes the main loop.
+        // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_ADD_NOTE, WPARAM(0), LPARAM(0));
         }
     });
 }
 
-/// Encode, write, file. Every rule
-/// here is core's (`chibipop::shot`);
-/// this runs it off the pump.
+/// Encodes, writes, and files the screenshot.
+/// Core (`chibipop::shot`) owns every rule. This function runs off the pump.
 fn handle_screenshot_save(
     cmd: crate::action::ScreenshotCommand,
 ) -> crate::action::ScreenshotResult {
@@ -2316,8 +2293,8 @@ fn handle_screenshot_save(
         if cmd.anki_connected && !cmd.plan.expr.is_empty() {
             return crate::shot::save_and_add(&png, &cmd.plan, &cmd.anki).map(Some);
         }
-        // Anki unreachable: the picture is still worth saving, it just
-        // has no card to ride on - and no card is not an add.
+        // If Anki is unreachable, save the screenshot without a card.
+        // No card means that no add occurs.
         crate::shot::save(&png, &cmd.plan)?;
         Ok(None)
     })();
@@ -2333,11 +2310,10 @@ fn handle_screenshot_save(
     }
 }
 
-/// Relaunch with this argv.
-/// Start the popup app.
+/// Starts the popup process again with this argv.
 fn start_run(config_path: &Path, dict_path: &Path) -> Result<()> {
     let exe = std::env::current_exe().context("locating this executable")?;
-    // Explicit: may be non-default.
+    // Pass the configured paths explicitly. They can differ from the defaults.
     std::process::Command::new(exe)
         .arg("run")
         .arg("--config")
@@ -2349,24 +2325,24 @@ fn start_run(config_path: &Path, dict_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Live, not the gated point.
+/// Returns the live cursor position instead of the gated point.
 fn cursor_now() -> PhysPoint {
     let mut pt = POINT::default();
-    // SAFETY: FFI call taking a pointer to local stack storage that outlives
-    // the call. On failure `pt` stays zeroed, which merely disarms the wheel
-    // for one tick.
+    // SAFETY: This FFI call receives a pointer to local stack storage that
+    // remains valid for the call. On failure, `pt` stays zeroed and the wheel
+    // remains disarmed for one tick.
     unsafe {
         let _ = GetCursorPos(&mut pt);
     }
     PhysPoint { x: pt.x, y: pt.y }
 }
 
-/// The monitor under the anchor.
+/// Returns the monitor that contains the anchor.
 fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     let c = anchor.center();
     let pt = POINT { x: c.x, y: c.y };
     unsafe {
-        // Never null, so never checked.
+        // `MonitorFromPoint` never returns null with this flag.
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -2392,10 +2368,9 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     }
 }
 
-/// Places, paints, or hides it.
+/// Places, paints, or hides the Anki button.
 ///
-/// Sits below the popup, flush
-/// with its left/right edges.
+/// The button sits below the popup and has the same left and right edges.
 fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme: &Theme) {
     let Some(btn) = btn else { return };
     let Some(v) = view else {
@@ -2419,7 +2394,7 @@ fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme
     btn.render(&text, color, theme);
 }
 
-/// What the Controller reads.
+/// Builds the Controller configuration from live settings.
 fn controller_config(live: &LiveSettings) -> ControllerConfig {
     ControllerConfig {
         trigger_mode: live.trigger_mode,
@@ -2433,25 +2408,25 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
     }
 }
 
-/// One add waiting on the OS half of the screenshot-on-add flow.
+/// Stores one add while the OS does the screenshot-on-add steps.
 ///
-/// Parked by the `AddNote` executor, drained at the top of the pump: the
-/// region selector runs its own nested message pump, which cannot be
-/// entered from inside a command batch.
+/// `AddNote` parks it and the pump drains it after the Command batch.
+/// The region selector owns a nested message pump, so this code cannot enter
+/// it inside a Command batch.
 struct PendingShot {
     plan: crate::shot::ShotPlan,
-    /// The popup's view of AnkiConnect when the add was authorised.
-    /// False still writes the PNG; it just files no card.
+    /// The popup's AnkiConnect state when the add was authorized.
+    /// `false` still writes the PNG but does not file a card.
     anki_connected: bool,
 }
 
-/// What executing Commands needs.
+/// Provides the values that Command handling needs.
 struct Exec<'a> {
     popup: &'a Popup,
     renderer: &'a mut Renderer,
     theme: &'a Theme,
-    /// The whole config: `AddNote` hands it to `chibipop::shot`, which
-    /// owns the screenshot-on-add rule.
+    /// `AddNote` passes the full config to `chibipop::shot`.
+    /// Core owns the screenshot-on-add rule.
     cfg: &'a Config,
     live: &'a LiveSettings,
     exe_dir: &'a Path,
@@ -2462,20 +2437,18 @@ struct Exec<'a> {
     anki_tx: &'a mpsc::Sender<AnkiDupeResult>,
     add_tx: &'a mpsc::Sender<AddNoteResult>,
     main_tid: u32,
-    /// OpenSettings, loop-handled.
+    /// The loop handles `OpenSettings`.
     want_settings: &'a mut bool,
-    /// An add that wants a picture; the loop does the OS half.
+    /// An add that needs a screenshot. The loop does the OS half.
     pending_shot: &'a mut Option<PendingShot>,
-    /// Read-only here; the pump
-    /// owns the writes.
+    /// This cache is read-only here. The pump owns all writes.
     dupe_cache: &'a HashMap<String, bool>,
 }
 
-/// One Event, to quiescence.
+/// Drives one Event until the state machine has no more work.
 ///
-/// `ShowPopup` is executed right
-/// here, so its `PopupPlaced` (or
-/// failure) feeds straight back.
+/// The function handles `ShowPopup` immediately, so `PopupPlaced` or
+/// `PopupPlaceFailed` enters the queue at once.
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     let mut queue = std::collections::VecDeque::new();
     queue.push_back(event);
@@ -2488,13 +2461,13 @@ fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     }
 }
 
-/// One Command, one effect.
+/// Handles one Command and returns any feedback Event.
 fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Event> {
     match cmd {
-        // Windows keeps its own popup out of its own captures at the OS
-        // level - WDA_EXCLUDEFROMCAPTURE or the hide/reshow capture guard
-        // - so it supplies no mask rects and `popup` goes unread here
-        // (ADR-0008).
+        // Windows excludes its popup from its own captures at the OS level.
+        // It uses WDA_EXCLUDEFROMCAPTURE or the hide-and-reshow Capture guard.
+        // It therefore sends no mask rectangles, and `popup` is unread here.
+        // (ARCHITECTURE.md#capture-and-masking).
         Command::RequestLookup {
             id,
             point,
@@ -2623,14 +2596,14 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         Command::CheckDupes { generation, exprs } => {
             let (cached_dupes, uncached, _) = partition_dupes(exprs, x.dupe_cache);
             if uncached.is_empty() {
-                // All answered from cache;
-                // no thread, no connection.
+                // The cache answers every reference.
+                // Do not start a thread or open a connection.
                 let _ = x.anki_tx.send(AnkiDupeResult {
                     gen: generation,
                     checked: Vec::new(),
                     dupes: Some(cached_dupes),
                 });
-                // SAFETY: wakes the main loop.
+                // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(x.main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
                 }
@@ -2644,8 +2617,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let main_tid = x.main_tid;
             thread::spawn(move || {
                 let refs: Vec<&str> = uncached.iter().map(|s| s.as_str()).collect();
-                // The union: the controller
-                // replaces, never merges.
+                // The Controller replaces its duplicate set. It does not merge it.
                 let dupes = match anki::find_duplicates(&url, &deck, &model, &refs, &field_map) {
                     Ok(found) => {
                         let mut all = cached_dupes;
@@ -2662,7 +2634,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                     checked: uncached,
                     dupes,
                 });
-                // SAFETY: wakes the main loop.
+                // SAFETY: This call wakes the main loop.
                 unsafe {
                     let _ = PostThreadMessageW(main_tid, WM_APP_ANKI, WPARAM(0), LPARAM(0));
                 }
@@ -2670,19 +2642,15 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::AddNote { expr, fields } => {
-            // The screenshot-on-add seam (spec D4). Every route to an add
-            // - the low-level hook click, the button's own
-            // WM_LBUTTONDOWN, the add hotkey - arrives here, and it
-            // arrives only once `start_add` has applied its guards and
-            // marked the popup in flight, so this bin never restates one
-            // of them.
+            // The screenshot-on-add seam receives every add path.
+            // A low-level hook click, `WM_LBUTTONDOWN`, and the add hotkey all reach
+            // this branch after `start_add` applies its guards and marks the popup for
+            // the add. This bin does not apply those guards again.
             //
-            // The OS half (hide, select a region, grab) is deliberately
-            // not done here: the selector runs its own nested
-            // `GetMessageW` pump, and pumping inside a command batch
-            // would re-enter `drive` half-way through one. The plan is
-            // parked instead and the loop drains it once the batch is
-            // over.
+            // Do not do the OS half here. The selector owns a nested
+            // `GetMessageW` pump, and a pump inside a Command batch would re-enter
+            // `drive` halfway through the batch. Park the plan, and let the loop
+            // drain it after the batch ends.
             let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
             let pending = controller.popup().and_then(|view| {
                 let anki_connected = view.anki.connected;
@@ -2728,24 +2696,23 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::Exit => {
-            // Already on the main thread.
+            // The main thread handles this Command.
             unsafe { PostQuitMessage(0) };
             None
         }
     }
 }
 
-/// Hands a glossary citation to the default browser.
+/// Sends a glossary citation to the default browser.
 ///
-/// `ShellExecuteW` with the `open` verb, the same call the settings
-/// window already uses to open a plugin directory. The scheme was
-/// allow-listed to `http`/`https` in `layout::link_action`, because the
-/// URL comes out of a dictionary file, and the shell would happily
-/// launch anything else.
+/// The settings window also calls `ShellExecuteW` with the `open` verb to
+/// open a plugin directory. `layout::link_action` allows only `http`/`https`
+/// because the URL comes from a Dictionary file. The shell can start any
+/// other scheme.
 fn open_url(url: &str) {
     let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is NUL-terminated UTF-16 valid for the call; the
-    // OS only reads it, and a URL it cannot open just fails.
+    // SAFETY: `wide` is NUL-terminated UTF-16 and stays valid for this call.
+    // The OS reads it only. A URL that it cannot open causes no effect.
     unsafe {
         let _ = windows::Win32::UI::Shell::ShellExecuteW(
             None,
@@ -2758,7 +2725,7 @@ fn open_url(url: &str) {
     }
 }
 
-/// Palette by name, font on top.
+/// Selects the palette by name and then sets the font.
 fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
     let mut theme = match popup.theme.as_str() {
         "light" => Theme::light(),
@@ -2775,7 +2742,7 @@ fn theme_from_config(popup: &crate::config::PopupConfig) -> Theme {
     theme
 }
 
-/// What run reads from config.
+/// Stores settings that `run` reads from the config.
 struct LiveSettings {
     popup: crate::config::PopupConfig,
     present_cfg: PresentConfig,
@@ -2812,10 +2779,12 @@ struct LiveSettings {
 }
 
 impl LiveSettings {
-    /// Where the static-region outline belongs, when it belongs
-    /// anywhere: static mode, the outline switched on, and a region the
-    /// user has actually drawn. Every place that shows or hides that
-    /// window asks this, so none of them can disagree.
+    /// Returns the static-region outline rectangle when all conditions allow it.
+    ///
+    /// The sentence mode must be `Static`.
+    /// The outline must be enabled.
+    /// The user must have drawn a region.
+    /// Every show or hide path calls this function, so all paths use the same decision.
     fn static_overlay_region(&self) -> Option<PhysRect> {
         if self.sentence_mode == crate::config::SentenceMode::Static && self.show_static_overlay {
             self.static_region
@@ -2825,14 +2794,13 @@ impl LiveSettings {
     }
 }
 
-/// Rebuilt on each change.
+/// Builds live settings from the config after each change.
 fn derive(cfg: &Config) -> LiveSettings {
     LiveSettings {
         popup: cfg.popup.clone(),
-        // No dictionary identities yet, so the enabled lists resolve to
-        // the names the config itself carries and nothing is appended for
-        // an installed dictionary no list mentions. The three callers that
-        // have the identities re-resolve `present_cfg` right after.
+        // The config has no Dictionary identities yet.
+        // Resolve enabled lists from the names in the config only. Do not append
+        // installed Dictionaries. Callers with identities resolve `present_cfg` again.
         present_cfg: cfg.present_config(&[]),
         scan_display: ScanDisplay {
             captures: cfg.debug.show_scan_region,
@@ -2886,7 +2854,7 @@ fn derive(cfg: &Config) -> LiveSettings {
     }
 }
 
-/// What the worker reloads.
+/// Builds the settings that the Worker reloads.
 fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     WorkerSettings {
         max_passes: live.max_ocr_passes,
@@ -2903,15 +2871,13 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
     }
 }
 
-/// The enabled terms list, once the identities are known.
+/// Updates the enabled terms list after the Dictionary identities are known.
 ///
-/// `Config::present_config` appends every installed dictionary the config
-/// does not name, and the worker's own first read is where those names
-/// come from - so the settings `Worker::spawn` was handed were resolved
-/// against an empty library and named only what the config listed. Push
-/// the real answer now that it can be computed: a fresh session must
-/// search the right dictionaries from its first lookup, not from the first
-/// reload. Nothing to say when it did not change.
+/// `Config::present_config` appends every installed Dictionary that the config
+/// does not name. The first `Worker::spawn` call has no identities, so it
+/// resolves only the names in the config. Update `present_cfg` now so a new
+/// session searches the right Dictionaries on its first lookup. Do not wait
+/// for the first reload. If the list did not change, do nothing.
 fn rescope_lookups(
     live: &mut LiveSettings,
     cfg: &Config,
@@ -2935,8 +2901,8 @@ fn rescope_lookups(
     });
 }
 
-/// Not excluded means guard on.
-/// `None`: no such window.
+/// Returns true when at least one window needs the Capture guard.
+/// `None` means that the window does not exist.
 fn capture_guard_needed(
     popup: CaptureExclusion,
     overlay: Option<CaptureExclusion>,
@@ -2947,7 +2913,7 @@ fn capture_guard_needed(
         || button.is_some_and(CaptureExclusion::needs_capture_guard)
 }
 
-/// Push settings to windows.
+/// Applies live settings to all active Windows surfaces.
 #[allow(clippy::too_many_arguments)]
 fn apply_live(
     live: &LiveSettings,
@@ -3020,7 +2986,7 @@ fn apply_live(
     }
 }
 
-/// Adds the action when a valid key exists.
+/// Registers the action when a valid key exists.
 fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotkey: Option<&str>) {
     if hotkey.and_then(crate::config::parse_trigger_key).is_some() {
         registry.register_at(
@@ -3030,7 +2996,7 @@ fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotke
     }
 }
 
-/// Must not block the pump.
+/// Saves the config while the pump stays responsive.
 fn save_in_background(
     prev: &mut Option<thread::JoinHandle<()>>,
     cfg: Config,
@@ -3041,21 +3007,21 @@ fn save_in_background(
     join_save(prev);
     *prev = Some(thread::spawn(move || {
         let _ = tx.send(cfg.save(&path));
-        // SAFETY: wakes the main loop.
+        // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
         }
     }));
 }
 
-/// No second writer, ever.
+/// Joins the previous save before a new save starts.
 fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
     if let Some(h) = job.take() {
         let _ = h.join();
     }
 }
 
-/// Some = substitute it.
+/// Returns a replacement language when the configured language is unavailable.
 fn startup_language(
     configured: &str,
     fallback: &str,
@@ -3126,9 +3092,9 @@ mod tests {
         assert!(status.matches(4));
     }
 
-    /// The shipped popup section with the two fields these tests are
-    /// about replaced, so a new field in core cannot silently give this
-    /// helper a value core does not ship.
+    /// Starts with the default popup section and replaces the two fields that
+    /// these tests check. A new core field therefore cannot get a value that
+    /// the default config does not contain.
     fn popup_config(theme: &str, font: &str) -> PopupConfig {
         PopupConfig {
             theme: theme.to_string(),
@@ -3137,7 +3103,7 @@ mod tests {
         }
     }
 
-    /// I1: font must reach Theme.
+    /// I1: passes the font to Theme.
     #[test]
     fn a_non_default_font_reaches_the_theme() {
         let theme = theme_from_config(&popup_config("dark", "Noto Sans JP"));
@@ -3185,7 +3151,7 @@ mod tests {
         assert!(!live.scan_alphanumeric);
     }
 
-    /// The headline plumbing.
+    /// Covers the main capture settings.
     #[test]
     fn worker_settings_carries_the_capture_settings() {
         let mut cfg = Config::default();
@@ -3208,12 +3174,14 @@ mod tests {
         assert_eq!("zh-Hant", worker_settings(&live, &[]).language);
     }
 
-    /// An installed dictionary no list names is searched, and the names
-    /// come from the worker's own first read - so the spawn cannot resolve
-    /// the enabled list before the worker exists and it re-resolves after.
-    /// Without that, a fresh session searched only what the config listed
-    /// until something sent a reload. The pump cannot be driven from a
-    /// unit test, so the decision-and-push function is pinned directly.
+    /// The search includes an installed Dictionary when no configured list names it.
+    /// The first Worker read supplies its name.
+    /// `Worker::spawn` cannot resolve the enabled list before that read, so the code
+    /// resolves the list again.
+    /// Without this step, a new session searches only configured Dictionaries until
+    /// a reload.
+    /// A unit test cannot drive the pump, so this test checks the decision-and-push
+    /// function directly.
     #[test]
     fn a_fresh_worker_is_told_the_split_once_the_names_are_known() {
         let mut cfg = Config::default();
@@ -3251,9 +3219,8 @@ mod tests {
         }
     }
 
-    /// And costs nothing when there is nothing to say: a config that
-    /// already names the installed dictionary in every list resolves to
-    /// itself, so no reload and no log line.
+    /// Do nothing when no list changes. A config that names the installed
+    /// Dictionary in every list resolves to itself, so no reload or log line occurs.
     #[test]
     fn a_worker_whose_scope_did_not_change_is_left_alone() {
         let mut cfg = Config::default();
@@ -3273,7 +3240,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "an unchanged scope must not reload");
     }
 
-    /// Step 3b: the input trio.
+    /// Step 3b: carries the three input settings.
     #[test]
     fn derive_carries_the_three_input_settings() {
         let mut cfg = Config::default();
@@ -3318,7 +3285,7 @@ mod tests {
         ));
     }
 
-    /// Spec D5: they can diverge.
+    /// The overlay and button can diverge from the popup.
     #[test]
     fn an_overlay_the_os_refused_arms_the_guard_alone() {
         assert!(capture_guard_needed(
@@ -3378,13 +3345,13 @@ mod tests {
         assert_eq!(None, startup_language("ko", "ja", || true));
     }
 
-    /// Else it would loop on itself.
+    /// Avoid a substitution loop when the configured language equals the fallback.
     #[test]
     fn the_default_language_never_substitutes_itself() {
         assert_eq!(None, startup_language("JA", "ja", || false));
     }
 
-    /// No WinRT call on the default.
+    /// Do not call WinRT for the default language.
     #[test]
     fn the_default_language_never_asks_windows() {
         let mut asked = false;
@@ -3426,7 +3393,7 @@ mod tests {
             .join(name)
     }
 
-    /// WAL, as build-dict writes it.
+    /// Creates a WAL database, as `build-dict` does.
     fn built_db(dir: &Path, library: &Path) -> PathBuf {
         std::fs::create_dir_all(library).unwrap();
         std::fs::copy(fixture("terms.zip"), library.join("terms.zip")).unwrap();
@@ -3490,7 +3457,7 @@ mod tests {
         }
     }
 
-    /// Spec 2: never write to it.
+    /// Do not write to a database that lacks WAL mode.
     #[test]
     fn the_writer_refuses_a_database_that_is_not_in_wal_mode() {
         let (dir, _guard) = edit_scratch("legacy_mode");
@@ -3518,7 +3485,7 @@ mod tests {
             .expect("the writer must be able to write");
     }
 
-    /// Never create a blank one.
+    /// Do not create a database for a missing path.
     #[test]
     fn the_writer_never_creates_a_missing_database() {
         let (dir, _guard) = edit_scratch("no_create");
@@ -3530,7 +3497,7 @@ mod tests {
         assert!(!missing.exists(), "opening must not create the file");
     }
 
-    /// Absolute ids read wrong.
+    /// Absolute IDs would produce an incorrect count.
     #[test]
     fn progress_counts_from_the_dictionary_being_added() {
         assert_eq!(
@@ -3557,11 +3524,11 @@ mod tests {
         assert_eq!("progress  x / ?", rebased("progress  x / ?", 10));
     }
 
-    /// `banks.zip`, not a second copy of the library's own `terms.zip`:
-    /// two byte-identical archives are one dictionary, and `Library::load`
-    /// collapses the copy away - so an apply that added it would leave the
-    /// database holding a dictionary the library does not list, which is
-    /// what [`drifted`] reports at the end of this test.
+    /// `banks.zip` is distinct from the library's `terms.zip`.
+    /// Two byte-identical archives form one Dictionary, and `Library::load`
+    /// removes the duplicate. An Apply that adds the duplicate would leave the
+    /// database with a Dictionary absent from the library.
+    /// [`drifted`] reports this mismatch at the end of the test.
     #[test]
     fn a_mixed_frequency_apply_reapplies_in_place() {
         let (dir, _guard) = edit_scratch("mixed_frequency");
@@ -3680,7 +3647,7 @@ mod tests {
         assert_eq!(Some("daijirin.zip".to_string()), plan.removals[0].file);
     }
 
-    /// Unreadables list by file.
+    /// Check that removal can name an unreadable archive by file.
     #[test]
     fn a_removal_may_name_the_archive_file() {
         let form = staged_form(&[], &["broken.zip"]);
@@ -3689,7 +3656,7 @@ mod tests {
         assert_eq!(Some("broken.zip".to_string()), plan.removals[0].file);
     }
 
-    /// A row the library forgot.
+    /// A database row can remain after the library loses its archive.
     #[test]
     fn a_removal_with_no_archive_still_names_its_row() {
         let form = staged_form(&[], &["Orphan"]);
@@ -3705,7 +3672,7 @@ mod tests {
         assert!(s.contains("Old"), "{s}");
     }
 
-    /// Spec 9: name the failure.
+    /// Include the failure name.
     #[test]
     fn the_status_names_what_failed_beside_what_worked() {
         let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));
@@ -3728,7 +3695,7 @@ mod tests {
         );
     }
 
-    /// The release's whole point.
+    /// This test covers the main Apply path.
     #[test]
     fn an_apply_adds_a_dictionary_to_the_live_database() {
         let (dir, _guard) = edit_scratch("add");
@@ -3759,14 +3726,14 @@ mod tests {
         );
     }
 
-    /// REGRESSION 1.18's symptom.
+    /// REGRESSION 1.18: preserve the reported symptom.
     #[test]
     fn an_apply_removes_a_dictionary_and_its_archive() {
         let (dir, _guard) = edit_scratch("remove");
         let library = dir.join("library");
         let db = built_db(&dir, &library);
-        // Distinct bytes, because a copy of `terms.zip` would be the same
-        // dictionary under a second name and the library collapses those.
+        // Use distinct bytes. A copy of `terms.zip` would be the same
+        // Dictionary under another name, and the library would collapse both.
         std::fs::copy(fixture("banks.zip"), library.join("extra.zip")).unwrap();
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
@@ -3803,11 +3770,11 @@ mod tests {
         assert_eq!(1, report.dicts.len());
     }
 
-    /// A frequency archive is a dictionary: it is what the user orders and
-    /// enables, its own reported frequencies are stored under its own
-    /// `dict_id`, and removing it drops them through the same `DICT_KEYED`
-    /// walk every other dictionary-keyed table takes (ADR-0015). What it
-    /// still contributes is no `entry` row at all.
+    /// A frequency archive is a Dictionary that the user orders and enables.
+    /// The database stores its Reported frequencies under the archive's
+    /// `dict_id`. Removal deletes those records through the same `DICT_KEYED`
+    /// walk as every other Dictionary-keyed table
+    /// (ARCHITECTURE.md#dictionary-and-lookup). The archive adds no `entry` row.
     #[test]
     fn a_frequency_addition_owns_a_dictionary_row_and_contributes_no_entries() {
         let (dir, _guard) = edit_scratch("add_frequency");
@@ -3844,7 +3811,7 @@ mod tests {
         assert_eq!(None, drifted(&library, &db).unwrap());
     }
 
-    /// Refuse before it moves.
+    /// Refuse before the library changes.
     #[test]
     fn a_legacy_database_is_refused_before_the_library_is_touched() {
         let (dir, _guard) = edit_scratch("legacy_apply");
@@ -3869,7 +3836,7 @@ mod tests {
         );
     }
 
-    /// Never the last dictionary.
+    /// Do not remove the last Dictionary.
     #[test]
     fn an_apply_that_would_empty_the_library_is_refused() {
         let (dir, _guard) = edit_scratch("last_one");
@@ -3885,7 +3852,7 @@ mod tests {
         assert!(library.join("terms.zip").exists(), "the archive must stay");
     }
 
-    /// Real bytes, not a constant.
+    /// Use actual source bytes instead of a constant.
     #[test]
     fn the_library_that_built_the_database_has_not_drifted() {
         let (dir, _guard) = edit_scratch("no_drift");
@@ -3902,7 +3869,7 @@ mod tests {
         assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
     }
 
-    /// The dropped-in archive.
+    /// Check that a new archive produces a drift notice.
     #[test]
     fn an_archive_the_build_never_saw_is_reported_as_drift() {
         let (dir, _guard) = edit_scratch("drifted");

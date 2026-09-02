@@ -1,9 +1,9 @@
-//! Machine-wide input hooks.
+//! Installs machine-wide input hooks.
 //!
-//! Only armed wheel is eaten.
-//! Never logs a keystroke.
-//! State is in statics only:
-//! HOOKPROC cannot capture.
+//! The hooks block an armed wheel event before the next hook receives it.
+//! The hooks never log keystrokes.
+//! Hook callbacks use static state only.
+//! A `HOOKPROC` cannot capture state.
 
 use crate::config::TriggerMode;
 use crate::geom::PhysPoint;
@@ -18,60 +18,59 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Movement gate, physical px.
+/// Defines the movement threshold for the gate in physical pixels.
 const MOVEMENT_GATE_PX: i64 = 4;
 
-/// "No point stored" sentinel.
+/// Marks the state with no stored point.
 const NO_POINT: i64 = i64::MIN;
 
-/// Hook thread startup budget.
+/// Defines the time limit for hook thread startup.
 const HOOK_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Last point the gate accepted.
+/// Stores the last point that the gate accepted.
 static LAST_ACCEPTED: AtomicI64 = AtomicI64::new(NO_POINT);
 
-/// The one candidate, if any.
+/// Stores one candidate point when one exists.
 static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 
-/// The configured trigger vkcode.
+/// Stores the configured virtual-key code for the trigger key.
 static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
 
-/// Whether the trigger key is held.
+/// Stores whether the trigger key is held.
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Stuck true kills every wheel.
-///
-/// Reset each main-thread tick.
+/// The main thread resets this flag on each tick.
+/// A stuck `true` value blocks every wheel event.
 static SCROLL_ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Delta banked while armed.
+/// Stores wheel delta while capture is armed.
 static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
 
-/// Clicks on the popup area.
+/// Arms click capture on the popup area.
 static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Screen coords of the click.
+/// Stores screen coordinates for the click.
 static PENDING_CLICK: AtomicI64 = AtomicI64::new(NO_POINT);
 
-/// `WHEEL_DELTA`, per winuser.h.
+/// Defines the number of `WHEEL_DELTA` units from `winuser.h`.
 const WHEEL_DELTA_UNITS: i32 = 120;
 
-/// Trigger mode, packed as u8.
+/// Stores the trigger mode as `u8`.
 static MODE: AtomicU8 = AtomicU8::new(0);
 
-/// Add-to-Anki hotkey vkcode.
+/// Stores the virtual-key code for the Add-to-Anki hotkey.
 static ANKI_ADD_VK: AtomicU16 = AtomicU16::new(0x41);
 
-/// Set when popup+Anki are up.
+/// Stores whether the popup is shown and Anki integration is enabled.
 static ANKI_ADD_ARMED: AtomicBool = AtomicBool::new(false);
 
-/// One hotkey press, banked.
+/// One stored hotkey press.
 static PENDING_ADD: AtomicBool = AtomicBool::new(false);
 
-/// Action hotkey slot count.
+/// Defines the number of action hotkey slots.
 pub const MAX_ACTION_SLOTS: usize = 8;
 
-/// Action hotkey vkcodes.
+/// Stores virtual-key codes for action hotkeys.
 static ACTION_VK: [AtomicU16; MAX_ACTION_SLOTS] = [
     AtomicU16::new(0),
     AtomicU16::new(0),
@@ -83,7 +82,7 @@ static ACTION_VK: [AtomicU16; MAX_ACTION_SLOTS] = [
     AtomicU16::new(0),
 ];
 
-/// Action hotkey modifiers.
+/// Stores modifier masks for action hotkeys.
 static ACTION_MODS: [AtomicU8; MAX_ACTION_SLOTS] = [
     AtomicU8::new(0),
     AtomicU8::new(0),
@@ -95,7 +94,7 @@ static ACTION_MODS: [AtomicU8; MAX_ACTION_SLOTS] = [
     AtomicU8::new(0),
 ];
 
-/// One action press per slot.
+/// Stores one action press for each slot.
 static PENDING_ACTION: [AtomicBool; MAX_ACTION_SLOTS] = [
     AtomicBool::new(false),
     AtomicBool::new(false),
@@ -107,19 +106,19 @@ static PENDING_ACTION: [AtomicBool; MAX_ACTION_SLOTS] = [
     AtomicBool::new(false),
 ];
 
-/// True during region select.
+/// Marks an active Region selector.
 static SELECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Set when history is non-empty.
+/// Marks that the history contains an entry.
 static BACK_ARMED: AtomicBool = AtomicBool::new(false);
 
-/// One Escape press, banked.
+/// Stores one Escape press.
 static PENDING_BACK: AtomicBool = AtomicBool::new(false);
 
-/// VK_ESCAPE.
+/// Defines the virtual-key code for Escape.
 const VK_ESCAPE: u16 = 0x1B;
 
-/// One word: reads never tear.
+/// Packs one point into one word so readers never see a torn value.
 fn pack(p: PhysPoint) -> i64 {
     ((p.x as i64) << 32) | (p.y as u32 as i64)
 }
@@ -146,7 +145,7 @@ fn u8_to_mode(v: u8) -> TriggerMode {
     }
 }
 
-/// Whether a move may count now.
+/// Returns whether a move can count now.
 fn mode_currently_eligible() -> bool {
     match u8_to_mode(MODE.load(Ordering::SeqCst)) {
         TriggerMode::Live => true,
@@ -154,7 +153,7 @@ fn mode_currently_eligible() -> bool {
     }
 }
 
-/// Left/right VK for a modifier.
+/// Returns the left and right virtual-key codes for a modifier.
 fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
     match vk {
         0x10 => Some((0xA0, 0xA1)),
@@ -164,15 +163,15 @@ fn modifier_variants(vk: u16) -> Option<(u16, u16)> {
     }
 }
 
-/// True if this event fires add.
+/// Returns true when this event fires Add-to-Anki.
 fn add_hotkey_hit(down: bool, vk: u16) -> bool {
     down && vk == ANKI_ADD_VK.load(Ordering::SeqCst) && ANKI_ADD_ARMED.load(Ordering::SeqCst)
 }
 
-/// Live Ctrl/Shift/Alt bitmask.
+/// Returns the current Ctrl, Shift, and Alt modifier mask.
 fn current_modifiers() -> u8 {
     let mut m = 0u8;
-    // SAFETY: no preconditions.
+    // SAFETY: This call has no preconditions.
     unsafe {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
         if (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0 {
@@ -188,7 +187,7 @@ fn current_modifiers() -> u8 {
     m
 }
 
-/// Fires when vk+mods match.
+/// Returns true and stores an action when the virtual-key code and modifiers match.
 fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
     if !down {
         return false;
@@ -206,12 +205,12 @@ fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
     false
 }
 
-/// Region select in progress?
+/// Returns whether the Region selector is active.
 fn selection_active() -> bool {
     SELECTION_ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Does this event match the key?
+/// Returns whether this event matches the trigger key.
 fn matches_trigger(vk: u16, target: u16) -> bool {
     if vk == target {
         return true;
@@ -223,14 +222,13 @@ fn matches_trigger(vk: u16, target: u16) -> bool {
     }
 }
 
-/// Mouse hook's per-event work.
+/// Records one mouse move.
 ///
-/// No alloc, no block, no I/O.
+/// This path does not allocate, wait, or use I/O.
 unsafe fn record_mouse_move(lparam: LPARAM) {
-    // SAFETY: mouse_hook_proc only calls this when code >= 0 and
-    // wparam == WM_MOUSEMOVE - the WH_MOUSE_LL contract that guarantees
-    // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
-    // duration of this call.
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
+    // `wparam == WM_MOUSEMOVE`. The `WH_MOUSE_LL` contract guarantees that
+    // `lparam` points to a valid, aligned `MSLLHOOKSTRUCT` for this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let p = PhysPoint {
         x: data.pt.x,
@@ -258,13 +256,13 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
     PENDING.store(packed, Ordering::SeqCst);
 }
 
-/// Tracks the configured key.
+/// Tracks the configured trigger key.
 ///
-/// From the event, not the state.
+/// It reads the event rather than current key state.
 unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
-    // SAFETY: keyboard_hook_proc only calls this with code >= 0, the
-    // WH_KEYBOARD_LL contract under which `lparam` is a live
-    // KBDLLHOOKSTRUCT owned by the OS for the duration of this call.
+    // SAFETY: `keyboard_hook_proc` calls this only with `code >= 0`. Under
+    // the `WH_KEYBOARD_LL` contract, `lparam` points to a live
+    // `KBDLLHOOKSTRUCT` that the OS owns for the duration of this call.
     let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
     let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
     if add_hotkey_hit(down, vk) {
@@ -282,10 +280,10 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     if down {
         KEY_DOWN.store(true, Ordering::SeqCst);
     } else {
-        // For modifiers with L/R variants,
-        // only hide when both sides up.
+        // For a modifier with left and right variants, clear the state only
+        // when both sides are up.
         let still_held = modifier_variants(target).is_some_and(|(l, r)| {
-            // The hook fires before state.
+            // The hook runs before Windows updates the key state.
             let other = if vk == l {
                 r
             } else if vk == r {
@@ -293,7 +291,7 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
             } else {
                 return false;
             };
-            // SAFETY: no preconditions.
+            // SAFETY: This call has no preconditions.
             (unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(other as i32) }
                 as u16
                 & 0x8000)
@@ -310,12 +308,11 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     }
 }
 
-/// Stores the click's screen pt.
+/// Stores the click point in screen coordinates.
 unsafe fn record_click(lparam: LPARAM) {
-    // SAFETY: mouse_hook_proc only calls this when code >= 0 and
-    // wparam == WM_LBUTTONDOWN - the WH_MOUSE_LL contract that
-    // guarantees lparam is a valid, aligned pointer to an
-    // MSLLHOOKSTRUCT for the duration of this call.
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
+    // `wparam == WM_LBUTTONDOWN`. The `WH_MOUSE_LL` contract guarantees that
+    // `lparam` points to a valid, aligned `MSLLHOOKSTRUCT` for this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let p = PhysPoint {
         x: data.pt.x,
@@ -324,30 +321,30 @@ unsafe fn record_click(lparam: LPARAM) {
     PENDING_CLICK.store(pack(p), Ordering::SeqCst);
 }
 
-/// Banks one event's delta.
+/// Stores one wheel event's delta.
 unsafe fn record_wheel(lparam: LPARAM) {
-    // SAFETY: `mouse_hook_proc` only calls this when code >= 0 and
-    // wparam == WM_MOUSEWHEEL - the WH_MOUSE_LL contract that guarantees
-    // lparam is a valid, aligned pointer to an MSLLHOOKSTRUCT for the
-    // duration of this call, exactly as for `record_mouse_move`.
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
+    // `wparam == WM_MOUSEWHEEL`. The `WH_MOUSE_LL` contract guarantees that
+    // `lparam` points to a valid, aligned `MSLLHOOKSTRUCT` for this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     accumulate_wheel((data.mouseData >> 16) as i16 as i32);
 }
 
-/// Notch maths, without Win32.
+/// Stores wheel delta values without Win32 calls.
 fn accumulate_wheel(delta: i32) {
     let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
         Some(v.saturating_add(delta))
     });
 }
 
-/// `WH_MOUSE_LL` callback.
+/// Handles `WH_MOUSE_LL` events.
 ///
-/// Armed wheel: the one swallow.
+/// An armed wheel event returns before the next hook receives it.
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         match wparam.0 as u32 {
-            // Unwinding here would be UB.
+            // A panic must not unwind through this callback.
+            // Unwinding through this callback causes undefined behavior.
             WM_MOUSEMOVE => {
                 let _ = catch_unwind(|| unsafe { record_mouse_move(lparam) });
             }
@@ -365,7 +362,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// `WH_KEYBOARD_LL` callback.
+/// Handles `WH_KEYBOARD_LL` events.
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let _ = catch_unwind(|| unsafe { record_key_state(wparam, lparam) });
@@ -373,7 +370,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// The installed Win32 hooks.
+/// Owns the installed Win32 hooks.
 struct InstalledHooks {
     mouse: HHOOK,
     keyboard: HHOOK,
@@ -385,7 +382,7 @@ enum HookStartup {
 }
 
 impl InstalledHooks {
-    /// Installs both, or neither.
+    /// Installs both hooks. On error, it removes the first hook before it returns.
     fn install() -> Result<InstalledHooks> {
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None)
@@ -418,7 +415,7 @@ impl InstalledHooks {
 }
 
 impl Drop for InstalledHooks {
-    /// Unhooks both, best effort.
+    /// Tries to remove both hooks and ignores removal errors.
     fn drop(&mut self) {
         unsafe {
             let _ = UnhookWindowsHookEx(self.mouse);
@@ -427,14 +424,14 @@ impl Drop for InstalledHooks {
     }
 }
 
-/// Hook pump thread.
+/// Controls the hook message thread.
 pub struct Hooks {
     thread_id: u32,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Hooks {
-    /// Starts the hook pump.
+    /// Starts the hook message thread.
     pub fn install() -> Result<Hooks> {
         let (startup_tx, startup_rx) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -495,52 +492,51 @@ impl Hooks {
         }
     }
 
-    /// Arms/disarms wheel capture.
+    /// Arms or disarms wheel capture.
     pub fn set_scroll_armed(armed: bool) {
         SCROLL_ARMED.store(armed, Ordering::SeqCst);
     }
 
-    /// Whether capture is armed.
+    /// Returns whether wheel capture is armed.
     pub fn scroll_armed() -> bool {
         SCROLL_ARMED.load(Ordering::SeqCst)
     }
 
-    /// Whether the key is down now.
+    /// Returns whether the trigger key is down now.
     ///
-    /// Hold mode gates moves off, so
-    /// no move can retract the popup;
-    /// the Controller hides on the
-    /// falling edge.
+    /// Hold mode rejects moves while the key is up.
+    /// Therefore, no move retracts the popup.
+    /// The `Controller` hides it when the key changes from down to up.
     pub fn trigger_held() -> bool {
         KEY_DOWN.load(Ordering::SeqCst)
     }
 
-    /// Sets the trigger vkcode.
+    /// Sets the virtual-key code for the trigger key.
     pub fn set_trigger_key(vk: u16) {
         TRIGGER_VK.store(vk, Ordering::SeqCst);
     }
 
-    /// Sets the add-to-Anki vkcode.
+    /// Sets the virtual-key code for the Add-to-Anki hotkey.
     pub fn set_add_hotkey(vk: u16) {
         ANKI_ADD_VK.store(vk, Ordering::SeqCst);
     }
 
-    /// Arms/disarms the add hotkey.
+    /// Arms or disarms the add-to-Anki hotkey.
     pub fn set_add_armed(armed: bool) {
         ANKI_ADD_ARMED.store(armed, Ordering::SeqCst);
     }
 
-    /// Takes the pending add, once.
+    /// Takes one stored add-to-Anki press.
     pub fn take_add_hotkey() -> bool {
         PENDING_ADD.swap(false, Ordering::SeqCst)
     }
 
-    /// Takes whole notches only.
+    /// Takes only complete wheel notches.
     ///
-    /// Sub-notch rest stays banked.
+    /// The rest of the delta stays stored.
     pub fn take_whole_notches() -> i32 {
         let mut whole = 0;
-        // Only the winning run stores.
+        // Only the successful `fetch_update` call stores the remainder.
         let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let remainder = v % WHEEL_DELTA_UNITS;
             whole = (v - remainder) / WHEEL_DELTA_UNITS;
@@ -549,17 +545,17 @@ impl Hooks {
         whole
     }
 
-    /// Drops everything accumulated.
+    /// Drops all accumulated wheel delta.
     pub fn discard_scroll() {
         PENDING_SCROLL.store(0, Ordering::SeqCst);
     }
 
-    /// Arms/disarms click capture.
+    /// Arms or disarms click capture.
     pub fn set_click_armed(armed: bool) {
         CLICK_ARMED.store(armed, Ordering::SeqCst);
     }
 
-    /// Takes the banked click, once.
+    /// Takes one stored click.
     pub fn take_click() -> Option<PhysPoint> {
         let v = PENDING_CLICK.swap(NO_POINT, Ordering::SeqCst);
         if v == NO_POINT {
@@ -569,14 +565,14 @@ impl Hooks {
         }
     }
 
-    /// Sets the gating mode.
+    /// Sets the mode that controls the trigger gate.
     pub fn set_mode(m: TriggerMode) {
         MODE.store(mode_to_u8(m), Ordering::SeqCst);
     }
 
-    /// Takes the candidate point.
+    /// Takes the stored candidate point.
     ///
-    /// Swap: never handed out twice.
+    /// The atomic swap returns it at most once.
     pub fn take_pending() -> Option<PhysPoint> {
         let v = PENDING.swap(NO_POINT, Ordering::SeqCst);
         if v == NO_POINT {
@@ -586,17 +582,17 @@ impl Hooks {
         }
     }
 
-    /// Arms/disarms back (Escape).
+    /// Arms or disarms Back for the Escape key.
     pub fn set_back_armed(armed: bool) {
         BACK_ARMED.store(armed, Ordering::SeqCst);
     }
 
-    /// Takes the pending back, once.
+    /// Takes one stored Back action.
     pub fn take_back() -> bool {
         PENDING_BACK.swap(false, Ordering::SeqCst)
     }
 
-    /// Polled fallback for the gate.
+    /// Uses a polled fallback for the movement gate.
     pub fn poll_gate(p: PhysPoint) -> bool {
         if !mode_currently_eligible() {
             return false;
@@ -614,7 +610,7 @@ impl Hooks {
         open
     }
 
-    /// Sets an action hotkey slot.
+    /// Sets one action hotkey slot.
     pub fn set_action_hotkey(slot: usize, vk: u16, modifiers: u8) {
         if slot < MAX_ACTION_SLOTS {
             ACTION_VK[slot].store(vk, Ordering::SeqCst);
@@ -622,7 +618,7 @@ impl Hooks {
         }
     }
 
-    /// Takes slot's pending fire.
+    /// Takes one stored action for a slot.
     pub fn take_action_hotkey(slot: usize) -> bool {
         if slot < MAX_ACTION_SLOTS {
             PENDING_ACTION[slot].swap(false, Ordering::SeqCst)
@@ -631,14 +627,14 @@ impl Hooks {
         }
     }
 
-    /// Sets the selection flag.
+    /// Sets the Region selector state.
     pub fn set_selection_active(active: bool) {
         SELECTION_ACTIVE.store(active, Ordering::SeqCst);
     }
 }
 
 impl Drop for Hooks {
-    /// Stops the hook pump.
+    /// Stops the hook message thread.
     fn drop(&mut self) {
         SCROLL_ARMED.store(false, Ordering::SeqCst);
         CLICK_ARMED.store(false, Ordering::SeqCst);
@@ -691,7 +687,7 @@ fn run_hook_thread(startup_tx: mpsc::Sender<HookStartup>) {
 mod tests {
     use super::*;
 
-    /// The wheel statics are shared.
+    /// The tests share the wheel state.
     static WHEEL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn wheel_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -703,7 +699,7 @@ mod tests {
         let _g = wheel_guard();
         Hooks::discard_scroll();
 
-        // Exact multiples: none banked.
+        // Exact multiples leave no remainder.
         accumulate_wheel(240);
         assert_eq!(2, Hooks::take_whole_notches());
         assert_eq!(
@@ -712,7 +708,7 @@ mod tests {
             "nothing should be left over"
         );
 
-        // Hi-res deltas must add up.
+        // High-resolution deltas must combine before they form a notch.
         accumulate_wheel(40);
         assert_eq!(0, Hooks::take_whole_notches(), "40 is not yet a notch");
         accumulate_wheel(40);
@@ -725,22 +721,22 @@ mod tests {
         );
         assert_eq!(0, Hooks::take_whole_notches());
 
-        // % keeps the dividend's sign.
+        // The remainder keeps the sign of the dividend.
         accumulate_wheel(-140);
         assert_eq!(-1, Hooks::take_whole_notches());
         accumulate_wheel(-100);
         assert_eq!(-1, Hooks::take_whole_notches(), "-20 banked plus -100");
         assert_eq!(0, Hooks::take_whole_notches());
 
-        // Replacing drops the rest too.
+        // The test discards the accumulator and drops the remainder.
         accumulate_wheel(80);
         Hooks::discard_scroll();
         assert_eq!(0, Hooks::take_whole_notches());
     }
 
-    /// The riskiest line we have.
+    /// Tests the highest-risk callback path.
     ///
-    /// Unarmed path: verified live.
+    /// This test covers the armed path only.
     #[test]
     fn an_armed_wheel_event_is_swallowed_and_banked() {
         let _g = wheel_guard();
@@ -756,11 +752,11 @@ mod tests {
         };
         let lparam = LPARAM(&data as *const MSLLHOOKSTRUCT as isize);
 
-        // SAFETY: this is the exact contract the OS provides for a
-        // WM_MOUSEWHEEL delivery - code >= 0 and lparam pointing at a live,
-        // aligned MSLLHOOKSTRUCT that outlives the call (it is on this
-        // frame's stack). Armed, so the callback returns before ever
-        // reaching `CallNextHookEx`.
+        // SAFETY: The test supplies the contract that the OS provides for a
+        // `WM_MOUSEWHEEL` delivery: `code >= 0` and `lparam` points to a live,
+        // aligned `MSLLHOOKSTRUCT` that stays valid for this call. The
+        // structure lives on this stack frame. The event is armed, so the
+        // callback returns before it reaches `CallNextHookEx`.
         let result = unsafe { mouse_hook_proc(0, WPARAM(WM_MOUSEWHEEL as usize), lparam) };
 
         assert_eq!(1, result.0, "an armed wheel event must be swallowed");
@@ -770,7 +766,7 @@ mod tests {
         Hooks::discard_scroll();
     }
 
-    /// A long stall pins, not wraps.
+    /// Confirms that a large delta saturates and does not wrap.
     #[test]
     fn a_saturated_accumulator_yields_a_bounded_notch_count() {
         let _g = wheel_guard();
@@ -791,7 +787,7 @@ mod tests {
 
     #[test]
     fn matches_trigger_shift_variants() {
-        // VK_LSHIFT and VK_RSHIFT.
+        // These values are the `VK_LSHIFT` and `VK_RSHIFT` virtual-key codes.
         assert!(matches_trigger(0xA0, 0x10));
         assert!(matches_trigger(0xA1, 0x10));
     }
@@ -834,7 +830,7 @@ mod tests {
 
     // ---- add-to-anki hotkey ----
 
-    /// Hotkey statics are shared.
+    /// The tests share the hotkey state.
     static ADD_HOTKEY_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -876,7 +872,7 @@ mod tests {
         assert!(!Hooks::take_add_hotkey(), "a second take sees it cleared");
     }
 
-    /// Exercises the real struct.
+    /// Exercises the real `KBDLLHOOKSTRUCT`.
     #[test]
     fn record_key_state_arms_pending_for_the_add_key() {
         let _g = add_hotkey_guard();
@@ -889,16 +885,16 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: `data` is a live, aligned KBDLLHOOKSTRUCT on this
-        // frame's stack for the whole call - the exact contract
-        // record_key_state relies on from the real WH_KEYBOARD_LL hook.
+        // SAFETY: `data` is a live, aligned `KBDLLHOOKSTRUCT` on this stack
+        // frame for the whole call. This matches the contract that
+        // `record_key_state` receives from the real `WH_KEYBOARD_LL` hook.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(Hooks::take_add_hotkey());
         Hooks::set_add_armed(false);
     }
 
-    /// Wrong key must not arm it.
+    /// A different key must not arm the hotkey.
     #[test]
     fn record_key_state_ignores_an_unrelated_key() {
         let _g = add_hotkey_guard();
@@ -911,7 +907,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: same contract as the test above.
+        // SAFETY: This test uses the same contract as the test above.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
@@ -987,7 +983,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: same contract as add-hotkey tests.
+        // SAFETY: This test uses the same contract as the add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_back());
@@ -1004,7 +1000,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: same contract as add-hotkey tests.
+        // SAFETY: This test uses the same contract as the add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(Hooks::take_back());
@@ -1023,7 +1019,7 @@ mod tests {
             ..Default::default()
         };
         let lparam = LPARAM(&data as *const KBDLLHOOKSTRUCT as isize);
-        // SAFETY: same contract as add-hotkey tests.
+        // SAFETY: This test uses the same contract as the add-hotkey tests.
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_back());

@@ -1,11 +1,9 @@
-//! The screenshot-on-add rule (spec D4).
+//! The screenshot-on-add and Mining screenshot rules.
 //!
-//! One home for every decision a screenshot add makes: whether a picture
-//! rides along at all, what the file is called, which Anki field the
-//! picture lands in, and the AnkiConnect call that files it. The bins
-//! own only the OS work either side - hide the windows, pick a region,
-//! grab the pixels, put them back - because none of the rules here is a
-//! platform fact (ADR-0001).
+//! This module decides whether an add carries a picture, names the file, selects
+//! the Anki field, and calls AnkiConnect. The platform bins hide windows, select
+//! a region, grab pixels, and restore windows. These rules do not depend on
+//! platform facts (ARCHITECTURE.md#workspace-and-seams).
 
 use crate::config::{AnkiConfig, Config};
 use crate::controller::PopupView;
@@ -14,26 +12,25 @@ use base64::Engine;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// One screenshot's add: the file to write and the note to file it on.
+/// The file and note data for one screenshot add.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShotPlan {
-    /// The word the card is filed under, and the key
-    /// [`Event::NoteAdded`](crate::controller::Event) answers with.
+    /// The expression that identifies the card and the key that
+    /// [`Event::NoteAdded`](crate::controller::Event) returns.
     pub expr: String,
     pub fields: HashMap<String, String>,
     /// `<save_root>/<sanitized expr>_<epoch seconds>.png`.
     pub path: PathBuf,
-    /// The Anki field the picture is embedded in, if the field map
-    /// routes the `screenshot` source anywhere. `None` files the note
-    /// with no picture at all.
+    /// The Anki field that receives the picture when the field map routes the
+    /// `screenshot` source. `None` means that the note has no picture.
     pub picture_field: Option<String>,
 }
 
-/// The shape of one screenshot add, gated by nothing.
+/// Builds a screenshot add plan without guards.
 ///
-/// This is the mining screenshot's plan: it saves a picture whatever the
-/// popup's add state is, so it applies none of [`plan_add`]'s guards and
-/// does not consult `include_on_add`.
+/// This is the Mining screenshot plan. It saves a picture regardless of the
+/// popup add state. It does not apply [`plan_add`]'s guards or read
+/// `include_on_add`.
 pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> ShotPlan {
     let (expr, fields) =
         crate::controller::note_payload(view.presentation, cfg.anki.first_dict_only);
@@ -47,30 +44,28 @@ pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> S
     ShotPlan { expr, fields, path, picture_field }
 }
 
-/// The screenshot that rides along with an add, or `None` when none
-/// does: `actions.screenshot.include_on_add` is off, the payload has no
-/// expression to file the picture under, or the word is already in the
-/// collection.
+/// Plans the screenshot that accompanies an add, or returns `None`.
 ///
-/// **`Controller::start_add`'s in-flight guard is deliberately not
-/// here.** Both bins reach this function from the `Command::AddNote` the
-/// state machine emits, and `start_add` marks the popup adding *before*
-/// it emits that command - reading the flag here would refuse the very
-/// add the machine just authorised, and no screenshot would ever ride
-/// along. Refusing a second concurrent add is `start_add`'s job and it
-/// has already done it. The other two are kept because they are facts
-/// about the card rather than about the machine: a blank expression
-/// would write `_<epoch>.png` and file an empty note, and a word already
-/// in the collection must not be filed twice.
+/// The function returns `None` when `actions.screenshot.include_on_add` is off,
+/// the payload has no expression for the file name, or the word is already in
+/// the collection.
 ///
-/// The payload is re-derived through [`crate::controller::note_payload`]
-/// rather than taken from the command, and cannot disagree with it:
-/// `expr` is `written || reading` off the same `Presentation` the
-/// command was built from and does not depend on `first_dict_only` at
-/// all, so the guard, the filename and the `NoteAdded` key are exact.
-/// `fields` would differ only if a bin fed this function a `Config` out
-/// of sync with the `ControllerConfig` it built the machine from, which
-/// is one clone of one value in both bins.
+/// **`Controller::start_add`'s in-flight guard is deliberately not here.**
+/// Both bins call this function after the state machine emits `Command::AddNote`.
+/// `start_add` marks the popup with the add state before it emits that command.
+/// A guard here would reject the authorized add, so no screenshot would accompany it.
+/// `start_add` already rejects a second add at the same time. This function keeps
+/// the other two guards because they describe the Card: a blank expression would
+/// write `_<epoch>.png` and an empty note, and a word in the collection must not
+/// be filed twice.
+///
+/// The function derives the payload through [`crate::controller::note_payload`]
+/// instead of taking it from the command. `expr` is `written || reading` from
+/// the same `Presentation` that built the command. `expr` does not depend on
+/// `first_dict_only`, so the guard, file name, and `NoteAdded` key agree.
+/// `fields` can differ only when a bin gives this function a `Config` that
+/// differs from the `ControllerConfig` that built the state machine. Both bins
+/// clone one value.
 pub fn plan_add(
     view: &PopupView<'_>,
     cfg: &Config,
@@ -87,7 +82,7 @@ pub fn plan_add(
     Some(plan)
 }
 
-/// Writes the PNG, creating the save folder if it is not there.
+/// Writes the PNG and creates the save folder when needed.
 pub fn save(png: &[u8], plan: &ShotPlan) -> Result<()> {
     if let Some(dir) = plan.path.parent() {
         std::fs::create_dir_all(dir)
@@ -97,12 +92,11 @@ pub fn save(png: &[u8], plan: &ShotPlan) -> Result<()> {
         .with_context(|| format!("writing {}", plan.path.display()))
 }
 
-/// [`save`], then the add that carries the picture. Returns the note id.
+/// Calls [`save`], then adds the note with its picture. Returns the note ID.
 ///
-/// The attached filename is Anki's own copy in `collection.media`, not
-/// the saved file: it is namespaced `chibipop-screenshot-` so a
-/// collection can tell our pictures from everything else, and it carries
-/// the saved file's stem so the two can be matched up by eye.
+/// Anki copies the attached file to `collection.media`. The copy uses the
+/// `chibipop-screenshot-` namespace and the saved file stem, so a user can
+/// match the two names.
 pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i64> {
     save(png, plan)?;
     let picture = plan.picture_field.as_ref().map(|field| crate::anki::NotePicture {
@@ -123,11 +117,10 @@ pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i6
     )
 }
 
-/// Seconds since the epoch, for the screenshot filename.
+/// Returns seconds since the epoch for a screenshot file name.
 ///
-/// One clock, here with the rule that consumes it: [`plan`] names files
-/// `<word>_<epoch>.png`, so both bins pass this as `now` and a
-/// screenshots folder carried between platforms is named one way.
+/// [`plan`] names files `<word>_<epoch>.png`. Both bins pass this value as
+/// `now`, so a screenshots folder keeps one name pattern on both platforms.
 pub fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -135,13 +128,11 @@ pub fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-/// A filename for `word`, safe on every platform this ships on.
+/// Returns a file name for `word` that works on every shipped platform.
 ///
-/// The illegal set is Windows': `\ / : * ? " < > |`. It is the strict
-/// superset - Linux forbids only `/` and NUL - and one shared rule is
-/// what lets a screenshots folder be carried between the two, so the
-/// Linux daemon deliberately files under the stricter name rather than
-/// growing a second sanitizer.
+/// Windows forbids `\ / : * ? " < > |`. Linux forbids only `/` and NUL.
+/// This shared rule uses the strict superset on both platforms. The Linux
+/// daemon therefore uses the stricter name instead of a second sanitizer.
 pub fn sanitize_filename(word: &str) -> String {
     let cleaned: String = word
         .chars()
@@ -170,7 +161,7 @@ pub fn sanitize_filename(word: &str) -> String {
     truncate_to_char_boundary(&result, 60)
 }
 
-/// Cuts at the nearest boundary.
+/// Truncates a string at the nearest character boundary.
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -221,7 +212,7 @@ mod tests {
         }
     }
 
-    /// Anki on and reachable, nothing added, nothing in flight.
+    /// Returns an Anki state with Anki enabled and connected, with no added note or active add.
     fn anki_state() -> AnkiPopupState {
         AnkiPopupState::fresh(true)
     }
@@ -301,9 +292,9 @@ mod tests {
         assert_eq!(None, plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1));
     }
 
-    /// The one `start_add` guard this function must not restate: it runs
-    /// from the `AddNote` that `start_add` emits *after* setting the
-    /// flag, so restating it would refuse every screenshot add there is.
+    /// This test sets `adding` before it calls `plan_add`. The state machine already
+    /// passed the `start_add` guard before it emitted `AddNote`, so `plan_add` must
+    /// still create this screenshot plan.
     #[test]
     fn an_add_already_marked_in_flight_still_plans_because_start_add_owns_that_guard() {
         let p = presentation(Some("\u{5bbf}\u{820e}"), None);
@@ -318,7 +309,7 @@ mod tests {
         let mut a = anki_state();
         a.adding = true;
         a.added.insert("\u{5bbf}\u{820e}".to_string());
-        // include_on_add is off in the default config.
+        // The default config has `include_on_add` off.
         let plan = plan(&view(&p, &a), &Config::default(), Path::new(ROOT), 7);
         assert_eq!(Path::new(ROOT).join("\u{5bbf}\u{820e}_7.png"), plan.path);
     }

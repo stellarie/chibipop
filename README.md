@@ -468,7 +468,7 @@ cargo test --workspace --exclude chibipop-linux     # Windows
 cargo test --workspace --exclude chibipop-windows   # Linux
 ```
 
-See [ADR-0001](docs/adr/0001-workspace-and-platform-seams.md).
+See [`ARCHITECTURE.md`](ARCHITECTURE.md#workspace-and-seams).
 
 ### The rest of the documentation
 
@@ -480,7 +480,7 @@ See [ADR-0001](docs/adr/0001-workspace-and-platform-seams.md).
 | [`docs/REGRESSION.md`](docs/REGRESSION.md) | the checklist that proves a build works, sorted by who can run it |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | how a release is cut |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | known problems and deferred work, with the evidence |
-| [`docs/adr/`](docs/adr/) | the decisions the code cannot state itself |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | the architecture and every decision the code cannot state itself |
 | [`docs/research/`](docs/research/) | the measurements those decisions rest on |
 
 ---

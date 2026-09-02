@@ -1,6 +1,7 @@
 //! The tray icon and its menu.
 //!
-//! Failing to create is fatal.
+//! The tray is the only way to change mode or to quit. A failure to create
+//! the icon is therefore fatal.
 
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -11,19 +12,19 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Shell32's callback message.
+/// The callback message that Shell32 sends to the window.
 const WM_TRAYICON: u32 = WM_APP + 2;
 
 const ID_SETTINGS: u32 = 1001;
 const ID_QUIT: u32 = 1003;
 
-/// One icon per process.
+/// The icon id. This process adds one icon only.
 const TRAY_UID: u32 = 1;
 
-/// chibipop's own tray icon.
+/// The tray icon of chibipop.
 const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 
-/// What the user picked.
+/// The menu item that the user picked.
 pub enum TrayCommand {
     OpenSettings,
     Quit,
@@ -33,14 +34,16 @@ fn owner_class_name() -> PCWSTR {
     w!("ChibipopTrayOwnerClass")
 }
 
-/// A `DefWindowProcW` trampoline.
+/// Passes every message to `DefWindowProcW`.
+///
+/// The owner window only holds the menu, so it needs no message handling.
 unsafe extern "system" fn owner_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// Once per process.
+/// Registers the owner window class one time for each process.
 ///
-/// Latch only after success.
+/// The latch turns on only after a success, so a failed call can retry.
 unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     if REGISTERED.load(Ordering::SeqCst) {
@@ -65,29 +68,29 @@ unsafe fn register_owner_class(hinstance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// Owns the icon and its menu.
+/// Owns the tray icon and its menu.
 pub struct Tray {
-    /// `NOTIFYICONDATAW.hWnd`.
+    /// The value of `NOTIFYICONDATAW.hWnd`. Shell32 sends the callback here.
     notify_hwnd: HWND,
     uid: u32,
-    /// `TrackPopupMenu`'s target.
+    /// The target window of `TrackPopupMenu`.
     menu_owner: HWND,
     /// The icon handle.
     hicon: HICON,
-    /// Owned handles need destroying.
+    /// True when this process owns `hicon` and must destroy it.
     hicon_owned: bool,
 }
 
 impl Tray {
-    /// Adds the icon; hard-fails.
+    /// Adds the icon to the tray. A failure is fatal.
     ///
-    /// Error paths free the icon.
+    /// Every error path frees the icon and the owner window first.
     pub fn create(hwnd: HWND) -> Result<Tray> {
         unsafe {
             let hinstance: HINSTANCE =
                 GetModuleHandleW(None).context("GetModuleHandleW(None)")?.into();
 
-            // Nothing to unwind yet.
+            // No resource exists yet, so an early error needs no cleanup.
             let (hicon, hicon_owned) = load_tray_icon()?;
 
             if let Err(e) = register_owner_class(hinstance) {
@@ -154,9 +157,9 @@ impl Tray {
         }
     }
 
-    /// The tray's callback message.
+    /// Handles the callback message of the tray.
     ///
-    /// Runs `before_blocking` first.
+    /// The menu blocks the thread, so this call runs `before_blocking` first.
     pub fn handle_message(
         &self,
         msg: u32,
@@ -174,12 +177,12 @@ impl Tray {
 
     /// Shows a balloon notification.
     pub fn notify(&self, title: &str, message: &str) {
-        // SAFETY: `self.notify_hwnd` is the live window handle
-        // passed to `Tray::create` and used by the existing icon;
-        // `NIM_MODIFY` + `NIF_INFO` asks Shell32 to show a balloon
-        // on the icon already registered with this `uID` and `hWnd`.
-        // The `szInfoTitle` and `szInfo` buffers are written from
-        // owned stack data that outlives the call.
+        // SAFETY: `self.notify_hwnd` is the live window handle that the
+        // caller gave to `Tray::create`. The existing icon uses that same
+        // handle. `NIM_MODIFY` with `NIF_INFO` tells Shell32 to show a
+        // balloon on the icon that this `uID` and `hWnd` already registered.
+        // The code writes the `szInfoTitle` and `szInfo` buffers from owned
+        // stack data that outlives the call.
         unsafe {
             let mut nid = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -195,9 +198,10 @@ impl Tray {
         }
     }
 
-    /// Shows the menu; blocks.
+    /// Shows the menu and blocks until the user picks an item.
     ///
-    /// Its pump eats thread messages.
+    /// The menu runs its own message pump, and that pump consumes thread
+    /// messages.
     fn show_menu(&self, before_blocking: impl FnOnce()) -> Option<TrayCommand> {
         unsafe {
             let hmenu = match build_menu() {
@@ -211,7 +215,7 @@ impl Tray {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
 
-            // MS KB135788: must foreground.
+            // MS KB135788 requires the owner window in the foreground first.
             let _ = SetForegroundWindow(self.menu_owner);
 
             before_blocking();
@@ -225,16 +229,16 @@ impl Tray {
             match cmd.0 as u32 {
                 ID_SETTINGS => Some(TrayCommand::OpenSettings),
                 ID_QUIT => Some(TrayCommand::Quit),
-                _ => None, // dismissed with no selection
+                _ => None, // the user dismissed the menu
             }
         }
     }
 }
 
 impl Drop for Tray {
-    /// Removes the icon; best-effort.
+    /// Removes the icon. Each call ignores a failure.
     ///
-    /// Or it ghosts the tray.
+    /// A missed removal leaves a dead icon in the tray.
     fn drop(&mut self) {
         unsafe {
             let nid = NOTIFYICONDATAW {
@@ -247,30 +251,31 @@ impl Drop for Tray {
             let _ = DestroyWindow(self.menu_owner);
 
             if self.hicon_owned {
-                // SAFETY: reached only after Shell_NotifyIconW(NIM_DELETE)
-                // above, so the shell can no longer be displaying this
-                // icon - destroying it any earlier would be the exact
-                // ordering bug this function exists to avoid. `hicon_owned`
-                // is true only when `hicon` came from
-                // CreateIconFromResourceEx (an owned handle this process
-                // must free); LoadIconW's shared handle always leaves it
-                // false, so this branch can never DestroyIcon a shared one.
+                // SAFETY: this line runs only after the
+                // Shell_NotifyIconW(NIM_DELETE) call above, so the shell no
+                // longer shows this icon. An earlier destroy would cause the
+                // exact ordering bug that this order prevents.
+                // `hicon_owned` is true only when `hicon` came from
+                // CreateIconFromResourceEx, which gives an owned handle that
+                // this process must free. The shared handle from LoadIconW
+                // always leaves the flag false, so this branch never
+                // destroys a shared icon.
                 let _ = DestroyIcon(self.hicon);
             }
         }
     }
 }
 
-/// UTF-16 into `szTip`, NUL-term.
+/// Writes `text` into `szTip` as UTF-16 and adds the NUL.
 fn set_tip(nid: &mut NOTIFYICONDATAW, text: &str) {
-    // Must keep the NUL.
+    // Keep one slot for the NUL.
     let cap = nid.szTip.len();
     let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
     wide.push(0);
     nid.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
-/// UTF-16 into `szInfo`, NUL-term.
+/// Writes `text` into `szInfo` as UTF-16 and adds the NUL.
 fn set_info(nid: &mut NOTIFYICONDATAW, text: &str) {
     let cap = nid.szInfo.len();
     let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
@@ -278,7 +283,7 @@ fn set_info(nid: &mut NOTIFYICONDATAW, text: &str) {
     nid.szInfo[..wide.len()].copy_from_slice(&wide);
 }
 
-/// UTF-16 into `szInfoTitle`.
+/// Writes `text` into `szInfoTitle` as UTF-16 and adds the NUL.
 fn set_info_title(nid: &mut NOTIFYICONDATAW, text: &str) {
     let cap = nid.szInfoTitle.len();
     let mut wide: Vec<u16> = text.encode_utf16().take(cap - 1).collect();
@@ -286,7 +291,7 @@ fn set_info_title(nid: &mut NOTIFYICONDATAW, text: &str) {
     nid.szInfoTitle[..wide.len()].copy_from_slice(&wide);
 }
 
-/// The right-click menu.
+/// Builds the right-click menu.
 unsafe fn build_menu() -> Result<HMENU> {
     unsafe {
         let hmenu = CreatePopupMenu().context("CreatePopupMenu")?;
@@ -308,9 +313,9 @@ unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
     Ok(())
 }
 
-/// The icon, or the OS default.
+/// Loads the embedded icon, or the default icon of the operating system.
 ///
-/// `true` = owned, must destroy.
+/// A `true` flag means this process owns the handle and must destroy it.
 unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
     if let Some(hicon) = unsafe { load_embedded_icon() } {
         return Ok((hicon, true));
@@ -321,31 +326,31 @@ unsafe fn load_tray_icon() -> Result<(HICON, bool)> {
     Ok((hicon, false))
 }
 
-/// The closest `.ico` frame.
+/// Loads the `.ico` frame that is closest to the small icon size.
 ///
-/// `None` on any failure.
+/// Returns `None` after any failure.
 unsafe fn load_embedded_icon() -> Option<HICON> {
     let desired = unsafe { GetSystemMetrics(SM_CXSMICON) } as u32;
     let bytes = ico_frame_bytes(ICON_BYTES, desired)?;
-    // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static`
-    // buffer embedded in this binary, so the pointer and length
-    // `CreateIconFromResourceEx` reads from stay valid for the whole
-    // call - the only precondition its docs place on `presbits` /
-    // `dwResSize`. `0x0003_0000` is `dwVer`'s documented "generally
-    // set to" value (MS Learn, CreateIconFromResourceEx).
+    // SAFETY: `bytes` is a sub-slice of `ICON_BYTES`, a `'static` buffer
+    // that this binary embeds. The pointer and the length that
+    // CreateIconFromResourceEx reads therefore stay valid for the whole
+    // call. That is the only precondition the docs place on `presbits` and
+    // `dwResSize`. The docs give `0x0003_0000` as the value to set `dwVer`
+    // to (MS Learn, CreateIconFromResourceEx).
     let icon =
         unsafe { CreateIconFromResourceEx(bytes, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR) };
     icon.ok()
 }
 
-/// The frame nearest `desired`.
+/// Finds the frame with the width nearest to `desired`.
 ///
-/// 6-byte head, 16-byte entries.
-/// `None` if malformed.
+/// The `.ico` format starts with a 6-byte header. A 16-byte entry follows
+/// for each frame. Returns `None` when the file is malformed.
 fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
     let header = ico.get(0..6)?;
     if header[0..4] != [0, 0, 1, 0] {
-        return None; // reserved=0, type=1
+        return None; // the header must hold reserved=0 and type=1
     }
     let count = u16::from_le_bytes([header[4], header[5]]);
 
@@ -370,7 +375,7 @@ fn ico_frame_bytes(ico: &[u8], desired: u32) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
-    /// Shell32 reads up to the NUL.
+    /// Shell32 reads the tip up to the NUL.
     #[test]
     fn a_tip_too_long_to_fit_is_still_terminated() {
         let mut nid = NOTIFYICONDATAW::default();

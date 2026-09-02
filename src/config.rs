@@ -1,29 +1,29 @@
-//! Settings, from a TOML file.
+//! This module loads and saves settings from a TOML file.
 //!
-//! No `windows` crate here.
+//! It stays independent of the `windows` crate so the core remains platform-neutral.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Width cap, % of monitor.
+/// The allowed popup width as a percent of the monitor.
 pub const MAX_WIDTH_RANGE: (u8, u8) = (10, 90);
-/// Height cap, % of monitor.
+/// The allowed popup height as a percent of the monitor.
 pub const MAX_HEIGHT_RANGE: (u8, u8) = (10, 90);
-/// Summary length, in chars.
+/// The maximum summary length in characters.
 pub const SUMMARY_RANGE: (usize, usize) = (10, 200);
-/// OCR captures per hover.
+/// The number of OCR captures for each hover.
 pub const PASSES_RANGE: (u8, u8) = (1, 5);
-/// Capture width bounds, px.
+/// The allowed capture width range in pixels.
 pub const CAPTURE_W_RANGE: (i32, i32) = (100, 1600);
 
-/// Capture height bounds, px.
+/// The allowed capture height range in pixels.
 ///
-/// Floor: hit-scan's reach.
+/// The lower limit sets the reach of the hit scan.
 pub const CAPTURE_H_RANGE: (i32, i32) = (80, 600);
 
-/// Root of the TOML file.
+/// The root section of the TOML configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub trigger: TriggerConfig,
@@ -41,30 +41,31 @@ pub struct Config {
     pub actions: ActionsConfig,
 }
 
-/// `[trigger]`.
+/// The `[trigger]` section of the configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerConfig {
     pub mode: TriggerMode,
-    /// Which key gates popups.
+    /// The key that controls popup display.
     #[serde(default = "default_trigger_key")]
     pub trigger_key: String,
-    /// Which chord gates popups on Linux.
+    /// The chord that controls popup display on Linux.
     ///
-    /// XDG GlobalShortcuts preferred-binding syntax; advisory on the
-    /// wlr-native channel, where the compositor bind is the truth.
+    /// The value uses the XDG GlobalShortcuts preferred-binding syntax.
+    /// The wlr-native channel treats this value as advisory because the compositor
+    /// bind controls behavior.
     #[serde(default = "default_trigger_key_linux")]
     pub trigger_key_linux: String,
-    /// Re-look-up per character?
+    /// Repeats a lookup for each character.
     #[serde(default)]
     pub per_character_lookup: bool,
 }
 
-/// `"shift"` for backwards compat.
+/// Uses `"shift"` for backward compatibility.
 fn default_trigger_key() -> String {
     "shift".to_string()
 }
 
-/// A chord, not a bare key: a portal binding is a system-wide grab.
+/// Uses a chord instead of a bare key because a portal binding is system-wide.
 fn default_trigger_key_linux() -> String {
     "ALT+F".to_string()
 }
@@ -73,19 +74,19 @@ pub fn default_ocr_language() -> String {
     "ja".to_string()
 }
 
-/// `kebab-case` for the TOML.
+/// The TOML file uses `kebab-case` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TriggerMode {
     Live,
-    /// Popup while a key is held.
+    /// Shows the popup while the user holds a key.
     HoldKey,
-    /// Legacy; maps to `HoldKey`.
+    /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]
     HoldShift,
 }
 
-/// VK code from a key name.
+/// Returns the VK code for a key name.
 pub fn parse_trigger_key(name: &str) -> Option<u16> {
     let lower = name.to_ascii_lowercase();
     let named = match lower.as_str() {
@@ -109,7 +110,7 @@ pub fn parse_trigger_key(name: &str) -> Option<u16> {
     named.or_else(|| parse_vk_number(name))
 }
 
-/// A lone letter or digit key.
+/// Returns the VK code for one letter or digit.
 fn single_char_vk(lower: &str) -> Option<u16> {
     let mut chars = lower.chars();
     let c = chars.next()?;
@@ -123,7 +124,7 @@ fn single_char_vk(lower: &str) -> Option<u16> {
     }
 }
 
-/// Hex or decimal VK number.
+/// Parses a hexadecimal or decimal VK number.
 fn parse_vk_number(name: &str) -> Option<u16> {
     let s = name.trim();
     match s.strip_prefix("0x").or(s.strip_prefix("0X")) {
@@ -132,7 +133,7 @@ fn parse_vk_number(name: &str) -> Option<u16> {
     }
 }
 
-/// Display name from a VK code.
+/// Returns the display name for a VK code.
 pub fn trigger_key_name(vk: u16) -> String {
     match vk {
         0x10 => "Shift".into(),
@@ -148,159 +149,160 @@ pub fn trigger_key_name(vk: u16) -> String {
     }
 }
 
-/// `[popup]`.
+/// The `[popup]` section of the configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PopupConfig {
-    /// `"dark"` | `"light"`.
+    /// The theme name. Use `"dark"` or `"light"`.
     pub theme: String,
-    /// Hide from screen capture.
+    /// Hides the popup from screen capture.
     ///
-    /// Off - recordable by default.
+    /// The default is off so a recorder can capture the popup.
     pub exclude_from_capture: bool,
-    /// Width cap, % of monitor.
+    /// The allowed popup width as a percent of the monitor.
     #[serde(default = "default_max_width_percent")]
     pub max_width_percent: u8,
-    /// Height cap, % of monitor.
+    /// The allowed popup height as a percent of the monitor.
     pub max_height_percent: u8,
-    /// Summary length, in chars.
+    /// The maximum summary length in characters.
     pub summary_chars: usize,
     pub font: String,
-    /// Box the word being defined.
+    /// Draws a box around the word that the popup defines.
     #[serde(default = "default_highlight_match")]
     pub highlight_match: bool,
-    /// Wheel-scroll a long popup.
+    /// Lets the user scroll a long popup with the wheel.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
-    /// Collapsed rows beside, not below.
+    /// Places collapsed rows beside the entry instead of below it.
     #[serde(default)]
     pub side_panel: bool,
-    /// Which layer the popup sits on, on Linux.
+    /// The layer that holds the popup on Linux.
     #[serde(default)]
     pub layer: PopupLayer,
-    /// Compact or roomy.
+    /// Selects a compact or roomy layout.
     #[serde(default)]
     pub layout_mode: LayoutMode,
-    /// Apply a dictionary's own styling.
+    /// Applies each Dictionary's style.
     ///
-    /// Off draws every entry in the theme's own font and colours,
-    /// ignoring both the inline `style` object and a dictionary's own
-    /// `styles.css`.
+    /// When this setting is off, the theme supplies the font and colors for every
+    /// entry. The setting also ignores the inline `style` object and the
+    /// Dictionary's `styles.css` file.
     #[serde(default = "default_dictionary_styling")]
     pub dictionary_styling: bool,
-    /// Show example sentences.
+    /// Shows example sentences.
     #[serde(default = "default_show_examples")]
     pub show_examples: bool,
-    /// Show attributions and footnotes.
+    /// Shows attributions and footnotes.
     ///
-    /// Independent of `show_examples`: keeping sources without keeping
-    /// three sentences per sense is its own choice.
+    /// This setting is independent of `show_examples`.
+    /// A user can keep the sources without three sentences for each sense.
     #[serde(default = "default_show_attributions")]
     pub show_attributions: bool,
-    /// Show a dictionary's images.
+    /// Shows Dictionary images.
     ///
-    /// Off leaves an image's `alt` text behind, because a gaiji is a
-    /// character and dropping it would leave a hole in a word.
+    /// When this setting is off, the code keeps an image's `alt` text because a
+    /// gaiji represents a character.
+    /// If the code drops the gaiji, a hole appears in the word.
     #[serde(default = "default_show_images")]
     pub show_images: bool,
-    /// Show part-of-speech labels inline.
+    /// Shows part-of-speech labels inline.
     ///
-    /// Off, and not for density: the labels are already the card's own
-    /// `pos` field, drawn above the glosses, so inline they read twice.
+    /// The default is off because the card's `pos` field already shows these labels
+    /// above the glosses.
+    /// Inline labels repeat them.
     /// `gloss::RoleFilter::CARD` drops them for the same reason.
     #[serde(default)]
     pub show_part_of_speech: bool,
 }
 
-/// 25% of the monitor.
+/// Uses 25 percent of the monitor by default.
 fn default_max_width_percent() -> u8 {
     25
 }
 
-/// On by default.
+/// Enables match highlights by default.
 fn default_highlight_match() -> bool {
     true
 }
 
-/// On by default.
+/// Enables popup scroll by default.
 fn default_scroll_popup() -> bool {
     true
 }
 
-/// On by default: a dictionary that
-/// styled its entry meant it.
+/// The default is on.
+/// A Dictionary that styles its entry expects this setting.
 fn default_dictionary_styling() -> bool {
     true
 }
 
-/// On by default. A sentence showing
-/// the word in use is the reason a
-/// learner hovers it.
+/// The default is on.
+/// A sentence that shows the word in use helps a learner understand
+/// the word.
 fn default_show_examples() -> bool {
     true
 }
 
-/// On by default: a licence line is
-/// what makes an entry quotable.
+/// The default is on.
+/// A license line makes an entry quotable.
 fn default_show_attributions() -> bool {
     true
 }
 
-/// On by default. An image node is a
-/// *character* far more often than an
-/// illustration - 427 786 census
-/// nodes carry a gaiji marker
+/// The default is on.
+/// An image node represents a *character* more often than an illustration.
+/// The census found 427 786 nodes with a gaiji marker in
 /// (`docs/research/dict-shapes.md`).
+/// This count supports the default.
 fn default_show_images() -> bool {
     true
 }
 
-/// `popup.layer`: which wlr layer the Linux popup sits on.
+/// Selects the wlr layer that holds the Linux popup.
 ///
-/// `overlay` clears everything including fullscreen clients; `top` sits
-/// under them, which some compositors handle better.
+/// `overlay` clears every surface and fullscreen client.
+/// `top` stays below them, and some compositors handle it better.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PopupLayer {
-    /// Above everything, the default.
+    /// Places the popup above everything. This value is the default.
     #[default]
     Overlay,
-    /// Below fullscreen clients.
+    /// Places the popup below fullscreen clients.
     Top,
 }
 
-/// `popup.layout_mode`: how much room an entry's own structure gets.
+/// Selects the room that the entry structure receives.
 ///
-/// Yomitan's configurability is a small fixed set of root attributes
-/// driving a CSS decision table, and this mirrors the one attribute
-/// that changes the most: whether a glossary list stacks or reads as a
-/// single line.
+/// Yomitan exposes a small fixed set of root attributes that drive a CSS decision table.
+/// This setting mirrors the attribute that changes the most: a glossary list
+/// stacks or reads as one line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutMode {
-    /// One item per line, marked and indented, as a browser draws a
-    /// list. The default, because rendering an entry's structure is the
-    /// whole point of having parsed it.
+    /// Places one marked and indented item on each line, as a browser draws a list.
+    /// This mode is the default because the popup must render the structure
+    /// of the parsed entry.
     #[default]
     Roomy,
-    /// One paragraph, items joined by a separator - the terse popup
-    /// chibipop drew before it could do better, kept as a choice rather
-    /// than as the only option. Yomitan and Hoshi Reader both implement
-    /// compact the same way: `li { display: inline }` plus a separator
-    /// on every item after the first.
+    /// Places one paragraph on one line with a separator between items.
+    /// This mode keeps the compact layout as a user choice, not the only option.
+    /// Yomitan and Hoshi Reader implement compact mode with
+    /// `li { display: inline }` and a separator after the first item.
+    /// The separator follows the first item only.
     Compact,
 }
 
 impl PopupConfig {
-    /// The popup's render settings, as the scene builder spends them.
+    /// Returns the popup render settings that the scene builder uses.
     ///
-    /// The same shape as [`Config::present_config`] and for the same
-    /// reason: handing back the finished record leaves no half-way state
-    /// for a bin to forget to apply, and the six knobs are then read in
-    /// exactly one place, `ui::layout::build_elements`.
+    /// The method has the same shape as [`Config::present_config`] for the same reason.
+    /// One resolved record gives each bin one complete state.
+    /// The method gives `ui::layout::build_elements` one place to read the six settings.
     ///
-    /// Deliberately not the Anki card's filter. The card renderer takes
-    /// `RoleFilter::CARD` and no setting reaches it, so hiding examples
-    /// on screen leaves them on a mined card.
+    /// This filter differs from the Anki card filter.
+    /// The card renderer uses `RoleFilter::CARD`, and no setting reaches it.
+    /// Hiding examples on screen leaves them on a mined card.
+    /// The card keeps examples that the popup hides.
     pub fn render_settings(&self) -> crate::ui::layout::RenderSettings {
         crate::ui::layout::RenderSettings {
             stack_items: self.layout_mode == LayoutMode::Roomy,
@@ -315,10 +317,10 @@ impl PopupConfig {
     }
 }
 
-/// Which platform a field is being read for.
+/// The platform for which a caller reads a field.
 ///
-/// Every field lives on the one shared `Config`; this only picks which
-/// of a per-platform pair a caller means.
+/// Every field stays on the shared `Config`.
+/// This enum selects the field from a per-platform pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Windows,
@@ -326,7 +328,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// The platform this build runs on.
+    /// Returns the platform that runs this build.
     pub const fn current() -> Platform {
         if cfg!(windows) {
             Platform::Windows
@@ -335,7 +337,7 @@ impl Platform {
         }
     }
 
-    /// The font a fresh config is created with.
+    /// Returns the font for a new config.
     pub const fn default_font(self) -> &'static str {
         match self {
             Platform::Windows => "Yu Gothic UI",
@@ -344,26 +346,26 @@ impl Platform {
     }
 }
 
-/// Which font family a popup should actually use.
+/// The font family that the popup must use.
 ///
-/// `popup.font` is a dumb literal, so a config carried from the other
-/// platform names a family this one may not have. The caller renders the
-/// warning; the choice is made here.
+/// `popup.font` is a literal. A config from the other platform can name a
+/// family that this platform lacks.
+/// The caller renders the warning, and this type selects the font family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FontChoice {
-    /// The configured family resolved.
+    /// The resolver found the configured family.
     Configured(String),
-    /// It did not; the platform default stands in.
+    /// The resolver did not find the configured family. The platform default replaces it.
     Fallback {
-        /// What the config asked for.
+        /// The family that the config requested.
         requested: String,
-        /// What will be used instead.
+        /// The family that the popup uses instead.
         family: &'static str,
     },
 }
 
 impl FontChoice {
-    /// The family to render with, either way.
+    /// Returns the family for both choices.
     pub fn family(&self) -> &str {
         match self {
             FontChoice::Configured(f) => f,
@@ -372,10 +374,11 @@ impl FontChoice {
     }
 }
 
-/// Picks the family to render with.
+/// Selects the family to render.
 ///
-/// `resolvable` answers whether the font stack has the family; an empty
-/// literal is never asked about, it just falls back.
+/// `resolvable` reports whether the font stack contains the family.
+/// The code does not query an empty literal.
+/// An empty literal always selects the platform default.
 pub fn resolve_font(
     configured: &str,
     platform: Platform,
@@ -390,64 +393,65 @@ pub fn resolve_font(
     }
 }
 
-/// `[dictionaries]`.
+/// The `[dictionaries]` section.
 ///
-/// One ordered array per Dictionary role plus its disabled twin, six flat
-/// arrays and no records: position in an array is priority within that
-/// role, membership of the `_disabled` twin is the checkbox, and both
-/// platforms' TOML writers round-trip the pair with no new struct
-/// (ADR-0014).
+/// Each Dictionary role has one enabled array and one disabled array. Six
+/// flat arrays hold names without records. Array position sets priority for
+/// that role.
+/// The `_disabled` array records checkbox state.
+/// Both platform TOML writers save the pair without another struct
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
-/// Every name is a Dictionary's **exact** name, matched by equality. A name
-/// no installed Dictionary answers to is kept and ignored, so unplugging
-/// the drive a library sits on does not delete the list.
+/// Every name is the **exact** name of a Dictionary, and equality matches it.
+/// The config keeps names that no installed Dictionary answers to.
+/// A disconnected library drive therefore does not delete the list.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DictionariesConfig {
-    /// Term Dictionaries, highest priority first.
+    /// Term Dictionaries in highest-priority order.
     #[serde(default)]
     pub terms: Vec<String>,
     #[serde(default)]
     pub terms_disabled: Vec<String>,
-    /// Frequency Dictionaries, highest priority first - the order
+    /// Frequency Dictionaries in highest-priority order. This is the order that
     /// [`crate::dict::frequency::RankingStrategy::Priority`] reads.
     #[serde(default)]
     pub frequency: Vec<String>,
     #[serde(default)]
     pub frequency_disabled: Vec<String>,
-    /// Pitch Dictionaries, highest priority first.
+    /// Pitch Dictionaries in highest-priority order.
     #[serde(default)]
     pub pitch: Vec<String>,
     #[serde(default)]
     pub pitch_disabled: Vec<String>,
-    /// The rule reducing the enabled Dictionaries' Reported frequencies to
-    /// the one Frequency rank `term.freq` carries.
+    /// The rule that reduces Reported frequencies from enabled
+    /// Dictionaries to one Frequency rank in `term.freq`.
     ///
-    /// Spelled exactly as `meta.frequency_strategy` spells it, so the file
-    /// and the database cannot drift.
+    /// The spelling matches `meta.frequency_strategy` exactly, so the file
+    /// and database stay consistent.
     #[serde(default)]
     pub ranking_strategy: crate::dict::frequency::RankingStrategy,
-    /// The terms one OCR language searches, in priority order.
+    /// The terms that one OCR language searches, in priority order.
     ///
-    /// Term-only and keyed by OCR language: it answers "which definitions
-    /// should this language look in", and frequency and pitch have no
-    /// per-language question to answer.
+    /// This map holds terms only. The OCR language is the key.
+    /// Its value lists the definitions that this language must search.
+    /// Frequency and pitch use one list for every language.
     #[serde(default)]
     pub per_language: BTreeMap<String, Vec<String>>,
-    /// The pre-roles substring list, read and never written.
+    /// The legacy substring list. The code reads it but never writes it.
     ///
-    /// `display_order` held **name substrings** matched with `contains`,
-    /// and it is the one thing in this struct a Dictionary is still named
-    /// by inexactly. [`DictionariesConfig::listed`] resolves it against the
-    /// installed names, every consumer goes through that, and
-    /// `skip_serializing` means the first save after an upgrade writes the
-    /// six arrays and drops the key. Crate-private so no bin can grow a
-    /// second reader of it.
+    /// `display_order` stores **name substrings** matched with `contains`.
+    /// It is the only field here that names a Dictionary inexactly.
+    /// [`DictionariesConfig::listed`] resolves each substring against installed
+    /// names, and every consumer uses that method.
+    /// `skip_serializing` means that the first save after an upgrade writes the six
+    /// arrays and removes this key.
+    /// The field is crate-private, so no other binary can add a reader.
     #[serde(default, skip_serializing)]
     pub(crate) display_order: Vec<String>,
 }
 
 impl DictionariesConfig {
-    /// This role's pair: the enabled array, then its disabled twin.
+    /// Returns the pair for one role: the enabled array, then its disabled twin.
     pub fn lists(&self, role: crate::library::Role) -> (&[String], &[String]) {
         match role {
             crate::library::Role::Terms => (&self.terms, &self.terms_disabled),
@@ -456,7 +460,7 @@ impl DictionariesConfig {
         }
     }
 
-    /// Writes one role's pair back.
+    /// Writes both arrays for one role.
     pub fn set_lists(&mut self, role: crate::library::Role, on: Vec<String>, off: Vec<String>) {
         match role {
             crate::library::Role::Terms => (self.terms, self.terms_disabled) = (on, off),
@@ -467,16 +471,16 @@ impl DictionariesConfig {
         }
     }
 
-    /// Every Dictionary this role's list names, in priority order, each
+    /// Returns every Dictionary that this role list names, in priority order,
     /// with its checkbox state.
     ///
-    /// The one place the pre-roles `display_order` is spent: a config
-    /// carrying it is a config written before roles existed, so its
-    /// substrings are resolved against `installed` and every name they
-    /// produced is enabled - a substring that matched nothing is dropped,
-    /// and one that matched two installed names contributes both, in
-    /// library order. Every other config is already exact and is read
-    /// verbatim.
+    /// This method resolves the legacy `display_order` list.
+    /// A config with this field predates roles.
+    /// The code resolves each substring against `installed` and enables every
+    /// name that it finds.
+    /// It drops substrings with no match.
+    /// A substring that matches two installed names contributes both names in
+    /// library order. Other configs use exact names, which the code reads unchanged.
     pub fn listed(
         &self,
         role: crate::library::Role,
@@ -495,15 +499,16 @@ impl DictionariesConfig {
             .collect()
     }
 
-    /// The Dictionaries this role's list enables, exact names, highest
-    /// priority first.
+    /// Returns enabled Dictionaries for this role in highest-priority order.
     ///
-    /// An installed Dictionary the config names in neither array is new,
-    /// and lands at the bottom enabled: installing one never reorders a
-    /// curated list and never silently does nothing. An installed one the
-    /// disabled twin names is left out, and an empty answer means "search
-    /// nothing in this role" - a state the user reached by unchecking every
-    /// row, not a typo to second-guess.
+    /// An installed Dictionary absent from both arrays is new.
+    /// It goes to the bottom in the enabled state.
+    /// The code does not reorder a curated list.
+    /// It appends each new Dictionary at the end.
+    /// The disabled array excludes its names.
+    /// An empty result means the user chose to search nothing in this role.
+    /// The code keeps that choice.
+    /// It does not replace the choice with a default.
     pub fn enabled(
         &self,
         role: crate::library::Role,
@@ -520,8 +525,8 @@ impl DictionariesConfig {
         out
     }
 
-    /// The terms one OCR language searches, or `None` when it has no list
-    /// of its own and the global terms list decides.
+    /// Returns the terms that an OCR language searches.
+    /// Returns `None` when the language has no own list, so the global terms list decides.
     pub fn language_scope(
         &self,
         language: &str,
@@ -535,22 +540,23 @@ impl DictionariesConfig {
         })
     }
 
-    /// Was this config written before Dictionaries had roles?
+    /// Confirms whether this config predates Dictionary roles.
     ///
-    /// The presence of the legacy key is the whole test: a migrated config
-    /// never writes it back, so this answers yes exactly once per upgrade.
+    /// The legacy key provides the whole test.
+    /// A migrated config never writes the key again.
+    /// This method identifies one upgrade state.
     fn is_pre_roles(&self) -> bool {
         !self.display_order.is_empty()
     }
 }
 
-/// A pre-roles substring list as the exact installed names it named.
+/// Resolves a legacy substring list to exact installed names.
 ///
-/// Each substring in the order it was written contributes every installed
-/// name it matches, in library order, and a name already contributed is not
-/// contributed twice. A substring matching nothing is dropped - it named a
-/// dictionary this library does not hold, and there is no exact name to
-/// carry forward for it.
+/// Each substring contributes every name that matches, in library order and list
+/// order.
+/// The code adds each name once.
+/// It drops substrings with no match because no exact installed name exists
+/// for them.
 fn resolve_substrings(
     list: &[String],
     installed: &[crate::present::DictInfo],
@@ -567,43 +573,43 @@ fn resolve_substrings(
     out
 }
 
-/// `[plugins]`, optional.
+/// The `[plugins]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PluginsConfig {
-    /// Plugin names allowed to run.
+    /// The names of plugins that can run.
     #[serde(default)]
     pub enabled: Vec<String>,
 }
 
-/// `[ocr]`. Optional section.
+/// The `[ocr]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrConfig {
-    /// Captures per hover.
+    /// The number of captures for each hover.
     ///
-    /// 1 = no tiling, the default.
+    /// The default is 1, so multiple captures stay disabled.
     #[serde(default = "default_max_ocr_passes")]
     pub max_ocr_passes: u8,
-    /// Tall capture for manga/VN.
+    /// Prefers a tall capture for manga and visual novels.
     #[serde(default)]
     pub prefer_vertical: bool,
-    /// Capture box width, px.
+    /// The capture box width in pixels.
     #[serde(default = "default_capture_width")]
     pub capture_width: i32,
-    /// Capture box height, px.
+    /// The capture box height in pixels.
     #[serde(default = "default_capture_height")]
     pub capture_height: i32,
-    /// Resolve Latin-only words?
+    /// Resolves words that contain only Latin characters.
     #[serde(default = "default_scan_alphanumeric")]
     pub scan_alphanumeric: bool,
-    /// OCR recogniser language tag.
+    /// The language tag for the OCR recognizer.
     #[serde(default = "default_ocr_language")]
     pub language: String,
-    /// "builtin" or a plugin's name.
+    /// The OCR engine name. Use `"builtin"` or a plugin name.
     #[serde(default = "default_ocr_engine")]
     pub engine: String,
 }
 
-/// 1: tiling is off by default.
+/// The default is 1, so multiple captures stay disabled.
 fn default_max_ocr_passes() -> u8 {
     1
 }
@@ -638,18 +644,19 @@ impl Default for OcrConfig {
     }
 }
 
-/// A resolved OCR engine choice.
+/// Represents the OCR engine after config resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineChoice {
     /// The Windows built-in engine.
     Builtin,
-    /// An enabled plugin, by name.
+    /// Names an enabled plugin.
     Plugin(String),
-    /// Named, but not enabled/found.
+    /// The config named a plugin that is neither enabled nor found.
+    /// The resolver uses this choice when no enabled plugin matches.
     FellBack(String),
 }
 
-/// Picks the engine from config.
+/// Selects the OCR engine from the config.
 pub fn resolve_engine(engine: &str, enabled: &[String]) -> EngineChoice {
     if engine == "builtin" {
         return EngineChoice::Builtin;
@@ -661,49 +668,50 @@ pub fn resolve_engine(engine: &str, enabled: &[String]) -> EngineChoice {
     }
 }
 
-/// `[debug]`. Optional section.
+/// The `[debug]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
-    /// Outline what a hover captured.
+    /// Draws an outline around the region that a hover captured.
     ///
-    /// Off: inert, not just hidden.
+    /// When this setting is off, the outline stays inactive instead of merely hidden.
     #[serde(default)]
     pub show_scan_region: bool,
-    /// A console of each hover.
+    /// Shows a console record for each hover.
     #[serde(default)]
     pub show_lookup_log: bool,
-    /// Name the active engine.
+    /// Shows the active engine name.
     #[serde(default)]
     pub show_engine_log: bool,
-    /// Show the adapter's log.
+    /// Shows the adapter log.
     #[serde(default)]
     pub show_adapter_log: bool,
 }
 
-/// Maps one field to Anki.
+/// Maps one source to one Anki field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMapping {
     pub anki_field: String,
     pub source: String,
 }
 
-/// Every `source` a field-map row may name, in the order a picker
-/// offers them.
+/// Lists each `source` that a field-map row can name, in picker order.
 ///
-/// A `source` is the key [`crate::anki::mapped_fields`] looks up in the
-/// note's `fields` map; a row whose source is absent from that map
-/// contributes nothing to the note. `expression`, `reading`, `glossary`
-/// and `glossary_html` always come from `anki::fields_from_card`, which
-/// adds `frequency` only when the card carries one and `pitch_html` only
-/// when an enabled pitch dictionary had the card's reading;
-/// `controller::note_payload` adds `sentence` when the hover produced
-/// one. `screenshot` is the odd one out: it is never a `fields` key at
-/// all, and `shot::plan` reads it straight off this list's row to learn
-/// which Anki field the picture belongs in.
+/// A `source` names a key that [`crate::anki::mapped_fields`] reads from
+/// the note's `fields` map.
+/// A row with a missing source value adds nothing to the note.
+/// `expression`, `reading`, `glossary`, and `glossary_html` always come
+/// from `anki::fields_from_card`.
+/// That function adds `frequency` only when the card has one.
+/// It adds `pitch_html` only when an enabled pitch Dictionary has the
+/// card's reading.
+/// `controller::note_payload` adds `sentence` when the hover produces one.
+/// `screenshot` is not a `fields` key.
+/// `shot::plan` reads it directly from this list and selects the Anki field
+/// for the picture.
 ///
-/// Windows' combo prepends `"(none)"`, which is that one UI's idiom for
-/// "this field is unmapped" and is filtered out by its `row_mapping`
-/// before a save; it is never a stored value, so it is not a source.
+/// The Windows combo box puts `"(none)"` first. This string means that no
+/// field is mapped. `row_mapping` removes it before a save.
+/// The string is never stored, so it is not a source.
 pub const FIELD_SOURCES: [&str; 8] = [
     "expression",
     "reading",
@@ -715,7 +723,7 @@ pub const FIELD_SOURCES: [&str; 8] = [
     "sentence",
 ];
 
-/// `[anki]`. Optional section.
+/// The `[anki]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnkiConfig {
     #[serde(default)]
@@ -726,108 +734,109 @@ pub struct AnkiConfig {
     pub deck: String,
     #[serde(default = "default_anki_model")]
     pub model: String,
-    /// Shortcut: add the top card.
+    /// The shortcut that adds the top card.
     #[serde(default = "default_anki_add_key")]
     pub add_key: String,
-    /// Same shortcut on Linux, in portal syntax.
+    /// The same shortcut on Linux, in portal syntax.
     #[serde(default = "default_anki_add_key_linux")]
     pub add_key_linux: String,
-    /// Tray balloon on add.
+    /// Shows a tray balloon after an add.
     #[serde(default = "default_notify_on_add")]
     pub notify_on_add: bool,
-    /// Which fields go where.
+    /// The Anki field for each source value.
     #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
-    /// How the Anki sentence field is assembled.
+    /// Defines how the code builds the Anki sentence field.
     #[serde(default = "default_sentence_mode")]
     pub sentence_mode: SentenceMode,
-    /// Set the static region.
+    /// Sets the static region for sentence capture.
     #[serde(default = "default_static_region_key")]
     pub static_region_key: String,
-    /// Same key on Linux, in portal syntax.
+    /// The same static-region key on Linux, in portal syntax.
     #[serde(default = "default_static_region_key_linux")]
     pub static_region_key_linux: String,
-    /// [x, y, w, h] if set.
+    /// The static region as [x, y, w, h], when the user sets one.
     #[serde(default)]
     pub static_region: Option<[i32; 4]>,
-    /// Teal border visible.
+    /// Makes the teal border visible.
     #[serde(default = "default_show_static_overlay")]
     pub show_static_overlay: bool,
-    /// Only the top dict's entry.
+    /// Uses only the entry from the top Dictionary.
     #[serde(default)]
     pub first_dict_only: bool,
 }
 
-/// Default Anki URL.
+/// The default Anki URL.
 fn default_anki_url() -> String {
     "http://localhost:8765".to_string()
 }
 
-/// Default Anki deck name.
+/// The default Anki deck name.
 fn default_anki_deck() -> String {
     "Default".to_string()
 }
 
-/// Default Anki model name.
+/// The default Anki model name.
 fn default_anki_model() -> String {
     "Lapis".to_string()
 }
 
-/// Default Anki add key.
+/// The default Anki add key.
 fn default_anki_add_key() -> String {
     "a".to_string()
 }
 
-/// Mirrors the trigger's modifier family: a portal
-/// binding is system-wide, so a bare letter will not do.
+/// Uses the same modifier family as the trigger.
+/// A portal binding is system-wide, so a bare letter is not enough.
 fn default_anki_add_key_linux() -> String {
     "ALT+A".to_string()
 }
 
-/// On by default.
+/// The default is on.
 fn default_notify_on_add() -> bool {
     true
 }
 
-/// `anki.sentence_mode`: which text the Anki sentence field gets.
+/// Defines the text that the Anki sentence field receives.
 ///
-/// `lowercase` for the TOML: existing files carry `"line"`, `"all"`,
-/// and `"static"`, and they keep parsing.
+/// The TOML file uses `lowercase` names.
+/// Files from earlier versions use `"line"`, `"all"`, and `"static"`.
+/// The parser still reads them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SentenceMode {
-    /// The OCR line the cursor is on.
+    /// The OCR line that contains the cursor.
     Line,
-    /// Every line the hover's capture read.
+    /// Every line that the hover capture reads.
     All,
-    /// Every line inside the user-drawn region, which is also what a
-    /// lookup reads from in this mode.
+    /// Every line inside the region that the user draws. In this mode, a
+    /// lookup also reads from that region.
     Static,
 }
 
-/// Default sentence mode.
+/// The default sentence mode.
 fn default_sentence_mode() -> SentenceMode {
     SentenceMode::Line
 }
 
-/// Default static region key.
+/// The default key for the static region.
 fn default_static_region_key() -> String {
     String::new()
 }
 
-/// Unbound, like its Windows twin: ADR-0003 keeps the portal's shortcut
-/// list to the trigger and the Anki add, so a chord shipped here would
-/// claim a system-wide grab that nothing binds.
+/// Leaves the key unbound, like its Windows twin.
+/// The portal shortcut list holds only the trigger and Anki add.
+/// No action binds this chord.
 fn default_static_region_key_linux() -> String {
     String::new()
 }
 
-/// Overlay on by default.
+/// The overlay is on by default.
 fn default_show_static_overlay() -> bool {
     true
 }
 
-/// The Lapis field mapping.
+/// Returns the Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
         FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
@@ -859,14 +868,14 @@ impl Default for AnkiConfig {
     }
 }
 
-/// Ctrl modifier bit.
+/// The Ctrl modifier bit.
 pub const MOD_CTRL: u8 = 0b001;
-/// Shift modifier bit.
+/// The Shift modifier bit.
 pub const MOD_SHIFT: u8 = 0b010;
-/// Alt modifier bit.
+/// The Alt modifier bit.
 pub const MOD_ALT: u8 = 0b100;
 
-/// `[actions]` section.
+/// The `[actions]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionsConfig {
     #[serde(default = "default_actions_enabled")]
@@ -877,19 +886,18 @@ pub struct ActionsConfig {
     pub ocr_clipboard: Option<OcrClipboardConfig>,
 }
 
-/// `[actions.screenshot]`.
+/// The `[actions.screenshot]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScreenshotConfig {
     #[serde(default = "default_screenshot_hotkey")]
     pub hotkey: String,
-    /// Same action on Linux; absent leaves it unbound.
+    /// The same action on Linux. No value leaves the action unbound.
     ///
-    /// Not portal syntax, unlike `anki.add_key_linux`: ADR-0003 fixes the
-    /// portal's shortcut ids at exactly two forever, so this action rides
-    /// the control socket instead (spec D1) and the chord here is the
-    /// compositor bind the Linux settings window hands out as a copyable
-    /// snippet. `Option`, mirroring the ocr-clipboard twin, so absence
-    /// stays typed rather than an empty-string sentinel.
+    /// This value is not portal syntax, unlike `anki.add_key_linux`.
+    /// The portal shortcut ID set stays fixed at two, so this action uses the control socket.
+    /// The Linux settings window gives this chord as a copyable compositor binding snippet.
+    /// The field uses `Option`, like the OCR-clipboard twin.
+    /// Absence stays distinct from an empty string.
     #[serde(default)]
     pub hotkey_linux: Option<String>,
     #[serde(default = "default_screenshot_save_dir")]
@@ -898,28 +906,28 @@ pub struct ScreenshotConfig {
     pub include_on_add: bool,
 }
 
-/// `[actions.ocr_clipboard]`.
+/// The `[actions.ocr_clipboard]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OcrClipboardConfig {
-    /// Empty or absent disables the action.
+    /// An empty value or no value disables the action.
     #[serde(default)]
     pub hotkey: Option<String>,
-    /// Same action on Linux, in portal syntax; absent disables it.
+    /// The same action on Linux, in portal syntax. No value disables the action.
     #[serde(default)]
     pub hotkey_linux: Option<String>,
 }
 
-/// On by default.
+/// The default is on.
 fn default_actions_enabled() -> bool {
     true
 }
 
-/// Default screenshot hotkey.
+/// The default screenshot hotkey.
 fn default_screenshot_hotkey() -> String {
     "ctrl+shift+s".to_string()
 }
 
-/// Default save folder.
+/// The default screenshot folder.
 fn default_screenshot_save_dir() -> String {
     "screenshots".to_string()
 }
@@ -946,7 +954,7 @@ impl Default for ScreenshotConfig {
     }
 }
 
-/// VK + mods, from a string.
+/// Returns the VK code and modifier bits from a hotkey string.
 pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
     let parts: Vec<&str> = s.split('+').collect();
     let (key, mod_parts) = parts.split_last()?;
@@ -964,7 +972,7 @@ pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
 }
 
 impl Default for Config {
-    /// Spec §4.3's shipped values.
+    /// The values that chibipop uses by default.
     fn default() -> Config {
         Config {
             trigger: TriggerConfig {
@@ -991,11 +999,10 @@ impl Default for Config {
                 show_images: default_show_images(),
                 show_part_of_speech: false,
             },
-            // Empty, and that is the whole default: a Dictionary the
-            // config names in no array is new, so a fresh install enables
-            // every dictionary it finds in library order without shipping a
-            // single name. The two names that used to sit here were
-            // substrings guessing at what the user would install.
+            // The default has no Dictionary names.
+            // A new installation enables every installed Dictionary in library order.
+            // Earlier defaults stored two substrings.
+            // Those substrings guessed which Dictionary a user installed.
             dictionaries: DictionariesConfig::default(),
             plugins: PluginsConfig::default(),
             ocr: OcrConfig::default(),
@@ -1007,14 +1014,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Writes the TOML.
+    /// Saves the config as a TOML file.
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut text = toml::to_string_pretty(self)
             .with_context(|| format!("serialising config for {}", path.display()))?;
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        // A torn write loses the lot.
+        // Write to a temporary file first. A torn write otherwise loses the whole config.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)
             .with_context(|| format!("writing config to {}", tmp.display()))?;
@@ -1023,7 +1030,7 @@ impl Config {
         Ok(())
     }
 
-    /// Clamps bounded numbers.
+    /// Clamps every bounded config value.
     fn clamp_ranges(&mut self, path: &Path) {
         self.popup.max_width_percent = clamped(
             path,
@@ -1069,22 +1076,19 @@ impl Config {
         );
     }
 
-    /// The bridge to `present.rs`, with this OCR language's term scope
-    /// resolved.
+    /// Builds the [`crate::present::PresentConfig`] for this OCR language.
+    /// It resolves the term scope before it returns.
     ///
-    /// Two lists, each of exact Dictionary names in priority order, and no
-    /// ladder behind either. The three guards this used to carry - no entry
-    /// or an empty one, a list matching nothing installed, and the
-    /// configured recogniser not being the one reading - all defended
-    /// against a substring that matched nothing and blanked the popup. An
-    /// exact name either names an installed Dictionary or does not, an
-    /// unchecked row was unchecked on purpose, and none of that reasoning
-    /// belongs on the presentation path (ADR-0014). If one of them has to
-    /// come back, the identity model is wrong rather than under-guarded.
+    /// It passes exact Dictionary names in priority order, without fallback guards.
+    /// A name that matches no installed Dictionary remains in the result.
+    /// An empty result remains valid when the user disables every Dictionary.
+    /// Older guards treated missing entries, empty entries, unmatched lists, and
+    /// recognizer differences as errors.
+    /// Exact names now express identity, so the presentation path does not add those guards.
+    /// See (ARCHITECTURE.md#dictionary-and-lookup).
     ///
-    /// `dictionaries.per_language[ocr.language]` still narrows the terms
-    /// list where the user gave that language one, and nothing narrows the
-    /// pitch list: pitch has no per-language question.
+    /// `dictionaries.per_language[ocr.language]` can narrow the terms list.
+    /// It never narrows the pitch list because pitch has no per-language scope.
     pub fn present_config(
         &self,
         dicts: &[crate::present::DictInfo],
@@ -1099,14 +1103,14 @@ impl Config {
         }
     }
 
-    /// Which layer the Linux popup sits on.
+    /// Returns the layer that holds the Linux popup.
     ///
-    /// The conduit the Linux popup reads; Windows ignores it.
+    /// Linux reads this field. Windows ignores it.
     pub fn popup_layer(&self) -> PopupLayer {
         self.popup.layer
     }
 
-    /// The trigger chord this platform binds.
+    /// Returns the trigger chord for a platform.
     pub fn trigger_key_for(&self, platform: Platform) -> &str {
         match platform {
             Platform::Windows => &self.trigger.trigger_key,
@@ -1114,7 +1118,7 @@ impl Config {
         }
     }
 
-    /// The Anki-add chord this platform binds.
+    /// Returns the Anki-add chord for a platform.
     pub fn add_key_for(&self, platform: Platform) -> &str {
         match platform {
             Platform::Windows => &self.anki.add_key,
@@ -1123,7 +1127,7 @@ impl Config {
     }
 }
 
-/// Clamps, naming any move.
+/// Clamps a value and reports each change.
 fn clamped<T>(path: &Path, field: &str, value: T, lo: T, hi: T) -> T
 where
     T: Ord + Copy + std::fmt::Display,
@@ -1136,16 +1140,16 @@ where
     out
 }
 
-/// Loads, creating if absent.
+/// Loads the config and creates it when the file does not exist.
 ///
-/// Malformed TOML is an `Err`.
-/// Out-of-range values clamp.
+/// Returns an error for malformed TOML.
+/// Clamps an out-of-range value.
 pub fn load_or_create(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let mut config: Config = toml::from_str(&text)
                 .with_context(|| format!("parsing config from {}", path.display()))?;
-            // Migrate legacy hold-shift.
+            // Convert the legacy hold-shift mode.
             if config.trigger.mode == TriggerMode::HoldShift {
                 config.trigger.mode = TriggerMode::HoldKey;
                 config.trigger.trigger_key = "shift".to_string();
@@ -1166,27 +1170,26 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 mod tests {
     use super::*;
 
-    /// Unique per process and test.
+    /// A path that is unique for each process and each test.
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("chibipop_cfg_{}_{}.toml", std::process::id(), name))
     }
 
-    /// `controller::note_payload` can supply a sentence, so a picker
-    /// must be able to route it.
+    /// `controller::note_payload` can supply a sentence. A picker must route it.
     #[test]
     fn field_sources_offers_sentence() {
         assert!(FIELD_SOURCES.contains(&"sentence"));
     }
 
-    /// Without this row a mining screenshot has no field to land in:
-    /// `shot::plan` finds the picture field by this source alone.
+    /// A mining screenshot needs this row to find its field.
+    /// `shot::plan` finds the picture field from this source.
     #[test]
     fn field_sources_offers_screenshot() {
         assert!(FIELD_SOURCES.contains(&"screenshot"));
     }
 
-    /// A shipped default a picker cannot offer would be unreproducible
-    /// from the settings window.
+    /// A picker must offer every shipped default.
+    /// Without that option, the settings window cannot reproduce the default.
     #[test]
     fn every_default_field_map_source_is_offered() {
         for mapping in default_field_map() {
@@ -1223,12 +1226,12 @@ mod tests {
         );
     }
 
-    /// §5.1: exclusion is opt-in.
+    /// Confirms that the user must enable capture exclusion.
     #[test]
     fn capture_exclusion_defaults_to_false() {
         assert!(
             !Config::default().popup.exclude_from_capture,
-            "the popup must be recordable out of the box - exclusion is the opt-in (spec section 5.1)"
+            "the popup must be recordable out of the box - exclusion is the opt-in"
         );
     }
 
@@ -1274,7 +1277,7 @@ mod tests {
         assert!(!Config::default().ocr.prefer_vertical);
     }
 
-    /// Re-enabled by one TOML line.
+    /// One TOML value can enable multiple OCR passes.
     #[test]
     fn a_multi_pass_round_trips() {
         let p = tmp("multipass");
@@ -1308,7 +1311,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A missing section must load.
+    /// Confirms that a missing section loads with defaults.
     #[test]
     fn a_config_written_before_the_ocr_section_existed_still_loads() {
         let p = tmp("no_ocr_section");
@@ -1323,7 +1326,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The field-level default.
+    /// Confirms that an empty section uses the field default.
     #[test]
     fn an_empty_ocr_section_still_defaults_max_ocr_passes_to_one() {
         let p = tmp("empty_ocr_section");
@@ -1356,7 +1359,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A missing section must load.
+    /// Confirms that a missing section loads with defaults.
     #[test]
     fn a_config_written_before_the_debug_section_existed_still_loads() {
         let p = tmp("no_debug_section");
@@ -1389,7 +1392,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-serde-default trap.
+    /// Confirms that the field default differs from Serde's bare default.
     #[test]
     fn a_config_written_before_the_highlight_existed_loads_with_it_on() {
         let p = tmp("no_highlight_field");
@@ -1450,7 +1453,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The same trap, for scrolling.
+    /// Confirms that the field default enables popup scroll.
     #[test]
     fn a_config_written_before_scroll_popup_loads_with_it_on() {
         let p = tmp("no_scroll_field");
@@ -1465,7 +1468,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Loading clamps too.
+    /// Confirms that the loader clamps an out-of-range value.
     #[test]
     fn an_out_of_range_hand_edit_is_clamped_on_load() {
         let p = tmp("out_of_range");
@@ -1485,7 +1488,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// In-range values must not move.
+    /// Confirms that values inside the range remain unchanged.
     #[test]
     fn an_in_range_value_survives_loading_untouched() {
         let p = tmp("in_range");
@@ -1519,7 +1522,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A pre-existing config loads.
+    /// Confirms that an earlier config loads.
     #[test]
     fn a_config_written_before_the_lookup_log_still_loads() {
         let p = tmp("no_lookup_log");
@@ -1635,7 +1638,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-serde-default trap.
+    /// Confirms that a missing Anki field uses its field default.
     #[test]
     fn an_anki_section_without_first_dict_only_still_defaults_off() {
         let p = tmp("anki_no_first_dict_only");
@@ -1720,8 +1723,8 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The strings an 0.9.x file carries still name the modes: the enum
-    /// is a Rust-side type, not a file format change.
+    /// A 0.9.x file still uses these mode names.
+    /// The enum is a Rust type, not a file-format change.
     #[test]
     fn a_config_written_before_the_enum_still_names_every_mode() {
         for (written, expected) in [
@@ -1740,7 +1743,7 @@ mod tests {
             ), written)).unwrap();
             let loaded = load_or_create(&p).unwrap();
             assert_eq!(expected, loaded.anki.sentence_mode, "{written} must still load");
-            // And the file we write back is the one it can read again.
+            // Save the same file and confirm that the parser reads it again.
             loaded.save(&p).unwrap();
             assert!(std::fs::read_to_string(&p)
                 .unwrap()
@@ -1749,14 +1752,14 @@ mod tests {
         }
     }
 
-    /// Guards the shipped default.
+    /// Confirms that the shipped default parses as the expected VK code.
     #[test]
     fn anki_add_key_default_parses_to_vk_a() {
         let vk = parse_trigger_key(&Config::default().anki.add_key);
         assert_eq!(Some(0x41), vk);
     }
 
-    /// The bare-serde-default trap.
+    /// Confirms that a missing Anki key uses its field default.
     #[test]
     fn an_anki_section_without_add_key_still_defaults_to_a() {
         let p = tmp("anki_no_add_key");
@@ -1800,11 +1803,10 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Ticket 20 makes an empty map reachable from either settings
-    /// window, so the serde default must keep firing on an absent key
-    /// only: a present `field_map = []` is the user's answer, not a
-    /// missing one (contrast
-    /// `an_anki_section_without_field_map_still_defaults_to_lapis`).
+    /// Both settings windows can save an empty map.
+    /// Serde must apply the default only when the key is absent.
+    /// A present `field_map = []` records the user's choice, not a missing value.
+    /// See `an_anki_section_without_field_map_still_defaults_to_lapis`.
     #[test]
     fn an_emptied_anki_field_map_survives_a_save_and_reload() {
         let p = tmp("field_map_emptied");
@@ -1834,7 +1836,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-serde-default trap.
+    /// Confirms that a missing field-map key uses the Lapis default.
     #[test]
     fn an_anki_section_without_field_map_still_defaults_to_lapis() {
         let p = tmp("anki_no_field_map");
@@ -1854,7 +1856,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    // ---- trigger key ----
+    // Tests for trigger keys.
 
     #[test]
     fn parse_trigger_key_shift() {
@@ -1903,7 +1905,7 @@ mod tests {
         assert_eq!(Some(0x35), parse_trigger_key("5"));
     }
 
-    /// Agrees with the display name.
+    /// Confirms that the parser and display use the same key names.
     #[test]
     fn parse_trigger_key_single_char_matches_trigger_key_name() {
         for c in 'a'..='z' {
@@ -1936,7 +1938,7 @@ mod tests {
         assert_eq!(Some(0x41), parse_trigger_key("65"));
     }
 
-    /// Overflows `u16`: not silently wrapped.
+    /// The value overflows `u16`. The parser rejects it and does not wrap it.
     #[test]
     fn parse_trigger_key_out_of_range_decimal_is_rejected() {
         assert_eq!(None, parse_trigger_key("99999"));
@@ -2078,7 +2080,7 @@ mod tests {
         assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
     }
 
-    /// Bounds themselves are legal.
+    /// Confirms that both boundary values are valid.
     #[test]
     fn capture_values_exactly_on_the_bounds_are_untouched() {
         let mut c = Config::default();
@@ -2147,15 +2149,15 @@ mod tests {
         assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
     }
 
-    /// ADR-0012: the creation-time font is a per-platform literal.
+    /// Confirms that config creation uses one literal font per platform.
     #[test]
     fn each_platform_creates_its_own_default_font() {
         assert_eq!("Yu Gothic UI", Platform::Windows.default_font());
         assert_eq!("Noto Sans CJK JP", Platform::Linux.default_font());
     }
 
-    /// ADR-0012: every field serializes on every platform, so a config
-    /// exercising both platforms' fields survives a save/load unchanged.
+    /// Every field serializes on every platform.
+    /// A config with fields from both platforms survives save and load unchanged.
     #[test]
     fn a_config_with_both_platforms_fields_round_trips_losslessly() {
         let p = tmp("both_platforms_round_trip");
@@ -2206,8 +2208,8 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A Windows-shaped file predating the Linux fields loads with every
-    /// stored value intact and the new fields at their documented defaults.
+    /// A Windows-shaped file from before the Linux fields keeps every stored value.
+    /// The new fields take their documented defaults.
     #[test]
     fn a_windows_shaped_legacy_file_loads_unchanged_and_gains_defaults() {
         let p = tmp("windows_legacy");
@@ -2219,21 +2221,20 @@ mod tests {
             "[anki]\nadd_key = \"d\"\n",
         )).unwrap();
         let mut c = load_or_create(&p).unwrap();
-        // Windows-rendered fields: exactly what the file said.
+        // Windows fields keep the values from the file.
         assert_eq!(TriggerMode::HoldKey, c.trigger.mode);
         assert_eq!("f2", c.trigger.trigger_key);
         assert_eq!("light", c.popup.theme);
         assert!(c.popup.exclude_from_capture);
         assert_eq!("Meiryo", c.popup.font);
         assert_eq!("d", c.anki.add_key);
-        // New fields: the documented defaults, no migration.
+        // New fields use documented defaults without migration.
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
         assert_eq!("", c.anki.static_region_key_linux);
         assert_eq!(None, c.actions.screenshot.hotkey_linux);
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
-        // The whole-struct save writes the new keys with those defaults
-        // and the old values verbatim.
+        // A whole-struct save writes the new keys with their defaults and preserves the old values.
         c.save(&p).unwrap();
         let saved = std::fs::read_to_string(&p).unwrap();
         assert!(saved.contains("trigger_key = \"f2\""));
@@ -2244,14 +2245,14 @@ mod tests {
         assert!(saved.contains("layer = \"overlay\""));
         assert!(saved.contains("font = \"Meiryo\""));
         assert!(!saved.contains("display_order"), "the save retires the pre-roles key");
-        // Everything else round-trips; the substring list is the one thing a
-        // save deliberately drops, which is what migrates the file once.
+        // The other values survive save and load.
+        // The save intentionally removes the substring list and migrates the file once.
         c.dictionaries.display_order.clear();
         assert_eq!(c, load_or_create(&p).unwrap());
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The other platform's fields survive a save untouched.
+    /// Confirms that a save preserves fields for the other platform.
     #[test]
     fn a_save_preserves_the_other_platforms_fields() {
         let p = tmp("preserve_other_platform");
@@ -2266,7 +2267,7 @@ mod tests {
             "[actions.screenshot]\nhotkey_linux = \"SUPER+S\"\n\n",
             "[actions.ocr_clipboard]\nhotkey_linux = \"SUPER+C\"\n",
         )).unwrap();
-        // A Windows-style edit: change a rendered field, save the struct.
+        // Change a Windows-rendered field and save the struct.
         let mut c = load_or_create(&p).unwrap();
         c.popup.theme = "light".to_string();
         c.save(&p).unwrap();
@@ -2308,7 +2309,7 @@ mod tests {
         assert!(parse("layer = \"bottom\"\n").is_err(), "garbage layers are a parse error");
     }
 
-    /// The conduit the Linux popup reads.
+    /// Confirms that the Linux popup accessor returns the configured layer.
     #[test]
     fn popup_layer_reaches_the_accessor() {
         let mut c = Config::default();
@@ -2319,10 +2320,9 @@ mod tests {
 
     /// `popup.layout_mode` accepts exactly `roomy` and `compact`.
     ///
-    /// The same shape as [`PopupLayer`]'s test, and the same posture: an
-    /// unreadable enum is a parse error rather than a silent fallback,
-    /// because a config naming a mode this build has never heard of is a
-    /// file from a build that knew something this one does not.
+    /// This test matches [`PopupLayer`] and rejects an unknown enum.
+    /// It does not choose a silent default.
+    /// A config with an unknown mode came from a build that this build does not understand.
     #[test]
     fn layout_mode_parses_roomy_and_compact_and_rejects_garbage() {
         let base = concat!(
@@ -2339,12 +2339,12 @@ mod tests {
         assert!(parse("layout_mode = \"terse\"\n").is_err(), "garbage modes are a parse error");
     }
 
-    /// A file predating the render settings loads at the documented
-    /// defaults, and a save writes them.
+    /// A file from before render settings loads with documented defaults.
+    /// A save writes those settings.
     ///
-    /// The whole of story 34 on this side: a config from the other
-    /// platform - or from a build before this ticket - is read back
-    /// unchanged, gains the six keys, and is not corrupted by either.
+    /// The test reads a config from the other platform or an older build.
+    /// It makes no changes to the stored values.
+    /// The save adds six keys and preserves the rest of the config.
     #[test]
     fn a_file_without_render_settings_takes_the_documented_defaults() {
         let p = tmp("render_defaults");
@@ -2377,12 +2377,11 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The shipped defaults resolve to the scene builder's own defaults.
+    /// The shipped defaults resolve to the scene builder's defaults.
     ///
-    /// The bind that keeps a geometry fixture and a fresh install drawing
-    /// the same panel: the fixtures ask for `RenderSettings::default()`,
-    /// a fresh install asks for the config's, and a golden would move the
-    /// day those two disagreed.
+    /// This test keeps a geometry fixture and a fresh install on the same panel.
+    /// Fixtures use `RenderSettings::default()`. A fresh install uses the config settings.
+    /// A difference between them moves a golden.
     #[test]
     fn the_shipped_popup_resolves_to_the_default_render_settings() {
         assert_eq!(
@@ -2391,8 +2390,8 @@ mod tests {
         );
     }
 
-    /// Every knob reaches its slot in the resolved record, and the enum
-    /// resolves the right way round.
+    /// Confirms that each setting reaches its field in the resolved record.
+    /// It also confirms both enum choices.
     #[test]
     fn every_render_knob_reaches_the_resolved_record() {
         type Edit = fn(&mut PopupConfig);
@@ -2416,7 +2415,7 @@ mod tests {
         }
     }
 
-    /// Each bin reads only its own key fields.
+    /// Confirms that each bin reads only its own platform fields.
     #[test]
     fn key_accessors_pick_the_platforms_field() {
         let mut c = Config::default();
@@ -2428,7 +2427,7 @@ mod tests {
         assert_eq!("ALT+A", c.add_key_for(Platform::Linux));
     }
 
-    /// A resolvable literal is used as-is.
+    /// Confirms that the code keeps a resolvable literal unchanged.
     #[test]
     fn a_resolvable_font_is_kept() {
         let choice = resolve_font("IPAexGothic", Platform::Linux, |_| true);
@@ -2436,8 +2435,8 @@ mod tests {
         assert_eq!("IPAexGothic", choice.family());
     }
 
-    /// ADR-0004/0012: an unresolvable literal falls back to the
-    /// platform default, naming what was asked for.
+    /// Confirms that an unresolvable literal uses the platform default.
+    /// It also records the requested family.
     #[test]
     fn an_unresolvable_font_falls_back_to_the_platform_default() {
         let choice = resolve_font("Yu Gothic UI", Platform::Linux, |_| false);
@@ -2453,14 +2452,14 @@ mod tests {
         assert_eq!("Yu Gothic UI", windows.family());
     }
 
-    /// An empty literal never reaches the resolver.
+    /// Confirms that an empty literal skips the resolver and uses the platform default.
     #[test]
     fn an_empty_font_falls_back_without_asking() {
         let choice = resolve_font("", Platform::Linux, |_| panic!("asked about an empty literal"));
         assert_eq!("Noto Sans CJK JP", choice.family());
     }
 
-    // ---- plugin engine ----
+    // Tests for the plugin engine.
 
     #[test]
     fn builtin_is_the_default_engine() {
@@ -2480,7 +2479,7 @@ mod tests {
         assert_eq!(chosen, EngineChoice::Plugin("meikiocr".into()));
     }
 
-    /// Builtin never needs the list.
+    /// Confirms that the builtin engine ignores the plugin list.
     #[test]
     fn builtin_wins_even_with_plugins_enabled() {
         let chosen = resolve_engine("builtin", &["meikiocr".to_string()]);
@@ -2510,7 +2509,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// A missing section must load.
+    /// Confirms that a missing section loads with defaults.
     #[test]
     fn a_config_without_plugins_section_still_loads() {
         let p = tmp("no_plugins_section");
@@ -2536,7 +2535,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// The bare-serde-default trap.
+    /// Confirms that a missing engine key uses the builtin default.
     #[test]
     fn an_ocr_section_without_engine_still_defaults_to_builtin() {
         let p = tmp("ocr_no_engine");
@@ -2599,7 +2598,8 @@ mod tests {
         assert_eq!(None, cfg.actions.ocr_clipboard);
     }
 
-    /// Both platforms' chords ride the one nested section (ADR-0012).
+    /// Both platform chords use one nested section.
+    /// See ARCHITECTURE.md#settings-and-config.
     #[test]
     fn ocr_clipboard_hotkey_round_trips() {
         let mut cfg = Config::default();
@@ -2618,7 +2618,7 @@ mod tests {
         );
     }
 
-    /// A Windows-shaped section predating the Linux twin.
+    /// Confirms that a Windows-shaped section from before the Linux twin loads.
     #[test]
     fn an_ocr_clipboard_section_without_the_linux_twin_loads_with_it_absent() {
         let toml = concat!(
@@ -2635,7 +2635,7 @@ mod tests {
         );
     }
 
-    /// No `[actions]` section.
+    /// Confirms that a config without an `[actions]` section uses defaults.
     #[test]
     fn actions_config_missing_section_uses_defaults() {
         let toml = concat!(
@@ -2657,7 +2657,7 @@ mod tests {
         [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")]
     }
 
-    /// A pre-roles config, as it sat on disk before this ticket.
+    /// Builds a pre-roles config in the form used before roles existed.
     fn pre_roles(order: &[&str]) -> Config {
         let mut cfg = Config::default();
         cfg.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
@@ -2698,11 +2698,11 @@ mod tests {
         assert_eq!(2, cfg.present_config(&installed()).terms.len());
     }
 
-    /// The guard this replaced fell back to the unrestricted order whenever
-    /// the list matched nothing installed, because a mistyped *substring*
-    /// could blank the popup. An exact name cannot typo its way into
-    /// matching everything, so a list naming an absent dictionary searches
-    /// that dictionary and finds nothing - which is the truth about it.
+    /// An older guard used the unrestricted order when a list matched no installed name.
+    /// A mistyped substring could then blank the popup.
+    /// Exact names cannot match another Dictionary by mistake.
+    /// A list with an absent name searches that name and finds nothing.
+    /// That result reflects the config.
     #[test]
     fn a_language_list_naming_nothing_installed_searches_nothing() {
         let mut cfg = Config::default();
@@ -2713,8 +2713,8 @@ mod tests {
         assert!(!crate::present::keeps_dict("大辞林　第四版", &out.terms));
     }
 
-    /// The user's story 3: unchecking every row is a legitimate "search
-    /// nothing", and nothing puts the dictionaries back.
+    /// Clearing every checkbox is a valid "search nothing" choice.
+    /// The code must not restore the Dictionaries.
     #[test]
     fn a_terms_list_with_every_row_disabled_enables_nothing() {
         let mut cfg = Config::default();
@@ -2733,8 +2733,8 @@ mod tests {
         );
     }
 
-    /// An unplugged drive must not delete a list: the name stays in the
-    /// file, and resolution simply finds nothing answering to it.
+    /// A disconnected drive must not delete a list.
+    /// The config keeps the name, and resolution finds no installed Dictionary for it.
     #[test]
     fn a_name_no_installed_dictionary_answers_to_is_kept_and_ignored() {
         let mut cfg = Config::default();
@@ -2755,12 +2755,12 @@ mod tests {
         );
     }
 
-    /// The migration, through the one seam that spends it: a substring
-    /// contributes every installed name it matches, in library order.
+    /// Tests the migration through the one method that resolves the legacy list.
+    /// Each substring contributes every installed name that matches, in library and list order.
     ///
-    /// `大辞` matching both installed names is exactly the defect the exact
-    /// model retires - a user who wrote it meant one dictionary and got two -
-    /// and migrating it to both is the honest reading of what it did.
+    /// `大辞` matches both installed names. The exact-name model removes that ambiguity.
+    /// A user who wrote this substring selected one Dictionary but received two matches.
+    /// Migration to both exact names preserves the result that the old config produced.
     #[test]
     fn a_pre_roles_substring_resolves_to_the_exact_names_it_matched() {
         let one = pre_roles(&["大辞林"]);
@@ -2805,8 +2805,7 @@ mod tests {
         );
     }
 
-    /// Pitch is its own list with its own membership, and no per-language
-    /// axis narrows it.
+    /// Pitch uses its own list and membership. A per-language list does not narrow it.
     #[test]
     fn the_pitch_list_is_resolved_independently_of_the_terms_list() {
         let mut cfg = Config::default();
@@ -2830,8 +2829,8 @@ mod tests {
         assert_eq!(55, cfg.present_config(&[]).summary_chars);
     }
 
-    /// Six flat arrays, and every one of them survives a round trip through
-    /// the writer the other platform saves with.
+    /// Confirms that all six arrays and the ranking strategy survive the TOML
+    /// writer that the other platform uses.
     #[test]
     fn all_six_arrays_and_the_strategy_round_trip_through_toml() {
         let mut cfg = Config::default();
@@ -2850,9 +2849,9 @@ mod tests {
         assert!(!text.contains("display_order"), "the retired key is not written: {text}");
     }
 
-    /// The database records the strategy through `as_str`; the file records
-    /// it through serde. They are the same three names or a config and the
-    /// ranking it produced can disagree in silence.
+    /// The database records the strategy with `as_str`, and the file records it with serde.
+    /// Both paths must use the same three names.
+    /// Otherwise the config and its ranking can disagree without an error.
     #[test]
     fn the_toml_spelling_is_the_one_the_database_records() {
         use crate::dict::frequency::RankingStrategy;

@@ -1,24 +1,25 @@
-//! The daemon's settings-child guard (ADR-0005): at most one spawned
-//! settings process, tracked by pid.
+//! The daemon settings-child guard
+//! (ARCHITECTURE.md#settings-and-config).
+//! The guard tracks at most one spawned settings process by process ID.
 //!
-//! The guard is the daemon's *own* discipline; the settings-scoped
-//! flock in `super::run` is the cross-process one (a directly launched
-//! second instance never consults this guard). Reaping happens lazily
-//! in `spawn_if_absent` via `try_wait` — no SIGCHLD plumbing for one
-//! transient child.
+//! The guard is the daemon's internal control. The settings-scoped
+//! flock in `super::run` controls separate processes. A second instance
+//! that starts directly does not read this guard. The `spawn_if_absent`
+//! function collects dead children with `try_wait`. The system does not
+//! use SIGCHLD signals for one temporary child.
 
 use std::io;
 use std::process::{Child, Command};
 
-/// What one spawn attempt did.
+/// The result of one spawn attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnOutcome {
     Spawned(u32),
-    /// The previous child is still alive; nothing was launched.
+    /// The previous child is still alive. The function started no process.
     AlreadyRunning(u32),
 }
 
-/// Holds the one live child, if any.
+/// Holds the one active child process, if one exists.
 #[derive(Default)]
 pub struct SettingsChild {
     child: Option<Child>,
@@ -29,8 +30,8 @@ impl SettingsChild {
         SettingsChild::default()
     }
 
-    /// Spawn `command` unless the previous child still runs. An exited
-    /// child is reaped here, so a fresh spawn follows a close.
+    /// Spawn `command` unless the previous child still runs.
+    /// The function collects an exited child before it starts a new child.
     pub fn spawn_if_absent(&mut self, command: &mut Command) -> io::Result<SpawnOutcome> {
         if let Some(child) = &mut self.child {
             match child.try_wait()? {
@@ -45,12 +46,11 @@ impl SettingsChild {
     }
 }
 
-/// The production command: this very binary, `settings` subcommand.
+/// The production command for this binary with the `settings` subcommand.
 ///
-/// `unmasked` because the daemon blocks SIGINT/SIGTERM for every thread
-/// it has (ticket 13) and a mask outlives `exec`: without it the settings
-/// window - a long-lived process of its own - would start unable to hear
-/// a supervisor or a session asking it to stop.
+/// The command uses `unmasked` because the daemon blocks SIGINT and SIGTERM
+/// on all threads. A signal mask survives across `exec`. Without this call,
+/// the settings window cannot receive stop signals from a supervisor or session.
 pub fn settings_command() -> io::Result<Command> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
@@ -63,7 +63,7 @@ pub fn settings_command() -> io::Result<Command> {
 mod tests {
     use super::*;
 
-    /// A child we fully control; `/bin/sleep` exists on any test box.
+    /// A child process for tests. The `/bin/sleep` binary exists on test hosts.
     fn sleeper(seconds: &str) -> Command {
         let mut c = Command::new("/bin/sleep");
         c.arg(seconds);
@@ -81,7 +81,7 @@ mod tests {
             guard.spawn_if_absent(&mut sleeper("30")).unwrap(),
             SpawnOutcome::AlreadyRunning(pid)
         );
-        // Cleanup: don't leak a 30s sleeper into the test run.
+        // Cleanup: stop the sleep process to prevent leaks in tests.
         if let Some(child) = &mut guard.child {
             let _ = child.kill();
             let _ = child.wait();
@@ -95,7 +95,7 @@ mod tests {
         else {
             panic!("first spawn must spawn");
         };
-        // Wait for the child to exit for real, then respawn.
+        // Wait for the child to exit, then spawn again.
         guard.child.as_mut().unwrap().wait().unwrap();
         match guard.spawn_if_absent(&mut sleeper("0")).unwrap() {
             SpawnOutcome::Spawned(second) => assert_ne!(first, second),

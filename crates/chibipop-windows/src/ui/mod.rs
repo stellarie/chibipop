@@ -1,4 +1,4 @@
-//! The popup and its content: Win32 windows, Direct2D/DirectWrite painting.
+//! The popup and its content: Win32 windows and Direct2D/DirectWrite paint output.
 
 pub mod audit;
 pub mod console;
@@ -11,8 +11,8 @@ pub mod static_overlay;
 pub mod tray;
 pub mod window;
 
-// The theme and the popup's layout are core vocabulary (ADR-0001, ADR-0004);
-// re-exported so the modules above keep addressing them as `crate::ui::…`,
-// unchanged by the workspace split. `css` styles that vocabulary, so it
-// lives beside them.
+// `theme` and the popup `layout` are core vocabulary
+// (ARCHITECTURE.md#workspace-and-seams). Re-export them so these modules
+// keep the `crate::ui::…` paths after the workspace split.
+// `css` styles that vocabulary, so keep it beside them.
 pub use chibipop::ui::{css, layout, theme};

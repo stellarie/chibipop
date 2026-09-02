@@ -1,4 +1,4 @@
-//! The lookup engine.
+//! The lookup engine resolves input against Dictionary terms.
 
 use crate::lookup::deconj::{Deconjugator, Form};
 use crate::lookup::model::{Dictionary, Entry, Hit, TermRow};
@@ -11,7 +11,7 @@ pub const MAX_RESULTS: usize = 10;
 const DEFAULT_FREQ: f64 = 999_999.0;
 const SEPARATORS: &[char] = &['、', '。', '「', '」', '！', '？', '…', '\n'];
 
-/// Trim, cut, truncate.
+/// Trim input, cut it at a separator, and truncate it by character count.
 pub fn clean_input(text: &str) -> String {
     let trimmed = text.trim();
     let cut = match trimmed.find(SEPARATORS) {
@@ -25,8 +25,8 @@ fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
 
-/// From weikipop's priority. Deliberately no `steps` term: see
-/// `Candidate::whole`.
+/// This score ports weikipop's priority formula. It omits `steps` by design.
+/// See `Candidate::whole`.
 fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     let f = freq.map(|v| v as f64).unwrap_or(DEFAULT_FREQ).max(1.0);
     let mut s = match_len as f64;
@@ -37,9 +37,9 @@ fn score(match_len: usize, freq: Option<i64>, kana_bonus: bool) -> f64 {
     s
 }
 
-/// Fine dec_tag to coarse pos. Having an arm here is also what makes a tag
-/// *terminal* - the `stem-` tags fall through to the fail-open case, and
-/// `all_terminal_dec_tags_are_handled_by_the_mapping` keeps that true.
+/// Map a fine `dec_tag` to a coarse POS. A mapped tag is *terminal*.
+/// `stem-` tags use the fail-open arm. The
+/// `all_terminal_dec_tags_are_handled_by_the_mapping` test guards this rule.
 fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
     match dec_tag {
         "v5aru" | "v5b" | "v5g" | "v5k" | "v5k-s" | "v5m" | "v5n" | "v5r"
@@ -48,9 +48,9 @@ fn dict_pos_for(dec_tag: &str) -> Option<Option<&'static str>> {
         "adj-i" => Some(Some("adj-i")),
         "v1" => Some(Some("v1")),
         "vk" => Some(Some("vk")),
-        // No POS signal.
+        // These tags have no POS signal.
         "exp" | "topic-condition" | "uninflectable" => Some(None),
-        // Unrecognised: fail open.
+        // Unrecognized tags use the fail-open path.
         _ => None,
     }
 }
@@ -59,41 +59,40 @@ struct Candidate {
     row: TermRow,
     match_len: usize,
     steps: usize,
-    /// Whether the deconjugator finished. A chain ending on a `stem-` tag
-    /// stopped mid-morphology, so the row it landed on is a spelling
-    /// coincidence with a stem rather than a word the input is a form of.
-    /// An unconjugated form needs no chain and is whole by definition.
+    /// This value is `true` when the deconjugator reaches a complete form. A chain that ends
+    /// with a `stem-` tag stops inside morphology. Its row matches a stem by text.
+    /// The input is not a form of that word. An unconjugated form needs no chain, so it is
+    /// whole by definition.
     whole: bool,
     process: Vec<String>,
 }
 
-/// Unconjugated all-kana only.
+/// Return `true` only for an unconjugated row with kana in every character.
 fn kana_bonus(c: &Candidate) -> bool {
     c.steps == 0 && c.row.surface.chars().all(is_kana)
 }
 
-/// One term-bank row per headword form: written, reading, and the entry the
-/// row points at.
+/// `GroupKey` identifies a term-bank row for a headword form. It uses the written
+/// form, the reading, and `entry_id`.
 ///
-/// Not one slot per (headword, dictionary). A dictionary that matched a
-/// headword with several term-bank rows contributes every one of them - the
-/// census found 6 220 大辞林 headwords with more than one row and a worst
-/// case of eleven - and keying the slot on `dict_id` made ten of that
-/// eleven unreachable from the panel, whatever the renderer did. The rows
-/// share the ten `MAX_RESULTS` slots in the ranking order below, and the
-/// cap still applies before `entries` is called, so a hover still parses at
-/// most ten glossaries (docs/research/hover-parse-cost.md).
+/// The key does not use one slot per (headword, Dictionary). If a Dictionary
+/// matches a headword with several term-bank rows, the engine keeps every row.
+/// A census found 6 220 大辞林 headwords with more than one row. The worst
+/// case had eleven rows. A key based on `dict_id` made ten rows unreachable
+/// from the panel, regardless of renderer behavior. The rows share the ten
+/// `MAX_RESULTS` slots in the sort order below. The engine applies the cap
+/// before it calls `entries`. Therefore, one hover parses at most ten glossaries
+/// (docs/research/hover-parse-cost.md).
 ///
-/// `entry_id` rather than `dict_id`: `entry.dict_id` determines the
-/// dictionary, so the third component still separates dictionaries, while
-/// one dictionary record reached through two surfaces - つま and 妻 for one
-/// Jitendex entry - remains one row.
+/// Use `entry_id`, not `dict_id`. `entry.dict_id` identifies the Dictionary, so
+/// the third key component still separates Dictionaries. One Jitendex Entry
+/// can use two surfaces, つま and 妻. Both surfaces still map to one row.
 type GroupKey = (Option<String>, Option<String>, i64);
 
-/// Deterministic total order. Mirrors the ranking below down to `steps`: the
-/// representative kept for a group must be the parse that group would be
-/// ranked on. No `entry_id` term, unlike the ranking: the key holds it, so
-/// every candidate in one group already shares it.
+/// This function defines a deterministic total order. It mirrors the sort order
+/// below through `steps`. The group keeps the representative that the order
+/// ranks first. The order has no `entry_id` term because the key already holds
+/// it. Every candidate in one group shares that value.
 fn is_better(new: &Candidate, existing: &Candidate) -> bool {
     fn rank(c: &Candidate) -> (usize, bool, Reverse<usize>, Reverse<&Vec<String>>) {
         (c.match_len, c.whole, Reverse(c.steps), Reverse(&c.process))
@@ -119,18 +118,18 @@ impl LookupEngine {
         let chars: Vec<char> = cleaned.chars().collect();
         let mut best: HashMap<GroupKey, Candidate> = HashMap::new();
 
-        // No early exit: forms differ.
+        // Do not exit early. Each prefix has different forms.
         for prefix_len in (1..=chars.len()).rev() {
             let prefix: String = chars[..prefix_len].iter().collect();
 
-            // It seeds the plain form.
+            // This call also adds the plain form.
             let forms: Vec<Form> = self.deconjugator.deconjugate(&prefix)
                 .into_iter()
                 .collect();
 
             for form in &forms {
-                // The POS the chain demands, and whether it got far enough to
-                // demand one at all.
+                // Get the POS that the chain requires. Mark a form as whole only when it has
+                // no tag or a terminal tag.
                 let (whole, required_pos) = match form.tags.last() {
                     None => (true, None),
                     Some(tag) => match dict_pos_for(tag) {
@@ -173,17 +172,15 @@ impl LookupEngine {
             let sb = score(b.match_len, b.row.freq, kana_bonus(b));
             b.match_len
                 .cmp(&a.match_len)
-                // Among candidates explaining the same span, a form the
-                // deconjugator actually resolved to a word class beats one
-                // that only got as far as a stem - however common the stem's
-                // homograph is. Needing more rules to get there is not what
-                // makes a parse worse.
+                // For equal spans, prefer a form that the deconjugator resolves to a word
+                // class. A stem-only result loses even if its homograph is common. Rule count
+                // does not make a parse worse.
                 .then(b.whole.cmp(&a.whole))
                 .then(sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
-                // Occam, once everything above ties: a nudge, never the
-                // discriminator.
+                // After all higher keys tie, use `steps` as a nudge, not as the main
+                // factor in the decision.
                 .then(a.steps.cmp(&b.steps))
-                // dict_id ascends by priority.
+                // Use raw `dict_id` only as a deterministic tie-break.
                 .then(a.row.dict_id.cmp(&b.row.dict_id))
                 .then(a.row.entry_id.cmp(&b.row.entry_id))
         });
@@ -228,8 +225,8 @@ mod tests {
         LookupEngine::new(Deconjugator::new(load_rules(&p).unwrap()))
     }
 
-    /// A glossary payload in the form the record stores: one
-    /// part-of-speech pill and one gloss block.
+    /// A glossary payload in the record format. It has one part-of-speech pill and
+    /// one gloss block.
     fn glossary(gloss: &str, pos: &str) -> String {
         serde_json::json!([{"type": "structured-content", "content": [
             {"tag": "span", "data": {"content": "part-of-speech-info"}, "content": pos},
@@ -322,13 +319,13 @@ mod tests {
 
     #[test]
     fn dict_pos_for_unrecognised_tag_imposes_no_constraint() {
-        // Must fail open, not closed.
+        // This path must fail open, not closed.
         assert_eq!(None, dict_pos_for("some-future-tag-not-yet-mapped"));
     }
 
     #[test]
     fn v5k_tagged_form_matches_v5_row() {
-        // v5k form, v5 row.
+        // The form has tag `v5k`, and the row has POS `v5`.
         let mut d = FakeDictionary::new();
         d.add_term("行く", Some("行く"), Some("いく"), "v5", Some(50), 1, 1);
         d.add_entry(1, 1, &glossary("to go", "v5"));
@@ -342,7 +339,7 @@ mod tests {
 
     #[test]
     fn vs_i_tagged_form_matches_vs_row() {
-        // vs-i form, vs row.
+        // The form has tag `vs-i`, and the row has POS `vs`.
         let mut d = FakeDictionary::new();
         d.add_term("する", Some("する"), Some("する"), "vs", Some(10), 1, 1);
         d.add_entry(1, 1, &glossary("to do", "vs"));
@@ -354,14 +351,14 @@ mod tests {
         );
     }
 
-    /// The test above cannot see a ranking defect: with one term in the
-    /// dictionary する wins by default. A ranking defect needs a crowd, so
-    /// this one reproduces the shape of a real frequency-less library at
-    /// してしまった - every row consumes the whole input, none carries a
-    /// frequency, and the only form the deconjugator resolves all the way to
-    /// a word class is also the one that took the most rules to reach. The
-    /// nouns are homographs of the stems on the way there (し, して), which
-    /// is the only reason they are candidates at all.
+    /// The previous test cannot expose a defect in rank order. With one term,
+    /// する wins by default. This test adds many candidates like a real
+    /// frequency-less library for してしまった.
+    ///
+    /// Every row consumes the full input and has no frequency. The only form that
+    /// the deconjugator resolves to a word class also uses the most rules. The
+    /// nouns are homographs of the stems: し and して. That text match makes
+    /// them candidates.
     #[test]
     fn whole_parse_survives_a_crowd_of_stem_homographs() {
         const SHI: &[&str] = &[
@@ -381,7 +378,7 @@ mod tests {
 
         let hits = engine().run(&d, "してしまった").unwrap();
         let shown: Vec<Option<String>> = hits.iter().map(|h| h.written.clone()).collect();
-        // Otherwise nothing was crowded out and the assertion below is free.
+        // The extra candidates fill `MAX_RESULTS` and expose the rank order.
         assert_eq!(MAX_RESULTS, hits.len(), "expected a full window, got {shown:?}");
         assert_eq!(
             Some(&Some("為る".to_string())),
@@ -392,7 +389,7 @@ mod tests {
 
     #[test]
     fn v1_tagged_form_does_not_match_v5_only_row() {
-        // The filter must still bite.
+        // The POS filter must still reject this row.
         let mut d = FakeDictionary::new();
         d.add_term("食べる", Some("食べる"), Some("たべる"), "v5", Some(500), 1, 1);
         d.add_entry(1, 1, &glossary("wrong pos", "v5"));
@@ -400,7 +397,7 @@ mod tests {
         assert!(hits.is_empty());
     }
 
-    /// Guards vocabulary drift.
+    /// This test detects changes to the rule vocabulary.
     #[test]
     fn all_terminal_dec_tags_are_handled_by_the_mapping() {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -418,7 +415,7 @@ mod tests {
             }
         }
 
-        // Else the guard is vacuous.
+        // The guard has no value when the set is empty.
         assert!(
             !terminal_tags.is_empty(),
             "expected at least one terminal dec_tag from the real rule file"
@@ -446,7 +443,7 @@ mod tests {
 
     #[test]
     fn more_common_word_ranks_first() {
-        // Two entries, two rows.
+        // The Dictionary has two Entries and two term-bank rows.
         let mut d = FakeDictionary::new();
         d.add_term("はし", None, Some("はし"), "", Some(50), 1, 1);
         d.add_entry(1, 1, &glossary("chopsticks", ""));
@@ -471,7 +468,7 @@ mod tests {
     fn results_truncated_to_max() {
         let mut d = FakeDictionary::new();
         for i in 1..=25 {
-            // One entry each.
+            // Add one Entry for each row.
             d.add_term("あ", None, Some("あ"), "", Some(i), i, i);
             d.add_entry(i, i, &glossary("x", ""));
         }
@@ -488,11 +485,11 @@ mod tests {
         assert_eq!(before, ids.len());
     }
 
-    /// The rows a dictionary gives one headword all reach the panel.
+    /// The panel receives every term-bank row that a Dictionary gives one headword.
     ///
-    /// 大辞林 splits one headword's senses across separate term-bank rows -
-    /// 6 220 headwords, worst eleven - and the slot key used to hold
-    /// `dict_id`, so ten of that eleven never left the engine.
+    /// 大辞林 stores one headword's senses in separate term-bank rows. A census found
+    /// 6 220 headwords and a worst case of eleven rows. The old key held `dict_id`,
+    /// so ten of those eleven rows never reached the panel.
     #[test]
     fn every_term_bank_row_of_one_headword_survives() {
         let mut d = FakeDictionary::new();
@@ -513,9 +510,9 @@ mod tests {
         );
     }
 
-    /// The dedupe that must remain. Jitendex writes one term row per surface
-    /// form, so つま and 妻 both point at the one 妻/つま record; rendering it
-    /// twice under its own heading would be the defect, not the fix.
+    /// Keep one row for this Entry. Jitendex writes one term row for each surface
+    /// form. Thus, つま and 妻 both point to one 妻/つま record. Two copies under
+    /// separate headings would be the defect, not the fix.
     #[test]
     fn one_record_reached_through_two_surfaces_is_one_row() {
         let mut d = FakeDictionary::new();
@@ -526,9 +523,9 @@ mod tests {
         assert_eq!(1, engine().run(&d, "妻").unwrap().len());
     }
 
-    /// The cap is inherited, not chosen: a hover renders at most ten rows
-    /// however many a headword matched, and the cap is counted in rows, not
-    /// in dictionaries.
+    /// The cap comes from inherited behavior, not a local choice. A hover shows at
+    /// most ten rows, no matter how many rows match a headword. The cap counts rows,
+    /// not Dictionaries.
     #[test]
     fn the_ten_row_cap_still_holds_when_one_dictionary_fills_it() {
         let mut d = FakeDictionary::new();
@@ -539,11 +536,10 @@ mod tests {
         assert_eq!(MAX_RESULTS, engine().run(&d, "ふし").unwrap().len());
     }
 
-    /// A headword no enabled frequency dictionary ranks keeps this fallback,
-    /// and keeping it is what makes "absent data is not counted" free at
-    /// lookup time (ADR-0015): the reindex writes `NULL` rather than a
-    /// stand-in rank, and `NULL` has always scored exactly as `DEFAULT_FREQ`
-    /// does.
+    /// A headword with no enabled frequency Dictionary keeps this fallback. This
+    /// fallback makes "absent data is not counted" free at lookup time
+    /// (ARCHITECTURE.md#dictionary-and-lookup). Reindex writes `NULL`, not a
+    /// stand-in rank. `NULL` has always scored exactly as `DEFAULT_FREQ` does.
     #[test]
     fn an_unranked_row_scores_exactly_as_a_default_frequency_one() {
         let stand_in = Some(DEFAULT_FREQ as i64);

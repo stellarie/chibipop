@@ -33,9 +33,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 # Support columns come out of these three, never out of a copy here, so the
-# report always scores against the current build. Ticket 02 moved the tag and
-# style tables out of the old `glossary.rs` into the arena parser, and ticket
-# 17 added the stylesheet grammar and property table beside them.
+# report always scores against the current build. The tag and style tables
+# moved out of the old `glossary.rs` into the arena parser, and the
+# stylesheet grammar and property table now sit beside them.
 PARSE_RS = REPO / "src" / "dict" / "gloss" / "parse.rs"
 GLOSS_RS = REPO / "src" / "dict" / "gloss" / "mod.rs"
 SHEET_RS = REPO / "src" / "dict" / "sheet" / "mod.rs"
@@ -320,7 +320,7 @@ def new_css_stats(parse_error: str | None = None) -> dict:
         "box_props": collections.Counter(),
         "box_rules": 0,
         "at_rules": collections.Counter(),
-        # ---- scored against the live grammar (ticket 17) ----
+        # ---- scored against the live grammar ----
         # These four partition `rules`, exactly as `dict::sheet::SheetCounts`
         # does, so the census and the matcher report the same arithmetic.
         "rules_kept": 0,

@@ -1,31 +1,34 @@
-//! The Linux text stack: cosmic-text behind core's `TextMeasure`, plus
-//! the paint half and the startup Japanese-font probe (ADR-0004).
+//! The Linux text stack. cosmic-text sits behind core's `TextMeasure`.
+//! This module also holds the paint half and the startup Japanese-font
+//! probe.
 //!
-//! **The locale is the whole feature.** cosmic-text picks a Han fallback
-//! through `han_unification(locale)`, and on unix only `"ja"` yields
-//! `Noto Sans CJK JP`; every other arm - including the `en-US` that
-//! `sys_locale` hands `FontSystem::new()` on a stock desktop - yields
-//! `Noto Sans CJK SC`, i.e. *Chinese* glyph shapes for kanji. Nothing
-//! errors, nothing logs: the popup just quietly teaches the user the
-//! wrong character forms, which is the one failure this product cannot
-//! ship. So the `FontSystem` is built by hand with the locale pinned,
-//! never by `FontSystem::new()`.
+//! **The locale is the whole feature.** cosmic-text picks a Han
+//! fallback through `han_unification(locale)`. On unix, only `"ja"`
+//! gives `Noto Sans CJK JP`. Every other arm gives `Noto Sans CJK SC`,
+//! which draws kanji with *Chinese* glyph shapes. A stock desktop hits
+//! one of those arms, because `sys_locale` hands `en-US` to
+//! `FontSystem::new()`. cosmic-text reports no error and logs nothing.
+//! The popup then teaches the user the wrong character forms, and this
+//! product cannot ship that failure. Therefore this module builds the
+//! `FontSystem` by hand and pins the locale. It never calls
+//! `FontSystem::new()`.
 //!
-//! **One shaping path.** `measure` and `draw_run` both go through
-//! [`shape`], so a run is never wrapped one way and painted another
-//! (ADR-0004). Windows earns the same property by routing both through
-//! one `IDWriteTextLayout`; the twin here is
-//! `chibipop-windows/src/ui/render.rs`'s `Text::layout`.
+//! **One shaping path.** `measure` and `draw_run` both call [`shape`].
+//! No run wraps one way and paints another. Windows earns the same
+//! property from one `IDWriteTextLayout`. The twin there is
+//! `Text::layout` in `chibipop-windows/src/ui/render.rs`.
 //!
-//! **Physical pixels only.** `size` and `max_w` arrive already scaled by
-//! `popup::physical_theme`; there is no logical-pixel arithmetic here.
+//! **Physical pixels only.** `popup::physical_theme` scales `size` and
+//! `max_w` before they arrive. This module holds no logical-pixel
+//! arithmetic.
 //!
-//! Where the twins diverge: DirectWrite hit-tests UTF-16 natively, so
-//! Windows passes core's caret offsets straight to
-//! `HitTestTextPosition`. cosmic-text is UTF-8 throughout -
-//! `LayoutGlyph::start`/`end` are byte ranges into the line - so the
-//! UTF-16 offsets core zips against kanji have to be walked back into
-//! byte offsets here ([`byte_offset`]).
+//! The twins diverge at hit-testing. DirectWrite hit-tests UTF-16
+//! natively, so Windows passes core's caret offsets straight to
+//! `HitTestTextPosition`. cosmic-text is UTF-8 throughout, and
+//! `LayoutGlyph::start`/`end` are byte ranges into the line. Core
+//! pairs its UTF-16 offsets with the kanji of a headword. Therefore
+//! [`byte_offset`] converts each of those offsets into a byte offset
+//! here.
 
 use chibipop::ui::layout::{
     GlyphBox, LineBox, MeasureError, MeasureRun, Measured, Metrics, SpanBox, StyledSpan,
@@ -41,48 +44,50 @@ use crate::popup::{DrawRun, PanelText};
 
 /// Line advance, as a multiple of the font size.
 ///
-/// Deliberate, and the one number core's line stacking rests on: every
-/// run's height is a whole number of these, so blocks stack exactly.
-/// Noto Sans CJK JP's `hhea` ascent+descent is 1.448 em with a zero line
-/// gap - correct but airy - while Yu Gothic UI through DirectWrite, the
-/// density the Windows popup ships and the one users compare against,
-/// lands near 1.36 em. 1.4 sits between them: tight enough that a Linux
-/// popup is not visibly looser than the Windows one, loose enough that
-/// full-height kana and kanji plus a descender never collide, since the
-/// panel is painted without clipping and neighbouring lines would
+/// Core's line stacking rests on this one number. Every run's height
+/// is a whole number of these advances, so blocks stack exactly. The
+/// `hhea` ascent plus descent of Noto Sans CJK JP is 1.448 em with a
+/// zero line gap. That value is correct but loose. Yu Gothic UI
+/// through DirectWrite reaches about 1.36 em, and the Windows popup
+/// uses that value. Users compare against the Windows popup, so 1.4
+/// sits between the two numbers. 1.4 is tight enough to keep the
+/// Linux popup no looser than the Windows one. 1.4 is also loose
+/// enough to keep full-height kana and kanji clear of a descender.
+/// The panel paints with no clipping. Lines next to each other would
 /// otherwise touch ink.
 const LINE_HEIGHT: f32 = 1.4;
 
-/// cosmic-text asserts on a zero font size or line height, and a scene
-/// that asks for one is a caller bug, not a reason to abort the daemon
-/// mid-paint. Clamping also disarms NaN: `f32::max` returns the finite
-/// operand.
+/// cosmic-text asserts on a zero font size or line height. A scene
+/// that asks for zero is a caller bug. That bug must not abort the
+/// daemon mid-paint. The clamp also disarms NaN, because `f32::max`
+/// returns the finite operand.
 const MIN_SIZE: f32 = 1.0;
 
-/// The kanji the startup probe shapes: 漢字, two of the commonest
-/// ideographs. If these are tofu, everything the popup shows is tofu.
+/// The kanji the startup probe shapes: 漢字, two of the most common
+/// ideographs. If these two are tofu, every glyph the popup shows is
+/// tofu.
 const PROBE_TEXT: &str = "\u{6f22}\u{5b57}";
 
 /// The package to name in the missing-font warning.
 ///
-/// Arch/`noto-fonts-cjk`; Debian and Fedora both ship an alias or a
-/// virtual package under this name, and naming one concrete family in
-/// the message covers the rest.
+/// Arch calls the package `noto-fonts-cjk`. Debian and Fedora both
+/// ship an alias or a virtual package under the same name. The message
+/// names one concrete family, and that name covers the rest.
 pub const PACKAGE: &str = "noto-fonts-cjk";
 
 /// cosmic-text, with the locale pinned and its caches warm.
 ///
-/// One per daemon: building it parses every installed face, which costs
-/// the better part of a second.
+/// One per daemon. The constructor parses every installed face, which
+/// costs the better part of a second.
 pub struct TextEngine {
     fonts: FontSystem,
-    /// Rasterized glyph images, keyed by face+size+subpixel offset. The
-    /// popup re-shapes on every paint (ADR-0004) and this is what makes
-    /// that free after the first frame.
+    /// Rasterized glyph images, keyed by face, size and subpixel
+    /// offset. The popup re-shapes on every paint, and this cache makes
+    /// each re-shape after the first frame free.
     swash: SwashCache,
-    /// The family the config resolved to, used for painting. `measure`
-    /// takes its family from the run instead, because core carries the
-    /// theme's name through the scene.
+    /// The family the config resolved to. The paint path uses it.
+    /// `measure` takes its family from the run instead, because core
+    /// carries the theme's name through the scene.
     family: String,
 }
 
@@ -90,16 +95,16 @@ impl TextEngine {
     pub fn new(family: &str) -> TextEngine {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
-        // The generic aliases (`Family::Serif` and friends) are left at
-        // fontdb's defaults on purpose: every run this engine shapes
-        // names a concrete family, and the Han fallback list is concrete
-        // family names too, so nothing ever consults them.
+        // The generic aliases (`Family::Serif` and friends) stay at
+        // fontdb's defaults on purpose. Every run this engine shapes
+        // names a concrete family, and the Han fallback list holds
+        // concrete family names too. Nothing consults the aliases.
         //
-        // Locale `"ja"`, and never `FontSystem::new()`: see the module
-        // doc and ADR-0004 ("Fractional scale and fonts"). The default
-        // arm of cosmic-text's `han_unification` is Simplified Chinese,
-        // so a system locale of `en-US` would silently render kanji with
-        // Chinese glyph variants.
+        // Use the locale `"ja"`, and never `FontSystem::new()`. See the
+        // module doc. The default arm of cosmic-text's
+        // `han_unification` is Simplified Chinese, so a system locale
+        // of `en-US` renders kanji with Chinese glyph variants and
+        // reports no error.
         TextEngine {
             fonts: FontSystem::new_with_locale_and_db("ja".to_string(), db),
             swash: SwashCache::new(),
@@ -107,30 +112,30 @@ impl TextEngine {
         }
     }
 
-    /// The family paints go through.
+    /// The family the paint path uses.
     pub fn family(&self) -> &str {
         &self.family
     }
 
-    /// Point paints at another family, without reloading the font db.
+    /// Select another family for paints, and keep the loaded font db.
     ///
-    /// Resolution happens *after* the engine exists - `resolve_font`
-    /// asks it whether the configured family is installed - and a
-    /// reload can change the family again later. Parsing every
-    /// installed face a second time for a string swap would cost the
-    /// better part of a second on the daemon thread.
+    /// The engine exists *before* resolution: `resolve_font` asks the
+    /// engine whether the configured family is installed. A reload can
+    /// change the family again later. A second parse of every
+    /// installed face for one string swap would cost the better part
+    /// of a second on the daemon thread.
     pub fn set_family(&mut self, family: &str) {
         self.family.clear();
         self.family.push_str(family);
     }
 
-    /// Does the font stack have `family`?
+    /// True when the font stack holds `family`.
     ///
-    /// The `resolvable` closure `chibipop::config::resolve_font` wants,
-    /// and it has to answer honestly: a `false` is what turns the
-    /// configured family into a visible `FontChoice::Fallback`. Folding
-    /// is ASCII-only, so localized Japanese family names compare
-    /// exactly - which is what the user typed either way.
+    /// `chibipop::config::resolve_font` wants this closure, and the
+    /// answer must be honest. A `false` turns the configured family
+    /// into a visible `FontChoice::Fallback`. The fold is ASCII-only,
+    /// so localized Japanese family names compare exactly. That form
+    /// is what the user typed either way.
     pub fn resolvable(&self, family: &str) -> bool {
         self.fonts
             .db()
@@ -139,14 +144,17 @@ impl TextEngine {
             .any(|(name, _)| name.eq_ignore_ascii_case(family))
     }
 
-    /// What Japanese will look like on this machine.
+    /// What Japanese looks like on this machine.
     ///
-    /// Two independent facts: whether kanji resolve to real glyphs at
-    /// all (shaped here, the only authority on tofu) and whether the
-    /// family that answers is Japanese (a name question, [`classify`]).
+    /// The answer rests on two independent facts. Fact one is whether
+    /// kanji resolve to real glyphs at all. This method shapes them
+    /// and is the only authority on tofu. Fact two is whether the
+    /// family that answers is Japanese. That fact is a name question,
+    /// and [`classify`] answers it.
     pub fn probe(&mut self) -> JpFonts {
-        // Shape first: `db()` borrows the same `FontSystem` the shaping
-        // mutates, and the name list borrows out of the db.
+        // Shape first. The shape call takes `&mut FontSystem`, `db()`
+        // borrows the same `FontSystem`, and the name list borrows out
+        // of the db.
         let covered = covers(&mut self.fonts, &self.family, PROBE_TEXT);
         let own = self.resolvable(&self.family);
         let mut names: Vec<&str> = self
@@ -159,9 +167,9 @@ impl TextEngine {
         names.sort_unstable();
         names.dedup();
         if own {
-            // Ask about the family the popup actually paints with first,
-            // so a verdict names that one rather than whichever installed
-            // Japanese family happens to sort earliest.
+            // Ask about the family the popup paints with first. A
+            // verdict then names that family, and not whichever
+            // installed Japanese family sorts earliest.
             names.insert(0, &self.family);
         }
         classify(&names, covered)
@@ -170,37 +178,38 @@ impl TextEngine {
     /// The one shaping call.
     ///
     /// Measure and paint both come through here, on the same styled
-    /// spans, so a run is never wrapped one way and painted another
-    /// (ADR-0004).
+    /// spans. No run wraps one way and paints another.
     ///
-    /// An associated function, not a method, so a caller can hand it
-    /// `&mut self.fonts` while still holding `&self.family`.
+    /// This is an associated function, not a method. A caller can
+    /// therefore hand it `&mut self.fonts` and hold `&self.family` at
+    /// the same time.
     fn shape(fonts: &mut FontSystem, spans: &[StyledSpan<'_>], max_w: f32) -> Buffer {
         // The buffer's own metrics answer for a line with no glyphs on
-        // it, which is the only line the spans cannot speak for.
+        // it. That line is the only line the spans cannot speak for.
         let size = spans.first().map_or(MIN_SIZE, |s| s.size).max(MIN_SIZE);
         let mut buffer = Buffer::new_empty(CosmicMetrics::new(size, size * LINE_HEIGHT));
-        // No height bound: shape every wrapped line, not just the ones
-        // that would fit a viewport. Core culls off-panel runs itself
-        // and needs the full metrics to decide.
+        // No height bound: shape every wrapped line, not only the
+        // lines that fit a viewport. Core culls off-panel runs itself,
+        // and it needs the full metrics to decide.
         //
-        // The width clamp is the same one DirectWrite gets on Windows: a
-        // measurer that cannot wrap at zero clamps itself, and the scene
-        // still reports the width it asked for.
+        // DirectWrite gets the same width clamp on Windows. A measurer
+        // that cannot wrap at zero clamps itself, and the scene still
+        // reports the width it asked for.
         buffer.set_size(Some(max_w.max(1.0)), None);
-        // Words first, glyphs when a "word" cannot fit alone. Japanese
-        // has no spaces, so the segmenter treats runs of ideographs as
-        // their own words and this behaves like CJK line breaking; the
-        // glyph fallback is what keeps a long Latin headword inside a
-        // narrow panel.
+        // Words first, then glyphs when one "word" cannot fit alone.
+        // Japanese has no spaces, so the segmenter treats runs of
+        // ideographs as their own words. That behaves like CJK line
+        // breaking. The glyph rule keeps a long Latin headword inside
+        // a narrow panel.
         buffer.set_wrap(Wrap::WordOrGlyph);
-        // `set_rich_text`, not `set_text`: the spans wrap as one
-        // paragraph, so a span boundary is not a line boundary and bold
-        // text can share a line with normal text (ADR-0013). Per-span
-        // `metrics` is what carries each span's own size into the line
-        // height cosmic-text takes the maximum of - the default attrs
-        // deliberately carry none, so a glyphless line still falls back
-        // to the buffer's.
+        // Call `set_rich_text`, not `set_text`. The spans wrap as one
+        // paragraph, so a span boundary is not a line boundary. Bold
+        // text can therefore share a line with normal text
+        // (ARCHITECTURE.md#popup-and-measurement). Per-span `metrics`
+        // carries each span's own size into the line height, and
+        // cosmic-text takes the maximum of those sizes. The default
+        // attrs carry no metrics on purpose, so a glyphless line uses
+        // the buffer's metrics.
         let default = spans.first().map_or_else(Attrs::new, attrs_of);
         let styled = spans.iter().map(|s| {
             let size = s.size.max(MIN_SIZE);
@@ -214,12 +223,12 @@ impl TextEngine {
 
 /// One span's shaping attributes, minus its size.
 ///
-/// Weight and style are the theme's, per role (CSS theming): fontdb
-/// weights are the same 100-900 numbers DirectWrite takes, so the
+/// The theme sets weight and style for each role (CSS theming). fontdb
+/// weights are the same 100-900 numbers that DirectWrite takes, so the
 /// scene's number travels unconverted. A family with no bold or italic
-/// face still shapes - fontdb picks the nearest weight it has, and
-/// cosmic-text does not synthesize - so a missing face costs the
-/// emphasis, never the run.
+/// face still shapes: fontdb picks the nearest weight it holds, and
+/// cosmic-text synthesizes nothing. A missing face therefore costs the
+/// emphasis, and never the run.
 fn attrs_of<'a>(span: &StyledSpan<'a>) -> Attrs<'a> {
     Attrs::new()
         .family(Family::Name(span.font))
@@ -229,10 +238,10 @@ fn attrs_of<'a>(span: &StyledSpan<'a>) -> Attrs<'a> {
 
 /// One coverage probe's span.
 ///
-/// Regular and upright: a probe asks which face answers for a
-/// character, and a family's bold or italic face - if it has one -
-/// covers what its regular one does. Colour is not a measurement
-/// input, so black is as good as any.
+/// The span is regular and upright. A probe asks which face answers
+/// for a character. A family's bold or italic face, when the family
+/// has one, covers what its regular face covers. Color is not a
+/// measurement input, so black serves as well as any other color.
 fn probe_span<'a>(text: &'a str, family: &'a str, size: f32) -> StyledSpan<'a> {
     StyledSpan {
         text,
@@ -244,7 +253,7 @@ fn probe_span<'a>(text: &'a str, family: &'a str, size: f32) -> StyledSpan<'a> {
     }
 }
 
-/// The line advance a run of `size` stacks by.
+/// The line advance that a run of `size` uses to stack.
 fn line_height(size: f32) -> f32 {
     size.max(MIN_SIZE) * LINE_HEIGHT
 }
@@ -252,20 +261,22 @@ fn line_height(size: f32) -> f32 {
 impl TextMeasure for TextEngine {
     /// Never `Err`.
     ///
-    /// The fallible signature exists for DirectWrite's HRESULTs; a
-    /// pure-Rust shaper has nothing to refuse. Missing glyphs are not a
-    /// failure here either - cosmic-text falls back and then emits
-    /// `.notdef`, which measures like any other glyph. Tofu is reported
-    /// once at startup by [`TextEngine::probe`], not per run.
+    /// The fallible signature exists for DirectWrite's HRESULTs. A
+    /// pure-Rust shaper has nothing to refuse. Missing glyphs are no
+    /// failure here either: cosmic-text picks a fallback and then
+    /// emits `.notdef`, which measures like any other glyph.
+    /// [`TextEngine::probe`] reports tofu once at startup, and no
+    /// caller reports it per run.
     fn measure(&mut self, run: MeasureRun<'_>, out: &mut Measured) -> Result<(), MeasureError> {
         out.clear();
         let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
         let mut w = 0.0f32;
-        // Summed wide and rounded once. Every line of a one-style run
-        // is the same advance, and the seam this widened reported
-        // `lines × advance` - which repeated `f32` addition drifts an
-        // ulp below by the eighth line. A block stack that moves is a
-        // golden that moves, so the drift is not affordable.
+        // Sum wide, and round once. Every line of a one-style run has
+        // the same advance, and the seam this widening protects
+        // reported `lines × advance`. Repeated `f32` addition drifts
+        // one ulp below that product by the eighth line. A block stack
+        // that moves is a golden that moves, so this code cannot
+        // afford the drift.
         let mut h = 0.0f64;
         let mut bases = LineBases::default();
         for (i, line) in buffer.layout_runs().enumerate() {
@@ -276,8 +287,8 @@ impl TextMeasure for TextEngine {
                 y: line.line_top,
                 w: line.line_w,
                 h: line.line_height,
-                // `line_y` is the baseline in buffer space; a line box
-                // reports it from the line's own top.
+                // `line_y` is the baseline in buffer space. A line box
+                // reports the baseline from the line's own top.
                 baseline: line.line_y - line.line_top,
             });
             for glyph in line.glyphs {
@@ -286,8 +297,8 @@ impl TextMeasure for TextEngine {
                 };
                 let (s, i) = (s as u32, i as u32);
                 // Glyphs arrive in visual order, so a span's box on
-                // this line is the last one pushed for it and only
-                // ever grows.
+                // this line is the last box pushed for that span. That
+                // box only grows.
                 match out.spans.iter_mut().rev().find(|b| b.span == s && b.line == i) {
                     Some(b) => {
                         let right = (b.x + b.w).max(glyph.x + glyph.w);
@@ -304,17 +315,17 @@ impl TextMeasure for TextEngine {
                 }
             }
         }
-        // An empty run is one empty line, not zero: core stacks the gap
-        // after it either way.
+        // An empty run is one empty line, and never zero lines. Core
+        // stacks the gap after the run either way.
         if out.lines.is_empty() {
             h = f64::from(line_height(run.spans.first().map_or(0.0, |s| s.size)));
-            // cosmic-text centres a glyphless line's baseline in it,
-            // there being no ascent to hang it from.
+            // cosmic-text centers a glyphless line's baseline inside
+            // the line. The line has no ascent to hang it from.
             let h = h as f32;
             out.lines.push(LineBox { y: 0.0, w: 0.0, h, baseline: h / 2.0 });
         }
-        // Stackable by construction - a whole number of line advances,
-        // never an ink box. Core's walk adds these up.
+        // Stackable by construction: a whole number of line advances,
+        // and never an ink box. Core's walk sums these values.
         out.metrics = Metrics { w, h: h as f32, lines: out.lines.len() as u32 };
         Ok(())
     }
@@ -326,9 +337,10 @@ impl TextMeasure for TextEngine {
         out: &mut Vec<GlyphBox>,
     ) -> Result<(), MeasureError> {
         let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
-        // Exactly one box per offset, in order: core zips these 1:1 with
-        // the kanji of a headword to build per-character hit targets, so
-        // a skipped offset would silently shift every target after it.
+        // One box per offset, in order. Core pairs these boxes 1:1
+        // with the kanji of a headword to build per-character hit
+        // targets. A skipped offset would shift every later target,
+        // and nothing would report the shift.
         for &offset in at {
             out.push(caret_box(&buffer, run.spans, offset));
         }
@@ -339,23 +351,23 @@ impl TextMeasure for TextEngine {
 impl PanelText for TextEngine {
     /// One shaping call, one glyph walk.
     ///
-    /// `Buffer::draw` would do the walk, but it offers no place to put
-    /// a per-span baseline shift and no place to read a span back off
-    /// a glyph, so the walk is here: cosmic-text's own two lines plus
-    /// the shift, which enters as the glyph's own y offset.
+    /// `Buffer::draw` would do the walk. But it offers no place for a
+    /// per-span baseline shift, and no place to read a span back off a
+    /// glyph. Therefore the walk lives here: cosmic-text's own two
+    /// lines plus the shift, which enters as the glyph's own y offset.
     fn draw_run(&mut self, run: DrawRun<'_>, target: &mut PixmapMut<'_>) {
-        // The family the config resolved to, not the theme's name:
-        // measuring takes the name the scene carries, painting takes
-        // the one that is actually installed. Disjoint field borrows -
-        // `family` here, `fonts` and `swash` below - are why `shape` is
-        // an associated function.
+        // Use the family the config resolved to, not the theme's name.
+        // Measurement takes the name the scene carries. Paint takes
+        // the name that is installed. The borrows must stay disjoint -
+        // `family` here, and `fonts` plus `swash` below - which is why
+        // `shape` is an associated function.
         let family = self.family.as_str();
         let spans: Vec<StyledSpan<'_>> =
             run.spans.iter().map(|s| StyledSpan { font: family, ..*s }).collect();
         let buffer = TextEngine::shape(&mut self.fonts, &spans, run.max_w);
-        // The glyph raster is already snapped to the pixel grid by
-        // cosmic-text, so the wrap box's own origin is too; a fractional
-        // pen would only smear the hinting.
+        // cosmic-text snaps the glyph raster to the pixel grid, so the
+        // wrap box's own origin snaps too. A fractional pen would only
+        // smear the hinting.
         let (ox, oy) = (round(run.origin.0), round(run.origin.1));
         let (w, h) = (target.width() as i32, target.height() as i32);
         let stride = target.width() as usize;
@@ -364,17 +376,17 @@ impl PanelText for TextEngine {
         for line in buffer.layout_runs() {
             let base = bases.advance(&spans, &line);
             for glyph in line.glyphs {
-                // A glyph no span claims - which the seam's own
-                // measurement also skips - keeps the first span's
-                // colour and sits on the baseline.
+                // A glyph that no span claims keeps the first span's
+                // color and sits on the baseline. The seam's own
+                // measurement skips such a glyph too.
                 let (index, span) = match span_at(&spans, base + glyph.start) {
                     Some(found) => found,
                     None => (0, &spans[0]),
                 };
                 let shift = run.shifts.get(index).copied().unwrap_or(0.0);
-                // `verticalAlign` raises the glyph off the baseline its
-                // line reported, which is the whole arithmetic
-                // ADR-0013's baseline exists for.
+                // `verticalAlign` raises the glyph off the baseline
+                // that its line reported. The measured baseline exists
+                // for this arithmetic.
                 let placed = glyph.physical((0.0, line.line_y - shift), 1.0);
                 let (r, g, b) = span.color;
                 let (gx, gy) = (placed.x.saturating_add(ox), placed.y.saturating_add(oy));
@@ -383,20 +395,22 @@ impl PanelText for TextEngine {
                     placed.cache_key,
                     Color::rgb(r, g, b),
                     |dx, dy, color| {
-                        // Straight alpha: for a mask glyph -
-                        // everything our faces produce - cosmic-text
-                        // hands back the base RGB with the coverage in
-                        // alpha. Colour bitmaps (emoji) come through
-                        // the same arm and are premultiplied a second
-                        // time, which costs a shade of saturation on a
-                        // path a dictionary popup barely has.
+                        // Straight alpha: for a mask glyph,
+                        // cosmic-text hands back the base RGB with the
+                        // coverage in alpha. Every face this popup
+                        // loads makes mask glyphs. Color bitmaps
+                        // (emoji) come through the same arm and get
+                        // premultiplied a second time. That costs a
+                        // shade of saturation, on a path a dictionary
+                        // popup rarely takes.
                         let a = u32::from(color.a());
                         if a == 0 {
                             return;
                         }
-                        // Clip, don't trust: cosmic-text reports the
-                        // glyph's ink box, which overhangs the wrap box
-                        // on both sides and goes negative for a leading
+                        // Clip, and do not trust the numbers.
+                        // cosmic-text reports the glyph's ink box.
+                        // That box overhangs the wrap box on both
+                        // sides, and it goes negative for a leading
                         // side bearing.
                         let (x, y) = (gx.saturating_add(dx), gy.saturating_add(dy));
                         if x < 0 || y < 0 || x >= w || y >= h {
@@ -408,10 +422,11 @@ impl PanelText for TextEngine {
                         let i = y as usize * stride + x as usize;
                         let dst = px[i];
                         // Premultiplied source-over onto the panel
-                        // background, which is already there. The result
-                        // keeps `rgb <= a` because each channel is
-                        // monotone in a value that already did, so
-                        // `from_rgba` cannot actually refuse it.
+                        // background, which the pixmap already holds.
+                        // The result keeps `rgb <= a`, because each
+                        // channel is monotone in a value that already
+                        // kept that bound. `from_rgba` therefore
+                        // cannot refuse the result.
                         if let Some(c) = PremultipliedColorU8::from_rgba(
                             over(r, a, u32::from(dst.red()), inv),
                             over(g, a, u32::from(dst.green()), inv),
@@ -447,24 +462,24 @@ fn round(v: f32) -> i32 {
 
 /// Where the current buffer line starts, over a run's whole text.
 ///
-/// Glyph offsets are relative to their *buffer line*, and
-/// `set_rich_text` splits the spans' text on line endings and strips
-/// them, so anything mapping a glyph back to the text it came from has
-/// to accumulate the lines' bases. Core's runs are single lines today;
-/// this keeps the answer right if one ever is not.
+/// Glyph offsets are relative to their *buffer line*. `set_rich_text`
+/// splits the spans' text on line endings and strips those endings.
+/// Any code that maps a glyph back to its source text must therefore
+/// accumulate the lines' bases. Core's runs are single lines today.
+/// This struct keeps the answer right when one run is not.
 #[derive(Default)]
 struct LineBases {
     /// Bytes before the current line.
     base: usize,
-    /// The buffer line it counts to.
+    /// The buffer line that `base` counts to.
     line: Option<usize>,
     /// That line's length in bytes.
     len: usize,
 }
 
 impl LineBases {
-    /// The base for `line`, which must not precede the last one asked
-    /// for: layout runs arrive top down.
+    /// The base for `line`, which must not precede the last line asked
+    /// for. Layout runs arrive top down.
     fn advance(&mut self, spans: &[StyledSpan<'_>], line: &LayoutRun<'_>) -> usize {
         if self.line != Some(line.line_i) {
             if self.line.is_some() {
@@ -479,12 +494,12 @@ impl LineBases {
 
 /// The byte offset `utf16` names in a run's spans, end to end.
 ///
-/// DirectWrite hit-tests UTF-16 code-unit offsets natively; cosmic-text
-/// is UTF-8 and its glyph clusters are byte ranges, so the conversion
-/// lands here. Walking is the honest way to do it - a UTF-16 offset has
-/// no arithmetic relation to a byte offset once the text leaves the BMP,
-/// and Japanese text reaches into it (astral kanji, emoji in a gloss).
-/// An offset past the end answers the end.
+/// DirectWrite hit-tests UTF-16 code-unit offsets natively.
+/// cosmic-text is UTF-8, and its glyph clusters are byte ranges, so
+/// the conversion lands here. A walk is the honest method: once the
+/// text leaves the BMP, a UTF-16 offset has no arithmetic relation to
+/// a byte offset. Japanese text reaches past the BMP, with astral
+/// kanji and emoji in a gloss. An offset past the end answers the end.
 fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
     let mut units = 0u32;
     let mut base = 0usize;
@@ -502,8 +517,8 @@ fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
 
 /// The span covering byte offset `at`, and its index.
 ///
-/// Linear: a paragraph carries a handful of spans and a search
-/// structure would cost more to build than it saves.
+/// The search is linear. A paragraph carries a handful of spans, and a
+/// search structure would cost more to build than it saves.
 fn span_at<'a, 's>(
     spans: &'a [StyledSpan<'s>],
     at: usize,
@@ -520,20 +535,22 @@ fn span_at<'a, 's>(
 
 /// The box of the cluster covering UTF-16 offset `utf16`.
 ///
-/// An offset that no glyph covers - past the end of the text, or inside
-/// a cluster boundary core did not expect - answers a zero-width box at
-/// the end of the last line rather than panicking or being skipped.
+/// Two kinds of offset match no glyph: an offset past the end of the
+/// text, and an offset inside a cluster boundary core did not expect.
+/// Such an offset answers a zero-width box at the end of the last
+/// line. This function never panics, and it never skips the offset.
 fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox {
     let target = byte_offset(spans, utf16);
-    // A run with no lines at all has no shaped height to report, so the
-    // first span's own advance stands in.
+    // A run with no lines at all has no shaped height to report, so
+    // the first span's own advance answers instead.
     let empty = line_height(spans.first().map_or(0.0, |s| s.size));
     let mut end = GlyphBox { x: 0.0, y: 0.0, w: 0.0, h: empty };
     let mut bases = LineBases::default();
     for run in buffer.layout_runs() {
         let base = bases.advance(spans, &run);
-        // The caret is as tall as the line it lands on, so a small span
-        // beside a large one still gives a full-height hit target.
+        // The caret is as tall as the line it lands on. A small span
+        // beside a large one therefore still gives a full-height hit
+        // target.
         let h = run.line_height;
         end = GlyphBox { x: run.line_w, y: run.line_top, w: 0.0, h };
         for glyph in run.glyphs {
@@ -567,16 +584,16 @@ fn ending_len(spans: &[StyledSpan<'_>], at: usize) -> usize {
     }
 }
 
-/// Does `family` render `text` as anything but tofu?
+/// True when `family` renders `text` as something other than tofu.
 fn covers(fonts: &mut FontSystem, family: &str, text: &str) -> bool {
-    // Wide enough that nothing wraps; the probe only cares about glyph
-    // ids, but a wrap would not change them anyway.
+    // Wide enough that nothing wraps. The probe cares only about glyph
+    // ids, and a wrap would not change them anyway.
     let buffer = TextEngine::shape(fonts, &[probe_span(text, family, 16.0)], 1024.0);
     let mut any = false;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
-            // Glyph 0 is `.notdef` - the box the user sees when no face
-            // in the fallback chain covered the character.
+            // Glyph 0 is `.notdef`. The user sees that box when no
+            // face in the fallback chain covered the character.
             if glyph.glyph_id == 0 {
                 return false;
             }
@@ -588,13 +605,14 @@ fn covers(fonts: &mut FontSystem, family: &str, text: &str) -> bool {
 
 // ---- the Japanese-font probe ----
 
-/// What kanji will look like on this machine.
+/// What kanji look like on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JpFonts {
     /// A Japanese-capable family is installed and kanji resolve.
     Present { family: String },
-    /// Kanji resolve, but only from a Chinese or Korean family, so Han
-    /// unification hands out the wrong glyph shapes for Japanese.
+    /// Kanji resolve, but only from a Chinese or Korean family. Han
+    /// unification therefore gives the wrong glyph shapes for
+    /// Japanese.
     WrongVariant { family: String },
     /// No CJK coverage at all: kanji are tofu.
     Missing,
@@ -602,12 +620,14 @@ pub enum JpFonts {
 
 /// Family-name markers that mean "this family draws Japanese".
 ///
-/// Substring matches, folded to lower case. Two shapes of evidence: an
-/// explicit JP locale tag (`CJK JP`, ` JP`) and the names of the
-/// families Linux distributions actually ship Japanese in. The bare
-/// `gothic`/`mincho` entries are the Japanese type classes and catch the
-/// long tail (`TakaoGothic`, `Sazanami Mincho`, distro-renamed IPA
-/// builds); [`NON_JP`] and [`FALSE_GOTHIC`] veto them first.
+/// The entries are substrings, folded to lower case. They carry two
+/// shapes of evidence. Evidence one is an explicit JP locale tag, such
+/// as `CJK JP` or ` JP`. Evidence two is the name of a family that
+/// Linux distributions ship Japanese in. The bare `gothic` and
+/// `mincho` entries name the Japanese type classes, and they catch the
+/// long tail: `TakaoGothic`, `Sazanami Mincho`, and distro-renamed IPA
+/// builds. [`NON_JP`] and [`FALSE_GOTHIC`] veto those two entries
+/// first.
 const JP_MARKERS: &[&str] = &[
     "cjk jp",
     " jp",
@@ -635,12 +655,12 @@ const JP_MARKERS: &[&str] = &[
 
 /// CJK families that are not Japanese.
 ///
-/// Checked before [`JP_MARKERS`], so a name matching both loses: this is
-/// what keeps `Noto Sans CJK SC` out of the JP bucket even though it
-/// contains no JP tag but does contain `Sans`, and what keeps
-/// `Hiragino Sans GB` (a Simplified Chinese face with a Japanese
-/// vendor's name) and `Gothic A1` (Korean) out of it too. A name from
-/// this table is also what a `WrongVariant` verdict points at.
+/// This table runs before [`JP_MARKERS`], so a name that matches both
+/// tables loses. That order keeps `Noto Sans CJK SC` out of the JP
+/// bucket, because the name holds no JP tag but does hold `Sans`. The
+/// same order keeps out `Hiragino Sans GB`, a Simplified Chinese face
+/// with a Japanese vendor's name, and `Gothic A1`, which is Korean. A
+/// `WrongVariant` verdict also points at a name from this table.
 const NON_JP: &[&str] = &[
     "cjk sc",
     "cjk tc",
@@ -681,15 +701,18 @@ const NON_JP: &[&str] = &[
     "spoqa han sans",
 ];
 
-/// Faces whose name carries "Gothic" for a reason that has nothing to do
-/// with Japanese, and which cover no kanji at all: the American type
-/// term (`Century Gothic` and the rest) and `Noto Sans Gothic`, which
-/// draws Wulfila's Gothic *script* - `U+10330..U+1034A` and a handful of
-/// combining marks, nothing else - and ships in the same `noto-fonts`
-/// package every desktop already has. Without this table one of them
-/// installed beside a Chinese CJK font would pass as Japanese and
-/// suppress the warning the user needs, and the settings font combo
-/// ([`jp_capable`]) would offer a family that can only draw tofu.
+/// Faces whose name carries "Gothic" for a reason unrelated to
+/// Japanese, and which cover no kanji at all.
+///
+/// Two groups land here. Group one is the American type term, such as
+/// `Century Gothic`. Group two is `Noto Sans Gothic`, which draws
+/// Wulfila's Gothic *script*: `U+10330..U+1034A` plus a handful of
+/// combining marks, and nothing else. That face ships in the same
+/// `noto-fonts` package every desktop already has. Without this table,
+/// one such face installed beside a Chinese CJK font would pass as
+/// Japanese and would suppress the warning the user needs. The
+/// settings font combo ([`jp_capable`]) would then offer a family that
+/// can draw only tofu.
 const FALSE_GOTHIC: &[&str] = &[
     "century gothic",
     "urw gothic",
@@ -705,29 +728,29 @@ const FALSE_GOTHIC: &[&str] = &[
 
 /// Trailing locale tags that mean "this CJK family is not Japanese".
 ///
-/// Matched against the last space-separated token, because that is the
-/// only place they are unambiguous: `Sarasa Gothic SC` is Simplified
-/// Chinese and `Sarasa Gothic J` is Japanese, and [`NON_JP`]'s infix
-/// entries (`cjk sc`, `sans sc`) miss both. A Latin small-caps face -
-/// `Alegreya SC` - trips this too, which costs nothing: it never
-/// matched [`JP_MARKERS`], and [`classify`] prefers a recognised CJK
-/// name when it has to point at one.
+/// The match runs against the last space-separated token, because only
+/// that position is unambiguous. `Sarasa Gothic SC` is Simplified
+/// Chinese, and `Sarasa Gothic J` is Japanese. [`NON_JP`]'s infix
+/// entries (`cjk sc`, `sans sc`) miss both names. A Latin small-caps
+/// face such as `Alegreya SC` trips this table too, and that costs
+/// nothing: the name never matched [`JP_MARKERS`], and [`classify`]
+/// prefers a recognized CJK name when it must point at one.
 const LOCALE_TAGS: &[&str] = &["sc", "tc", "hc", "cn", "tw", "hk", "kr", "k"];
 
 fn locale_tagged(lower: &str) -> bool {
     lower.rsplit(' ').next().is_some_and(|tag| LOCALE_TAGS.contains(&tag))
 }
 
-/// Which of [`classify`]'s buckets a family name falls in.
+/// Which of [`classify`]'s buckets holds a family name.
 ///
-/// One lowercasing, one pass over the tables, and one place the order of
-/// the vetoes is written down: [`classify`] needs all four answers and
-/// [`jp_capable`] needs one of them, and a second copy of that order
+/// `bucket` lowercases once, passes over the tables once, and records
+/// the veto order in one place. [`classify`] needs all four answers,
+/// and [`jp_capable`] needs one of them. A second copy of that order
 /// would be a second definition of "Japanese font".
 enum Bucket {
     /// A name the tables read as Japanese.
     Jp,
-    /// A [`NON_JP`] name: recognised, and recognisably not Japanese.
+    /// A [`NON_JP`] name: recognized, and clearly not Japanese.
     NonJp,
     /// A [`LOCALE_TAGS`] name: not Japanese, and not reliably CJK either.
     Tagged,
@@ -748,33 +771,34 @@ fn bucket(family: &str) -> Bucket {
     }
 }
 
-/// Does this family name read as Japanese?
+/// True when this family name reads as Japanese.
 ///
-/// The per-name half of [`classify`], for the settings font combo
-/// (ADR-0005: the combo is populated from fontdb's JP-capable
-/// families). A name question only - there is no shaping here, so
-/// unlike [`classify`] it cannot know what a face's cmap holds. That is
-/// the right trade for a combo, which offers candidates rather than
-/// passing a verdict on the machine.
+/// This is the per-name half of [`classify`], for the settings font
+/// combo (ARCHITECTURE.md#settings-and-config: fontdb's JP-capable
+/// families fill the combo). The check asks about names only. It runs
+/// no shaping, so it cannot know what a face's cmap holds, and
+/// [`classify`] can. That trade suits a combo, which offers candidates
+/// and passes no verdict on the machine.
 pub fn jp_capable(family: &str) -> bool {
     matches!(bucket(family), Bucket::Jp)
 }
 
 /// The verdict for a set of installed families.
 ///
-/// Pure, so the table above is testable without a font stack.
-/// `kanji_covered` comes from actually shaping kanji
-/// ([`TextEngine::probe`]) and outranks every name: a name table cannot
-/// know what a face's cmap holds, so no coverage means [`JpFonts::Missing`]
-/// however Japanese the installed names look.
+/// The function is pure, so a test can exercise the tables above with
+/// no font stack. `kanji_covered` comes from real kanji shaping
+/// ([`TextEngine::probe`]) and outranks every name. A name table
+/// cannot know what a face's cmap holds. Therefore no coverage means
+/// [`JpFonts::Missing`], even when the installed names look Japanese.
 pub fn classify(families: &[&str], kanji_covered: bool) -> JpFonts {
     if !kanji_covered {
         return JpFonts::Missing;
     }
-    // Two buckets of "not Japanese", because they differ in how much
-    // they are worth saying out loud: a family the table recognises can
-    // be named in the warning, a merely locale-tagged one cannot be
-    // trusted to be CJK at all.
+    // Two buckets of "not Japanese", because the warning can say more
+    // about one than the other. The tables recognize a `NON_JP`
+    // family, so the warning can name it. A merely locale-tagged
+    // family is no proof of CJK at all, so the warning must not name
+    // it.
     let mut named = None;
     let mut tagged = None;
     for name in families {
@@ -785,9 +809,10 @@ pub fn classify(families: &[&str], kanji_covered: bool) -> JpFonts {
             Bucket::Neutral => {}
         }
     }
-    // Kanji resolved, so *something* covers them even when no name in
-    // the tables claims it - a bundled pan-CJK face, say. Say so without
-    // naming a family we did not recognise.
+    // Kanji resolved, so *something* covers them, even when no name in
+    // the tables claims them. A bundled pan-CJK face is one example.
+    // Report that fact, and name no family the tables did not
+    // recognize.
     JpFonts::WrongVariant {
         family: named
             .or(tagged)
@@ -801,10 +826,11 @@ fn matches_any(lower: &str, table: &[&str]) -> bool {
 
 /// The one-line diagnostic for a bad verdict.
 ///
-/// Goes to the daemon log and the tray, so it matches the house style of
-/// the other degrade-visibly messages (`cursor:`, `config:`): one line,
-/// lower case, no trailing period, and it names the package rather than
-/// leaving the user to guess.
+/// The text reaches the daemon log and the tray, so it matches the
+/// house style of the other degrade-visibly messages (`cursor:`,
+/// `config:`). That style is one line, lower case, and no trailing
+/// period. The text also names the package, and leaves the user no
+/// guess.
 pub fn warning(verdict: &JpFonts) -> Option<String> {
     match verdict {
         JpFonts::Present { .. } => None,
@@ -823,12 +849,12 @@ pub fn warning(verdict: &JpFonts) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The family the Linux theme default names (ADR-0004).
+    /// The family the Linux theme default names.
     const JP: &str = "Noto Sans CJK JP";
 
-    /// Anything needing real glyph geometry needs a real Japanese face,
-    /// and a CI runner carries almost no fonts. Those tests announce
-    /// themselves out instead of failing.
+    /// A test that needs real glyph geometry needs a real Japanese
+    /// face, and a CI runner carries almost no fonts. Such a test
+    /// prints a skip line instead of a failure.
     fn jp_engine() -> Option<TextEngine> {
         let mut engine = TextEngine::new(JP);
         match engine.probe() {
@@ -850,7 +876,7 @@ mod tests {
         StyledSpan { weight, ..span(text, size) }
     }
 
-    /// One run's measurement, through the seam.
+    /// One run measured through the seam.
     fn measured(engine: &mut TextEngine, spans: &[StyledSpan<'_>], max_w: f32) -> Measured {
         let mut out = Measured::default();
         engine
@@ -875,7 +901,7 @@ mod tests {
         face_of_shape(engine, &[probe_span(text, family, 20.0)], 400.0)
     }
 
-    /// Does `family` ship a bold face?
+    /// True when `family` ships a bold face.
     fn ships_bold(engine: &TextEngine, family: &str) -> bool {
         engine.fonts.db().faces().any(|face| {
             face.weight == Weight::BOLD
@@ -885,11 +911,12 @@ mod tests {
 
     /// A themed weight reaches the shaper.
     ///
-    /// What core's per-role weights buy on Linux: a bold role has to
-    /// resolve to the family's bold face, not be quietly shaped regular
-    /// the way every run was before CSS theming. Skipped when the
-    /// family ships one weight, since fontdb then answers with the
-    /// nearest face it has and there is nothing to tell apart.
+    /// This test states what core's per-role weights buy on Linux. A
+    /// bold role must resolve to the family's bold face. Before CSS
+    /// theming, every run shaped regular and reported nothing. The
+    /// test skips when the family ships one weight, because fontdb
+    /// then answers with the nearest face it has, and the two results
+    /// match.
     #[test]
     fn a_bold_run_shapes_in_the_familys_bold_face() {
         let Some(mut engine) = jp_engine() else { return };
@@ -903,27 +930,27 @@ mod tests {
         assert_ne!(regular, bold, "a bold role must not shape in the regular face");
     }
 
-    /// The one invariant ADR-0004 built this whole module around: with
-    /// no Japanese family named, kanji still resolve through
-    /// cosmic-text's Han unification - and at locale `ja` that lands on
-    /// the JP face, not the Simplified Chinese one. A regression here
-    /// draws Chinese glyph variants for every kanji the popup shows and
-    /// nothing else fails, which is why it is asserted rather than
-    /// trusted.
+    /// The one invariant this whole module protects. With no Japanese
+    /// family named, kanji still resolve through cosmic-text's Han
+    /// unification. At locale `ja`, that path lands on the JP face,
+    /// and not on the Simplified Chinese one. A regression here draws
+    /// Chinese glyph variants for every kanji the popup shows, and
+    /// nothing else fails. Therefore this test asserts the invariant
+    /// and trusts nothing.
     #[test]
     fn kanji_fall_back_to_the_japanese_face_and_never_the_chinese_one() {
         let Some(mut engine) = jp_engine() else { return };
         // A family that exists nowhere: only the script fallback can
-        // answer, which is exactly the path the locale decides.
+        // answer, and the locale decides that path.
         let Some(face) = face_of(&mut engine, "\u{6f22}\u{5b57}", "chibipop-no-such-family") else {
             eprintln!("skipping: the font stack produced no glyphs at all");
             return;
         };
         let lower = face.to_ascii_lowercase();
         assert!(lower.contains("jp"), "kanji fell back to {face}, which is not a Japanese face");
-        // Whole tags only: `NotoSansCJKjp-Regular` contains a bare "sc"
-        // inside "SansCJK", so the Chinese and Korean faces have to be
-        // named as the tags they carry.
+        // Whole tags only. `NotoSansCJKjp-Regular` holds a bare "sc"
+        // inside "SansCJK", so this list names the Chinese and Korean
+        // faces by the tags they carry.
         for wrong in ["cjksc", "cjktc", "cjkhk", "cjkkr", "cjkkorean"] {
             assert!(!lower.contains(wrong), "kanji fell back to {face}: the wrong Han variants");
         }
@@ -974,9 +1001,9 @@ mod tests {
         assert_eq!(JpFonts::Present { family: JP.to_string() }, classify(&both, true));
     }
 
-    /// `Noto Sans Gothic` is the one that matters in practice: it draws
-    /// the Gothic script, covers no kanji, and is already installed
-    /// wherever `noto-fonts` is.
+    /// `Noto Sans Gothic` is the face that matters in practice. It
+    /// draws the Gothic script, covers no kanji, and is already
+    /// installed wherever `noto-fonts` is installed.
     #[test]
     fn faces_named_gothic_for_other_reasons_are_not_japanese() {
         for gothic in ["Century Gothic", "Noto Sans Gothic"] {
@@ -989,8 +1016,9 @@ mod tests {
         }
     }
 
-    /// Sarasa ships one family per locale and its tag is the last token,
-    /// so the type-class markers alone cannot tell them apart.
+    /// Sarasa ships one family per locale, and the locale tag is the
+    /// last token. The type-class markers alone therefore cannot
+    /// separate the cuts.
     #[test]
     fn a_trailing_locale_tag_beats_the_gothic_marker() {
         assert_eq!(
@@ -1046,11 +1074,11 @@ mod tests {
         assert_eq!(JpFonts::Present { family: JP.to_string() }, engine.probe());
     }
 
-    /// The safety property ADR-0013 turns on: widening the seam must
-    /// not move a number. Every assertion here is the arithmetic the
-    /// one-string seam did - `lines × size × LINE_HEIGHT` for the
-    /// height, the widest `line_w` for the width - so a single-span
-    /// request that drifts fails here rather than in a golden.
+    /// The safety property this test locks. A wider seam must not move
+    /// a number. Every assertion here repeats the arithmetic of the
+    /// one-string seam: `lines × size × LINE_HEIGHT` for the height,
+    /// and the widest `line_w` for the width. A single-span request
+    /// that drifts therefore fails here, and not in a golden.
     #[test]
     fn an_empty_run_measures_no_width_and_exactly_one_line() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1080,17 +1108,17 @@ mod tests {
         assert_eq!(m.metrics.w, widest, "the aggregate width is the widest line");
         assert_eq!(0.0, m.lines[0].y, "the first line sits at the run's top");
         for pair in m.lines.windows(2) {
-            // The shaper's own running top, which is what it paints
-            // from; the aggregate height is summed wide and rounded
+            // The shaper reports its own running top, and it paints
+            // from that top. The aggregate height sums wide and rounds
             // once instead, so the two can differ by an ulp at eight
-            // lines and the block stack still may not move.
+            // lines. The block stack still must not move.
             assert_eq!(pair[0].y + pair[0].h, pair[1].y, "a line starts where the last ended");
         }
         for line in &m.lines {
             assert_eq!(16.0 * LINE_HEIGHT, line.h);
             assert!(line.baseline > 0.0 && line.baseline < line.h, "{line:?}");
         }
-        // One span, so one box per line, each starting at the margin.
+        // One span, so one box per line. Each box starts at the margin.
         assert_eq!(n as usize, m.spans.len());
         for (i, b) in m.spans.iter().enumerate() {
             assert_eq!((0, i as u32), (b.span, b.line));
@@ -1101,13 +1129,15 @@ mod tests {
     }
 
     /// The whole point of the widening: two styles on one line, each
-    /// with its own box, all hung off one baseline. Asserted against
-    /// real cosmic-text output rather than a fake, because it is the
-    /// shaper - not core - that decides a mixed line's height.
+    /// with its own box, and all of them hung from one baseline. This
+    /// test asserts against real cosmic-text output, and not against a
+    /// fake. The shaper decides a mixed line's height, and core does
+    /// not.
     #[test]
     fn spans_of_two_sizes_share_a_line_and_a_baseline() {
         let Some(mut engine) = jp_engine() else { return };
-        // 漢 at body size, 字 half of it: wide enough that neither wraps.
+        // 漢 at body size, and 字 at half of it. The box is wide
+        // enough that neither span wraps.
         let spans = [span("\u{6f22}", 20.0), span("\u{5b57}", 10.0)];
         let m = measured(&mut engine, &spans, 400.0);
         assert_eq!(1, m.metrics.lines, "both spans fit one line");
@@ -1121,21 +1151,22 @@ mod tests {
         assert_eq!(big.w, small.x, "the second span starts where the first ends");
         assert_eq!(small.x + small.w, m.lines[0].w, "the spans sum to the line");
 
-        // Each span asks for its own advance; the line takes the max.
+        // Each span asks for its own advance. The line takes the
+        // maximum.
         assert_eq!(line_height(20.0), big.h);
         assert_eq!(line_height(10.0), small.h);
         assert_eq!(line_height(20.0), m.lines[0].h, "the taller span sets the line");
         assert_eq!(m.lines[0].h, m.metrics.h);
-        // One baseline for the line, inside it, which is the whole
-        // reason ADR-0013 made it a required output.
+        // One baseline for the line, and inside the line. That
+        // property is the reason the seam must report a baseline.
         let base = m.lines[0].baseline;
         assert!(base > 0.0 && base < m.lines[0].h, "baseline {base} outside the line");
     }
 
-    /// The walk hands one `Measured` to every element in a panel, so a
+    /// The walk hands one `Measured` to every element in a panel. A
     /// measurer that appended instead of clearing would grow each
-    /// element's geometry by every element before it - and the panel
-    /// would still lay out, just wrong.
+    /// element's geometry by every element before it. The panel would
+    /// still produce a layout, and that layout would be wrong.
     #[test]
     fn one_buffer_measures_two_runs_without_carrying_the_first_over() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1150,9 +1181,10 @@ mod tests {
         assert!(scratch.metrics.w < long.metrics.w, "two kanji are narrower than four");
     }
 
-    /// The one place the real shaper meets the real walk: everything
-    /// else drives `layout::scene` from a fake and this module from
-    /// core's types, so nothing else would notice the two disagreeing.
+    /// The one place the real shaper meets the real walk. Every other
+    /// test drives `layout::scene` from a fake, and drives this module
+    /// from core's types. Therefore no other test would see the two
+    /// answers differ.
     #[test]
     fn the_real_engine_lays_out_a_whole_panel() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1216,9 +1248,9 @@ mod tests {
         }
     }
 
-    /// Drill-down probes a headword that ticket 07 may hand over as
-    /// several styled spans, so an offset has to be counted over the
-    /// run's whole text and not just the first span's.
+    /// Drill-down probes a headword that can arrive as several styled
+    /// spans. An offset must therefore count over the run's whole
+    /// text, and not over the first span alone.
     #[test]
     fn caret_offsets_run_on_across_a_span_boundary() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1251,9 +1283,9 @@ mod tests {
     #[test]
     fn utf16_offsets_step_over_a_surrogate_pair() {
         let Some(mut engine) = jp_engine() else { return };
-        // 🍣 is astral (two UTF-16 units, four bytes), so 寿 starts at
-        // UTF-16 offset 2 and byte offset 4. A naive offset-as-index
-        // would land inside the emoji.
+        // 🍣 is astral: two UTF-16 units and four bytes. 寿 therefore
+        // starts at UTF-16 offset 2 and byte offset 4. An offset used
+        // as an index would land inside the emoji.
         let text = "\u{1f363}\u{5bff}";
         assert_eq!(4, byte_offset(&[span(text, 20.0)], 2));
         let mut out = Vec::new();
@@ -1270,8 +1302,9 @@ mod tests {
         let Some(mut engine) = jp_engine() else { return };
         const W: usize = 48;
         const H: usize = 32;
-        // One guard row past the pixmap: a stride overrun writes here
-        // instead of tripping a slice bound, so check it explicitly.
+        // One guard row past the pixmap. A stride overrun writes into
+        // that row instead of tripping a slice bound, so this test
+        // checks the row directly.
         let mut data = vec![0u8; W * (H + 1) * 4];
         let (front, guard) = data.split_at_mut(W * H * 4);
         for px in front.chunks_mut(4) {
@@ -1281,7 +1314,7 @@ mod tests {
         let mut target = PixmapMut::from_bytes(front, W as u32, H as u32).expect("pixmap");
 
         let draw = |target: &mut PixmapMut<'_>, engine: &mut TextEngine, origin| {
-            // White on the black fill below, so ink is visible ink.
+            // White on the black fill below, so the ink is visible.
             let spans = [StyledSpan {
                 text: PROBE_TEXT,
                 font: "",
@@ -1299,9 +1332,10 @@ mod tests {
         draw(&mut target, &mut engine, (2.0, 2.0));
         assert_ne!(before, target.data_mut().to_vec(), "a kanji leaves ink");
 
-        // The edges: a glyph hanging off the bottom-right and one at a
-        // negative origin both have to clip, not index out of the
-        // buffer and not spill into the next row.
+        // The edges. A glyph that hangs past the bottom-right corner
+        // must clip, and a glyph at a negative origin must clip too.
+        // Neither glyph indexes out of the buffer, and neither spills
+        // into the next row.
         draw(&mut target, &mut engine, (W as f32 - 3.0, H as f32 - 3.0));
         draw(&mut target, &mut engine, (-8.0, -8.0));
         draw(&mut target, &mut engine, (-4000.0, -4000.0));

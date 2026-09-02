@@ -1,4 +1,4 @@
-//! Windows clipboard writes.
+//! Writes text to the Windows clipboard.
 
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -9,7 +9,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
-/// Owns an open clipboard.
+/// Keeps the clipboard open until `Drop` closes it.
 struct ClipboardGuard;
 
 impl Drop for ClipboardGuard {
@@ -32,7 +32,7 @@ impl Drop for GlobalMemory {
     }
 }
 
-/// Copies UTF-16 text to the Windows clipboard.
+/// Converts text to UTF-16 and writes it to the Windows clipboard.
 pub fn set_text(text: &str) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let bytes = wide
