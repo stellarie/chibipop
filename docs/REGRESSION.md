@@ -56,14 +56,17 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 > [!tip] Prefer the disposable runner install for mutation-heavy passes
 > `python scripts/manual_regression.py --test-install --allow-destructive ...`
 > builds the Windows release and seeds `.scratch/regression-test-install` from
-> the package-owned files. The runner marks that target disposable, so config,
+> the package-owned files. It never copies `chibipop.toml`, a dictionary,
+> `popup.css`, screenshots, or `plugins/meikiocr/config.toml`. The runner marks that target disposable, so config,
 > dictionary, and plugin-fixture checks can mutate it without touching
 > `Documents\chibipop-nightly`, `Documents\chibipop-nightly-jp`, or any other
 > real install. Destructive checks against non-disposable targets require the
 > extra `--allow-real-target-destructive` flag.
 >
-> The disposable install is marker-gated. The runner removes it only when
-> `.chibipop-test-install.json` proves it created the directory. This keeps a
+> The disposable install is marker-gated. A per-run token binds its exclusive
+> lock, marker, process, path, and directory identity. Cleanup first renames the
+> directory and checks its identity again. It refuses reparse points and leaves
+> uncertain paths for manual inspection. This keeps a
 > typo from deleting an unrelated root folder.
 >
 > Some desktop checks are agent-drivable now. The runner can launch Settings,

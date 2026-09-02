@@ -1,9 +1,11 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "manual_regression.py"
@@ -179,7 +181,6 @@ class ManualRegressionTests(unittest.TestCase):
                 "LICENSE",
                 "plugins/meikiocr/plugin.toml",
                 "plugins/meikiocr/adapter.py",
-                "plugins/meikiocr/config.toml",
             ]
             for name in files:
                 path = root / name
@@ -214,7 +215,7 @@ class ManualRegressionTests(unittest.TestCase):
             self.assertEqual(target.name, "test-install")
             self.assertTrue(target.exe.exists())
             self.assertTrue((target.root / manual_regression.TEST_INSTALL_MARKER).exists())
-            self.assertTrue((target.root / "plugins" / "meikiocr" / "config.toml").exists())
+            self.assertFalse((target.root / "plugins" / "meikiocr" / "config.toml").exists())
 
     def test_seed_test_install_refuses_unmarked_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,22 +270,210 @@ class ManualRegressionTests(unittest.TestCase):
             install = root / ".scratch" / "regression-test-install"
             install.mkdir(parents=True)
             marker = install / manual_regression.TEST_INSTALL_MARKER
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": root,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                    "test_install_run_token": "token-a",
+                },
+            )()
             marker.write_text("{}", encoding="utf-8")
-            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install))
-            marker.write_text(
-                '{"schema":"chibipop-test-install/v1","root":"'
-                + str(root / "other").replace("\\", "\\\\")
-                + '"}',
-                encoding="utf-8",
-            )
-            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install))
-            marker.write_text(
-                '{"schema":"chibipop-test-install/v1","root":"'
-                + str(install).replace("\\", "\\\\")
-                + '"}',
-                encoding="utf-8",
-            )
-            self.assertTrue(manual_regression.marker_identifies_test_install(marker, install))
+            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install, args))
+            marker.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_SCHEMA,
+                "root": str(root / "other"),
+                "token": "token-a",
+                "pid": os.getpid(),
+            }), encoding="utf-8")
+            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install, args))
+            marker.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_SCHEMA,
+                "root": str(install),
+                "token": "token-b",
+                "pid": os.getpid(),
+            }), encoding="utf-8")
+            self.assertFalse(manual_regression.marker_identifies_test_install(marker, install, args))
+            marker.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_SCHEMA,
+                "lock_schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+                "root": str(install),
+                "token": "token-a",
+                "pid": os.getpid(),
+                "directory_id": manual_regression.directory_identity(install),
+            }), encoding="utf-8")
+            self.assertTrue(manual_regression.marker_identifies_test_install(marker, install, args))
+
+    def test_replaced_lock_blocks_cleanup_and_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            marker = install / manual_regression.TEST_INSTALL_MARKER
+            marker.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_SCHEMA,
+                "root": str(install),
+                "token": "token-a",
+                "pid": os.getpid(),
+            }), encoding="utf-8")
+            lock = install.with_name(install.name + ".lock")
+            lock.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+                "root": str(install),
+                "token": "token-b",
+                "pid": os.getpid(),
+            }), encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": root,
+                    "test_install": True,
+                    "keep_test_install": False,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                    "test_install_run_token": "token-a",
+                    "test_install_lock_path": lock,
+                },
+            )()
+            cleanup = manual_regression.cleanup_test_install(args)
+            release = manual_regression.release_test_install_lock(args)
+            self.assertIsNotNone(cleanup)
+            self.assertIsNotNone(release)
+            assert cleanup is not None
+            assert release is not None
+            self.assertEqual(cleanup.status, "FAIL")
+            self.assertEqual(release.status, "FAIL")
+            self.assertTrue(install.exists())
+            self.assertTrue(lock.exists())
+
+    def test_stale_lock_requires_manual_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            lock = install.with_name(install.name + ".lock")
+            lock.parent.mkdir(parents=True)
+            lock.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+                "root": str(install),
+                "token": "old",
+                "pid": 99999999,
+            }), encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": root,
+                    "test_install_dir": Path(".scratch/regression-test-install"),
+                    "test_install_run_token": "new",
+                },
+            )()
+            with self.assertRaises(ValueError):
+                manual_regression.acquire_test_install_lock(args)
+            self.assertTrue(lock.exists())
+
+    def test_symlink_test_install_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            actual = root / "actual"
+            link = root / ".scratch" / "link"
+            actual.mkdir()
+            link.parent.mkdir()
+            try:
+                link.symlink_to(actual, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks unavailable")
+            with self.assertRaises(ValueError):
+                manual_regression.assert_safe_test_install_dir(Path(".scratch/link"), root)
+
+    def test_reparse_component_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / ".scratch" / "install"
+            candidate.mkdir(parents=True)
+            with mock.patch.object(
+                manual_regression,
+                "is_reparse_point",
+                side_effect=lambda path: path.name == ".scratch",
+            ):
+                with self.assertRaises(ValueError):
+                    manual_regression.assert_safe_test_install_dir(candidate, root)
+
+    def test_cleanup_detects_directory_swap_after_quarantine_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            install.mkdir(parents=True)
+            token = "token-a"
+            lock = install.with_name(install.name + ".lock")
+            args = type("Args", (), {
+                "repo_root": root,
+                "test_install": True,
+                "keep_test_install": False,
+                "test_install_dir": Path(".scratch/regression-test-install"),
+                "test_install_run_token": token,
+                "test_install_lock_path": lock,
+            })()
+            (install / manual_regression.TEST_INSTALL_MARKER).write_text(json.dumps({
+                **manual_regression.test_install_identity(args, install),
+                "directory_id": manual_regression.directory_identity(install),
+            }), encoding="utf-8")
+            lock.write_text(json.dumps({
+                **manual_regression.test_install_identity(args, install),
+                "schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+            }), encoding="utf-8")
+            original_replace = manual_regression.os.replace
+            swapped = root / ".scratch" / "original-after-swap"
+
+            def swap_once(src, dst):
+                original_replace(src, dst)
+                if Path(src) == install:
+                    original_replace(dst, swapped)
+                    Path(dst).mkdir()
+                    (Path(dst) / "attacker.txt").write_text("keep", encoding="utf-8")
+
+            with mock.patch.object(manual_regression.os, "replace", side_effect=swap_once):
+                result = manual_regression.cleanup_test_install(args)
+            assert result is not None
+            self.assertEqual(result.status, "FAIL")
+            self.assertTrue((install / "attacker.txt").exists())
+            self.assertTrue(swapped.exists())
+
+    def test_cleanup_refuses_nested_reparse_point(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install = root / ".scratch" / "regression-test-install"
+            outside = root / "outside"
+            install.mkdir(parents=True)
+            outside.mkdir()
+            link = install / "escape"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks unavailable")
+            token = "token-a"
+            lock = install.with_name(install.name + ".lock")
+            args = type("Args", (), {
+                "repo_root": root,
+                "test_install": True,
+                "keep_test_install": False,
+                "test_install_dir": Path(".scratch/regression-test-install"),
+                "test_install_run_token": token,
+                "test_install_lock_path": lock,
+            })()
+            (install / manual_regression.TEST_INSTALL_MARKER).write_text(json.dumps({
+                **manual_regression.test_install_identity(args, install),
+                "directory_id": manual_regression.directory_identity(install),
+            }), encoding="utf-8")
+            lock.write_text(json.dumps({
+                **manual_regression.test_install_identity(args, install),
+                "schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+            }), encoding="utf-8")
+            result = manual_regression.cleanup_test_install(args)
+            assert result is not None
+            self.assertEqual(result.status, "FAIL")
+            self.assertTrue(install.exists())
+            self.assertTrue(outside.exists())
 
     def test_cleanup_refuses_invalid_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -314,13 +503,23 @@ class ManualRegressionTests(unittest.TestCase):
             install = root / ".scratch" / "regression-test-install"
             install.mkdir(parents=True)
             (install / "chibipop.exe").write_text("exe", encoding="utf-8")
+            lock = install.with_name(install.name + ".lock")
+            token = "token-a"
             marker = install / manual_regression.TEST_INSTALL_MARKER
-            marker.write_text(
-                '{"schema":"chibipop-test-install/v1","root":"'
-                + str(install).replace("\\", "\\\\")
-                + '"}',
-                encoding="utf-8",
-            )
+            marker.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_SCHEMA,
+                "lock_schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+                "root": str(install),
+                "token": token,
+                "pid": os.getpid(),
+                "directory_id": manual_regression.directory_identity(install),
+            }), encoding="utf-8")
+            lock.write_text(json.dumps({
+                "schema": manual_regression.TEST_INSTALL_LOCK_SCHEMA,
+                "root": str(install),
+                "token": token,
+                "pid": os.getpid(),
+            }), encoding="utf-8")
             args = type(
                 "Args",
                 (),
@@ -351,6 +550,8 @@ class ManualRegressionTests(unittest.TestCase):
                     "test_install": True,
                     "test_install_dir": Path(".scratch/regression-test-install"),
                     "keep_test_install": False,
+                    "test_install_run_token": token,
+                    "test_install_lock_path": lock,
                     "repeat_tests": 1,
                     "min_test_total": 0,
                     "expected_clippy_warnings": 1,
@@ -585,9 +786,63 @@ class ManualRegressionTests(unittest.TestCase):
             manual_regression.ensure_fixture_database = original_seed
             manual_regression.run_cmd = original_run_cmd
 
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "MANUAL")
         self.assertEqual(calls, ["seed", "tier1-1.26-settings-audit"])
         self.assertEqual(result.evidence["fixture_db"], "PASS")
+
+    def test_partial_automation_never_reports_full_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = manual_regression.Target("scratch", root / "chibipop.exe", True)
+            target.exe.write_bytes(b"exe")
+            args = type("Args", (), {"repo_root": root, "show_region_seconds": 1})()
+            resource = manual_regression.auto_resources(
+                manual_regression.Check("1.8", "1", "Resources", "auto-or-interactive", "", ""),
+                args,
+                Path("."),
+                [target],
+            )
+            self.assertEqual(resource.status, "MANUAL")
+
+    def test_desktop_exception_stops_only_launched_process(self) -> None:
+        check = manual_regression.Check("2.11c", "2", "Quit", "auto-or-interactive", "", "")
+        target = manual_regression.Target("scratch", Path("scratch/chibipop.exe"), True)
+        args = type("Args", (), {"repo_root": Path("."), "cargo": "cargo"})()
+
+        class FakeProcess:
+            pid = 43210
+            running = True
+            terminated = False
+
+            def poll(self):
+                return None if self.running else 0
+
+            def terminate(self):
+                self.terminated = True
+                self.running = False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                self.running = False
+
+        proc = FakeProcess()
+        handle = mock.Mock()
+        with mock.patch.object(manual_regression, "ensure_fixture_database", return_value=None), mock.patch.object(
+            manual_regression, "launch_logged_process", return_value=(proc, Path("log"), handle)
+        ), mock.patch.object(manual_regression, "Win32Desktop", side_effect=RuntimeError("desktop failed")), mock.patch.object(
+            manual_regression.os, "name", "nt"
+        ):
+            with self.assertRaises(RuntimeError):
+                manual_regression.auto_settings_desktop_smoke(check, args, Path("."), [target])
+        self.assertTrue(proc.terminated)
+        handle.close.assert_called_once()
+
+    def test_pointer_sized_lresult_type(self) -> None:
+        import ctypes
+
+        self.assertEqual(ctypes.sizeof(ctypes.c_ssize_t), ctypes.sizeof(ctypes.c_void_p))
 
     def test_source_does_not_embed_local_machine_paths(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

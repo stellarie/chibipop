@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -391,11 +392,115 @@ def default_target(repo_root: Path) -> Target:
 
 
 TEST_INSTALL_MARKER = ".chibipop-test-install.json"
+TEST_INSTALL_SCHEMA = "chibipop-test-install/v1"
+TEST_INSTALL_LOCK_SCHEMA = "chibipop-test-install-lock/v1"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def existing_components(path: Path, stop_at: Path) -> list[Path]:
+    components: list[Path] = []
+    current = path
+    while True:
+        if current.exists() or current.is_symlink():
+            components.append(current)
+        if current == stop_at or current.parent == current:
+            break
+        current = current.parent
+    return list(reversed(components))
+
+
+def is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    if os.name != "nt" or not path.exists():
+        return False
+    import ctypes.wintypes as wt
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetFileAttributesW.argtypes = [wt.LPCWSTR]
+    kernel32.GetFileAttributesW.restype = wt.DWORD
+    attrs = kernel32.GetFileAttributesW(str(path))
+    if attrs == 0xFFFFFFFF:
+        return False
+    return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def tree_contains_reparse_point(root: Path) -> bool:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if is_reparse_point(path):
+                    return True
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+    return False
+
+
+def process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes.wintypes as wt
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        kernel32.OpenProcess.restype = wt.HANDLE
+        kernel32.CloseHandle.argtypes = [wt.HANDLE]
+        kernel32.CloseHandle.restype = wt.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_install_root(args: argparse.Namespace) -> Path:
+    return assert_safe_test_install_dir(args.test_install_dir, args.repo_root)
+
+
+def test_install_identity(args: argparse.Namespace, install_dir: Path | None = None) -> dict[str, object]:
+    install = install_dir or test_install_root(args)
+    token = getattr(args, "test_install_run_token", "")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        args.test_install_run_token = token
+    return {
+        "schema": TEST_INSTALL_SCHEMA,
+        "lock_schema": TEST_INSTALL_LOCK_SCHEMA,
+        "token": token,
+        "pid": os.getpid(),
+        "root": str(install),
+    }
+
+
+def directory_identity(path: Path) -> dict[str, int]:
+    stat_result = path.stat()
+    return {"st_dev": int(stat_result.st_dev), "st_ino": int(stat_result.st_ino)}
+
+
+def read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def assert_safe_test_install_dir(path: Path, repo_root: Path) -> Path:
     root = repo_root.resolve()
-    resolved = normalize_path(path, root)
+    candidate = path if path.is_absolute() else root / path
+    for component in existing_components(candidate, root):
+        if component != root and is_reparse_point(component):
+            raise ValueError(f"--test-install-dir cannot use a symlink or reparse point: {component}")
+    resolved = candidate.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
@@ -425,30 +530,66 @@ def assert_safe_test_install_dir(path: Path, repo_root: Path) -> Path:
 
 
 def test_install_lock_path(args: argparse.Namespace) -> Path:
-    install_dir = assert_safe_test_install_dir(args.test_install_dir, args.repo_root)
+    install_dir = test_install_root(args)
     return install_dir.with_name(install_dir.name + ".lock")
 
 
 def acquire_test_install_lock(args: argparse.Namespace) -> Path:
     lock = test_install_lock_path(args)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise ValueError(f"test install is already in use: {lock}") from exc
+    identity = test_install_identity(args)
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError as exc:
+            raise ValueError(
+                f"test install lock already exists; inspect and remove it manually: {lock}"
+            ) from exc
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"pid": os.getpid(), "created_at": dt.datetime.now(dt.timezone.utc).isoformat()}, handle)
+        payload = {
+            **identity,
+            "schema": TEST_INSTALL_LOCK_SCHEMA,
+            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        json.dump(payload, handle)
     return lock
 
 
-def release_test_install_lock(args: argparse.Namespace) -> None:
+def lock_matches_current_run(lock: Path, args: argparse.Namespace) -> bool:
+    data = read_json_object(lock)
+    if data is None:
+        return False
+    token = getattr(args, "test_install_run_token", "")
+    if not token:
+        return False
+    if data.get("schema") != TEST_INSTALL_LOCK_SCHEMA:
+        return False
+    if data.get("token") != token or data.get("pid") != os.getpid():
+        return False
+    root_text = data.get("root")
+    if not isinstance(root_text, str):
+        return False
+    try:
+        return Path(root_text).resolve() == test_install_root(args)
+    except OSError:
+        return False
+
+
+def release_test_install_lock(args: argparse.Namespace) -> Result | None:
     lock = getattr(args, "test_install_lock_path", None)
     if not lock:
-        return
+        return None
+    lock = Path(lock)
+    if not lock.exists():
+        return Result("postflight.test-install-lock", "postflight", "Release disposable install lock", "auto", STATUS_PASS, "already absent")
+    if not lock_matches_current_run(lock, args):
+        return Result("postflight.test-install-lock", "postflight", "Release disposable install lock", "auto", STATUS_FAIL, f"lock identity changed; left in place: {lock}")
     try:
-        Path(lock).unlink()
-    except FileNotFoundError:
-        pass
+        lock.unlink()
+    except OSError as exc:
+        return Result("postflight.test-install-lock", "postflight", "Release disposable install lock", "auto", STATUS_FAIL, f"remove failed: {exc}")
+    return Result("postflight.test-install-lock", "postflight", "Release disposable install lock", "auto", STATUS_PASS, "removed disposable install lock")
 
 
 def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target, Result]:
@@ -462,7 +603,7 @@ def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target,
         "preflight-test-install-release-build",
     )
     if code != 0:
-        target = Target("test-install", args.repo_root / args.test_install_dir / "chibipop.exe", True)
+        target = Target("test-install", test_install_root(args) / "chibipop.exe", True)
         result = Result(
             "preflight.test-install",
             "preflight",
@@ -480,7 +621,7 @@ def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target,
     if install_dir.exists():
         if not install_dir.is_dir():
             raise ValueError(f"refusing to replace non-directory test install path: {install_dir}")
-        if not marker_identifies_test_install(marker, install_dir):
+        if not marker_identifies_test_install(marker, install_dir, args):
             raise ValueError(f"refusing to replace unmarked test install directory: {install_dir}")
         shutil.rmtree(install_dir)
 
@@ -492,7 +633,6 @@ def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target,
         (args.repo_root / "LICENSE", install_dir / "LICENSE"),
         (args.repo_root / "plugins" / "meikiocr" / "plugin.toml", install_dir / "plugins" / "meikiocr" / "plugin.toml"),
         (args.repo_root / "plugins" / "meikiocr" / "adapter.py", install_dir / "plugins" / "meikiocr" / "adapter.py"),
-        (args.repo_root / "plugins" / "meikiocr" / "config.toml", install_dir / "plugins" / "meikiocr" / "config.toml"),
     ]
     copied = []
     for src, dst in copies:
@@ -504,8 +644,8 @@ def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target,
     marker.write_text(
         json.dumps(
             {
-                "schema": "chibipop-test-install/v1",
-                "root": str(install_dir),
+                **test_install_identity(args, install_dir),
+                "directory_id": directory_identity(install_dir),
                 "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "source": rel(args.repo_root / "target" / "release" / exe_name, args.repo_root),
                 "files": copied,
@@ -516,6 +656,12 @@ def seed_test_install(args: argparse.Namespace, logs_dir: Path) -> tuple[Target,
         encoding="utf-8",
     )
     target = Target("test-install", install_dir / exe_name, True)
+    args.test_install_initial_state = {
+        "config_exists": False,
+        "database_exists": False,
+        "library_exists": False,
+        "meikiocr_config_exists": False,
+    }
     result = Result(
         "preflight.test-install",
         "preflight",
@@ -542,10 +688,31 @@ def cleanup_test_install(args: argparse.Namespace) -> Result | None:
     marker = install_dir / TEST_INSTALL_MARKER
     if not install_dir.exists():
         return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_PASS, "already absent", 0.0)
-    if not marker_identifies_test_install(marker, install_dir):
+    if not marker_identifies_test_install(marker, install_dir, args):
         return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, f"marker missing or invalid in {install_dir}")
+    lock = getattr(args, "test_install_lock_path", None)
+    if not lock or not lock_matches_current_run(Path(lock), args):
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, "lock identity missing or changed; left install in place")
+    if tree_contains_reparse_point(install_dir):
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, "install contains a symlink or reparse point; left it in place")
+    marker_data = read_json_object(marker)
+    assert marker_data is not None
+    expected_id = marker_data["directory_id"]
+    quarantine = install_dir.with_name(
+        f"{install_dir.name}.delete-{getattr(args, 'test_install_run_token', '')}"
+    )
+    if quarantine.exists() or quarantine.is_symlink():
+        return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, "cleanup quarantine already exists; left install in place")
     try:
-        shutil.rmtree(install_dir)
+        assert_safe_test_install_dir(install_dir, args.repo_root)
+        os.replace(install_dir, quarantine)
+        if is_reparse_point(quarantine) or tree_contains_reparse_point(quarantine) or directory_identity(quarantine) != expected_id:
+            try:
+                os.replace(quarantine, install_dir)
+            except OSError:
+                pass
+            return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, "directory identity changed during cleanup; left it in place")
+        shutil.rmtree(quarantine)
     except OSError as exc:
         return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, f"remove failed: {exc}", time.perf_counter() - start, {"root": rel(install_dir, args.repo_root)})
     return Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_PASS, "removed disposable install", time.perf_counter() - start, {"root": rel(install_dir, args.repo_root)})
@@ -567,7 +734,7 @@ def normalize_path(path: Path, base: Path) -> Path:
     return candidate.resolve()
 
 
-def marker_identifies_test_install(marker: Path, install_dir: Path) -> bool:
+def marker_identifies_test_install(marker: Path, install_dir: Path, args: argparse.Namespace | None = None) -> bool:
     if not marker.exists():
         return False
     try:
@@ -576,13 +743,26 @@ def marker_identifies_test_install(marker: Path, install_dir: Path) -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    if data.get("schema") != "chibipop-test-install/v1":
+    if data.get("schema") != TEST_INSTALL_SCHEMA:
         return False
+    if data.get("lock_schema") != TEST_INSTALL_LOCK_SCHEMA:
+        return False
+    if args is not None:
+        token = getattr(args, "test_install_run_token", "")
+        if not token or data.get("token") != token:
+            return False
+        if data.get("pid") != os.getpid():
+            return False
     root_text = data.get("root")
     if not isinstance(root_text, str):
         return False
     try:
-        return Path(root_text).resolve() == install_dir.resolve()
+        if Path(root_text).resolve() != install_dir.resolve():
+            return False
+        expected_id = data.get("directory_id")
+        if not isinstance(expected_id, dict):
+            return False
+        return expected_id == directory_identity(install_dir)
     except OSError:
         return False
 
@@ -745,6 +925,22 @@ def launch_logged_process(cmd: list[str | os.PathLike[str]], cwd: Path, logs_dir
     return proc, log_path, handle
 
 
+def stop_launched_process(proc: subprocess.Popen[str], polite_timeout: float = 3.0) -> str:
+    if proc.poll() is not None:
+        return "already_exited"
+    try:
+        proc.terminate()
+        proc.wait(timeout=polite_timeout)
+        return "terminated"
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+            proc.wait(timeout=polite_timeout)
+            return "killed"
+        except (OSError, subprocess.TimeoutExpired):
+            return "still_running"
+
+
 class Win32Desktop:
     WM_CLOSE = 0x0010
     WM_COMMAND = 0x0111
@@ -776,7 +972,7 @@ class Win32Desktop:
         self.user32.IsWindowEnabled.argtypes = [wt.HWND]
         self.user32.IsWindowEnabled.restype = wt.BOOL
         self.user32.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
-        self.user32.SendMessageW.restype = wt.LPARAM
+        self.user32.SendMessageW.restype = ctypes.c_ssize_t
         self.user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
         self.user32.PostMessageW.restype = wt.BOOL
 
@@ -1004,8 +1200,9 @@ def auto_probe_show_region(check: Check, args: argparse.Namespace, logs_dir: Pat
         return unavailable(check, "needs --target and --probe-point draw=X,Y")
     cmd = [target.exe, "probe", "--at", point, "--tiles", "1", "--show-region", str(args.show_region_seconds)]
     code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, "tier1-1.4-probe-show-region")
-    status = STATUS_PASS if code == 0 and "match:" in out else STATUS_FAIL
-    detail = "probe displayed region; visual inspection still required" if status == STATUS_PASS else f"probe exited {code}"
+    ok = code == 0 and "match:" in out
+    status = STATUS_MANUAL if ok else STATUS_FAIL
+    detail = "probe produced match evidence; region drawing still needs visual inspection" if ok else f"probe exited {code}"
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, {"command": command_text(cmd), "log": rel(log, args.repo_root)})
 
 
@@ -1065,8 +1262,8 @@ def auto_resources(check: Check, args: argparse.Namespace, logs_dir: Path, targe
     if not target.exe.exists():
         return unavailable(check, f"missing target exe {target.exe}")
     size = target.exe.stat().st_size
-    status = STATUS_PASS if size < 100 * 1024 * 1024 else STATUS_FAIL
-    detail = f"exe size {size} bytes"
+    status = STATUS_MANUAL if size < 100 * 1024 * 1024 else STATUS_FAIL
+    detail = f"exe size {size} bytes; idle, plateau, startup, and sustained-hover checks still manual"
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, 0.0, {"exe": rel(target.exe, args.repo_root), "bytes": size})
 
 
@@ -1104,8 +1301,15 @@ def auto_settings_audit(check: Check, args: argparse.Namespace, logs_dir: Path, 
         if isinstance(rect, dict) and "y" in rect:
             ys.append(rect["y"])
     same = bool(ys) and len(set(ys)) == 1
-    status = STATUS_PASS if same else STATUS_FAIL
-    detail = f"Apply control y values: {ys}" if ys else "Apply control id 100 not found"
+    if not same:
+        status = STATUS_FAIL
+        detail = f"Apply control y values: {ys}" if ys else "Apply control id 100 not found"
+    elif check.ident == "1.26":
+        status = STATUS_MANUAL
+        detail = f"Apply control y values: {ys}; visual scroll checks still manual"
+    else:
+        status = STATUS_PASS
+        detail = f"Apply control y values: {ys}"
     evidence = {"log": rel(log, args.repo_root), "apply_y": ys}
     if seeded is not None:
         evidence["fixture_db"] = seeded.status
@@ -1138,6 +1342,19 @@ def run_settings_audit(target: Target, args: argparse.Namespace, logs_dir: Path,
     return code, data, elapsed, log, out
 
 
+def fresh_install_state(target: Target) -> dict[str, bool]:
+    return {
+        "config_exists": (target.root / "chibipop.toml").exists(),
+        "database_exists": (target.root / "data" / "chibipop.sqlite").exists(),
+        "library_exists": (target.root / "library").exists(),
+        "meikiocr_config_exists": (target.root / "plugins" / "meikiocr" / "config.toml").exists(),
+    }
+
+
+def state_is_fresh(state: dict[str, bool]) -> bool:
+    return not any(state.values())
+
+
 def ensure_fixture_database(target: Target, args: argparse.Namespace, logs_dir: Path) -> Result | None:
     db = target.root / "data" / "chibipop.sqlite"
     if db.exists():
@@ -1163,23 +1380,23 @@ def ensure_fixture_database(target: Target, args: argparse.Namespace, logs_dir: 
 
 
 def auto_fresh_meikiocr_combo(check: Check, args: argparse.Namespace, logs_dir: Path, target: Target) -> Result:
+    initial_state = getattr(args, "test_install_initial_state", fresh_install_state(target))
+    if not state_is_fresh(initial_state):
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "disposable target was not fresh before inspection", evidence={"fresh_state": initial_state})
     seeded = ensure_fixture_database(target, args, logs_dir)
     if seeded is not None and seeded.status != STATUS_PASS:
-        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, {**seeded.evidence, "fresh_state": initial_state})
     if os.name != "nt":
         return unavailable(check, "Win32 combo inspection requires Windows")
     proc, log, handle = launch_logged_process([target.exe, "settings"], target.root, logs_dir, f"tier1-{check.ident}-fresh-meikiocr-combo")
     start = time.perf_counter()
-    desktop = Win32Desktop()
+    desktop: Win32Desktop | None = None
+    cleanup = "not_needed"
     try:
+        desktop = Win32Desktop()
         window = desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=10.0)
         if window is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
+            cleanup = stop_launched_process(proc)
             return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "settings window did not appear", time.perf_counter() - start, {"pid": proc.pid, "log": rel(log, args.repo_root)})
         engine = None
         deadline = time.perf_counter() + 5.0
@@ -1200,9 +1417,9 @@ def auto_fresh_meikiocr_combo(check: Check, args: argparse.Namespace, logs_dir: 
         desktop.post_close(int(window["hwnd"]))
         try:
             proc.wait(timeout=5)
+            cleanup = "closed"
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=3)
+            cleanup = stop_launched_process(proc)
         return Result(
             check.ident,
             check.tier,
@@ -1211,15 +1428,11 @@ def auto_fresh_meikiocr_combo(check: Check, args: argparse.Namespace, logs_dir: 
             status,
             detail,
             time.perf_counter() - start,
-            {"pid": proc.pid, "items": items, "fixture_db": seeded.status if seeded else "already_present", "log": rel(log, args.repo_root)},
+            {"pid": proc.pid, "items": items, "fresh_state": initial_state, "fixture_db": seeded.status if seeded else "already_present", "log": rel(log, args.repo_root), "process_cleanup": cleanup},
         )
     finally:
         if proc.poll() is None:
-            proc.kill()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
+            stop_launched_process(proc)
         handle.close()
 
 
@@ -1231,9 +1444,12 @@ def auto_fresh_meikiocr_audit(check: Check, args: argparse.Namespace, logs_dir: 
         return unavailable(check, "fresh-install check requires --test-install")
     if check.ident == "1.28.3":
         return auto_fresh_meikiocr_combo(check, args, logs_dir, target)
+    initial_state = getattr(args, "test_install_initial_state", fresh_install_state(target))
+    if not state_is_fresh(initial_state):
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "disposable target was not fresh before inspection", evidence={"fresh_state": initial_state})
     seeded = ensure_fixture_database(target, args, logs_dir)
     if seeded is not None and seeded.status != STATUS_PASS:
-        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, seeded.evidence)
+        return Result(check.ident, check.tier, check.title, check.mode, seeded.status, seeded.detail, seeded.seconds, {**seeded.evidence, "fresh_state": initial_state})
     code, data, elapsed, log, out = run_settings_audit(target, args, logs_dir, f"tier1-{check.ident}-fresh-meikiocr-audit")
     if code != 0:
         return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, f"settings --audit exited {code}", elapsed, {"log": rel(log, args.repo_root)})
@@ -1252,7 +1468,13 @@ def auto_fresh_meikiocr_audit(check: Check, args: argparse.Namespace, logs_dir: 
         missing.append("plugin discovery without No plugins found")
     status = STATUS_PASS if not missing else STATUS_FAIL
     detail = "fresh install audit found meikiocr controls" if status == STATUS_PASS else f"missing {', '.join(missing)}"
-    evidence = {"log": rel(log, args.repo_root), "text_count": len(texts), "dump_count": len(dumps)}
+    evidence = {
+        "log": rel(log, args.repo_root),
+        "text_count": len(texts),
+        "dump_count": len(dumps),
+        "fresh_state": initial_state,
+        "fresh": True,
+    }
     if seeded is not None:
         evidence["fixture_db"] = seeded.status
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, evidence)
@@ -1270,15 +1492,13 @@ def auto_settings_desktop_smoke(check: Check, args: argparse.Namespace, logs_dir
     command = [target.exe] if check.ident == "2.11d" else [target.exe, "settings"]
     proc, log, handle = launch_logged_process(command, target.root, logs_dir, f"tier{check.tier}-{check.ident}-settings-desktop")
     start = time.perf_counter()
-    desktop = Win32Desktop()
+    desktop: Win32Desktop | None = None
+    cleanup = "not_needed"
     try:
+        desktop = Win32Desktop()
         window = desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=10.0)
         if window is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            cleanup = stop_launched_process(proc)
             return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL, "settings window did not appear", time.perf_counter() - start, {"pid": proc.pid, "log": rel(log, args.repo_root)})
         rows = desktop.windows_for_pid(proc.pid, include_children=True)
         classes = sorted({str(row["class"]) for row in rows if row["class"]})
@@ -1293,20 +1513,22 @@ def auto_settings_desktop_smoke(check: Check, args: argparse.Namespace, logs_dir
                 proc.wait(timeout=5)
                 status = STATUS_PASS
                 detail = "Quit command closed standalone settings process"
+                cleanup = "closed"
             except subprocess.TimeoutExpired:
                 status = STATUS_FAIL
                 detail = "process stayed alive after Quit command"
-                proc.kill()
+                cleanup = stop_launched_process(proc)
         else:
             desktop.post_close(int(window["hwnd"]))
             try:
                 proc.wait(timeout=5)
                 status = STATUS_MANUAL
                 detail = "WM_CLOSE closed standalone settings; normal run route still needs manual confirmation"
+                cleanup = "closed"
             except subprocess.TimeoutExpired:
                 status = STATUS_FAIL
                 detail = "process stayed alive after WM_CLOSE"
-                proc.kill()
+                cleanup = stop_launched_process(proc)
         return Result(
             check.ident,
             check.tier,
@@ -1315,20 +1537,18 @@ def auto_settings_desktop_smoke(check: Check, args: argparse.Namespace, logs_dir
             status,
             detail,
             time.perf_counter() - start,
-            {"pid": proc.pid, "settings_hwnd": window["hwnd"], "classes": classes, "log": rel(log, args.repo_root), "fixture_db": seeded.status if seeded else "already_present"},
+            {"pid": proc.pid, "settings_hwnd": window["hwnd"], "classes": classes, "log": rel(log, args.repo_root), "fixture_db": seeded.status if seeded else "already_present", "process_cleanup": cleanup},
         )
     finally:
-        if proc.poll() is None and check.ident == "2.11d":
-            if window := desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=0.1):
-                desktop.post_close(int(window["hwnd"]))
+        if proc.poll() is None and desktop is not None:
             try:
+                if window := desktop.wait_for_class(proc.pid, "ChibipopSettingsClass", timeout=0.1):
+                    desktop.post_close(int(window["hwnd"]))
                 proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
+            except Exception:
+                stop_launched_process(proc)
+        elif proc.poll() is None:
+            stop_launched_process(proc)
         handle.close()
 
 
@@ -1743,7 +1963,11 @@ def main() -> int:
             backup_root = backups.get(target.name)
             if not backup_root:
                 continue
-            cleanup_status, evidence = restore_protected_state(target, backup_root)
+            try:
+                cleanup_status, evidence = restore_protected_state(target, backup_root)
+            except Exception as exc:
+                cleanup_status = "failed"
+                evidence = {"exception": f"{type(exc).__name__}: {exc}"}
             if cleanup_status == "failed":
                 cleanup_failed = True
             record_result(
@@ -1761,7 +1985,23 @@ def main() -> int:
             )
 
     for target in targets:
-        after = snapshot_target(target)
+        try:
+            after = snapshot_target(target)
+        except Exception as exc:
+            cleanup_failed = True
+            record_result(
+                results,
+                Result(
+                    "postflight.snapshot",
+                    "postflight",
+                    f"Snapshot protected state for {target.name}",
+                    "auto",
+                    STATUS_FAIL,
+                    f"{type(exc).__name__}: {exc}",
+                ),
+            )
+            continue
+        snapshots.setdefault(target.name, {})
         before = snapshots[target.name].get("before", {})
         snapshots[target.name]["after"] = after
         if isinstance(before, dict):
@@ -1783,16 +2023,45 @@ def main() -> int:
                     )
                 )
 
-    cleanup_result = cleanup_test_install(args)
+    try:
+        cleanup_result = cleanup_test_install(args)
+    except Exception as exc:
+        cleanup_failed = True
+        cleanup_result = Result("postflight.test-install", "postflight", "Remove disposable test install", "auto", STATUS_FAIL, f"{type(exc).__name__}: {exc}")
     if cleanup_result is not None:
         record_result(results, cleanup_result)
-    release_test_install_lock(args)
 
-    write_report(args, targets, results, snapshots)
+    try:
+        release_result = release_test_install_lock(args)
+    except Exception as exc:
+        cleanup_failed = True
+        release_result = Result("postflight.test-install-lock", "postflight", "Release disposable install lock", "auto", STATUS_FAIL, f"{type(exc).__name__}: {exc}")
+    if release_result is not None:
+        record_result(results, release_result)
+        if release_result.status == STATUS_FAIL:
+            cleanup_failed = True
+
+    report_failed = False
+    try:
+        write_report(args, targets, results, snapshots)
+    except Exception as exc:
+        report_failed = True
+        record_result(results, Result("internal.report", "internal", "Write regression report", "auto", STATUS_FAIL, f"{type(exc).__name__}: {exc}"))
+        print(f"failed to write report: {type(exc).__name__}: {exc}", file=sys.stderr)
+        fallback = args.artifacts_dir / "regression-report-fallback.json"
+        if fallback != args.report:
+            original_report = args.report
+            args.report = fallback
+            try:
+                write_report(args, targets, results, snapshots)
+            except Exception as fallback_exc:
+                print(f"failed to write fallback report: {type(fallback_exc).__name__}: {fallback_exc}", file=sys.stderr)
+            finally:
+                args.report = original_report
 
     summary = summarize(results)
     print(json.dumps(summary, sort_keys=True))
-    if run_error or cleanup_failed or summary.get(STATUS_FAIL, 0):
+    if report_failed or run_error or cleanup_failed or summary.get(STATUS_FAIL, 0):
         return 1
     if args.strict and (summary.get(STATUS_SKIP, 0) or summary.get(STATUS_MANUAL, 0)):
         return 2
