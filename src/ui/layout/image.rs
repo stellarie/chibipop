@@ -40,8 +40,8 @@ use super::style::{finite, shift_on, Inline};
 /// because both bins re-measure an
 /// element's own spans to paint it and
 /// would get the ungrown lines back.
-/// Ticket 11's ruby filler is the same
-/// trick for the same reason.
+/// The ruby filler is the same trick
+/// for the same reason.
 ///
 /// So the run asks, and this decides
 /// what it asks for. Two ratios are
@@ -192,7 +192,7 @@ pub(super) fn place_images(
         // Its bottom on the line's own
         // baseline, raised by whatever
         // `verticalAlign` asked for -
-        // ticket 07's own resolution,
+        // `shift_on`'s own resolution,
         // against the line the image
         // landed on, with the image's box
         // as the span height a
@@ -303,11 +303,12 @@ pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
 /// one image's box reaches.
 ///
 /// Its own fitted height plus whatever
-/// `verticalAlign` asked for - ticket
-/// 07's own resolution, against the
-/// line the image landed on, with the
-/// image's box as the span height a
-/// line-relative value aligns.
+/// `verticalAlign` asked for -
+/// [`shift_on`]'s own resolution,
+/// against the line the image landed
+/// on, with the image's box as the
+/// span height a line-relative value
+/// aligns.
 ///
 /// One function rather than the same
 /// two terms in two places, because
@@ -336,8 +337,8 @@ pub(super) fn image_rise(img: &FlowImage, line: LineBox, room: f32) -> f32 {
 /// the build recorded, then a square
 /// of the text it sits in. No decode
 /// at any rung - that is the whole
-/// reason ticket 03 reads an intrinsic
-/// size out of the container header at
+/// reason the intrinsic size is read
+/// out of the container header at
 /// extraction time.
 ///
 /// The middle arms are the ones that
@@ -670,8 +671,8 @@ impl Paragraphs<'_> {
     /// `Tag::Img` is inline, and this
     /// keeps it that way.
     ///
-    /// The ladder, in the order the
-    /// ticket names it. With bytes
+    /// The ladder, in the order this
+    /// module tries it. With bytes
     /// behind the path the image is an
     /// element of its own, sized from
     /// what the node declared or from

@@ -213,10 +213,9 @@ pub(super) const SQUARE_MARKER: &str = "\u{25AA}";
 /// One label serves both, which is why
 /// [`Marker::label`] appends it and
 /// neither placement has to. It is the
-/// gap ticket 16's row number already
-/// writes after its `1.`, so a
-/// numbered row and a numbered item
-/// read alike.
+/// gap the row number already writes
+/// after its `1.`, so a numbered row
+/// and a numbered item read alike.
 pub(super) const MARKER_GAP: &str = " ";
 
 /// What a list draws beside each of
@@ -273,8 +272,8 @@ impl Marker<'_> {
             Marker::Glyph(glyph) => Some(format!("{glyph}{MARKER_GAP}")),
             // CSS's `decimal` counter
             // carries a `.` suffix, which
-            // is also what ticket 16's row
-            // number writes.
+            // is also what the row number
+            // writes.
             Marker::Decimal => Some(format!("{n}.{MARKER_GAP}")),
             Marker::Literal(text) => Some(format!("{text}{MARKER_GAP}")),
             Marker::None => None,
@@ -307,17 +306,16 @@ impl Marker<'_> {
 /// values `"①"` through `"㊿"` - and
 /// its ①②③ sense numbering is nothing
 /// but that. The list half is what
-/// ticket 17 will feed from a
-/// dictionary's own `styles.css`,
-/// where Jitendex writes
+/// will come from a dictionary's own
+/// `styles.css`, where Jitendex writes
 /// `ul[data-sc-content="sense-groups"]
 /// { list-style-type: "＊" }`.
 ///
 /// Independent of any layout mode by
 /// construction: it takes a document,
-/// a node and a fallback, so ticket
-/// 14's compact list and this one
-/// resolve the same marker (see
+/// a node and a fallback, so a
+/// compact list and this one resolve
+/// the same marker (see
 /// [`Paragraphs::stack_items`]).
 ///
 /// [`apply_style`]: super::style::apply_style
@@ -367,7 +365,7 @@ pub(super) fn marker_of<'a>(doc: &'a GlossDoc, id: NodeId, fallback: Marker<'a>)
 /// The third and last reader of a
 /// node's resolved style record, and
 /// therefore the third arm of the one
-/// gate ticket 14's "honour dictionary
+/// gate the "honour dictionary
 /// styling" setting closes - the other
 /// two go through
 /// [`Paragraphs::declarations`].
@@ -552,7 +550,7 @@ impl Paragraphs<'_> {
             if self.stack_items {
                 self.node(child, at, prose);
             } else {
-                // Ticket 14's compact list:
+                // The list in compact mode:
                 // the item's content joins the
                 // paragraph already open,
                 // separated as the panel has

@@ -50,8 +50,8 @@ fn styled(css: &str, content: serde_json::Value) -> GlossDoc {
 /// key's own first letter because Yomitan's `sc` prefix puts it in the
 /// middle, then turns every ASCII capital into `-x`, and leaves a CJK key
 /// entirely alone. Ported from `tools/dict-census/census.py`, which verified
-/// it against the corpus; these are the awkward cases the ticket names plus
-/// the four most-selected real keys.
+/// it against the corpus; these are the awkward cases plus the four
+/// most-selected real keys.
 #[test]
 fn a_data_key_becomes_the_attribute_name_yomitan_derives() {
     let cases = [
@@ -80,7 +80,7 @@ fn a_data_key_becomes_the_attribute_name_yomitan_derives() {
 
 /// The kebab-case half of the tree parser's camelCase table, and no wider.
 /// The `unmapped` rows are the corpus's highest-volume unsupported
-/// properties: dropping them is the ticket's rule, and a table that quietly
+/// properties: dropping them is the rule here, and a table that quietly
 /// grew past the renderer would put a value in a record nothing can read.
 #[test]
 fn only_the_properties_the_renderer_maps_survive() {
@@ -181,7 +181,7 @@ fn the_declared_selector_kind_list_is_the_one_the_parser_accepts() {
 
 /// 字通's own shape: a `data-sc`-keyed span carrying a full box, and not one
 /// inline `style` anywhere in the entry. This is the test that the mechanism
-/// works at all - before this ticket the box model drew nothing for the 13
+/// works at all - before this change the box model drew nothing for the 13
 /// dictionaries in the census's `css-only` bucket.
 #[test]
 fn a_css_only_dictionary_gets_a_box_with_no_inline_style_anywhere() {
@@ -238,8 +238,8 @@ fn a_has_selector_reaches_a_parent_through_its_child() {
     assert_eq!(None, prop(&miss, find(&miss, Tag::Div), StyleKey::BorderWidth));
 }
 
-/// 旺文社漢字典's `td:has([data-sc親字])`, the descendant form the ticket
-/// names, on a real CJK `data` key.
+/// 旺文社漢字典's `td:has([data-sc親字])`, the descendant form the corpus
+/// uses, on a real CJK `data` key.
 #[test]
 fn a_descendant_has_selector_reaches_a_cell_through_a_cjk_data_key() {
     let d = styled(
@@ -592,7 +592,7 @@ fn an_unsupported_selector_drops_its_rule_whole_and_is_counted() {
 /// A selector list is atomic: one unreadable member drops the readable ones
 /// with it, which is what CSS does with an unreadable selector list and the
 /// only answer that never half-applies a rule. Jitendex loses a real
-/// `margin-top` this way, and the ticket's measured cost is that count.
+/// `margin-top` this way, and the measured cost is that count.
 #[test]
 fn one_bad_selector_in_a_list_drops_the_whole_rule() {
     let sheet = Sheet::compile(
@@ -676,7 +676,7 @@ fn every_scanned_rule_lands_in_exactly_one_count() {
 // ---- malformed input ----
 
 /// Malformed CSS drops the rule it is in, records what went wrong, and never
-/// panics. Every case here is one the ticket names.
+/// panics.
 #[test]
 fn malformed_css_drops_rules_and_never_panics() {
     let cases: [(&str, &str); 8] = [

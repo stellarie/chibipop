@@ -262,9 +262,9 @@ fn geometry_golden_pitch_sources() {
 /// ones the widened schema requires,
 /// because it has fields no
 /// plain-string fixture can fill; the
-/// last three are ticket 02's, and
-/// they are the only thing pinning the
-/// card header's pitch geometry.
+/// last three came with the card
+/// header's pitch geometry, and they
+/// are the only thing pinning it.
 #[test]
 fn the_fixture_set_is_the_pinned_sixteen() {
     let names: Vec<&str> = fixtures().iter().map(|f| f.name).collect();

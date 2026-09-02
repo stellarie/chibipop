@@ -4,22 +4,21 @@
 //! text and the SNI `Status`.
 //!
 //! The registry is daemon-owned and works with or without a tray — it is
-//! fed from what the daemon already knows (the ticket-34 capture backend
-//! selection and the consent it resolved before publishing, the
-//! ticket-33 cursor rung selection and its live health, the
-//! always-bound control socket), and later channel tickets flip states
-//! as their backends land. Nothing here touches D-Bus, so all of it is
-//! testable without a tray host.
+//! fed from what the daemon already knows (the capture backend selection
+//! and the consent it resolved before publishing, the cursor rung
+//! selection and its live health, the always-bound control socket), and
+//! later channel work flips states as their backends land. Nothing here
+//! touches D-Bus, so all of it is testable without a tray host.
 
 use crate::capture::backend::{Backend, Selection as CaptureSelection};
 use crate::cursor::{Rung, Selection};
 
 /// One monitored channel, in menu order: the three input channels, plus
 /// the popup surface that shows what they produce. The popup earns a row
-/// for the stock-GNOME case (ticket 49): a session with no layer shell
-/// has three perfectly healthy input channels and still cannot show a
-/// definition, and a tray that reads all-green there is the "silently
-/// half-works" failure this app refuses.
+/// for the stock-GNOME case: a session with no layer shell has three
+/// perfectly healthy input channels and still cannot show a definition,
+/// and a tray that reads all-green there is the "silently half-works"
+/// failure this app refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelId {
     Capture,
@@ -60,10 +59,10 @@ impl ChannelId {
 /// there is no channel left for a "not built yet" placeholder to
 /// describe. The third is for the failure this app refuses to hide: a
 /// channel that serves pixels *and* is known to serve them spoiled - a
-/// compositor painting the pointer into the frames we OCR (ticket 52).
-/// Reporting that as Up would be a lie the user pays for in wrong
-/// readings; reporting it as Down would be a lie they could not act on,
-/// because lookups do work.
+/// compositor painting the pointer into the frames we OCR. Reporting
+/// that as Up would be a lie the user pays for in wrong readings;
+/// reporting it as Down would be a lie they could not act on, because
+/// lookups do work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Working; `detail` names what serves it ("control socket").
@@ -122,8 +121,8 @@ pub fn rung_detail(rung: Rung) -> &'static str {
     }
 }
 
-/// The cursor channel's state, straight from the ticket-33 rung
-/// selection the daemon already made.
+/// The cursor channel's state, straight from the rung selection the
+/// daemon already made.
 pub fn cursor_state(selection: &Selection) -> ChannelState {
     match selection {
         Selection::Rung(rung) => ChannelState::up(rung_detail(*rung)),
@@ -213,9 +212,9 @@ impl ChannelStatuses {
     }
 
     /// The SNI `Status`: NeedsAttention exactly when a channel is down
-    /// or serving spoiled (ticket 52's software cursor). Nothing else
-    /// raises it - an icon parked on NeedsAttention teaches the user to
-    /// ignore it, and both of those states name a fix in their row.
+    /// or serving spoiled (a software cursor). Nothing else raises it -
+    /// an icon parked on NeedsAttention teaches the user to ignore it,
+    /// and both of those states name a fix in their row.
     pub fn sni_status(&self) -> ksni::Status {
         let wants_attention = |s: &ChannelState| {
             matches!(s, ChannelState::Down { .. } | ChannelState::Degraded { .. })
@@ -263,10 +262,10 @@ mod tests {
     }
 
     /// Stock GNOME, as a tray host with the AppIndicator extension sees
-    /// it (ticket 49): capture, cursor and trigger can all be perfectly
-    /// healthy through the portals while the popup has nowhere to be
-    /// drawn, and an all-Active icon there would be a lie. The row names
-    /// the missing global, so the fix is legible without the log.
+    /// it: capture, cursor and trigger can all be perfectly healthy
+    /// through the portals while the popup has nowhere to be drawn, and
+    /// an all-Active icon there would be a lie. The row names the
+    /// missing global, so the fix is legible without the log.
     #[test]
     fn a_session_without_the_layer_shell_shows_a_down_popup_row() {
         let statuses = ChannelStatuses::startup(
@@ -284,10 +283,10 @@ mod tests {
         assert_eq!("Trigger: control socket", statuses.row(ChannelId::Trigger));
     }
 
-    /// Ticket 52: the compositor paints the pointer into the frames the
-    /// backend copies. Lookups work, so the row still names the
-    /// backend - and it names the option to change, and the icon asks
-    /// to be looked at.
+    /// The software cursor case: the compositor paints the pointer into
+    /// the frames the backend copies. Lookups work, so the row still
+    /// names the backend - and it names the option to change, and the
+    /// icon asks to be looked at.
     #[test]
     fn a_capture_row_can_serve_and_still_name_a_defect() {
         let defect = software_cursor::PointerInFrames::Always
@@ -314,8 +313,8 @@ mod tests {
         assert_eq!(down.clone(), down.clone().degraded_by("pointer painted into frames"));
     }
 
-    /// The ticket's headline contract: a down channel flips the SNI
-    /// status to NeedsAttention, and recovery clears it.
+    /// The headline contract: a down channel flips the SNI status to
+    /// NeedsAttention, and recovery clears it.
     #[test]
     fn any_down_channel_needs_attention() {
         let mut statuses = ChannelStatuses::startup(
@@ -351,7 +350,7 @@ mod tests {
         assert_eq!(ksni::Status::NeedsAttention, statuses.sni_status());
     }
 
-    /// Today's real down case: the ticket-33 selection came back
+    /// Today's real down case: the cursor rung selection came back
     /// Unsupported, and the row names the exact missing capability so a
     /// compositor upgrade is an obvious fix.
     #[test]

@@ -31,7 +31,7 @@
 //!
 //! What this module deliberately does *not* hold is an `ID2D1Bitmap`. A
 //! device bitmap belongs to a render target and dies with it on device
-//! loss; these bytes outlive that, and ticket 12 uploads them.
+//! loss; these bytes outlive that, and the paint pass uploads them.
 
 use chibipop::dict::media::{
     premultiplied, ByteBudget, MediaKey, Missing, Surface, SURFACE_BUDGET,
@@ -338,9 +338,10 @@ mod tests {
         );
     }
 
-    /// Story 17, at the level the tint is reachable: a monochrome asset's
-    /// alpha becomes the coverage of the body text colour, so a gaiji
-    /// authored as black ink is legible on a dark theme and on a light one.
+    /// The monochrome-tint requirement, at the level the tint is reachable:
+    /// a monochrome asset's alpha becomes the coverage of the body text
+    /// colour, so a gaiji authored as black ink is legible on a dark theme
+    /// and on a light one.
     ///
     /// The fixture is half-alpha blue, so the assertion is also the channel
     /// order: a tint that forgot the swap would put the red channel where
@@ -366,13 +367,13 @@ mod tests {
         assert_eq!(2 * 12 * 7 * 4, cache.footprint());
     }
 
-    /// Story 17 on the assets story 17 is about: a monochrome SVG is a mask
-    /// with no pixels until something picks a size, `SceneImage::tint`
-    /// picks it out of the resolved box, and this is where that number
-    /// becomes a bitmap. All 35 of this library's gaiji are exactly this
-    /// shape - `appearance: "monochrome"`, `height: 1em`, an SVG glyph
-    /// outline - and the theme's body text colour is what makes them
-    /// legible on a dark panel and on a light one.
+    /// The same rule on the assets it was written for: a monochrome SVG is
+    /// a mask with no pixels until something picks a size,
+    /// `SceneImage::tint` picks it out of the resolved box, and this is
+    /// where that number becomes a bitmap. All 35 of this library's gaiji
+    /// are exactly this shape - `appearance: "monochrome"`, `height: 1em`,
+    /// an SVG glyph outline - and the theme's body text colour is what
+    /// makes them legible on a dark panel and on a light one.
     #[test]
     fn a_monochrome_vector_rasterizes_at_the_size_the_tint_asked_for() {
         let (db, _guard) = built("vector");

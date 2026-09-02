@@ -4,7 +4,7 @@
 //! a global-physical-pixel position becomes core `Event::CursorMoved`
 //! — core vocabulary unchanged, no evdev anywhere.
 //!
-//! Test hooks (documented, used by the ticket-33 smoke tests):
+//! Test hooks (documented, used by the cursor-channel smoke tests):
 //! - `CHIBIPOP_CURSOR_CHANNEL=auto|image-copy|portal|hyprctl|none` forces a
 //!   rung (or the empty ladder, to exercise the unsupported
 //!   diagnostic) instead of the capability-selected one.
@@ -27,8 +27,8 @@ pub mod budget {
     /// Event-driven cursor rungs, cursor parked: nothing runs.
     pub const IDLE_WAKEUPS_PER_SEC: u32 = 0;
     /// Dwell re-check while a popup is shown (the 250 ms deadline).
-    /// Budgeted here with the rest; the capture tickets (30/31) race
-    /// damage on the same deadline, and the daemon's watch fires at it.
+    /// Budgeted here with the rest; the capture path races damage on
+    /// the same deadline, and the daemon's watch fires at it.
     pub const DWELL_MAX_WAKEUPS_PER_SEC: u32 = 4;
     /// That budget as the deadline itself: one wakeup per period, and
     /// no second number that could drift from the first.

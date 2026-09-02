@@ -75,9 +75,9 @@ pub(super) const SIDE_GAP: f32 = 12.0;
 /// What the popup shows of an entry,
 /// as the scene builder spends it.
 ///
-/// The spec's "render settings are a
-/// decision table, not a style
-/// engine": Yomitan's own
+/// Render settings are a decision
+/// table, not a style engine:
+/// Yomitan's own
 /// configurability is a small fixed
 /// set of root attributes driving
 /// fixed CSS rules, and this is
@@ -603,8 +603,8 @@ pub(super) struct SideEntry {
 /// a list's layout and a [`Render`]
 /// record - and nothing below this
 /// point consults a setting again.
-/// That is the spec's "decision
-/// table, not a style engine":
+/// That is a decision table, not
+/// a style engine:
 /// Yomitan drives the same handful of
 /// root attributes into fixed CSS
 /// rules rather than offering a
@@ -756,8 +756,7 @@ pub(super) fn build_elements(
                 // paragraph already carries,
                 // this is what turns "select
                 // the text" into "select sense
-                // 3 of 大辞林" (stories 45
-                // and 46).
+                // 3 of 大辞林".
                 for piece in &mut pieces {
                     piece.stamp(block.dict_id, entry.entry_id);
                 }

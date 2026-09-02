@@ -1215,9 +1215,9 @@ mod tests {
         }
     }
 
-    /// Drill-down probes a headword that ticket 07 may hand over as
-    /// several styled spans, so an offset has to be counted over the
-    /// run's whole text and not just the first span's.
+    /// Drill-down probes a headword that may arrive as several styled
+    /// spans, so an offset has to be counted over the run's whole text
+    /// and not just the first span's.
     #[test]
     fn caret_offsets_run_on_across_a_span_boundary() {
         let Some(mut engine) = jp_engine() else { return };

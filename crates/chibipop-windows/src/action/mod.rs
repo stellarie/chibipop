@@ -110,8 +110,8 @@ pub enum ActionOutcome {
 
 /// Worker's input: raw pixels plus the whole add, already decided.
 ///
-/// The rule lives in `chibipop::shot` (spec D4) - the pump plans, the
-/// worker only encodes, writes and posts.
+/// The rule lives in `chibipop::shot` - the pump plans, the worker
+/// only encodes, writes and posts.
 pub struct ScreenshotCommand {
     pub bgra_buf: Vec<u8>,
     pub width: i32,

@@ -156,7 +156,7 @@ const SVG_WINDOW: usize = 16 << 10;
 /// The largest dimension a real asset declares, by a wide margin.
 ///
 /// A header is four bytes of attacker- or bug-controlled integer, and a
-/// declared 4 294 967 295 x 1 would give ticket 12 an aspect ratio of four
+/// declared 4 294 967 295 x 1 would give the layout an aspect ratio of four
 /// billion to reason about. No dictionary asset in the census is anywhere
 /// near 65 536 px, so refusing that is refusing corruption, not content.
 const MAX_DIM: f32 = 65_536.0;
@@ -217,7 +217,7 @@ fn raster_magic(bytes: &[u8]) -> Option<MediaFormat> {
     None
 }
 
-/// Validated, so the rest of this module cannot record a size ticket 12
+/// Validated, so the rest of this module cannot record a size the layout
 /// would have to defend itself against.
 fn sized(format: MediaFormat, w: f64, h: f64) -> Result<Intrinsic, Unreadable> {
     let (width, height) = (w as f32, h as f32);
@@ -681,7 +681,7 @@ pub const MAX_PIXELS: u32 = 16 << 20;
 /// `at` is the pixel size to rasterize a **vector** at, and it is the one
 /// place a size enters this half of the module. It flows one way, from
 /// layout to the decoder: the resolved box comes from the intrinsic size
-/// ticket 03 recorded, [`crate::ui::layout::SceneImage::tint`] quantises
+/// the build recorded, [`crate::ui::layout::SceneImage::tint`] quantises
 /// it into `Tint::Raster`, and the bin hands that number here. Nothing
 /// reads a decoded size back out, which is what keeps a decoder off the
 /// measurement path. `None` rasterizes an SVG at its own intrinsic size,
@@ -872,7 +872,7 @@ fn decode_gif(bytes: &[u8]) -> Decoded {
 
 /// An SVG rasterized at `at`, or at its own intrinsic size.
 ///
-/// This is the decoder story 17 needs and the only one whose output size
+/// This is the decoder an SVG needs and the only one whose output size
 /// is a choice rather than a property of the bytes: a vector has no pixels
 /// until something picks a size. `at` is `Tint::Raster`'s pair, already
 /// quantised and clamped by [`crate::ui::layout::SceneImage::tint`], so a

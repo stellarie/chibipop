@@ -706,7 +706,7 @@ impl Builder {
     /// rejects, so the subtree follows its root without a byte on any
     /// descendant. That also leaves a descendant addressable on its own -
     /// `Selection::Nodes` renders a sense a user picked out of an example
-    /// block, which is the Anki half of stories 45 and 46.
+    /// block, which is the Anki half of a sense picker.
     ///
     /// A fast exit for the overwhelming majority: a node with no `data` map
     /// stages no entries, so the loop does not run and the node is content.
@@ -937,9 +937,9 @@ impl<'de> Visitor<'de> for InternSeed<'_> {
 }
 
 /// The `data` object, whose keys are per-dictionary and unbounded - which is
-/// why ticket 15 classifies an editorial role out of them rather than
-/// matching a fixed name list, and why ticket 17's stylesheet matcher indexes
-/// on them.
+/// why the role classifier reads an editorial role out of them rather than
+/// matching a fixed name list, and why the stylesheet matcher indexes on
+/// them.
 struct DataSeed<'a> {
     b: &'a mut Builder,
 }

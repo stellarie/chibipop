@@ -14,12 +14,12 @@
 //! background a bin paints and the advance the text took cannot disagree.
 //! Change either and the other is wrong.
 //!
-//! Ticket 08 shipped the drawn rect alone and recorded the room as
-//! impossible; two tickets later it was not. Ticket 11 buys a reading
-//! *vertical* room with a zero-advance filler and ticket 12 buys an image
-//! *horizontal* room with a run of no-break spaces solved from one probe.
-//! This is ticket 12's mechanism over a box's four edges instead of one
-//! replaced element's width.
+//! An earlier pass shipped the drawn rect alone and recorded the room as
+//! impossible; it later was not. A reading buys *vertical* room with a
+//! zero-advance filler and an image buys *horizontal* room with a run of
+//! no-break spaces solved from one probe. This is the image spacer's
+//! mechanism over a box's four edges instead of one replaced element's
+//! width.
 //!
 //! # The horizontal axis only, and that is CSS
 //!
@@ -273,9 +273,9 @@ fn spacer_spans(pill: &InlineBox) -> impl Iterator<Item = (usize, f32)> {
 /// would fool nobody, because both bins
 /// re-measure an element's own spans to
 /// paint it and would get the ungrown
-/// lines back. Ticket 11's ruby filler
-/// and ticket 12's image spacer are the
-/// same trick for the same reason.
+/// lines back. The ruby filler and the
+/// image spacer are the same trick for
+/// the same reason.
 ///
 /// So the run asks, and this decides
 /// what it asks for. One ratio is

@@ -5,12 +5,12 @@
 //! every node after it. That is fine for a walk and wrong for an identity.
 //! A [`NodePath`] is the identity - "the third child of the first glossary
 //! item" - which is what the spec means by "a selection means *sense 3 of
-//! 大辞林* rather than a character range" (stories 45 and 46).
+//! 大辞林* rather than a character range".
 //!
 //! Two consumers, and they set the whole design:
 //!
-//! - **Ticket 08** puts one on every `SceneElem` while the block pass is
-//!   already descending the tree. So the type is [`Copy`] with inline
+//! - **The popup scene's block pass** puts one on every `SceneElem` while it
+//!   is already descending the tree. So the type is [`Copy`] with inline
 //!   storage - a `Vec` per element per frame is an allocation the scene walk
 //!   cannot afford - and extending a path by one step ([`NodePath::child`])
 //!   is the operation that walk performs.

@@ -75,7 +75,7 @@ jobs:
       # make quietly.
       #
       # --workspace --exclude chibipop-linux, not bare: default-members
-      # serves the Linux dev box since ticket 29, so a bare command here
+      # serves the Linux dev box, so a bare command here
       # would skip the Windows crate - and a bare build would uplift the
       # Linux crate's foreign-target stub as target/release/chibipop.exe,
       # shipping a refusal binary. Same collision rule as ci.yml.

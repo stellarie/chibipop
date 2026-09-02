@@ -140,8 +140,8 @@ pub fn for_each_meta_row(zip: &Path, mut on_row: impl FnMut(Value) -> Result<()>
 /// The same walk [`for_each_meta_row`] takes, stopped at the first row that
 /// answers yes - which is what makes a role predicate affordable. A pitch
 /// archive answers from the first row of its first bank instead of being
-/// read whole: ticket 01's census measured 48.7 MB of bank JSON across the
-/// five pitch archives in one library.
+/// read whole: the census measured 48.7 MB of bank JSON across the five
+/// pitch archives in one library.
 ///
 /// `false` for an archive with no matching row, and an `Err` for one this
 /// build cannot open or parse - the caller decides what an unreadable
@@ -234,7 +234,7 @@ fn shallowest<'a>(names: &'a [String], want: &str) -> Option<&'a str> {
 ///
 /// Returns the wanted paths this archive holds no usable bytes for -
 /// absent, or over [`MAX_ASSET`]. The build reports the count and writes no
-/// row for them, which is what makes ticket 12's `alt`-text fallback fire.
+/// row for them, which is what makes the `alt`-text fallback fire.
 pub fn for_each_media<'a>(
     zip: &Path,
     wanted: &'a BTreeSet<String>,
@@ -337,7 +337,7 @@ fn archive_names(archive: &ZipArchive<File>) -> Vec<String> {
 ///
 /// The one place a member's bytes are reached, so the reasoning lives once.
 /// **The check is off deliberately.** Every one of the five pitch archives
-/// ticket 01 censused stores CRC-32 values that do not match its own
+/// the census covered stores CRC-32 values that do not match its own
 /// payload - 48 of their 54 members - and this reader refused every one of
 /// them with `Invalid checksum` while Yomitan imported them cleanly, never
 /// passing `checkSignature` or `checkCrc32` to its own zip reader. So the
@@ -821,7 +821,7 @@ mod tests {
         assert_eq!("[]", fields(r#"[["書く","かく","","v5"]]"#)[0].3);
     }
 
-    // ---- media extraction (ticket 03) ----
+    // ---- media extraction ----
 
     fn media_zip() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(vec!["gaiji/huge.png"], missing);
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a dictionary's own styles.css ----
 
     /// The census found `styles.css` at the archive root and one directory
     /// deep, because some archives are zipped with a wrapper folder. Two

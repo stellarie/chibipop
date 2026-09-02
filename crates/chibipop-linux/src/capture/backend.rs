@@ -21,7 +21,7 @@
 //! forces a rung (or the empty ladder, to exercise the unsupported
 //! diagnostic) instead of the capability-selected one. Forcing
 //! `portal` on Hyprland — which advertises screencopy and so would
-//! never reach rung 2 on its own — is how ticket 34's fallback backend
+//! never reach rung 2 on its own — is how the portal fallback backend
 //! is smoke-tested.
 
 /// The portal interface whose presence on the session bus is the

@@ -1,7 +1,7 @@
 //! Startup capability probe scaffold: list what the compositor
 //! advertises, and name exactly what is missing so a compositor upgrade
-//! self-heals. No capture, no surfaces yet — later tickets bind these
-//! globals; this one only reports.
+//! self-heals. No capture, no surfaces yet — later work binds these
+//! globals; this module only reports.
 
 use std::collections::BTreeMap;
 use wayland_client::protocol::wl_registry;

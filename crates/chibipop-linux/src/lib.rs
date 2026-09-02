@@ -19,7 +19,7 @@
 #[cfg(target_os = "linux")]
 pub mod ocr;
 
-/// The popup's decoded-surface cache (ticket 03).
+/// The popup's decoded-surface cache.
 ///
 /// Here rather than in the bin's own `popup` tree for the reason above:
 /// the module carries its own tests against a database the real builder

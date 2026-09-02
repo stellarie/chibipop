@@ -98,7 +98,7 @@ pub fn run(paths: Paths) -> Result<()> {
         home: env.home.clone(),
         // Resolved in this process, which is the same binary as the
         // daemon (`chibipop settings`), so the snippet names the exe
-        // the user is actually running (ticket 51).
+        // the user is actually running.
         exe: paths::exec_name(),
         // Whether a focus-less client can write the selection here is a
         // fact about the compositor, not about the daemon, so this
@@ -130,13 +130,13 @@ fn clipboard_rung() -> Option<clipboard::Rung> {
     clipboard::rung(&wayland::collect_globals(&conn).ok()?)
 }
 
-/// Who owns one action's binding, as the daemon published it (ticket 36).
+/// Who owns one action's binding, as the daemon published it.
 ///
-/// Resolved per portal id (ticket 09): the daemon requests both ids in
-/// one session, so its published answer names each one separately and a
-/// row can render its own key without borrowing another's. `published`
-/// is read once by the caller so the two rows can never disagree about
-/// which file they read.
+/// Resolved per portal id: the daemon requests both ids in one session,
+/// so its published answer names each one separately and a row can
+/// render its own key without borrowing another's. `published` is read
+/// once by the caller so the two rows can never disagree about which
+/// file they read.
 ///
 /// The portal control is only rendered when a daemon actually got the
 /// GlobalShortcuts session *and* the bind through — never on a bus
@@ -260,9 +260,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The add-card row's own status (ticket 09): when the portal
-    /// answered for `anki-add`, that row names *its* key and the
-    /// trigger row names the trigger's - two rows, two keys, one file.
+    /// The add-card row's own status: when the portal answered for
+    /// `anki-add`, that row names *its* key and the trigger row names the
+    /// trigger's - two rows, two keys, one file.
     #[test]
     fn the_add_card_row_gets_the_key_the_portal_published_for_it() {
         let dir = scratch("addportal");

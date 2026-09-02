@@ -55,8 +55,7 @@ impl HotkeyChannel {
     /// press of one verb.
     ///
     /// `exe` is the binary a pasted bind must exec, resolved by the
-    /// caller (`paths::exec_name`) rather than assumed to be on PATH
-    /// (ticket 51).
+    /// caller (`paths::exec_name`) rather than assumed to be on PATH.
     pub fn control(
         &self,
         compositor: Compositor,
@@ -127,11 +126,10 @@ mod tests {
         );
     }
 
-    /// Each row is handed the channel resolved for its *own* portal id
-    /// (ticket 09), so the add-card row names the add-card key and an
-    /// id the portal never answered for names nothing at all. The row
-    /// shape cannot borrow another action's key because it never sees
-    /// one.
+    /// Each row is handed the channel resolved for its *own* portal id,
+    /// so the add-card row names the add-card key and an id the portal
+    /// never answered for names nothing at all. The row shape cannot
+    /// borrow another action's key because it never sees one.
     #[test]
     fn a_one_shot_row_names_the_key_published_for_its_own_action() {
         let add = Bind::Press(crate::control::Verb::AnkiAdd);

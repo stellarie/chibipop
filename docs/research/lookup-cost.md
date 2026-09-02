@@ -136,7 +136,7 @@ over the box tree is 2.7 µs - noise. What is not noise:
   faster to free** (20.5 µs -> 1.7 µs). This is the parsed-tree cache the spec now
   wants: a box tree costs 1 817 live allocation blocks and 384 KB per hover-worth,
   an arena 186 blocks and 84 KB, cloneable in six `memcpy`s and free behind an `Arc`.
-- **The ticket 17 style probe is 3.6x faster at p50 and 17.1x at p99** (7.8/140.3 µs
+- **The style probe is 3.6x faster at p50 and 17.1x at p99** (7.8/140.3 µs
   -> 2.2/8.2 µs). 27.8% of all nodes carry one of the top 20 `data-*` keys, so this
   is the CSS matcher's inner loop, and it runs per node per hover.
 - Going **typed at all** is the timing win, not the arena: `Value` -> box tree cuts
@@ -156,7 +156,7 @@ three, and that is where the parse time goes.
 3. **Deconjugation memoisation** - 228 µs, 23% of the p50 hover, pure CPU with no
    database involved. Backlog 39.
 4. **Gloss representation** - 0.6% of a hover. Choose it for the cache and the CSS
-   probe, which is what ticket 02 now does.
+   probe, which is what the arena parser now does.
 
 The schema, the indexes, and the statement cache need no work.
 
@@ -170,6 +170,6 @@ The schema, the indexes, and the statement cache need no work.
 - The bloom hash is FNV-1a with Kirsch-Mitzenmacher double hashing; hoshidicts uses
   xxHash, which is faster on short keys, so the probe cost is a ceiling and the
   benefit a floor.
-- The arena prototypes are not the parser ticket 02 must ship: no depth cap, no
+- The arena prototypes are not the parser that must ship: no depth cap, no
   per-row degradation on malformed input, no editorial-role classification, no CSS
   matching.

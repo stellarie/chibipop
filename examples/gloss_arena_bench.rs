@@ -1,5 +1,5 @@
-//! How `GlossDoc` should be laid out in memory, measured before ticket 02
-//! writes it.
+//! How `GlossDoc` should be laid out in memory, measured before the arena
+//! rewrite writes it.
 //!
 //! Three representations of the same Yomitan structured-content tree, over the
 //! real glossary payloads `tools/hover-parse-bench/payload.py` extracted:
@@ -8,7 +8,7 @@
 //!    [hover-parse-cost.md](../docs/research/hover-parse-cost.md) measured, so
 //!    it anchors the comparison.
 //! 2. **Box tree** - an enum with `Vec<Node>` children, `String` text, and a
-//!    `HashMap<String, _>` `data` map. The implementation ticket 02 produces if
+//!    `HashMap<String, _>` `data` map. The implementation a rewrite produces if
 //!    nobody thinks about layout.
 //! 3. **Arena** - one flat `Vec<ANode>` per entry, children as a
 //!    first-child/next-sibling index pair, every byte of text in one `String`
@@ -166,7 +166,7 @@ fn alloc_snapshot() -> AllocStat {
 // the node model all three representations are held to
 // ---------------------------------------------------------------------------
 
-/// The node kinds ticket 02 names.
+/// The node kinds this model names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 enum Kind {
@@ -379,9 +379,8 @@ fn style_key_for(s: &str) -> Option<StyleKey> {
     })
 }
 
-/// The editorial role field ticket 02 says to carry now and classify in
-/// ticket 15. One byte, present in both typed representations, never set by
-/// these prototypes.
+/// The editorial role field to carry now and classify later. One byte,
+/// present in both typed representations, never set by these prototypes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Role(u8);
 
@@ -502,9 +501,10 @@ fn walk_value(v: &Value, depth: u32, w: &mut Walk) {
     }
 }
 
-/// Ticket 17's inner loop: does this node's `data` map carry any of the probe
-/// keys? Iterating the node's own keys and binary-searching the (sorted) probe
-/// list is the cheaper of the two obvious spellings, so it is the one measured.
+/// The style matcher's inner loop: does this node's `data` map carry any of
+/// the probe keys? Iterating the node's own keys and binary-searching the
+/// (sorted) probe list is the cheaper of the two obvious spellings, so it is
+/// the one measured.
 fn probe_value(v: &Value, probe: &[String], hits: &mut u64) {
     match v {
         Value::Array(a) => {
@@ -546,7 +546,7 @@ struct BoxNode {
     /// Text nodes only.
     text: String,
     children: Vec<BoxNode>,
-    /// The naive choice, and the one ticket 17's style matching has to live
+    /// The naive choice, and the one style matching has to live
     /// with. `HashMap::new()` does not allocate until the first insert, so an
     /// unadorned node pays nothing but the 48 inline bytes.
     data: HashMap<String, BoxScalar>,
@@ -1512,9 +1512,10 @@ fn walk_arena(a: &Arena, w: &mut Walk) {
 
 const PROBE_MAX: usize = 24;
 
-/// Ticket 17's inner loop on a flat arena: resolve the probe keys to ids once
-/// per document, then sweep the node vector linearly comparing `u32`s. No
-/// hashing and no string comparison per node, and no tree pointer-chasing.
+/// The style matcher's inner loop on a flat arena: resolve the probe keys to
+/// ids once per document, then sweep the node vector linearly comparing
+/// `u32`s. No hashing and no string comparison per node, and no tree
+/// pointer-chasing.
 fn probe_arena(a: &Arena, probe: &[String]) -> u64 {
     let mut ids = [u32::MAX; PROBE_MAX];
     let mut n = 0;
@@ -1805,8 +1806,8 @@ fn load_records() -> Result<Vec<Record>> {
         .collect()
 }
 
-/// The `data` keys ticket 17 would actually match on: the most common ones in
-/// the population being probed, measured here rather than guessed.
+/// The `data` keys the style matcher would actually match on: the most common
+/// ones in the population being probed, measured here rather than guessed.
 fn census_probe_keys(slices: &[(&str, &[String])], want: usize) -> Vec<String> {
     fn count(v: &Value, out: &mut BTreeMap<String, u64>) {
         match v {

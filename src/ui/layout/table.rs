@@ -448,7 +448,7 @@ impl Paragraphs<'_> {
     /// to the cells inside it, which is
     /// how a `td` in a header row comes
     /// out bold and tinted. `tfoot` is
-    /// out of this ticket's scope and
+    /// out of scope here and
     /// contributes its rows plainly,
     /// which loses no text and invents
     /// no styling for a shape the

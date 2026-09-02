@@ -90,13 +90,14 @@ pub struct Fixture {
 /// it has fields no plain-string
 /// fixture can ever fill, and an
 /// unfilled field gates nothing. The
-/// last three are ticket 02's, for the
-/// same reason again: pitch has no
-/// geometry before that ticket, so
-/// nothing could be captured from a
-/// build that drew none, and these
-/// three are the only thing pinning
-/// the card header's marks.
+/// last three came with the card
+/// header's pitch geometry, for the
+/// same reason again: pitch had no
+/// geometry before it, so nothing
+/// could be captured from a build that
+/// drew none, and these three are the
+/// only thing pinning the card
+/// header's marks.
 ///
 /// The per-fixture prose - what each
 /// one is for - lives in
@@ -969,13 +970,13 @@ fn styled_spans() -> Fixture {
 ///   `Block` element ahead of the runs it frames. The `span` inside it
 ///   carries a `data.content` marker *and* a box that only spaces
 ///   (padding and a right margin, no fill and no border), so it opens a
-///   line - that is ticket 01's sense separator - and then resolves to
-///   **no box drawn**, where before ticket 15's fix a marker-carrying
-///   node became a block box and indented its own line by its padding.
-///   It does still *reserve* that padding and margin, as an inline box
-///   in a browser does: the room is spacer spans in the run itself
-///   (`ui::layout`'s `pill` pass), so what a box with no ink costs the
-///   line is advance and not pixels.
+///   line - that is the sense separator - and then resolves to **no
+///   box drawn**, where a marker-carrying node once became a block box
+///   and indented its own line by its padding. It does still *reserve*
+///   that padding and margin, as an inline box in a browser does: the
+///   room is spacer spans in the run itself (`ui::layout`'s `pill`
+///   pass), so what a box with no ink costs the line is advance and
+///   not pixels.
 ///   The second `div` is the same block with the marker span *first*:
 ///   the shape that used to lose its box entirely, because the
 ///   paragraph the block opened was flushed empty before it could carry
@@ -1057,10 +1058,10 @@ fn bordered_pill() -> Fixture {
 ///   so that element carries **two** markers hanging in two gutters -
 ///   what a browser draws. It also carries the sense's own example pair
 ///   and the entry's attribution line, which is the *other* half of
-///   Jitendex's real record and the only place a golden sees ticket 15's
-///   default: `RoleFilter::CARD` keeps examples and attributions, where
-///   the deleted six-name drop list hid 40 975 nodes of exactly this
-///   shape, all of them Jitendex's.
+///   Jitendex's real record and the only place a golden sees the
+///   role-filter default: `RoleFilter::CARD` keeps examples and
+///   attributions, where the deleted six-name drop list hid 40 975 nodes
+///   of exactly this shape, all of them Jitendex's.
 /// - `plain` is the default ladder with no stylesheet at all: a `ul`'s
 ///   bullet, an `ol`'s number, and the indent each level adds.
 fn nested_list() -> Fixture {
@@ -1130,7 +1131,7 @@ fn nested_list() -> Fixture {
 ///
 /// `table` is in 16 of 72 dictionaries, `td` in 18, `th` in 11, `tbody`
 /// in 1; `rowSpan` in 7 over 116 813 nodes and `colSpan` in 2 over 4 597.
-/// A conjugation table is the shape the spec's own fixture list names,
+/// A conjugation table is the shape the pinned fixture list names,
 /// and it is the one place three `ElemKind`s meet: a `Table` leading its
 /// `Cell`s in draw order so the grid's background sits under them, and
 /// each cell's paragraphs following it as their own addressed runs.
@@ -1174,11 +1175,11 @@ fn table_spans() -> Fixture {
 /// where it is told, which makes the snapshot the only record of where
 /// that is.
 ///
-/// **Two term-bank rows under one dictionary label**, which is ticket
-/// 16's shape and no other fixture holds it: the census found 6 220 大辞林
-/// headwords with more than one row and a worst case of eleven, and the
-/// panel used to repeat the dictionary's name once per row. Rows here
-/// mean one label with two gloss bodies under it.
+/// **Two term-bank rows under one dictionary label**, a shape no other
+/// fixture holds: the census found 6 220 大辞林 headwords with more than
+/// one row and a worst case of eleven, and the panel used to repeat the
+/// dictionary's name once per row. Rows here mean one label with two
+/// gloss bodies under it.
 ///
 /// The second row's `斉` carries a six-mora reading over a one-character
 /// base, so the reading overhangs its base on both sides and the
@@ -1271,11 +1272,11 @@ fn inline_image() -> Fixture {
 /// 14. **One accent** — the card header's new geometry at its simplest, and
 ///     the only fixture that pins where an overline and a downstep tick land.
 ///
-/// `雑談 / ざつだん`, heiban, which is 48.0% of ticket 01's censused accents:
-/// the first mora low, the other three high, and no tick - so this golden
-/// records the overline's own extent with nothing else in the row to confuse
-/// it. Every mark is an `inline_box` with one border edge, so the fields that
-/// move here are exactly the ones marked kana is drawn out of.
+/// `雑談 / ざつだん`, heiban, which is 48.0% of the census's accents: the first
+/// mora low, the other three high, and no tick - so this golden records the
+/// overline's own extent with nothing else in the row to confuse it. Every
+/// mark is an `inline_box` with one border edge, so the fields that move here
+/// are exactly the ones marked kana is drawn out of.
 fn pitch_single() -> Fixture {
     let mut top = card(
         Some("雑談"),
@@ -1294,11 +1295,11 @@ fn pitch_single() -> Fixture {
 
 /// 15. **Several accents** — the row stack, and the tick inside a word.
 ///
-/// `白目 / しろめ` with all four of the accents ticket 01's census unions out
-/// of its five pitch dictionaries, which is the corpus maximum and reached by
-/// only 50 of 218 783 expression+reading pairs. Heiban, atamadaka, nakadaka
-/// and odaka in one capture, so the golden holds one row of each shape and
-/// the gap the walk stacks between them.
+/// `白目 / しろめ` with all four of the accents the census unions out of its five
+/// pitch dictionaries, which is the corpus maximum and reached by only 50 of
+/// 218 783 expression+reading pairs. Heiban, atamadaka, nakadaka and odaka
+/// in one capture, so the golden holds one row of each shape and the gap the
+/// walk stacks between them.
 fn pitch_multiple() -> Fixture {
     let mut top = card(
         Some("白目"),

@@ -83,7 +83,7 @@ pub fn file_name(display: &str) -> String {
 }
 
 /// What the received verbs did so far. Placeholder until the core
-/// `Controller` lands (ticket 25): a verb updates this and produces a
+/// `Controller` lands: a verb updates this and produces a
 /// diagnostic line, nothing more.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StubState {

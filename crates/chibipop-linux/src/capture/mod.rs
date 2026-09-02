@@ -35,7 +35,7 @@
 //! **What no rung can do.** [`software_cursor`] is the one cursor fact
 //! that is not a request: a compositor drawing a software pointer into
 //! its framebuffer hands it to every backend here, so that condition is
-//! detected and said out loud rather than silently OCR'd (ticket 52).
+//! detected and said out loud rather than silently OCR'd.
 
 pub mod backend;
 pub mod crop;
@@ -112,7 +112,7 @@ pub struct Opened {
 /// The Worker's backend is thread-affine by construction (see the
 /// module doc), so nothing outside the Worker may borrow it: everything
 /// else opens its own here. Both rungs are reachable, which is the
-/// whole reason this is not a `grim` shell-out (spec D2).
+/// whole reason this is not a `grim` shell-out.
 ///
 /// `log` carries the portal rung's consent steps, which are the only
 /// part of an open a user ever needs to see. The screencopy rung says
@@ -176,7 +176,7 @@ pub fn read(backend: &mut dyn RegionCapture, region: PhysRect) -> Result<Frame> 
     Ok(frame)
 }
 
-/// One arbitrary-rect grab with a backend of its own (spec D6).
+/// One arbitrary-rect grab with a backend of its own.
 ///
 /// **The caller owns the thread.** This blocks - a screencopy round
 /// trip, or a whole portal handshake on rung 2 - so the daemon must

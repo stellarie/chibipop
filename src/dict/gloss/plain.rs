@@ -1,10 +1,10 @@
 //! The plain-text renderer.
 //!
 //! One of three renderers over [`GlossDoc`] - the other two are the Anki HTML
-//! field ([`super::html`]) and the popup scene (`ui::layout`). Before ticket
-//! 02 this walk and the HTML walk were two independent recursions over the
-//! raw JSON, which is what let the card and the popup drift apart; they now
-//! read one parsed tree.
+//! field ([`super::html`]) and the popup scene (`ui::layout`). Before the
+//! arena rewrite this walk and the HTML walk were two independent recursions
+//! over the raw JSON, which is what let the card and the popup drift apart;
+//! they now read one parsed tree.
 //!
 //! Two consumers need a plain string and will keep needing one: the
 //! collapsed-row summary, which is one line by construction, and the Anki
@@ -18,7 +18,7 @@
 //! reached in here would make a dictionary's row count depend on a popup
 //! preference.
 //!
-//! The line-breaking rules are ticket 01's and are reproduced exactly.
+//! The line-breaking rules are the original walk's, reproduced exactly.
 //! A block tag emits a mark, [`tidy`] turns every mark into a line break and
 //! drops the empty parts, and an inline tag's children cannot break a line
 //! because the schema admits no break there. One exemption, shared with the
@@ -377,10 +377,9 @@ mod tests {
         assert_eq!(vec!["あ い\nう".to_string()], plain(&g));
     }
 
-    /// Ticket 11 took `rt` off the drop list: a reading is information a
-    /// reader of a plain string wants, and dropping it silently was the bug.
-    /// An image stays dropped - it is a character this renderer cannot
-    /// draw.
+    /// `rt` is off the drop list: a reading is information a reader of a
+    /// plain string wants, and dropping it silently was the bug. An image
+    /// stays dropped - it is a character this renderer cannot draw.
     #[test]
     fn a_reading_renders_after_its_base_and_an_image_is_still_dropped() {
         let g = json!([{"type": "structured-content", "content": [

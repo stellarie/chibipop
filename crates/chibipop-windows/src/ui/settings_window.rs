@@ -2332,8 +2332,7 @@ fn row_mapping(anki_field: &str, source: &str) -> Option<crate::config::FieldMap
 /// renamed field, a deleted one, or one belonging to the note type the user
 /// just switched away from - has no row to be read out of and must survive
 /// the save untouched. Rebuilding from the rows alone silently deleted it
-/// the first time the user opened the Anki tab and pressed Apply (ticket
-/// 21).
+/// the first time the user opened the Anki tab and pressed Apply.
 ///
 /// `"(none)"` is the opposite case and must stay so: a row exists, so the
 /// user looked at a field the model *has* and said no. `row_mapping` drops
@@ -2625,9 +2624,9 @@ impl SettingsWindow {
     /// Create and show the window, populated from `form`.
     ///
     /// `stale` are names the config's dictionary lists carry that no
-    /// installed dictionary answers to (spec D6a); when non-empty a warning
-    /// naming them is shown, because that is what a dictionary rename looks
-    /// like from in here.
+    /// installed dictionary answers to; when non-empty a warning naming
+    /// them is shown, because that is what a dictionary rename looks like
+    /// from in here.
     ///
     /// `mode` words the Apply button.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
@@ -3161,9 +3160,9 @@ impl SettingsWindow {
     /// would be more honest, but the rows are two columns of fixed geometry
     /// sized off the model's field count, and an invisible mapping is only
     /// confusing where a deleted one is data loss. `merged_field_map` is
-    /// what makes it safe - the save preserves what it never rendered
-    /// (ticket 21). Nothing here deletes a mapping the user did not ask to
-    /// delete: unmapping is setting a rendered row to `"(none)"`.
+    /// what makes it safe - the save preserves what it never rendered.
+    /// Nothing here deletes a mapping the user did not ask to delete:
+    /// unmapping is setting a rendered row to `"(none)"`.
     fn populate_field_map(&self, fields: Vec<String>) {
         let needs_rebuild = {
             let rows = self.field_map_rows.borrow();
@@ -3850,9 +3849,9 @@ impl SettingsWindow {
             )?;
             gen.push(fonts_hwnd);
             let mut families = japanese_font_families();
-            // Spec D4: an absent configured font is still offered and
-            // selected, so opening Settings and applying cannot silently
-            // change a setting the user never touched.
+            // An absent configured font is still offered and selected,
+            // so opening Settings and applying cannot silently change a
+            // setting the user never touched.
             if !families.iter().any(|x| x == &form.font) {
                 families.push(form.font.clone());
                 families.sort();
@@ -4145,9 +4144,9 @@ impl SettingsWindow {
                 y += 48;
             }
 
-            // Spec D6a: name the entry, because a config name matching
-            // nothing installed is also what a renamed archive looks like.
-            // Its place is kept rather than dropped, so an unplugged drive
+            // Name the entry, because a config name matching nothing
+            // installed is also what a renamed archive looks like. Its
+            // place is kept rather than dropped, so an unplugged drive
             // does not quietly rewrite the lists
             // (ARCHITECTURE.md#dictionary-and-lookup).
             if !stale.is_empty() {
@@ -4171,7 +4170,7 @@ impl SettingsWindow {
             let found = crate::plugin::discover::discover(&plugins_root);
             let mut engine_names = vec!["builtin".to_string()];
             engine_names.extend(discovered_text_providers(&found));
-            // Spec D4: keep it offered.
+            // Keep it offered.
             if form.engine != "builtin" && !engine_names.contains(&form.engine) {
                 engine_names.push(form.engine.clone());
             }
@@ -5020,8 +5019,7 @@ impl SettingsWindow {
                 .collect();
             // Always an answer, never `None`: a merged map is complete even
             // with no rows, so core's "a window with nothing to say must not
-            // wipe the map" rule (ticket 20) has nothing left to protect on
-            // this path.
+            // wipe the map" rule has nothing left to protect on this path.
             let saved = template.field_map.as_deref().unwrap_or_default();
             let field_map = Some(merged_field_map(saved, &readings));
 
@@ -5316,9 +5314,9 @@ mod tests {
         assert_eq!(None, row_mapping("Front", "(none)"));
     }
 
-    /// Ticket 21's data loss: the note type no longer has `LegacyAudio`, so
-    /// no row renders for it and the pre-merge read-back deleted the
-    /// mapping the user never touched.
+    /// The data loss this guards against: the note type no longer has
+    /// `LegacyAudio`, so no row renders for it and the pre-merge read-back
+    /// deleted the mapping the user never touched.
     #[test]
     fn merged_field_map_keeps_a_mapping_the_model_lacks() {
         let saved = vec![
@@ -5933,7 +5931,7 @@ mod tests {
         ]
     }
 
-    /// Spec D4: never reselect.
+    /// Never reselect.
     #[test]
     fn a_configured_language_missing_from_the_list_is_appended() {
         let got = language_choices(installed(), "ko");

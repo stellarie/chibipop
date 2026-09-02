@@ -20,10 +20,10 @@
 //! not be. Reopening afterwards is both race-free and optional.
 //!
 //! That reload has **two** handles to reopen in the daemon, not one: the
-//! worker's dictionary (`worker::ReopenDict`) and, since ticket 03, the
-//! popup's own media-store connection (`Popup::reconfigure`). Failure
-//! sends nothing — the old database is still the live one, and telling
-//! the daemon to reopen it would be noise.
+//! worker's dictionary (`worker::ReopenDict`) and the popup's own
+//! media-store connection (`Popup::reconfigure`). Failure sends nothing —
+//! the old database is still the live one, and telling the daemon to
+//! reopen it would be noise.
 
 use crate::control::{self, Verb};
 use crate::lock::{self, InstanceLock, LockError};

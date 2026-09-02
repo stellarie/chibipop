@@ -69,8 +69,8 @@ D-Bus is the only game in town.
 Caveat to carry into implementation: ksni's README documents a zbus/tokio feature-unification
 footgun ([z-galaxy/zbus#526](https://github.com/z-galaxy/zbus/issues/526)) — if any other
 dependency in the Linux binary uses zbus *without* the tokio feature while ksni enables it, you
-can get a runtime panic. If our capture/portal stack (per the sibling capture ticket) also uses
-zbus, pick one arrangement deliberately: either all-tokio or ksni with
+can get a runtime panic. If our capture/portal stack (per the capture and portal research)
+also uses zbus, pick one arrangement deliberately: either all-tokio or ksni with
 `default-features = false, features = ["async-io"]` (runtime-agnostic).
 
 ### Desktop coverage

@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(vec![di(7, "Added")], state.dicts, "the removed name must not answer");
     }
 
-    /// The reload gap ticket 41 pinned: a rebuild renames a new database
+    /// The reload gap: a rebuild renames a new database
     /// over the old inode, so only reopening serves it. The reopened
     /// file's identities win over the ones the bin sent, because the bin
     /// only knows what it read before the rebuild.

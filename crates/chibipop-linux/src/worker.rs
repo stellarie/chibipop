@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(None, settings(&Config::default(), &[]).static_region);
     }
 
-    /// The whole point of ticket 08: an unchecked row in the settings
+    /// The point of dictionary exclusion: an unchecked row in the settings
     /// window's Terms section has to reach the pipeline. `settings` is the
     /// only place the daemon builds `WorkerSettings` (reload and spawn both
     /// go through it), so the scoping is pinned here at that seam.

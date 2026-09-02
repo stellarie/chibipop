@@ -14,7 +14,7 @@ the only way to learn whether any dictionary emits them is to count.
 
 The pitch role is detected from bank content, never from the filename - an
 archive has the pitch role when a `term_meta_bank_` row carries `"pitch"` in
-field 1, which is the predicate the dictionary-roles spec uses.
+field 1.
 
 Bank discovery mirrors chibipop's own `sorted_banks` (`src/dict/archive.rs:509`):
 an entry name that starts with `term_meta_bank_` and ends with `.json`, at the
@@ -126,8 +126,8 @@ def accent_key(accent: dict, with_marks: bool) -> str:
 
     `with_marks` is the strict form: two accents that name the same downstep
     but disagree about which mora is nasal are the same row in the card header
-    ticket 02 draws and two different rows once ticket 06 draws the marks, so
-    both counts are reported."""
+    today, and two different rows once the header draws the marks, so both
+    counts are reported."""
     key = position_key(accent.get("position"))
     if not with_marks:
         return key
@@ -341,8 +341,8 @@ def walk_pitch_row(
 
         # A present `nasal` is not a nasal mora: all five of this library's
         # pitch dictionaries write `"nasal": []` on every accent, so the
-        # number ticket 06 rests on is the *non-empty* one and the two are
-        # counted apart.
+        # number the mark drawing rests on is the *non-empty* one and the
+        # two are counted apart.
         for key in ("nasal", "devoice"):
             if key not in accent:
                 continue

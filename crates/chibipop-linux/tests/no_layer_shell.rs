@@ -1,5 +1,5 @@
 //! The stock-GNOME posture, on a compositor that really has no layer
-//! shell (ticket 49).
+//! shell.
 //!
 //! GNOME cannot be installed beside a session to test against, and a
 //! claim about "what chibipop does on Mutter" that only ever ran against
@@ -12,7 +12,7 @@
 //! global, a Popup channel row that says so, every other channel still
 //! resolved, a settings window that still opens - and a daemon that is
 //! still running at the end of it. That last one is not theoretical:
-//! before this ticket the daemon panicked on its first `wl_shm::format`
+//! previously the daemon panicked on its first `wl_shm::format`
 //! here, because dropping the popup left its other Wayland objects
 //! dispatching into handlers with nothing behind them.
 //!
@@ -210,8 +210,8 @@ fn a_compositor_without_the_layer_shell_degrades_instead_of_failing() {
 
     // The daemon is still up. `cage` exits with its child, so a live
     // cage IS a live daemon - and this is the assertion that would have
-    // failed before ticket 49, when the popup's orphaned `wl_shm`
-    // panicked the pump within a second of startup.
+    // failed before the no-layer-shell fallback, when the popup's
+    // orphaned `wl_shm` panicked the pump within a second of startup.
     std::thread::sleep(Duration::from_secs(2));
     assert!(
         nested.cage.try_wait().expect("polling cage").is_none(),

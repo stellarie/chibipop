@@ -146,11 +146,11 @@ impl BorderStyle {
 /// twice.
 ///
 /// Fed today by a node's inline
-/// `style` only. Ticket 17 folds a
-/// dictionary's own `styles.css` in
-/// underneath that, in `GlossDoc`'s
-/// resolved style record, so nothing
-/// here learns that CSS exists.
+/// `style` only. A dictionary's own
+/// `styles.css` folds in underneath
+/// that, in `GlossDoc`'s resolved
+/// style record, so nothing here
+/// learns that CSS exists.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BoxStyle {
     pub margin: Edges<f32>,
@@ -600,7 +600,7 @@ pub(super) fn tag_style(tag: Tag, parent: Inline) -> Inline {
 ///
 /// The properties a styled span can
 /// carry, and no others: the box
-/// properties are ticket 08's,
+/// properties are [`apply_box`]'s,
 /// `listStyleType` is a list's own and
 /// [`marker_of`] reads it straight off
 /// the same record, and a value this
@@ -1156,13 +1156,13 @@ impl Paragraphs<'_> {
     /// exactly that reason: off has to
     /// mean *neither* inline `style`
     /// nor a dictionary's own
-    /// `styles.css`, and ticket 17
-    /// folds the sheet into this same
-    /// record rather than a second
-    /// one. So a source added there is
-    /// gated by construction, and
-    /// nothing downstream learns that
-    /// a setting exists.
+    /// `styles.css`, and that sheet
+    /// folds into this same record
+    /// rather than a second one. So a
+    /// source added there is gated by
+    /// construction, and nothing
+    /// downstream learns that a
+    /// setting exists.
     ///
     /// An empty record is every
     /// property unset, which leaves
@@ -1200,9 +1200,9 @@ impl Paragraphs<'_> {
     /// node's resolved style record,
     /// which is the dictionary
     /// author's last word and which
-    /// ticket 17 also feeds from the
-    /// dictionary's own `styles.css`.
-    /// Both arrive through
+    /// the dictionary's own
+    /// `styles.css` also feeds. Both
+    /// arrive through
     /// [`Paragraphs::declarations`],
     /// so the styling setting turns
     /// off both at once.
@@ -1242,11 +1242,10 @@ impl Paragraphs<'_> {
     /// size, where `fontSize: 0.8em`
     /// is eight tenths of its parent's.
     ///
-    /// Ticket 17 feeds this from a
-    /// dictionary's own `styles.css`
-    /// by widening the same resolved
-    /// record, so nothing here learns
-    /// that CSS exists.
+    /// A dictionary's own `styles.css`
+    /// feeds this by widening the same
+    /// resolved record, so nothing here
+    /// learns that CSS exists.
     pub(super) fn boxed(&self, id: NodeId, parent: Block, inline: Inline) -> Block {
         let start = Block {
             style: BoxStyle { border_color: inline.color, ..BoxStyle::default() },

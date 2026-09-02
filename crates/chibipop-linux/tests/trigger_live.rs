@@ -6,10 +6,10 @@
 //! verdict, not a test failure. A third verdict skips it too, and the
 //! daemon is the one who gives it: a press looks up what is under the
 //! cursor, so a session where the cursor ladder found no rung has
-//! nothing for these verbs to act on. That is the ticket-48
-//! headless-sway case (sway 1.9 advertises no ext-image-copy-capture,
-//! runs no portal and is not Hyprland); the diagnostic it prints instead
-//! has its own tests in `daemon.rs`.
+//! nothing for these verbs to act on. That is the headless-sway case
+//! (sway 1.9 advertises no ext-image-copy-capture, runs no portal and is
+//! not Hyprland); the diagnostic it prints instead has its own tests in
+//! `daemon.rs`.
 //!
 //! One test, deliberately: it drives a whole daemon - real screencopy
 //! backend, real meikiocr models, real SQLite dictionary built here from
@@ -17,8 +17,7 @@
 //! everything back out of the daemon's own log. It synthesizes no input
 //! and never touches the seat, so it cannot know what is on the screen and
 //! asserts nothing about the words it reads: which word resolves is the
-//! smoke's business (ticket 35's Comments), and the frozen-hold mechanism
-//! is this one's.
+//! smoke's business, and the frozen-hold mechanism is this one's.
 //!
 //! The lookup log stays off here for the same reason: the screen belongs
 //! to whoever is at the machine.

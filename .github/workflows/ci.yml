@@ -97,7 +97,7 @@ jobs:
       # lookup/model.rs add_term too_many_arguments, in core.
       #
       # Was 4 until 2026-08-09 (the hot-reload branch removed worker_main's
-      # `while_let_loop` site), then 3 until 2026-08-25: ticket 27 moved the
+      # `while_let_loop` site), then 3 until 2026-08-25: a refactor moved the
       # layout walk into core as `PopupScene`, and chibipop-windows'
       # ui/render.rs `layout_pass` - the third finding - no longer exists.
       # Then 2 until 2026-08-26, when the upstream v0.9.x merge brought a
@@ -354,7 +354,7 @@ jobs:
       # `cage` is the *other* compositor this job needs, and it is here
       # for what it lacks: it advertises no zwlr_layer_shell_v1, so a
       # nested headless cage is the only stock-GNOME-shaped session CI
-      # can produce (ticket 49). `no_layer_shell` skips itself without
+      # can produce. `no_layer_shell` skips itself without
       # it, which would quietly retire the GNOME posture from CI.
       - name: Install cage
         run: |
@@ -424,7 +424,7 @@ jobs:
             --test portal_capture_live \
             -- --nocapture --test-threads=1
 
-      # The degradation pair (ticket 49), kept separate because neither
+      # The degradation pair, kept separate because neither
       # one runs against *this* compositor: `no_layer_shell` nests its
       # own cage, and `portal_denial` talks to a fake denying portal on a
       # private bus. Both are hermetic, and both assert what a user sees
@@ -555,7 +555,7 @@ jobs:
 
           echo "::group::SIGTERM ends the daemon"
           stop "$demo"
-          # FINDING, ticket 48, 2026-08-26: the daemon dies by SIGTERM's
+          # FINDING, 2026-08-26: the daemon dies by SIGTERM's
           # default disposition, not through its calloop signal source -
           # `signal: ... shutting down` never reaches the log and the
           # socket file survives. calloop's `Signals` blocks the signal

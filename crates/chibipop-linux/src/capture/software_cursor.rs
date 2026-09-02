@@ -1,5 +1,5 @@
-//! Whether this session paints the pointer into the pixels we OCR
-//! (ticket 52), and the diagnostic that says so out loud.
+//! Whether this session paints the pointer into the pixels we OCR, and
+//! the diagnostic that says so out loud.
 //!
 //! Every capture request chibipop makes asks for pixels *without* a
 //! cursor: the wlr rung passes `overlay_cursor = 0` on both slots
@@ -142,7 +142,7 @@ pub fn probe() -> PointerInFrames {
 
 fn read_option(option: &str) -> Option<i64> {
     // Same reason as `hyprctl::sample`: no child inherits the daemon's
-    // shutdown mask (ticket 13).
+    // shutdown mask.
     let out = crate::signals::unmasked(&mut Command::new("hyprctl"))
         .args(["getoption", option])
         .output()

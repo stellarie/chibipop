@@ -1,12 +1,11 @@
 # Hover parse benchmark
 
 Self-contained harness behind the "parse structured content at build time or
-at hover time" question in the dictionary render-parity spec. It extracts the
-glossary payloads a real hover touches, then times two things against them:
-what a hover costs today, and what parsing the structured content per hover
-would add.
+at hover time" question. It extracts the glossary payloads a real hover
+touches, then times two things against them: what a hover costs today, and
+what parsing the structured content per hover would add.
 
-It exists because the spec closes that question on an unmeasured assertion -
+It exists because that cost was asserted without measurement -
 "hover runs roughly 25 point queries and cannot afford a parse" - and the
 assertion decides whether a parser fix costs a schema bump and a full
 dictionary rebuild or costs nothing. Two competing pieces of evidence say the

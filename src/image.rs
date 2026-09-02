@@ -1,4 +1,4 @@
-//! The one PNG encoder (spec D3).
+//! The one PNG encoder.
 //!
 //! Both bins hand pixels to Anki and to disk, and both used to carry
 //! their own writer: the Windows bin drove WinRT's `BitmapEncoder`

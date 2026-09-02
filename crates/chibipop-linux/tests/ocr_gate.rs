@@ -523,7 +523,7 @@ fn vertical_accuracy_matches_the_python_harness() {
     near(REPORT.vertical.hit(), REF_VERTICAL_HIT, "vertical hit-scan");
 }
 
-/// The masked sweep, the robustness half of ticket 31: the engine must not
+/// The masked sweep, the robustness half of this gate: the engine must not
 /// fall apart when part of the crop is painted over, once the boundary words
 /// chibipop already discards are discarded.
 #[test]

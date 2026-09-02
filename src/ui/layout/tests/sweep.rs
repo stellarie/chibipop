@@ -558,7 +558,7 @@ const MARKER_GAP_SLACK_EM: f32 = 0.5;
 ///
 /// Passed in rather than read from the constants directly, because a
 /// detector nobody can tighten is a detector nobody can trust: the two
-/// resolved tickets are checked by rendering their verbatim shapes, asking
+/// resolved defects are checked by rendering their verbatim shapes, asking
 /// for zero candidates, and then tightening a threshold past the fix until
 /// the same geometry is flagged again. That is the only evidence available
 /// that these checkers would have caught the defects they were written for,
@@ -733,7 +733,7 @@ fn orphan_fragment(
         // Counted only once the fragment is one this invariant can speak
         // about: a fragment the scene draws nowhere as one string was never
         // stated over, and a count that rose for it would be the
-        // reassurance ticket 01's string count exists to refuse.
+        // reassurance this string count exists to refuse.
         let Some(company) = best_company(&drawn, &f.text) else {
             checked.declined += 1;
             continue;
@@ -1136,8 +1136,8 @@ fn horizontal_overflow(
 /// - [`Stack::Assets`] is the images. Each advances no y and composites over
 ///   the spacer run whose line already bought its room, so an image against
 ///   the paragraph around it is not a defect - but an image against *another*
-///   image is the double-drawn element story 9 asks for, and no run stands
-///   between two of those to report it.
+///   image is the double-drawn element this invariant looks for, and no run
+///   stands between two of those to report it.
 ///
 /// The three kinds that carry no promise are the containers. A block, a table
 /// and a cell each lead the paragraphs inside them in draw order and their
@@ -2702,7 +2702,7 @@ fn a_default_gutter_under_a_suppressed_marker_is_no_marker_gap() {
 /// tightened tolerance rather than a tightened rule: the gap the fix leaves
 /// *is* the declared 0.5em, so a checker that flagged it would be wrong
 /// about a browser. What the tightening shows is that this checker measures
-/// that 0.5em - the same number the ticket pinned - and would therefore
+/// that 0.5em - the same number the fix pinned - and would therefore
 /// have reported the 1.9em a reader saw.
 #[test]
 fn the_fixed_gutter_re_flags_when_its_slack_is_tightened_past_the_declaration() {
@@ -2715,7 +2715,7 @@ fn the_fixed_gutter_re_flags_when_its_slack_is_tightened_past_the_declaration() 
     assert_eq!(
         Some(&format!("{:.2}", 0.5 * BOX_EM)),
         found.violations[0].measured.get("gap_px"),
-        "and the number it reports is the gap the ticket pinned",
+        "and the number it reports is the pinned gap",
     );
 }
 
@@ -3017,11 +3017,12 @@ fn a_reading_over_its_base_is_no_overlapping_box() {
 /// Two assets composited on one line stand beside each other, and one moved
 /// onto the other is a violation.
 ///
-/// The *double-drawn element* half of story 9, and the reason the assets
-/// carry a promise of their own rather than joining the flow's: an image
-/// shares pixels with the paragraph around it by design - the spacer run
-/// whose line bought its room sits right under it - so nothing in the flow
-/// can report two assets landing on one place. Only another asset can.
+/// The *double-drawn element* half of the overlap invariant, and the reason
+/// the assets carry a promise of their own rather than joining the flow's:
+/// an image shares pixels with the paragraph around it by design - the
+/// spacer run whose line bought its room sits right under it - so nothing
+/// in the flow can report two assets landing on one place. Only another
+/// asset can.
 #[test]
 fn two_assets_composited_on_one_place_are_overlapping_boxes() {
     let glossary = sc(concat!(

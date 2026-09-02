@@ -14,10 +14,10 @@ what a pitch payload is *permitted* to contain.
 `term_meta_bank_*.json` row of every archive read, no sampling. This says what
 is *used*.
 
-This doc exists because ticket 02 of the dictionary-roles effort has to choose
-a storage shape and write a parser, and today the whole of what this repo
-knows about pitch is [dict-shapes.md:347-353](dict-shapes.md): it exists,
-it is numeric mora data in `term_meta_bank`, and chibipop throws it away.
+This doc exists because the pitch role needs a storage shape and a parser, and
+today the whole of what this repo knows about pitch is
+[dict-shapes.md:347-353](dict-shapes.md): it exists, it is numeric mora data in
+`term_meta_bank`, and chibipop throws it away.
 
 ## Headline
 
@@ -29,13 +29,13 @@ it is numeric mora data in `term_meta_bank`, and chibipop throws it away.
   pitch archives store wrong CRC-32 values - 48 of their 54 members fail the
   check - and chibipop's zip reader refuses every one of them with
   `Invalid checksum`. Yomitan does not check, which is why they are installed
-  and working there. **This blocks ticket 02** and is measured, not inferred -
-  see [The blocker](#the-blocker-a-wrong-crc-32-on-48-of-54-members).
+  and working there. **This blocks the pitch-role read** and is measured, not
+  inferred - see [The blocker](#the-blocker-a-wrong-crc-32-on-48-of-54-members).
 - **Nasal and devoice markers: 2.0% and 2.6% of accents, all of them in one
   dictionary.** 10 358 of 511 488 accents carry a non-empty `nasal`, 13 211 a
   non-empty `devoice`, and every one of them comes from NHK. Corpus-wide that is
-  rare; *within NHK* it is 25.8% of rows. Ticket 06's deferral survives the
-  first number and should be read against the second.
+  rare; *within NHK* it is 25.8% of rows. The deferral of mark rendering
+  survives the first number and should be read against the second.
 - **Deduplication is the main event, not a nice-to-have.** Over the 101 279
   readings that two or more pitch dictionaries both know, 379 288 accent claims
   arrive and 123 140 survive deduplication: **67.5% collapse**. 81.4% of those
@@ -466,10 +466,10 @@ quoted above - a required `reading` and a required `transcriptions` list of
 a number.
 
 The enum is closed - `["freq", "pitch", "ipa"]` - and ajv rejects anything else
-at import, so a fourth mode cannot appear in an archive Yomitan accepted. Ticket
-02's role detection therefore has exactly one mode to skip deliberately, and
-should skip it by name rather than by "not freq and not pitch", so a future
-Yomitan mode does not silently acquire the pitch role.
+at import, so a fourth mode cannot appear in an archive Yomitan accepted. Role
+detection therefore has exactly one mode to skip deliberately, and should skip
+it by name rather than by "not freq and not pitch", so a future Yomitan mode
+does not silently acquire the pitch role.
 
 The kanji banks are a separate namespace and chibipop never reads them:
 `KanjiMeta = KanjiMetaFrequency` has only `freq`, in `kanji_meta_bank_*.json`,
@@ -613,8 +613,7 @@ Each `index.json: Ok(n)` belongs to the archive named on the line *after* it.
 `index.json` reads, so `read_index` succeeds and `kind_of`
 (`src/library.rs:27-36`) calls the archive `Kind::Term` rather than
 `Kind::Unreadable` - the archive is listed, looks fine, and contributes nothing.
-The moment ticket 02 makes the pitch role read `term_meta_bank_`, that read
-fails.
+The moment the pitch role reads `term_meta_bank_`, that read fails.
 
 **Yomitan does not check.** `dictionary-importer.js` never passes
 `checkSignature` or `checkCrc32` to zip.js (zero occurrences), and zip.js
@@ -622,12 +621,12 @@ documents both as `@defaultValue false`. So the same bytes import cleanly there,
 which is why a user has five working pitch dictionaries that chibipop cannot
 open.
 
-*This is ticket 02's problem to solve, not this doc's.* It is recorded here
-because it is the difference between "parse the payload" and "parse the payload
-and get zero rows", and because the census would have measured nothing without
-working around it: `tools/pitch-census` bypasses the check in `inflate_member`
-and records every member it bypassed, so no number below rests on unverified
-bytes without saying so.
+*This is the implementation's problem to solve, not this doc's.* It is recorded
+here because it is the difference between "parse the payload" and "parse the
+payload and get zero rows", and because the census would have measured nothing
+without working around it: `tools/pitch-census` bypasses the check in
+`inflate_member` and records every member it bypassed, so no number below rests
+on unverified bytes without saying so.
 
 ## Rows, expressions and accents
 
@@ -675,12 +674,12 @@ and says nothing. The number that matters:
 - **All of them are NHK's.** Within NHK alone: 8 790 rows nasal, 10 941 rows
   devoice, **18 855 of 73 100 rows = 25.8% carrying at least one mark.**
 
-That is the number ticket 06's deferral rests on, and it cuts both ways. A user
-with no NHK pitch dictionary loses nothing by not rendering marks. A user whose
-*only* pitch dictionary is NHK sees a quarter of their pitch rows drawn without
-a mark the dictionary supplied. The spec's call - store now, render later - is
-the right one precisely because of the second number: the marks must survive the
-build or ticket 06 becomes a second schema bump.
+That is the number the mark-rendering deferral rests on, and it cuts both ways.
+A user with no NHK pitch dictionary loses nothing by not rendering marks. A user
+whose *only* pitch dictionary is NHK sees a quarter of their pitch rows drawn
+without a mark the dictionary supplied. The spec's call - store now, render
+later - is the right one precisely because of the second number: the marks must
+survive the build or rendering them later becomes a second schema bump.
 
 One accent can carry several marked morae: 10 358 accents hold 10 511 nasal mora
 indices and 13 211 accents hold 13 657 devoice indices. Every observed index is
@@ -773,7 +772,7 @@ comfortable typical case.
 
 **Four rows is the bound, and only 50 of 218 783 pairs reach it.** 85.7% need
 one row. If the nasal and devoice marks are also treated as part of an accent's
-identity - which they become the moment ticket 06 draws them - the bound rises
+identity - which they become the moment they are drawn - the bound rises
 to **7**, reached by 3 pairs.
 
 ## Cross-dictionary agreement: dedup is the main event
@@ -810,15 +809,15 @@ Pairwise, so no single dictionary's idiosyncrasy hides in the aggregate:
 
 Every pair lands between 8.0% and 15.0% disagreement. No dictionary is the
 outlier, which means the 18.7% of readings that are not unanimous are a real
-property of Japanese lexicography rather than one bad archive - the user story
-"a disagreement between sources is visible rather than hidden" is answering
+property of Japanese lexicography rather than one bad archive - the requirement
+that "a disagreement between sources is visible rather than hidden" is answering
 something that happens roughly one time in five.
 
 Comparing accents including their marks instead flips one column badly:
 identical falls to 73 397 and disjoint rises to 3 313, entirely because NHK is
 the only dictionary with marks and so agrees with nobody once marks count. That
-is the wrong comparison for the header row ticket 02 draws, and the right one
-for ticket 06 to revisit.
+is the wrong comparison for the header row, and the right one to revisit once
+the marks are rendered.
 
 ## Readings that are not plain kana
 
@@ -1129,12 +1128,12 @@ with zipfile.ZipFile(__import__("os").path.expanduser(path)) as z:
   frequency-only and 5 pitch-only, none both, and the pitch archives ship no
   term banks. So the census cannot say what a combined archive looks like, and
   the role-set model's dual-role path has no specimen in this library.
-- **No `ipa` row exists in either corpus**, so the mode ticket 02 deliberately
-  ignores is unmeasured beyond "it is in the enum and nobody here emits it".
+- **No `ipa` row exists in either corpus**, so the deliberately ignored mode is
+  unmeasured beyond "it is in the enum and nobody here emits it".
 - **Whether the CRC-32 problem is general.** It is measured on five archives
   from one publisher. Whether pitch archives from other sources share it is
   unknown, and whether the right fix is tolerating a bad checksum or repairing
-  the archive at import is ticket 02's call, not this doc's.
+  the archive at import is the implementation's call, not this doc's.
 - **Nothing about rendering.** The census bounds the header row at 4 accents
   over readings up to 19 morae; it does not say that fits, and the spec settles
   the notation. Layout correctness belongs to the geometry goldens.

@@ -24,7 +24,7 @@
 //! come from [`super::open`] and [`super::read`], so this file proves
 //! the same code the daemon runs rather than a copy of it. A single
 //! named box with no `--dwell` is exactly the product's one-shot path
-//! (spec D6 - own backend, one bracket, no reuse), so it goes through
+//! (own backend, one bracket, no reuse), so it goes through
 //! [`super::oneshot`]; everything else keeps one backend across several
 //! boxes, which is what the dwell damage race needs.
 
@@ -98,7 +98,7 @@ pub fn run(args: Args) -> Result<()> {
     // the product runs it. `oneshot` opens the ladder itself, so
     // nothing above it is needed and nothing below it is reused.
     if let (Some(region), 0) = (args.region, args.dwell) {
-        println!("capture: one-shot path - this grab's own backend (spec D6)");
+        println!("capture: one-shot path - this grab's own backend");
         let started = Instant::now();
         let frame = super::oneshot(&setup, region)?;
         let path = args.out.join("chibipop-capture-0.png");

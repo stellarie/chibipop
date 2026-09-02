@@ -459,7 +459,7 @@ impl Controller {
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
         self.button_h = button_h;
         let placed = self.surface.as_ref().and_then(|s| s.placed);
-        // Spec D7: the popup's own rect.
+        // The popup's own rect.
         let over_popup = placed.is_some_and(|p| p.popup.contains(cursor));
         let over_popup_or_btn = placed.is_some_and(|p| {
             PhysRect { h: p.popup.h + button_h, ..p.popup }.contains(cursor)
@@ -635,7 +635,7 @@ impl Controller {
         self.dispatch_hover(pos)
     }
 
-    /// Spec D3: hold, do not resolve.
+    /// Hold, do not resolve.
     fn dispatch_hover(&mut self, pos: PhysPoint) -> Vec<Command> {
         if self.frozen(pos) {
             return Vec::new();

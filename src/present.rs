@@ -47,7 +47,7 @@ pub struct Card {
     /// The Pitch patterns the enabled pitch dictionaries give this card's
     /// reading, deduplicated, in the pitch list's order.
     ///
-    /// One row per *distinct* accent and not one per dictionary: ticket 01's
+    /// One row per *distinct* accent and not one per dictionary: the
     /// census found that over the readings two or more pitch dictionaries
     /// both know, 379 288 accent claims reduce to 123 140 - a 67.5% collapse -
     /// so without the dedup a three-dictionary user would read the same accent
@@ -62,7 +62,7 @@ pub struct Card {
 ///
 /// The accents are compared by their **position** alone, because the
 /// position is the whole of what this card draws: the nasal and devoiced
-/// moras ride along unread until ticket 06 draws them, and comparing with
+/// moras ride along unread until later work draws them, and comparing with
 /// them would put NHK's marked heiban on a second row beside 三省堂's
 /// unmarked one - two rows that look identical, which is the failure the
 /// dedup exists to prevent (`docs/research/pitch-accent-shapes.md`).
@@ -90,9 +90,8 @@ pub struct GlossBlock {
     pub dict_name: String,
     /// The dictionary's own row id, which is what identifies it - the name
     /// is what a reader sees and two libraries can spell it differently.
-    /// Half of the stable identity a scene element carries (stories 45 and
-    /// 46); the other half is the row's `entry_id` and the node path inside
-    /// its tree.
+    /// Half of the stable identity a scene element carries; the other half
+    /// is the row's `entry_id` and the node path inside its tree.
     pub dict_id: i64,
     /// One per matched term-bank row, in the order the rows ranked.
     pub entries: Vec<GlossEntry>,
@@ -118,7 +117,7 @@ pub struct GlossEntry {
     pub tags: Vec<String>,
     /// The parsed tree the glosses were rendered from, shared with the
     /// parsed-tree cache. Every other view of this gloss is a renderer over
-    /// it - the Anki HTML field today, the popup scene once ticket 08 lands -
+    /// it - the Anki HTML field today, the popup scene once it lands -
     /// so the card and the panel cannot drift apart again.
     pub doc: Arc<GlossDoc>,
     /// The recorded size of every image asset this row's tree names and the
@@ -663,7 +662,7 @@ mod tests {
         }
     }
 
-    /// The defect ticket 16 fixes. The census found 6 220 大辞林 headwords
+    /// The defect grouping fixes. The census found 6 220 大辞林 headwords
     /// with more than one term-bank row, the worst eleven, and each row used
     /// to bring its own copy of the dictionary's name.
     #[test]
@@ -1137,7 +1136,7 @@ mod tests {
 
     // ---- pitch
 
-    /// The dedup, which ticket 01's census makes the visible part of pitch
+    /// The dedup, which the census makes the visible part of pitch
     /// rather than a refinement: 81.4% of the readings two or more pitch
     /// dictionaries both know get an identical accent set from all of them.
     #[test]
@@ -1160,7 +1159,7 @@ mod tests {
         );
     }
 
-    /// The 18.7% of readings that are not unanimous, which the user story
+    /// The 18.7% of readings that are not unanimous, which the user
     /// asks to see rather than hide.
     #[test]
     fn two_dictionaries_giving_different_accents_draw_two_rows_in_list_order() {
@@ -1238,7 +1237,7 @@ mod tests {
         assert_eq!(1, card.pitch.len(), "{:?}", card.pitch);
         assert_eq!(
             marked, card.pitch[0].accent,
-            "the markers kept are the highest-ordered dictionary's, so ticket 06 has them"
+            "the markers kept are the highest-ordered dictionary's"
         );
         assert_eq!(2, card.pitch[0].dicts.len());
     }

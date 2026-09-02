@@ -275,10 +275,9 @@ impl Outline {
     /// before that.
     ///
     /// `None` means this compositor advertises no `zwlr_layer_shell_v1`:
-    /// the same *state, not error* rule `Popup::bind` follows
-    /// (ticket 49), so the caller reports the outline unavailable
-    /// through the channel it already has and every other channel keeps
-    /// running.
+    /// the same *state, not error* rule `Popup::bind` follows, so the
+    /// caller reports the outline unavailable through the channel it
+    /// already has and every other channel keeps running.
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, popup: &Popup) -> Option<Outline> {
         let shell = LayerShell::bind(globals, qh).ok()?;
         // One modest outline's worth; the pool grows on demand.

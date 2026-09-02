@@ -188,10 +188,10 @@ pub struct Popup {
     /// miss: a rebuild renames a **new file** over this path, so a
     /// connection opened before it keeps reading the replaced inode for as
     /// long as it is held. The worker reopens the dictionary on
-    /// `Event::ConfigReloaded` (`worker::ReopenDict`); until ticket 03 this
-    /// process held no second handle, and now it holds this one. A reload
-    /// that reopened only the worker's would leave the popup drawing the
-    /// old dictionary's gaiji at the new dictionary's ids.
+    /// `Event::ConfigReloaded` (`worker::ReopenDict`); this process once
+    /// held no second handle, and now it holds this one. A reload that
+    /// reopened only the worker's would leave the popup drawing the old
+    /// dictionary's gaiji at the new dictionary's ids.
     db: std::path::PathBuf,
     /// The logical theme; every render scales a copy of it.
     theme: Theme,
@@ -222,14 +222,14 @@ impl Popup {
     /// roundtrip has geometry to place them against.
     ///
     /// The layer shell is the one global whose absence is a *state*
-    /// rather than an error (ticket 49): stock GNOME advertises none,
-    /// and the popup then exists with no shell to draw on - it maps
-    /// nothing, shows nothing, and says so - while the seat, the
-    /// outputs and the shm pool it also owns keep serving the handlers
-    /// SCTK dispatches into `App`. Returning `Err` here instead would
-    /// leave those live proxies behind with nothing to answer their
-    /// events, which is exactly how a layer-shell-less session used to
-    /// panic on its first `wl_shm::format`.
+    /// rather than an error: stock GNOME advertises none, and the popup
+    /// then exists with no shell to draw on - it maps nothing, shows
+    /// nothing, and says so - while the seat, the outputs and the shm
+    /// pool it also owns keep serving the handlers SCTK dispatches into
+    /// `App`. Returning `Err` here instead would leave those live
+    /// proxies behind with nothing to answer their events, which is
+    /// exactly how a layer-shell-less session used to panic on its
+    /// first `wl_shm::format`.
     ///
     /// An `Err` from this function therefore means something no session
     /// can work without (no `wl_compositor`, no `wl_shm`, no shared

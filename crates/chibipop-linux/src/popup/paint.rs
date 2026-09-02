@@ -1126,10 +1126,9 @@ mod tests {
     /// The reading is drawn, and drawn where the scene put it.
     ///
     /// A bin that painted only `spans` would draw the base and silently
-    /// lose the furigana - the same deletion ticket 11 closes in the
-    /// layout, one layer further out. It is a second run and not a span of
-    /// the first, because a reading takes no horizontal room from the line
-    /// it sits on.
+    /// lose the furigana - the same deletion the layout closes one layer
+    /// further out. It is a second run and not a span of the first, because
+    /// a reading takes no horizontal room from the line it sits on.
     #[test]
     fn a_reading_is_drawn_over_its_base_where_the_scene_placed_it() {
         let theme = Theme::dark();
@@ -1228,7 +1227,7 @@ mod tests {
     ///
     /// A bin that painted only `spans` would draw the item and silently
     /// lose its bullet. It is a second run and not a span of the first
-    /// for the reason ticket 09 hangs it at all: the marker box sits
+    /// for the reason the layout hangs it at all: the marker box sits
     /// beside the item's principal box, so every line of the item -
     /// including a continuation - starts at the item's own indent.
     #[test]
@@ -1584,9 +1583,9 @@ mod tests {
         assert_eq!("[\u{5bfe}]", text.runs.first().expect("the alt run").text());
     }
 
-    /// Story 17 through the painter: a monochrome asset reaches the buffer
-    /// in the element's own colour, which is the theme's body text - so a
-    /// gaiji authored as black ink is visible on a dark panel.
+    /// Monochrome tinting through the painter: a monochrome asset reaches
+    /// the buffer in the element's own colour, which is the theme's body
+    /// text - so a gaiji authored as black ink is visible on a dark panel.
     #[test]
     fn a_monochrome_asset_paints_in_the_elements_own_colour() {
         let theme = Theme::dark();

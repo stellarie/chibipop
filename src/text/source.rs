@@ -1321,7 +1321,7 @@ mod tests {
         assert_eq!(runs.get(), 1, "the same box of one frozen frame is the same words");
     }
 
-    /// The `serve` hook's passthrough (ticket 11): pixels the caller
+    /// The `serve` hook's passthrough: pixels the caller
     /// already holds reach the engine as they are - no capture, no
     /// upscale, no mask - so a one-off job never needs the seam itself.
     #[test]

@@ -401,8 +401,8 @@ fn cursor_mode(available: Option<u32>, want_metadata: bool) -> Option<u32> {
     }
 }
 
-/// Every `SelectSources` option, in one pure place so ticket 52's audit
-/// can assert what a session is actually negotiated with.
+/// Every `SelectSources` option, in one pure place so tests can assert
+/// what a session is actually negotiated with.
 ///
 /// The cursor mode and the restore token travel in the *same* dict, and
 /// that is the whole answer to "can a restored session predate the
@@ -909,7 +909,7 @@ mod tests {
         assert_eq!(cursor_mode(Some(0), true), None);
     }
 
-    // -- ticket 52's audit: no path embeds the pointer --
+    // -- no path embeds the pointer --
 
     /// Exhaustive over every advertisable combination of the four
     /// defined modes: whatever a portal offers, and whichever rung

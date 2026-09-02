@@ -787,7 +787,7 @@ mod tests {
         assert!(advice.contains("chibipop.desktop"), "{advice}");
         assert!(advice.contains("ctl trigger-down|trigger-up"), "{advice}");
         // The way out must not spell a command that assumes `chibipop`
-        // is on PATH: under `cargo run` it is not (ticket 51), and the
+        // is on PATH: under `cargo run` it is not, and the
         // bind lines that name the running exe live in the window.
         assert!(!advice.contains("chibipop ctl"), "{advice}");
     }

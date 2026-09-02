@@ -41,7 +41,7 @@ once. That is the one step a downloaded binary cannot remove.
 executable on first run.
 
 **`plugins/meikiocr/` ships enabled by discovery.** It is the reference
-text-provider plugin, per spec section 10. Discovery adds it to the in-memory
+text-provider plugin. Discovery adds it to the in-memory
 enabled list when its manifest parses successfully. `config.toml` holds the
 machine-specific meikiocr install path, the HF cache directory, and the ONNX
 thread cap — the user edits that file, never `adapter.py` or `plugin.toml`.
@@ -304,7 +304,7 @@ scripts/package-linux.sh v0.8.2        # -> dist/chibipop-v0.8.2-linux-x64.tar.g
 
 `.github/workflows/ci.yml` runs [`REGRESSION.md`](REGRESSION.md) tier 0 on
 every push to `main` and every pull request, plus a mirrored Linux gate on
-ubuntu (ticket 29; both bins are named `chibipop`, so link-producing steps
+ubuntu (both bins are named `chibipop`, so link-producing steps
 exclude the foreign bin crate — see the workspace `Cargo.toml`):
 
 - `cargo test --workspace --exclude chibipop-linux` **three times** — the

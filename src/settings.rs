@@ -89,7 +89,7 @@ pub struct SettingsForm {
     /// (`crates/chibipop-windows/src/app.rs:797-806`), and a window that
     /// was never told the field names must not wipe a good mapping.
     /// `Some(vec![])` is a user who mapped nothing, which is an answer
-    /// and saves (ticket 20).
+    /// and saves.
     pub field_map: Option<Vec<FieldMapping>>,
     pub notify_on_add: bool,
     pub sentence_mode: SentenceMode,
@@ -576,7 +576,7 @@ pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
     }
 }
 
-/// Spec §7's exact sentence.
+/// The clamp notice's exact sentence.
 fn axis_notice(axis: &str, asked: i32, got: i32) -> String {
     let (verb, bound) = if got > asked {
         ("raised", "minimum")
@@ -784,7 +784,7 @@ mod tests {
         c
     }
 
-    /// A pre-roles config, carrying the substrings this ticket migrates.
+    /// A pre-roles config, carrying the substrings the role shape replaced.
     fn pre_roles(order: &[&str]) -> Config {
         let mut c = Config::default();
         c.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();

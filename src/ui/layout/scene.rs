@@ -401,10 +401,10 @@ pub enum Tint {
 /// the rect from the media row's
 /// recorded intrinsic size and the key
 /// to fetch bytes with, which is the
-/// whole reason ticket 03 records
-/// sizes at extraction time. Decoding
-/// is the bin's, behind its own
-/// surface cache.
+/// whole reason sizes are recorded at
+/// extraction time. Decoding is the
+/// bin's, behind its own surface
+/// cache.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneImage {
     /// The asset to composite, or
@@ -506,8 +506,8 @@ pub struct ElemBox {
 /// Where in its dictionary a scene
 /// element came from.
 ///
-/// The stable identity stories 45 and
-/// 46 ask for: a hit on a sense means
+/// The stable identity a hit has to
+/// carry: a hit on a sense means
 /// "sense 3 of 大辞林" and not a
 /// character range. `dict_id` and
 /// `entry_id` name the term-bank row,

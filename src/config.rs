@@ -886,7 +886,7 @@ pub struct ScreenshotConfig {
     ///
     /// Not portal syntax, unlike `anki.add_key_linux`: the portal's
     /// shortcut ids are fixed at exactly two forever, so this action
-    /// rides the control socket instead (spec D1) and the chord here is
+    /// rides the control socket instead and the chord here is
     /// the compositor bind the Linux settings window hands out as a
     /// copyable snippet. `Option`, mirroring the ocr-clipboard twin, so
     /// absence stays typed rather than an empty-string sentinel.
@@ -964,7 +964,7 @@ pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
 }
 
 impl Default for Config {
-    /// Spec §4.3's shipped values.
+    /// The shipped values.
     fn default() -> Config {
         Config {
             trigger: TriggerConfig {
@@ -1224,12 +1224,12 @@ mod tests {
         );
     }
 
-    /// §5.1: exclusion is opt-in.
+    /// Exclusion is opt-in.
     #[test]
     fn capture_exclusion_defaults_to_false() {
         assert!(
             !Config::default().popup.exclude_from_capture,
-            "the popup must be recordable out of the box - exclusion is the opt-in (spec section 5.1)"
+            "the popup must be recordable out of the box - exclusion is the opt-in"
         );
     }
 
@@ -1801,7 +1801,7 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// Ticket 20 makes an empty map reachable from either settings
+    /// An empty map is reachable from either settings
     /// window, so the serde default must keep firing on an absent key
     /// only: a present `field_map = []` is the user's answer, not a
     /// missing one (contrast
@@ -2343,8 +2343,8 @@ mod tests {
     /// A file predating the render settings loads at the documented
     /// defaults, and a save writes them.
     ///
-    /// The whole of story 34 on this side: a config from the other
-    /// platform - or from a build before this ticket - is read back
+    /// The whole of the requirement on this side: a config from the other
+    /// platform - or from a build before this change - is read back
     /// unchanged, gains the six keys, and is not corrupted by either.
     #[test]
     fn a_file_without_render_settings_takes_the_documented_defaults() {
@@ -2659,7 +2659,7 @@ mod tests {
         [di(1, "大辞林　第四版"), di(2, "中日大辞典　第二版")]
     }
 
-    /// A pre-roles config, as it sat on disk before this ticket.
+    /// A pre-roles config, as it sat on disk before roles existed.
     fn pre_roles(order: &[&str]) -> Config {
         let mut cfg = Config::default();
         cfg.dictionaries.display_order = order.iter().map(|s| (*s).to_string()).collect();
@@ -2715,7 +2715,7 @@ mod tests {
         assert!(!crate::present::keeps_dict("大辞林　第四版", &out.terms));
     }
 
-    /// The user's story 3: unchecking every row is a legitimate "search
+    /// The user's case: unchecking every row is a legitimate "search
     /// nothing", and nothing puts the dictionaries back.
     #[test]
     fn a_terms_list_with_every_row_disabled_enables_nothing() {

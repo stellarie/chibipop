@@ -113,7 +113,7 @@ impl Nth {
 
 /// Every selector part in one sheet, pooled.
 ///
-/// Flat arenas for the same reason ticket 02's node arena is one: a compiled
+/// Flat arenas for the same reason the gloss node arena is one: a compiled
 /// selector is a `Span` into a shared vector, so a rule costs no allocation
 /// of its own and the whole sheet is a handful of contiguous blocks.
 #[derive(Default)]

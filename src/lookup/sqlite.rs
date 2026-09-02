@@ -23,7 +23,7 @@ pub struct SqliteDictionary {
     /// Per process, not per hover and not on disk. The corpus carries 174 KB
     /// of CSS across 14 dictionaries, so caching a compiled form in the
     /// database would buy a millisecond once per process and cost every
-    /// matcher fix a dictionary rebuild - the same trade ticket 02 made for
+    /// matcher fix a dictionary rebuild - the same trade already made for
     /// the tree itself. `None` records "this dictionary ships none", so a
     /// dictionary without a stylesheet costs one query for the whole
     /// process rather than one per hover.
@@ -53,7 +53,7 @@ const EXPECTED_SCHEMA_VERSION: i64 = 4;
 /// what one cached entry costs.
 const GLOSS_CACHE_ENTRIES: usize = 256;
 
-/// The parsed-tree cache the spec asks for: the record stores raw glossary
+/// The parsed-tree cache: the record stores raw glossary
 /// JSON and the tree is parsed per hover, so a parser fix ships as a patch
 /// rather than as a dictionary rebuild.
 ///
@@ -436,7 +436,7 @@ fn read_pitch(conn: &Connection, term: &str, reading: &str) -> Result<Vec<PitchC
 /// One stored mora list, as the indices it names.
 ///
 /// Total, like the rest of this read: a column this build cannot decode
-/// costs the accent its markers - which this ticket does not draw anyway -
+/// costs the accent its markers - which this build does not draw anyway -
 /// and never the card.
 fn mora_list(json: &str) -> Vec<u32> {
     serde_json::from_str(json).unwrap_or_default()
@@ -704,7 +704,7 @@ mod tests {
         );
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- the media store ----
 
     /// A real built database, because the media read path exists to read
     /// what a build wrote.
@@ -717,7 +717,7 @@ mod tests {
         (path, guard)
     }
 
-    /// The sizing path: what ticket 12 asks during measurement, and the
+    /// The sizing path: what measurement asks for, and the
     /// reason width, height and aspect are columns at all.
     #[test]
     fn the_dictionary_answers_an_assets_recorded_size_without_reading_its_bytes() {
@@ -797,8 +797,8 @@ mod tests {
     }
 
     /// The version gate is the contract that a store which opens has the
-    /// media tables in it: ticket 02 took `schema_version` to 3 to cover
-    /// both its record change and these tables.
+    /// media tables in it: `schema_version` went to 3 to cover both a
+    /// record change and these tables.
     #[test]
     fn the_media_store_refuses_a_database_this_build_does_not_understand() {
         let path = fixture_path("media_store_version");
@@ -809,13 +809,13 @@ mod tests {
         assert!(err.to_string().contains("schema_version is 2"), "got: {err}");
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a dictionary's own styles.css ----
 
     /// The whole of the hover path for a stylesheet: the text comes out of
     /// `dict_style`, the matcher compiles it on first use, and the winners
     /// land in the resolved style record the renderer already reads. This is
     /// 明鏡国語辞典's own shape - a box in CSS and not one inline `style`
-    /// anywhere - so before this ticket the entry drew no box at all.
+    /// anywhere - so before this change the entry drew no box at all.
     #[test]
     fn a_stored_stylesheet_reaches_the_resolved_style_record() {
         let path = fixture_path("stored_stylesheet_folds");
@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(1, d.sheets.borrow().len(), "one compile for one dictionary");
     }
 
-    // ---- pitch (ticket 02) ----
+    // ---- pitch ----
 
     /// Every field the table holds comes back, markers included, and the
     /// claims come back with the dictionary that made them rather than
@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// The `^[HL]+$` form, which the schema permits and no archive in either
-    /// of ticket 01's corpora writes. Stored in its own column because the
+    /// corpus writes. Stored in its own column because the
     /// two forms of `position` share no indexing origin.
     #[test]
     fn a_stored_pattern_comes_back_as_a_pattern_and_not_as_a_downstep() {

@@ -1,20 +1,20 @@
 //! The HTML renderer, for the Anki `glossary_html` field.
 //!
-//! The second of three renderers over [`GlossDoc`]. Before ticket 02 this was
-//! an independent recursion over the raw JSON that mirrored the plain-text
-//! walk's drop rules by hand - two views of one tree, which is the bug class
-//! the spec set out to close. It now reads the same parsed tree, so the card
-//! and the popup cannot disagree about what an entry *contains*.
+//! The second of three renderers over [`GlossDoc`]. Before the arena rewrite
+//! this was an independent recursion over the raw JSON that mirrored the
+//! plain-text walk's drop rules by hand - two views of one tree, which is the
+//! bug class the spec set out to close. It now reads the same parsed tree, so
+//! the card and the popup cannot disagree about what an entry *contains*.
 //!
 //! What they may disagree about, on purpose, is what to *show*. The popup is
 //! a hover panel and the card is a permanent record, so this renderer takes
 //! its own [`RoleFilter`] rather than the popup's: hiding examples on screen
-//! must not strip them from a mined card (spec story 42).
+//! must not strip them from a mined card.
 //!
 //! It also takes a [`Selection`], so it can render an arbitrary set of
-//! subtrees and not only a whole document. That is the Anki half of stories
-//! 45 and 46 - a sense picker built on it hands over formatted markup for the
-//! senses a user chose, never a flattened text range.
+//! subtrees and not only a whole document. That is the Anki half of the sense
+//! picker: it hands over formatted markup for the senses a user chose, never
+//! a flattened text range.
 //!
 //! Structured content is untrusted input from a dictionary file rather than
 //! from chibipop, so tags, attributes, and link schemes are allow-listed
@@ -31,12 +31,12 @@ use super::{GlossDoc, ItemType, Kind, NodeId, NodePath, Role, Scalar, Selection,
 ///
 /// Deliberately a value the caller passes rather than a rule this module
 /// knows, because the whole point is that the card's answer and the popup's
-/// are separate: ticket 14 gives the popup its own settings and this stays
-/// untouched by them.
+/// are separate: the popup has its own settings and this stays untouched by
+/// them.
 ///
 /// Three knobs against six [`Role`]s, because three of the six are not
 /// droppable - [`Role::Reference`] and [`Role::Commentary`] are classified so
-/// a later ticket can add a knob without touching the classifier, and
+/// later work can add a knob without touching the classifier, and
 /// [`Role::Content`] is what a node with no recognised hook gets. So
 /// [`allows`](Self::allows) is total over the enum and keeps everything it
 /// has no knob for, which is the failure direction the evidence demands.
@@ -70,9 +70,9 @@ impl RoleFilter {
     /// Its two consumers are a summary by construction: the collapsed row,
     /// which is one truncated line, and the Anki plain-text `glossary` field,
     /// which sits beside `glossary_html` - and *that* field takes
-    /// [`CARD`](Self::CARD) and keeps every example. Story 42's "keep them on
-    /// the card" is answered there, in markup, rather than by pushing three
-    /// sentences per sense into a numbered plain-text list.
+    /// [`CARD`](Self::CARD) and keeps every example. "Keep them on the card"
+    /// is answered there, in markup, rather than by pushing three sentences
+    /// per sense into a numbered plain-text list.
     pub const SUMMARY: RoleFilter =
         RoleFilter { examples: false, attributions: false, part_of_speech: false };
 
@@ -141,11 +141,11 @@ fn html_tag(tag: Tag) -> Option<&'static str> {
 
 /// A resolved style property as its CSS name.
 ///
-/// The whole record is emitted, not a chosen subset: ticket 17 folds a
-/// dictionary's `styles.css` into this same record, and the 13 css-only
-/// dictionaries in the census draw their pills with box properties alone. A
-/// subset here would mine those dictionaries as unstyled text while the popup
-/// drew their pills.
+/// The whole record is emitted, not a chosen subset: a dictionary's
+/// `styles.css` folds into this same record, and the 13 css-only dictionaries
+/// in the census draw their pills with box properties alone. A subset here
+/// would mine those dictionaries as unstyled text while the popup drew their
+/// pills.
 fn css_name(key: StyleKey) -> &'static str {
     match key {
         StyleKey::FontStyle => "font-style",
@@ -496,7 +496,7 @@ mod tests {
 
     const SENSE_TWO: &str = "<div><span>to flow</span><i> (of liquid)</i></div>";
 
-    // -- shape that existed before this ticket, unchanged --
+    // -- shape that predates the arena rewrite, unchanged --
 
     #[test]
     fn a_plain_string_gloss_is_escaped_but_unwrapped() {
@@ -702,7 +702,7 @@ mod tests {
 
     // -- editorial roles, filtered independently of the popup --
 
-    /// Story 42: popup density and card completeness are separate choices.
+    /// Popup density and card completeness are separate choices.
     /// The popup's plain-text renderer drops both, from the same tree, in
     /// the same process, while the card keeps both.
     #[test]
@@ -749,7 +749,8 @@ mod tests {
         );
     }
 
-    /// Ticket 15's acceptance, through the role the parser classified.
+    /// The role classifier's acceptance, through the role the parser
+    /// classified.
     #[test]
     fn a_part_of_speech_role_stays_out_of_the_card_body() {
         let d = doc(&json!([{"type": "structured-content", "content": [
@@ -781,8 +782,8 @@ mod tests {
         );
     }
 
-    /// Stories 45 and 46 on the Anki side: a selected sense reaches the card
-    /// as markup, with its formatting, and without its neighbour.
+    /// A selected sense reaches the card as markup, with its formatting, and
+    /// without its neighbour.
     #[test]
     fn a_subtree_selection_renders_exactly_what_the_document_rendered_for_it() {
         let d = doc(&two_senses());
@@ -936,9 +937,9 @@ mod tests {
     // -- the resolved style record --
 
     /// A css-only dictionary draws its pill entirely with box properties.
-    /// Ticket 17 folds `styles.css` into the same resolved record inline
-    /// `style` writes into, so what this asserts is that the whole record
-    /// reaches the card, not just the six properties the old subset knew.
+    /// `styles.css` folds into the same resolved record inline `style` writes
+    /// into, so what this asserts is that the whole record reaches the card,
+    /// not just the six properties the old subset knew.
     #[test]
     fn a_pill_reaches_the_card_as_one_inline_style() {
         let g = json!([{"type": "structured-content", "content": [

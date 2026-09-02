@@ -1,5 +1,5 @@
 //! The selection, on the one Wayland protocol family a daemon can use
-//! (spec D2 — no `wl-copy` process dependency).
+//! (no `wl-copy` process dependency).
 //!
 //! An ordinary clipboard write goes through `wl_data_device`, which the
 //! compositor only honours for a client holding keyboard focus on a

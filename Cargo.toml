@@ -71,7 +71,7 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging", "uns
 # ARCHITECTURE.md#capture-and-masking): the only protocol with
 # compositor-side region capture. Same wayland-rs generation as the pin above.
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-# The popup's own stack (ticket 32): SCTK 0.21 drives the
+# The popup's own stack: SCTK 0.21 drives the
 # wlr-layer surface and the `wl_shm` SlotPool behind it, tiny-skia
 # rasters the panel, cosmic-text shapes and rasterizes text with locale
 # `ja` (Han unification: kanji must be JP variants). No GPU context -
@@ -129,7 +129,7 @@ png = "0.18.1"
 # Test-only: the OCR gate mirrors the benchmark harness's NFKC step when it
 # scores a prediction (tools/ocr-bench/bench/common.py normalise()).
 unicode-normalization = "0.1.24"
-# The POSIX signal mask (ticket 13): the daemon blocks SIGINT/SIGTERM for
+# The POSIX signal mask: the daemon blocks SIGINT/SIGTERM for
 # every thread and hands the default disposition back to every child it
 # execs. `calloop`'s `signals` feature already resolves exactly this
 # version - its `Signal` enum is its own, so the mask itself has to come
@@ -137,7 +137,7 @@ unicode-normalization = "0.1.24"
 # one-pin rule costs no new package and no new feature in the lockfile.
 nix = { version = "0.31.3", default-features = false, features = ["signal"] }
 
-# --- ticket 34 (portal ScreenCast capture backend, capture rung 2) ---
+# --- portal ScreenCast capture backend (capture rung 2) ---
 # The portal handshake is D-Bus, and zbus is already in this tree: ksni's
 # `async-io` feature resolves exactly this version, so the one-pin rule
 # costs nothing new and the daemon still hosts no executor of its own -
@@ -154,16 +154,16 @@ zbus = "5.19.0"
 # this exact version, so the lockfile gains no package.
 libloading = "0.9.0"
 
-# --- ticket 12's paint-time decoders (`dict::media::decode`) ---
+# --- paint-time decoders (`dict::media::decode`) ---
 # One rasterizer per census format, reachable from nothing else. They run
 # in the bin behind its own surface cache and never on the measurement
-# path: ticket 03 records intrinsic sizes in the media row at build time
+# path: the media row records intrinsic sizes at build time
 # precisely so that a decoder is not an input to layout, and `decode`
 # takes the format the row already recorded rather than sniffing again.
 #
 # resvg is the one that carries the gaiji. 35 of this library's 236 assets
 # are HanaMin glyph outlines at `height: 1em, appearance: monochrome`, so
-# it is also the only decoder story 17's `Tint::Raster` can rasterize a
+# it is also the only decoder `Tint::Raster` can rasterize a
 # mask with - a vector has no pixels until something picks a size, which
 # is the whole reason that variant carries one. It resolves tiny-skia
 # 0.12.0, the exact pin the popup panel above already paints with, so the
@@ -187,7 +187,7 @@ resvg = { version = "0.48.1", default-features = false }
 # which is what `probe` already documents that column as meaning.
 zune-jpeg = "0.5"
 gif = "0.14.2"
-# AVIF: 201 of this library's 236 assets and the format ticket 03 flagged,
+# AVIF: 201 of this library's 236 assets and the awkward format,
 # because sizing one needs no decoder and painting one needs a whole AV1
 # implementation. Every C route was refused on the build it would cost:
 # `libavif-sys` and `libdav1d-sys` build their codec with meson, ninja and
@@ -203,7 +203,7 @@ gif = "0.14.2"
 # promise is `alt` text, so that is disqualifying. `avif-rust` is safe
 # Rust throughout, survives 11 574 truncations and single-byte
 # corruptions of real assets without one panic, and matches libavif to
-# within one level on 198 of 201. The residue is named in ticket 12's
+# within one level on 198 of 201. The residue is named in the decoder
 # comments and lands on the `alt` ladder, not on a crash.
 avif-rust = "0.0.6"
 
@@ -223,12 +223,12 @@ path = "src/lib.rs"
 anyhow.workspace = true
 # The Anki picture payload: AnkiConnect takes attachments as base64.
 base64.workspace = true
-# The one PNG encoder (spec D3, src/image.rs) and the first of
+# The one PNG encoder (src/image.rs) and the first of
 # `dict::media::decode`'s five rasterizers. Pure Rust, so it costs the
 # Windows bin nothing and it is the same version the Linux bin already
 # decodes its tray icons with.
 png.workspace = true
-# The other four (`dict::media::decode`, ticket 12). Every one is pure
+# The other four (`dict::media::decode`). Every one is pure
 # Rust, so both bins keep the C-free build they have today - the only
 # native code in this tree stays rusqlite's bundled SQLite. resvg brings
 # tiny-skia into this crate, and therefore into the Windows bin, which is

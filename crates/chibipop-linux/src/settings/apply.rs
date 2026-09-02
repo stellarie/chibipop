@@ -38,9 +38,9 @@ pub struct LinuxFields {
     /// The mining screenshot's chord, native-channel only for the same
     /// reason as the static-region one above. `Option`, not a `String`
     /// with `""` for unbound: the config field is `Option<String>`
-    /// precisely so absence stays typed (`upstream-merge-fallout`
-    /// ticket 06 removed that sentinel from the Windows twin), so the
-    /// empty-text-box mapping lives at the UI edge and nowhere else.
+    /// precisely so absence stays typed (the Windows twin carries no such
+    /// sentinel either), so the empty-text-box mapping lives at the UI
+    /// edge and nowhere else.
     pub screenshot_key_linux: Option<String>,
     /// `actions.screenshot.save_dir` as typed. Where it resolves *to* is
     /// the daemon's (`Paths::screenshots_dir`), not this window's.
@@ -333,8 +333,7 @@ mod tests {
 
     /// And with neither chord the section goes away rather than being
     /// written as a table full of `None`: absence stays absence
-    /// (ARCHITECTURE.md#settings-and-config, `upstream-merge-fallout`
-    /// ticket 06).
+    /// (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn an_ocr_clipboard_section_with_neither_chord_is_dropped() {
         let dir = scratch("ocrclip_dropped");

@@ -211,7 +211,7 @@ impl Removed {
 /// itself. The list is checked against the schema of the database in hand
 /// before a single row goes ([`refuse_unlisted_tables`]), because the
 /// removal falling behind the schema is the defect this shape exists to
-/// prevent - ticket 17 added `dict_style` and left the removal alone, and
+/// prevent - one change added `dict_style` and left the removal alone, and
 /// the next removal died on that table's foreign key.
 pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) -> Result<Removed> {
     let tx = conn.transaction().context("opening the removal transaction")?;
@@ -233,7 +233,7 @@ pub fn remove_dictionary(conn: &mut Connection, dict_id: i64, archive: &Path) ->
 
 /// Refuses a removal that would leave a row behind.
 ///
-/// Which tables a removal has to walk is knowledge, and ticket 17 proved it
+/// Which tables a removal has to walk is knowledge, and one change proved it
 /// is knowledge that goes stale silently: `dict_style` arrived with the
 /// schema and not with the removal, and because no committed fixture ships a
 /// `styles.css` the table was empty in every test, so a removal that
@@ -1072,7 +1072,7 @@ mod tests {
         assert!(seen > 1_000, "an edit must not leave the planner reading {after}");
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- the media store ----
 
     fn media_zip() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
@@ -1128,7 +1128,7 @@ mod tests {
     /// stylesheet nor media, so every removal test written against it
     /// exercises a database in which `dict_style` and `media` are empty -
     /// which is exactly why a removal that forgets `dict_style` passed the
-    /// suite for a whole ticket. The PNG is the real committed asset from
+    /// suite. The PNG is the real committed asset from
     /// `tests/fixtures/media`, so no new binary blob enters the tree.
     fn complete_archive(test_name: &str) -> (PathBuf, TempDbGuard) {
         use std::io::Write as _;
@@ -1260,7 +1260,7 @@ mod tests {
     ///
     /// This is the production half of the test above. The next person to add
     /// a table gets a message naming their table rather than a foreign-key
-    /// error two tickets later, and a user whose database somehow carries an
+    /// error much later, and a user whose database somehow carries an
     /// unknown table keeps it whole.
     #[test]
     fn a_dict_keyed_table_the_removal_does_not_know_aborts_it_by_name() {
@@ -1270,7 +1270,7 @@ mod tests {
                  dict_id INTEGER PRIMARY KEY REFERENCES dict(dict_id),
                  note    TEXT NOT NULL
              );
-             INSERT INTO dict_note (dict_id, note) VALUES (1, 'ticket 23 was here');",
+             INSERT INTO dict_note (dict_id, note) VALUES (1, 'a note the removal does not know');",
         )
         .unwrap();
         let before = snapshot(&conn, 1);

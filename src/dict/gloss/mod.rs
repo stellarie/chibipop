@@ -16,8 +16,8 @@
 //! noise is 8.1x fewer allocations, 4.6x less retained heap, 12.1x faster to
 //! free, and a 3.6x-17.1x faster per-node `data-*` probe. The first three
 //! matter because this tree is *cached* (`SqliteDictionary`'s parsed-tree
-//! cache); the last matters because ticket 17's stylesheet matcher probes
-//! every node's `data` map on every hover.
+//! cache); the last matters because the stylesheet matcher probes every
+//! node's `data` map on every hover.
 //!
 //! Concretely, and this is the whole layout:
 //!
@@ -297,8 +297,8 @@ pub enum StyleKey {
 /// classified but never hidden: `docs/research/dict-shapes.md` counts 116 000
 /// cross-reference and 184 000 commentary nodes across eight dictionaries
 /// each, and no setting asks for them to go. Classifying them anyway makes
-/// them addressable - a later ticket that adds a setting adds the knob and
-/// not the classifier.
+/// them addressable - later work that adds a setting adds the knob and not
+/// the classifier.
 ///
 /// **The declaration order is the classification precedence**, lowest first,
 /// and [`Ord`] is derived for exactly that: a node carrying two editorial
@@ -433,9 +433,9 @@ impl GlossDoc {
         self.first_item == NONE
     }
 
-    /// Every node, in parse order. For a linear sweep - ticket 17's style
-    /// probe walks this rather than the tree, which is where its 17.1x p99
-    /// win comes from.
+    /// Every node, in parse order. For a linear sweep - the style probe walks
+    /// this rather than the tree, which is where its 17.1x p99 win comes
+    /// from.
     pub fn all_nodes(&self) -> &[Node] {
         &self.nodes
     }

@@ -1228,7 +1228,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // Never fatal - spec §5.
+    // Never fatal.
     //
     // Always live; shown on demand.
     let overlay = match Overlay::create(live.exclude_from_capture) {
@@ -1242,7 +1242,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     let overlay_hwnd = overlay.as_ref().map(Overlay::hwnd);
 
-    // Spec D5: can diverge.
+    // Can diverge.
     if let Some(CaptureExclusion::AttemptFailed) = overlay.as_ref().map(Overlay::capture_exclusion)
     {
         eprintln!("chibipop: ============================================================");
@@ -1271,7 +1271,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
     }
 
-    // Never fatal - spec §5.
+    // Never fatal.
     //
     // Always live; shown on demand.
     let anki_button = match AnkiButton::create(live.exclude_from_capture) {
@@ -1536,9 +1536,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             break; // 0 = WM_QUIT, -1 = error. Either way, stop pumping.
         }
 
-        // Modeless routing - spec D2.
+        // Modeless routing.
         if let Some(w) = &settings {
-            // Spec D9: the picker pumps.
+            // The picker pumps.
             w.pump(|| {
                 Hooks::set_scroll_armed(false);
                 Hooks::set_click_armed(false);
@@ -1595,7 +1595,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
-            // Spec D7: the popup's own rect.
+            // The popup's own rect.
             let cursor_pos = cursor_now();
             let button_h = anki_button
                 .as_ref()
@@ -1632,7 +1632,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
 
             // Every add route is one event: the state machine decides,
-            // and its `AddNote` is where a screenshot joins in (spec D4).
+            // and its `AddNote` is where a screenshot joins in.
             if Hooks::take_add_hotkey() {
                 drive!(Event::AddRequested);
             }
@@ -1809,7 +1809,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 for (name, roles) in &report.added {
                                     settings::dictionary_added(&mut updated, name, *roles);
                                 }
-                                // Spec §4: the cache was stale.
+                                // The cache was stale.
                                 dicts = report.dicts;
                                 w.clear_staged();
                                 w.reseed_per_language(&updated.dictionaries.per_language);
@@ -2671,12 +2671,11 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::AddNote { expr, fields } => {
-            // The screenshot-on-add seam (spec D4). Every route to an add
-            // - the low-level hook click, the button's own
-            // WM_LBUTTONDOWN, the add hotkey - arrives here, and it
-            // arrives only once `start_add` has applied its guards and
-            // marked the popup in flight, so this bin never restates one
-            // of them.
+            // The screenshot-on-add seam. Every route to an add - the
+            // low-level hook click, the button's own WM_LBUTTONDOWN, the
+            // add hotkey - arrives here, and it arrives only once
+            // `start_add` has applied its guards and marked the popup in
+            // flight, so this bin never restates one of them.
             //
             // The OS half (hide, select a region, grab) is deliberately
             // not done here: the selector runs its own nested
@@ -3319,7 +3318,7 @@ mod tests {
         ));
     }
 
-    /// Spec D5: they can diverge.
+    /// They can diverge.
     #[test]
     fn an_overlay_the_os_refused_arms_the_guard_alone() {
         assert!(capture_guard_needed(
@@ -3491,7 +3490,7 @@ mod tests {
         }
     }
 
-    /// Spec 2: never write to it.
+    /// Never write to it.
     #[test]
     fn the_writer_refuses_a_database_that_is_not_in_wal_mode() {
         let (dir, _guard) = edit_scratch("legacy_mode");
@@ -3706,7 +3705,7 @@ mod tests {
         assert!(s.contains("Old"), "{s}");
     }
 
-    /// Spec 9: name the failure.
+    /// Name the failure.
     #[test]
     fn the_status_names_what_failed_beside_what_worked() {
         let s = edit_status(&report_of(&["New"], &[], &["Bad: the zip is corrupt"]));

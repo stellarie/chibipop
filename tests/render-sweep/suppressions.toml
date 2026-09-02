@@ -13,7 +13,7 @@
 # To add an entry:
 #
 #   1. Adjudicate the candidate. Only a non-bug belongs here; a real defect
-#      becomes a dict-render-parity issue and a fragment test.
+#      becomes a render-parity bug and a fragment test.
 #   2. Copy the candidate file's `signature` field verbatim into `signature`.
 #      It is `<invariant> | <dictionary> | <shape>`, and it must match
 #      character for character - the sweep compares whole strings, never

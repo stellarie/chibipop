@@ -6,10 +6,9 @@
 //! rules**, and over the 52 structured-content dictionaries box properties
 //! live inline for 29 but **only in the stylesheet for 13**
 //! ([dict-shapes.md](../../../docs/research/dict-shapes.md#dictionary-stylesheets-stylescss)).
-//! So the box model of tickets 07 and 08, fed only by inline `style`, draws
-//! nothing at all for 明鏡国語辞典, 大辞泉, 角川新字源, 字通, 旺文社漢字典
-//! and eight more, and misses Jitendex's `[data-sc-class="tag"]` pill over
-//! 48 776 nodes.
+//! So the box model, fed only by inline `style`, draws nothing at all for
+//! 明鏡国語辞典, 大辞泉, 角川新字源, 字通, 旺文社漢字典 and eight more, and
+//! misses Jitendex's `[data-sc-class="tag"]` pill over 48 776 nodes.
 //!
 //! This is a matcher, not a CSS engine, and the difference is measured
 //! rather than asserted. Structured content has **no `class` attribute**, so
@@ -23,8 +22,8 @@
 //!
 //! The stylesheet text is stored per dictionary at build time and compiled
 //! **once, on first use** - not at build. That keeps it consistent with
-//! ticket 02's per-hover tree parse: a matcher bug ships as a patch and not
-//! as a rebuild. The whole corpus carries 174 KB of CSS across 14
+//! the gloss arena's per-hover tree parse: a matcher bug ships as a patch
+//! and not as a rebuild. The whole corpus carries 174 KB of CSS across 14
 //! dictionaries, so the compiled form is not worth caching on disk.
 //!
 //! [`apply`] then folds the winners into [`GlossDoc`]'s own resolved style
@@ -48,7 +47,7 @@ use select::{Ctx, Pool, NO_ATTR};
 /// The selector kinds this grammar compiles, in `tools/dict-census`'s own
 /// vocabulary.
 ///
-/// Here, and not in the census, for the reason ticket 02's allow-lists are:
+/// Here, and not in the census, for the reason the gloss allow-lists are:
 /// the census parses this array out of this source, so the count of rules it
 /// reports as dropped re-scores itself as the grammar grows instead of
 /// drifting from it. A test below is what keeps the array honest against the
@@ -62,7 +61,7 @@ pub const SUPPORTED_SELECTOR_KINDS: [&str; 3] = ["tag", "data-attr", "pseudo-cla
 /// `:nth-child` on 146, `:has` on 26, then `:first-of-type`,
 /// `:nth-last-of-type`, `:last-of-type`, `:nth-of-type` and `:not`. Plus
 /// `:last-child`, `:nth-last-child`, `:is` and `:where`, which are the same
-/// lines as the siblings beside them and which the ticket names.
+/// lines as the siblings beside them.
 ///
 /// Not here: `:hover` and `:link`, which are pointer and history state that
 /// gloss content in a popup never has - 20 corpus selectors, dropped.
@@ -83,7 +82,7 @@ pub const SUPPORTED_PSEUDO_CLASSES: [&str; 12] = [
 
 /// A dictionary's compiled stylesheet.
 ///
-/// Flat arenas throughout, for the reason ticket 02's node arena is flat: a
+/// Flat arenas throughout, for the reason the gloss node arena is flat: a
 /// compiled rule is a pair of spans, so the largest corpus sheet is a
 /// handful of contiguous blocks rather than 315 little allocations.
 pub struct Sheet {
@@ -412,7 +411,7 @@ impl Pool {
 /// The CSS spelling of every property this build maps.
 ///
 /// The kebab-case half of `gloss::parse::style_key_for`'s camelCase table,
-/// and deliberately no wider: the ticket's rule is to keep the declarations
+/// and deliberately no wider: the rule here is to keep the declarations
 /// the renderer already understands and drop the rest. So the corpus's
 /// `display`, `grid-column`, `line-height`, `font-family` and its 15 logical
 /// properties (`margin-inline-start` and friends, 700-odd declarations) are
@@ -577,7 +576,7 @@ fn resolve<'a>(doc: &GlossDoc, sheet: &'a Sheet) -> Vec<(NodeId, StyleKey, &'a s
 
 /// One document's interned keys, mapped to the sheet's attribute ids.
 ///
-/// Once per document, which is the whole point of ticket 02's interning: a
+/// Once per document, which is why the gloss arena interns keys at all: a
 /// key's attribute name is computed here and every per-node probe after this
 /// compares `u32`s. A binary search over the sheet's names rather than a
 /// scan, because the largest corpus sheet names 322 of them.
@@ -690,7 +689,7 @@ impl<'s> Walk<'s, '_> {
         // whatever rule it came from - which takes a second pass over the
         // same ordering. Only when there is one: 6 of the 14 corpus sheets
         // carry no `!important` at all, and those pay for one pass. It never
-        // beats inline `style`, which this ticket's contract gives the last
+        // beats inline `style`, which this module's contract gives the last
         // word unconditionally.
         let passes: &[bool] =
             if self.hits.iter().any(|h| h.0) { &[true, false] } else { &[false] };

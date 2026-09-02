@@ -1,4 +1,4 @@
-//! The daemon's shutdown-signal discipline (ticket 13): which thread may
+//! The daemon's shutdown-signal discipline: which thread may
 //! see SIGINT/SIGTERM, and who must not inherit that answer.
 //!
 //! Two rules, and they only work together. The signalfd is the daemon's
@@ -70,7 +70,7 @@ mod tests {
         SigSet::thread_get_mask().expect("reading the thread's signal mask")
     }
 
-    /// The rule the ticket was filed on: the block reaches threads that
+    /// The first of the two rules: the block reaches threads that
     /// do not exist yet, and only those spawned after it.
     #[test]
     fn a_thread_spawned_after_the_block_inherits_it() {

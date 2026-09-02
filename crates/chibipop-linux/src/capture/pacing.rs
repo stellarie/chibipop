@@ -26,7 +26,7 @@
 //! touches the race at all and pays no deadline: plain copies only, as
 //! before.
 //!
-//! **What the two compositors actually do** (measured, ticket 30):
+//! **What the two compositors actually do** (measured):
 //! wlroots scopes damage to the frame's box, so a static screen really
 //! does answer at the deadline and cost zero copies - and real damage
 //! wins the race early, at 108 ms of a 250 ms deadline in the smoke

@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(None, f.get("frequency"));
     }
 
-    /// Story 42: popup density and card completeness are separate choices.
+    /// Popup density and card completeness are separate choices.
     /// Both fields come off one parsed tree in one call, so the disagreement
     /// here is two filters, not two configurations - the popup's plain-text
     /// summary still drops what the card keeps.
@@ -787,7 +787,7 @@ mod tests {
         assert!(note.get("picture").is_none());
     }
 
-    // -- the dupe probe (upstream-merge-fallout 03) --
+    // -- the dupe probe --
 
     /// The Lapis default, plus a JP Mining Note-shaped map: the same
     /// sources, none of the same Anki field names.
@@ -1011,7 +1011,7 @@ mod tests {
         );
     }
 
-    // ---- pitch (ticket 02) ----
+    // ---- pitch ----
 
     /// One pitch row: an accent and the dictionaries that gave it.
     fn pitch_row(fall: u32, dicts: &[&str]) -> crate::present::PitchRow {

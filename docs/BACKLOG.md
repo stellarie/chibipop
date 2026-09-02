@@ -64,14 +64,14 @@ re-run, so the gate stays closed until someone does.
 
 ## 2. Vertical text: square-to-detect, transpose-to-read
 
-**Measured 2026-07-28**, fix deliberately left to its own round (spec §5 says so).
+**Measured 2026-07-28**, fix deliberately left to its own round.
 **Evidence:** the vertical-text measurement of 2026-07-28, summarised below.
 
 Vertical text at the shipped 500×100 region resolves the correct character **2 times in 6** and
 twice returns a sentence spliced across four unrelated columns. A transposed 100×500 probe scores
 6/6 characters and 5/6 exact column text.
 
-**The measurement already rules out spec §5's candidate (b) as written:** "take a second
+**The measurement already rules out candidate (b) as written:** "take a second
 orientation-aware probe when pass 1's line looks vertical" cannot fire, because at the top of a
 column pass 1 reports **Horizontal** — the 100 px band catches the top glyph of four columns and
 `orientation_of` reads their spread as horizontal. Both square shapes reported Vertical at all
@@ -1116,13 +1116,13 @@ the order list usefully.
 **Raised 2026-08-16 by the v0.8.0 round, after four consecutive tasks re-reported it. Pre-existing,
 and it quietly inflates every test total this project has ever published.**
 
-> **Amended 2026-08-27 (ticket 17): the guard is fixed, and half of this item stands.**
+> **Amended 2026-08-27: the guard is fixed, and half of this item stands.**
 > `tests/golden.rs` no longer probes one repo path. It resolves the dictionary the way the
 > product does — `$CHIBIPOP_GOLDEN_DB`, then the Linux daemon's
 > `$XDG_DATA_HOME/chibipop/chibipop.sqlite`, then the path the Windows bin's default `--out`
 > lands on in a cargo tree — so the corpus **runs** on any box with a real library, and it
-> failed the first time it did: `してしまった: expected する in top 3, got ["仕手", "して", "梓"]`
-> (ticket 16). A skip now prints every path it looked at, so the reason is checkable.
+> failed the first time it did: `してしまった: expected する in top 3, got ["仕手", "して", "梓"]`.
+> A skip now prints every path it looked at, so the reason is checkable.
 >
 > What stands: in dictionary-free CI it still early-returns and libtest still counts that as a
 > pass, so CI totals still include one test that did not run. Option (b) below is **not** the
@@ -1251,7 +1251,7 @@ resolve a real evenly-spaced CJK run and assert a 2-char match yields ink + 2×3
 > `new`, so the built-in path is untouched. `EngineChoice::Builtin`, `EngineChoice::FellBack` and
 > any discovery/spawn failure all take the same fallback: one `eprintln!` naming the plugin and the
 > reason, then the built-in engine, with `cfg.ocr.engine` never rewritten — a returning plugin
-> resumes on the next start, per spec section 6.
+> resumes on the next start.
 >
 > **Verified live, not reasoned.** A throwaway test (written, run, deleted) drove exactly this
 > chain against the real meikiocr plugin under `target/release/plugins/`: `with_recogniser` built
@@ -1450,7 +1450,7 @@ removed.
 
 ---
 
-## 35. Spec section 7.2's capability check is one-directional
+## 35. The capability check is one-directional
 
 **Raised 2026-08-18 by the whole-branch review.**
 

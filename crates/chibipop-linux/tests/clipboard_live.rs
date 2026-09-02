@@ -4,7 +4,7 @@
 //! CI is headless (ARCHITECTURE.md#packaging-and-ci), so this skips
 //! without `WAYLAND_DISPLAY` - and skips again when the session
 //! advertises no data-control protocol, because an absent rung is a rung
-//! the ladder walks past (spec D2), not a failure. The degradation is
+//! the ladder walks past, not a failure. The degradation is
 //! asserted from the other side instead: `chibipop clipboard-check` exits
 //! non-zero naming both globals, which is what `skip` reads, and
 //! `src/clipboard.rs`'s unit tests pin the same refusal with no

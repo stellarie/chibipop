@@ -73,7 +73,7 @@ pub struct Init {
     pub home: Option<PathBuf>,
     /// The binary compositor snippets must name, resolved before the
     /// window opened (`paths::exec_name`): a pasted bind has to exec
-    /// *this* daemon, not whatever `chibipop` PATH finds (ticket 51).
+    /// *this* daemon, not whatever `chibipop` PATH finds.
     pub exe: PathBuf,
     /// Which data-control protocol this session advertises, if any
     /// (`clipboard::rung`). `None` - stock GNOME - is what the
@@ -330,7 +330,7 @@ impl App {
     /// What the mining screenshot's chord row renders.
     ///
     /// [`HotkeyChannel::Native`] for exactly the reason given above:
-    /// nothing registers this action with the portal (D1), so the
+    /// nothing registers this action with the portal, so the
     /// compositor bind is its only global channel.
     fn screenshot_control(&self) -> HotkeyControl {
         HotkeyChannel::Native.control(
@@ -838,8 +838,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.linux.screenshot_key_linux = (!v.trim().is_empty()).then_some(v);
         }
         Message::ScreenshotSaveDir(v) => app.linux.screenshot_save_dir = v,
-        // Same mapping, same reason (`upstream-merge-fallout` ticket 06
-        // removed this sentinel from the Windows twin).
+        // Same mapping, same reason (this sentinel was removed from
+        // the Windows twin too).
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
         }
@@ -1217,12 +1217,11 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // The portal rung (ticket 36). There is no in-app rebind to
-        // offer and pretending otherwise would be the one thing this
-        // window must never do: the portal owns the binding, the
-        // dialog it raises at bind time and the desktop's own
-        // shortcut editor are where a key changes, and the chord
-        // above is only what we ask for next time.
+        // The portal rung. There is no in-app rebind to offer and
+        // pretending otherwise would be the one thing this window must
+        // never do: the portal owns the binding, the dialog it raises at
+        // bind time and the desktop's own shortcut editor are where a key
+        // changes, and the chord above is only what we ask for next time.
         HotkeyControl::Rebind { current } => column![
             text("Portal channel: the GlobalShortcuts portal owns this binding."),
             text(match &current {
@@ -1810,7 +1809,7 @@ fn sentence_mode_of(label: &str) -> SentenceMode {
 /// The static-region chord's copyable bind, or the reason there is none.
 ///
 /// Its caption says "native channel" in every case, unlike the trigger's
-/// and the add's: this action has no portal id at all (D1), so a
+/// and the add's: this action has no portal id at all, so a
 /// compositor bind is not one of two ways to reach it - it is the only
 /// way, and a row that left that implicit would be inviting the user to
 /// wait for a consent dialog that is never coming.
@@ -1888,7 +1887,7 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
 /// The mining screenshot's copyable bind, or the reason there is none.
 ///
 /// Native-channel wording in every case, for the same reason
-/// `static_region_bind` uses it: this action has no portal id (D1), so
+/// `static_region_bind` uses it: this action has no portal id, so
 /// a compositor bind is not one of two ways to reach it but the only
 /// one, and a row that left that implicit would be inviting the user to
 /// wait for a consent dialog that is never coming.
@@ -2061,7 +2060,7 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         .spacing(6)
         .into(),
         // The portal rung, with the key the portal published for the
-        // *add-card* id (ticket 09) - the same status vocabulary the
+        // *add-card* id - the same status vocabulary the
         // trigger row uses, because it is the same fact about a
         // different action. `current: None` is the honest absence: a
         // desktop that reports no key, or one that never answered for
@@ -2331,7 +2330,7 @@ mod tests {
         chibipop::settings::apply_to(&app.form, &chibipop::config::Config::default())
     }
 
-    /// What Apply would do beyond writing the file: ticket 03's in-place
+    /// What Apply would do beyond writing the file: the in-place
     /// reindex, or nothing at all. The rule is core's
     /// (`settings::dictionary_work`), asked here of the config the window
     /// opened with and the one a press leaves behind - which is exactly
@@ -2386,10 +2385,10 @@ mod tests {
         }
     }
 
-    /// The add-card row carries the trigger row's status vocabulary
-    /// (ticket 09): on the portal rung it names the key the portal
-    /// published for `anki-add` and offers no snippet, because a
-    /// pasted compositor bind is not what owns that key.
+    /// The add-card row carries the trigger row's status vocabulary:
+    /// on the portal rung it names the key the portal published for
+    /// `anki-add` and offers no snippet, because a pasted compositor
+    /// bind is not what owns that key.
     #[test]
     fn the_add_card_row_reports_the_portals_own_add_key() {
         let dir = scratch("addportalrow");
@@ -2458,7 +2457,7 @@ mod tests {
     /// The OCR-to-clipboard row's whole point on the native rung: the
     /// typed chord comes back as a bind naming the running binary and the
     /// `ocr-clipboard` verb, and never as a portal key - this action has
-    /// no portal id (D1), so borrowing the trigger's would be a row
+    /// no portal id, so borrowing the trigger's would be a row
     /// claiming a key it was never given.
     #[test]
     fn the_ocr_clipboard_chord_offers_a_pasteable_native_bind() {
@@ -2478,8 +2477,8 @@ mod tests {
     }
 
     /// A cleared box is an absent `Option`, not a `""` chord: the config
-    /// field is `Option<String>` precisely so absence stays typed
-    /// (`upstream-merge-fallout` ticket 06), and the row offers no bind.
+    /// field is `Option<String>` precisely so absence stays typed, and
+    /// the row offers no bind.
     #[test]
     fn a_cleared_ocr_clipboard_chord_is_absent_rather_than_an_empty_string() {
         let dir = scratch("ocrclipclear");
@@ -2761,7 +2760,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The ticket: until this window could add a row and pick a source,
+    /// The gap: until this window could add a row and pick a source,
     /// `shot::plan` had nothing to find and a Linux user's only way to
     /// name the picture's field was hand-editing the TOML. Asserted the
     /// way `plan` reads it - the first row whose source is `screenshot`,
@@ -2867,11 +2866,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Ticket 20: removing every row is an answer, not a window that
-    /// never had rows to show, so Apply writes the empty map instead of
-    /// silently keeping the shipped one. Read off the file Apply wrote,
-    /// because the guard this replaced was invisible from inside the
-    /// form - the save reported success either way.
+    /// Removing every row is an answer, not a window that never had
+    /// rows to show, so Apply writes the empty map instead of silently
+    /// keeping the shipped one. Read off the file Apply wrote, because
+    /// the guard this replaced was invisible from inside the form - the
+    /// save reported success either way.
     #[test]
     fn removing_every_row_saves_an_empty_map() {
         let dir = scratch("fmempty");
@@ -3291,7 +3290,7 @@ mod tests {
 
     /// A pitch archive supplies no definitions and no ranks, so it is a
     /// row in one section only - and it reaches the file, which is the
-    /// half that had no UI at all before this ticket.
+    /// half that had no UI at all before this change.
     #[test]
     fn a_pitch_only_import_is_a_row_in_the_pitch_section_and_nowhere_else() {
         let dir = scratch("add_pitch");

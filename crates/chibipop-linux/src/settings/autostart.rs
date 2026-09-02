@@ -374,8 +374,8 @@ mod tests {
 
     /// `extras/` is documentation that has to keep working: the shipped
     /// files are read here so a renamed verb or a changed snippet cannot
-    /// silently leave a broken copy-paste in the tarball (ticket 45
-    /// packages this directory).
+    /// silently leave a broken copy-paste in the tarball (packaging
+    /// ships this directory).
     fn extras(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extras").join(name);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -403,9 +403,8 @@ mod tests {
     /// of one binding would be a support trap. The shipped file is for
     /// an *installed* chibipop, so the bare command name is the right
     /// exe there; a dev checkout gets its own path from
-    /// `paths::exec_name` at runtime (ticket 51). The add-card bind is
-    /// commented out in the shipped file, which still contains its
-    /// line verbatim.
+    /// `paths::exec_name` at runtime. The add-card bind is commented out
+    /// in the shipped file, which still contains its line verbatim.
     #[test]
     fn the_shipped_hyprland_snippet_matches_the_window_snippet() {
         let text = extras("hyprland.conf");

@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Bumped to 4 by the dictionary-roles work: `reported_freq` keeps each
-/// frequency dictionary's own claims per dictionary instead of merging them
-/// into one build-time global, and ticket 02's pitch table lands under the
-/// same bump. Costs every user one rebuild, once - a rebuild, not a
-/// re-import, because the library directory keeps the archives and the
-/// rebuild flow replays them.
+/// Bumped to 4 when per-dictionary frequency landed: `reported_freq` keeps
+/// each frequency dictionary's own claims per dictionary instead of merging
+/// them into one build-time global, and the pitch table lands under the same
+/// bump. Costs every user one rebuild, once - a rebuild, not a re-import,
+/// because the library directory keeps the archives and the rebuild flow
+/// replays them.
 const SCHEMA_VERSION: i64 = 4;
 #[cfg(test)]
 const BATCH_ROWS: usize = 2;
@@ -146,19 +146,19 @@ CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
     reading  TEXT NOT NULL,
     -- Where the pitch falls, in the two forms the schema permits, exactly
     -- one per row. `downstep` is the 1-based count of moras before the fall
-    -- with 0 meaning heiban, which is what all 511 488 accents ticket 01
-    -- censused are; `pattern` is the `^[HL]+$` level-per-mora form, which
-    -- the schema permits and neither corpus uses. Two columns rather than
-    -- one because the two forms share no indexing origin and the string can
-    -- say things no integer can - several falls, or a word that neither
-    -- falls nor starts low.
+    -- with 0 meaning heiban, which is what all 511 488 censused accents
+    -- are; `pattern` is the `^[HL]+$` level-per-mora form, which the schema
+    -- permits and neither corpus uses. Two columns rather than one because
+    -- the two forms share no indexing origin and the string can say things
+    -- no integer can - several falls, or a word that neither falls nor
+    -- starts low.
     downstep INTEGER,
     pattern  TEXT,
     -- The moras this accent marks nasal and devoiced, as JSON arrays of
     -- 1-based mora indices, and the accent's own tags. Stored and not
-    -- drawn: ticket 06 draws the marks, 25.8% of NHK's rows carry one, and
-    -- dropping them here is exactly what would have cost that ticket a
-    -- second schema bump.
+    -- drawn: mark drawing needs them, 25.8% of NHK's rows carry one, and
+    -- dropping them here is exactly what would have cost a second schema
+    -- bump.
     nasal    TEXT NOT NULL,
     devoice  TEXT NOT NULL,
     tags     TEXT NOT NULL
@@ -174,11 +174,11 @@ CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
 /// [`crate::dict::edit::remove_dictionary`] walks.
 ///
 /// It lives here, next to [`DDL`], because the two have to be read
-/// together. Ticket 17 added `dict_style` above and did not add it to the
-/// removal, and no test noticed for a whole ticket, because every committed
-/// fixture ships no `styles.css` and so leaves `dict_style` empty - a
-/// removal against an empty table passes whatever it forgets. One list read
-/// beside the schema it belongs to is the cheapest thing that cannot drift.
+/// together. `dict_style` was added above and not added to the removal, and
+/// no test noticed for a long time, because every committed fixture ships no
+/// `styles.css` and so leaves `dict_style` empty - a removal against an
+/// empty table passes whatever it forgets. One list read beside the schema
+/// it belongs to is the cheapest thing that cannot drift.
 ///
 /// `dict` itself is deliberately absent: it is the parent row the removal
 /// deletes *last*, and it is counted on its own.
@@ -1236,12 +1236,12 @@ fn collect_assets(doc: &GlossDoc, into: &mut BTreeSet<String>) {
 
 /// Extracts one archive's referenced assets into the media store.
 ///
-/// The contract a missing asset gets, and the one ticket 12's `alt`-text
-/// ladder is written against: **a media row exists only when the bytes are
-/// in the store and the intrinsic size is known.** An absent path and an
-/// unsizeable file both produce no row and one diagnostic line, and never a
-/// failed build - an archive is third-party bytes, and one corrupt gaiji
-/// must not cost a user their whole rebuild.
+/// The contract a missing asset gets, and the one the `alt`-text ladder is
+/// written against: **a media row exists only when the bytes are in the
+/// store and the intrinsic size is known.** An absent path and an unsizeable
+/// file both produce no row and one diagnostic line, and never a failed
+/// build - an archive is third-party bytes, and one corrupt gaiji must not
+/// cost a user their whole rebuild.
 fn insert_media(
     tx: &rusqlite::Transaction,
     archive: &Path,
@@ -2436,7 +2436,7 @@ mod tests {
         );
     }
 
-    // ---- the media store (ticket 03) ----
+    // ---- the media store ----
 
     fn media_archive() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/media.zip")
@@ -2477,7 +2477,7 @@ mod tests {
                 "gaiji/ratio.svg",
                 "gaiji/three.jpg",
                 // Sized from its header and undecodable behind it, which
-                // is a real row and ticket 12's paint-time rung.
+                // is a real row and the `alt`-text ladder's paint-time rung.
                 "gaiji/torn.png",
                 "gaiji/two.svg",
             ],
@@ -2563,9 +2563,9 @@ mod tests {
         }
     }
 
-    /// The contract ticket 12's `alt`-text ladder is written against: a
-    /// media row exists only when the bytes are stored and the size is
-    /// known, so a lookup that answers nothing means "fall back".
+    /// The contract the `alt`-text ladder is written against: a media row
+    /// exists only when the bytes are stored and the size is known, so a
+    /// lookup that answers nothing means "fall back".
     #[test]
     fn a_missing_or_unreadable_asset_is_counted_and_never_fails_the_build() {
         let (conn, _guard, counts, lines) = build_media_db("media_absent");
@@ -2609,7 +2609,7 @@ mod tests {
         assert_eq!(0, rows);
     }
 
-    // ---- a dictionary's own styles.css (ticket 17) ----
+    // ---- a dictionary's own styles.css ----
 
     /// One archive, written here, built by the real builder.
     ///
@@ -2769,8 +2769,8 @@ mod tests {
     }
 
     /// The predicate reads banks and not filenames, which is the whole
-    /// reason it exists: one of the six archives named `[Pitch]` in ticket
-    /// 01's census has no `term_meta_bank_` at all.
+    /// reason it exists: one of the six archives named `[Pitch]` in the
+    /// census has no `term_meta_bank_` at all.
     #[test]
     fn a_pitch_only_archive_supplies_the_pitch_role_and_a_term_archive_does_not() {
         assert!(pitch::supplies_pitch(&fixture("pitch.zip")));
@@ -2801,9 +2801,9 @@ mod tests {
             "the archive's two rows for one reading merged, in arrival order");
     }
 
-    /// Both roles from one archive, which ticket 01's census has no specimen
-    /// of - 9 frequency-only and 5 pitch-only, none both. Neither role
-    /// suppresses the other and both land under one dictionary row.
+    /// Both roles from one archive, which the census has no specimen of - 9
+    /// frequency-only and 5 pitch-only, none both. Neither role suppresses
+    /// the other and both land under one dictionary row.
     #[test]
     fn an_archive_supplying_terms_and_pitch_contributes_both() {
         let out = out_path("both_roles");
@@ -2823,8 +2823,8 @@ mod tests {
     }
 
     /// Every field the schema permits reaches the table, including the two
-    /// this ticket does not draw: dropping them would cost ticket 06 a second
-    /// schema bump.
+    /// this builder does not draw: dropping them would cost mark drawing a
+    /// second schema bump.
     #[test]
     fn the_stored_row_carries_the_nasal_and_devoice_markers() {
         let out = out_path("pitch_markers");
@@ -2866,7 +2866,7 @@ mod tests {
         );
     }
 
-    /// The blocker ticket 01 measured, as a fixture: every one of the five
+    /// The blocker the census measured, as a fixture: every one of the five
     /// real pitch archives stores CRC-32 values that do not match its own
     /// payload, and this reader used to refuse all of them while Yomitan
     /// imported them cleanly.
@@ -2884,7 +2884,7 @@ mod tests {
     }
 
 
-    /// End to end, which is the ticket's own goal: a user installs two pitch
+    /// End to end, which is the goal: a user installs two pitch
     /// dictionaries, hovers a word, and the card header carries the accents -
     /// deduplicated where they agree, both rows where they do not.
     ///

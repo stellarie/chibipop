@@ -86,21 +86,21 @@ pub(crate) struct App {
     log: Log,
     stub: StubState,
     /// Every directory this daemon reads or writes, resolved once at
-    /// startup: the published trigger state (ticket 36), the config
-    /// file a reload re-reads, and the screenshots folder a mined
-    /// picture lands in (`Paths::screenshots_dir`, ticket 02).
+    /// startup: the published trigger state, the config file a
+    /// reload re-reads, and the screenshots folder a mined picture
+    /// lands in (`Paths::screenshots_dir`).
     paths: Paths,
     /// The config as loaded, so a reload can rebuild what the Worker
     /// owns from the same source of truth the Controller reads.
     config: chibipop::config::Config,
     signal: LoopSignal,
-    /// The protocol error that ended this session, if one did (ticket
-    /// 11). Unrecoverable by construction, so the Wayland source's
+    /// The protocol error that ended this session, if one did.
+    /// Unrecoverable by construction, so the Wayland source's
     /// dispatch stops the pump the way a signal does and leaves its
     /// verdict here; [`run`] reads it after the orderly shutdown and
     /// turns it into a non-zero exit.
     fatal: Option<ProtocolError>,
-    /// The cursor channel's Wayland side (ticket 33).
+    /// The cursor channel's Wayland side.
     cursor: CursorState,
     /// Driven by cursor Events and the trigger verbs; its Commands are
     /// executed below.
@@ -128,7 +128,7 @@ pub(crate) struct App {
     /// compositor to bind against: a unit test, or a session missing the
     /// layer shell — the daemon stays up either way.
     popup: Option<Popup>,
-    /// The region selector's layer surfaces (spec D5). `None` on a
+    /// The region selector's layer surfaces. `None` on a
     /// compositor with no layer shell, and for the same reason the
     /// popup's shell is: absence is a state, not an error.
     selector: Option<Selector>,
@@ -177,7 +177,7 @@ pub(crate) struct App {
     /// Where a mined region's pixels come back. Same shape and same
     /// reason as `anki_tx`: opening a capture backend and grabbing a
     /// frame blocks, so it happens on a thread and arrives as an
-    /// event (spec D6).
+    /// event.
     shot_tx: calloop::channel::Sender<Result<Frame, String>>,
     /// The one screenshot in flight, if any (see [`Shot`]).
     shot: Option<Shot>,
@@ -195,10 +195,10 @@ pub(crate) struct App {
     /// flight: what the answer's diagnostic names, and the guard that
     /// keeps one key press from queueing two.
     ocr_job: Option<PhysRect>,
-    /// The writable selection (spec D2). `None` on a compositor that
-    /// advertises no data-control protocol - stock GNOME - which is a
-    /// state discovered at bind time, exactly like a missing layer
-    /// shell, and costs this one action and nothing else.
+    /// The writable selection. `None` on a compositor that advertises
+    /// no data-control protocol - stock GNOME - which is a state
+    /// discovered at bind time, exactly like a missing layer shell,
+    /// and costs this one action and nothing else.
     clipboard: Option<clipboard::Clipboard>,
     /// Dictionary identities the pipeline last reported.
     dicts: Vec<DictInfo>,
@@ -215,12 +215,12 @@ pub(crate) struct App {
     /// What the ladder picked, so `reload` knows whether a retry is
     /// even meaningful.
     capture_selection: capture_backend::Selection,
-    /// Ticket 52: what the Capture row must say *besides* which backend
-    /// serves it, when this compositor paints the pointer into the
-    /// frames we OCR. Probed once at startup - the option cannot change
-    /// without a compositor reload - and folded into every later
-    /// Capture transition, so a portal retry cannot quietly drop the
-    /// defect from the row.
+    /// What the Capture row must say *besides* which backend serves it,
+    /// when this compositor paints the pointer into the frames we OCR.
+    /// Probed once at startup - the option cannot change without a
+    /// compositor reload - and folded into every later Capture
+    /// transition, so a portal retry cannot quietly drop the defect
+    /// from the row.
     pointer_defect: Option<String>,
     /// Everything the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
@@ -288,8 +288,8 @@ enum Shot {
 
 /// One screenshot's plan, and which feature asked for it.
 struct Pending {
-    /// Every rule about the file and the note is core's (`chibipop::shot`,
-    /// spec D4); this bin only picks a region and grabs pixels.
+    /// Every rule about the file and the note is core's
+    /// (`chibipop::shot`); this bin only picks a region and grabs pixels.
     plan: chibipop::shot::ShotPlan,
     kind: ShotKind,
 }
@@ -349,7 +349,7 @@ impl AnkiCall {
                 );
                 AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
             }
-            // Every rule here is core's (spec D4): the filename, the
+            // Every rule here is core's: the filename, the
             // `source = "screenshot"` field lookup, the base64 payload
             // and the AnkiConnect call all live in `chibipop::shot`, so
             // this arm is three of its functions and no decisions.
@@ -457,18 +457,18 @@ impl App {
             // The same Event the in-panel Anki slot raises, so every
             // route to a card is one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
-            // Native-channel only (D1), like `static-region` below.
+            // Native-channel only, like `static-region` below.
             Verb::Screenshot => self.mining_screenshot(),
-            // Native-channel only (D1) too.
+            // Native-channel only too.
             Verb::OcrClipboard => self.ocr_to_clipboard(),
-            // Native-channel only (D1): there is no portal id for this,
-            // so the socket is the whole global channel and this arm is
+            // Native-channel only: there is no portal id for this, so
+            // the socket is the whole global channel and this arm is
             // the whole action.
             Verb::StaticRegion => self.pick_static_region(),
         }
     }
 
-    /// One event from the GlobalShortcuts session's thread (ticket 36).
+    /// One event from the GlobalShortcuts session's thread.
     ///
     /// The portal is an *additional* source of the same presses the
     /// socket carries, never a replacement, so a press goes through
@@ -622,7 +622,7 @@ impl App {
 
     /// The popup, from a Wayland dispatch. `run` always builds one -
     /// a compositor with no layer shell still gets a popup, it just has
-    /// no shell to draw on (ticket 49), and a popup that cannot bind
+    /// no shell to draw on, and a popup that cannot bind
     /// `wl_compositor`/`wl_shm` at all ends startup before any handler
     /// can run. The `Option` is what lets the daemon's own tests build
     /// an `App` with no compositor behind it.
@@ -646,7 +646,7 @@ impl App {
         }
     }
 
-    // ---- the surfaces beside the popup (spec D5, ticket 03) ----
+    // ---- the surfaces beside the popup ----
     //
     // Three kinds of layer surface answer into this one state, so every
     // shared SCTK handler routes by surface identity here rather than
@@ -757,8 +757,8 @@ impl App {
     }
 
     /// Drag a region on the dimmed screen, blocking until the user
-    /// decides (spec D5). `None` is cancelled, under the threshold, or
-    /// no selector on this compositor - all of them states, none an
+    /// decides. `None` is cancelled, under the threshold, or no
+    /// selector on this compositor - all of them states, none an
     /// error.
     ///
     /// The popup is hidden for the duration: it must not be in the
@@ -909,9 +909,9 @@ impl App {
 
     // ---- the mining screenshot and the picture that rides an add ----
 
-    /// Where `actions.screenshot.save_dir` resolves to (ticket 02):
-    /// absolute as typed, otherwise beside the exe in portable mode and
-    /// under the XDG data dir everywhere else.
+    /// Where `actions.screenshot.save_dir` resolves to: absolute as
+    /// typed, otherwise beside the exe in portable mode and under the
+    /// XDG data dir everywhere else.
     fn screenshots_dir(&self) -> PathBuf {
         self.paths.screenshots_dir(&self.config.actions.screenshot.save_dir)
     }
@@ -919,10 +919,10 @@ impl App {
     /// The picture that rides along with the add the Controller just
     /// authorised, or `None` when none does.
     ///
-    /// Every part of that decision is core's (`chibipop::shot::plan_add`,
-    /// spec D4): the `include_on_add` gate, the blank-expression and
-    /// already-added guards, the filename and the picture field. This
-    /// only hands it the popup, the config and the clock.
+    /// Every part of that decision is core's (`chibipop::shot::plan_add`):
+    /// the `include_on_add` gate, the blank-expression and already-added
+    /// guards, the filename and the picture field. This only hands it the
+    /// popup, the config and the clock.
     fn plan_shot_for_add(&self) -> Option<chibipop::shot::ShotPlan> {
         let view = self.controller.popup()?;
         chibipop::shot::plan_add(
@@ -1004,7 +1004,7 @@ impl App {
         self.pump.insert_idle(|app: &mut App| app.drain_shot());
     }
 
-    /// The OS half of a parked shot: hide, drag, grab (spec D5/D6).
+    /// The OS half of a parked shot: hide, drag, grab.
     ///
     /// The hide is [`App::pick_region`]'s; the popup stays down until the
     /// pixels are in, because the whole point of the sequence is that it
@@ -1033,7 +1033,7 @@ impl App {
         }
     }
 
-    /// One arbitrary-rect grab, on a thread of its own (spec D6).
+    /// One arbitrary-rect grab, on a thread of its own.
     ///
     /// The plan stays here rather than riding into the closure: a
     /// `Builder::spawn` that fails drops its closure, and a plan lost
@@ -1150,7 +1150,7 @@ impl App {
     /// Both refusals happen *before* the pick, because dragging a box
     /// that can go nowhere is worse than being told so up front: a
     /// compositor with no data-control protocol has no clipboard
-    /// chibipop can write (spec D2), and a region still waiting on the
+    /// chibipop can write, and a region still waiting on the
     /// recogniser owns the answer channel this one would arrive on.
     fn ocr_to_clipboard(&mut self) {
         if self.clipboard.is_none() {
@@ -1191,8 +1191,8 @@ impl App {
     /// Grab the region and hand its pixels to the Worker's engine.
     ///
     /// Two off-pump stages, one thread each and neither of them this
-    /// one: the grab opens a capture backend of its own (spec D6), and
-    /// the recogniser is thread-affine to the Worker
+    /// one: the grab opens a capture backend of its own, and the
+    /// recogniser is thread-affine to the Worker
     /// (ARCHITECTURE.md#ocr-engine), so the grab thread forwards
     /// straight into [`worker::OcrJobs`] rather than bouncing a whole
     /// frame off the pump that has no use for it. Only the text comes
@@ -1479,7 +1479,7 @@ impl App {
         }
     }
 
-    /// Popup-local pointer input (ticket 38) -> Controller Events.
+    /// Popup-local pointer input -> Controller Events.
     ///
     /// The other half of the contextual-interaction bargain: there is no
     /// global wheel or click channel on Wayland, so these arrive from
@@ -1716,7 +1716,7 @@ impl App {
             Command::ShowScanOverlay { rects } => self.show_scan_overlay(&rects),
             // A fresh popup replaces the old one: the sub-notch delta
             // banked against the entry that just went away must not
-            // nudge the new one (ticket 38).
+            // nudge the new one.
             Command::DiscardScroll => {
                 if let Some(popup) = self.popup.as_mut() {
                     popup.discard_scroll();
@@ -1738,11 +1738,10 @@ impl App {
             Command::CheckDupes { generation, exprs } => {
                 self.spawn_anki(AnkiCall::Dupes { generation, exprs });
             }
-            // The screenshot-on-add seam (spec D4, ticket 01). A plan
-            // means a picture rides along, so the plain add is *not*
-            // dispatched: the call that carries the picture files the
-            // card. The OS half cannot happen here - see
-            // [`App::park_shot`].
+            // The screenshot-on-add seam. A plan means a picture
+            // rides along, so the plain add is *not* dispatched: the
+            // call that carries the picture files the card. The OS
+            // half cannot happen here - see [`App::park_shot`].
             Command::AddNote { expr, fields } => match self.plan_shot_for_add() {
                 Some(plan) => self.park_shot(Pending { plan, kind: ShotKind::Add }),
                 None => self.spawn_anki(AnkiCall::Add { expr, fields }),
@@ -2045,8 +2044,7 @@ impl App {
     }
 
     /// The compositor's verdict on this connection: one diagnostic, then
-    /// the same stop the tray's Quit and the signal source use (ticket
-    /// 11).
+    /// the same stop the tray's Quit and the signal source use.
     ///
     /// A protocol error is unrecoverable by construction - the object it
     /// names is already destroyed server-side and every later request on
@@ -2078,8 +2076,7 @@ impl App {
     /// SNI status, and one log line — only when something moved.
     ///
     /// A known software cursor rides along on the Capture row: the
-    /// backend serving pixels does not stop the pointer being in them
-    /// (ticket 52).
+    /// backend serving pixels does not stop the pointer being in them.
     fn note_channel(&mut self, id: ChannelId, state: ChannelState) {
         let state = match (id, &self.pointer_defect) {
             (ChannelId::Capture, Some(defect)) => state.degraded_by(defect),
@@ -2315,8 +2312,8 @@ impl App {
     }
 }
 
-/// The one seam (ticket 33): channel -> `Event::CursorMoved` ->
-/// Controller. Both rungs land here with global physical pixels.
+/// The one seam: channel -> `Event::CursorMoved` -> Controller.
+/// Both rungs land here with global physical pixels.
 impl CursorHandler for App {
     fn cursor(&mut self) -> &mut CursorState {
         &mut self.cursor
@@ -2426,7 +2423,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
 }
 
 /// The daemon's own queue on the pump, dispatched by the daemon rather
-/// than by `WaylandSource::insert`'s callback (ticket 11).
+/// than by `WaylandSource::insert`'s callback.
 ///
 /// `insert` hands the queue `EventQueue::dispatch_pending` and stops
 /// there, and that call cannot report a protocol error: wayland-client's
@@ -2472,7 +2469,7 @@ fn insert_wayland_source(
 }
 
 /// Which dispatch failures the daemon ends on: protocol errors, and only
-/// those (ticket 11).
+/// those.
 ///
 /// A protocol error is a verdict on the whole connection. Everything else
 /// stays the source's business, which is what keeps a `WouldBlock` flush
@@ -2514,9 +2511,9 @@ fn anki_channel(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sen
 /// The mined region's pixel channel, registered on the pump.
 ///
 /// `anki_channel`'s twin, for the same reason: the grab happens on a
-/// thread of its own (spec D6) and the tests build an `App` too, so a
-/// grab that reached no `App` method would make the whole screenshot
-/// flow untestable.
+/// thread of its own and the tests build an `App` too, so a grab that
+/// reached no `App` method would make the whole screenshot flow
+/// untestable.
 fn shot_channel(
     pump: &LoopHandle<'static, App>,
 ) -> Result<calloop::channel::Sender<Result<Frame, String>>> {
@@ -2569,9 +2566,9 @@ fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::
 pub fn run(paths: Paths) -> Result<()> {
     // Before anything else in this process, because "anything else"
     // eventually spawns a thread and the mask is only inherited at spawn
-    // (ticket 13, `signals::block_shutdown`). The source itself joins the
-    // pump far below, next to the other event sources; the signals are
-    // blocked from this line on either way.
+    // (`signals::block_shutdown`). The source itself joins the pump far
+    // below, next to the other event sources; the signals are blocked
+    // from this line on either way.
     let signals = signals::block_shutdown()?;
 
     let display = wayland::display_name()?;
@@ -2617,8 +2614,8 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(&line);
     }
 
-    // The capture backend ladder (ticket 34). Decided first, because the
-    // cursor ladder's rung 2 only exists when the portal rung is the one
+    // The capture backend ladder. Decided first, because the cursor
+    // ladder's rung 2 only exists when the portal rung is the one
     // serving pixels - it rides that same stream.
     let (capture_override, capture_warning) = capture_backend::BackendOverride::from_env();
     if let Some(w) = &capture_warning {
@@ -2633,11 +2630,11 @@ pub fn run(paths: Paths) -> Result<()> {
     let capture_caps = capture_backend::Capabilities::scan(&globals, portal::available());
     let capture_selection = capture_backend::select(&capture_caps, capture_override);
     log.diag(&capture_selection.startup_line());
-    // Ticket 52: neither rung's pixels can exclude a pointer the
-    // compositor already painted into its own framebuffer, so say so
-    // here rather than letting OCR read arrows as glyphs. Backend-
-    // independent on purpose - the portal's own backend on a wlr desk
-    // copies through the same framebuffer.
+    // Neither rung's pixels can exclude a pointer the compositor
+    // already painted into its own framebuffer, so say so here rather
+    // than letting OCR read arrows as glyphs. Backend-independent on
+    // purpose - the portal's own backend on a wlr desk copies through
+    // the same framebuffer.
     let pointer_in_frames = software_cursor::probe();
     if let Some(line) = pointer_in_frames.startup_line() {
         log.diag(&line);
@@ -2646,9 +2643,9 @@ pub fn run(paths: Paths) -> Result<()> {
     let portal_metadata = capture_selection.backend() == Some(Backend::Portal)
         && portal::cursor_metadata_available();
 
-    // The cursor channel (ticket 33): one rung by advertised
-    // capability (ARCHITECTURE.md#input-ladders), or a diagnostic naming
-    // exactly what is missing — and the daemon stays up either way.
+    // The cursor channel: one rung by advertised capability
+    // (ARCHITECTURE.md#input-ladders), or a diagnostic naming exactly
+    // what is missing — and the daemon stays up either way.
     let (ladder_override, override_warning) = cursor::LadderOverride::from_env();
     if let Some(w) = &override_warning {
         log.diag(w);
@@ -2700,7 +2697,7 @@ pub fn run(paths: Paths) -> Result<()> {
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
     // The trigger channel's ladder
-    // (ARCHITECTURE.md#input-ladders, ticket 36). The socket above is
+    // (ARCHITECTURE.md#input-ladders). The socket above is
     // rung 2 and is now listening, so this decides only one thing:
     // whether the GlobalShortcuts portal is *also* asked to carry the
     // two shortcuts. Its session runs on its own thread and its news
@@ -2712,8 +2709,7 @@ pub fn run(paths: Paths) -> Result<()> {
     }
     let trigger_selection = shortcuts::select(shortcuts::portal::probe(), trigger_override);
     // The advice half of this line is a bind the user pastes, so it
-    // names this binary rather than a bare `chibipop` PATH may lack
-    // (ticket 51).
+    // names this binary rather than a bare `chibipop` PATH may lack.
     log.diag(&trigger_selection.startup_line(&crate::paths::exec_name()));
     // Until the portal answers, the honest published state is "the
     // compositor owns the key": that is what the settings window must
@@ -2784,12 +2780,12 @@ pub fn run(paths: Paths) -> Result<()> {
     // global, and the Popup channel row says so where a user looks. What
     // it must NOT do is drop the popup's other Wayland objects on the
     // floor: their events keep arriving, and a handler with nothing
-    // behind it is a panic (ticket 49 found exactly that on a
-    // layer-shell-less session). So the popup is always built, and a
-    // bind error here is the fatal kind the report already called fatal.
-    // The database path is the painter's too: it opens its own read-only
-    // connection onto the media store, because the worker owns the
-    // dictionary on another thread.
+    // behind it is a panic (exactly that happened on a layer-shell-less
+    // session). So the popup is always built, and a bind error here is
+    // the fatal kind the report already called fatal. The database path
+    // is the painter's too: it opens its own read-only connection onto
+    // the media store, because the worker owns the dictionary on another
+    // thread.
     let db = paths.data_dir.join("chibipop.sqlite");
     let mut popup = Popup::bind(&globals_list, &queue.handle(), &config, &db)
         .context("binding the popup's Wayland globals")?;
@@ -2806,10 +2802,10 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     }
 
-    // The three surfaces beside the popup (spec D5, ticket 03). All
-    // borrow the popup's process-wide handles - one `wl_compositor`, one
-    // `wl_shm`, one `wl_viewporter`, one `OutputState` - and all answer
-    // `None` on the same missing global the popup already reported, so a
+    // The three surfaces beside the popup. All borrow the popup's
+    // process-wide handles - one `wl_compositor`, one `wl_shm`, one
+    // `wl_viewporter`, one `OutputState` - and all answer `None` on the
+    // same missing global the popup already reported, so a
     // layer-shell-less session says it once and keeps every other
     // channel. Two outlines, because the scan rects and the static
     // region's border have independent lifetimes.
@@ -2859,8 +2855,8 @@ pub fn run(paths: Paths) -> Result<()> {
     let shot_tx = shot_channel(&event_loop.handle())?;
     let ocr_tx = ocr_text_channel(&event_loop.handle())?;
 
-    // The writable selection (spec D2), on its own connection and its
-    // own thread. A compositor with no data-control protocol - stock
+    // The writable selection, on its own connection and its own
+    // thread. A compositor with no data-control protocol - stock
     // GNOME - is a state named once here, exactly like a missing layer
     // shell above: it costs `ocr-clipboard` and nothing else, and
     // naming both globals is what lets a compositor upgrade self-heal
@@ -3045,10 +3041,10 @@ pub fn run(paths: Paths) -> Result<()> {
     }
 
     // The portal session's news: the bound set, every press and
-    // release, and its own diagnostics (ticket 36). Registered
-    // whichever rung was picked, because the receiver has to outlive
-    // the sender either way: on the native rung nothing was spawned to
-    // send, and an idle channel costs no wakeups.
+    // release, and its own diagnostics. Registered whichever rung was
+    // picked, because the receiver has to outlive the sender either
+    // way: on the native rung nothing was spawned to send, and an idle
+    // channel costs no wakeups.
     event_loop
         .handle()
         .insert_source(shortcut_rx, |event, _, app: &mut App| {
@@ -3120,9 +3116,9 @@ pub fn run(paths: Paths) -> Result<()> {
     // A protocol error stopped the pump the way a signal does, so the
     // shutdown above is the orderly one - but a session the compositor
     // killed is not a session the user quit, and the exit status has to
-    // tell a supervisor apart from the two (ticket 11). The diagnostic
-    // naming the object, the code and the compositor's message is
-    // already in the log and on stderr; this only carries the verdict.
+    // tell a supervisor apart from the two. The diagnostic naming the
+    // object, the code and the compositor's message is already in the
+    // log and on stderr; this only carries the verdict.
     match &app.fatal {
         Some(err) => bail!("shut down on a Wayland protocol error on {}", err.object_interface),
         None => Ok(()),
@@ -3312,8 +3308,8 @@ mod tests {
             last_warning: None,
             portal_serving: false,
             capture_selection: capture,
-            // Ticket 52's probe is a startup fact; the harness asserts
-            // the folding, not the compositor's option.
+            // The software-cursor probe is a startup fact; the harness
+            // asserts the folding, not the compositor's option.
             pointer_defect: None,
             portal_retry: None,
             popup: None,
@@ -3865,7 +3861,7 @@ mod tests {
         );
     }
 
-    // -- the trigger channel's portal rung (ticket 36) --
+    // -- the trigger channel's portal rung --
 
     fn binding(id: shortcuts::ShortcutId, trigger: Option<&str>) -> shortcuts::Binding {
         shortcuts::Binding { id, trigger: trigger.map(str::to_string) }
@@ -4362,7 +4358,7 @@ mod tests {
     /// own first read, so `spawn_worker` cannot resolve the list before
     /// the pipeline exists - it re-resolves after. Without that, a fresh
     /// daemon searched an empty list until something sent `reload`, which
-    /// is the ticket-08 defect one step further in.
+    /// is the same empty-list defect one step further in.
     #[test]
     fn a_fresh_pipeline_is_told_the_split_once_the_names_are_known() {
         let dir = scratch("rescope");
@@ -4541,7 +4537,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- AnkiConnect (ticket 42) --
+    // -- AnkiConnect --
 
     use std::io::{Read, Write};
 
@@ -4985,8 +4981,8 @@ mod tests {
     //   indistinguishable here from real pixels.
     //
     // Only the drag itself and `capture::oneshot` are left out, and both
-    // are covered against a real compositor by ticket 03
-    // (`tests/surfaces_live.rs`, `capture-dump`).
+    // are covered against a real compositor by `tests/surfaces_live.rs`
+    // and `capture-dump`.
 
     /// Two by two of solid blue, which is the smallest thing
     /// `encode_bgra_to_png` will take: BGRA8, top-down, `w * h * 4`.
@@ -5377,7 +5373,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- ticket 11: a protocol error ends the daemon ----
+    // ---- a protocol error ends the daemon ----
 
     /// A `ProtocolError` shaped like the one a compositor sends when a
     /// client binds a global that does not exist.
@@ -5455,12 +5451,12 @@ mod tests {
     /// The real thing, when there is a compositor to say it: a throwaway
     /// registry binds a global that cannot exist, and the pump ends.
     ///
-    /// This is the case the ticket was filed on, so it is worth a live
-    /// test - but CI is headless (ARCHITECTURE.md#packaging-and-ci), which
-    /// is why the wiring above is pinned without one too. Nothing here is
-    /// compositor-specific: refusing a bind for an unknown global name
-    /// belongs to the wayland library the compositor links, not to the
-    /// compositor.
+    /// This is the case the protocol-error path was written for, so it is
+    /// worth a live test - but CI is headless
+    /// (ARCHITECTURE.md#packaging-and-ci), which is why the wiring above
+    /// is pinned without one too. Nothing here is compositor-specific:
+    /// refusing a bind for an unknown global name belongs to the wayland
+    /// library the compositor links, not to the compositor.
     #[test]
     fn a_real_protocol_error_ends_the_pump() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {

@@ -145,9 +145,9 @@ fn an_unknown_style_property_drops_without_disturbing_the_rest() {
     assert_eq!(Some("bold"), d.style_of(id, StyleKey::FontWeight).and_then(|v| d.scalar_str(v)));
 }
 
-/// Every image field the census counted reaches the tree, because ticket 03's
-/// media store reads them off the node and a rebuild is the only way to get
-/// them back.
+/// Every image field the census counted reaches the tree, because the media
+/// store reads them off the node and a rebuild is the only way to get them
+/// back.
 #[test]
 fn an_image_node_keeps_every_field_the_census_counted() {
     // Verbatim from dict-shapes.md's "Representative nodes", 三省堂国語辞典
@@ -218,8 +218,8 @@ fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     assert_eq!(vec!["noun".to_string(), "suru verb".to_string()], pos_labels(&d));
     assert_eq!(vec!["chatting\nidle talk".to_string()], plain_items(&d));
 
-    // The list marker Jitendex declares inline is on the node, so ticket
-    // 08 can draw it and ticket 15 can see the roles beside it.
+    // The list marker Jitendex declares inline is on the node, so the popup
+    // scene can draw it and the role classifier can see the roles beside it.
     let list = find_tag(&d, Tag::Ul).unwrap();
     assert_eq!(
         Some("\"◍\""),
@@ -227,7 +227,7 @@ fn jitendex_parses_to_pills_a_sense_list_and_dropped_editorial_matter() {
     );
     let attribution = d.items().next().map(|item| d.children(item).nth(4).unwrap()).unwrap();
     assert_eq!(Role::Attribution, d.role(attribution));
-    // Dropped from the *render*, kept in the tree: ticket 14's "show
+    // Dropped from the *render*, kept in the tree: the popup's "show
     // attributions" setting has nothing to switch on otherwise.
     assert_eq!(Tag::A, d.node(d.children(attribution).next().unwrap()).tag);
 }
@@ -255,8 +255,8 @@ fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
     // Both example hooks classify, so 大辞林's examples now behave the way
     // Jitendex's always did: two senses as sibling blocks, each on its own
     // line, the dictionary's own marker intact, no synthesised number, and
-    // the two `用例` blocks out of the summary. Before ticket 15 the drop
-    // list named neither `用例` nor `慣用例` and both rendered.
+    // the two `用例` blocks out of the summary. Before the role classifier
+    // the drop list named neither `用例` nor `慣用例` and both rendered.
     assert_eq!(vec!["①走る。駆ける。\n②流れる。".to_string()], plain_items(&d));
 
     let roles: Vec<(&str, Role)> = (0..d.all_nodes().len() as NodeId)
@@ -275,8 +275,9 @@ fn daijirin_keeps_its_own_sense_markers_and_its_example_hooks() {
 }
 
 /// 明鏡国語辞典 第三版, whose 38 892 example sentences hang off an `example=`
-/// key no fixed drop list ever named - the headline defect ticket 15 closes,
-/// since Jitendex lost its examples while this dictionary kept every one.
+/// key no fixed drop list ever named - the headline defect the role
+/// classifier closes, since Jitendex lost its examples while this dictionary
+/// kept every one.
 #[test]
 fn meikyo_examples_classify_under_a_key_no_drop_list_ever_named() {
     let g = json!([{"type": "structured-content", "content": {
@@ -293,7 +294,7 @@ fn meikyo_examples_classify_under_a_key_no_drop_list_ever_named() {
     assert_eq!(vec!["非常に。たいそう。".to_string()], plain_items(&d));
     assert!(
         render_html(&d, Selection::Whole, RoleFilter::CARD)[0].contains("―うれしい"),
-        "and the card keeps it, which is the whole of story 42"
+        "and the card keeps it"
     );
 }
 
@@ -422,7 +423,7 @@ fn a_typed_text_item_is_the_same_single_node_shape() {
 
 /// The four `details`/`summary` dictionaries, 31 000 nodes. Outside the HTML
 /// allow-list, so the *renderers* drop the wrapper - but the tree keeps both
-/// tags, which is what ticket 08 needs to distinguish the summary.
+/// tags, which is what the popup scene needs to distinguish the summary.
 #[test]
 fn a_details_summary_dictionary_keeps_both_tags_and_separates_them() {
     let g = json!([{"type": "structured-content", "content": {
@@ -642,8 +643,8 @@ fn the_deleted_drop_list_is_now_the_role_the_knobs_govern() {
     assert!(!RoleFilter::CARD.allows(role_of_hook("content", "part-of-speech-info")));
 }
 
-/// Story 42, at the tree's own seam: one document, one parse, the example
-/// gone from the summary and present on the card.
+/// At the tree's own seam: one document, one parse, the example gone from the
+/// summary and present on the card.
 #[test]
 fn an_example_leaves_the_summary_and_stays_on_the_card() {
     let d = doc(&json!([{"type": "structured-content", "content": [
@@ -657,7 +658,7 @@ fn an_example_leaves_the_summary_and_stays_on_the_card() {
 }
 
 /// Attributions and examples are two knobs over one document, and all four
-/// combinations differ - story 27.
+/// combinations differ.
 #[test]
 fn examples_and_attributions_filter_independently_in_all_four_combinations() {
     let d = doc(&json!([{"type": "structured-content", "content": [
@@ -873,7 +874,7 @@ fn a_node_stays_pointer_free_and_small() {
     assert_eq!(44, std::mem::size_of::<Node>());
 }
 
-/// Interning is what makes ticket 17's per-node probe an integer compare.
+/// Interning is what makes the per-node style probe an integer compare.
 #[test]
 fn a_repeated_data_key_is_interned_once() {
     let d = doc(&json!([{"type": "structured-content", "content": [

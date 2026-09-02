@@ -29,8 +29,8 @@
 //!   cargo test -p chibipop-linux --test portal_capture_live -- --nocapture
 //! ```
 //!
-//! That is the smoke this ticket's Comments record, and it is the only
-//! way to see frames actually flow over PipeWire.
+//! That is the smoke this test records, and it is the only way to see
+//! frames actually flow over PipeWire.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -147,8 +147,8 @@ fn png_size(path: &Path) -> (u32, u32) {
     )
 }
 
-/// The ticket's headline selection rule, on the machine that can
-/// actually contradict it: Hyprland advertises screencopy *and* runs a
+/// The headline selection rule, on the machine that can actually
+/// contradict it: Hyprland advertises screencopy *and* runs a
 /// ScreenCast portal, and the promptless rung must still win. If this
 /// ever regresses, a wlr user gets a permission dialog they never had.
 ///

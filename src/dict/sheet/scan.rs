@@ -46,7 +46,7 @@ pub(super) struct Decl {
     /// stylesheets, so stripping the marker and forgetting it would hand a
     /// declaration the author flagged as decisive to whichever rule happened
     /// to be more specific. It never outranks inline `style`, which this
-    /// ticket's contract gives the last word unconditionally.
+    /// module's contract gives the last word unconditionally.
     pub(super) important: bool,
 }
 

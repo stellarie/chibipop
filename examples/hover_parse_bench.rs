@@ -1,6 +1,6 @@
 //! What one hover costs, measured three ways.
 //!
-//! Behind the open question in the dictionary render-parity spec: the spec
+//! Behind the "parse at build time or at hover time" question: one plan
 //! parses structured content at *build* time and stores a typed tree, on the
 //! stated grounds that "hover runs roughly 25 point queries and cannot afford
 //! a parse". Storing the raw Yomitan JSON and parsing per hover keeps parser
@@ -185,7 +185,7 @@ fn walk(v: &Value) -> usize {
 
 /// Every node of a parsed `GlossDoc`, and every byte of its text. The
 /// arena's equivalent of `walk`: a linear sweep of the node vector, which is
-/// also how ticket 17's style matcher will read it.
+/// also how the style matcher will read it.
 fn walk_doc(doc: &GlossDoc) -> usize {
     doc.all_nodes()
         .iter()
@@ -205,7 +205,7 @@ enum Rep {
     /// What `docs/research/hover-parse-cost.md` measured, kept so its
     /// numbers stay reproducible from this harness.
     Value,
-    /// What ticket 02 shipped.
+    /// What the arena rewrite shipped.
     Typed,
 }
 
@@ -251,7 +251,7 @@ fn mode_parse() -> Result<()> {
     );
     // Both representations, over the same payloads in the same run: the
     // `Value` row anchors the published numbers and the `GlossDoc` row is
-    // the one ticket 02 is answerable for.
+    // the one the arena rewrite is answerable for.
     parse_pass(&records, Rep::Value, "serde_json::Value + full walk")?;
     parse_pass(&records, Rep::Typed, "GlossDoc::parse + full walk")
 }

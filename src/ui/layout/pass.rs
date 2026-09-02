@@ -213,7 +213,7 @@ impl<'a> Pass<'a> {
         // Each image over the spacer
         // run that bought its room, and
         // capped at the room the block
-        // itself was given (ticket 24).
+        // itself was given.
         let images = place_images(flow, &self.measured, pen, wrap_w, line_at);
 
         let spans = flow
@@ -370,8 +370,8 @@ impl<'a> Pass<'a> {
     /// One block's box, around every
     /// piece inside it.
     ///
-    /// Ticket 08's own arithmetic with
-    /// the body's total advance where a
+    /// The box arithmetic with the
+    /// body's total advance where a
     /// paragraph's height used to be,
     /// which is what makes one box
     /// around three paragraphs the same

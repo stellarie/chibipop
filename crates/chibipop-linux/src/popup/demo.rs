@@ -1,9 +1,9 @@
 //! The canned popup: a real surface, real layout, real glyphs, with no
 //! capture and no OCR behind it.
 //!
-//! The pipeline that produces a `Presentation` from the screen is
-//! ticket 35's; this exists so the surface, the placement round-trip
-//! and the JP text stack can be driven - and smoke-tested on a live
+//! The pipeline that produces a `Presentation` from the screen is not
+//! built yet; this exists so the surface, the placement round-trip and
+//! the JP text stack can be driven - and smoke-tested on a live
 //! compositor - before it lands. It is env-gated
 //! (`CHIBIPOP_POPUP_DEMO=1`) and drives off the existing trigger verbs,
 //! so the forever verb set on the control socket stays untouched.

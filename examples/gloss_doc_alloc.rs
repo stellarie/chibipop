@@ -1,6 +1,6 @@
 //! What one cached `GlossDoc` costs, measured with a counting allocator.
 //!
-//! Ticket 02 chose a flat arena over a box tree on two axes that latency
+//! `GlossDoc` is a flat arena, not a box tree, on two axes that latency
 //! cannot decide: allocation count and retained heap, because the parsed tree
 //! is *cached*. `examples/gloss_arena_bench.rs` prototyped all three
 //! candidates and set the bar this harness has to clear, over the same real
@@ -12,7 +12,7 @@
 //! | arena prototype | 186 | 84 KB |
 //!
 //! This measures the shipped `chibipop::dict::gloss::GlossDoc` the same way,
-//! so the claim in the ticket is a measurement of the real type rather than of
+//! so the claim here is a measurement of the real type rather than of
 //! a prototype that resembles it.
 //!
 //! ```sh

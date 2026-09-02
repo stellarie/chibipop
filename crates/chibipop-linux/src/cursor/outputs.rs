@@ -9,7 +9,7 @@
 //! logical origin by that output's own scale. Exact for single-output
 //! and uniform-scale layouts; for mixed-scale layouts a global
 //! physical space is not well-defined, and this is the documented
-//! approximation until a ticket needs better.
+//! approximation until something needs better.
 
 use chibipop::geom::PhysPoint;
 

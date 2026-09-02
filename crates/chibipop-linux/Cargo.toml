@@ -67,7 +67,7 @@ calloop-wayland-source.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
-# The signal mask behind the signalfd (ticket 13, src/signals.rs):
+# The signal mask behind the signalfd (src/signals.rs):
 # calloop's `signals` source masks only the thread that builds it, and
 # calloop exposes no mask of its own.
 nix.workspace = true
@@ -91,7 +91,7 @@ sha2.workspace = true
 ksni.workspace = true
 png.workspace = true
 
-# --- ticket 34 (portal ScreenCast capture backend + METADATA cursor rung) ---
+# --- portal ScreenCast capture backend + METADATA cursor rung ---
 # The fallback capture rung (see ARCHITECTURE.md#capture-and-masking).
 # Two deps, both deliberate: `zbus` speaks the portal handshake (blocking
 # API, on the portal's own thread - the daemon stays sync), and
@@ -99,7 +99,7 @@ png.workspace = true
 # build-time PipeWire.
 zbus.workspace = true
 libloading.workspace = true
-# The popup (ticket 32): the layer surface and its shm
+# The popup: the layer surface and its shm
 # buffers, the panel raster, and the JP text stack - all daemon-side,
 # which is why none of them is a GPU stack.
 smithay-client-toolkit.workspace = true

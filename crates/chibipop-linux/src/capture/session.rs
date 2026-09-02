@@ -47,7 +47,7 @@ const BUFFER_DONE_SINCE: u32 = 3;
 /// asks the compositor for an *extra* compositing pass that paints the
 /// pointer into the copy. Zero, always, on every slot - the damage-race
 /// arm ([`Slot::Watch`]) as much as the read ([`Slot::Copy`]) - because
-/// OCR must read the text, not the pointer sitting on it (ticket 52).
+/// OCR must read the text, not the pointer sitting on it.
 ///
 /// It cannot do more than that: a compositor that already painted a
 /// *software* cursor into the framebuffer screencopy copies hands that
@@ -441,10 +441,10 @@ mod tests {
         assert_eq!(shape(wl_shm::Format::Rgb565).order(), None);
     }
 
-    /// Ticket 52's audit, pinned: the cursor is never requested into a
-    /// copy, on either slot. A regression here is silent - the pixels
-    /// still arrive, with a pointer in them - so it is asserted rather
-    /// than trusted to the call site's comment.
+    /// The cursor-overlay audit, pinned: the cursor is never requested
+    /// into a copy, on either slot. A regression here is silent - the
+    /// pixels still arrive, with a pointer in them - so it is asserted
+    /// rather than trusted to the call site's comment.
     #[test]
     fn screencopy_never_asks_for_the_pointer_to_be_overlaid() {
         assert_eq!(0, WITHOUT_CURSOR);

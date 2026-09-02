@@ -1,4 +1,4 @@
-//! The screenshot-on-add rule (spec D4).
+//! The screenshot-on-add rule.
 //!
 //! One home for every decision a screenshot add makes: whether a picture
 //! rides along at all, what the file is called, which Anki field the

@@ -76,8 +76,8 @@ pub enum Bind {
 /// `exe` is the binary to name, resolved by the caller
 /// (`paths::exec_name`) and never looked up here: a pasted bind must
 /// exec the daemon the user is actually running, which under
-/// `cargo run` is `target/debug/chibipop` and is not on PATH
-/// (ticket 51). Keeping the lookup outside keeps this function pure.
+/// `cargo run` is `target/debug/chibipop` and is not on PATH. Keeping
+/// the lookup outside keeps this function pure.
 pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind) -> String {
     let (mods, key) = split_chord(chord);
     let exe = paths::shell_quote(exe);
@@ -96,7 +96,7 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                 // rescue was tried and measured — a modifier
                 // `bindr`/`bindir`, an empty-mask `bindr` on the key,
                 // and a submap-scoped `bindri` (which wedges the whole
-                // keymap) — see ticket 53. So the pair is shipped as-is
+                // keymap). So the pair is shipped as-is
                 // and the user is told the one habit and the one
                 // recovery that exist. The GlobalShortcuts `global`
                 // dispatcher is immune by design, which is one more

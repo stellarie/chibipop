@@ -93,7 +93,7 @@ The script carries both clippy counts as `--expected-clippy-warnings 1` and
 `--expected-other-clippy 0`. Its `--stop-target-strays` flag replaces the kill line above, and it
 matches on the repo's `target` directory for the reason the callout below gives.
 
-The `--workspace --exclude chibipop-linux` flags arrived with ticket 29: `default-members`
+The `--workspace --exclude chibipop-linux` flags arrived with `default-members`, which
 serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
 Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
 `chibipop`, so link-producing commands must exclude the foreign bin crate (collision);
@@ -166,7 +166,7 @@ belongs to the `linux` job, not to this tier.
 > did not run**: every fresh clone, every worktree, and CI. The ignored tests beside the total are
 > *different* tests.
 >
-> **Amended 2026-08-27 (ticket 17).** Until then it probed `data/chibipop.sqlite` and nothing else,
+> **Amended 2026-08-27.** Until then it probed `data/chibipop.sqlite` and nothing else,
 > so it skipped on *every* tree, this one included — the Windows box above is the exception, because
 > that repo path is where its own `build-dict --out` default lands. It now resolves the dictionary
 > the way the product does (`$CHIBIPOP_GOLDEN_DB`, the Linux daemon's
@@ -339,7 +339,7 @@ hook's boxed closure, and a `LookupState` bundle for the five reload-replaced lo
 It was **4** until 2026-08-09, **3** until 2026-08-25, and **2** until 2026-08-26. The fourth was
 `while_let_loop`, on `worker_main`'s trigger drain; the hot-reload branch replaced that loop with an
 explicit `drain` (a `Reload` message must never be swallowed by newest-wins coalescing), so the lint
-went with it. The third was `layout_pass` in the Windows bin crate, deleted when ticket 27 moved the
+went with it. The third was `layout_pass` in the Windows bin crate, deleted by the move of the
 popup's layout walk into core as `PopupScene`. The second was `useless_conversion` at
 `src/lookup/deconj.rs:78`, gone with upstream's own rewrite of that function. Each of those is a
 legitimate step down, not a suppression — the count went **down** because the code did, and no
@@ -517,7 +517,7 @@ counted fresh, not assumed.
 
 **917 → 924 is Task 8, and all seven new tests are unit tests.** `src/plugin/text.rs` adds two pure
 functions plus the `PluginText` struct. `estimate_offset` is the text-only downgrade's proportional
-cursor-to-byte estimate (spec 7.2): it turns a cursor x into a char index by position across the
+cursor-to-byte estimate: it turns a cursor x into a char index by position across the
 line's screen region, then reads that char's byte offset back out of `char_indices()` — never a
 byte index computed by hand — so every return value is either `0` or something `char_indices()`
 already proved to be a boundary. `the_estimate_always_returns_a_char_boundary` sweeps every x from
@@ -1610,8 +1610,8 @@ The work proceeded on the ruling that the encode is paid only by plugin users, w
 **Pass** when the real byte count and p95 land inside the bracket above, and the p95 is **under
 10 ms**. Record the number here either way.
 
-**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen spec
-section 6 and consider the length-prefixed binary frame named in spec section 12.
+**Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen the
+PNG transport and consider the length-prefixed binary frame instead.
 
 ### 1.24 Provider trait, no behaviour change — **added 2026-08-17, not run**
 

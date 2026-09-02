@@ -74,7 +74,7 @@ fn an_svg_sizes_the_missing_length_from_its_ratio() {
 fn an_svg_with_neither_a_size_nor_a_ratio_takes_the_css_default_object_size() {
     // Not an invented number: 300x150 is what every browser draws for a
     // replaced element with no intrinsic size and no intrinsic ratio. The
-    // row exists, so ticket 12 renders the asset rather than its `alt`.
+    // row exists, so the layout renders the asset rather than its `alt`.
     let got = probe(br#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#).unwrap();
     assert_eq!((300.0, 150.0), (got.width, got.height));
 }
@@ -248,7 +248,7 @@ fn grey_and_palette_pngs_widen_to_four_lanes() {
 }
 
 /// Every format the census found now reaches pixels, which is the whole
-/// point of the ticket: before this, `decode` refused four of five and a
+/// point of this change: before it, `decode` refused four of five and a
 /// real gaiji painted as an outlined box.
 ///
 /// One sampled pixel per format, at its own generator colour, so reading

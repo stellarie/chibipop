@@ -10,7 +10,7 @@
 //! anchored to all four edges so the compositor sizes it to the whole
 //! output.
 //!
-//! **The live screen, not a frozen grab** (spec D5). Nothing is captured
+//! **The live screen, not a frozen grab.** Nothing is captured
 //! before the drag: the dim is a translucent surface over whatever is
 //! there, so the user drags against what they are actually looking at
 //! and the region is grabbed *after* this surface is down - which is
@@ -628,8 +628,8 @@ impl Selector {
     /// maximum-size surface the popup already rejected once.
     ///
     /// `None` means this compositor advertises no `zwlr_layer_shell_v1` -
-    /// the same *state, not error* rule `Popup::bind` follows
-    /// (ticket 49): the caller reports the selector unavailable through
+    /// the same *state, not error* rule `Popup::bind` follows:
+    /// the caller reports the selector unavailable through
     /// the channel it already has, and every other channel keeps running.
     pub fn bind(
         conn: &Connection,
@@ -705,7 +705,7 @@ impl Selector {
     ///
     /// On return the surfaces are destroyed and a round trip has
     /// completed, so a caller that grabs the returned rect cannot
-    /// capture the selector (spec D5).
+    /// capture the selector.
     pub fn pick(
         app: &mut App,
         screens: &[Screen],
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[test]
     fn the_dim_is_a_translucent_black_rather_than_an_opaque_one() {
-        // Spec D5: the selector shows the live screen dimmed, so the
+        // The selector shows the live screen dimmed, so the
         // alpha must be partial and premultiplied to match `wl_shm`.
         assert_eq!(DIM, [0, 0, 0, 102], "40% black, premultiplied");
         assert!(DIM[3] < 255, "an opaque dim would hide the screen being selected from");

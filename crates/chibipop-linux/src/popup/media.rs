@@ -310,9 +310,10 @@ mod tests {
         );
     }
 
-    /// Story 17, at the level the tint is reachable: a monochrome asset's
-    /// alpha becomes the coverage of the body text colour, so a gaiji
-    /// authored as black ink is legible on a dark theme and on a light one.
+    /// Monochrome tinting, at the level the tint is reachable: a monochrome
+    /// asset's alpha becomes the coverage of the body text colour, so a
+    /// gaiji authored as black ink is legible on a dark theme and on a
+    /// light one.
     ///
     /// Asserted on real decoded pixels from the real builder, because the
     /// premultiplication invariant is the thing that would break: a tinted
@@ -349,8 +350,8 @@ mod tests {
         assert_eq!(3 * 12 * 7 * 4, cache.footprint());
     }
 
-    /// Story 17 on the assets story 17 is about: a monochrome SVG is a mask
-    /// with no pixels until something picks a size, `SceneImage::tint`
+    /// Monochrome tinting on the assets it is about: a monochrome SVG is a
+    /// mask with no pixels until something picks a size, `SceneImage::tint`
     /// picks it out of the resolved box, and this is where that number
     /// becomes a pixmap. All 35 of this library's gaiji are exactly this
     /// shape - `appearance: "monochrome"`, `height: 1em`, an SVG glyph
@@ -405,8 +406,8 @@ mod tests {
     /// entries, and nothing about the picture says so.
     ///
     /// The worker has always reopened its own handle on `reload`
-    /// (`worker::ReopenDict`). This one arrived with ticket 03 and is the
-    /// second handle in the process, so the reload has two to do.
+    /// (`worker::ReopenDict`). This one arrived later and is the second
+    /// handle in the process, so the reload has two to do.
     #[test]
     fn a_rebuild_is_invisible_to_a_handle_that_did_not_reopen() {
         let (db, _guard) = built("reopen_after_rebuild");

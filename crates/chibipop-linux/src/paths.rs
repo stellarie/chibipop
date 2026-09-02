@@ -211,7 +211,7 @@ pub const COMMAND: &str = "chibipop";
 /// need the same answer: the autostart entry's `Exec`, and every
 /// compositor bind snippet the settings window hands out. Under
 /// `cargo run` the binary is `target/debug/chibipop` and is not on
-/// PATH, so a snippet naming the bare command execs nothing (ticket 51).
+/// PATH, so a snippet naming the bare command execs nothing.
 pub fn exec_path() -> std::io::Result<PathBuf> {
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
         let appimage = PathBuf::from(appimage);

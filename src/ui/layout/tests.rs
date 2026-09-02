@@ -1137,9 +1137,9 @@ fn one_span_measures_to_one_line_box_that_fills_the_run() {
     assert_eq!(vec![SpanBox { span: 0, line: 0, x: 0.0, w: 20.0, h: 20.0 }], m.spans);
 }
 
-/// The contract ticket 07's inline
-/// pass is written against: spans that
-/// fit share one line, sit end to end
+/// The contract the inline pass is
+/// written against: spans that fit
+/// share one line, sit end to end
 /// across it, and hang off one
 /// baseline whatever their own heights
 /// are.
@@ -1594,10 +1594,10 @@ fn per_character_furigana_gives_each_base_its_own_reading() {
     assert_eq!(unit + (unit - unit * RUBY_RATIO) / 2.0, gloss.ruby[1].x);
 }
 
-/// Story 13. `rp` holds the parentheses HTML wrote for a renderer that
-/// cannot draw ruby. This one can, so they are spent only when no reading
-/// arrives - and then a malformed ruby degrades to readable text instead of
-/// to a bare base.
+/// `rp` holds the parentheses HTML wrote for a renderer that cannot draw
+/// ruby. This one can, so they are spent only when no reading arrives - and
+/// then a malformed ruby degrades to readable text instead of to a bare
+/// base.
 #[test]
 fn an_rp_fallback_renders_only_when_no_reading_arrives() {
     let with_rt = laid_out(
@@ -1810,9 +1810,9 @@ fn a_styled_span_carries_its_own_colour_and_weight() {
 /// A header cell is bold beside its row's data cell, per the spec's
 /// defaults table - the shape a real conjugation table has.
 ///
-/// Ticket 07 wrote this when a row was one paragraph. Ticket 10 grids it,
-/// so the two cells are now two paragraphs side by side on one row; the
-/// weight is what the test is about, and it survived the grid.
+/// This was written when a row was one paragraph. A row is now a grid, so
+/// the two cells are two paragraphs side by side on one row; the weight
+/// is what the test is about, and it survived the grid.
 #[test]
 fn a_header_cell_is_bold_beside_its_data_cell() {
     let p = rich(&sc(
@@ -2010,14 +2010,13 @@ fn a_block_wrapping_several_paragraphs_draws_one_box_around_all_of_them() {
     );
 }
 
-/// The defect ticket 13's author found and did not fix: **a block lost
-/// its own box when its first child opened a line.** A `span` carrying
-/// `data.content` beside another span opens a paragraph (ticket 01's
-/// sense separator), the box used to attach to the first paragraph the
-/// block emitted, and there was none - the one the block opened was
-/// still empty when the `span`'s `open` flushed it, and `flush` drops an
-/// empty paragraph and its box with it. So a bordered, filled `div` drew
-/// nothing at all.
+/// A known unfixed defect: **a block lost its own box when its first
+/// child opened a line.** A `span` carrying `data.content` beside
+/// another span opens a paragraph (the sense separator), the box used to
+/// attach to the first paragraph the block emitted, and there was none -
+/// the one the block opened was still empty when the `span`'s `open`
+/// flushed it, and `flush` drops an empty paragraph and its box with it.
+/// So a bordered, filled `div` drew nothing at all.
 ///
 /// The sibling is a `span` rather than a bare string on purpose: beside
 /// bare sentence text the marker would stay in its line
@@ -2025,9 +2024,9 @@ fn a_block_wrapping_several_paragraphs_draws_one_box_around_all_of_them() {
 /// opening a line - would never fire.
 ///
 /// Jitendex's `div[data-sc-class="extra-box"]` over `data.content`
-/// children is exactly this shape, and ticket 17's fold gives it
-/// 0.4rem/0.5rem padding - so this is the difference between ticket 08's
-/// goal being met on real data and not.
+/// children is exactly this shape, and the stylesheet fold gives it
+/// 0.4rem/0.5rem padding - so this is the difference between a declared
+/// box drawing on real data and not.
 #[test]
 fn a_block_whose_first_child_opens_a_line_still_draws_its_box() {
     let p = rich(&sc(concat!(
@@ -2195,9 +2194,9 @@ fn a_boxed_block_closes_its_line_and_gives_the_next_run_its_parents_context() {
 /// child, parent to last child, adjacent siblings, and an empty block
 /// through itself - and this walk is a forward accumulation with no box
 /// tree to resolve against. Implementing one of those four rules and not
-/// the others is the "unexpectedly" the ticket warns about, so none is
-/// implemented and the divergence is bounded to the pair of dictionaries
-/// that declare `marginTop` (3) and `marginBottom` (12) on facing edges.
+/// the others is the warned-about "unexpectedly", so none is implemented
+/// and the divergence is bounded to the pair of dictionaries that declare
+/// `marginTop` (3) and `marginBottom` (12) on facing edges.
 #[test]
 fn adjacent_block_siblings_do_not_collapse_their_margins() {
     let p = rich(&sc(concat!(
@@ -2264,8 +2263,8 @@ fn a_bordered_pill_puts_its_border_and_radius_in_the_scene() {
     // "noun" is four units at 7.5, with 3 of border and 3 of padding a
     // side bought as advance in the run itself, so the box is the run:
     // it starts at the pen and ends where the text after it starts.
-    // Ticket 08 drew the same 42 wide outset 6 to the left of the pen,
-    // over a neighbour's glyphs at both ends.
+    // The earlier box pass drew the same 42 wide outset 6 to the left
+    // of the pen, over a neighbour's glyphs at both ends.
     assert_eq!(gloss.pen.0, pill.rect.x);
     assert_eq!(gloss.pen.1 - 6.0, pill.rect.y, "vertically it is still an outset");
     assert_eq!(4.0 * BOX_EM * ADVANCE + 12.0, pill.rect.w);
@@ -2295,8 +2294,8 @@ fn a_background_pill_draws_without_a_border() {
     assert_eq!(4.5, pill.style.radius);
 }
 
-/// A defect ticket 17's author found against real Jitendex data: a node
-/// carrying `data.content` opens a block however inline its tag is
+/// A defect found against real Jitendex data: a node carrying
+/// `data.content` opens a block however inline its tag is
 /// (`GlossDoc::has_marker`), so a pill carrying one used to carry the
 /// *same* resolved box twice - once as `block_box`, once in
 /// `inline_boxes` - and a bin looping over `SceneElem::boxes()` painted
@@ -2337,7 +2336,7 @@ fn a_pill_carrying_a_content_marker_draws_one_box_and_not_two() {
 
 /// The defect a reader of 雑談 saw: Jitendex writes the example keyword
 /// as a marked `span` inside the sentence
-/// (`data.content = "example-keyword"`, 51 062 nodes), and ticket 01's
+/// (`data.content = "example-keyword"`, 51 062 nodes), and the
 /// marker line break cut the sentence after every word before the
 /// keyword - `ぜひ`, then a fresh line for the rest. Beside bare
 /// sentence text a marker separates nothing (`GlossDoc::prose`), so the
@@ -2423,9 +2422,9 @@ fn painted(boxes: &Measured, span: u32) -> SpanBox {
         .unwrap_or_else(|| panic!("span {span} landed nowhere in {boxes:?}"))
 }
 
-/// The defect ticket 08 recorded as impossible, and the numbers that close
-/// it: an inline box's horizontal margin, border and padding each reserve
-/// real advance in the line.
+/// A defect once recorded as impossible, and the numbers that close it: an
+/// inline box's horizontal margin, border and padding each reserve real
+/// advance in the line.
 ///
 /// Observed on a real Wayland surface against Jitendex, whose
 /// `span[data-sc-class="tag"]` declares `padding: 0.2em 0.3em` and
@@ -2610,10 +2609,10 @@ fn an_inline_boxs_vertical_padding_paints_without_growing_its_line() {
     assert_eq!(BODY_LINE + 15.0, pill.rect.h);
 }
 
-/// A box that paints nothing and only spaces its content out. Ticket 08
-/// resolved these to nothing, because nothing could spend them; now the
-/// room is bought and no box is drawn, which is what a browser does with
-/// `<span style="margin-right:.5em">`.
+/// A box that paints nothing and only spaces its content out. The
+/// earlier box pass resolved these to nothing, because nothing could
+/// spend them; now the room is bought and no box is drawn, which is what
+/// a browser does with `<span style="margin-right:.5em">`.
 #[test]
 fn a_margin_with_nothing_to_draw_still_reserves_its_room() {
     let p = rich(&sc(concat!(
@@ -2707,8 +2706,8 @@ fn a_pill_around_nothing_reserves_nothing() {
     assert!(gloss.inline_boxes.is_empty());
 }
 
-/// The other defect ticket 17's author found: `css_len` read `em`, `%`
-/// and `px` and dropped `rem`, which Jitendex writes on its
+/// The other defect found against real dictionary data: `css_len` read
+/// `em`, `%` and `px` and dropped `rem`, which Jitendex writes on its
 /// `div[data-sc-class="extra-box"]` (`0.4rem`/`0.5rem`) and
 /// Onomatoproject writes on 3 096 inline nodes.
 ///
@@ -2975,9 +2974,9 @@ fn list_card(tag: &str, style: &str, items: &[&str]) -> Presentation {
     )))
 }
 
-/// The acceptance shape (story 5): one element per item, each carrying
-/// its own marker at the same indent. The marker text and the offsets
-/// are what is asserted, not that the words arrived.
+/// The acceptance shape: one element per item, each carrying its own
+/// marker at the same indent. The marker text and the offsets are
+/// what is asserted, not that the words arrived.
 #[test]
 fn an_unordered_list_marks_every_item_and_indents_them_alike() {
     let s = laid_out(&list_card("ul", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
@@ -3003,8 +3002,8 @@ fn an_unordered_list_marks_every_item_and_indents_them_alike() {
     assert_eq!(None, items[0].block_box);
 }
 
-/// Story 5 again, and the numbering ticket 16 does *not* do: an ordinal
-/// per item of this list, which is a marker rather than a Sense number.
+/// The numbering this does *not* do: an ordinal per item of this list,
+/// which is a marker rather than a Sense number.
 #[test]
 fn an_ordered_list_numbers_its_items_from_one() {
     let s = laid_out(&list_card("ol", "", &["a", "b", "c"]), 224.0, 4000.0, false, false);
@@ -3023,8 +3022,8 @@ fn an_ordered_list_numbers_its_items_from_one() {
     }
 }
 
-/// Story 6: the nesting is shown by the indentation, one level per level,
-/// and the marker is resolved again at the inner level.
+/// The nesting is shown by the indentation, one level per level, and the
+/// marker is resolved again at the inner level.
 #[test]
 fn a_nested_list_indents_its_inner_items_past_its_outer_ones() {
     let p = rich(&sc(concat!(
@@ -3047,10 +3046,10 @@ fn a_nested_list_indents_its_inner_items_past_its_outer_ones() {
     assert_eq!(items[0].wrap_w - LEVEL, items[1].wrap_w);
 }
 
-/// The acceptance bullet ticket 09 first shipped `inside` for: a nested
-/// list's inner marker hangs in the *inner* gutter, one level past the
-/// outer one, because a marker box is placed against the content edge of
-/// the list that owed it and each level opens its own.
+/// The acceptance bullet `inside` first shipped for: a nested list's
+/// inner marker hangs in the *inner* gutter, one level past the outer
+/// one, because a marker box is placed against the content edge of the
+/// list that owed it and each level opens its own.
 ///
 /// Two unordered levels, so both markers are one bullet and both fit
 /// their 21px gutter with room to spare - the geometry under test is
@@ -3109,7 +3108,7 @@ fn an_items_marker_and_its_nested_items_marker_hang_in_their_own_gutters() {
     assert_eq!(0.0, inner.y);
 }
 
-/// Story 7: a dictionary's own counter, rendered as written. No counter
+/// A dictionary's own counter, rendered as written. No counter
 /// algorithm runs over it and no suffix is added to it.
 #[test]
 fn a_literal_string_marker_renders_verbatim() {
@@ -3154,7 +3153,7 @@ fn an_items_own_list_style_wins_over_its_lists() {
 
     // And the inheritance runs the other way too: a list's own
     // declaration reaches an item that declares nothing, which is where
-    // ticket 17 will put a `styles.css` rule.
+    // a `styles.css` rule will go.
     let inherited = laid_out(
         &list_card("ul", r#","style":{"listStyleType":"circle"}"#, &["a", "b"]),
         224.0,
@@ -3380,8 +3379,8 @@ fn an_items_own_padding_adds_to_the_level_indent() {
     assert_eq!(s.origin + LEVEL - marker_w(&bullet()), marker_x(item));
 }
 
-/// The acceptance bullet ticket 09 shipped `inside` for, now pinned the
-/// other way round.
+/// The acceptance bullet `inside` shipped for, now pinned the other way
+/// round.
 ///
 /// What this used to assert was that every line of a wrapped item sat at
 /// the item's own indent *beside* the marker, because the marker was the
@@ -3405,17 +3404,17 @@ fn a_wrapped_items_continuation_lines_align_to_its_text_not_its_marker() {
     assert!(marker_x(item) < line_x(item)[1], "the second line is not under it");
 }
 
-/// The parameter ticket 14 wires, exercised at both its values.
+/// The `stack_items` parameter, exercised at both its values.
 ///
 /// Below `layout::scene`, because nothing above it can ask for the
-/// compact layout until ticket 14's setting exists. What is asserted is
-/// the contract between the two tickets: what a marker *says* is shared -
+/// compact layout until the setting behind it exists. What is asserted is
+/// the contract between the two halves: what a marker *says* is shared -
 /// `marker_of` and `Marker::label` never see this flag - and where it
 /// *goes* is the one thing the flag decides. A compact list has no
 /// gutter and gives an item no line of its own, so its marker is written
 /// inline as the joined paragraph's spans; a stacked list hangs it.
-/// Ticket 14 owns the setting, its plumbing, and the scene-level
-/// assertion the spec asks it for.
+/// The setting, its plumbing, and the scene-level assertion the spec asks
+/// for belong to the settings work, not to this file.
 #[test]
 fn stack_items_false_joins_a_list_into_one_separated_paragraph() {
     let theme = Theme::dark();
@@ -3725,7 +3724,7 @@ fn an_interior_cell_owns_only_its_left_and_top_rule() {
 /// The acceptance: a header cell is bold with a tinted background, as
 /// Yomitan draws it. The weight comes from `tag_style`'s HTML-default
 /// table, which already knew `th`; the tint is the box property this
-/// ticket added.
+/// change added.
 #[test]
 fn a_header_cell_is_bold_and_tinted() {
     let s = gridded(&table(&[mixed_row(&[("th", "a"), ("td", "b")])]), 424.0);
@@ -3874,7 +3873,7 @@ fn an_empty_cell_still_draws_its_border() {
 }
 
 /// Every cell names the node it came from, so a hit inside a conjugation
-/// table resolves to that cell's subtree and ticket 04's renderer
+/// table resolves to that cell's subtree and the subtree renderer
 /// reproduces exactly it.
 #[test]
 fn every_cell_names_the_node_it_came_from() {
@@ -4064,9 +4063,9 @@ fn every_gloss_element_carries_a_path_that_resolves_to_its_own_node() {
     assert_eq!(None, head.origin, "the panel's chrome addresses no tree");
 }
 
-/// Stories 45 and 46, end to end: a hit on a sense resolves to that
-/// sense's node path, and the path round trips through ticket 04's
-/// renderer - it yields that sense's markup and nothing else.
+/// End to end: a hit on a sense resolves to that sense's node path,
+/// and the path round trips through the subtree renderer - it
+/// yields that sense's markup and nothing else.
 ///
 /// This is the half of the sense picker that is expensive to retrofit. The
 /// interaction is out of scope; the addressability is not.
@@ -4500,7 +4499,7 @@ fn side_entries_show_headword_only() {
 
 // ---- one label per dictionary ----
 
-/// The defect ticket 16 fixes: a headword with eleven 大辞林 rows used to
+/// The defect this fixes: a headword with eleven 大辞林 rows used to
 /// draw eleven 大辞林 headings, one gloss under each.
 #[test]
 fn three_rows_from_one_dictionary_draw_one_label() {
@@ -4797,9 +4796,9 @@ fn image_host(s: &PopupScene) -> &SceneElem {
         .expect("the paragraph that reserved the image's room")
 }
 
-/// Rung one of the sizing ladder, and story 16: a `height: 1em` gaiji is
-/// the size of the text it sits in, and its bottom is on that line's
-/// baseline - not floating above it, not hanging below it.
+/// Rung one of the sizing ladder: a `height: 1em` gaiji is the size of
+/// the text it sits in, and its bottom is on that line's baseline - not
+/// floating above it, not hanging below it.
 ///
 /// The declared size wins over the recorded one, which is deliberately
 /// nothing like it here (20x10 against 15x15).
@@ -4822,9 +4821,9 @@ fn a_declared_em_size_beats_the_recorded_one_and_sits_on_the_baseline() {
     assert_eq!(0.0, img.advance, "the paragraph already stacked its line");
 }
 
-/// Rung two, and story 18: no declared size at all takes the size the
-/// build recorded, so an undeclared gaiji neither collapses nor overflows.
-/// 99 807 census image nodes are this shape.
+/// Rung two: no declared size at all takes the size the build recorded, so
+/// an undeclared gaiji neither collapses nor overflows. 99 807 census image
+/// nodes are this shape.
 #[test]
 fn an_image_with_no_declared_size_takes_its_recorded_dimensions() {
     let p = imaged(
@@ -4884,10 +4883,10 @@ fn an_image_with_neither_size_nor_bytes_is_a_one_em_placeholder_box() {
     assert!(img.rect.w > 0.0 && img.rect.h > 0.0, "never a gap");
 }
 
-/// Story 19: a missing asset shows what it stood for. The `alt` goes into
-/// the flow as ordinary text rather than onto an image element, because
-/// that is the *better* rung - real text wraps with the sentence around it
-/// - and Jitendex writes its gaiji's alt in `data`, not as an attribute.
+/// A missing asset shows what it stood for. The `alt` goes into the flow as
+/// ordinary text rather than onto an image element, because that is the
+/// *better* rung - real text wraps with the sentence around it - and
+/// Jitendex writes its gaiji's alt in `data`, not as an attribute.
 #[test]
 fn missing_media_renders_its_alt_text_in_the_flow() {
     let p = imaged(
@@ -5012,10 +5011,10 @@ fn an_image_mid_sentence_wraps_with_the_text_and_forces_no_break() {
     assert_eq!(ab + BOX_EM + 2.0 * BOX_EM * ADVANCE, host.rect.w, "text, image, text");
 }
 
-/// `verticalAlign` is ticket 07's machinery, reused rather than rebuilt: a
-/// raised image is raised off the same baseline a raised span is, and the
-/// pass reserves the rise as well as the height so the line above is not
-/// overlapped.
+/// `verticalAlign` is the inline pass's machinery, reused rather than
+/// rebuilt: a raised image is raised off the same baseline a raised span
+/// is, and the pass reserves the rise as well as the height so the line
+/// above is not overlapped.
 #[test]
 fn a_raised_image_clears_the_baseline_by_its_own_vertical_align() {
     let p = imaged(
@@ -5091,8 +5090,8 @@ fn an_image_item_is_an_image_too() {
     assert_eq!((9.0, 9.0), (one_image(&s).rect.w, one_image(&s).rect.h));
 }
 
-/// Story 45/46: an image is addressable as the node it is, not as the
-/// paragraph around it.
+/// An image is addressable as the node it is, not as the paragraph
+/// around it.
 #[test]
 fn an_image_element_names_the_node_it_came_from() {
     let p = imaged(
@@ -5108,7 +5107,7 @@ fn an_image_element_names_the_node_it_came_from() {
 
 /// Read and carried, acted on by nothing: the spec builds no
 /// hover-to-reveal affordance, and 26 dictionaries declare `collapsed`
-/// over 243 264 nodes - so a later ticket must not have to re-derive them.
+/// over 243 264 nodes - so later work must not have to re-derive them.
 #[test]
 fn collapsed_and_collapsible_are_carried_and_change_nothing() {
     let p = imaged(
@@ -5276,7 +5275,7 @@ fn an_image_inside_a_link_is_part_of_its_hit_target() {
     assert_eq!(Some(img.rect.w), hit.w, "the whole asset, not a sliver");
 }
 
-/// Ticket 20: a `<ruby>` whose base is a gaiji image keeps its reading. 251
+/// A `<ruby>` whose base is a gaiji image keeps its reading. 251
 /// nodes across eight dictionaries write this shape, and in most of them the
 /// mark is editorial rather than decorative - 三省堂 and 大辞林 put their
 /// 表外字 mark over the gaiji this way, and 岩波 puts a real reading there.
@@ -5326,12 +5325,13 @@ fn a_reading_over_an_image_base_sits_on_the_assets_own_top_edge() {
 /// The reading is pinned to the *asset* and not to the line, so it follows
 /// the picture wherever `verticalAlign` puts it.
 ///
-/// Not the ticket's distilled fragment verbatim: 岩波国語辞典 hangs `ｘ` over
+/// Not the distilled fragment verbatim: 岩波国語辞典 hangs `ｘ` over
 /// 赤鱏's gaiji and declares the alignment on a `span` wrapping the `img`,
 /// and `verticalAlign` is not inherited (CSS says so, and [`tag_style`]
-/// agrees), so the alignment a wrapper carries is a question for ticket 07
-/// and not for this one. What this pins is the alignment reaching the image
-/// itself, which is the shape whose geometry the reading has to follow.
+/// agrees), so the alignment a wrapper carries is a question for the inline
+/// pass and not for this one. What this pins is the alignment reaching the
+/// image itself, which is the shape whose geometry the reading has to
+/// follow.
 #[test]
 fn a_reading_follows_a_gaiji_its_vertical_align_moved() {
     let p = imaged(
@@ -5431,7 +5431,7 @@ fn span_of<'a>(elem: &'a SceneElem, text: &str) -> &'a ElemSpan {
 /// The two examples are deliberately two *different* conventions: Jitendex's
 /// ASCII `content=example-sentence` and 明鏡国語辞典's Japanese `example=`,
 /// the key that used to keep 38 892 example nodes on screen while Jitendex
-/// lost every one of its own. The whole point of ticket 15 is that these two
+/// lost every one of its own. The whole point is that these two
 /// now behave the same, so the fixture would fail on a classifier that
 /// covered only one alphabet.
 const EDITORIAL: &str = concat!(
@@ -5447,9 +5447,9 @@ const EDITORIAL: &str = concat!(
 /// [`EDITORIAL`] parsed once, behind both the panel and the card.
 ///
 /// One `Arc`, so a test can ask the two renderers about the same document
-/// rather than about two parses of one string - which is what makes story
-/// 42's "hidden here, present there" an assertion about the *filters* and
-/// not about the fixture.
+/// rather than about two parses of one string - which is what makes
+/// "hidden here, present there" an assertion about the *filters* and not
+/// about the fixture.
 fn editorial() -> (std::sync::Arc<crate::dict::gloss::GlossDoc>, Presentation) {
     let doc = std::sync::Arc::new(crate::dict::gloss::GlossDoc::parse(&sc(EDITORIAL)));
     let p = card_with(vec![GlossBlock {
@@ -5508,8 +5508,8 @@ fn compact_joins_a_glossary_list_into_one_separated_element_and_roomy_stacks_it(
     assert!(one.marker.is_empty(), "no gutter in a compact list, so nothing hangs");
 }
 
-/// Story 28, concretely: a user who wants the terse one-line popup
-/// chibipop used to draw can have it by choosing compact.
+/// A user who wants the terse one-line popup chibipop used to draw
+/// can have it by choosing compact.
 ///
 /// Two dictionaries, four glosses between them, and one line each -
 /// which is the whole of what "one line per dictionary" means. Roomy
@@ -5555,10 +5555,10 @@ fn compact_gives_the_terse_one_line_per_dictionary_popup_back() {
 }
 
 /// Examples on and off, at the element count the spec asks for - and the
-/// ticket-15 acceptance that two dictionaries' examples behave the same.
+/// acceptance that two dictionaries' examples behave the same.
 ///
 /// The two example blocks are one ASCII hook and one Japanese one. Before
-/// ticket 15 the popup drew *neither* branch of this test on real data:
+/// the fix the popup drew *neither* branch of this test on real data:
 /// every node parsed unclassified, the setting had nothing to bite on, and
 /// Jitendex's own examples went unconditionally through a six-name drop
 /// list that never named 明鏡's key at all.
@@ -5587,8 +5587,8 @@ fn examples_off_drops_every_dictionarys_examples_and_leaves_the_gloss() {
     assert!(kept.iter().any(|e| e.text == "JMdict"), "and so does the attribution");
 }
 
-/// Story 27: attributions are a separate knob, so a user can keep
-/// sources without keeping three sentences per sense. All four
+/// Attributions are a separate knob, so a user can keep sources
+/// without keeping three sentences per sense. All four
 /// combinations, over one parse of one document.
 #[test]
 fn attributions_are_hidden_independently_of_examples() {
@@ -5623,12 +5623,12 @@ fn attributions_are_hidden_independently_of_examples() {
     );
 }
 
-/// Story 42, at the seam where it is finally reachable: one document, one
-/// parse, the example gone from the panel and present on the card.
+/// At the seam where it is finally reachable: one document, one parse,
+/// the example gone from the panel and present on the card.
 ///
 /// The two filters are independent by construction - the popup resolves
 /// its own from config at `build_elements` and the card renderer takes
-/// `RoleFilter::CARD`, which no setting reaches. Until ticket 15 every
+/// `RoleFilter::CARD`, which no setting reaches. Until the fix every
 /// node was unclassified, so neither filter could tell an example from a
 /// gloss and this assertion could not be written.
 #[test]
@@ -5647,8 +5647,6 @@ fn an_example_hidden_in_the_popup_is_still_on_the_card() {
     assert!(card.contains("\u{30d1}\u{30f3}\u{3092}\u{98df}\u{3079}\u{308b}"), "{card}");
 }
 
-/// Story 32.
-///
 /// A part-of-speech label classifies to `Role::PartOfSpeech` from
 /// `data.content = "part-of-speech-info"`, which Jitendex writes over
 /// 48 776 nodes - and the popup has always dropped it because the card's
@@ -5697,8 +5695,8 @@ fn images_off_removes_the_image_element_and_keeps_its_alt_text() {
     );
 }
 
-/// Story 30: styling off draws the entry in the theme's own font and
-/// colours. A node declaring a colour and a box produces neither.
+/// Styling off draws the entry in the theme's own font and colours.
+/// A node declaring a colour and a box produces neither.
 #[test]
 fn styling_off_renders_in_the_themes_own_colours_and_draws_no_box() {
     let theme = Theme::dark();
@@ -5754,8 +5752,8 @@ fn styling_off_falls_back_to_the_browsers_own_list_marker() {
     assert_eq!(bullet(), one_marker(plain).text, "a `ul`'s own initial value, as CSS has it");
 }
 
-/// Story 35: the height cap and the scrollbar keep working when a
-/// setting makes an entry taller.
+/// The height cap and the scrollbar keep working when a setting
+/// makes an entry taller.
 ///
 /// Roomy over the same tree is three lines where compact is one, so the
 /// two settings put different content heights against one cap. What must
@@ -5849,7 +5847,7 @@ fn drawn_boxes(s: &PopupScene) -> Vec<(&str, BoxStyle)> {
 /// The CSS is that dictionary's own `span[data-sc-fbox]` rule verbatim, and
 /// the glossary carries not one inline `style` anywhere - which is the state
 /// the census puts 13 of 52 structured-content dictionaries in, and for
-/// which tickets 07 and 08 drew nothing at all before this.
+/// which the earlier inline passes drew nothing at all before this.
 ///
 /// The arithmetic, so a reader can redo it: `body_size` is 15, the rule's
 /// own `font-size: 0.8em` makes the element 12, and every box length is a
@@ -5884,14 +5882,14 @@ fn a_css_only_dictionary_draws_its_boxes_through_the_scene() {
     // `margin-inline-end` is a logical property this build does not map, and
     // `border-color: var(--text-color)` is a custom property it cannot
     // substitute. Both are dropped and counted; the border still draws,
-    // because CSS's initial `border-color` is `currentColor` and ticket 08
-    // seeds it from the element's own resolved colour.
+    // because CSS's initial `border-color` is `currentColor` and the box
+    // pass seeds it from the element's own resolved colour.
     assert_eq!(Edges::all(0.0), style.margin, "a logical margin is dropped");
     assert_eq!(Theme::dark().body_text, style.border_color, "currentColor stands");
     assert_eq!(None, style.background);
 }
 
-/// 字通, the other dictionary the ticket names, and a *descendant* selector
+/// 字通, the other dictionary in this pair, and a *descendant* selector
 /// on a CJK `data` key: `[data-sc-h3] span[data-sc筆画]`, its own rule
 /// verbatim. Two assertions in one, because the interesting failure is the
 /// ancestor constraint rather than the box: the same span outside a
@@ -5926,7 +5924,7 @@ fn a_descendant_rule_draws_a_box_only_where_its_ancestor_holds() {
     let style = boxes[0].1;
     // An absolute `px` is scaled against Yomitan's own 14px base, so a
     // dictionary's pixel grows with the panel instead of shrinking on a
-    // dense screen (ticket 07's [`css_len`]). The element is 12px, so
+    // dense screen ([`css_len`]). The element is 12px, so
     // `4px` is 12 * 4 / 14.
     assert_eq!(12.0 * 4.0 / YOMITAN_BASE_PX, style.radius, "border-radius: 4px");
     assert_eq!(Edges::all(1.2), style.border, "border-width: 0.1em of a 12px element");
@@ -6101,7 +6099,7 @@ fn jitendexs_extra_box_resolves_its_rem_lengths() {
     }
 }
 
-/// The setting from ticket 14 governs a stylesheet declaration exactly as it
+/// The styling setting governs a stylesheet declaration exactly as it
 /// governs an inline one, because after the fold there is one record and one
 /// gate over it. This is the assertion that there is no second switch.
 #[test]
@@ -6853,9 +6851,9 @@ fn a_reading_at_a_line_end_is_pulled_back_to_the_content_edge() {
     assert_eq!(edge, gloss.rect.x + gloss.rect.w, "the ink box ends there too");
 }
 
-// ---- pitch (ticket 02) ----
+// ---- pitch ----
 
-/// One accent with no markers, which is 96% of ticket 01's corpus.
+/// One accent with no markers, which is 96% of the corpus.
 fn accent(fall: u32) -> crate::dict::pitch::Accent {
     crate::dict::pitch::Accent {
         position: crate::dict::pitch::Position::Downstep(fall),

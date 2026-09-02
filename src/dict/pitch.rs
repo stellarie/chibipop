@@ -26,17 +26,16 @@ use std::path::Path;
 /// bytes, and a card draws several accents in the order they arrived.
 ///
 /// One key may be named by several rows - 3 614 expression+reading pairs in
-/// ticket 01's census are - so the parser merges rather than overwrites, and
-/// an accent already claimed for a key is not claimed twice.
+/// the census are - so the parser merges rather than overwrites, and an
+/// accent already claimed for a key is not claimed twice.
 pub type PitchTable = BTreeMap<(String, String), Vec<Accent>>;
 
 /// One Pitch pattern: where the pitch falls, and the moras the dictionary
 /// marked alongside it.
 ///
-/// Every field the schema permits, including the two this ticket does not
-/// draw. Ticket 06 draws them, and 25.8% of NHK's rows carry one, so
-/// dropping them on the way in would have cost that ticket a second schema
-/// bump.
+/// Every field the schema permits, including the two this module does not
+/// draw. Mark drawing needs them, and 25.8% of NHK's rows carry one, so
+/// dropping them on the way in would have cost a second schema bump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accent {
     pub position: Position,
@@ -45,13 +44,13 @@ pub struct Accent {
     /// 1-based indices of the moras with a devoiced sound.
     pub devoice: Vec<u32>,
     /// The accent's own tags, which typically name a part of speech. Never
-    /// present in either corpus ticket 01 read, and schema-legal.
+    /// present in either corpus, and schema-legal.
     pub tags: Vec<String>,
 }
 
 /// Where the pitch falls, in the two forms the schema permits.
 ///
-/// They do not share an indexing origin, which is the trap ticket 01
+/// They do not share an indexing origin, which is the trap the census
 /// recorded: the integer is a **1-based** count of moras before the fall
 /// and the string is a **0-based** level per mora. [`is_mora_high`] is the
 /// only place that difference is spent.
@@ -59,7 +58,7 @@ pub struct Accent {
 pub enum Position {
     /// Moras before the downstep. `0` is heiban - no fall inside the word.
     ///
-    /// Every one of the 511 488 accents ticket 01 censused is this form.
+    /// Every one of the 511 488 accents in the census is this form.
     Downstep(u32),
     /// One `H` or `L` per mora, in order, optionally with one more level at
     /// the end to state the following particle's.
@@ -120,9 +119,9 @@ const SMALL_KANA: &str = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ
 /// Does this archive supply the pitch role?
 ///
 /// Its own `term_meta_bank_` rows, never its filename: one of the six
-/// archives named `[Pitch]` in ticket 01's census carries no
-/// `term_meta_bank_` at all and writes its accents as text inside a
-/// glossary, so the name is wrong about that archive in both directions.
+/// archives named `[Pitch]` in the census carries no `term_meta_bank_` at
+/// all and writes its accents as text inside a glossary, so the name is
+/// wrong about that archive in both directions.
 ///
 /// The mode is matched by name rather than as "not `freq`". The term-meta
 /// enum is closed today at `freq`, `pitch` and `ipa`, and a fourth mode
@@ -183,9 +182,9 @@ pub fn merge_pitch_row(table: &mut PitchTable, row: &Value) {
     }
     let claimed = table.entry((term.to_string(), reading.to_string())).or_default();
     for accent in found {
-        // Within one row as well as across rows: 11 rows in ticket 01's
-        // census list one accent twice in one `pitches` list, and a
-        // dictionary that claimed an accent once did not claim it twice.
+        // Within one row as well as across rows: 11 rows in the census list
+        // one accent twice in one `pitches` list, and a dictionary that
+        // claimed an accent once did not claim it twice.
         if !claimed.contains(&accent) {
             claimed.push(accent);
         }
@@ -196,9 +195,8 @@ pub fn merge_pitch_row(table: &mut PitchTable, row: &Value) {
 ///
 /// Yomitan's `isMoraPitchHigh`, and the whole semantics of a position. Note
 /// what it does *not* do: it never bounds-checks the index against the
-/// reading's mora count, because two rows in ticket 01's census put the
-/// downstep past the last mora and both render as odaka rather than
-/// panicking.
+/// reading's mora count, because two rows in the census put the downstep
+/// past the last mora and both render as odaka rather than panicking.
 pub fn is_mora_high(index: usize, position: &Position) -> bool {
     match position {
         // 0-based and positional, so a level past the end of the string is
@@ -407,7 +405,7 @@ mod tests {
 
     /// NHK's `合鍵`: a nasal marker on a heiban accent. 2.03% of the
     /// corpus's accents carry one and every one of them is NHK's, so this
-    /// is the shape ticket 06 will draw.
+    /// is the shape a renderer will draw.
     #[test]
     fn a_nasal_marker_is_kept_as_a_one_based_mora_index() {
         let table = parsed(json!(["合鍵", "pitch", {"reading": "あいかぎ", "pitches": [{"devoice": [], "position": 0, "nasal": [4]}]}]));
@@ -507,7 +505,7 @@ mod tests {
     /// indexed an array by `position` would go out of bounds here.
     ///
     /// `isMoraPitchHigh` handles it by accident, and the accident is worth
-    /// spelling out because ticket 01's prose rounds it to "odaka": with
+    /// spelling out because the census's prose rounds it to "odaka": with
     /// three moras and a downstep of 5 the mora *past* the last is high too,
     /// so nothing falls and the row draws as a rise with no tick.
     #[test]
@@ -579,9 +577,9 @@ mod tests {
     // ---- the four shapes the corpus cannot supply, as constructions
 
     /// Schema-legal and absent from the corpus (0 of 466 990 rows), so this
-    /// payload is ticket 01's construction and not evidence. It names a
-    /// reading and gives it no accent, which is what an absent key already
-    /// says - so it must claim no key, or the card would draw an empty row.
+    /// payload is a construction and not evidence. It names a reading and
+    /// gives it no accent, which is what an absent key already says - so it
+    /// must claim no key, or the card would draw an empty row.
     #[test]
     fn an_empty_pitches_list_claims_no_key() {
         let table = parsed(json!(["れい", "pitch", {"reading": "れい", "pitches": []}]));
@@ -590,7 +588,7 @@ mod tests {
     }
 
     /// The `^[HL]+$` form of `position`, which the schema permits and no
-    /// archive in either corpus writes. A construction, from ticket 01.
+    /// archive in either corpus writes. A construction.
     #[test]
     fn the_hl_string_form_of_position_parses_and_indexes_from_zero() {
         let table = parsed(json!(["れい", "pitch", {"reading": "れい", "pitches": [{"position": "LHHL"}]}]));
@@ -605,7 +603,7 @@ mod tests {
     }
 
     /// The scalar rather than list form of the two markers, which
-    /// `_toNumberArray` normalises. A construction, from ticket 01.
+    /// `_toNumberArray` normalises. A construction.
     #[test]
     fn scalar_nasal_and_devoice_markers_normalise_to_one_element_lists() {
         let table = parsed(json!(["れい", "pitch", {"reading": "れい", "pitches": [{"position": 2, "nasal": 3, "devoice": 1}]}]));
@@ -616,7 +614,7 @@ mod tests {
     }
 
     /// `tags` never appears in 511 488 accents across two corpora, and is
-    /// schema-legal. A construction, from ticket 01.
+    /// schema-legal. A construction.
     #[test]
     fn a_tags_list_is_kept_verbatim() {
         let table = parsed(json!(["れい", "pitch", {"reading": "れい", "pitches": [{"position": 2, "tags": ["名"]}]}]));

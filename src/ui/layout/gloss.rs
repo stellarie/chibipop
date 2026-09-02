@@ -43,9 +43,9 @@ use super::style::{Block, BoxStyle, Inline};
 /// dictionaries, so this is a no-op
 /// on nearly every entry - and on the
 /// ones that hold more it is what the
-/// panel has always drawn. Ticket 14
-/// is what lets a reader stack them
-/// instead.
+/// panel has always drawn. The list
+/// layout mode is what lets a reader
+/// stack them instead.
 pub(super) const ITEM_SEPARATOR: &str = "; ";
 
 /// What one term-bank row's images can
@@ -232,16 +232,15 @@ pub(super) struct Paragraphs<'a> {
     pub(super) pending_marker: Vec<FlowMarker>,
     /// Does a list stack its items?
     ///
-    /// The one thing ticket 14's
-    /// compact mode changes about a
-    /// list, and the only field in this
-    /// pass that may know a layout mode
-    /// exists: `true` gives every item
-    /// its own paragraph and the
-    /// indent, `false` joins the items
-    /// into the paragraph already open
-    /// with [`ITEM_SEPARATOR`] between
-    /// them.
+    /// The one thing compact mode
+    /// changes about a list, and the
+    /// only field in this pass that may
+    /// know a layout mode exists:
+    /// `true` gives every item its own
+    /// paragraph and the indent,
+    /// `false` joins the items into the
+    /// paragraph already open with
+    /// [`ITEM_SEPARATOR`] between them.
     ///
     /// Marker *resolution* sits above
     /// it and is shared by both:
@@ -460,13 +459,13 @@ impl Paragraphs<'_> {
     /// card.
     ///
     /// One clause, over the role the
-    /// parser classified. Ticket 15
-    /// deleted the name-matched
-    /// part-of-speech marker and the
-    /// six-name drop list that used to
-    /// stand beside this call: the
-    /// role is now on the node for
-    /// every dictionary, so
+    /// parser classified. The
+    /// name-matched part-of-speech
+    /// marker and the six-name drop
+    /// list that used to stand beside
+    /// this call are gone: the role is
+    /// now on the node for every
+    /// dictionary, so
     /// `RoleFilter::allows` is the
     /// whole gate here, in
     /// `gloss::html`, and in
@@ -580,7 +579,7 @@ impl Paragraphs<'_> {
         // follows the tag alone.
         // `has_marker` is a line-break
         // rule inherited from the
-        // plain-text walk: ticket 01 gave
+        // plain-text walk. That walk gave
         // a `data.content` node a block
         // mark because that mark is what
         // separated senses before a tree

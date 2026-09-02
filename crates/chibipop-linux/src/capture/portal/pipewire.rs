@@ -4,7 +4,7 @@
 //! **Why dlopen and not the `pipewire` crate.** `pipewire-sys` is a
 //! `system-deps` binding: building it needs `libpipewire-0.3-dev` and
 //! a pkg-config file on the build machine, and the project's Linux CI
-//! image has neither and this ticket may not edit the workflow. More
+//! image has neither and the CI workflow is out of scope here. More
 //! to the point, a *build-time* dependency on PipeWire would make the
 //! release tarball unbuildable on machines that will never run the
 //! portal rung. So the library is opened at runtime, exactly the

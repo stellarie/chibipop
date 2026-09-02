@@ -4,12 +4,12 @@
 //! costs zero wakeups (ARCHITECTURE.md#hover-cadence).
 //!
 //! Only the *cursor session* is created, never the inner capture
-//! session: this ticket wants positions, not pixels. The session's
+//! session: this module wants positions, not pixels. The session's
 //! `position` events are transformed buffer pixels relative to one
 //! output; `outputs::OutputGeometry` lifts them to global physical.
 //!
-//! Outputs present at startup get sessions; hotplug is a later
-//! ticket's concern (the registry listener in `daemon.rs` logs it).
+//! Outputs present at startup get sessions; hotplug is not this
+//! module's concern (the registry listener in `daemon.rs` logs it).
 
 use super::outputs::{self, OutputGeometry};
 use crate::wayland::Advertised;

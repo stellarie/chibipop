@@ -275,9 +275,9 @@ needs a decoder chibipop does not otherwise want.
 
 ## Editorial drops
 
-*Measured before ticket 15. The `DROP_CONTENT` const it names is gone; the
-section is kept as the evidence that motivated its deletion, and the census
-now prints a role table per dictionary in its place.*
+*Measured against an earlier build. The `DROP_CONTENT` const it names is
+gone; the section is kept as the evidence that motivated its deletion, and
+the census now prints a role table per dictionary in its place.*
 
 `DROP_CONTENT` removes 40 975 nodes, **all of them from Jitendex**. No other
 dictionary in the corpus tags content with those six names.

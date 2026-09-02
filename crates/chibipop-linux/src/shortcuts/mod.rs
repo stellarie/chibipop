@@ -218,7 +218,7 @@ impl Selection {
     /// `exe` is the binary the native rung's advice must name, resolved
     /// by the caller (`paths::exec_name`): the line tells the user what
     /// to bind, and under `cargo run` the bare command name is not on
-    /// PATH, so a snippet built from it execs nothing (ticket 51).
+    /// PATH, so a snippet built from it execs nothing.
     pub fn startup_line(self, exe: &Path) -> String {
         match self {
             Selection::Portal => format!(
@@ -355,8 +355,8 @@ pub fn portal_detail(bindings: &[Binding]) -> String {
 ///
 /// Names the verbs, not the binary: a status row has one short line
 /// (ARCHITECTURE.md#platform-integration), and a bare `chibipop` in it
-/// would be a command that does not resolve under `cargo run`
-/// (ticket 51). The bind lines that do name the running exe are the
+/// would be a command that does not resolve under `cargo run`.
+/// The bind lines that do name the running exe are the
 /// settings window's snippet.
 pub fn native_detail(why: &str) -> String {
     format!("control socket (`ctl trigger-down`) - {why}")
@@ -445,7 +445,7 @@ mod tests {
     /// ones name the socket so a reader knows the trigger still works.
     /// The rung-2 line is also the user's instruction, so it must name
     /// the running binary rather than a bare command name that PATH may
-    /// not have (ticket 51).
+    /// not have.
     #[test]
     fn every_startup_line_names_what_serves_the_trigger() {
         let exe = Path::new("/home/u/chibipop/target/debug/chibipop");
