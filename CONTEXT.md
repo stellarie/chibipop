@@ -341,4 +341,3 @@ _Avoid_: corpus golden, snapshot test
 The only coordinate space (`PhysPoint`/`PhysRect`) in core. These are the pixels that OCR
 actually sees.
 _Avoid_: logical coordinates (in core), DIPs
-
