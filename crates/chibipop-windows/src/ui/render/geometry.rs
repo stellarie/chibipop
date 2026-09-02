@@ -1189,7 +1189,7 @@ fn inline_image() -> Fixture {
 }
 
 /// 14. **One accent**: the simplest card-header pitch geometry. This fixture
-///    pins the positions of an overline and a downstep tick.
+///     pins the positions of an overline and a downstep tick.
 ///
 /// `雑談 / ざつだん` uses heiban, which represents 48.0% of the census's
 /// accents. The first mora is low, the other three are high, and no tick exists.

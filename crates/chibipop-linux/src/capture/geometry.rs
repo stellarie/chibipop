@@ -38,7 +38,6 @@ use chibipop::geom::{PhysPoint, PhysRect};
 ///
 /// `Axis::new` computes each axis step as `logical / gcd(physical, logical)`.
 /// If that step exceeds `MAX_SNAP`, the axis uses a unit step instead.
-
 const MAX_SNAP: i64 = 64;
 
 /// Return the physical height after the output transform.

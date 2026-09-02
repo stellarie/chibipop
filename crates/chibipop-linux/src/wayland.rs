@@ -110,6 +110,7 @@ pub fn collect_globals(conn: &Connection) -> anyhow::Result<Vec<Advertised>> {
 /// - a compositor that cannot run chibipop.
 /// - a compositor that supports all channels except the hover loop.
 /// - a compositor that supports the popup only at an integer scale.
+///
 /// These cases need different messages.
 /// A GNOME user must not see "cannot run" when only the hover loop lacks support.
 pub fn report(globals: &[Advertised]) -> Vec<String> {
