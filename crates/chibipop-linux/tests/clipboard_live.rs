@@ -1,13 +1,14 @@
 //! The data-control clipboard against a real compositor, when there is
 //! one.
 //!
-//! CI is headless (ADR-0007), so this skips without `WAYLAND_DISPLAY` -
-//! and skips again when the session advertises no data-control protocol,
-//! because an absent rung is a rung the ladder walks past (spec D2), not
-//! a failure. The degradation is asserted from the other side instead:
-//! `chibipop clipboard-check` exits non-zero naming both globals, which
-//! is what `skip` reads, and `src/clipboard.rs`'s unit tests pin the same
-//! refusal with no compositor at all.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci), so this skips
+//! without `WAYLAND_DISPLAY` - and skips again when the session
+//! advertises no data-control protocol, because an absent rung is a rung
+//! the ladder walks past (spec D2), not a failure. The degradation is
+//! asserted from the other side instead: `chibipop clipboard-check` exits
+//! non-zero naming both globals, which is what `skip` reads, and
+//! `src/clipboard.rs`'s unit tests pin the same refusal with no
+//! compositor at all.
 //!
 //! **These tests replace the session clipboard** with a marker string.
 //! There is no way to own the selection without owning it, and a test

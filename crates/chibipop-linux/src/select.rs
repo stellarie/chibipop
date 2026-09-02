@@ -18,8 +18,8 @@
 //! [`Selector::pick`] therefore destroys its surfaces and completes a
 //! round trip before it returns.
 //!
-//! **Why this may take keyboard focus and the popup may not.** ADR-0004
-//! makes `keyboard_interactivity = none` inviolable for the popup:
+//! **Why this may take keyboard focus and the popup may not.**
+//! `keyboard_interactivity = none` is inviolable for the popup:
 //! focus-stealing has to be impossible by construction for a surface
 //! that appears on every hover, unasked. The selector is the exact
 //! opposite - it exists only because the user pressed a key to ask for
@@ -500,9 +500,9 @@ impl Pick {
     /// `IDC_CROSS`'s equivalent, where the compositor offers one.
     ///
     /// Without `wp_cursor_shape_v1` the cursor is left exactly as it
-    /// was: loading XCursor themes ourselves is what ADR-0004 refused
-    /// for the popup, and a picker is not a reason to change that. The
-    /// absence is said once, at bind.
+    /// was: loading XCursor themes ourselves is what the popup refuses
+    /// to do, and a picker is not a reason to change that. The absence
+    /// is said once, at bind.
     fn crosshair(&mut self) {
         let (Some(device), Some(serial)) = (self.shape.as_ref(), self.serial) else { return };
         device.set_shape(serial, Shape::Crosshair);
@@ -625,13 +625,12 @@ impl Selector {
     /// Bind the selector's globals. Surfaces are per pick: a full-output
     /// dim held permanently would be a screenful of buffer per monitor
     /// for a thing used seconds at a time, which is the permanent
-    /// maximum-size surface ADR-0004 already rejected once.
+    /// maximum-size surface the popup already rejected once.
     ///
     /// `None` means this compositor advertises no `zwlr_layer_shell_v1` -
-    /// the same *state, not error* rule `Popup::bind` follows (ADR-0004,
-    /// ticket 49): the caller reports the selector unavailable through
-    /// the channel it already has, and every other channel keeps
-    /// running.
+    /// the same *state, not error* rule `Popup::bind` follows
+    /// (ticket 49): the caller reports the selector unavailable through
+    /// the channel it already has, and every other channel keeps running.
     pub fn bind(
         conn: &Connection,
         globals: &GlobalList,

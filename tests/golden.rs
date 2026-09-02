@@ -1,9 +1,9 @@
 //! Golden corpus: (input, expected headword) against the real dictionary.
 //!
-//! No dictionary is committed here and CI builds none (ADR-0007 keeps the
-//! Linux job headless, and a 238 MB build is not a CI step), so this skips
-//! when it cannot find one. It looks where the *product* keeps its
-//! dictionary rather than at a repo path nothing writes, best rung first:
+//! No dictionary is committed here and CI builds none (the Linux job stays
+//! headless, and a 238 MB build is not a CI step), so this skips when it
+//! cannot find one. It looks where the *product* keeps its dictionary
+//! rather than at a repo path nothing writes, best rung first:
 //!
 //! 1. `$CHIBIPOP_GOLDEN_DB`, for a library kept somewhere else entirely.
 //! 2. `$XDG_DATA_HOME/chibipop/chibipop.sqlite` (`~/.local/share` when
@@ -20,11 +20,11 @@
 //! probe `target/debug/deps/data/`, which nothing writes.
 //!
 //! The corpus deliberately does not pin a named dictionary build. Pinning
-//! one would send it straight back to skipping everywhere, which is the
-//! whole of ticket 17; instead every run prints the library that answered,
-//! so a failure is attributable to that build. A skip names every path it
-//! looked at, because an uncheckable skip is how this file spent its life
-//! reporting `ok` without running.
+//! one would send it straight back to skipping everywhere. Instead every
+//! run prints the library that answered, so a failure is attributable to
+//! that build. A skip names every path it looked at, because an
+//! uncheckable skip is how this file spent its life reporting `ok`
+//! without running.
 
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;

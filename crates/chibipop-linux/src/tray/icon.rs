@@ -1,5 +1,6 @@
 //! The tray icon: the app's artwork pre-rendered to PNG and decoded to
-//! the ARGB32 pixmaps StatusNotifierItem asks for (ADR-0006).
+//! the ARGB32 pixmaps StatusNotifierItem asks for
+//! (ARCHITECTURE.md#platform-integration).
 //!
 //! Why embedded pixmaps rather than a freedesktop *named* icon: an
 //! unpackaged `chibipop` — release tarball, AppImage, plain

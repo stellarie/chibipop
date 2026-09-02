@@ -1,17 +1,18 @@
 //! The core pipeline on this session: what the Worker's `open` closure
-//! builds, and where its three parts come from (ADR-0001).
+//! builds, and where its three parts come from
+//! (ARCHITECTURE.md#workspace-and-seams).
 //!
 //! The Worker owns its thread and everything thread-affine on it: the
-//! capture backend the ladder picked (ADR-0002), the meikiocr engine
-//! (ADR-0009), and the dictionary handle. The daemon keeps only the
-//! handle, so a lookup can never stall the pump.
+//! capture backend the ladder picked, the meikiocr engine, and the
+//! dictionary handle. The daemon keeps only the handle, so a lookup can
+//! never stall the pump.
 //!
 //! Two absences are normal rather than fatal, and both are named in the
 //! log instead of taking the daemon down:
 //!
 //! - **No database.** A fresh install has none until the first rebuild
-//!   (ADR-0005), so lookups say exactly that and a `reload` after the
-//!   rebuild reopens the path for real.
+//!   (ARCHITECTURE.md#settings-and-config), so lookups say exactly that
+//!   and a `reload` after the rebuild reopens the path for real.
 //! - **No deconjugation rules.** A packaging slip costs conjugated forms,
 //!   not the whole pipeline: exact matches still resolve.
 
@@ -43,7 +44,8 @@ pub struct Setup {
     /// The startup capability probe. The screencopy rung binds its own
     /// connection out of this, on the worker thread.
     pub globals: Vec<Advertised>,
-    /// Which rung the capture ladder picked (ADR-0002).
+    /// Which rung the capture ladder picked
+    /// (ARCHITECTURE.md#capture-and-masking).
     pub backend: Option<Backend>,
     /// The built dictionary; may not exist yet.
     pub db: PathBuf,
@@ -52,19 +54,19 @@ pub struct Setup {
 /// Pixels handed to the Worker's OCR engine as a one-off job, and where
 /// the lines go home.
 ///
-/// The engine is thread-affine (ADR-0009: three ONNX sessions built on
-/// the Worker's thread), so a job that wants OCR outside a hover has to
-/// run *there*. Core owns that seam — `WorkerParts::serve` — and this is
+/// The engine is thread-affine (three ONNX sessions built on the
+/// Worker's thread), so a job that wants OCR outside a hover has to run
+/// *there*. Core owns that seam — `WorkerParts::serve` — and this is
 /// what travels through it.
 pub struct OcrRequest {
     /// Top-down BGRA8, at native resolution: this adapter never
-    /// upscales (ADR-0009).
+    /// upscales (ARCHITECTURE.md#ocr-engine).
     pub bgra: Vec<u8>,
     pub w: i32,
     pub h: i32,
     /// The pump's own channel, so an answer is an event and never a
-    /// blocked thread (ADR-0001). A failure travels as text because the
-    /// log lives on the pump.
+    /// blocked thread (ARCHITECTURE.md#workspace-and-seams). A failure
+    /// travels as text because the log lives on the pump.
     pub answer: calloop::channel::Sender<Result<Vec<OcrLine>, String>>,
 }
 
@@ -197,7 +199,7 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         max_passes: config.ocr.max_ocr_passes,
         // Never upscaled: meikiocr is strictly worse on 2x crops than
         // on native-resolution ones, on every benchmark slice
-        // (ADR-0009 - "the Linux adapter never upscales").
+        // (ARCHITECTURE.md#ocr-engine).
         upscale: 1,
         prefer_vertical: config.ocr.prefer_vertical,
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
@@ -206,7 +208,7 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         // The enabled terms and pitch lists from the settings window,
         // exact names in priority order. No engine gate rides along any
         // more: an exact name either names an installed dictionary or it
-        // does not (ADR-0014).
+        // does not (ARCHITECTURE.md#dictionary-and-lookup).
         present_cfg: config.present_config(dicts),
         scan_display: ScanDisplay {
             captures: config.debug.show_scan_region,
@@ -221,9 +223,9 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
 /// Spawn the pipeline; answers the dictionary identities it read.
 ///
 /// `portal` is the session the daemon's eager consent already opened
-/// (ADR-0002 rung 2), handed over because the Worker thread is what
-/// reads through it. The screencopy rung needs nothing here: it binds
-/// its own connection inside the closure, on that thread.
+/// (rung 2 of the capture ladder), handed over because the Worker thread
+/// is what reads through it. The screencopy rung needs nothing here: it
+/// binds its own connection inside the closure, on that thread.
 ///
 /// `jobs` is the receiving half of an [`OcrJobs`] queue, drained by the
 /// core `serve` hook between lookups. A fresh channel per spawn, because
@@ -350,11 +352,11 @@ mod tests {
         assert!(!rules.is_empty());
     }
 
-    /// ADR-0009: "the Linux adapter never upscales" - native crops beat
-    /// 2x on every benchmark slice, so the settings this daemon hands
-    /// the shared Worker must carry factor 1. The OCR gate feeds meiki
-    /// native fixtures directly and cannot catch a runtime factor
-    /// drift; this pins it at the seam instead.
+    /// The Linux adapter never upscales (ARCHITECTURE.md#ocr-engine) -
+    /// native crops beat 2x on every benchmark slice, so the settings
+    /// this daemon hands the shared Worker must carry factor 1. The OCR
+    /// gate feeds meiki native fixtures directly and cannot catch a
+    /// runtime factor drift; this pins it at the seam instead.
     #[test]
     fn the_linux_worker_never_upscales() {
         let s = settings(&Config::default(), &[]);
@@ -428,11 +430,12 @@ mod tests {
         assert!(chibipop::present::keeps_dict("Jitendex.org", &cfg.terms));
     }
 
-    /// ADR-0012 hides `ocr.language` but keeps whatever is stored, so a
-    /// config shared with a Windows install can name a language meikiocr
-    /// does not read. There is no engine probe left to ask about that: the
-    /// only question is whether the configured language was given a list
-    /// of its own, and if it was, that list is what gets searched.
+    /// The Linux settings UI hides `ocr.language` but keeps whatever is
+    /// stored, so a config shared with a Windows install can name a
+    /// language meikiocr does not read. There is no engine probe left to
+    /// ask about that: the only question is whether the configured
+    /// language was given a list of its own, and if it was, that list is
+    /// what gets searched.
     #[test]
     fn the_ocr_languages_own_list_is_searched_and_the_global_list_stands_in_without_one() {
         let dicts = vec![

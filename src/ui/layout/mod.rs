@@ -1,4 +1,4 @@
-//! The popup's measured scene (ADR-0004).
+//! The popup's measured scene.
 //!
 //! Layout lives here, not in the bins: element construction, wrapping,
 //! line stacking, the side panel, scrollbar geometry and hit rects.
@@ -8,16 +8,15 @@
 //! One pixel space, and no scale factor: core never sees one. Windows
 //! hands in DIPs because its Direct2D target carries the DPI, Linux
 //! hands in device pixels; either way the conversion is the bin's
-//! (ADR-0004 - physical pixels stay authoritative, logical geometry is
-//! derived).
+//! (physical pixels stay authoritative, logical geometry is derived).
 //!
 //! # The submodules, and the one reason each has to change
 //!
-//! Private organisation and not a seam: ADR-0004 and ADR-0013 give the
-//! inline pass exactly one implementation and no trait, so every public
-//! path is re-exported below and no caller anywhere names a submodule.
-//! The cut is by reason to change, so a census finding, a golden field or
-//! a table rule each lands in one file:
+//! Private organisation and not a seam: the inline pass has exactly one
+//! implementation and no trait, so every public path is re-exported below
+//! and no caller anywhere names a submodule. The cut is by reason to
+//! change, so a census finding, a golden field or a table rule each lands
+//! in one file:
 //!
 //! | module | one reason to change |
 //! |---|---|

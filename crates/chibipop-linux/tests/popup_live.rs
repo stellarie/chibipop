@@ -1,10 +1,10 @@
 //! The popup against a real compositor, when there is one.
 //!
-//! CI is headless (ADR-0007), so this skips without `WAYLAND_DISPLAY` -
-//! and skips again on a compositor advertising no layer shell,
-//! fractional scale or viewporter, because those are the three globals
-//! ADR-0004 makes mandatory and their absence is a compositor verdict,
-//! not a test failure.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci), so this skips
+//! without `WAYLAND_DISPLAY` - and skips again on a compositor
+//! advertising no layer shell, fractional scale or viewporter, because
+//! those three globals are mandatory and their absence is a compositor
+//! verdict, not a test failure.
 //!
 //! One test, deliberately: it drives a whole daemon through the canned
 //! popup (`CHIBIPOP_POPUP_DEMO=1`) and two of these racing over one
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The globals ADR-0004 requires for a crisp popup.
+/// The globals a crisp popup requires.
 const NEEDED: [&str; 3] =
     ["zwlr_layer_shell_v1", "wp_fractional_scale_manager_v1", "wp_viewporter"];
 
@@ -187,8 +187,8 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
     let mut session = Session::start();
 
     // Startup: one surface per output, mapped hidden, on the layer the
-    // config asks for and with keyboard interactivity off - three of the
-    // properties ADR-0004 calls inviolable.
+    // config asks for and with keyboard interactivity off - three of
+    // the popup's inviolable properties.
     let mapped = session.wait_for("layer surface(s) mapped hidden");
     let created = session.wait_for("popup: layer surface 0 on ");
     assert!(created.contains("overlay layer"), "{created}");

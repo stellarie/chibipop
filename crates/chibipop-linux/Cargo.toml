@@ -5,24 +5,26 @@ edition.workspace = true
 license.workspace = true
 
 # The binary keeps its name, exactly like the Windows crate: a Linux user
-# types `chibipop`, and the release tarball ships it as such (ADR-0007).
+# types `chibipop`, and the release tarball ships it as such (see
+# ARCHITECTURE.md#packaging-and-ci).
 [[bin]]
 name = "chibipop"
 path = "src/main.rs"
 
 # The OCR engine is the one piece of this adapter with a standing fixture
-# gate (ADR-0009), and cargo cannot link an integration test against a bin
+# gate, and cargo cannot link an integration test against a bin
 # target - so the adapter grows a thin lib face carrying exactly that
 # module. The bin stays the product; the lib exists for `tests/`.
 [lib]
 name = "chibipop_linux"
 path = "src/lib.rs"
 
-# ADR-0009's two distribution paths, one feature each. The default fetches
-# a pinned ONNX Runtime at build time and ships it beside the binary, which
-# is what the release tarball and `chibipop-bin` want and what lets CI run
-# with no apt package. `--no-default-features --features system-onnxruntime`
-# is the source-AUR path: `ort` dlopens the distro's `libonnxruntime.so` at
+# Two distribution paths for the OCR runtime, one feature each - see
+# ARCHITECTURE.md#ocr-engine. The default fetches a pinned ONNX Runtime
+# at build time and ships it beside the binary, which is what the release
+# tarball and `chibipop-bin` want and what lets CI run with no apt
+# package. `--no-default-features --features system-onnxruntime` is the
+# source-AUR path: `ort` dlopens the distro's `libonnxruntime.so` at
 # runtime and nothing is downloaded or linked at build time. Enabling both
 # (as `--all-features` does) is harmless - dynamic loading wins and the
 # download is skipped.
@@ -31,7 +33,7 @@ default = ["bundled-onnxruntime"]
 bundled-onnxruntime = ["ort/download-binaries", "ort/tls-rustls"]
 system-onnxruntime = ["ort/load-dynamic"]
 
-# ADR-0009's OCR quality gate: 152 corpus crops through three ONNX
+# The OCR quality gate: 152 corpus crops through three ONNX
 # sessions. `test = false` keeps it out of the default `cargo test` sweep
 # and, more to the point, out of the Linux CI job's deliberate x3 loop -
 # that loop exists to catch process-global state racing between parallel
@@ -69,8 +71,9 @@ wayland-protocols-wlr.workspace = true
 # calloop's `signals` source masks only the thread that builds it, and
 # calloop exposes no mask of its own.
 nix.workspace = true
-# The `chibipop settings` window (ADR-0005): iced 0.14 on a plain
-# xdg_toplevel, in this transient process only — the daemon never links it.
+# The `chibipop settings` window (ARCHITECTURE.md#settings-and-config):
+# iced 0.14 on a plain xdg_toplevel, in this transient process only —
+# the daemon never links it.
 iced.workspace = true
 fontdb.workspace = true
 # The settings window's Apply reconciles `term.freq` in place when the
@@ -78,23 +81,25 @@ fontdb.workspace = true
 # needs a writer connection - core's lookup face only hands out read-only
 # ones. Same workspace pin as core, so both link one bundled SQLite.
 rusqlite.workspace = true
-# The meikiocr port (ADR-0009): three ONNX sessions, plus the digest check
+# The meikiocr port: three ONNX sessions, plus the digest check
 # over their bundled files.
 ort.workspace = true
 sha2.workspace = true
 
-# The SNI tray (ADR-0006) and the ARGB32 decode for its embedded icon.
+# The SNI tray (ARCHITECTURE.md#platform-integration) and the ARGB32
+# decode for its embedded icon.
 ksni.workspace = true
 png.workspace = true
 
 # --- ticket 34 (portal ScreenCast capture backend + METADATA cursor rung) ---
-# ADR-0002's fallback capture rung. Two deps, both deliberate: `zbus` speaks
-# the portal handshake (blocking API, on the portal's own thread - ADR-0001
-# keeps the daemon sync), and `libloading` dlopens `libpipewire-0.3.so.0` so
-# nothing here needs a build-time PipeWire.
+# The fallback capture rung (see ARCHITECTURE.md#capture-and-masking).
+# Two deps, both deliberate: `zbus` speaks the portal handshake (blocking
+# API, on the portal's own thread - the daemon stays sync), and
+# `libloading` dlopens `libpipewire-0.3.so.0` so nothing here needs a
+# build-time PipeWire.
 zbus.workspace = true
 libloading.workspace = true
-# The popup (ADR-0004, ticket 32): the layer surface and its shm
+# The popup (ticket 32): the layer surface and its shm
 # buffers, the panel raster, and the JP text stack - all daemon-side,
 # which is why none of them is a GPU stack.
 smithay-client-toolkit.workspace = true

@@ -1,5 +1,5 @@
-//! The shm buffers copies land in (ADR-0002: shm everywhere, CPU crop,
-//! no GPU plumbing inside a capture backend).
+//! The shm buffers copies land in (ARCHITECTURE.md#capture-and-masking:
+//! shm everywhere, CPU crop, no GPU plumbing inside a capture backend).
 //!
 //! One file per pool, in `XDG_RUNTIME_DIR` and unlinked the instant it
 //! exists: the fd keeps it alive, so however this process ends it

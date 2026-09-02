@@ -1,5 +1,6 @@
-//! `chibipop settings`: a separate process on iced (ADR-0005), so a
-//! settings crash can never take live-hover down.
+//! `chibipop settings`: a separate process on iced
+//! (ARCHITECTURE.md#settings-and-config), so a settings crash can never
+//! take live-hover down.
 //!
 //! Core's `Config` + `SettingsForm` drive the window; this module owns
 //! only widgetry and the process discipline around it: the
@@ -40,8 +41,8 @@ pub fn run(paths: Paths) -> Result<()> {
         Ok(lock) => lock,
         Err(LockError::AlreadyRunning { path, pid }) => {
             // A notice, not an error: the window the user wants is up.
-            // No cross-process raise (ADR-0005) - compositors routinely
-            // ignore self-activation.
+            // No cross-process raise - compositors routinely ignore
+            // self-activation.
             let holder = match pid {
                 Some(pid) => format!("pid {pid}"),
                 None => "an unknown pid".to_string(),
@@ -139,13 +140,13 @@ fn clipboard_rung() -> Option<clipboard::Rung> {
 ///
 /// The portal control is only rendered when a daemon actually got the
 /// GlobalShortcuts session *and* the bind through — never on a bus
-/// probe. ADR-0005's rule is that the hotkey section cannot lie about
-/// who owns the key, and "a portal exists on this machine" is not the
-/// same fact as "the portal owns this binding": the frontend refuses
-/// shortcut sessions to a launch with no app id, so a probe would print
-/// a portal binding for a daemon that has none. No file, or a file
-/// saying native, therefore means the compositor bind is the truth and
-/// the snippet is what helps.
+/// probe. The hotkey section cannot lie about who owns the key, and "a
+/// portal exists on this machine" is not the same fact as "the portal
+/// owns this binding": the frontend refuses shortcut sessions to a
+/// launch with no app id, so a probe would print a portal binding for a
+/// daemon that has none. No file, or a file saying native, therefore
+/// means the compositor bind is the truth and the snippet is what
+/// helps.
 fn hotkey_channel(
     published: Option<&shortcuts::state::Published>,
     id: shortcuts::ShortcutId,

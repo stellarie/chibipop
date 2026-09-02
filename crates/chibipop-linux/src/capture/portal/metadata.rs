@@ -1,4 +1,4 @@
-//! ADR-0003 rung 2's arithmetic: turning a `spa_meta_cursor` sample
+//! Cursor rung 2's arithmetic: turning a `spa_meta_cursor` sample
 //! into a core cursor position.
 //!
 //! The portal's `cursor_mode=METADATA` rides the PipeWire stream the

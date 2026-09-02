@@ -1,14 +1,13 @@
 //! The KDE/GNOME "user clicked Deny" path, end to end, against a portal
 //! that only exists inside this test.
 //!
-//! ADR-0002 makes one promise about its fallback capture rung that no
-//! other test in this tree can check: a refusal is a *named channel
-//! state with a way back*, never an exit and never a silent
-//! half-working daemon. Checking it needs a portal that says no, and
-//! the only portal on a developer's machine says no by putting a
-//! consent dialog on their screen - which is exactly what
-//! `portal_capture_live.rs` refuses to do, and why its one real-dialog
-//! test is opt-in.
+//! The fallback capture rung makes one promise that no other test in
+//! this tree can check: a refusal is a *named channel state with a
+//! way back*, never an exit and never a silent half-working daemon.
+//! Checking it needs a portal that says no, and the only portal on a
+//! developer's machine says no by putting a consent dialog on their
+//! screen - which is exactly what `portal_capture_live.rs` refuses to
+//! do, and why its one real-dialog test is opt-in.
 //!
 //! So this file brings its own portal.
 //!
@@ -34,7 +33,7 @@
 //! turns "the daemon recovered" into "the daemon *asked again*".
 //!
 //! Skips, and only for honest reasons: no `WAYLAND_DISPLAY` (CI is
-//! headless - ADR-0007) and no way to start a private bus.
+//! headless) and no way to start a private bus.
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
@@ -492,11 +491,11 @@ fn a_denied_capture_portal_stays_up_named_and_recovers_on_reload() {
     );
     assert!(
         failed.contains("chibipop ctl reload"),
-        "the diagnostic must name the way back (ADR-0002): {failed}"
+        "the diagnostic must name the way back: {failed}"
     );
 
     // The Capture channel row went down carrying that same detail: this
-    // is what the tray shows and what ADR-0006 calls a named state.
+    // is what the tray shows, and it must read as a named state.
     // Asserted as a substring of one row, not against the row list -
     // the set of channels grows.
     let row = session.wait_for("channel: Capture: ");

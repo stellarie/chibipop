@@ -1,17 +1,18 @@
-//! Channel-aware hotkey controls (ADR-0005): the UI never lies about
-//! who owns a global binding.
+//! Channel-aware hotkey controls
+//! (ARCHITECTURE.md#settings-and-config): the UI never lies about who
+//! owns a global binding.
 //!
-//! Both rungs of ADR-0003's trigger ladder are real here. On the native
-//! rung the compositor bind is the truth and the config chord is
-//! advisory, so the only honest control is the snippet to paste. On the
-//! portal rung the GlobalShortcuts session owns the binding and reports
-//! it, so the control names the key the portal gave and points at the
-//! desktop's own editor — the daemon publishes which of the two it
-//! resolved (`shortcuts::state`), because a bus probe cannot tell them
-//! apart.
+//! Both rungs of the trigger ladder (ARCHITECTURE.md#input-ladders) are
+//! real here. On the native rung the compositor bind is the truth and
+//! the config chord is advisory, so the only honest control is the
+//! snippet to paste. On the portal rung the GlobalShortcuts session
+//! owns the binding and reports it, so the control names the key the
+//! portal gave and points at the desktop's own editor — the daemon
+//! publishes which of the two it resolved (`shortcuts::state`), because
+//! a bus probe cannot tell them apart.
 //!
 //! The same two rungs answer for every global action, not just the
-//! trigger: since ADR-0003's 2026-08-26 addendum each one has its own
+//! trigger: since the 2026-08-26 addendum each one has its own
 //! control-socket verb, so one row shape serves them all and the only
 //! difference is which [`Bind`] the native rung pastes.
 
@@ -43,8 +44,8 @@ pub enum HotkeyControl {
     Rebind { current: Option<String> },
     /// The chord field is blank, so there is no bind to build: a
     /// snippet for it would be a syntactically invalid `bind = , F, …`
-    /// line, which is exactly the kind of thing ADR-0005 forbids this
-    /// window from handing a user. The row says so instead.
+    /// line, which is exactly the kind of thing this window must never
+    /// hand a user. The row says so instead.
     NoChord,
 }
 
@@ -73,8 +74,8 @@ impl HotkeyChannel {
             // `current_binding` is this action's own published key: a
             // channel is resolved per portal id (`hotkey_channel`), so
             // a row can only ever name the key it was told. Borrowing
-            // another row's key is the one thing ADR-0005 forbids here,
-            // and the type is what prevents it.
+            // another row's key is the one thing this window must never
+            // do, and the type is what prevents it.
             HotkeyChannel::Portal { current_binding } => {
                 HotkeyControl::Rebind { current: current_binding.clone() }
             }
@@ -100,7 +101,8 @@ mod tests {
     }
 
     /// The add-card row is the same row: on the native rung it is the
-    /// only way that chord can be bound at all (ADR-0003 rung 2).
+    /// only way that chord can be bound at all
+    /// (ARCHITECTURE.md#input-ladders, rung 2).
     #[test]
     fn native_channel_renders_a_press_snippet_for_a_one_shot_action() {
         let control = HotkeyChannel::Native.control(

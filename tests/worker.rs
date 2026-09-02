@@ -122,10 +122,11 @@ fn dict_named(name: &str) -> FakeDictionary {
 /// A list under `[dictionaries]` names a Dictionary by its whole name and
 /// is matched by equality, and an enabled terms list naming none of the
 /// installed Dictionaries searches nothing - there is no ladder behind it
-/// to widen the scope back out (ADR-0014). A fixture that never names
-/// itself therefore presents an empty popup, so every identity these
-/// tests expect a card from is listed: the one `dict()` installs, the two
-/// a reopen swaps between, and the one a reload renames it to.
+/// to widen the scope back out (ARCHITECTURE.md#dictionary-and-lookup). A
+/// fixture that never names itself therefore presents an empty popup, so
+/// every identity these tests expect a card from is listed: the one
+/// `dict()` installs, the two a reopen swaps between, and the one a
+/// reload renames it to.
 /// `WhatTheBinKnew` is deliberately absent - it is the stale name the
 /// reopened file's own identities beat, and a card wearing it is the bug
 /// that test pins.
@@ -197,8 +198,8 @@ fn masked_hover(id: u64, mode: CaptureMode) -> Trigger {
 }
 
 /// The mask boundary is a capture edge: `FakeOcr`'s one word spans the
-/// whole grab, so a popup anywhere in it takes the word with it rather
-/// than leaving half a glyph to look up (ADR-0008).
+/// whole grab, so a popup anywhere in it takes the word with it rather than
+/// leaving half a glyph to look up (ARCHITECTURE.md#capture-and-masking).
 #[test]
 fn a_live_hover_under_our_own_popup_resolves_nothing() {
     let (worker, _dicts, log_rx) = spawn(Some("食"), false, None, None);
@@ -230,7 +231,8 @@ fn a_frozen_hover_is_maskless_and_still_resolves() {
 }
 
 /// A backend that answers "unchanged" after its first grab: what a
-/// damage-paced dwell looks like from above the seam (ADR-0002).
+/// damage-paced dwell looks like from above the seam
+/// (ARCHITECTURE.md#capture-and-masking).
 struct DwellingCapture {
     log: mpsc::Sender<String>,
     grabs: u32,
@@ -289,13 +291,13 @@ fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
     (worker, log_rx)
 }
 
-/// ADR-0010's dwell re-check, at the cost that makes it viable.
+/// The dwell re-check, at the cost that makes it viable.
 ///
 /// A second look at a still screen reuses the first read's words: same
 /// pixels, same mask, same answer, no OCR pass. The popup coming up
 /// between two looks *is* a new question - the pixels OCR reads are the
-/// grab after masking (ADR-0008) - so that one look pays a pass, and
-/// every dwell behind it is free again.
+/// grab after masking (ARCHITECTURE.md#capture-and-masking) - so that one
+/// look pays a pass, and every dwell behind it is free again.
 #[test]
 fn a_dwell_on_unchanged_pixels_skips_the_ocr_pass() {
     let (worker, log_rx) = spawn_dwelling();
@@ -495,7 +497,7 @@ fn wake_fires_after_each_result() {
     assert!(worker.results().try_recv().is_ok(), "the result precedes its wake");
 }
 
-// -- trigger mode's hold, end to end through the Worker (ADR-0010) --
+// -- trigger mode's hold, end to end through the Worker --
 
 /// A hover somewhere else, so the hold is asked for a second box.
 fn hover_at(id: u64, at: PhysPoint) -> Trigger {
@@ -543,7 +545,7 @@ fn a_trigger_hold_copies_once_and_serves_every_lookup_from_that_copy() {
 
 /// The read-through property. The same popup rect that hides the word
 /// from a live grab cannot hide it from the hold: those pixels were
-/// copied before the popup existed (ADR-0008/0010).
+/// copied before the popup existed.
 #[test]
 fn a_hold_resolves_the_word_the_popup_is_covering() {
     let (worker, _dicts, _log_rx) = spawn(Some("食"), false, None, None);
@@ -599,10 +601,10 @@ fn a_second_freeze_mid_hold_copies_again() {
     );
 }
 
-/// The reload gap ticket 41 pinned, through the real seam: a rebuild
-/// renames a new database over the old inode, so the handle the worker
-/// holds keeps reading the old one until a `reload` reopens it - and the
-/// reopened file's identities are what the popup then names.
+/// The reload gap, through the real seam: a rebuild renames a new
+/// database over the old inode, so the handle the worker holds keeps
+/// reading the old one until a `reload` reopens it - and the reopened
+/// file's identities are what the popup then names.
 #[test]
 fn a_reload_reopens_the_dictionary_the_worker_reads() {
     let (log_tx, _log_rx) = mpsc::channel::<String>();
@@ -653,7 +655,7 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
     );
 }
 
-// -- the `serve` hook: one-off OCR jobs between lookups (tickets 09/11) --
+// -- the `serve` hook: one-off OCR jobs between lookups --
 
 /// One-off pixels, as the Windows bin's OCR-to-clipboard queues them.
 struct Job {
@@ -666,8 +668,8 @@ struct Job {
 /// A worker with a `serve` hook over the fakes.
 ///
 /// The hook logs every run and drains the job queue through the facade
-/// it is handed - it never sees the engine (ticket 11), and the queue is
-/// the bin's, invisible to the worker.
+/// it is handed - it never sees the engine, and the queue is the bin's,
+/// invisible to the worker.
 fn spawn_serving(
     gate: Option<mpsc::Receiver<()>>,
     entered_tx: Option<mpsc::Sender<()>>,
@@ -718,7 +720,7 @@ fn wait_for_a_hook_run(log_rx: &mpsc::Receiver<String>) {
     );
 }
 
-/// Ticket 09/11 together: a queued job wakes a worker that is blocked -
+/// Both properties at once: a queued job wakes a worker that is blocked -
 /// no poll to catch it - and the hook reads the pixels through the
 /// facade, on the worker's own thread, with no trigger in sight.
 #[test]
@@ -742,9 +744,9 @@ fn a_nudged_job_wakes_a_blocked_worker_and_is_read_through_the_facade() {
     );
 }
 
-/// ADR-0010's idle budget, and the reason ticket 09 exists: with a hook
-/// installed and nothing queued, the worker blocks. The 20 ms poll it
-/// replaced would have logged ~15 hook runs over this window.
+/// The idle budget is 0 wakeups/s, which is why the 20 ms poll had to go:
+/// with a hook installed and nothing queued, the worker blocks. The poll
+/// it replaced would have logged ~15 hook runs over this window.
 #[test]
 fn an_idle_worker_with_a_serve_hook_never_wakes_itself() {
     let (_worker, _jobs, log_rx) = spawn_serving(None, None);

@@ -5,7 +5,7 @@
 //! module: [`Flow`] is a `String`, a flat vector of styled byte ranges over
 //! it, and one side table per thing that does *not* flow.
 //!
-//! Why the side tables exist at all is ADR-0013's seam: the measurer takes
+//! Why the side tables exist at all is the seam: the measurer takes
 //! styled spans and no boxes, so anything with a position of its own - a
 //! reading, a marker, an image - cannot be a span of the paragraph. Each
 //! rides beside it and is placed by its own module
@@ -179,8 +179,8 @@ pub(super) struct InlineBox {
 /// accumulates into one string so the
 /// seam gets the paragraph whole -
 /// a span boundary is not a line
-/// boundary (ADR-0013) - and each
-/// span is a byte range into it.
+/// boundary - and each span is a byte
+/// range into it.
 ///
 /// [`MeasureRun`]: super::measure::MeasureRun
 /// [`SceneElem`]: super::scene::SceneElem

@@ -23,11 +23,11 @@
 //! to change. Silence would leave the user with an app that reads the
 //! wrong character under the cursor and no way to know why.
 //!
-//! Hyprland-gated, like `cursor::hyprctl` (ADR-0003's documented
-//! identity exception): it is the compositor whose option is known,
-//! whose default many NVIDIA setups override, and whose `hyprctl` can be
-//! asked. Elsewhere the verdict is [`PointerInFrames::Unknown`] and
-//! nothing is printed - a guess would be worse than silence.
+//! Hyprland-gated, like `cursor::hyprctl` (the one identity exception):
+//! it is the compositor whose option is known, whose default many
+//! NVIDIA setups override, and whose `hyprctl` can be asked. Elsewhere
+//! the verdict is [`PointerInFrames::Unknown`] and nothing is printed -
+//! a guess would be worse than silence.
 
 use crate::cursor::hyprctl;
 use std::process::Command;

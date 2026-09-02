@@ -1,22 +1,22 @@
 //! The one frame the portal stream keeps, and the crop out of it.
 //!
-//! **Why a store at all.** ADR-0002's fallback rung is push-shaped -
-//! PipeWire hands whole monitors over whenever the compositor
-//! composites - while `RegionCapture` is pull-shaped and must never
-//! wait for damage. The join is this: the stream thread parks the
-//! newest frame here, and `grab` crops out of whatever is parked.
+//! **Why a store at all.** The fallback rung is push-shaped - PipeWire
+//! hands whole monitors over whenever the compositor composites - while
+//! `RegionCapture` is pull-shaped and must never wait for damage. The
+//! join is this: the stream thread parks the newest frame here, and
+//! `grab` crops out of whatever is parked.
 //!
 //! **Why the frame is not copied.** The obvious store is a `Vec<u8>`
 //! filled on every `process`. At 4K that is 33 MB memcpy'd per frame
 //! by a background daemon that will read a 600x400 box out of it, and
-//! ADR-0002 already spends the portal tier's budget on full-monitor
-//! *compositor* copies. So the parked frame is the `pw_buffer` itself,
-//! still checked out of the stream, and the crop reads straight from
-//! its mapped pages. One buffer stays checked out at a time; the
-//! previous one goes back the instant a newer one arrives, which is
-//! exactly the "hold one, recycle the rest" pattern PipeWire's own
-//! consumers use. The raw pointers that implies live behind this
-//! module's mutex and nowhere else.
+//! the portal tier's budget already goes on full-monitor *compositor*
+//! copies. So the parked frame is the `pw_buffer` itself, still checked
+//! out of the stream, and the crop reads straight from its mapped
+//! pages. One buffer stays checked out at a time; the previous one goes
+//! back the instant a newer one arrives, which is exactly the "hold
+//! one, recycle the rest" pattern PipeWire's own consumers use. The raw
+//! pointers that implies live behind this module's mutex and nowhere
+//! else.
 //!
 //! **Content change.** [`Latest::content_seq`] increments only for a
 //! frame that actually changed something: a buffer carrying

@@ -1,8 +1,9 @@
-//! The trigger channel's ladder (ADR-0003): the GlobalShortcuts portal
-//! rung, the ids it may ever register, and how one portal signal turns
-//! into the same effect a control-socket verb has.
+//! The trigger channel's ladder (ARCHITECTURE.md#input-ladders): the
+//! GlobalShortcuts portal rung, the ids it may ever register, and how
+//! one portal signal turns into the same effect a control-socket verb
+//! has.
 //!
-//! **The native rung never stops working.** ADR-0003 lists the portal
+//! **The native rung never stops working.** The ladder lists the portal
 //! first and the compositor-keybind-into-control-socket rung second, but
 //! that order is about *who the product asks to bind a key*, not about
 //! transport exclusivity: `chibipop ctl trigger-down|trigger-up|toggle`
@@ -37,9 +38,9 @@
 //!   spec (freedesktop, draft 0.1) defines a shortcut as XKB modifier
 //!   names (`CTRL`, `ALT`, `SHIFT`, `NUM`, `LOGO`) plus one keysym
 //!   identifier from `xkbcommon-keysyms.h` minus the `XKB_KEY_` prefix,
-//!   joined by `+`, limited to the base layer. Hence ADR-0003's Linux
-//!   default `ALT+F`, and hence [`normalize_trigger`], which spells a
-//!   user's chord the way that spec wants before it goes on the wire.
+//!   joined by `+`, limited to the base layer. Hence the Linux default
+//!   `ALT+F`, and hence [`normalize_trigger`], which spells a user's
+//!   chord the way that spec wants before it goes on the wire.
 
 pub mod portal;
 pub mod state;
@@ -48,7 +49,7 @@ use crate::control::Verb;
 use std::path::Path;
 
 /// Every shortcut chibipop will ever register, and nothing else
-/// (ADR-0003: keep the consent dialog small).
+/// (keep the consent dialog small - ARCHITECTURE.md#input-ladders).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutId {
     /// Hold to read: press freezes and looks up, release retracts. The
@@ -56,8 +57,8 @@ pub enum ShortcutId {
     /// what makes a *hold* expressible without observing the keyboard.
     Trigger,
     /// The Anki add affordance's keyboard path — the one contextual
-    /// interaction that keeps a global key on Wayland (ADR-0003), since
-    /// the popup itself never takes focus.
+    /// interaction that keeps a global key on Wayland, since the popup
+    /// itself never takes focus.
     AnkiAdd,
 }
 
@@ -120,8 +121,9 @@ impl Binding {
 }
 
 /// What the portal thread tells the pump. Everything the D-Bus session
-/// learns arrives here; the thread owns no log and no tray (ADR-0001 —
-/// the pump stays sync and single-threaded).
+/// learns arrives here; the thread owns no log and no tray
+/// (ARCHITECTURE.md#workspace-and-seams — the pump stays sync and
+/// single-threaded).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// `BindShortcuts` succeeded; the payload is what the portal says is
@@ -145,7 +147,7 @@ pub enum Event {
 /// The `CHIBIPOP_TRIGGER_CHANNEL` test hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelOverride {
-    /// Walk the ladder as ADR-0003 describes it.
+    /// Walk the ladder in its documented order.
     Auto,
     /// Take the portal rung when the interface is there, and say so
     /// loudly when it is not — the documented way to test the rung on a
@@ -220,13 +222,13 @@ impl Selection {
     pub fn startup_line(self, exe: &Path) -> String {
         match self {
             Selection::Portal => format!(
-                "trigger: {} portal (ADR-0003 rung 1) - registering {} and {}; the control socket keeps serving too",
+                "trigger: {} portal (ladder rung 1) - registering {} and {}; the control socket keeps serving too",
                 portal::SHORTCUTS_INTERFACE,
                 ShortcutId::Trigger.as_str(),
                 ShortcutId::AnkiAdd.as_str()
             ),
             Selection::Native(NativeReason::NoPortal) => format!(
-                "trigger: control socket only (ADR-0003 rung 2) - no {} on the session bus; bind `{} ctl trigger-down|trigger-up` in your compositor",
+                "trigger: control socket only (ladder rung 2) - no {} on the session bus; bind `{} ctl trigger-down|trigger-up` in your compositor",
                 portal::SHORTCUTS_INTERFACE,
                 crate::paths::shell_quote(exe)
             ),
@@ -243,8 +245,8 @@ impl Selection {
     }
 }
 
-/// Walk the trigger ladder (ADR-0003). `portal` is the D-Bus probe the
-/// caller already ran.
+/// Walk the trigger ladder (ARCHITECTURE.md#input-ladders). `portal`
+/// is the D-Bus probe the caller already ran.
 pub fn select(portal: bool, ov: ChannelOverride) -> Selection {
     match (ov, portal) {
         (ChannelOverride::Auto | ChannelOverride::Portal, true) => Selection::Portal,
@@ -273,9 +275,9 @@ pub fn preferred(config: &chibipop::config::Config) -> [(ShortcutId, String); 2]
 /// it is `LOGO` — the portal is entitled to reject the other spelling.
 /// And a single letter is lower-cased, because `F` is the keysym
 /// `XKB_KEY_F` (i.e. shifted) while the spec asks for the base layer:
-/// ADR-0003's `ALT+F` default means Alt plus the F *key*. Longer
-/// identifiers (`Return`, `F1`, `space`) are passed through verbatim:
-/// they are keysym names already, and case is part of the name.
+/// the `ALT+F` default means Alt plus the F *key*. Longer identifiers
+/// (`Return`, `F1`, `space`) are passed through verbatim: they are
+/// keysym names already, and case is part of the name.
 pub fn normalize_trigger(chord: &str) -> String {
     let parts: Vec<&str> = chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
     let Some((key, modifiers)) = parts.split_last() else {
@@ -312,8 +314,8 @@ pub enum Action {
     /// Exactly what the control socket's verb does — one code path for
     /// every rung, so a portal press and a `chibipop ctl <verb>` cannot
     /// drift apart. There is no second kind of effect on purpose: every
-    /// global action has a verb (ADR-0003's 2026-08-26 addendum), so a
-    /// portal signal is only ever a verb or nothing.
+    /// global action has a verb, so a portal signal is only ever a verb
+    /// or nothing.
     Verb(Verb),
     /// Nothing to do.
     Nothing,
@@ -322,8 +324,8 @@ pub enum Action {
 /// One `Activated`/`Deactivated` mapped onto the daemon's vocabulary.
 pub fn action(id: ShortcutId, activated: bool) -> Action {
     match (id, activated) {
-        // The hold, both halves (ADR-0003: press *and* release arrive on
-        // both rungs).
+        // The hold, both halves: press *and* release arrive on both
+        // rungs.
         (ShortcutId::Trigger, true) => Action::Verb(Verb::TriggerDown),
         (ShortcutId::Trigger, false) => Action::Verb(Verb::TriggerUp),
         (ShortcutId::AnkiAdd, true) => Action::Verb(Verb::AnkiAdd),
@@ -352,9 +354,10 @@ pub fn portal_detail(bindings: &[Binding]) -> String {
 /// and `why` is the part a user can act on.
 ///
 /// Names the verbs, not the binary: a status row has one short line
-/// (ADR-0006), and a bare `chibipop` in it would be a command that does
-/// not resolve under `cargo run` (ticket 51). The bind lines that do
-/// name the running exe are the settings window's snippet.
+/// (ARCHITECTURE.md#platform-integration), and a bare `chibipop` in it
+/// would be a command that does not resolve under `cargo run`
+/// (ticket 51). The bind lines that do name the running exe are the
+/// settings window's snippet.
 pub fn native_detail(why: &str) -> String {
     format!("control socket (`ctl trigger-down`) - {why}")
 }
@@ -376,7 +379,7 @@ pub fn native_reason(reason: NativeReason) -> String {
 mod tests {
     use super::*;
 
-    /// ADR-0003's whole consent argument: two ids, no more, ever. A new
+    /// The whole consent argument: two ids, no more, ever. A new
     /// variant has to break this test on purpose.
     #[test]
     fn exactly_two_ids_exist_and_they_round_trip() {

@@ -4,10 +4,10 @@ Measured 2026-08-29 with [tools/hover-parse-bench](../../tools/hover-parse-bench
 against the same corpus as [dict-shapes.md](dict-shapes.md), on an AMD Ryzen 7
 9800X3D under `rustc 1.98.0`, stock `--release`.
 
-This doc exists to settle one assertion in
-[.scratch/dict-render-parity/spec.md](../../.scratch/dict-render-parity/spec.md):
-"hover runs roughly 25 point queries and cannot afford a parse", on which the spec
-parses structured content at dictionary build time and stores the typed tree.
+This doc exists to settle one assertion made by the dictionary render-parity
+effort: "hover runs roughly 25 point queries and cannot afford a parse", on
+which that effort parses structured content at dictionary build time and
+stores the typed tree.
 
 **Superseded in two places by [lookup-cost.md](lookup-cost.md).** The fan-out is 139
 point queries at p50, not 25, and 131 of them miss; and the 63 µs figure below is one

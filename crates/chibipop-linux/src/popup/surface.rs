@@ -1,5 +1,5 @@
-//! The layer surfaces (ADR-0004): one per output, all mapped at
-//! startup, hidden by a transparent buffer and never unmapped.
+//! The layer surfaces: one per output, all mapped at startup, hidden
+//! by a transparent buffer and never unmapped.
 //!
 //! Why one per output: a layer surface's output is fixed at creation
 //! and its margins are relative to that output, so `output = NULL`
@@ -73,9 +73,9 @@ const NAMESPACE: &str = "chibipop";
 /// paced it before painting anyway.
 ///
 /// Frame gating bounds work by the refresh rate instead of the cursor
-/// event rate (ADR-0004), but callbacks stop arriving entirely for an
-/// occluded surface - a fullscreen client above an `overlay` popup that
-/// is currently hidden - and a gate that waits forever would wedge the
+/// event rate, but callbacks stop arriving entirely for an occluded
+/// surface - a fullscreen client above an `overlay` popup that is
+/// currently hidden - and a gate that waits forever would wedge the
 /// popup shut. Six frames at 60 Hz: long enough that a real cadence is
 /// never broken, short enough that no user sees the popup stall.
 const FRAME_GRACE: Duration = Duration::from_millis(100);
@@ -110,11 +110,12 @@ pub struct Placed {
 
 /// A frame that is waiting for the compositor.
 ///
-/// Commits coalesce to one pending state (ADR-0004): work is bounded by
-/// the refresh rate rather than the cursor-event rate, at the cost of
-/// up to one frame of positional latency. Show and hide are *not*
-/// gated - a hidden or occluded surface receives no frame callbacks, so
-/// gating them would deadlock the popup shut.
+/// Every commit is frame-gated, and commits coalesce to one pending
+/// state: work is bounded by the refresh rate rather than the
+/// cursor-event rate, at the cost of up to one frame of positional
+/// latency. Show and hide are the two exceptions and must never be
+/// gated - a hidden or occluded surface receives no frame callbacks,
+/// so gating them would deadlock the popup shut.
 struct Pending {
     placement: Placement,
     scale: f64,
@@ -205,8 +206,9 @@ pub struct Popup {
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
-    /// The seat's pointer and where it is (ADR-0003): the popup's whole
-    /// input story, since Wayland has no machine-wide mouse hook.
+    /// The seat's pointer and where it is: the popup's whole input
+    /// story, since Wayland has no machine-wide mouse hook
+    /// (ARCHITECTURE.md#input-ladders).
     pointer: Pointer,
     /// The frame on screen, as the pointer resolves against it. Taken
     /// from every repaint and dropped by every hide, so a hit can never
@@ -286,12 +288,12 @@ impl Popup {
             notes.push(warning);
         }
 
-        // The pointer (ADR-0003). The seat is bound now and the pointer
-        // itself arrives with the seat's `capabilities` event, which is
-        // also where a pointer plugged in later shows up. No
-        // `wp_cursor_shape_v1` means the cursor is simply left as it
-        // was over the panel: loading XCursor themes ourselves is
-        // exactly what ADR-0004 refused.
+        // The pointer (ARCHITECTURE.md#input-ladders). The seat is
+        // bound now and the pointer itself arrives with the seat's
+        // `capabilities` event, which is also where a pointer plugged
+        // in later shows up. No `wp_cursor_shape_v1` means the cursor
+        // is simply left as it was over the panel: this popup never
+        // loads XCursor themes itself.
         let shapes = CursorShapeManager::bind(globals, qh).ok();
         if shapes.is_none() {
             notes.push(
@@ -448,7 +450,7 @@ impl Popup {
         self.current.as_ref()
     }
 
-    // ---- pointer input (ADR-0003) ----
+    // ---- pointer input ----
 
     /// The seat, for SCTK's own `wl_seat` dispatch.
     pub fn seats(&mut self) -> &mut SeatState {
@@ -655,9 +657,9 @@ impl Popup {
         let scale = self.fractional.as_ref().map(|f| f.get_fractional_scale(&surface, qh, id));
         let layer = shell.create_layer_surface(qh, surface, self.layer, Some(NAMESPACE), Some(output));
         self.next_id += 1;
-        // Inviolable (ADR-0004): the popup must never reserve space,
-        // never take keyboard focus, and be positioned by margins from
-        // the top-left corner of *this* output.
+        // Inviolable: the popup must never reserve space, never take
+        // keyboard focus, and must be positioned by margins from the
+        // top-left corner of *this* output.
         layer.set_anchor(Anchor::TOP | Anchor::LEFT);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -690,7 +692,7 @@ impl Popup {
     }
 
     /// An output went away, or its surface was closed by the
-    /// compositor: routine recreation, not an error (ADR-0004).
+    /// compositor: routine recreation, not an error.
     pub fn drop_output(&mut self, output: &WlOutput) {
         let Some(slot) = self.panels.iter().position(|p| &p.output == output) else { return };
         let id = self.panels[slot].id;
@@ -721,12 +723,13 @@ impl Popup {
         // The popup's half of the reload. `reload` arrives here for two
         // reasons at once: the settings window applied a config, and the
         // settings window finished a rebuild - the socket carries no way to
-        // tell them apart (ADR-0005: the config file is the only truth), and
-        // nothing here needs to. Reopening on a plain config reload costs one
-        // `sqlite3_open` and an emptied cache; not reopening after a rebuild
-        // costs the popup every gaiji it draws, because a rebuild renames a
-        // new file over this path and re-numbers the `dict_id` this cache is
-        // keyed on. The worker reopens its own handle off the same event.
+        // tell them apart (ARCHITECTURE.md#settings-and-config: the config
+        // file is the only truth), and nothing here needs to. Reopening on
+        // a plain config reload costs one `sqlite3_open` and an emptied
+        // cache; not reopening after a rebuild costs the popup every gaiji
+        // it draws, because a rebuild renames a new file over this path and
+        // re-numbers the `dict_id` this cache is keyed on. The worker
+        // reopens its own handle off the same event.
         self.media = open_media(&self.db, &mut self.notes);
         let layer = layer_of(config.popup_layer());
         if layer != self.layer {
@@ -972,10 +975,10 @@ impl Popup {
         if let Some(viewport) = &panel.viewport {
             viewport.set_destination(pending.placement.logical.0.max(1), pending.placement.logical.1.max(1));
         }
-        // The whole panel accepts input while it is shown: ADR-0003
-        // moved wheel and click onto the popup's own region, and
-        // Wayland has no machine-wide mouse hook to synthesize them
-        // from. Region coordinates are surface-local, i.e. logical.
+        // The whole panel accepts input while it is shown: wheel and
+        // click live on the popup's own region, and Wayland has no
+        // machine-wide mouse hook to synthesize them from. Region
+        // coordinates are surface-local, i.e. logical.
         if let Ok(wl) = Region::new(&self.compositor) {
             if let Some((x, y, w, h)) = region.rect() {
                 wl.add(x, y, w, h);
@@ -1077,9 +1080,10 @@ fn open_media(
     }
 }
 
-/// The theme a config asks for. Same shape as the Windows bin's
-/// `theme_from_config`, so the two platforms disagree about nothing but
-/// the default family.
+/// The theme a config asks for. Not the same as the Windows bin's
+/// `theme_from_config`: that one also reads and parses `popup.css`,
+/// which Linux never does, so a CSS override lands on Windows and is
+/// silently ignored here (issue #53).
 fn theme_from_config(config: &Config) -> Theme {
     let mut theme = match config.popup.theme.as_str() {
         "light" => Theme::light(),
@@ -1219,7 +1223,7 @@ impl Dispatch<WpFractionalScaleV1, usize> for App {
 impl CompositorHandler for App {
     /// The integer `wl_surface` scale. Irrelevant here: the popup keeps
     /// `buffer_scale` at 1 and sizes its buffer from the *fractional*
-    /// scale instead (ADR-0004).
+    /// scale instead, which is never latched.
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<App>, _: &WlSurface, _: i32) {}
 
     fn transform_changed(

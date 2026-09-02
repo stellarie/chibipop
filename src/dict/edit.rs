@@ -48,8 +48,9 @@ pub struct Added {
 /// Any archive, whatever it supplies: a Dictionary holds a set of roles, so
 /// one with frequency data and no term bank simply contributes no term rows
 /// and still gets the `dict` row its stored claims and accents hang off
-/// (ADR-0014). The refusal that used to stand here rejected an archive for
-/// being called something with `Freq` in it.
+/// (ARCHITECTURE.md#dictionary-and-lookup). The refusal that used to
+/// stand here rejected an archive for being called something with
+/// `Freq` in it.
 pub fn add_dictionary(
     conn: &mut Connection,
     archive: &Path,

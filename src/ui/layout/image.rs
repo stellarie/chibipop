@@ -11,8 +11,8 @@
 //!
 //! The room comes from the same trick [`ruby`](super::ruby) uses and for
 //! the same reason: the measurement seam takes styled spans and no boxes
-//! (ADR-0013), so a replaced element can only occupy a line by *being* a
-//! span the measurer charges for.
+//! (ARCHITECTURE.md#popup-and-measurement), so a replaced element can only
+//! occupy a line by *being* a span the measurer charges for.
 
 use crate::dict::gloss::{GlossDoc, NodeId, NodePath, Scalar};
 use crate::dict::media::{Intrinsic, MediaKey};
@@ -32,17 +32,16 @@ use super::style::{finite, shift_on, Inline};
 /// measured, and it is the whole of
 /// how an inline image occupies a
 /// line. The measurement seam takes
-/// styled spans and no boxes
-/// (ADR-0013), so a replaced element
-/// can only take room by *being* a
-/// span the measurer charges for - and
-/// editing the line boxes afterwards
-/// would fool nobody, because both
-/// bins re-measure an element's own
-/// spans to paint it and would get the
-/// ungrown lines back. Ticket 11's
-/// ruby filler is the same trick for
-/// the same reason.
+/// styled spans and no boxes, so a
+/// replaced element can only take room
+/// by *being* a span the measurer
+/// charges for - and editing the line
+/// boxes afterwards would fool nobody,
+/// because both bins re-measure an
+/// element's own spans to paint it and
+/// would get the ungrown lines back.
+/// Ticket 11's ruby filler is the same
+/// trick for the same reason.
 ///
 /// So the run asks, and this decides
 /// what it asks for. Two ratios are
@@ -487,15 +486,15 @@ pub(super) const NO_IMAGE: u32 = u32::MAX;
 ///
 /// An inline image is a replaced
 /// element, and the measurement seam
-/// takes styled spans and no boxes
-/// (ADR-0013) - so the only way an
-/// image can occupy room on a line is
-/// to *be* a span the measurer
-/// charges for. Growing the line
-/// boxes afterwards would fool
-/// nobody: both bins re-measure an
-/// element's own spans to paint it and
-/// would get the ungrown lines back.
+/// takes styled spans and no boxes -
+/// so the only way an image can occupy
+/// room on a line is to *be* a span
+/// the measurer charges for. Growing
+/// the line boxes afterwards would
+/// fool nobody: both bins re-measure
+/// an element's own spans to paint it
+/// and would get the ungrown lines
+/// back.
 ///
 /// Three properties earn this
 /// character the job. It carries no

@@ -3,12 +3,12 @@
 //! **One reason to change:** what a bin paints and what a geometry snapshot
 //! pins. Everything here is comparable data with no measurer, no document
 //! and no setting behind it, because both readers need exactly that - a bin
-//! walks it to paint, and the Windows golden capture walks it to serialise
-//! (ADR-0011). A field added here is a field thirteen goldens change for.
+//! walks it to paint, and the Windows golden capture walks it to serialise.
+//! A field added here is a field thirteen goldens change for.
 //!
 //! One pixel space and no scale factor: core never sees one. Windows hands
 //! in DIPs because its Direct2D target carries the DPI, Linux hands in
-//! device pixels; either way the conversion is the bin's (ADR-0004).
+//! device pixels; either way the conversion is the bin's.
 
 use crate::controller::HitAction;
 use crate::dict::gloss::NodePath;
@@ -195,11 +195,11 @@ pub struct ElemSpan {
     /// resolved against the line the
     /// span landed on: the seam
     /// reports the baseline and this
-    /// is the arithmetic ADR-0013
-    /// exists to make possible. Zero
-    /// for every span that sits on
-    /// its line's own baseline, which
-    /// is nearly all of them.
+    /// is the arithmetic it makes
+    /// possible. Zero for every span
+    /// that sits on its line's own
+    /// baseline, which is nearly all
+    /// of them.
     pub shift: f32,
 }
 
@@ -293,8 +293,8 @@ impl RubyBox {
 /// wrapped item under the bullet,
 /// because a [`SceneElem`] is one run
 /// at one wrap width painted from one
-/// origin (ADR-0013) and every line of
-/// it therefore starts at the same x.
+/// origin and every line of it
+/// therefore starts at the same x.
 ///
 /// `x` and `y` are run-relative, like
 /// the [`LineBox`] the marker was
@@ -810,11 +810,11 @@ pub struct PaintedRow<'a> {
 ///
 /// Core reserves the strip under the
 /// panel and names the label;
-/// realisation is per-bin (ADR-0004).
-/// Windows gives the affordance its
-/// own window, sized by that window's
-/// own font, and takes only the strip;
-/// a bin painting in the panel uses
+/// realisation is per-bin. Windows
+/// gives the affordance its own
+/// window, sized by that window's own
+/// font, and takes only the strip; a
+/// bin painting in the panel uses
 /// `rect` whole.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnkiSlot {

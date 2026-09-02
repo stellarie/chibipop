@@ -1,6 +1,7 @@
 //! Trigger mode's hold: what the control socket's three trigger verbs do
-//! to it, and when it needs a fresh press-time grab (ADR-0003's verb set,
-//! ADR-0010's freeze).
+//! to it, and when it needs a fresh press-time grab. The verb set lives
+//! at ARCHITECTURE.md#input-ladders, the freeze at
+//! ARCHITECTURE.md#hover-cadence.
 //!
 //! All decision, no effect: the daemon owns the cursor, the Worker and the
 //! popup, and this owns the rules about them. That is what makes "a
@@ -16,7 +17,7 @@ use chibipop::geom::{PhysPoint, PhysRect};
 pub struct Hold {
     /// The box the press-time grab covers. A cursor leaving it has
     /// crossed onto another output, which is the one thing mid-hold that
-    /// takes a fresh grab (ADR-0010).
+    /// takes a fresh grab (ARCHITECTURE.md#hover-cadence).
     pub output: PhysRect,
     /// Started by `toggle`, so a key release must not end it.
     pub latched: bool,
@@ -35,7 +36,7 @@ pub enum Step {
     Nothing(&'static str),
 }
 
-/// `trigger-down`: every press grabs fresh (ADR-0010).
+/// `trigger-down`: every press grabs fresh.
 pub fn down(hold: Option<Hold>) -> Step {
     Step::Freeze { latched: hold.is_some_and(|h| h.latched) }
 }
@@ -63,10 +64,10 @@ pub fn toggle(hold: Option<Hold>) -> Step {
 /// The fresh grab a moved cursor needs, or `None` while it is still on
 /// the output the hold already froze.
 ///
-/// ADR-0010: crossing outputs mid-hold takes one fresh full grab of the
-/// entered output - "hold and glance at the other monitor" works, and a
-/// dead second monitor would read as a bug. Staying put costs nothing,
-/// which is what keeps a hold at one copy.
+/// Crossing outputs mid-hold takes one fresh full grab of the entered
+/// output (ARCHITECTURE.md#hover-cadence) - "hold and glance at the
+/// other monitor" works, and a dead second monitor would read as a bug.
+/// Staying put costs nothing, which is what keeps a hold at one copy.
 pub fn regrab(hold: Hold, geoms: &[OutputGeometry], pos: PhysPoint) -> Option<PhysRect> {
     if hold.output.contains(pos) {
         return None;

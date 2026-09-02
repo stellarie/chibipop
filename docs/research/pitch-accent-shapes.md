@@ -14,10 +14,9 @@ what a pitch payload is *permitted* to contain.
 `term_meta_bank_*.json` row of every archive read, no sampling. This says what
 is *used*.
 
-This doc exists because ticket 02 of
-[.scratch/dictionary-roles/spec.md](../../.scratch/dictionary-roles/spec.md) has
-to choose a storage shape and write a parser, and today the whole of what this
-repo knows about pitch is [dict-shapes.md:347-353](dict-shapes.md): it exists,
+This doc exists because ticket 02 of the dictionary-roles effort has to choose
+a storage shape and write a parser, and today the whole of what this repo
+knows about pitch is [dict-shapes.md:347-353](dict-shapes.md): it exists,
 it is numeric mora data in `term_meta_bank`, and chibipop throws it away.
 
 ## Headline
@@ -1138,4 +1137,4 @@ with zipfile.ZipFile(__import__("os").path.expanduser(path)) as z:
   the archive at import is ticket 02's call, not this doc's.
 - **Nothing about rendering.** The census bounds the header row at 4 accents
   over readings up to 19 morae; it does not say that fits, and the spec settles
-  the notation. Layout correctness belongs to the geometry goldens (ADR-0011).
+  the notation. Layout correctness belongs to the geometry goldens.

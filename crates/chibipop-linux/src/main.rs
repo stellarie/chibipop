@@ -4,8 +4,9 @@
 #![warn(unsafe_op_in_unsafe_fn)]
 
 //! The Linux/Wayland platform adapter: this package *is* the adapter
-//! (ADR-0001). Per-platform bins compile everywhere, run on their own OS
-//! (ADR-0007): on a foreign target this bin is a two-line refusal, so
+//! (ARCHITECTURE.md#workspace-and-seams). Per-platform bins compile
+//! everywhere, run on their own OS (ARCHITECTURE.md#packaging-and-ci):
+//! on a foreign target this bin is a two-line refusal, so
 //! `cargo test --workspace` stays one command on both CI runners with no
 //! cross-compilation. All Wayland/POSIX code sits behind
 //! `cfg(target_os = "linux")` — the stub pulls in none of it.

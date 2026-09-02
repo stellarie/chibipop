@@ -22,7 +22,8 @@ pub struct FreqSource {
 /// `index.json`: the heuristic this replaced asked whether the file was
 /// called something containing `Freq` and whether the index set
 /// `frequencyMode`, and neither can say what an archive contains
-/// (ADR-0014). The same shape [`crate::dict::pitch::supplies_pitch`] and
+/// (ARCHITECTURE.md#dictionary-and-lookup). The same shape
+/// [`crate::dict::pitch::supplies_pitch`] and
 /// [`crate::dict::archive::supplies_terms`] take.
 ///
 /// Stops at the first `"freq"` row, so a frequency archive answers from the
@@ -105,7 +106,7 @@ fn extract_reading_and_rank(payload: &serde_json::Value) -> (Option<String>, Opt
 /// rank, not a zero and not a vote - so a strategy is only ever handed the
 /// ranks that exist, and a headword no enabled dictionary ranks reduces to
 /// `None`. That `None` is the `NULL` in `term.freq` that leaves `score` on
-/// its `DEFAULT_FREQ` fallback (ADR-0015).
+/// its `DEFAULT_FREQ` fallback (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// The three kebab-case names are the *one* spelling: `meta.frequency_strategy`
 /// records them through [`RankingStrategy::as_str`], `[dictionaries]` writes

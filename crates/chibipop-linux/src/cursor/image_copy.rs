@@ -1,7 +1,7 @@
 //! Rung 1: the ext-image-copy-capture pointer cursor session
-//! (ADR-0003). Event-driven — positions arrive on the daemon's
-//! existing Wayland calloop source, so a parked cursor costs zero
-//! wakeups (ADR-0010).
+//! (ARCHITECTURE.md#input-ladders). Event-driven — positions arrive on
+//! the daemon's existing Wayland calloop source, so a parked cursor
+//! costs zero wakeups (ARCHITECTURE.md#hover-cadence).
 //!
 //! Only the *cursor session* is created, never the inner capture
 //! session: this ticket wants positions, not pixels. The session's
@@ -153,8 +153,9 @@ impl CursorState {
     /// Every output's layout facts, in registry order.
     ///
     /// The portal capture rung anchors its monitors against these
-    /// (ADR-0002 rung 2), and both seams must use the same numbers or
-    /// a hover on the second monitor lands on the first.
+    /// (capture ladder rung 2, ARCHITECTURE.md#capture-and-masking),
+    /// and both seams must use the same numbers or a hover on the
+    /// second monitor lands on the first.
     pub fn geometries(&self) -> Vec<OutputGeometry> {
         self.outputs.values().map(|e| e.geo).collect()
     }
@@ -365,13 +366,14 @@ impl Dispatch<WlRegistry, ()> for Probe {
 
 /// Settle output geometry on a connection nobody else holds.
 ///
-/// The portal capture rung's consent is *eager* (ADR-0002): it runs
-/// before the pump exists, and the channel-status row it produces has
-/// to be right the first time the tray is published - which means the
-/// monitors it approves must be anchorable before `App` and its queue
-/// are built. Two roundtrips on a throwaway connection is a smaller
-/// price than reordering the whole startup around a dialog, and it is
-/// only paid on the sessions that select that rung.
+/// The portal capture rung's consent is *eager*
+/// (ARCHITECTURE.md#capture-and-masking): it runs before the pump
+/// exists, and the channel-status row it produces has to be right the
+/// first time the tray is published - which means the monitors it
+/// approves must be anchorable before `App` and its queue are built.
+/// Two roundtrips on a throwaway connection is a smaller price than
+/// reordering the whole startup around a dialog, and it is only paid
+/// on the sessions that select that rung.
 ///
 /// An empty answer is normal, not an error: the caller degrades to an
 /// unanchored stream rather than refusing to start.

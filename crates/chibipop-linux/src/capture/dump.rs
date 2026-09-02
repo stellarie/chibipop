@@ -1,7 +1,7 @@
 //! `chibipop capture-dump`: the capture backends' own eyes.
 //!
 //! A diagnostic, like `probe`, and no part of the product: it opens the
-//! real backend the ADR-0002 ladder picks for this session, grabs real
+//! real backend the capture ladder picks for this session, grabs real
 //! boxes, writes PNGs, and prints what each grab decided - so a dwell
 //! on a static screen can be *watched* answering without copying, and
 //! damage can be watched arriving. Without it the only proof of a
@@ -48,7 +48,7 @@ pub struct Args {
     /// Grab each output whole instead of a centred sample.
     pub full: bool,
     /// Where the portal rung's restore token lives, so the dump and
-    /// the daemon share one grant (ADR-0002).
+    /// the daemon share one grant.
     pub state_dir: PathBuf,
 }
 

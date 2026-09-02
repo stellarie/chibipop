@@ -1,5 +1,5 @@
 //! The measurement seam: what core asks a text engine for, and what comes
-//! back (ADR-0004, widened by ADR-0013).
+//! back.
 //!
 //! **One reason to change:** the contract between core and a platform text
 //! engine. Nothing here knows what a popup is - it is styled spans, a wrap
@@ -14,11 +14,11 @@ use super::scene::Rgb;
 
 /// One run of text with one style.
 ///
-/// The finest unit the seam addresses
-/// (ADR-0013). Colour rides along for
-/// the bin's paint walk, which shapes
-/// the same spans; no measurer reads
-/// it and no geometry depends on it.
+/// The finest unit the seam addresses.
+/// Colour rides along for the bin's
+/// paint walk, which shapes the same
+/// spans; no measurer reads it and no
+/// geometry depends on it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyledSpan<'a> {
     pub text: &'a str,
@@ -35,10 +35,9 @@ pub struct StyledSpan<'a> {
 ///
 /// Its spans wrap as one paragraph, so
 /// a span boundary is not a line
-/// boundary. That is the whole of what
-/// ADR-0013 widened: before it, bold
-/// text and normal text could not
-/// share a wrapped line.
+/// boundary. That one fact is what
+/// lets bold text and normal text
+/// share one wrapped line.
 #[derive(Debug, Clone, Copy)]
 pub struct MeasureRun<'a> {
     /// In reading order.
@@ -89,7 +88,7 @@ pub struct LineBox {
     /// text size are all positions
     /// relative to this, so without it
     /// there is no arithmetic to place
-    /// them, only a guess (ADR-0013).
+    /// them, only a guess.
     pub baseline: f32,
 }
 
@@ -199,8 +198,7 @@ impl std::error::Error for MeasureError {}
 /// paints, and the scene it feeds
 /// carries positioned runs as plain
 /// data, so layout is testable against
-/// fixed metrics (ADR-0004, amended by
-/// ADR-0013).
+/// fixed metrics.
 pub trait TextMeasure {
     /// Wrap `run` and measure it.
     ///

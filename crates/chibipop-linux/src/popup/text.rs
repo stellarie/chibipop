@@ -1,5 +1,5 @@
 //! The Linux text stack: cosmic-text behind core's `TextMeasure`, plus
-//! the paint half and the startup Japanese-font probe (ADR-0004).
+//! the paint half and the startup Japanese-font probe.
 //!
 //! **The locale is the whole feature.** cosmic-text picks a Han fallback
 //! through `han_unification(locale)`, and on unix only `"ja"` yields
@@ -12,9 +12,9 @@
 //! never by `FontSystem::new()`.
 //!
 //! **One shaping path.** `measure` and `draw_run` both go through
-//! [`shape`], so a run is never wrapped one way and painted another
-//! (ADR-0004). Windows earns the same property by routing both through
-//! one `IDWriteTextLayout`; the twin here is
+//! [`shape`], so a run is never wrapped one way and painted another.
+//! Windows earns the same property by routing both through one
+//! `IDWriteTextLayout`; the twin here is
 //! `chibipop-windows/src/ui/render.rs`'s `Text::layout`.
 //!
 //! **Physical pixels only.** `size` and `max_w` arrive already scaled by
@@ -77,8 +77,8 @@ pub const PACKAGE: &str = "noto-fonts-cjk";
 pub struct TextEngine {
     fonts: FontSystem,
     /// Rasterized glyph images, keyed by face+size+subpixel offset. The
-    /// popup re-shapes on every paint (ADR-0004) and this is what makes
-    /// that free after the first frame.
+    /// popup re-shapes on every paint and this is what makes that free
+    /// after the first frame.
     swash: SwashCache,
     /// The family the config resolved to, used for painting. `measure`
     /// takes its family from the run instead, because core carries the
@@ -96,10 +96,9 @@ impl TextEngine {
         // family names too, so nothing ever consults them.
         //
         // Locale `"ja"`, and never `FontSystem::new()`: see the module
-        // doc and ADR-0004 ("Fractional scale and fonts"). The default
-        // arm of cosmic-text's `han_unification` is Simplified Chinese,
-        // so a system locale of `en-US` would silently render kanji with
-        // Chinese glyph variants.
+        // doc. The default arm of cosmic-text's `han_unification` is
+        // Simplified Chinese, so a system locale of `en-US` would
+        // silently render kanji with Chinese glyph variants.
         TextEngine {
             fonts: FontSystem::new_with_locale_and_db("ja".to_string(), db),
             swash: SwashCache::new(),
@@ -170,8 +169,7 @@ impl TextEngine {
     /// The one shaping call.
     ///
     /// Measure and paint both come through here, on the same styled
-    /// spans, so a run is never wrapped one way and painted another
-    /// (ADR-0004).
+    /// spans, so a run is never wrapped one way and painted another.
     ///
     /// An associated function, not a method, so a caller can hand it
     /// `&mut self.fonts` while still holding `&self.family`.
@@ -196,8 +194,9 @@ impl TextEngine {
         buffer.set_wrap(Wrap::WordOrGlyph);
         // `set_rich_text`, not `set_text`: the spans wrap as one
         // paragraph, so a span boundary is not a line boundary and bold
-        // text can share a line with normal text (ADR-0013). Per-span
-        // `metrics` is what carries each span's own size into the line
+        // text can share a line with normal text
+        // (ARCHITECTURE.md#popup-and-measurement). Per-span `metrics`
+        // is what carries each span's own size into the line
         // height cosmic-text takes the maximum of - the default attrs
         // deliberately carry none, so a glyphless line still falls back
         // to the buffer's.
@@ -373,8 +372,8 @@ impl PanelText for TextEngine {
                 };
                 let shift = run.shifts.get(index).copied().unwrap_or(0.0);
                 // `verticalAlign` raises the glyph off the baseline its
-                // line reported, which is the whole arithmetic
-                // ADR-0013's baseline exists for.
+                // line reported, which is the whole arithmetic the
+                // measured baseline exists for.
                 let placed = glyph.physical((0.0, line.line_y - shift), 1.0);
                 let (r, g, b) = span.color;
                 let (gx, gy) = (placed.x.saturating_add(ox), placed.y.saturating_add(oy));
@@ -751,11 +750,11 @@ fn bucket(family: &str) -> Bucket {
 /// Does this family name read as Japanese?
 ///
 /// The per-name half of [`classify`], for the settings font combo
-/// (ADR-0005: the combo is populated from fontdb's JP-capable
-/// families). A name question only - there is no shaping here, so
-/// unlike [`classify`] it cannot know what a face's cmap holds. That is
-/// the right trade for a combo, which offers candidates rather than
-/// passing a verdict on the machine.
+/// (ARCHITECTURE.md#settings-and-config: the combo is populated from
+/// fontdb's JP-capable families). A name question only - there is no
+/// shaping here, so unlike [`classify`] it cannot know what a face's
+/// cmap holds. That is the right trade for a combo, which offers
+/// candidates rather than passing a verdict on the machine.
 pub fn jp_capable(family: &str) -> bool {
     matches!(bucket(family), Bucket::Jp)
 }
@@ -823,7 +822,7 @@ pub fn warning(verdict: &JpFonts) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The family the Linux theme default names (ADR-0004).
+    /// The family the Linux theme default names.
     const JP: &str = "Noto Sans CJK JP";
 
     /// Anything needing real glyph geometry needs a real Japanese face,
@@ -903,7 +902,7 @@ mod tests {
         assert_ne!(regular, bold, "a bold role must not shape in the regular face");
     }
 
-    /// The one invariant ADR-0004 built this whole module around: with
+    /// The one invariant this whole module is built around: with
     /// no Japanese family named, kanji still resolve through
     /// cosmic-text's Han unification - and at locale `ja` that lands on
     /// the JP face, not the Simplified Chinese one. A regression here
@@ -1046,9 +1045,9 @@ mod tests {
         assert_eq!(JpFonts::Present { family: JP.to_string() }, engine.probe());
     }
 
-    /// The safety property ADR-0013 turns on: widening the seam must
-    /// not move a number. Every assertion here is the arithmetic the
-    /// one-string seam did - `lines × size × LINE_HEIGHT` for the
+    /// The safety property this test locks down: widening the seam
+    /// must not move a number. Every assertion here is the arithmetic
+    /// the one-string seam did - `lines × size × LINE_HEIGHT` for the
     /// height, the widest `line_w` for the width - so a single-span
     /// request that drifts fails here rather than in a golden.
     #[test]
@@ -1127,7 +1126,7 @@ mod tests {
         assert_eq!(line_height(20.0), m.lines[0].h, "the taller span sets the line");
         assert_eq!(m.lines[0].h, m.metrics.h);
         // One baseline for the line, inside it, which is the whole
-        // reason ADR-0013 made it a required output.
+        // reason it is a required output of the seam.
         let base = m.lines[0].baseline;
         assert!(base > 0.0 && base < m.lines[0].h, "baseline {base} outside the line");
     }

@@ -1,13 +1,15 @@
-//! Rung 3: `hyprctl cursorpos` adaptive polling (ADR-0003).
+//! Rung 3 of the cursor ladder (ARCHITECTURE.md#input-ladders):
+//! `hyprctl cursorpos` adaptive polling.
 //!
 //! Gated on HYPRLAND_INSTANCE_SIGNATURE — the one deliberate
-//! identity-based exception to ADR-0002's "never compositor identity"
-//! rule, documented in ADR-0003: ~50 lines, zero permissions, and it
-//! covers Hyprland versions below the ext-image-copy-capture floor.
+//! identity-based exception to the "never compositor identity" rule
+//! (ARCHITECTURE.md#capture-and-masking): ~50 lines, zero permissions,
+//! and it covers Hyprland versions below the ext-image-copy-capture
+//! floor.
 //!
-//! Cadence per ADR-0010 (`cursor::budget`): 20 ms while the cursor
-//! moves, decaying to ~150 ms after 5 s of quiet, bursting back to
-//! 20 ms on the first observed move.
+//! Cadence per `cursor::budget` (ARCHITECTURE.md#hover-cadence): 20 ms
+//! while the cursor moves, decaying to ~150 ms after 5 s of quiet,
+//! bursting back to 20 ms on the first observed move.
 
 use super::budget;
 use std::process::Command;

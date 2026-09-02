@@ -1,4 +1,4 @@
-//! Direct2D/DirectWrite paint (ADR-0004).
+//! Direct2D/DirectWrite paint.
 //!
 //! Hwnd target, not layered.
 //! Caller paints; wndproc won't.
@@ -138,7 +138,8 @@ impl Text {
     /// The whole run is one layout, so
     /// its spans wrap as one paragraph
     /// and a bold span can share a line
-    /// with a normal one (ADR-0013).
+    /// with a normal one
+    /// (ARCHITECTURE.md#popup-and-measurement).
     /// The first span's cached
     /// `IDWriteTextFormat` is the base
     /// and the rest override their own
@@ -447,8 +448,7 @@ fn scene_of(
     // The Anki affordance is its own
     // window here, sized by its own
     // font: Windows takes the label
-    // and leaves core's slot alone
-    // (ADR-0004).
+    // and leaves core's slot alone.
     layout::scene(
         &SceneRequest {
             presentation: p,
@@ -863,7 +863,8 @@ impl Renderer {
         // one paragraph, so painting
         // them one at a time would
         // re-break the lines the scene
-        // already measured (ADR-0013).
+        // already measured
+        // (ARCHITECTURE.md#popup-and-measurement).
         spans.clear();
         spans.extend(elem.styled_spans(&theme.font_name));
         let shifts: Vec<f32> = elem.spans.iter().map(|s| s.shift).collect();
@@ -1112,8 +1113,9 @@ impl Renderer {
     /// exactly what it drew before the
     /// seam widened. Colour is the one
     /// styled-span field measurement
-    /// ignores (ADR-0013), and this is
-    /// where it is answered.
+    /// ignores, and this is where it
+    /// is answered
+    /// (ARCHITECTURE.md#popup-and-measurement).
     ///
     /// `verticalAlign` costs one draw
     /// per *distinct* shift, because

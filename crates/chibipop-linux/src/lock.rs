@@ -1,4 +1,5 @@
-//! Single-instance lock (ADR-0006): `flock(LOCK_EX | LOCK_NB)` on
+//! Single-instance lock (ARCHITECTURE.md#platform-integration):
+//! `flock(LOCK_EX | LOCK_NB)` on
 //! `$XDG_RUNTIME_DIR/chibipop/run-$WAYLAND_DISPLAY.lock`.
 //!
 //! Kernel-released on any death — no stale-lock handling, and no unlink
@@ -44,7 +45,7 @@ pub fn file_name(display: &str) -> String {
 
 /// The settings window's own lock, beside the daemon's: one settings
 /// process per compositor instance, without ever contending with the
-/// daemon (ADR-0005).
+/// daemon (ARCHITECTURE.md#settings-and-config).
 pub fn settings_file_name(display: &str) -> String {
     format!("settings-{}.lock", sanitize(display))
 }
@@ -53,7 +54,8 @@ pub fn settings_file_name(display: &str) -> String {
 /// display: a rebuild rewrites files on disk, so what must never overlap
 /// is two writers of the *same library*, whichever session they belong
 /// to. Windows guards this with a named mutex; on Linux it is one more
-/// flock in the same per-user runtime dir (ADR-0005).
+/// flock in the same per-user runtime dir
+/// (ARCHITECTURE.md#settings-and-config).
 pub fn library_file_name(library: &Path) -> String {
     format!("library-{:016x}.lock", fnv1a(library))
 }

@@ -335,7 +335,7 @@ fn read_sheet(conn: &Connection, dict_id: i64) -> Option<Sheet> {
 /// in SQL rather than in a `HashMap`. It is that rule whichever ranking
 /// strategy the Frequency ranks were reduced under, because the popup's job
 /// is to report a number a reader can look up, and a median of three sources
-/// is not one (ADR-0015).
+/// is not one (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// One query per rendered entry, both sides of it index probes, and cached
 /// beside the tree it belongs to - so a repeated hover costs nothing and a
@@ -382,9 +382,10 @@ fn read_reported_freq(conn: &Connection, order: &[i64], entry_id: i64) -> Result
 /// One index probe per shown card, on `(term, reading)`, and every claim
 /// this database holds for that reading whichever dictionary made it: which
 /// of them are enabled and in what order is the pitch list's question, and
-/// the pitch list is config's (ADR-0014). A handful of rows come back - the
-/// census bounds a reading at four distinct accents over five dictionaries -
-/// so the reduction costs less than a second query would.
+/// the pitch list is config's (ARCHITECTURE.md#dictionary-and-lookup). A
+/// handful of rows come back - the census bounds a reading at four distinct
+/// accents over five dictionaries - so the reduction costs less than a
+/// second query would.
 ///
 /// The hot term statement is untouched and cannot come here: pitch is per
 /// reading, and a `term` row is per surface. This is read once per card the
@@ -920,7 +921,8 @@ mod tests {
     /// Every field the table holds comes back, markers included, and the
     /// claims come back with the dictionary that made them rather than
     /// filtered or ordered: which are enabled and in what order is the pitch
-    /// list's question, and the pitch list is config's (ADR-0014).
+    /// list's question, and the pitch list is config's
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn a_pitch_read_returns_every_claim_with_its_dictionary_and_its_markers() {
         let path = fixture_path("a_pitch_read_returns_every_claim");
@@ -996,7 +998,7 @@ mod tests {
     /// reading, read once per shown card instead. Asserted as the plan
     /// SQLite makes of it, which is what "no join" actually means - one
     /// table, one index probe, and neither of the two per-dictionary tables
-    /// anywhere in it (ADR-0014).
+    /// anywhere in it (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn the_term_statement_still_plans_as_one_index_probe_with_no_join() {
         let path = fixture_path("the_term_statement_still_plans");

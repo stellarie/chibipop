@@ -1,4 +1,4 @@
-//! Layout against fixed metrics (ADR-0011, layer one).
+//! Layout against fixed metrics: the platform-free layer.
 //!
 //! `FakeMeasure` wraps at a whole number of pixels per UTF-16 unit, so
 //! every expectation below is arithmetic a reader can redo by hand. No
@@ -157,10 +157,9 @@ fn wrap(run: MeasureRun<'_>) -> (Vec<Frag>, Measured) {
             // LB12 and LB12a, over the
             // run's whole text: a span
             // boundary is not a line
-            // boundary (ADR-0013), so the
-            // character before this one
-            // may belong to the span
-            // before it.
+            // boundary, so the character
+            // before this one may belong
+            // to the span before it.
             let after_glue = prev.is_some_and(glue);
             let before_glue = glue(c) && !prev.is_some_and(|p| p == ' ' || p == '\t');
             let breakable = !after_glue && !before_glue;
@@ -1143,7 +1142,7 @@ fn one_span_measures_to_one_line_box_that_fills_the_run() {
 /// fit share one line, sit end to end
 /// across it, and hang off one
 /// baseline whatever their own heights
-/// are (ADR-0013).
+/// are.
 #[test]
 fn spans_that_fit_share_one_line_and_one_baseline() {
     // 4 units at 10px plus 4 at 20px:
@@ -1172,8 +1171,8 @@ fn spans_that_fit_share_one_line_and_one_baseline() {
 /// boundary: the second span keeps
 /// filling the line the first left off
 /// on, and wraps mid-span when it runs
-/// out. That is the single fact
-/// ADR-0013 exists to change.
+/// out. That single fact is what the
+/// whole inline pass rests on.
 #[test]
 fn a_span_wraps_within_itself_rather_than_at_its_boundary() {
     // 5px units, 8 to a 40px line.
@@ -1279,7 +1278,7 @@ fn items_in_one_style_coalesce_into_a_single_span() {
     asked_for(&asked, "raw; uncooked; natural");
 }
 
-/// The one thing ADR-0013 exists to change: a bold word and a normal word
+/// The single fact the inline pass turns on: a bold word and a normal word
 /// adjacent in the source share a line.
 #[test]
 fn a_bold_word_and_a_normal_word_share_one_wrapped_line() {
@@ -1382,7 +1381,7 @@ fn a_subscript_drops_and_an_explicit_vertical_align_agrees() {
 }
 
 /// The text-relative values are answered against the line the span landed
-/// on, which is the one fact only the measurer knows (ADR-0013).
+/// on, which is the one fact only the measurer knows.
 #[test]
 fn text_top_lifts_a_small_span_to_its_lines_own_text_top() {
     let theme = Theme::dark();
@@ -2946,10 +2945,10 @@ fn marker_x(e: &SceneElem) -> f32 {
 /// Where each line of an element's own run starts, in panel space.
 ///
 /// Exactly the arithmetic a bin does: it re-measures the element's spans
-/// at the element's wrap width and draws the whole run from one origin
-/// (ADR-0013), so a line's x is that origin plus the leftmost span box
-/// the seam put on it. This is the number that says whether a wrapped
-/// item's second line sits under its marker or under its text.
+/// at the element's wrap width and draws the whole run from one origin, so
+/// a line's x is that origin plus the leftmost span box the seam put on
+/// it. This is the number that says whether a wrapped item's second line
+/// sits under its marker or under its text.
 fn line_x(e: &SceneElem) -> Vec<f32> {
     let spans: Vec<StyledSpan<'_>> = e.styled_spans("").collect();
     let measured = fake_measure(&spans, e.wrap_w);
@@ -4976,7 +4975,7 @@ fn an_image_buys_its_room_from_the_measurer_and_not_after_the_wrap() {
         .expect("the riser is a span too");
     assert_eq!(BOX_EM, SPACER_ASCENT * riser.size, "and the height, above the baseline");
     // The probe is a real request through the seam, because only a
-    // measurer knows either ratio (ADR-0013).
+    // measurer knows either ratio.
     assert!(
         asked.iter().any(|a| a.text == IMAGE_SPACER && a.size == BOX_EM),
         "the pass probes one spacer at the image's own em"

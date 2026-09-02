@@ -1,5 +1,6 @@
-//! Which capture backend serves this session (ADR-0002), decided by
-//! *advertised capability* at startup and never by compositor identity.
+//! Which capture backend serves this session
+//! (ARCHITECTURE.md#capture-and-masking), decided by *advertised
+//! capability* at startup and never by compositor identity.
 //!
 //! Two rungs, in this order. Rung 1 is wlr-screencopy: compositor-side
 //! region capture that prompts for nothing, so on Hyprland/sway/niri a
@@ -27,7 +28,7 @@
 /// fallback rung's capability probe.
 pub const SCREENCAST_INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 
-/// The ladder, in ADR-0002 order.
+/// The ladder, in rung order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// Rung 1: `zwlr_screencopy_manager_v1` region capture. Promptless.
@@ -57,7 +58,7 @@ impl Capabilities {
 /// The `CHIBIPOP_CAPTURE_BACKEND` test hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendOverride {
-    /// Walk the ladder as ADR-0002 describes it.
+    /// Walk the ladder normally: capability-first, promptless rung first.
     Auto,
     /// Force rung 1 (fail rather than fall through to the portal).
     Screencopy,
@@ -124,14 +125,14 @@ impl Selection {
     pub fn startup_line(&self) -> String {
         match self {
             Selection::Backend(Backend::WlrScreencopy) => {
-                "capture: wlr-screencopy region capture (promptless - ADR-0002 rung 1)".to_string()
+                "capture: wlr-screencopy region capture (promptless - ladder rung 1)".to_string()
             }
             Selection::Backend(Backend::Portal) => {
-                "capture: portal ScreenCast + PipeWire (eager consent at startup - ADR-0002 rung 2)"
+                "capture: portal ScreenCast + PipeWire (eager consent at startup - ladder rung 2)"
                     .to_string()
             }
             Selection::Unsupported { missing } => format!(
-                "capture: unsupported - missing {}; a compositor or portal offering the missing capability self-heals this install (ADR-0002)",
+                "capture: unsupported - missing {}; a compositor or portal offering the missing capability self-heals this install",
                 missing.join(", ")
             ),
         }
@@ -139,7 +140,7 @@ impl Selection {
 }
 
 /// The capabilities `caps` lacks, by exact protocol/interface name, so
-/// a compositor upgrade self-heals the install (ADR-0002).
+/// a compositor upgrade self-heals the install.
 fn missing(caps: &Capabilities) -> Vec<String> {
     let mut names = Vec::new();
     if !caps.screencopy {
@@ -151,9 +152,9 @@ fn missing(caps: &Capabilities) -> Vec<String> {
     names
 }
 
-/// Walk the capture ladder (ADR-0002). Capability-first, promptless
-/// rung first: screencopy wins whenever it is advertised, even on a
-/// session that also runs a portal.
+/// Walk the capture ladder. Capability-first, promptless rung first:
+/// screencopy wins whenever it is advertised, even on a session that
+/// also runs a portal.
 pub fn select(caps: &Capabilities, ov: BackendOverride) -> Selection {
     match ov {
         BackendOverride::Auto => {
@@ -269,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn every_startup_line_is_one_greppable_line_naming_the_adr() {
+    fn every_startup_line_is_one_greppable_line_naming_its_rung_or_the_way_back() {
         for selection in [
             Selection::Backend(Backend::WlrScreencopy),
             Selection::Backend(Backend::Portal),
@@ -278,7 +279,7 @@ mod tests {
             let line = selection.startup_line();
             assert!(line.starts_with("capture: "), "{line}");
             assert!(!line.contains('\n'), "{line}");
-            assert!(line.contains("ADR-0002"), "{line}");
+            assert!(line.contains("rung ") || line.contains("self-heals"), "{line}");
         }
         assert!(
             Selection::Backend(Backend::WlrScreencopy).startup_line().contains("promptless"),

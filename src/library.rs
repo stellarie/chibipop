@@ -18,7 +18,7 @@ const QUARANTINE: &str = ".removed";
 /// A fact about the archive's banks, never a preference and never a
 /// filename: `term_bank_` members mean [`Role::Terms`], `term_meta_bank_`
 /// rows tagged `"freq"` mean [`Role::Frequency`] and rows tagged `"pitch"`
-/// mean [`Role::Pitch`] (ADR-0014).
+/// mean [`Role::Pitch`] (ARCHITECTURE.md#dictionary-and-lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
@@ -313,9 +313,9 @@ impl Library {
     /// Every readable archive, whatever its roles: one archive is one
     /// `dict` row, because a frequency archive owns its stored claims and a
     /// pitch archive owns its stored accents, and both need a dictionary to
-    /// own them under (ADR-0014, ADR-0015). One that supplies no terms role
-    /// simply contributes no term rows, which is why nothing here asks
-    /// whether it has one.
+    /// own them under (ARCHITECTURE.md#dictionary-and-lookup). One that
+    /// supplies no terms role simply contributes no term rows, which is
+    /// why nothing here asks whether it has one.
     ///
     /// The unreadable ones are what this leaves out - they are listed so
     /// they can be removed, and there is nothing in them to build.

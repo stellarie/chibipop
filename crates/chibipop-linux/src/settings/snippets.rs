@@ -1,4 +1,5 @@
-//! Copyable compositor snippets (ADR-0005/0008).
+//! Copyable compositor snippets (ARCHITECTURE.md#settings-and-config,
+//! ARCHITECTURE.md#capture-and-masking).
 //!
 //! On the wlr-native channel the compositor bind is the truth, so the
 //! settings window never pretends to own the trigger: it shows the bind
@@ -99,7 +100,8 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                 // and the user is told the one habit and the one
                 // recovery that exist. The GlobalShortcuts `global`
                 // dispatcher is immune by design, which is one more
-                // reason the portal rung is rung 1 (ADR-0003).
+                // reason the portal rung is rung 1
+                // (ARCHITECTURE.md#input-ladders).
                 Bind::Hold => format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {down}\n\
                      bindr = {mask}, {key}, exec, {exe} ctl {up}\n\
@@ -143,9 +145,9 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
     }
 }
 
-/// Hide-from-screen-share, per ADR-0008: a copyable rule on Hyprland, a
-/// pointer on KDE, the honest "not available" elsewhere. `None` means
-/// there is nothing to copy.
+/// Hide-from-screen-share, per ARCHITECTURE.md#capture-and-masking: a
+/// copyable rule on Hyprland, a pointer on KDE, the honest "not
+/// available" elsewhere. `None` means there is nothing to copy.
 pub fn capture_rule(compositor: Compositor) -> (String, Option<String>) {
     match compositor {
         Compositor::Hyprland => (

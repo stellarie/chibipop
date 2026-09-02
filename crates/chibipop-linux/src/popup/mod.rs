@@ -1,5 +1,5 @@
-//! The popup (ADR-0004): one wlr-layer surface per output, painted by
-//! hand with tiny-skia and cosmic-text.
+//! The popup: one wlr-layer surface per output, painted by hand with
+//! tiny-skia and cosmic-text.
 //!
 //! Nothing here is a toolkit. SCTK drives the surface and its shm
 //! buffers ([`surface`]), core `layout` produces the measured
@@ -30,16 +30,17 @@ pub use place::{derive, Screen};
 pub use pointer::{frame as pointer_frame, Interaction, Step};
 pub use surface::{Placed, Popup, ShowRequest};
 /// The name half of the Japanese-font probe, for the settings font
-/// combo (ADR-0005). The popup itself asks the whole question through
-/// [`surface::Popup`]'s engine.
+/// combo (ARCHITECTURE.md#settings-and-config). The popup itself asks
+/// the whole question through [`surface::Popup`]'s engine.
 pub use text::jp_capable;
 
 use chibipop::ui::layout::StyledSpan;
 use chibipop::ui::theme::Theme;
 
-/// Panel opacity, matching Windows' `LWA_ALPHA` 230/255 exactly
-/// (ADR-0004). Per-pixel here, so the antialiased corners fade with
-/// it instead of being hard-clipped by a window region.
+/// Panel opacity, matching Windows' `LWA_ALPHA` 230/255 exactly. The
+/// Linux panel alpha is this fixed constant. Per-pixel here, so the
+/// antialiased corners fade with it instead of being hard-clipped by a
+/// window region.
 pub const PANEL_ALPHA: u8 = 230;
 
 /// One run of text to rasterize.
@@ -50,9 +51,10 @@ pub const PANEL_ALPHA: u8 = 230;
 ///
 /// It carries the same ordered styled spans the seam measured, not one
 /// string, so a paragraph holding bold and normal text paints in the
-/// wrap it was measured in (ADR-0013). Colour rides on each span, and
-/// `shifts` says how far up each one sits off its line's baseline -
-/// `verticalAlign`, already resolved by the scene.
+/// wrap it was measured in (ARCHITECTURE.md#popup-and-measurement).
+/// Colour rides on each span, and `shifts` says how far up each one
+/// sits off its line's baseline - `verticalAlign`, already resolved by
+/// the scene.
 #[derive(Debug, Clone, Copy)]
 pub struct DrawRun<'a> {
     /// In reading order.

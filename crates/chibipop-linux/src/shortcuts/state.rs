@@ -3,18 +3,20 @@
 //! `chibipop settings`.
 //!
 //! **Why a file and not a probe.** The settings process is a separate
-//! process (ADR-0005) and cannot see the daemon's portal session — and
-//! the session is where the truth lives. Probing the bus from the
-//! settings window would answer a *different* question ("could a portal
-//! be used?") and would let the UI claim the portal owns a binding on a
-//! session where the bind actually failed, which is the one thing
-//! ADR-0005 forbids: the hotkey control never lies about who owns the
-//! key. So the daemon publishes what its own handshake resolved, and the
-//! window renders that or falls back to the native snippet.
+//! process (ARCHITECTURE.md#settings-and-config) and cannot see the
+//! daemon's portal session — and the session is where the truth lives.
+//! Probing the bus from the settings window would answer a *different*
+//! question ("could a portal be used?") and would let the UI claim the
+//! portal owns a binding on a session where the bind actually failed,
+//! which is the one thing this window may never do: the hotkey control
+//! never lies about who owns the key. So the daemon publishes what its
+//! own handshake resolved, and the window renders that or falls back to
+//! the native snippet.
 //!
-//! **Why not the control socket.** The verb set is trigger transport, not
-//! a scripting API (ADR-0003), and it is deliberately closed. A status
-//! read is not a trigger, so it does not belong there.
+//! **Why not the control socket.** The verb set is trigger transport,
+//! not a scripting API (ARCHITECTURE.md#input-ladders), and it is
+//! deliberately closed. A status read is not a trigger, so it does not
+//! belong there.
 //!
 //! Absent is the normal case, not an error: it is what a fresh install
 //! and a never-started daemon look like, and both mean "assume the
@@ -171,7 +173,7 @@ mod tests {
     /// Both published ids answer for themselves, and an id the portal
     /// never named answers with the honest absence rather than with the
     /// other row's key — the add-card row borrowing the trigger's key
-    /// is exactly the lie ADR-0005 forbids this window.
+    /// is exactly the lie this window may never tell.
     #[test]
     fn each_id_gets_its_own_description_and_an_unbound_id_gets_none() {
         let published = Published::portal(vec![

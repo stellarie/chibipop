@@ -1,7 +1,8 @@
-//! The core-owned background pipeline: capture -> OCR -> lookup -> present
-//! (ADR-0001). Fed `Trigger`s, yields `WorkerResult`s over plain mpsc
-//! channels; the platform bin supplies the two seams and a wake callback,
-//! and drives everything else from its own event loop.
+//! The core-owned background pipeline: capture -> OCR -> lookup ->
+//! present (ARCHITECTURE.md#workspace-and-seams). Fed `Trigger`s, yields
+//! `WorkerResult`s over plain mpsc channels; the platform bin supplies
+//! the two seams and a wake callback, and drives everything else from
+//! its own event loop.
 
 use crate::config::SentenceMode;
 use crate::controller::{LookupOutcome, RequestId};
@@ -20,9 +21,10 @@ use std::thread;
 #[derive(Clone, Copy)]
 pub struct Hover {
     pub at: PhysPoint,
-    /// Our own popup where the platform cannot exclude it (ADR-0008).
-    /// `CaptureMask::NONE` on a frozen grab, which predates the popup,
-    /// and on platforms that exclude the surface themselves.
+    /// Our own popup where the platform cannot exclude it
+    /// (ARCHITECTURE.md#capture-and-masking). `CaptureMask::NONE` on a
+    /// frozen grab, which predates the popup, and on platforms that
+    /// exclude the surface themselves.
     pub mask: CaptureMask,
 }
 
@@ -33,8 +35,9 @@ pub enum TriggerKind {
     Reload(Box<WorkerSettings>),
     /// Trigger press: take one full grab of the output holding this
     /// point and read every lookup out of it until [`TriggerKind::Thaw`]
-    /// (ADR-0010). Sent again mid-hold when the cursor crosses onto
-    /// another output, which is what makes the second monitor live.
+    /// (ARCHITECTURE.md#hover-cadence). Sent again mid-hold when the
+    /// cursor crosses onto another output, which is what makes the
+    /// second monitor live.
     ///
     /// Answers nothing: it is state, not a lookup. A grab that fails is
     /// reported by the lookups that follow it, which is where a user
@@ -52,7 +55,8 @@ pub enum TriggerKind {
 /// What the worker owns.
 pub struct WorkerSettings {
     pub max_passes: u8,
-    /// Per-platform capture upscale (Windows 2, Linux 1 - ADR-0009).
+    /// Per-platform capture upscale, Windows 2 and Linux 1
+    /// (ARCHITECTURE.md#ocr-engine).
     pub upscale: i32,
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
@@ -132,8 +136,8 @@ pub struct WorkerParts {
     /// trigger channel - never on a timer. The queue the hook drains is
     /// the bin's own, and the worker cannot see it, so the producer must
     /// queue the job and then wake the worker with [`ServeNudge`];
-    /// ADR-0010's idle budget is 0 wakeups/s and a poll would spend it
-    /// on nothing. `None` costs nothing.
+    /// the idle budget is 0 wakeups/s and a poll would spend it on
+    /// nothing. `None` costs nothing.
     pub serve: Option<ServeHook>,
 }
 
@@ -333,7 +337,7 @@ fn worker_main(
         // Anything the bin queued for the hook runs before we block, so
         // a nudge that a batch swallowed mid-lookup cannot leave its job
         // waiting - and an idle worker with a hook installed still
-        // blocks, it does not poll (ADR-0010).
+        // blocks, it does not poll (ARCHITECTURE.md#hover-cadence).
         if let Some(hook) = &mut serve {
             hook(&source);
         }
@@ -346,8 +350,9 @@ fn worker_main(
                     take_reload(s, reopen_dict.as_ref(), &mut dict, &mut state);
                 }
                 // The press-time grab: one full output, before any
-                // popup exists (ADR-0010). A failure is remembered by
-                // the source, so the hold's lookups report it.
+                // popup exists (ARCHITECTURE.md#hover-cadence). A
+                // failure is remembered by the source, so the hold's
+                // lookups report it.
                 Pre::Freeze(at) => {
                     if let Err(e) = source.freeze(at) {
                         eprintln!("chibipop: the trigger-press grab failed: {e:#}");

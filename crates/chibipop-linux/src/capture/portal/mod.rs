@@ -1,8 +1,9 @@
-//! ADR-0002's fallback capture rung: xdg-desktop-portal ScreenCast
-//! frames arriving over PipeWire, cropped into core's `RegionCapture`.
+//! The fallback capture rung (ARCHITECTURE.md#capture-and-masking):
+//! xdg-desktop-portal ScreenCast frames arriving over PipeWire,
+//! cropped into core's `RegionCapture`.
 //!
-//! This is the only path on GNOME and KDE, and the shape of the ADR is
-//! visible in the files here:
+//! This is the only path on GNOME and KDE, and the shape of the rung
+//! is visible in the files here:
 //!
 //! - [`dbus`] runs the consent handshake, **eagerly at startup**: one
 //!   dialog covering every monitor (`SelectSources` with
@@ -16,8 +17,8 @@
 //! - [`frame`] parks the newest frame and crops out of it without
 //!   copying the monitor.
 //! - [`metadata`] turns `cursor_mode=METADATA` samples into core
-//!   cursor positions - ADR-0003's rung 2, riding this same stream so
-//!   cursor tracking costs no second consent.
+//!   cursor positions - the cursor ladder's rung 2, riding this same
+//!   stream so cursor tracking costs no second consent.
 //! - [`pod`] serialises the SPA format handshake by hand, because
 //!   PipeWire's builders are `static inline` and unreachable through
 //!   dlopen.
@@ -74,8 +75,8 @@ pub fn available() -> bool {
     dbus::probe()
 }
 
-/// Does the portal advertise `cursor_mode=METADATA`, i.e. can
-/// ADR-0003's rung 2 exist on this session?
+/// Does the portal advertise `cursor_mode=METADATA`, i.e. can the
+/// cursor ladder's rung 2 exist on this session?
 pub fn cursor_metadata_available() -> bool {
     dbus::available_cursor_modes().is_some_and(|m| m & dbus::CURSOR_MODE_METADATA != 0)
 }
@@ -97,8 +98,7 @@ pub enum OpenError {
 }
 
 impl OpenError {
-    /// The channel-status row (ADR-0006): what is wrong, and the way
-    /// back.
+    /// The channel-status row: what is wrong, and the way back.
     pub fn detail(&self) -> String {
         match self {
             OpenError::Portal(e) => e.detail(),
@@ -186,7 +186,7 @@ pub struct PortalSession {
 }
 
 impl PortalSession {
-    /// ADR-0002's eager startup consent, end to end.
+    /// The eager startup consent, end to end.
     ///
     /// `state_dir` holds the rotating restore token that makes the
     /// second launch silent. `at` is where the cursor is now, which
@@ -312,7 +312,7 @@ impl PortalSession {
             return Ok(false);
         }
         // The old stream goes first: two connected streams is the
-        // multi-monitor cost ADR-0002 declines to pay. The connection
+        // multi-monitor cost this rung declines to pay. The connection
         // underneath survives, so the swap costs a frame, not a
         // handshake.
         let replacement = connect(&self.remote, wanted, self.cursor.as_ref())?;

@@ -1,9 +1,9 @@
 //! The capture backend against a real compositor, when there is one.
 //!
-//! CI is headless (ADR-0007), so every test here skips without
+//! CI is headless, so every test here skips without
 //! `WAYLAND_DISPLAY` - and skips again when the session advertises no
 //! `zwlr_screencopy_manager_v1`, because an absent rung is a rung the
-//! ladder walks past (ADR-0002), not a failure.
+//! ladder walks past, not a failure.
 //!
 //! The three that read pixels skip once more when this session's outputs
 //! are not being repainted - a locked desktop whose panel has powered
@@ -177,9 +177,9 @@ fn every_output_answers_a_grab() {
 }
 
 /// The trait's never-block invariant, measured: a dwell races damage
-/// against the 250 ms deadline (ADR-0010), so five reads of a static
-/// screen must finish in well under the two seconds an unbounded wait
-/// would take - and a busy screen must not be slower.
+/// against the 250 ms deadline, so five reads of a static screen must
+/// finish in well under the two seconds an unbounded wait would take -
+/// and a busy screen must not be slower.
 #[test]
 fn a_dwell_answers_within_the_deadline_and_never_hangs() {
     if skip_unless_painting() {

@@ -1,4 +1,5 @@
-//! The Windows platform adapter: this package *is* the adapter (ADR-0001).
+//! The Windows platform adapter: this package *is* the adapter
+//! (ARCHITECTURE.md#workspace-and-seams).
 //!
 //! A lib target beside the bin, not a separate platform-lib crate: it exists
 //! only so this package's own integration tests (`tests/rebuild.rs`,

@@ -409,7 +409,7 @@ const _: () = assert!((DICT_LIST_H - 2) / 17 >= 6);
 ///
 /// The strategy row is Frequency's alone: it is the rule that reduces
 /// *that* list, and drawing it anywhere else would claim it reduces the
-/// other two as well (ADR-0014).
+/// other two as well (ARCHITECTURE.md#dictionary-and-lookup).
 fn role_group_h(role: Role) -> i32 {
     let strategy = if role == Role::Frequency { ROW_H + ROW_GAP } else { 0 };
     20 + DICT_CAP_H + strategy + DICT_LIST_H + 8
@@ -459,7 +459,8 @@ struct Section {
 ///
 /// One list per role, each with its own order and its own checkbox: a
 /// mixed archive is a row in every section it has data for, and unticking
-/// its definitions may not silently kill its frequency data (ADR-0014).
+/// its definitions may not silently kill its frequency data
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 const SECTIONS: [Section; 3] = [
     Section {
         role: Role::Terms,
@@ -1488,8 +1489,9 @@ unsafe fn make_role_list(
 /// A ListView has no "how long is this row" message, so the buffer is
 /// grown until the control stops filling it. Guessing one size and
 /// truncating would be a real bug rather than a cosmetic one: a dictionary
-/// is identified by its exact name now (ADR-0014), so a shortened name is
-/// a different dictionary.
+/// is identified by its exact name now
+/// (ARCHITECTURE.md#dictionary-and-lookup), so a shortened name is a
+/// different dictionary.
 unsafe fn lv_text(list: HWND, index: i32) -> String {
     // SAFETY: `list` is a live ListView owned by the caller; `item` is
     // fully initialised and its `pszText` points at `buf`, which outlives
@@ -1584,7 +1586,7 @@ unsafe fn lv_rows(hwnd: HWND, id: i32) -> Option<Vec<DictRow>> {
 ///
 /// Compared for equality rather than asked of LVM_FINDITEMW, whose string
 /// search is the control's own and not the exact-name rule the config now
-/// keys on (ADR-0014).
+/// keys on (ARCHITECTURE.md#dictionary-and-lookup).
 unsafe fn lv_find(list: HWND, name: &str) -> Option<i32> {
     // SAFETY: `list` is a live ListView owned by the caller; `lv_text`
     // states its own contract.
@@ -1696,7 +1698,8 @@ unsafe fn fill_role_list(list: HWND, rows: &[DictRow], at: i32) {
 /// One list per role makes a move a trade with the neighbour and nothing
 /// else: there is no second box to cross into, and an empty enabled list
 /// is a legitimate "search nothing" rather than a state to defend against
-/// (ADR-0014), so no row is pinned in place to keep one non-empty.
+/// (ARCHITECTURE.md#dictionary-and-lookup), so no row is pinned in
+/// place to keep one non-empty.
 fn move_target(len: usize, index: usize, up: bool) -> Option<usize> {
     if index >= len {
         return None;
@@ -1771,7 +1774,8 @@ unsafe fn update_list_buttons(hwnd: HWND) {
                 (section.down, can_move(count, cur, false)),
                 // A row is all Remove needs: an unreadable archive is a
                 // row with no roles at all, listed in Terms precisely so
-                // it can still be removed (ADR-0014).
+                // it can still be removed
+                // (ARCHITECTURE.md#dictionary-and-lookup).
                 (section.remove, cur >= 0),
             ] {
                 if let Ok(btn) = dlg_item(hwnd, id) {
@@ -1833,7 +1837,8 @@ fn clears_drag_deadband(origin: (i32, i32), now: (i32, i32)) -> bool {
 /// confines a drag to its own section: a cursor above or below this list -
 /// including one over another role's list - answers with this list's first
 /// or last gap and never with another list's row. Each role's order is its
-/// own and a row has no meaning in a list it holds no role for (ADR-0014).
+/// own and a row has no meaning in a list it holds no role for
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 fn drop_gap(y: i32, top: i32, row_h: i32, rows: i32) -> i32 {
     if row_h <= 0 || rows <= 0 {
         return 0;
@@ -2546,7 +2551,7 @@ fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
 
 /// Same, for the OCR clipboard key. This is the edge where the window's
 /// "Not set" button becomes the form's `None`: nothing inward carries
-/// an empty string meaning "off" (ADR-0012).
+/// an empty string meaning "off" (ARCHITECTURE.md#settings-and-config).
 fn resolved_ocr_clipboard_key(hwnd: HWND, template: Option<&str>) -> Option<String> {
     let key = resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template.unwrap_or_default());
     (!key.is_empty()).then_some(key)
@@ -3422,8 +3427,9 @@ impl SettingsWindow {
     ///
     /// One archive is one library entry, so removing it is not a change to
     /// one list: `stage_remove` drops the name from all three roles
-    /// (ADR-0014) and the controls have to say the same thing. `role` only
-    /// names the section that asked, and so which selection names the row.
+    /// (ARCHITECTURE.md#dictionary-and-lookup) and the controls have to
+    /// say the same thing. `role` only names the section that asked, and
+    /// so which selection names the row.
     unsafe fn remove_selected(&self, role: Role) {
         // SAFETY: every `section.list` names a live descendant of
         // `self.hwnd`, created in `build`; a missing one yields `Err` here
@@ -3478,7 +3484,7 @@ impl SettingsWindow {
                 };
                 // The bottom of each of its role lists, ticked, leaving
                 // every row the user curated where it already is
-                // (ADR-0014).
+                // (ARCHITECTURE.md#dictionary-and-lookup).
                 let row = DictRow { name, enabled: true };
                 for section in SECTIONS.iter().filter(|s| roles.has(s.role)) {
                     let Ok(list) = dlg_item(self.hwnd, section.list) else { continue };
@@ -4066,7 +4072,7 @@ impl SettingsWindow {
             // each ordered on its own. A mixed archive is a row in every
             // section it has data for, because enabled is per role:
             // unticking its definitions may not silently kill its
-            // frequency data (ADR-0014).
+            // frequency data (ARCHITECTURE.md#dictionary-and-lookup).
             y = 0;
             let bx = WIN_W - PAD - BTN_W - 8;
             let list_w = bx - 2 * PAD + 4;
@@ -4142,7 +4148,8 @@ impl SettingsWindow {
             // Spec D6a: name the entry, because a config name matching
             // nothing installed is also what a renamed archive looks like.
             // Its place is kept rather than dropped, so an unplugged drive
-            // does not quietly rewrite the lists (ADR-0014).
+            // does not quietly rewrite the lists
+            // (ARCHITECTURE.md#dictionary-and-lookup).
             if !stale.is_empty() {
                 let msg = format!(
                     "\"{}\" names no installed dictionary — it may have been renamed, or \
@@ -5223,7 +5230,8 @@ impl Drop for SettingsWindow {
 /// `list` is that language's own `per_language` entry, so it names the
 /// dictionaries it searches in priority order: those rows come first,
 /// ticked and in the list's order, and every other installed name follows
-/// unticked. `per_language` is term-only (ADR-0014), so this is the Terms
+/// unticked. `per_language` is term-only
+/// (ARCHITECTURE.md#dictionary-and-lookup), so this is the Terms
 /// section's alone.
 fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<DictRow> {
     let readable = |n: &String| !unreadable.iter().any(|u| u == n);
@@ -5799,7 +5807,7 @@ mod tests {
     }
 
     /// The "Not set" button is the form's `None`, never an empty string
-    /// standing in for it (ADR-0012).
+    /// standing in for it (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn resolved_ocr_clipboard_key_maps_an_unset_button_to_none() {
         let hwnd = HWND(6015 as *mut core::ffi::c_void);
@@ -6213,7 +6221,8 @@ mod tests {
 
     /// There is no second box to cross into and no row worth pinning in
     /// place: an empty enabled list is a legitimate "search nothing"
-    /// (ADR-0014), so a section's only row simply cannot move.
+    /// (ARCHITECTURE.md#dictionary-and-lookup), so a section's only row
+    /// simply cannot move.
     #[test]
     fn the_only_row_in_a_section_can_move_neither_way() {
         assert_eq!(None, move_target(1, 0, true));
@@ -6284,7 +6293,8 @@ mod tests {
     /// The clamp *is* the confinement: a cursor dragged out of this list -
     /// over another role's list, or off the window entirely - answers with
     /// this list's own first or last gap, so a row can never cross into a
-    /// list it holds no role for (ADR-0014).
+    /// list it holds no role for
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn a_cursor_outside_the_list_clamps_to_that_lists_own_ends() {
         assert_eq!(0, drop_gap(-9, 0, 17, 3), "a row and a half above it");
@@ -6476,8 +6486,9 @@ mod tests {
     /// Each role's order is its own, so a drag has nowhere to go but its
     /// own list: released over another section it lands on the end of the
     /// list it started in, and that other section does not move a row
-    /// (ADR-0014). Both ways, because the sections are stacked and a drag
-    /// leaves through the top as easily as the bottom.
+    /// (ARCHITECTURE.md#dictionary-and-lookup). Both ways, because the
+    /// sections are stacked and a drag leaves through the top as easily
+    /// as the bottom.
     ///
     /// Needs a real desktop session.
     #[test]
@@ -6784,7 +6795,7 @@ mod tests {
     }
 
     /// It must stay removable, and Terms is the one section an empty role
-    /// set is listed in at all (ADR-0014).
+    /// set is listed in at all (ARCHITECTURE.md#dictionary-and-lookup).
     #[test]
     fn an_unreadable_row_survives_a_re_scope_so_it_can_still_be_removed() {
         let mut all = installed_two();
@@ -6846,7 +6857,7 @@ mod tests {
     /// A checkbox may only affect the section it sits in, and a Move button
     /// only the list beside it: one dictionary supplying two roles has two
     /// rows, and unticking its definitions may not touch its frequency
-    /// data (ADR-0014).
+    /// data (ARCHITECTURE.md#dictionary-and-lookup).
     ///
     /// Needs a real desktop session.
     #[test]

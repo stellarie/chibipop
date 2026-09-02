@@ -8,9 +8,9 @@
 //! `#[cfg(windows)]`, so on Linux there is no path that replaces the
 //! installed binary: a pacman-owned `/usr/bin/chibipop` must never
 //! self-modify, and the settings button there reports the newer version
-//! and stops (ADR-0007). That is a compile-time property rather than a
-//! runtime flag — on Linux the swap is not built, so it cannot be
-//! reached, wired up, or accidentally re-enabled.
+//! and stops (ARCHITECTURE.md#packaging-and-ci). That is a compile-time
+//! property rather than a runtime flag — on Linux the swap is not built,
+//! so it cannot be reached, wired up, or accidentally re-enabled.
 
 use anyhow::{Context, Result};
 use std::time::Duration;

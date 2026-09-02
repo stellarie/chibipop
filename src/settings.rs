@@ -43,7 +43,7 @@ pub struct SettingsForm {
     ///
     /// One list per role and not one list plus an exclusion box: order and
     /// enabling are separate questions, so reordering can never silently
-    /// exclude anything (ADR-0014).
+    /// exclude anything (ARCHITECTURE.md#dictionary-and-lookup).
     pub terms: Vec<DictRow>,
     /// The frequency Dictionary list. Position is the order
     /// [`RankingStrategy::Priority`] reads, and a checkbox here never
@@ -109,7 +109,8 @@ pub struct SettingsForm {
 /// The name is the identity and the flag is that role's checkbox. Enabled
 /// is per *role* and not per Dictionary: unchecking a mixed archive's
 /// definitions must not silently kill its frequency data, so a checkbox
-/// only ever affects the list it sits in (ADR-0014).
+/// only ever affects the list it sits in
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictRow {
     pub name: String,
@@ -517,9 +518,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
     out.anki.first_dict_only = form.first_dict_only;
-    // ADR-0012: the form renders the Windows chord only, so the Linux
-    // twin rides through untouched - turning one off never deletes the
-    // other, and the section survives while either is set.
+    // The form renders the Windows chord only, so the Linux twin rides
+    // through untouched - turning one off never deletes the other, and
+    // the section survives while either is set.
     let hotkey_linux = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone());
     out.actions.ocr_clipboard = match (&form.ocr_clipboard_key, &hotkey_linux) {
         (None, None) => None,
@@ -672,7 +673,8 @@ pub enum DictionaryWork {
 /// are enabled, the order they rank in, and the strategy that reduces them.
 /// Change one and the ranks in the file were computed from something else;
 /// change anything in the terms or pitch lists and they were not, because
-/// neither role contributes a number to reduce (ADR-0015).
+/// neither role contributes a number to reduce
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// The rule lives here so that neither settings window carries a copy of
 /// it, and so that a Reindex is never mistaken for a rebuild: nothing here
@@ -852,8 +854,8 @@ mod tests {
         assert!(!text.contains("\"大辞林\""), "and so is the substring: {text}");
     }
 
-    /// ADR-0012: the Windows Apply pipeline renders its subset and
-    /// carries the Linux platform fields untouched.
+    /// The Windows Apply pipeline renders its subset and carries the
+    /// Linux platform fields untouched.
     #[test]
     fn applying_the_form_preserves_the_other_platforms_fields() {
         let mut cfg = cfg_with(&["大辞林　第四版", "Jitendex.org [2026-07-09]"]);

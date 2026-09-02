@@ -123,9 +123,9 @@ BANKS = {
 PITCH_INDEX = {"title": "FixturePitch", "format": 3, "revision": "pitch_1.0.0.1"}
 
 # Pitch-only: `term_meta_bank_` and no `term_bank_`, which is what all five
-# pitch archives in ticket 01's census are. Every row here is a real one from
-# docs/research/pitch-accent-shapes.md, re-serialised, so the parser is tested
-# against payloads a dictionary actually shipped:
+# pitch archives in the surveyed pitch library are. Every row here is a real
+# one from docs/research/pitch-accent-shapes.md, re-serialised, so the parser
+# is tested against payloads a dictionary actually shipped:
 #
 #   猫 / ねこ      two rows for one expression and reading, which must merge
 #   食べる / たべる heiban, 48.0% of the corpus and the value drawn most
@@ -175,12 +175,12 @@ BOTH_PITCH_BANK = [
 
 BADCRC_INDEX = {"title": "FixtureBadCrc", "format": 3, "revision": "pitch_1.0.0.1"}
 
-# The blocker ticket 01 measured: all five pitch archives in that library
-# store CRC-32 values that do not match their own payload, 48 of 54 members,
-# and chibipop's zip reader refused every one of them while Yomitan imported
-# them cleanly. `write_bad_crc` below corrupts the stored checksums of this
-# archive's banks and leaves the payload alone, exactly the way those archives
-# are wrong, so the tolerance is tested against the shape rather than asserted.
+# The measured blocker: all five pitch archives in that library store CRC-32
+# values that do not match their own payload, 48 of 54 members, and chibipop's
+# zip reader refused every one of them while Yomitan imported them cleanly.
+# `write_bad_crc` below corrupts the stored checksums of this archive's banks
+# and leaves the payload alone, exactly the way those archives are wrong, so
+# the tolerance is tested against the shape rather than asserted.
 BADCRC_BANK = [
     ["鍵", "pitch", {"reading": "かぎ", "pitches": [{"position": 2, "devoice": [], "nasal": []}]}],
 ]

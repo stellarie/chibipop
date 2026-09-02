@@ -1,14 +1,15 @@
 //! Trigger mode against a real compositor, when there is one.
 //!
-//! CI is headless (ADR-0007), so this skips without `WAYLAND_DISPLAY` and
-//! skips again where the capture protocol ADR-0002's promptless rung needs
-//! is not advertised - that is a compositor verdict, not a test failure.
-//! A third verdict skips it too, and the daemon is the one who gives it:
-//! a press looks up what is under the cursor, so a session where
-//! ADR-0003's cursor ladder found no rung has nothing for these verbs to
-//! act on. That is the ticket-48 headless-sway case (sway 1.9 advertises
-//! no ext-image-copy-capture, runs no portal and is not Hyprland); the
-//! diagnostic it prints instead has its own tests in `daemon.rs`.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci), so this skips
+//! without `WAYLAND_DISPLAY` and skips again where the capture protocol
+//! the promptless rung needs is not advertised - that is a compositor
+//! verdict, not a test failure. A third verdict skips it too, and the
+//! daemon is the one who gives it: a press looks up what is under the
+//! cursor, so a session where the cursor ladder found no rung has
+//! nothing for these verbs to act on. That is the ticket-48
+//! headless-sway case (sway 1.9 advertises no ext-image-copy-capture,
+//! runs no portal and is not Hyprland); the diagnostic it prints instead
+//! has its own tests in `daemon.rs`.
 //!
 //! One test, deliberately: it drives a whole daemon - real screencopy
 //! backend, real meikiocr models, real SQLite dictionary built here from
@@ -221,7 +222,7 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
     assert_eq!(1, session.count("frozen grab of output"), "one press, one grab");
 
     // Toggle latches: a stray release must not end it, a second toggle
-    // must (ADR-0010).
+    // must.
     session.ctl("toggle");
     assert_eq!(2, session.count("frozen grab of output"), "toggle-on grabs too");
     session.ctl("trigger-up");

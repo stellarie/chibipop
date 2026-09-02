@@ -1,4 +1,5 @@
-//! XDG path mapping with portable mode (ADR-0006).
+//! XDG path mapping with portable mode
+//! (ARCHITECTURE.md#platform-integration).
 //!
 //! Discovery order, first match wins, never dual-read:
 //!
@@ -80,11 +81,12 @@ impl Paths {
     /// parity: Windows always joins a relative `save_dir` onto the exe
     /// directory (`crates/chibipop-windows/src/app.rs:1479-1483`,
     /// documented in `README.md`), and portable mode's whole promise
-    /// (ADR-0006) is that a copied folder carries everything with it —
-    /// screenshots landing in `~/.local/share` would leave part of the
-    /// user's data behind on the machine. Under XDG the default
-    /// `screenshots` is user *data*, not cache: it is the picture a card
-    /// points at, and losing it breaks the card.
+    /// (ARCHITECTURE.md#platform-integration) is that a copied folder
+    /// carries everything with it — screenshots landing in
+    /// `~/.local/share` would leave part of the user's data behind on
+    /// the machine. Under XDG the default `screenshots` is user *data*,
+    /// not cache: it is the picture a card points at, and losing it
+    /// breaks the card.
     pub fn screenshots_dir(&self, save_dir: &str) -> PathBuf {
         let save_dir = Path::new(save_dir);
         if save_dir.is_absolute() {

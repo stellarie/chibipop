@@ -10,7 +10,7 @@ on:
         description: >-
           Rewrite the geometry goldens (CHIBIPOP_BLESS=1) and upload them as
           an artifact for review instead of running the tier 0 gate. Never
-          commits anything (ADR-0011).
+          commits anything.
         type: boolean
         default: false
 
@@ -23,12 +23,12 @@ jobs:
     # the crate is Win32, WinRT OCR and Direct2D throughout and does not
     # build anywhere else.
     #
-    # Pinned to windows-2025, not windows-latest, per ADR-0011: the geometry
-    # goldens assert exact DirectWrite metrics, so the runner image (its font
-    # files) is part of tier0's baseline, like the clippy count and the test
-    # floor. A label migration changing fonts would red the gate for no code
-    # change. Image EOL is one scheduled re-baseline: bless on the new image,
-    # review, and commit stating re-baseline vs finding.
+    # Pinned to windows-2025, not windows-latest: the geometry goldens
+    # assert exact DirectWrite metrics with no tolerance, so the runner image
+    # (its font files) is part of tier0's baseline, like the clippy count and
+    # the test floor. A label migration changing fonts would red the gate for
+    # no code change. Image EOL is one scheduled re-baseline: bless on the
+    # new image, review, and commit stating re-baseline vs finding.
     name: Tier 0 gate
     runs-on: windows-2025
     # A bless dispatch replaces the gate run: blessing exists precisely
@@ -52,12 +52,13 @@ jobs:
       # (docs/REGRESSION.md tier 0).
       #
       # --exclude chibipop-linux: both bin crates deliberately produce a
-      # binary named `chibipop` (ADR-0001), and cargo uplifts every bin to
-      # target/debug/chibipop - one link-producing invocation spanning both
-      # bin crates races two linkers over one output path. Check-shaped
-      # commands (clippy below) are collision-free and stay --workspace;
-      # test/build exclude the foreign bin crate instead. The Linux crate's
-      # own gates are the `linux` job's. See the workspace Cargo.toml.
+      # binary named `chibipop` (ARCHITECTURE.md#workspace-and-seams), and
+      # cargo uplifts every bin to target/debug/chibipop - one link-producing
+      # invocation spanning both bin crates races two linkers over one output
+      # path. Check-shaped commands (clippy below) are collision-free and stay
+      # --workspace; test/build exclude the foreign bin crate instead. The
+      # Linux crate's own gates are the `linux` job's. See the workspace
+      # Cargo.toml.
       - name: Tests, three times
         shell: bash
         run: |
@@ -147,15 +148,15 @@ jobs:
           path: target/release/chibipop.exe
           if-no-files-found: error
 
-  # ADR-0007: the second native job, mirrored gates, no cross-compilation.
+  # The second native job, mirrored gates, no cross-compilation.
   # Pinned to ubuntu-24.04, not ubuntu-latest, per the rolling
   # oldest-supported-runner policy (the runner's glibc is the release
   # binary's floor). ubuntu-22.04 is still hosted, but `ort`'s static
   # ONNX Runtime prebuilt needs its glibc 2.38+/GCC-13 libstdc++ and
   # fails to link there - the prebuilt, not the runner catalogue, sets
-  # the floor (see release.yml and ADR-0007's 2026-08-26 amendment). The gate is
-  # compositor-free: the runner has no WAYLAND_DISPLAY, and every
-  # integration test that needs one skips without it (ADR-0007). The real
+  # the floor (see release.yml and ARCHITECTURE.md#packaging-and-ci).
+  # The gate is compositor-free: the runner has no WAYLAND_DISPLAY, and
+  # every integration test that needs one skips without it. The real
   # compositor lives in the non-blocking `sway-smoke` job below; nothing
   # in this gate may ever depend on it.
   linux:
@@ -192,30 +193,30 @@ jobs:
             exit 1
           fi
 
-      # ADR-0009's OCR quality gate: the committed 152-crop benchmark corpus
-      # through the ported meikiocr pipeline, asserting the ADR's floors
-      # (horizontal CER <= 5 % / hit-scan >= 90 %, vertical CER <= 20 % /
-      # hit-scan >= 75 %) and +-3 pp parity with the Python harness's 1x
-      # numbers. Deliberately outside the x3 loop above and marked
-      # `test = false` in the crate manifest: that loop exists to catch
-      # process-global state racing between parallel tests, and this target
-      # has none - it reads committed files and committed models and answers
-      # the same thing every time, so repeating it only spends runner time on
-      # the slowest target in the tree. CPU-only; ONNX Runtime arrives as
-      # `ort`'s pinned prebuilt download, so there is nothing to apt-install.
-      # `--nocapture` puts the measured-vs-reference table in the log, which
-      # is what the next regression gets read against.
+      # The OCR quality gate: the committed 152-crop benchmark corpus
+      # through the ported meikiocr pipeline, asserting the floors in
+      # ARCHITECTURE.md#ocr-engine (horizontal CER <= 5 % / hit-scan >= 90 %,
+      # vertical CER <= 20 % / hit-scan >= 75 %) and +-3 pp parity with the
+      # Python harness's 1x numbers. Deliberately outside the x3 loop above
+      # and marked `test = false` in the crate manifest: that loop exists to
+      # catch process-global state racing between parallel tests, and this
+      # target has none - it reads committed files and committed models and
+      # answers the same thing every time, so repeating it only spends runner
+      # time on the slowest target in the tree. CPU-only; ONNX Runtime arrives
+      # as `ort`'s pinned prebuilt download, so there is nothing to
+      # apt-install. `--nocapture` puts the measured-vs-reference table in the
+      # log, which is what the next regression gets read against.
       - name: OCR quality gate
         run: cargo test -p chibipop-linux --test ocr_gate -- --nocapture
 
       # Same warning-count mechanics as tier0 (see the long comment there;
       # --color never is load-bearing). The count is per-platform after the
-      # workspace split (ADR-0007): on Linux the windows crate cfg-stubs to
-      # nothing, so its render.rs finding does not exist here - and since the
-      # v0.9.x merge fixed lookup/deconj.rs's useless_conversion, the
-      # baseline is core's one remaining finding, lookup/model.rs
-      # too_many_arguments. The Linux crate's accepted count is zero and
-      # must stay zero.
+      # workspace split (ARCHITECTURE.md#packaging-and-ci): on Linux the
+      # windows crate cfg-stubs to nothing, so its render.rs finding does not
+      # exist here - and since the v0.9.x merge fixed lookup/deconj.rs's
+      # useless_conversion, the baseline is core's one remaining finding,
+      # lookup/model.rs too_many_arguments. The Linux crate's accepted count
+      # is zero and must stay zero.
       - name: Clippy - exactly one accepted finding
         shell: bash
         run: |
@@ -255,7 +256,7 @@ jobs:
           path: target/release/chibipop
           if-no-files-found: error
 
-  # ADR-0007's headless-sway smoke: the one job that runs chibipop
+  # The headless-sway smoke: the one job that runs chibipop
   # against a real compositor - real layer surfaces, real wlr-screencopy
   # pixels, a real control socket - where both gates above are
   # deliberately compositor-free. It proves nothing about layout or
@@ -277,13 +278,13 @@ jobs:
   # What this exercises on today's fleet (sway 1.9 / wlroots 0.17 on
   # ubuntu-24.04), and what it cannot:
   #   - zwlr_layer_shell_v1 v4, wp_viewporter, wp_fractional_scale_manager_v1:
-  #     all advertised, so ADR-0004's popup maps, paints and hides for
+  #     all advertised, so the popup maps, paints and hides for
   #     real. The grab pair below is the proof the pixels reached the
   #     output rather than only the log.
-  #   - zwlr_screencopy_manager_v1 v3: ADR-0002's promptless rung 1, the
-  #     rung under test. Rung 2 is not: no xdg-desktop-portal runs on a
-  #     runner, so portal_capture_live skips itself.
-  #   - ADR-0003's cursor ladder has NO rung here: sway 1.9 advertises
+  #   - zwlr_screencopy_manager_v1 v3: the capture ladder's promptless
+  #     rung 1, the rung under test. Rung 2 is not: no xdg-desktop-portal
+  #     runs on a runner, so portal_capture_live skips itself.
+  #   - The cursor ladder has NO rung here: sway 1.9 advertises
   #     no ext-image-copy-capture, there is no portal, and it is not
   #     Hyprland. So the daemon must come up saying `hover unsupported`
   #     and naming both missing globals, and a trigger press must answer
@@ -339,7 +340,7 @@ jobs:
 
       # fonts-noto-cjk is not decoration: the canned popup paints
       # Japanese, and a tofu-only paint would still "map a surface"
-      # while proving nothing about ADR-0004's text stack. No wallpaper
+      # while proving nothing about the popup's text stack. No wallpaper
       # is configured (swaybg comes in as a sway dependency but is never
       # launched), so the screen behind the popup is one constant
       # colour - which is what makes the grab comparison below mean
@@ -398,9 +399,9 @@ jobs:
           fi
           swaymsg -t get_outputs
 
-      # chibipop's own capability report, and the four globals ADR-0004
-      # and ADR-0002 rung 1 need. A missing one is a finding about this
-      # sway, printed as such, not a mystery later in the job.
+      # chibipop's own capability report, and the four globals the popup
+      # and capture ladder rung 1 need. A missing one is a finding about
+      # this sway, printed as such, not a mystery later in the job.
       - name: Capability probe
         run: |
           ./target/debug/chibipop probe | tee "$SMOKE/probe.txt"
@@ -497,15 +498,15 @@ jobs:
           wait_count "layer surface(s) mapped hidden" 1
           grep -F "popup: layer surface 0 on " "$log" || fail "no layer surface was created"
           grep -F "keyboard none" "$log" > /dev/null ||
-            fail "ADR-0004: the popup must never take keyboard focus"
+            fail "the popup must never take keyboard focus"
           grep -F "capture: wlr-screencopy" "$log" > /dev/null ||
-            fail "ADR-0002 rung 1 is what this job tests; the ladder picked something else"
+            fail "capture ladder rung 1 is what this job tests; the ladder picked something else"
           # The cursor ladder's verdict, whatever it is, and the daemon
           # surviving it. On sway 1.9 that verdict is `hover
           # unsupported` naming both ext-image-copy-capture globals.
           grep -F "cursor: " "$log" | head -2 || true
           kill -0 "$demo" 2> /dev/null ||
-            fail "the daemon died on the cursor channel's verdict; it must stay up (ADR-0003)"
+            fail "the daemon died on the cursor channel's verdict; it must stay up"
           socket=$(sed -n 's/.*control: listening on //p' "$log" | head -1)
           echo "control socket: $socket"
           echo "::endgroup::"
@@ -535,7 +536,7 @@ jobs:
           # only the log - and the third must be byte-identical to the
           # first, which is how "hide attaches a transparent buffer and
           # never unmaps" looks from the compositor's side. Both grabs
-          # go through ADR-0002 rung 1, so one comparison tests the
+          # go through capture ladder rung 1, so one comparison tests the
           # painter and the capture backend at once.
           grab hidden-before "$geom"
           "$BIN" ctl trigger-down || fail "the second ctl trigger-down was refused"
@@ -603,7 +604,7 @@ jobs:
             fi
             grep -E "lookup|no dictionary at" "$log" | tail -3 || true
           elif [ "$(count "trigger: no cursor sample yet")" -ge 1 ]; then
-            echo "SKIPPED (named): this compositor gave ADR-0003's cursor ladder no rung,"
+            echo "SKIPPED (named): this compositor gave the cursor ladder no rung,"
             echo "so a press has no position to look up and says exactly that:"
             grep -F "trigger: no cursor sample yet" "$log" | tail -1
             echo "The lookup-through-OCR sub-step is not runnable here; the trigger"
@@ -642,7 +643,7 @@ jobs:
             /tmp/chibipop-smoke/state/chibipop/chibipop.log
           if-no-files-found: warn
 
-  # ADR-0011 bless mechanics: workflow_dispatch with bless=true reruns the
+  # The bless mechanics: workflow_dispatch with bless=true reruns the
   # golden tests with CHIBIPOP_BLESS=1, which rewrites the goldens instead of
   # comparing, and uploads the result for a human to review and commit. CI
   # holds no push credentials and this job must never gain any: the artifact

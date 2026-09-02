@@ -1,5 +1,6 @@
-//! The `org.freedesktop.portal.ScreenCast` handshake: ADR-0002's
-//! fallback capture rung, from first dialog to a PipeWire remote fd.
+//! The `org.freedesktop.portal.ScreenCast` handshake: the fallback
+//! capture rung (ARCHITECTURE.md#capture-and-masking), from first
+//! dialog to a PipeWire remote fd.
 //!
 //! **Why eager.** The portal is the one rung that asks a human for
 //! permission, and a background daemon cannot ask politely twice. So
@@ -12,7 +13,7 @@
 //!
 //! **Why blocking zbus and not `ashpd`.** `ashpd` is the ergonomic
 //! choice and it is async-first: using it would drag a second async
-//! runtime into the daemon, which ADR-0001 forbids — the calloop pump is
+//! runtime into the daemon, which the design forbids — the calloop pump is
 //! sync and stays sync. zbus is already in this tree (ksni pulls it, and
 //! ksni's `async-io` feature resolves the very same version), so its
 //! blocking API costs nothing new and rides the one `async-io` executor
@@ -71,19 +72,19 @@ pub const SOURCE_MONITOR: u32 = 1;
 /// Cursor modes (`AvailableCursorModes` / `SelectSources` `cursor_mode`).
 /// `SPA`'s third mode, EMBEDDED (2), is deliberately absent: it
 /// composites a pointer into the pixels we are about to OCR, and
-/// ADR-0003's rung wants coordinates instead.
+/// the cursor rung wants coordinates instead.
 pub const CURSOR_MODE_HIDDEN: u32 = 1;
-/// The cursor rides beside the pixels as stream metadata - ADR-0003's
-/// rung-2 cursor source.
+/// The cursor rides beside the pixels as stream metadata - the rung-2
+/// cursor source.
 pub const CURSOR_MODE_METADATA: u32 = 4;
-/// `persist_mode`: 2 = persist until explicitly revoked (ADR-0002).
+/// `persist_mode`: 2 = persist until explicitly revoked.
 pub const PERSIST_UNTIL_REVOKED: u32 = 2;
 /// `persist_mode` and `restore_token` arrived in ScreenCast version 4.
 ///
 /// A version-3 portal - xdg-desktop-portal-hyprland, at the time of
-/// writing - cannot remember a grant at all, so ADR-0002's "silent
-/// launches after" is unreachable there and every launch shows the
-/// dialog. Sending the keys anyway would be harmless, because a portal
+/// writing - cannot remember a grant at all, so "silent launches
+/// after" is unreachable there and every launch shows the dialog.
+/// Sending the keys anyway would be harmless, because a portal
 /// ignores options it does not know, but it would leave the missing
 /// token unexplained; and the difference between "we asked and it
 /// refused" and "it cannot" is the difference between a bug report and
@@ -143,10 +144,10 @@ impl PortalError {
                  and its compositor backend, then retry with `chibipop ctl reload`"
             ),
             // "From the tray" would be a lie: the tray's rows are
-            // status, not buttons (ADR-0006), and the retry hook is the
-            // `reload` verb - which is exactly what the settings
-            // window's Apply sends. Both routes are named because a
-            // stock-GNOME session has no tray to reach either from.
+            // status, not buttons, and the retry hook is the `reload`
+            // verb - which is exactly what the settings window's Apply
+            // sends. Both routes are named because a stock-GNOME
+            // session has no tray to reach either from.
             PortalError::Denied => "screen-capture permission denied - retry with Apply in the \
                                     settings window or `chibipop ctl reload`"
                 .to_string(),
@@ -260,14 +261,14 @@ pub fn probe() -> bool {
     proxy.get_property::<u32>("version").is_ok()
 }
 
-/// The portal's advertised cursor modes, for the ADR-0003 rung-2
-/// capability check. `None` when the property cannot be read.
+/// The portal's advertised cursor modes, for the rung-2 capability
+/// check. `None` when the property cannot be read.
 pub fn available_cursor_modes() -> Option<u32> {
     let conn = Connection::session().ok()?;
     screencast_proxy(&conn).ok()?.get_property::<u32>("AvailableCursorModes").ok()
 }
 
-/// ADR-0002's eager startup consent, start to finish: CreateSession,
+/// The eager startup consent, start to finish: CreateSession,
 /// SelectSources (all monitors in ONE dialog), Start, and
 /// OpenPipeWireRemote. Blocks the calling thread up to `timeout` in
 /// total. `restore_token` is the previous run's token, which is what
@@ -336,7 +337,7 @@ fn handshake(
     // From here on a failure owes the portal a `Close`; the caller's
     // connection teardown in `open` is what delivers it.
 
-    // -- SelectSources: one dialog, every monitor (ADR-0002) --
+    // -- SelectSources: one dialog, every monitor --
     request(conn, &sender, "SelectSources", deadline, |token| {
         let options = select_sources_options(token, cursor, persists, restore_token);
         screencast.call("SelectSources", &(session_object.clone(), options))
@@ -761,7 +762,7 @@ mod tests {
 
     // -- what the tray and the log get to say --
 
-    /// ADR-0006: a status row names the way back, on one line.
+    /// A status row names the way back, on one line.
     #[test]
     fn every_failure_names_a_way_back() {
         let failures = [
@@ -863,7 +864,7 @@ mod tests {
         assert_eq!(info.source_type, Some(SOURCE_MONITOR));
     }
 
-    // -- the persist gate (ADR-0002's silent relaunch) --
+    // -- the persist gate (the silent relaunch) --
 
     /// `persist_mode`/`restore_token` are ScreenCast v4 keys. Sending
     /// them to an older portal is not an error, but the daemon has to
@@ -879,7 +880,7 @@ mod tests {
         assert!(persists(5), "a newer portal keeps the keys");
     }
 
-    // -- the cursor rung's capability check (ADR-0003) --
+    // -- the cursor rung's capability check --
 
     /// EMBEDDED (2) has no constant of its own: this backend never
     /// asks for it, and a portal advertising it changes nothing.

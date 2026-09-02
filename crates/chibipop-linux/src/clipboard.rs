@@ -4,13 +4,13 @@
 //! An ordinary clipboard write goes through `wl_data_device`, which the
 //! compositor only honours for a client holding keyboard focus on a
 //! surface. chibipop has neither half: the popup is
-//! `keyboard_interactivity: none` for good (ADR-0004), and
-//! OCR-to-clipboard is invoked from a global key while the *user's*
-//! window has focus. Data control is the protocol written for exactly
-//! this case — managing the selection with no focus and no surface —
-//! which is why it, and not a `wl-copy` subprocess, is the rung here.
+//! `keyboard_interactivity: none` for good, and OCR-to-clipboard is
+//! invoked from a global key while the *user's* window has focus. Data
+//! control is the protocol written for exactly this case — managing the
+//! selection with no focus and no surface — which is why it, and not a
+//! `wl-copy` subprocess, is the rung here.
 //!
-//! Two rungs, first advertised wins (ADR-0002/0003's shape):
+//! Two rungs, first advertised wins:
 //!
 //! 1. `ext_data_control_manager_v1` — the staged, non-deprecated
 //!    protocol (Hyprland ≥ 0.48, sway ≥ 1.11, KWin ≥ 6.3, niri).
@@ -37,7 +37,8 @@
 //! concerned: one connection, one calloop loop, one thread, alive for
 //! the daemon's lifetime. The pump only ever hands it bytes and reads
 //! its notes back, both over `calloop::channel` — the `spawn_anki`
-//! bargain (ADR-0001: nothing blocking on the pump).
+//! bargain: nothing blocking on the pump
+//! (ARCHITECTURE.md#workspace-and-seams).
 //!
 //! **What this client is told, and does not read.** Data control makes
 //! its holder a clipboard *manager*: the compositor announces every
@@ -45,7 +46,8 @@
 //! protocol and cannot be opted out of. Every announced offer is
 //! destroyed on arrival and `receive` is never sent, so no other
 //! application's clipboard content is ever read, let alone logged — the
-//! same posture the lookup log takes towards screen content (ADR-0006).
+//! same posture the lookup log takes towards screen content
+//! (ARCHITECTURE.md#platform-integration).
 
 use crate::wayland::Advertised;
 use anyhow::{Context, Result};
@@ -127,7 +129,8 @@ pub fn rung(globals: &[Advertised]) -> Option<Rung> {
 }
 
 /// The line a session with no rung earns, naming both globals so a
-/// compositor upgrade self-heals the install (ADR-0002's rule).
+/// compositor upgrade self-heals the install
+/// (ARCHITECTURE.md#capture-and-masking).
 pub fn unavailable_line() -> String {
     format!(
         "clipboard: unavailable - this compositor advertises neither {EXT_MANAGER} nor \
@@ -138,8 +141,9 @@ pub fn unavailable_line() -> String {
 
 /// Where the clipboard thread's diagnostics go.
 ///
-/// The pump owns the log (ADR-0006) and this thread is not the pump, so
-/// a line travels as a line, exactly as an AnkiConnect failure does.
+/// The pump owns the log (ARCHITECTURE.md#platform-integration) and this
+/// thread is not the pump, so a line travels as a line, exactly as an
+/// AnkiConnect failure does.
 #[derive(Clone)]
 struct Notes(calloop::channel::Sender<String>);
 
@@ -506,7 +510,7 @@ fn serve(
     let signal = events.get_signal();
     let mut events = events;
     // No timeout: this thread is asleep until the compositor or the pump
-    // says something (ADR-0010's idle budget).
+    // says something (the idle budget, ARCHITECTURE.md#hover-cadence).
     let ran = events.run(None, &mut owner, |owner| {
         if owner.finished {
             signal.stop();
@@ -737,7 +741,8 @@ mod tests {
     }
 
     /// The refusal names both globals, because that is what lets a
-    /// compositor upgrade self-heal the install (ADR-0002).
+    /// compositor upgrade self-heal the install
+    /// (ARCHITECTURE.md#capture-and-masking).
     #[test]
     fn the_unavailable_line_names_both_globals_it_looked_for() {
         let line = unavailable_line();

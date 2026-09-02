@@ -78,8 +78,9 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
     let first = package(&out, VERSION, &binary);
     expect_ok(&first);
 
-    // The forever contract (ADR-0007): the update check parses this name
-    // off releases/latest, so its shape is not ours to drift.
+    // The forever contract (ARCHITECTURE.md#packaging-and-ci): the update
+    // check parses this name off releases/latest, so its shape is not ours
+    // to drift.
     let tarball = out.join(format!("{ASSET}.tar.gz"));
     assert!(tarball.is_file(), "no {} - packaging wrote something else", tarball.display());
 

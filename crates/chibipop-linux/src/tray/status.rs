@@ -1,6 +1,7 @@
 //! The per-channel status registry behind the tray's disabled menu rows
-//! (ADR-0006): what each input channel is doing right now, and the one
-//! mapping from those states to menu-row text and the SNI `Status`.
+//! (ARCHITECTURE.md#platform-integration): what each input channel is
+//! doing right now, and the one mapping from those states to menu-row
+//! text and the SNI `Status`.
 //!
 //! The registry is daemon-owned and works with or without a tray — it is
 //! fed from what the daemon already knows (the ticket-34 capture backend
@@ -54,15 +55,15 @@ impl ChannelId {
 /// row — short, honest, and naming the mechanism or the exact gap.
 ///
 /// Three states. Two of them resolve at startup for every channel the
-/// daemon tracks (the ADR-0002 capture ladder including the portal's
-/// eager consent, the ADR-0003 cursor ladder, the always-bound control
-/// socket), so there is no channel left for a "not built yet"
-/// placeholder to describe. The third is for the failure this app
-/// refuses to hide: a channel that serves pixels *and* is known to
-/// serve them spoiled - a compositor painting the pointer into the
-/// frames we OCR (ticket 52). Reporting that as Up would be a lie the
-/// user pays for in wrong readings; reporting it as Down would be a lie
-/// they could not act on, because lookups do work.
+/// daemon tracks (the capture ladder including the portal's eager
+/// consent, the cursor ladder, the always-bound control socket), so
+/// there is no channel left for a "not built yet" placeholder to
+/// describe. The third is for the failure this app refuses to hide: a
+/// channel that serves pixels *and* is known to serve them spoiled - a
+/// compositor painting the pointer into the frames we OCR (ticket 52).
+/// Reporting that as Up would be a lie the user pays for in wrong
+/// readings; reporting it as Down would be a lie they could not act on,
+/// because lookups do work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelState {
     /// Working; `detail` names what serves it ("control socket").
@@ -71,7 +72,7 @@ pub enum ChannelState {
     /// what serves it *and* what to change.
     Degraded { detail: String },
     /// Down; `detail` names exactly what is missing or denied, per the
-    /// ADR-0006 example row "Cursor: portal denied — see settings".
+    /// example row "Cursor: portal denied — see settings".
     Down { detail: String },
 }
 
@@ -111,7 +112,8 @@ impl ChannelState {
 
 /// How a live cursor rung reads in a menu row. Deliberately not a method
 /// on `Rung`: the ladder's own startup diagnostic is a paragraph naming
-/// protocol globals (ADR-0003), and a menu row has one line.
+/// protocol globals (ARCHITECTURE.md#input-ladders), and a menu row has
+/// one line.
 pub fn rung_detail(rung: Rung) -> &'static str {
     match rung {
         Rung::ImageCopyCapture => "ext-image-copy-capture cursor session",
@@ -131,11 +133,10 @@ pub fn cursor_state(selection: &Selection) -> ChannelState {
     }
 }
 
-/// The capture channel's state, straight from the ADR-0002 backend
-/// selection. A portal backend that has been selected but whose
-/// consent has not been answered yet is *not* reported here — the
-/// daemon overwrites this row with the consent outcome before the tray
-/// is ever published.
+/// The capture channel's state, straight from the backend selection. A
+/// portal backend that has been selected but whose consent has not been
+/// answered yet is *not* reported here — the daemon overwrites this row
+/// with the consent outcome before the tray is ever published.
 pub fn capture_state(selection: &CaptureSelection) -> ChannelState {
     match selection {
         CaptureSelection::Backend(Backend::WlrScreencopy) => {
@@ -173,12 +174,12 @@ pub struct ChannelStatuses {
 
 impl ChannelStatuses {
     /// What the daemon knows once startup is done: `capture` is the
-    /// already-resolved capture state (the daemon runs ADR-0002's
+    /// already-resolved capture state (the daemon runs the backend
     /// selection and, for the portal backend, its eager consent before
     /// publishing the tray), the cursor rung was just selected, the
     /// trigger is the always-bound control socket, and `popup` is
-    /// whether the layer shell this session advertises can carry a
-    /// panel at all.
+    /// whether the layer shell this session advertises can carry a panel
+    /// at all.
     pub fn startup(capture: ChannelState, cursor: &Selection, popup: ChannelState) -> ChannelStatuses {
         ChannelStatuses {
             states: [capture, cursor_state(cursor), ChannelState::up("control socket"), popup],
@@ -332,8 +333,8 @@ mod tests {
         assert_eq!(ksni::Status::Active, statuses.sni_status(), "recovery must clear it");
     }
 
-    /// ADR-0002's denial path as the tray sees it: a refused portal is
-    /// a capture row with the way back in it, and the icon says so.
+    /// The denial path as the tray sees it: a refused portal is a
+    /// capture row with the way back in it, and the icon says so.
     #[test]
     fn a_refused_capture_channel_shows_the_retry_and_needs_attention() {
         let mut statuses = ChannelStatuses::startup(
@@ -399,8 +400,8 @@ mod tests {
         }
     }
 
-    /// The ADR-0002 selection maps onto three honest rows: either
-    /// backend names its mechanism, and no backend names the gap.
+    /// The backend selection maps onto three honest rows: either backend
+    /// names its mechanism, and no backend names the gap.
     #[test]
     fn every_capture_selection_maps_to_its_own_row() {
         assert_eq!(ChannelState::up("wlr-screencopy region capture"), screencopy());

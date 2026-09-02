@@ -93,8 +93,8 @@ def eval_crop(entry: dict, out, feed: str) -> dict:
         )
         if out.boxes:
             # Production-equivalent CER: chibipop's layout.rs drops words whose
-            # rects intersect the mask (ADR-0008 "mask boundary is a capture
-            # edge"), so boundary garbage with honest geometry is discarded.
+            # rects intersect the mask - the mask boundary is a capture edge -
+            # so boundary garbage with honest geometry is discarded.
             kept = "".join(b.text for b in out.boxes if not boxes_intersect(b, clipped))
             rec["cer_dropped"] = round(cer(gt, normalise(kept)), 4)
     return rec

@@ -32,7 +32,7 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
 use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 /// The manager global this backend is. Selection is by advertised
-/// global, never by compositor identity (ADR-0002).
+/// global, never by compositor identity.
 pub const MANAGER_GLOBAL: &str = "zwlr_screencopy_manager_v1";
 
 /// `copy_with_damage` arrived in version 2; without it there is no
@@ -215,8 +215,8 @@ impl Bound {
     }
 }
 
-/// Advertised globals enough for this backend (ADR-0002: absence is a
-/// rung that does not exist, never a crash).
+/// Advertised globals enough for this backend (absence is a rung that
+/// does not exist, never a crash).
 pub fn available(globals: &[Advertised]) -> bool {
     let has = |i: &str| globals.iter().any(|g| g.interface == i);
     has(MANAGER_GLOBAL) && has("wl_shm") && has("wl_output")

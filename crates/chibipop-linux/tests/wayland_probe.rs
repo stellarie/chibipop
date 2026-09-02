@@ -1,8 +1,9 @@
 //! Against the real compositor, when there is one.
 //!
-//! CI is headless (ADR-0007): every test here skips without
-//! `WAYLAND_DISPLAY`, so the gate stays compositor-free while a dev box
-//! still exercises the real connect path on `cargo test`.
+//! CI is headless (ARCHITECTURE.md#packaging-and-ci): every test here
+//! skips without `WAYLAND_DISPLAY`, so the gate stays compositor-free
+//! while a dev box still exercises the real connect path on
+//! `cargo test`.
 #![cfg(target_os = "linux")]
 
 /// The real chibipop binary.

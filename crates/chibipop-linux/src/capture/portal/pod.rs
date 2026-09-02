@@ -312,8 +312,8 @@ pub fn object(object_type: u32, object_id: u32, props: &Props) -> Vec<u8> {
 ///
 /// `SPA_FORMAT_VIDEO_modifier` is deliberately absent. Naming it is
 /// what tells the server we can take dmabuf; leaving it out keeps the
-/// stream on shm, which is exactly ADR-0002's "shm buffers and CPU
-/// cropping everywhere, no GPU plumbing inside a capture backend".
+/// stream on shm: shm buffers and CPU cropping everywhere, no GPU
+/// plumbing inside a capture backend.
 pub fn enum_format() -> Vec<u8> {
     let mut props = Props::new();
     props
@@ -360,9 +360,9 @@ pub fn meta_range(meta_type: u32, default: i32, min: i32, max: i32) -> Vec<u8> {
     object(OBJECT_PARAM_META, PARAM_META, &props)
 }
 
-/// The cursor metadata request that makes ADR-0003's rung 2 exist: a
-/// size range, because the portal picks a bitmap size we do not care
-/// about and a fixed ask would be refused.
+/// The cursor metadata request that makes the cursor ladder's rung 2
+/// exist: a size range, because the portal picks a bitmap size we do
+/// not care about and a fixed ask would be refused.
 pub fn meta_cursor() -> Vec<u8> {
     meta_range(
         META_CURSOR,
@@ -695,7 +695,7 @@ mod tests {
     }
 
     /// shm only: a dmabuf arrives unmapped and there is no CPU pointer
-    /// to crop from (ADR-0002).
+    /// to crop from.
     #[test]
     fn the_buffer_param_asks_for_shm_only() {
         let bytes = buffers(4096, 1080);

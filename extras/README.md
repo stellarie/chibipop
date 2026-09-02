@@ -48,4 +48,4 @@ modifier-as-key bind:
     bindsym --release   Mod1+f exec chibipop ctl trigger-up
 
 sway's own `bindsym --release Shift_L` is the documented bare-modifier
-form there (ADR-0003); it is untested by this project.
+form there; it is untested by this project.

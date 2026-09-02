@@ -1,4 +1,4 @@
-//! Where the popup goes, and in which pixel space (ADR-0004).
+//! Where the popup goes, and in which pixel space.
 //!
 //! Physical pixels are authoritative: core places a known-size popup
 //! with `geom::place_popup` in the global physical space, and the
@@ -103,10 +103,10 @@ pub struct Placement {
 
 /// One physical rect on one output as that surface's own geometry.
 ///
-/// The whole ADR-0004 derivation in one place, because three surfaces
-/// now need it: physical pixels are authoritative, the buffer is that
-/// many device pixels, the logical size is `ceil(physical / scale)` and
-/// the margins are `round(local / scale)` from the output's top-left
+/// The whole derivation in one place, because three surfaces now need
+/// it: physical pixels are authoritative, the buffer is that many
+/// device pixels, the logical size is `ceil(physical / scale)` and the
+/// margins are `round(local / scale)` from the output's top-left
 /// corner - a layer surface's margins being relative to the output it
 /// was created on. Sub-pixel slack lands in the last row and column of
 /// the buffer, which is padding on the popup and one border pixel
@@ -142,10 +142,10 @@ pub fn place(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, scale: f64) 
 ///
 /// The selector and the outline map their own layer surfaces and must
 /// pin each one to a `wl_output`: an output is fixed at creation and
-/// margins are relative to it (ADR-0004), so `output = NULL` would hand
-/// them an origin nobody chose. They read this list off the popup
-/// rather than binding a second `OutputState`, so all three surfaces
-/// agree about the global physical space by construction.
+/// margins are relative to it, so `output = NULL` would hand them an
+/// origin nobody chose. They read this list off the popup rather than
+/// binding a second `OutputState`, so all three surfaces agree about
+/// the global physical space by construction.
 #[derive(Debug, Clone)]
 pub struct Screen {
     /// The popup's own stable surface id for this output, so a
@@ -191,9 +191,9 @@ pub fn output_at<'a>(outputs: impl Iterator<Item = (usize, &'a OutputGeometry)>,
 /// region; the surface is never unmapped, because Hyprland animates
 /// layer surfaces by default and a map per lookup would fly the popup
 /// in on every hover - a regression against Windows, where show and
-/// hide are instant (ADR-0004). The state exists so a redundant hide
-/// costs no commit at all: at the hover cadence this runs, "already
-/// hidden" is the common case.
+/// hide are instant. The state exists so a redundant hide costs no
+/// commit at all: at the hover cadence this runs, "already hidden" is
+/// the common case.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Visibility {
     Hidden,

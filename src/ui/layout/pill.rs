@@ -8,11 +8,11 @@
 //! as a reading's are ([`ruby`](super::ruby)) and an image's are
 //! ([`image`](super::image)). The room comes from the same trick and for
 //! the same reason: the measurement seam takes styled spans and no boxes
-//! (ADR-0013), so an inline box's own edges can only occupy a line by
-//! *being* spans the measurer charges for. The rect is then read back off
-//! the very spans that bought the room, so the background a bin paints and
-//! the advance the text took cannot disagree. Change either and the other
-//! is wrong.
+//! (ARCHITECTURE.md#popup-and-measurement), so an inline box's own edges
+//! can only occupy a line by *being* spans the measurer charges for. The
+//! rect is then read back off the very spans that bought the room, so the
+//! background a bin paints and the advance the text took cannot disagree.
+//! Change either and the other is wrong.
 //!
 //! Ticket 08 shipped the drawn rect alone and recorded the room as
 //! impossible; two tickets later it was not. Ticket 11 buys a reading
@@ -163,14 +163,14 @@ pub(super) const PILL_SPACER_MAX: usize = 64;
 /// but a span cannot advance backwards
 /// and pulling the following text over
 /// the box would need the seam to place
-/// glyphs rather than runs (ADR-0013) -
-/// so a negative margin still draws
-/// where it always did and reserves
-/// what it always reserved, nothing.
-/// No census dictionary writes one.
-/// Padding and border widths are
-/// already non-negative: [`apply_box`]
-/// clamps exactly what CSS clamps.
+/// glyphs rather than runs - so a
+/// negative margin still draws where it
+/// always did and reserves what it
+/// always reserved, nothing. No census
+/// dictionary writes one. Padding and
+/// border widths are already
+/// non-negative: [`apply_box`] clamps
+/// exactly what CSS clamps.
 ///
 /// [`box_len`]: super::style::box_len
 /// [`apply_box`]: super::style::apply_box
@@ -266,17 +266,16 @@ fn spacer_spans(pill: &InlineBox) -> impl Iterator<Item = (usize, f32)> {
 /// an inline box's horizontal margin,
 /// border and padding occupy a line.
 /// The measurement seam takes styled
-/// spans and no boxes (ADR-0013), so a
-/// box's edges can only take room by
-/// *being* spans the measurer charges
-/// for - and growing the line boxes
-/// afterwards would fool nobody,
-/// because both bins re-measure an
-/// element's own spans to paint it and
-/// would get the ungrown lines back.
-/// Ticket 11's ruby filler and ticket
-/// 12's image spacer are the same trick
-/// for the same reason.
+/// spans and no boxes, so a box's edges
+/// can only take room by *being* spans
+/// the measurer charges for - and
+/// growing the line boxes afterwards
+/// would fool nobody, because both bins
+/// re-measure an element's own spans to
+/// paint it and would get the ungrown
+/// lines back. Ticket 11's ruby filler
+/// and ticket 12's image spacer are the
+/// same trick for the same reason.
 ///
 /// So the run asks, and this decides
 /// what it asks for. One ratio is

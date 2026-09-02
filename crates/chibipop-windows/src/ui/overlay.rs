@@ -65,8 +65,9 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
 ///
 /// The overlay draws its outlines **outset**: a stroke inside a scan rect
 /// would land in the very pixels the next grab reads, and captures must
-/// never contain chibipop's own furniture (ADR-0008). Inflating by the
-/// stroke thickness puts the whole frame in the band around the rect, so
+/// never contain chibipop's own furniture
+/// (ARCHITECTURE.md#capture-and-masking). Inflating by the stroke
+/// thickness puts the whole frame in the band around the rect, so
 /// `inset(outset(r), FRAME_THICKNESS) == r` - the capture rect itself
 /// stays clear.
 fn outset(rects: &[ScanRect]) -> Vec<ScanRect> {
@@ -328,7 +329,7 @@ impl Overlay {
     ///
     /// Empty hides it instead. The outlines land outside the rects handed
     /// in, so a scan region shown here is never a scan region painted on
-    /// (ADR-0008).
+    /// (ARCHITECTURE.md#capture-and-masking).
     pub fn show_rects(&self, rects: &[ScanRect], theme: &Theme) -> Result<()> {
         let Some((bounds, local)) = overlay_layout(&outset(rects)) else {
             self.hide();
@@ -470,7 +471,7 @@ mod tests {
         assert_eq!(vec![rect], edge_strips(rect, FRAME_THICKNESS));
     }
 
-    /// ADR-0008: nothing the overlay paints may land in a capture rect.
+    /// Nothing the overlay paints may land in a capture rect.
     #[test]
     fn outset_strokes_never_touch_the_rect_they_outline() {
         let scan = PhysRect { x: 100, y: 200, w: 60, h: 30 };

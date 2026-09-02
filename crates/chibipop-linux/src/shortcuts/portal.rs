@@ -1,15 +1,16 @@
-//! `org.freedesktop.portal.GlobalShortcuts`: ADR-0003's rung 1 for the
-//! trigger channel, on its own thread.
+//! `org.freedesktop.portal.GlobalShortcuts`: rung 1 of the trigger
+//! channel's ladder (ARCHITECTURE.md#input-ladders), on its own thread.
 //!
 //! **Why a thread and blocking zbus.** Same two reasons as the capture
-//! portal ([`crate::capture::portal::dbus`]): ADR-0001 keeps the calloop
-//! pump sync, so no async runtime may appear here, and zbus is already in
-//! the tree with a blocking API that rides the executor ksni starts. The
-//! session then lives for the whole run — unlike the capture handshake,
-//! which is over once it has an fd — because `Activated`/`Deactivated`
-//! keep arriving on it for as long as the user holds a key. So this is a
-//! *long-lived* portal client: handshake, then a signal pump that turns
-//! D-Bus messages into [`Event`]s on a calloop channel.
+//! portal ([`crate::capture::portal::dbus`]): the calloop pump stays
+//! sync (ARCHITECTURE.md#workspace-and-seams), so no async runtime may
+//! appear here, and zbus is already in the tree with a blocking API
+//! that rides the executor ksni starts. The session then lives for the
+//! whole run — unlike the capture handshake, which is over once it has
+//! an fd — because `Activated`/`Deactivated` keep arriving on it for as
+//! long as the user holds a key. So this is a *long-lived* portal
+//! client: handshake, then a signal pump that turns D-Bus messages into
+//! [`Event`]s on a calloop channel.
 //!
 //! **The Request race** is avoided exactly as the capture module does it:
 //! every portal method answers twice (an `o` handle now, a
@@ -67,8 +68,7 @@ const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
 /// The portal's single object path; every portal interface lives here.
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 /// The interface whose presence on the session bus is this rung's
-/// capability probe (ADR-0003: advertised capability, never compositor
-/// identity).
+/// capability probe: advertised capability, never compositor identity.
 pub const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
 /// Shared across all portal interfaces: where a method's deferred answer
@@ -86,7 +86,7 @@ const QUICK: Duration = Duration::from_secs(10);
 /// `BindShortcuts` "will typically result the portal presenting a dialog"
 /// — on KDE that is a human reading a list of keys, so the budget is a
 /// human's, not a bus's. Nothing waits on it: the control socket is
-/// already serving and the pump never blocks (ADR-0001).
+/// already serving and the pump never blocks.
 const BIND: Duration = Duration::from_secs(180);
 
 /// How large a burst of shortcut signals may queue while the handshake
@@ -129,9 +129,9 @@ pub fn spawn(preferred: [(ShortcutId, String); 2], tx: SyncSender<Event>) -> std
 /// Why the rung is not serving.
 ///
 /// Two fields, because two readers: a tray row wants one short clause
-/// (ADR-0006), and the log wants the whole story. Keeping them apart is
-/// what lets the app-id case explain a launch method without pasting a
-/// paragraph into a menu.
+/// (ARCHITECTURE.md#platform-integration), and the log wants the whole
+/// story. Keeping them apart is what lets the app-id case explain a
+/// launch method without pasting a paragraph into a menu.
 pub struct Why {
     /// Short enough for a status row.
     pub reason: String,

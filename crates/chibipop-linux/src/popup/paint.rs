@@ -6,14 +6,14 @@
 //! `LWA_ALPHA`; a layer surface has neither, so the rounded rect *is*
 //! the silhouette - everything outside it stays fully transparent -
 //! and the constant alpha is reproduced per pixel by fading the
-//! finished frame once, at the end (ADR-0004). The corners therefore
-//! fade instead of being hard-clipped, which is the one place this
-//! looks better than Win32, at the cost of one pass over the buffer.
+//! finished frame once, at the end. The corners therefore fade
+//! instead of being hard-clipped, which is the one place this looks
+//! better than Win32, at the cost of one pass over the buffer.
 //!
 //! The Anki affordance is painted here too. Windows only gives it a
 //! separate HWND because a `WS_EX_TRANSPARENT` popup cannot receive a
 //! click; our panel serves it from its own input region, so the slot
-//! core reserved is just another strip of this buffer (ADR-0004).
+//! core reserved is just another strip of this buffer.
 //!
 //! Everything arriving here is already in physical pixels: the scene
 //! was laid out at the output's fractional scale and the theme is
@@ -94,7 +94,7 @@ pub fn panel(
     // 4. Elements, in the scene's order, scroll applied and off-panel
     // runs already culled by core. One paragraph is one run, however
     // many styles it holds, so the wrap the scene measured is the wrap
-    // that paints (ADR-0013).
+    // that paints (ARCHITECTURE.md#popup-and-measurement).
     let mut spans: Vec<StyledSpan<'_>> = Vec::new();
     let mut shifts: Vec<f32> = Vec::new();
     for painted in scene.visible(p.scroll, scene.view_h) {
@@ -299,11 +299,10 @@ fn side_span<'a>(theme: &'a Theme, text: &'a str, color: Rgb) -> StyledSpan<'a> 
 
 /// The hide frame: a fully transparent buffer.
 ///
-/// The surface is never unmapped (ADR-0004), so Hyprland's layer
-/// animation never fires and show/hide stays instant. Zeroed bytes
-/// *are* transparent premultiplied, whatever the channel order, and
-/// zeroing sidesteps `pixels_mut`'s cast of a buffer this module did
-/// not size.
+/// The surface is never unmapped, so Hyprland's layer animation
+/// never fires and show/hide stays instant. Zeroed bytes *are*
+/// transparent premultiplied, whatever the channel order, and zeroing
+/// sidesteps `pixels_mut`'s cast of a buffer this module did not size.
 pub fn transparent(target: &mut PixmapMut<'_>) {
     let n = pixel_bytes(target);
     target.data_mut()[..n].fill(0);

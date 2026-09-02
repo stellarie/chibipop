@@ -1,4 +1,4 @@
-//! The rebuild, in this process (ADR-0005).
+//! The rebuild, in this process (ARCHITECTURE.md#settings-and-config).
 //!
 //! Windows spawns `chibipop.exe build-dict` as a child with
 //! `CREATE_NO_WINDOW` and reads its stdout; on Linux there is no window
@@ -118,8 +118,9 @@ fn run(form: &SettingsForm, plan: &Plan, sink: &impl Fn(Progress)) -> Progress {
 ///
 /// The first list is `dict_paths`, which is every readable archive the
 /// build installs as a dictionary row - a frequency- or pitch-only
-/// archive is a dictionary in its own right now (ADR-0014), not something
-/// the term list skips. The `term dict` prefix stays because
+/// archive is a dictionary in its own right now
+/// (ARCHITECTURE.md#dictionary-and-lookup), not something the term list
+/// skips. The `term dict` prefix stays because
 /// [`chibipop::dict::progress::friendly`] is what turns these into
 /// "Reading <file>…", and it parses exactly that word; the second list
 /// re-announces the archives read for their frequencies, so an archive

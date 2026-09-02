@@ -1,4 +1,4 @@
-//! The popup's decoded-surface cache (ADR-0004's paint side).
+//! The popup's decoded-surface cache, on the paint side.
 //!
 //! One `MediaStore` connection of its own plus a bounded map of decoded
 //! bitmaps. Its own connection because the worker owns the dictionary on
@@ -25,8 +25,9 @@
 //! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`] and
 //! [`chibipop::dict::media::premultiplied`]. None of the three carries a
 //! pixel format, which is what lets them be shared while painting stays
-//! per-platform (ADR-0001). What stays here is the channel swap, the
-//! bitmap layout `CreateBitmap` needs, and the diagnostics.
+//! per-platform (ARCHITECTURE.md#workspace-and-seams). What stays here is
+//! the channel swap, the bitmap layout `CreateBitmap` needs, and the
+//! diagnostics.
 //!
 //! What this module deliberately does *not* hold is an `ID2D1Bitmap`. A
 //! device bitmap belongs to a render target and dies with it on device

@@ -2,6 +2,9 @@
 
 Style the popup with a CSS file. Share the file to share a theme.
 
+**chibipop reads `popup.css` on Windows only.** The Linux popup does not
+read it, and upstream issue #53 tracks that gap.
+
 ## Quick start
 
 1. Open **Settings**.

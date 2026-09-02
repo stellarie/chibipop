@@ -3,7 +3,8 @@
 #![warn(unsafe_attr_outside_unsafe)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-//! Per-platform bins compile everywhere, run on their own OS (ADR-0007):
+//! Per-platform bins compile everywhere, run on their own OS
+//! (ARCHITECTURE.md#packaging-and-ci):
 //! on a foreign target this bin is a two-line refusal instead of a compile
 //! error, so `cargo test --workspace` / `cargo clippy --workspace` stay one
 //! command on both CI runners with no cross-compilation and no member

@@ -1,6 +1,6 @@
-//! Popup pointer input (ADR-0003, ADR-0004): the wheel, entry clicks,
-//! the back affordance and the Anki slot, all served from the panel's
-//! own input region.
+//! Popup pointer input (ARCHITECTURE.md#input-ladders): the wheel,
+//! entry clicks, the back affordance and the Anki slot, all served
+//! from the panel's own input region.
 //!
 //! Wayland has no machine-wide mouse hook, so the Windows `WH_MOUSE_LL`
 //! swallow is replaced by `wl_pointer` events on the layer surface
@@ -69,8 +69,8 @@ const NOTCH_PX: f64 = 10.0;
 pub enum Hit {
     /// A scene target: expand, drill down, or back.
     Action(HitAction),
-    /// The Anki slot. Core reserves it and the painter fills it
-    /// (ADR-0004); a click on it is the Controller's `AddRequested`.
+    /// The Anki slot. Core reserves it and the painter fills it; a
+    /// click on it is the Controller's `AddRequested`.
     Anki,
 }
 
@@ -173,7 +173,7 @@ fn within(origin: f32, len: f32, at: f32) -> bool {
 /// The surface's pointer input region for one commit.
 ///
 /// Surface-local logical units, because `wl_region` is. The two states
-/// are the whole ADR-0003 bargain: while the popup is up the pointer
+/// are the whole input bargain: while the popup is up the pointer
 /// belongs to it (the app underneath loses hover, which the popup was
 /// covering anyway), and the moment it is hidden every event falls
 /// straight through.
@@ -270,8 +270,7 @@ pub struct Focus {
 pub struct Pointer {
     seats: SeatState,
     /// `wp_cursor_shape_v1` where advertised. Where it is not, the
-    /// cursor is left alone rather than us loading XCursor themes
-    /// (ADR-0004).
+    /// cursor is left alone rather than us loading XCursor themes.
     shapes: Option<CursorShapeManager>,
     pointer: Option<WlPointer>,
     device: Option<WpCursorShapeDeviceV1>,
@@ -579,7 +578,7 @@ forward!(WpCursorShapeDeviceV1, GlobalData);
 /// The seat's capabilities are how a pointer is learned about - at
 /// startup and when one is plugged in later. Nothing here ever asks for
 /// a keyboard: `keyboard_interactivity` is `none` and the popup has no
-/// use for one (ADR-0003).
+/// use for one (ARCHITECTURE.md#input-ladders).
 impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState {
         self.popup_mut().seats()

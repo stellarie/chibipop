@@ -4,12 +4,12 @@
 //! *bit-for-bit*: the half-pixel centre mapping, fixed-point tap weights at
 //! 1/2048, and the horizontal-then-vertical accumulation with OpenCV's
 //! exact shift schedule. That fidelity is not fussiness. The Python
-//! harness in `tools/ocr-bench` is ADR-0009's parity reference, it resizes
-//! with `cv2`, and the gate holds this port to +-3 pp of its numbers on a
-//! corpus whose vertical slice is a single 16-glyph crop - where one
-//! flipped character is 6.25 pp. A plain float bilinear differs from cv2 by
-//! a least-significant bit on a good fraction of pixels, which is exactly
-//! the size of perturbation that flips a borderline glyph.
+//! harness in `tools/ocr-bench` is the parity reference, it resizes with
+//! `cv2`, and the gate holds this port to +-3 pp of its numbers on a corpus
+//! whose vertical slice is a single 16-glyph crop - where one flipped
+//! character is 6.25 pp. A plain float bilinear differs from cv2 by a
+//! least-significant bit on a good fraction of pixels, which is exactly the
+//! size of perturbation that flips a borderline glyph.
 
 /// A tightly packed 8-bit BGR image.
 ///

@@ -1,5 +1,5 @@
-//! The wlr-screencopy capture backend: ADR-0002's primary Linux
-//! `RegionCapture`.
+//! The wlr-screencopy capture backend: the primary Linux
+//! `RegionCapture` (ARCHITECTURE.md#capture-and-masking).
 //!
 //! It is the only protocol with compositor-side *region* capture and it
 //! prompts for nothing, so on Hyprland/sway/niri a hover works the
@@ -13,7 +13,7 @@
 //! is a dwell, and dwells run the damage race in [`pacing`] instead -
 //! whose timeout is not a failure but the answer *nothing changed*,
 //! handed up as `Frame::unchanged` so the pipeline can skip an OCR pass
-//! it has already paid for (ADR-0010's dwell re-check).
+//! it has already paid for (the dwell re-check).
 //!
 //! **Threading.** Thread-affine by construction: the connection, the
 //! queue, the loop and the shm pools are all made in `open`, which the
@@ -27,10 +27,10 @@
 //! Wayland plumbing, [`shm`] the buffers. Only this file needs all
 //! five, and only this file blocks.
 //!
-//! **The other rung.** [`backend`] is the ladder itself: which of
-//! ADR-0002's two backends this session gets, by advertised
-//! capability. [`portal`] is rung 2, the xdg-desktop-portal ScreenCast
-//! + PipeWire fallback for the compositors with no screencopy at all.
+//! **The other rung.** [`backend`] is the ladder itself: which of the
+//! two backends this session gets, by advertised capability. [`portal`]
+//! is rung 2, the xdg-desktop-portal ScreenCast + PipeWire fallback for
+//! the compositors with no screencopy at all.
 //!
 //! **What no rung can do.** [`software_cursor`] is the one cursor fact
 //! that is not a request: a compositor drawing a software pointer into
@@ -83,17 +83,16 @@ pub fn available(globals: &[Advertised]) -> bool {
 ///
 /// Deliberately not [`crate::worker::Setup`]: that one carries the
 /// dictionary path and no state dir, and a one-shot grab opens no
-/// dictionary. What the two share is the only two inputs ADR-0002's
-/// ladder has: what this session advertises, and which rung it picked.
+/// dictionary. What the two share is the only two inputs the ladder
+/// has: what this session advertises, and which rung it picked.
 /// Both are read from the same startup probe, so neither re-runs
 /// [`backend::select`] behind the daemon's back.
 #[derive(Debug, Clone)]
 pub struct Setup {
     /// The startup capability probe.
     pub globals: Vec<Advertised>,
-    /// Which rung the ladder picked (ADR-0002). `None` is a session
-    /// with no capture protocol at all, which is a state and not a
-    /// crash.
+    /// Which rung the ladder picked. `None` is a session with no
+    /// capture protocol at all, which is a state and not a crash.
     pub backend: Option<Backend>,
     /// Where the portal rung's restore token lives, so a second
     /// session on rung 2 is silent instead of prompting again.
@@ -145,8 +144,8 @@ pub fn open(setup: &Setup, log: &mut dyn FnMut(&str)) -> Result<Opened> {
             ));
             Ok(Opened { backend: Box::new(portal::PortalCapture::new(session)), outputs })
         }
-        // ADR-0002: an absent rung is a rung the ladder skips, and a
-        // ladder with no rungs left is a named state.
+        // An absent rung is a rung the ladder skips, and a ladder with
+        // no rungs left is a named state.
         None => anyhow::bail!("this compositor advertises no capture protocol chibipop can use"),
     }
 }
@@ -589,7 +588,7 @@ mod tests {
         assert!(!available(&[advertised("wl_shm"), advertised("wl_output")]));
     }
 
-    /// Absence must fall through the ladder, not crash it (ADR-0002).
+    /// Absence must fall through the ladder, not crash it.
     #[test]
     fn opening_without_the_global_is_an_error_not_a_panic() {
         let Err(err) = WlrScreencopy::open(&[advertised("wl_compositor")]) else {

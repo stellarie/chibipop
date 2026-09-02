@@ -90,7 +90,7 @@ impl PluginText {
 
 /// The core worker seam: a plugin serves hovers exactly like the
 /// built-in engine, strikes and all, and answers the same metadata
-/// (ADR-0001).
+/// (ARCHITECTURE.md#workspace-and-seams).
 impl chibipop::text::OcrEngine for PluginText {
     fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         if self.disabled() {

@@ -1,7 +1,7 @@
 //! The daemon: calloop pump + instance lock + control socket + logging
-//! (ADR-0001: all sync, calloop as the Linux pump), the popup's layer
-//! surfaces (ADR-0004), and the capture channel's startup half — the
-//! ADR-0002 backend ladder and, when it picks the portal rung, the
+//! (ARCHITECTURE.md#workspace-and-seams: all sync, calloop as the Linux
+//! pump), the popup's layer surfaces, and the capture channel's startup
+//! half — the backend ladder and, when it picks the portal rung, the
 //! eager consent that has to finish before anything reports a channel
 //! state. OCR is the one channel still to plug into this loop.
 
@@ -63,8 +63,8 @@ use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::Zxd
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 
 /// The controller's tick length. No dispatch timer exists on Linux
-/// (ADR-0010: event-paced, Worker-throttled); this only scales the
-/// controller's tick-derived warning arithmetic.
+/// (ARCHITECTURE.md#hover-cadence: event-paced, Worker-throttled); this
+/// only scales the controller's tick-derived warning arithmetic.
 const DISPATCH_TICK_MS: u32 = 20;
 
 /// The surface probe's env hook and its pick deadline. See
@@ -116,16 +116,17 @@ pub(crate) struct App {
     cursor_rung: Option<cursor::Rung>,
     /// When the hyprctl rung last saw the cursor move.
     last_move: Instant,
-    /// At most one settings child (ADR-0005), spawned from the tray's
-    /// Settings item; the settings-scoped flock is the cross-process
-    /// guard, this is the daemon's own.
+    /// At most one settings child (ARCHITECTURE.md#settings-and-config),
+    /// spawned from the tray's Settings item; the settings-scoped flock
+    /// is the cross-process guard, this is the daemon's own.
     settings: SettingsChild,
-    /// Channel health plus the SNI tray mirroring it (ADR-0006). Also
-    /// the daemon's own view: it works unchanged when there is no tray.
+    /// Channel health plus the SNI tray mirroring it
+    /// (ARCHITECTURE.md#platform-integration). Also the daemon's own
+    /// view: it works unchanged when there is no tray.
     tray: TrayHandle,
-    /// The popup's layer surfaces (ADR-0004). `None` only where there
-    /// is no compositor to bind against: a unit test, or a session
-    /// missing the layer shell — the daemon stays up either way.
+    /// The popup's layer surfaces. `None` only where there is no
+    /// compositor to bind against: a unit test, or a session missing the
+    /// layer shell — the daemon stays up either way.
     popup: Option<Popup>,
     /// The region selector's layer surfaces (spec D5). `None` on a
     /// compositor with no layer shell, and for the same reason the
@@ -159,9 +160,9 @@ pub(crate) struct App {
     /// so the repaints its own steps cause do not start another.
     scripting: bool,
     /// The core pipeline: capture + OCR + dictionary on their own
-    /// thread (ADR-0001). `None` when it could not be built - no
-    /// capture protocol, no OCR models, a refused portal - and the
-    /// daemon stays up saying so.
+    /// thread (ARCHITECTURE.md#workspace-and-seams). `None` when it
+    /// could not be built - no capture protocol, no OCR models, a
+    /// refused portal - and the daemon stays up saying so.
     worker: Option<Worker>,
     /// What a spawn needs, kept so a granted portal retry can hand the
     /// new session to a fresh pipeline.
@@ -170,7 +171,8 @@ pub(crate) struct App {
     worker_ping: calloop::ping::Ping,
     /// Where an AnkiConnect call's answer comes back. The calls are
     /// blocking HTTP on their own threads, so the pump hears about
-    /// them the way it hears about the Worker: as an event (ADR-0001).
+    /// them the way it hears about the Worker: as an event
+    /// (ARCHITECTURE.md#workspace-and-seams).
     anki_tx: calloop::channel::Sender<AnkiOutcome>,
     /// Where a mined region's pixels come back. Same shape and same
     /// reason as `anki_tx`: opening a capture backend and grabbing a
@@ -187,7 +189,7 @@ pub(crate) struct App {
     ocr_jobs: worker::OcrJobs,
     /// Where a one-off OCR job's lines come back. Cloned into each
     /// request, so the answer is an event on this pump and the Worker
-    /// thread never waits for us (ADR-0001).
+    /// thread never waits for us (ARCHITECTURE.md#workspace-and-seams).
     ocr_tx: calloop::channel::Sender<Result<Vec<OcrLine>, String>>,
     /// The region a queued OCR job was read out of, while one is in
     /// flight: what the answer's diagnostic names, and the guard that
@@ -200,7 +202,8 @@ pub(crate) struct App {
     clipboard: Option<clipboard::Clipboard>,
     /// Dictionary identities the pipeline last reported.
     dicts: Vec<DictInfo>,
-    /// Trigger mode's hold, while one is held (ADR-0010).
+    /// Trigger mode's hold, while one is held
+    /// (ARCHITECTURE.md#hover-cadence).
     hold: Option<Hold>,
     /// The last lookup failure logged, so a moving cursor cannot repeat
     /// one line hundreds of times.
@@ -225,7 +228,8 @@ pub(crate) struct App {
     /// daemon adds and drops at runtime, so the pump's own handle has
     /// to be reachable from the state that decides to.
     pump: LoopHandle<'static, App>,
-    /// The dwell re-check's timer while one is armed (ADR-0010).
+    /// The dwell re-check's timer while one is armed
+    /// (ARCHITECTURE.md#hover-cadence).
     dwell: Option<RegistrationToken>,
 }
 
@@ -254,7 +258,8 @@ enum AnkiOutcome {
     /// filed, `Ok(None)` saved with no card to file it on, `Err` a step
     /// that did not get there. `dir` is the folder it went to and never
     /// the file: the filename carries the word, which is screen content
-    /// and does not belong in diagnostics (ADR-0006).
+    /// and does not belong in diagnostics
+    /// (ARCHITECTURE.md#platform-integration).
     Shot { expr: String, dir: PathBuf, filed: Result<Option<i64>, String> },
 }
 
@@ -379,7 +384,7 @@ struct PortalRetry {
     cursor: Option<portal::CursorSink>,
 }
 
-/// ADR-0002's eager consent, start to finish.
+/// The portal's eager consent, start to finish.
 ///
 /// Answers the backend when the portal said yes, and the capture
 /// channel's row either way: a refusal is a status with a retry in it,
@@ -432,8 +437,8 @@ impl App {
     }
 
     /// One verb's effect, whichever channel delivered it: the control
-    /// socket (ADR-0003's rung 2, always bound) or the GlobalShortcuts
-    /// portal (rung 1). Both land here on purpose — a portal press and a
+    /// socket (rung 2, always bound) or the GlobalShortcuts portal
+    /// (rung 1). Both land here on purpose — a portal press and a
     /// `chibipop ctl trigger-down` that could drift apart would be two
     /// trigger semantics, and the product has one. The same holds for
     /// the add: `Verb::AnkiAdd` is the *only* place the keyboard path to
@@ -489,9 +494,10 @@ impl App {
             // status with a reason in it, never an exit.
             shortcuts::Event::Unavailable { reason, advice } => {
                 self.log.diag(&format!("trigger: portal rung unavailable - {reason}"));
-                // The row gets the short clause (ADR-0006: one line);
-                // the way out belongs in the log, where there is room
-                // for it.
+                // The row gets the short clause
+                // (ARCHITECTURE.md#platform-integration: one line); the
+                // way out belongs in the log, where there is room for
+                // it.
                 if let Some(advice) = advice {
                     self.log.diag(&format!("trigger: {advice}"));
                 }
@@ -516,16 +522,17 @@ impl App {
         self.publish_trigger(&shortcuts::state::Published::portal(bindings));
     }
 
-    /// Tell the settings window who owns the binding (ADR-0005: the UI
-    /// never lies about that). A file it cannot write is a diagnostic,
-    /// not a failure — the trigger keeps working either way.
+    /// Tell the settings window who owns the binding
+    /// (ARCHITECTURE.md#settings-and-config: the UI never lies about
+    /// that). A file it cannot write is a diagnostic, not a failure —
+    /// the trigger keeps working either way.
     fn publish_trigger(&mut self, published: &shortcuts::state::Published) {
         if let Err(e) = shortcuts::state::publish(&self.paths.state_dir, published) {
             self.log.diag(&format!("trigger: could not publish the channel state - {e}"));
         }
     }
 
-    /// One trigger verb's effect (ADR-0010).
+    /// One trigger verb's effect (ARCHITECTURE.md#hover-cadence).
     ///
     /// A press freezes the output under the cursor and looks up what is
     /// there; a release drops the frame and retracts the popup. The
@@ -591,9 +598,9 @@ impl App {
     /// Where the cursor is *now*, for a press.
     ///
     /// The polling rung is asked directly: a press is exactly when its
-    /// adaptive interval may be at its slowest (ADR-0010), and reading
-    /// the position is free. The event rungs have already delivered
-    /// their newest sample.
+    /// adaptive interval may be at its slowest
+    /// (ARCHITECTURE.md#hover-cadence), and reading the position is
+    /// free. The event rungs have already delivered their newest sample.
     fn cursor_now(&mut self) -> Option<PhysPoint> {
         if self.cursor_rung == Some(cursor::Rung::HyprctlPoll) {
             if let Some((lx, ly)) = hyprctl::sample() {
@@ -820,13 +827,14 @@ impl App {
             return;
         };
         self.config.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
-        // The config file is the sole source of truth (ADR-0005), so the
-        // region has to be *in* it before anything is re-derived from
-        // it. Synchronous: this is a few KB of TOML on local disk at the
-        // end of an interaction that just held the thread for as long as
-        // the user took to drag, so a thread for it would buy nothing
-        // and cost an ordering question. A failed write is a diagnostic
-        // and a region that lasts until the next reload, not an exit.
+        // The config file is the sole source of truth
+        // (ARCHITECTURE.md#settings-and-config), so the region has to be
+        // *in* it before anything is re-derived from it. Synchronous:
+        // this is a few KB of TOML on local disk at the end of an
+        // interaction that just held the thread for as long as the user
+        // took to drag, so a thread for it would buy nothing and cost an
+        // ordering question. A failed write is a diagnostic and a region
+        // that lasts until the next reload, not an exit.
         match self.config.save(&self.paths.config_file) {
             Ok(()) => self.log.diag(&format!(
                 "static region: set to {}x{} at {},{} and saved to {}",
@@ -1050,7 +1058,7 @@ impl App {
     }
 
     /// What a one-shot grab needs to open a backend of its own: the
-    /// startup capability probe, the rung the ADR-0002 ladder picked, and
+    /// startup capability probe, the rung the capture ladder picked, and
     /// the state dir the portal rung keeps its restore token in - so a
     /// second session on rung 2 is silent instead of prompting again.
     fn capture_setup(&self) -> capture::Setup {
@@ -1063,7 +1071,8 @@ impl App {
 
     /// The grabbing thread answered. The popup goes back up here and
     /// nowhere earlier, and the pixels go on to the call that writes and
-    /// files them - off this thread again (ADR-0001).
+    /// files them - off this thread again
+    /// (ARCHITECTURE.md#workspace-and-seams).
     fn handle_shot(&mut self, grabbed: Result<Frame, String>) {
         let Some(Shot::Grabbing(shot)) = self.shot.take() else {
             self.log.diag("screenshot: pixels arrived with no shot waiting for them");
@@ -1183,10 +1192,11 @@ impl App {
     ///
     /// Two off-pump stages, one thread each and neither of them this
     /// one: the grab opens a capture backend of its own (spec D6), and
-    /// the recogniser is thread-affine to the Worker (ADR-0009), so the
-    /// grab thread forwards straight into [`worker::OcrJobs`] rather
-    /// than bouncing a whole frame off the pump that has no use for it.
-    /// Only the text comes back here, as an event (ADR-0001).
+    /// the recogniser is thread-affine to the Worker
+    /// (ARCHITECTURE.md#ocr-engine), so the grab thread forwards
+    /// straight into [`worker::OcrJobs`] rather than bouncing a whole
+    /// frame off the pump that has no use for it. Only the text comes
+    /// back here, as an event (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_ocr_read(&mut self, region: PhysRect) {
         let setup = self.capture_setup();
         let jobs = self.ocr_jobs.clone();
@@ -1196,8 +1206,9 @@ impl App {
             .spawn(move || {
                 // Native resolution: this adapter never upscales, and
                 // meikiocr is strictly worse on 2x crops on every
-                // benchmark slice (ADR-0009). The Windows twin's 2x is
-                // its engine's fact, not this one's.
+                // benchmark slice (ARCHITECTURE.md#ocr-engine). The
+                // Windows twin's 2x is its engine's fact, not this
+                // one's.
                 match capture::oneshot(&setup, region) {
                     Ok(frame) => {
                         let request = worker::OcrRequest {
@@ -1251,7 +1262,8 @@ impl App {
             return;
         }
         // Counts, never the text: what the user read is screen content
-        // and diagnostics are not opted in to (ADR-0006).
+        // and diagnostics are not opted in to
+        // (ARCHITECTURE.md#platform-integration).
         let chars = text.chars().count();
         let Some(board) = self.clipboard.as_ref() else {
             self.log.diag(&clipboard::unavailable_line());
@@ -1384,8 +1396,8 @@ impl App {
     }
 
     /// The compositor closed a layer surface. For the popup that is
-    /// routine recreation (ADR-0004); for a pick it is a cancel; for an
-    /// outline it is one surface fewer until the next show.
+    /// routine recreation; for a pick it is a cancel; for an outline it
+    /// is one surface fewer until the next show.
     pub(crate) fn layer_closed(&mut self, layer: &LayerSurface) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1444,10 +1456,10 @@ impl App {
         self.pointer_interactions(interactions);
     }
 
-    /// A `preferred_scale` arrived. The scale is never latched
-    /// (ADR-0004): Hyprland may send 1.0 first and correct it later, so
-    /// a change to the surface currently showing is re-rastered and
-    /// re-placed, and the Controller hears the new rect.
+    /// A `preferred_scale` arrived. The scale is never latched: Hyprland
+    /// may send 1.0 first and correct it later, so a change to the
+    /// surface currently showing is re-rastered and re-placed, and the
+    /// Controller hears the new rect.
     pub(crate) fn popup_rescaled(&mut self, idx: usize, scale_120ths: u32) {
         let moved = self.popup.as_mut().is_some_and(|p| p.preferred_scale(idx, scale_120ths));
         self.flush_popup_notes();
@@ -1469,9 +1481,9 @@ impl App {
 
     /// Popup-local pointer input (ticket 38) -> Controller Events.
     ///
-    /// The other half of ADR-0003's contextual-interaction bargain:
-    /// there is no global wheel or click channel on Wayland, so these
-    /// arrive from the popup's own input region and nowhere else.
+    /// The other half of the contextual-interaction bargain: there is no
+    /// global wheel or click channel on Wayland, so these arrive from
+    /// the popup's own input region and nowhere else.
     pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
         for interaction in interactions {
             match interaction {
@@ -1491,9 +1503,9 @@ impl App {
                     ));
                     self.feed(Event::Clicked { local, hit });
                 }
-                // Core reserves the slot and the painter fills it
-                // (ADR-0004); the Controller decides whether a click
-                // on it is an add at all.
+                // Core reserves the slot and the painter fills it; the
+                // Controller decides whether a click on it is an add at
+                // all.
                 popup::Interaction::Anki { local } => {
                     self.log.diag(&format!(
                         "pointer: click at panel {},{} -> the Anki slot",
@@ -1573,7 +1585,7 @@ impl App {
 
     /// One Event through the Controller, and every Command it answers
     /// with executed - then the dwell watch brought in line with what
-    /// is now on screen (ADR-0010).
+    /// is now on screen (ARCHITECTURE.md#hover-cadence).
     fn feed(&mut self, event: Event) {
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
@@ -1591,8 +1603,8 @@ impl App {
     /// Disarming is the timer's own job (see [`App::dwell_tick`]): a
     /// source must not be removed from inside its own dispatch, and a
     /// watch that retires on its next deadline still leaves an idle
-    /// daemon holding no timed source at all - which is what ADR-0010's
-    /// zero idle wakeups means on an event-driven cursor rung.
+    /// daemon holding no timed source at all - which is what zero idle
+    /// wakeups means on an event-driven cursor rung.
     fn sync_dwell(&mut self) {
         if self.dwell.is_some() || !self.dwell_wanted() {
             return;
@@ -1617,7 +1629,8 @@ impl App {
     }
 
     /// One dwell deadline: re-ask the shown popup's own question, then
-    /// decide whether this watch is still wanted (ADR-0010).
+    /// decide whether this watch is still wanted
+    /// (ARCHITECTURE.md#hover-cadence).
     ///
     /// The re-grab races damage on the same deadline below the seams, so
     /// an unchanged screen costs no copy and no OCR pass, and the
@@ -1640,9 +1653,10 @@ impl App {
     fn execute(&mut self, cmd: Command) {
         match cmd {
             // What OCR must not read is our own popup, and only on a
-            // live grab: a frozen hold's pixels predate it (ADR-0008,
-            // ADR-0010). Wayland has no protocol-level surface
-            // exclusion, so this rect is the whole mechanism.
+            // live grab: a frozen hold's pixels predate it
+            // (ARCHITECTURE.md#capture-and-masking). Wayland has no
+            // protocol-level surface exclusion, so this rect is the
+            // whole mechanism.
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
                 self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
@@ -1668,8 +1682,8 @@ impl App {
                     scroll,
                     show_back,
                     // The slot is painted into the panel here, not
-                    // hung beside it as on Windows (ADR-0004), so
-                    // every raster carries the affordance's own state.
+                    // hung beside it as on Windows, so every raster
+                    // carries the affordance's own state.
                     anki: self.controller.anki().cloned(),
                 });
             }
@@ -1736,7 +1750,7 @@ impl App {
             // The arming rows (`Set*Armed`, `SetCursorShape`) come off
             // the Windows dispatch tick, which this daemon does not
             // have: nothing here is armed per tick, because nothing
-            // here hooks the seat (ADR-0003, ADR-0010).
+            // here hooks the seat.
             other => self.log.diag(&format!("controller: {other:?} (no-op)")),
         }
     }
@@ -1783,7 +1797,7 @@ impl App {
     /// may not be running at all, so none may happen on this thread: a
     /// two-second connect timeout here would be two seconds of frozen
     /// popup. The answer comes back as an event, like the Worker's
-    /// (ADR-0001).
+    /// (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_anki(&mut self, call: AnkiCall) {
         let anki = self.config.anki.clone();
         let tx = self.anki_tx.clone();
@@ -1801,7 +1815,7 @@ impl App {
     ///
     /// The lines carry counts and note ids and never the expression
     /// itself: what the user read is screen content, and diagnostics
-    /// are not opted in to (ADR-0006).
+    /// are not opted in to (ARCHITECTURE.md#platform-integration).
     fn handle_anki(&mut self, outcome: AnkiOutcome) {
         match outcome {
             AnkiOutcome::Dupes { generation, dupes } => {
@@ -1869,9 +1883,9 @@ impl App {
     /// The Anki affordance's state moved.
     ///
     /// Windows has a button window of its own to place, hide and
-    /// repaint; here the slot is part of the panel (ADR-0004), so every
-    /// paint above already carries the current state and this only has
-    /// to catch a state that moved after the last raster.
+    /// repaint; here the slot is part of the panel, so every paint above
+    /// already carries the current state and this only has to catch a
+    /// state that moved after the last raster.
     fn sync_anki_slot(&mut self) {
         // Nothing shown is nothing to reconcile: retracting is
         // `HidePopup`'s job, and the request left on the surface must
@@ -1886,7 +1900,7 @@ impl App {
 
     /// Measure, place, raster, commit — then tell the Controller where
     /// it landed. The bin owns the measurer, so this round-trip is how
-    /// the Controller learns a rect it cannot compute (ADR-0004).
+    /// the Controller learns a rect it cannot compute.
     fn show_popup(&mut self, req: &ShowRequest) {
         let started = Instant::now();
         let shown = match self.popup.as_mut() {
@@ -1928,8 +1942,8 @@ impl App {
         });
     }
 
-    /// Hide: a transparent buffer, never an unmap (ADR-0004), so
-    /// Hyprland's layer animation never fires and this stays instant.
+    /// Hide: a transparent buffer, never an unmap, so Hyprland's layer
+    /// animation never fires and this stays instant.
     ///
     /// The scan outline goes with it. A lookup's boxes belong to the
     /// popup that is showing its answer; leaving them up would outline
@@ -2018,7 +2032,7 @@ impl App {
 
     /// One message from the tray thread, executed here on the daemon
     /// thread where the log, the settings guard and the loop signal
-    /// live (ADR-0006).
+    /// live (ARCHITECTURE.md#platform-integration).
     fn handle_tray(&mut self, request: TrayRequest) {
         match request {
             TrayRequest::OpenSettings => self.spawn_settings(),
@@ -2121,11 +2135,11 @@ impl App {
     /// `reload` re-reads the file and re-applies everything the daemon
     /// honors: the lookup-log gate, the popup's own settings -
     /// `popup.layer` needs no surface recreation, which is exactly why
-    /// it is a runtime toggle - and, per ADR-0002's "denial never exits,
-    /// hover shows one actionable error state with in-app retry", a
+    /// it is a runtime toggle - and, because a denial never exits and
+    /// hover shows one actionable error state with in-app retry, a
     /// second go at the portal consent. The config file is the sole
-    /// source of
-    /// truth (ADR-0005); nothing structured crosses the socket.
+    /// source of truth (ARCHITECTURE.md#settings-and-config); nothing
+    /// structured crosses the socket.
     fn reload_config(&mut self) {
         self.retry_portal_capture();
         match chibipop::config::load_or_create(&self.paths.config_file) {
@@ -2227,25 +2241,26 @@ impl App {
     /// One lookup at the cursor's present position, if it is known.
     ///
     /// The event rungs deliver a position when their session opens and
-    /// then only on movement (ADR-0003), so a daemon that came up with
-    /// the cursor already resting on a word has exactly one sample and
-    /// no pipeline to spend it on. Asking here is what makes live mode
-    /// true the moment it can be - the same reason a trigger press is
-    /// its own first cursor sample (ADR-0010).
+    /// then only on movement (ARCHITECTURE.md#input-ladders), so a
+    /// daemon that came up with the cursor already resting on a word has
+    /// exactly one sample and no pipeline to spend it on. Asking here is
+    /// what makes live mode true the moment it can be - the same reason
+    /// a trigger press is its own first cursor sample
+    /// (ARCHITECTURE.md#hover-cadence).
     fn look_where_the_cursor_is(&mut self) {
         let Some(pos) = self.last_cursor else { return };
         self.log.diag(&format!("lookup: asking where the cursor already is ({}, {})", pos.x, pos.y));
         self.feed(Event::CursorMoved { pos });
     }
 
-    /// The in-app retry ADR-0002 requires: ask the portal again.
+    /// The in-app retry a denial requires: ask the portal again.
     ///
     /// Only when the ladder picked the portal rung and the backend is
     /// not already serving - a granted session must not be torn down
     /// and re-prompted just because someone edited the config file.
     /// The verb is `reload` on purpose: the tray's Settings window and
     /// a shell one-liner reach the same hook, and the trigger channel
-    /// stays the minimal verb set ADR-0003 argues for.
+    /// stays the minimal verb set.
     fn retry_portal_capture(&mut self) {
         if self.portal_serving || self.capture_selection.backend() != Some(Backend::Portal) {
             return;
@@ -2264,7 +2279,8 @@ impl App {
     }
 
     /// One `hyprctl cursorpos` poll tick: sample, feed the seam on
-    /// change, re-arm at the adaptive cadence (ADR-0010).
+    /// change, re-arm at the adaptive cadence
+    /// (ARCHITECTURE.md#hover-cadence).
     ///
     /// A sample that stops answering is the one channel failure this
     /// daemon can observe live (the compositor went away, or `hyprctl`
@@ -2312,9 +2328,9 @@ impl CursorHandler for App {
         }
         self.last_cursor = Some(pos);
         // Crossing outputs mid-hold takes one fresh full grab of the
-        // entered output (ADR-0010), and it has to be taken before the
-        // lookup that noticed the crossing - so it happens here, not
-        // behind the Controller.
+        // entered output (ARCHITECTURE.md#hover-cadence), and it has to
+        // be taken before the lookup that noticed the crossing - so it
+        // happens here, not behind the Controller.
         if let Some(hold) = self.hold {
             if let Some(output) = trigger::regrab(hold, &self.cursor.geometries(), pos) {
                 self.log.diag("trigger: the cursor crossed onto another output");
@@ -2377,8 +2393,8 @@ fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> 
     worker::static_region(&config.anki)
 }
 
-/// Whether the dwell re-check has anything to watch (ADR-0010), in two
-/// halves.
+/// Whether the dwell re-check has anything to watch
+/// (ARCHITECTURE.md#hover-cadence), in two halves.
 ///
 /// `armed` is the Controller's: live mode, a popup with a rect and no
 /// drill-down over it. `hold` is this daemon's own, because only it
@@ -2517,8 +2533,9 @@ fn shot_channel(
 /// The one-off OCR job's answer channel, registered on the pump.
 ///
 /// `shot_channel`'s twin one stage further along: the recogniser runs on
-/// the Worker's thread (ADR-0009 - the engine is thread-affine), so its
-/// lines arrive here as an event and never as a blocked pump.
+/// the Worker's thread (ARCHITECTURE.md#ocr-engine - the engine is
+/// thread-affine), so its lines arrive here as an event and never as a
+/// blocked pump.
 fn ocr_text_channel(
     pump: &LoopHandle<'static, App>,
 ) -> Result<calloop::channel::Sender<Result<Vec<OcrLine>, String>>> {
@@ -2535,8 +2552,9 @@ fn ocr_text_channel(
 /// The clipboard thread's diagnostic channel, registered on the pump.
 ///
 /// The offer lives on a connection and a thread of its own
-/// (`clipboard`), and the log lives here (ADR-0006), so its lines travel
-/// as lines - exactly as an AnkiConnect failure does.
+/// (`clipboard`), and the log lives here
+/// (ARCHITECTURE.md#platform-integration), so its lines travel as
+/// lines - exactly as an AnkiConnect failure does.
 fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<String>> {
     let (tx, rx) = calloop::channel::channel::<String>();
     pump.insert_source(rx, |event, _, app: &mut App| {
@@ -2599,9 +2617,9 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(&line);
     }
 
-    // The capture backend (ADR-0002's ladder, ticket 34). Decided
-    // first, because ADR-0003's rung 2 only exists when the portal
-    // rung is the one serving pixels - it rides that same stream.
+    // The capture backend ladder (ticket 34). Decided first, because the
+    // cursor ladder's rung 2 only exists when the portal rung is the one
+    // serving pixels - it rides that same stream.
     let (capture_override, capture_warning) = capture_backend::BackendOverride::from_env();
     if let Some(w) = &capture_warning {
         log.diag(w);
@@ -2629,8 +2647,8 @@ pub fn run(paths: Paths) -> Result<()> {
         && portal::cursor_metadata_available();
 
     // The cursor channel (ticket 33): one rung by advertised
-    // capability (ADR-0003), or a diagnostic naming exactly what is
-    // missing — and the daemon stays up either way.
+    // capability (ARCHITECTURE.md#input-ladders), or a diagnostic naming
+    // exactly what is missing — and the daemon stays up either way.
     let (ladder_override, override_warning) = cursor::LadderOverride::from_env();
     if let Some(w) = &override_warning {
         log.diag(w);
@@ -2649,7 +2667,7 @@ pub fn run(paths: Paths) -> Result<()> {
     // Rung 2's samples arrive on PipeWire's thread and must reach the
     // pump like every other event: a bounded calloop channel, so a
     // burst of cursor metadata can never grow without limit and the
-    // daemon stays sync (ADR-0001).
+    // daemon stays sync (ARCHITECTURE.md#workspace-and-seams).
     let (cursor_tx, cursor_rx) = calloop::channel::sync_channel::<PhysPoint>(64);
     let cursor_sink: Option<portal::CursorSink> =
         if selection == cursor::Selection::Rung(cursor::Rung::PortalMetadata) {
@@ -2664,9 +2682,9 @@ pub fn run(paths: Paths) -> Result<()> {
             None
         };
 
-    // ADR-0002's eager consent: the dialog belongs in the launch
-    // context, not in the middle of a hover, and the channel row has
-    // to be true before the tray is ever published.
+    // The portal's eager consent: the dialog belongs in the launch
+    // context, not in the middle of a hover, and the channel row has to
+    // be true before the tray is ever published.
     let portal_retry = (capture_selection.backend() == Some(Backend::Portal)).then(|| PortalRetry {
         state_dir: paths.state_dir.clone(),
         globals: globals.clone(),
@@ -2681,12 +2699,13 @@ pub fn run(paths: Paths) -> Result<()> {
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
-    // The trigger channel's ladder (ADR-0003, ticket 36). The socket
-    // above is rung 2 and is now listening, so this decides only one
-    // thing: whether the GlobalShortcuts portal is *also* asked to
-    // carry the two shortcuts. Its session runs on its own thread and
-    // its news arrives here as events, so the pump stays sync
-    // (ADR-0001).
+    // The trigger channel's ladder
+    // (ARCHITECTURE.md#input-ladders, ticket 36). The socket above is
+    // rung 2 and is now listening, so this decides only one thing:
+    // whether the GlobalShortcuts portal is *also* asked to carry the
+    // two shortcuts. Its session runs on its own thread and its news
+    // arrives here as events, so the pump stays sync
+    // (ARCHITECTURE.md#workspace-and-seams).
     let (trigger_override, trigger_warning) = shortcuts::ChannelOverride::from_env();
     if let Some(w) = &trigger_warning {
         log.diag(w);
@@ -2721,12 +2740,13 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     };
 
-    // The SNI tray (ADR-0006). It runs its own D-Bus thread and its
-    // activations arrive here as `TrayRequest`s, so the pump stays sync.
-    // Non-fatal by construction: `spawn` hands back diagnostics instead
-    // of an error, because a trayless session is normal (stock GNOME,
-    // bare Hyprland) and must cost nothing. The registry it carries is
-    // the daemon's own view of channel health, tray or no tray.
+    // The SNI tray (ARCHITECTURE.md#platform-integration). It runs its
+    // own D-Bus thread and its activations arrive here as
+    // `TrayRequest`s, so the pump stays sync. Non-fatal by construction:
+    // `spawn` hands back diagnostics instead of an error, because a
+    // trayless session is normal (stock GNOME, bare Hyprland) and must
+    // cost nothing. The registry it carries is the daemon's own view of
+    // channel health, tray or no tray.
     let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
     let mut statuses = ChannelStatuses::startup(
         match &pointer_defect {
@@ -2758,16 +2778,15 @@ pub fn run(paths: Paths) -> Result<()> {
         registry_queue_init::<App>(&conn).context("initialising the Wayland registry")?;
     let registry = conn.display().get_registry(&queue.handle(), ());
 
-    // The popup (ADR-0004). A compositor without the layer shell keeps
-    // the daemon up: everything else - capture, cursor, trigger, tray,
-    // settings - still works, the capability report already named the
-    // missing global, and the Popup channel row says so where a user
-    // looks. What it must NOT do is drop the popup's other Wayland
-    // objects on the floor: their events keep arriving, and a handler
-    // with nothing behind it is a panic (ticket 49 found exactly that
-    // on a layer-shell-less session). So the popup is always built, and
-    // a bind error here is the fatal kind the report already called
-    // fatal.
+    // The popup. A compositor without the layer shell keeps the daemon
+    // up: everything else - capture, cursor, trigger, tray, settings -
+    // still works, the capability report already named the missing
+    // global, and the Popup channel row says so where a user looks. What
+    // it must NOT do is drop the popup's other Wayland objects on the
+    // floor: their events keep arriving, and a handler with nothing
+    // behind it is a panic (ticket 49 found exactly that on a
+    // layer-shell-less session). So the popup is always built, and a
+    // bind error here is the fatal kind the report already called fatal.
     // The database path is the painter's too: it opens its own read-only
     // connection onto the media store, because the worker owns the
     // dictionary on another thread.
@@ -2828,7 +2847,8 @@ pub fn run(paths: Paths) -> Result<()> {
     }
 
     // The Worker's wake: a result queued on its thread becomes one
-    // event-loop wakeup here (ADR-0001 - the pump stays sync).
+    // event-loop wakeup here (ARCHITECTURE.md#workspace-and-seams - the
+    // pump stays sync).
     let (worker_ping, worker_pings) =
         calloop::ping::make_ping().context("creating the worker wake")?;
 
@@ -2844,8 +2864,9 @@ pub fn run(paths: Paths) -> Result<()> {
     // GNOME - is a state named once here, exactly like a missing layer
     // shell above: it costs `ocr-clipboard` and nothing else, and
     // naming both globals is what lets a compositor upgrade self-heal
-    // the install (ADR-0002's rule). A *failure* to open one is also
-    // not fatal: the daemon says so and keeps every other channel.
+    // the install (ARCHITECTURE.md#capture-and-masking). A *failure* to
+    // open one is also not fatal: the daemon says so and keeps every
+    // other channel.
     let clipboard = match clipboard::Clipboard::bind(&globals, clipboard_notes(&event_loop.handle())?)
     {
         Ok(Some(board)) => {
@@ -2947,10 +2968,10 @@ pub fn run(paths: Paths) -> Result<()> {
     }
 
     // The popup's surfaces: one per output, mapped now and never
-    // unmapped (ADR-0004). The output roundtrip above has already run,
-    // so every surface is created against known geometry; the second
-    // roundtrip lets the initial configures arrive and each surface map
-    // itself hidden before the pump starts.
+    // unmapped. The output roundtrip above has already run, so every
+    // surface is created against known geometry; the second roundtrip
+    // lets the initial configures arrive and each surface map itself
+    // hidden before the pump starts.
     if app.popup_can_draw() {
         app.popup_mut().map_all();
         app.flush_popup_notes();
@@ -2982,7 +3003,7 @@ pub fn run(paths: Paths) -> Result<()> {
     insert_wayland_source(&event_loop.handle(), &conn, queue)?;
 
     // Rung 3 is the only timed source; event rungs cost zero idle
-    // wakeups (ADR-0010).
+    // wakeups (ARCHITECTURE.md#hover-cadence).
     if matches!(selection, cursor::Selection::Rung(cursor::Rung::HyprctlPoll)) {
         event_loop
             .handle()
@@ -3307,8 +3328,8 @@ mod tests {
 
     /// The retry hook is portal-only and one-shot-guarded: `reload` on
     /// a screencopy session must never reach the portal, and must never
-    /// touch the capture row (ADR-0002 - the promptless rung is exactly
-    /// the one that has nothing to ask for).
+    /// touch the capture row (ARCHITECTURE.md#capture-and-masking - the
+    /// promptless rung is exactly the one that has nothing to ask for).
     #[test]
     fn reload_does_not_prompt_a_screencopy_session() {
         let dir =
@@ -3329,11 +3350,11 @@ mod tests {
     }
 
     /// The static-region action, all the way through: the rect lands in
-    /// the config *file* (ADR-0005 - that file is the sole source of
-    /// truth, so a restarted daemon has to find the box there) and the
-    /// same rect reaches the pipeline, proved the one way that cannot
-    /// lie: the next hover reads the user's box instead of a
-    /// cursor-centred tile.
+    /// the config *file* (ARCHITECTURE.md#settings-and-config - that
+    /// file is the sole source of truth, so a restarted daemon has to
+    /// find the box there) and the same rect reaches the pipeline,
+    /// proved the one way that cannot lie: the next hover reads the
+    /// user's box instead of a cursor-centred tile.
     ///
     /// The pick is stubbed at its seam. `took_static_region` takes the
     /// `Option<PhysRect>` a pick answers with, and that is the whole
@@ -3504,7 +3525,7 @@ mod tests {
     /// user who already said yes: a portal session that IS serving must
     /// not be torn down and re-prompted just because something sent
     /// `reload` (a settings Apply does, on every save). One consent per
-    /// grant is ADR-0002's whole bargain.
+    /// grant is the whole bargain.
     #[test]
     fn reload_does_not_reprompt_a_serving_portal_session() {
         let dir = scratch("noreprompt");
@@ -3675,7 +3696,8 @@ mod tests {
     }
 
     /// `toggle` outlives the key: a release while latched changes
-    /// nothing, and only a second toggle ends it (ADR-0010).
+    /// nothing, and only a second toggle ends it
+    /// (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn a_toggle_holds_the_freeze_until_it_is_toggled_off() {
         let dir = scratch("toggle");
@@ -3714,9 +3736,10 @@ mod tests {
     }
 
     /// Crossing outputs mid-hold re-grabs, and the hold follows the
-    /// cursor onto the output it entered (ADR-0010). This box has one
-    /// monitor, so the geometry is injected; `trigger::regrab` carries
-    /// the decision and this pins that the daemon acts on it.
+    /// cursor onto the output it entered
+    /// (ARCHITECTURE.md#hover-cadence). This box has one monitor, so the
+    /// geometry is injected; `trigger::regrab` carries the decision and
+    /// this pins that the daemon acts on it.
     #[test]
     fn a_hold_follows_the_cursor_onto_another_output() {
         let dir = scratch("crossing");
@@ -3818,8 +3841,9 @@ mod tests {
 
     /// What reaches the outline, for the one hover above: each box
     /// framed just outside itself so the next grab reads no border
-    /// (ADR-0008), and the match in its own theme colour so it does not
-    /// look like the capture box it was found in.
+    /// (ARCHITECTURE.md#capture-and-masking), and the match in its own
+    /// theme colour so it does not look like the capture box it was
+    /// found in.
     #[test]
     fn a_hovers_scan_rects_reach_the_outline_outset_and_coloured_by_kind() {
         let theme = chibipop::ui::theme::Theme::dark();
@@ -3906,8 +3930,8 @@ mod tests {
     }
 
     /// What the portal bound is what the tray row and the settings
-    /// window say — the observability half of ADR-0003's "channel
-    /// selection is visible".
+    /// window say — the observability half of a visible channel
+    /// selection.
     #[test]
     fn a_bind_names_the_owner_in_the_row_and_publishes_it() {
         let dir = scratch("portalbound");
@@ -4010,7 +4034,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // -- live hover and the dwell re-check (ADR-0010) --
+    // -- live hover and the dwell re-check --
 
     use chibipop::lookup::deconj::Deconjugator;
     use chibipop::lookup::engine::LookupEngine;
@@ -4097,8 +4121,9 @@ mod tests {
 
     /// One word over the whole grab, plus whether the pixels handed to
     /// it had been masked: the capture's own are black and a mask fills
-    /// white (ADR-0008), so this is the mask itself, observed. Alpha is
-    /// not evidence - the upscale sets it opaque either way.
+    /// white (ARCHITECTURE.md#capture-and-masking), so this is the mask
+    /// itself, observed. Alpha is not evidence - the upscale sets it
+    /// opaque either way.
     struct FakeOcr {
         log: Seams,
     }
@@ -4151,8 +4176,9 @@ mod tests {
         let capture_log = log.clone();
         let ocr_log = log.clone();
         // Named, not `&[]`: an empty terms list searches nothing
-        // (ADR-0014), so a pipeline built without its own identity would
-        // read every lookup and present none of it.
+        // (ARCHITECTURE.md#dictionary-and-lookup), so a pipeline built
+        // without its own identity would read every lookup and present
+        // none of it.
         let settings = worker::settings(&chibipop::config::Config::default(), &fake_dicts());
         let (worker, _dicts) = Worker::spawn(
             settings,
@@ -4274,7 +4300,7 @@ mod tests {
 
     /// The non-negotiable core: a cursor sample becomes a lookup on the
     /// sample. Nothing timed sits in between - no settle delay, no
-    /// velocity gate, no dispatch tick (ADR-0010).
+    /// velocity gate, no dispatch tick (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn a_cursor_sample_dispatches_a_live_lookup_at_once() {
         let dir = scratch("live");
@@ -4297,12 +4323,12 @@ mod tests {
     }
 
     /// An event rung delivers a position when its session opens and
-    /// then only on movement (ADR-0003), so a daemon that came up with
-    /// the cursor already resting on a word has exactly one sample -
-    /// and the pipeline is the last thing to exist. Spending that
-    /// sample on nothing would leave live mode silent until the mouse
-    /// moved, and would spend the Controller's movement gate too: the
-    /// same position asked twice is not a move.
+    /// then only on movement (ARCHITECTURE.md#input-ladders), so a
+    /// daemon that came up with the cursor already resting on a word has
+    /// exactly one sample - and the pipeline is the last thing to exist.
+    /// Spending that sample on nothing would leave live mode silent
+    /// until the mouse moved, and would spend the Controller's movement
+    /// gate too: the same position asked twice is not a move.
     #[test]
     fn a_sample_that_arrives_before_the_pipeline_is_spent_once_it_is_up() {
         let dir = scratch("earlysample");
@@ -4391,9 +4417,9 @@ mod tests {
     }
 
     /// A live grab must not read our own popup; a hold's frozen grab
-    /// reads straight through it (ADR-0008/0010). The fake recogniser
-    /// reports the fill it was handed, so both halves are observed
-    /// rather than argued.
+    /// reads straight through it (ARCHITECTURE.md#capture-and-masking).
+    /// The fake recogniser reports the fill it was handed, so both
+    /// halves are observed rather than argued.
     #[test]
     fn a_live_lookup_masks_the_popup_and_a_hold_reads_through_it() {
         let dir = scratch("livemask");
@@ -4431,7 +4457,7 @@ mod tests {
 
     /// Backpressure is the pacer: samples arriving behind an in-flight
     /// read coalesce to the newest, and the daemon queues nothing of its
-    /// own (ADR-0010 - one in flight, latest-wins).
+    /// own (ARCHITECTURE.md#hover-cadence - one in flight, latest-wins).
     #[test]
     fn samples_behind_an_in_flight_lookup_coalesce_to_the_newest() {
         let dir = scratch("coalesce");
@@ -4480,7 +4506,8 @@ mod tests {
 
     /// A watch with nothing on screen asks the pipeline for nothing and
     /// retires on its own deadline - which is what leaves an idle daemon
-    /// holding no timed source at all (ADR-0010's zero idle wakeups).
+    /// holding no timed source at all (ARCHITECTURE.md#hover-cadence -
+    /// zero idle wakeups).
     ///
     /// Armed by hand: a popup with a rect needs a compositor, and the
     /// Controller's half of the decision is core's own test.
@@ -4872,11 +4899,10 @@ mod tests {
     }
 
     /// The same card, asked for over the control socket instead of the
-    /// portal - ADR-0003 rung 2, the only rung a sway user has. It
-    /// enters through `handle_request` with the verb parsed off the
-    /// wire word, so what is driven here is `chibipop ctl anki-add`
-    /// end to end minus the socket bytes (those are `control`'s own
-    /// round-trip test).
+    /// portal - rung 2, the only rung a sway user has. It enters through
+    /// `handle_request` with the verb parsed off the wire word, so what
+    /// is driven here is `chibipop ctl anki-add` end to end minus the
+    /// socket bytes (those are `control`'s own round-trip test).
     #[test]
     fn the_anki_add_verb_creates_the_same_card_the_portal_shortcut_does() {
         let dir = scratch("ankiverb");
@@ -5430,10 +5456,11 @@ mod tests {
     /// registry binds a global that cannot exist, and the pump ends.
     ///
     /// This is the case the ticket was filed on, so it is worth a live
-    /// test - but CI is headless (ADR-0007), which is why the wiring above
-    /// is pinned without one too. Nothing here is compositor-specific:
-    /// refusing a bind for an unknown global name belongs to the wayland
-    /// library the compositor links, not to the compositor.
+    /// test - but CI is headless (ARCHITECTURE.md#packaging-and-ci), which
+    /// is why the wiring above is pinned without one too. Nothing here is
+    /// compositor-specific: refusing a bind for an unknown global name
+    /// belongs to the wayland library the compositor links, not to the
+    /// compositor.
     #[test]
     fn a_real_protocol_error_ends_the_pump() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {

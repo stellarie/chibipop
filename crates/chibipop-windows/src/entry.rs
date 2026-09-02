@@ -1,6 +1,7 @@
 //! The Windows program itself. `main.rs` is a two-line entry that reaches
 //! this module on Windows and a stub everywhere else, so `cargo test
-//! --workspace` is one command on every platform (ADR-0001, ADR-0007).
+//! --workspace` is one command on every platform
+//! (ARCHITECTURE.md#workspace-and-seams, ARCHITECTURE.md#packaging-and-ci).
 
 use anyhow::{Context, Result};
 use chibipop::lookup::deconj::Deconjugator;
@@ -15,7 +16,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 /// `probe` shows no popup of its own, so there is never anything of ours
-/// in its pixels to mask out (ADR-0008).
+/// in its pixels to mask out (ARCHITECTURE.md#capture-and-masking).
 const MASKLESS: CaptureMask = CaptureMask::NONE;
 
 #[derive(Parser)]
@@ -469,7 +470,7 @@ pub fn run() -> Result<()> {
             // dictionary row and the second is the subset whose reported
             // frequencies it also loads. An archive carrying a term bank
             // beside its frequency data is named in both, on purpose
-            // (ADR-0014).
+            // (ARCHITECTURE.md#dictionary-and-lookup).
             let mut dict_archives = Vec::new();
             let mut freq_archives = Vec::new();
             let mut unreadable = Vec::new();

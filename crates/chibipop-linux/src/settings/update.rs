@@ -1,4 +1,5 @@
-//! The "Check for updates" button: check-only, forever (ADR-0007).
+//! The "Check for updates" button: check-only, forever
+//! (ARCHITECTURE.md#packaging-and-ci).
 //!
 //! Windows parity is the whole shape of this module — the check runs on
 //! a click and nowhere else, so there is no startup phone-home — but the
@@ -9,7 +10,10 @@
 //!
 //! Naming the asset is not decoration. A tarball install and an AUR
 //! install update by different means, and the one thing chibipop knows
-//! for certain is which file on the release page is its own.
+//! for certain is which file on the release page is its own. The
+//! checker matches that asset by name, so the release asset naming
+//! scheme is a forever contract: rename an asset and every chibipop
+//! already installed stops finding it.
 
 use chibipop::update::{self, News};
 

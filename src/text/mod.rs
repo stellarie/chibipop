@@ -42,10 +42,10 @@ pub struct Frame {
     ///
     /// An optimisation hint, never a data-absence marker: `buf` is
     /// always the region's real content. A damage-paced backend
-    /// (wlr-screencopy, ADR-0002) learns this for free from the race
-    /// it already runs, so the pipeline can reuse the OCR it already
-    /// paid for; a backend that cannot tell says `false`, which is
-    /// always correct and merely costs a pass.
+    /// (wlr-screencopy, ARCHITECTURE.md#capture-and-masking) learns this
+    /// for free from the race it already runs, so the pipeline can reuse
+    /// the OCR it already paid for; a backend that cannot tell says
+    /// `false`, which is always correct and merely costs a pass.
     pub unchanged: bool,
 }
 
@@ -57,7 +57,7 @@ pub struct Frame {
 /// is the product. A push-shaped backend - a portal/PipeWire stream that
 /// only delivers on change - keeps its newest buffer internally and serves
 /// `grab` out of that buffer, so one weird backend absorbs the mismatch
-/// rather than every caller (ADR-0001).
+/// rather than every caller (ARCHITECTURE.md#workspace-and-seams).
 ///
 /// The returned [`Frame`] is exactly `region.w x region.h` pixels: word
 /// geometry is mapped back to the desktop by offsetting against the region's

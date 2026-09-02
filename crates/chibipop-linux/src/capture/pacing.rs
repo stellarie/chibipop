@@ -1,5 +1,6 @@
-//! Hybrid damage pacing (ADR-0002/0010), as a state machine with no
-//! Wayland in it.
+//! Hybrid damage pacing, as a state machine with no Wayland in it. See
+//! ARCHITECTURE.md#capture-and-masking and
+//! ARCHITECTURE.md#hover-cadence.
 //!
 //! The problem: a plain `copy` forces the compositor to repaint, and
 //! `copy_with_damage` answers only when something changed - which on a
@@ -11,9 +12,9 @@
 //! The race is armed on the union of the regions a read grabbed, at
 //! `end_read`, and is deliberately *retained* across reads while the
 //! screen stays still. That is what makes a dwelling hover cost one
-//! deadline wakeup per period and zero copies (ADR-0010's power
-//! budget): the next read waits on the race already in flight instead
-//! of asking for anything.
+//! deadline wakeup per period and zero copies (the power budget): the
+//! next read waits on the race already in flight instead of asking
+//! for anything.
 //!
 //! One verdict serves a whole read. The first cached region settles the
 //! race; every later pass in that read trusts the answer, so a
@@ -38,8 +39,8 @@
 use chibipop::geom::PhysRect;
 use std::time::Duration;
 
-/// The dwell deadline (ADR-0010): at most four wakeups a second while
-/// dwelling on a static screen.
+/// The dwell deadline: at most four wakeups a second while dwelling
+/// on a static screen.
 pub const DWELL_DEADLINE: Duration = Duration::from_millis(250);
 
 /// A plain copy waits for one repaint, not for damage. This only

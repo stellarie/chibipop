@@ -309,7 +309,7 @@ fn archive_relative(path: &str) -> &str {
 /// definitions whatever it is called. The same question
 /// [`crate::dict::frequency::supplies_frequency`] and
 /// [`crate::dict::pitch::supplies_pitch`] answer for the other two roles,
-/// asked the same way (ADR-0014).
+/// asked the same way (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// The central directory answers it, so this costs one open and no
 /// inflation: a term bank is present or it is not, and a bank member with

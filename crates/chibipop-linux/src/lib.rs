@@ -5,12 +5,12 @@
 
 //! The library face of the Linux adapter.
 //!
-//! The adapter *is* the bin (ADR-0001) and everything it does is reachable
-//! from `src/main.rs`. This lib exists for one reason: the OCR engine
-//! carries a standing 152-crop fixture gate (ADR-0009) and cargo cannot
-//! link an integration test against a bin target. So the modules with
-//! their own `tests/` gate live here and the bin uses them; nothing else
-//! moves.
+//! The adapter *is* the bin (ARCHITECTURE.md#workspace-and-seams) and
+//! everything it does is reachable from `src/main.rs`. This lib exists for
+//! one reason: the OCR engine carries a standing 152-crop fixture gate
+//! (ARCHITECTURE.md#ocr-engine) and cargo cannot link an integration test
+//! against a bin target. So the modules with their own `tests/` gate live
+//! here and the bin uses them; nothing else moves.
 //!
 //! Foreign targets get an empty crate, exactly as the bin gets a two-line
 //! refusal: `cargo clippy --workspace` still lints every member on both CI

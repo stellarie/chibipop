@@ -3,11 +3,11 @@
 //! One in-place transaction over rows that are already here. Nothing in this
 //! module reads an archive, builds a file beside the live one, or renames
 //! anything - that is [`crate::dict::build::build`], and it exists for
-//! archive reads only (ADR-0005). The promoted database is already stamped
-//! `PRAGMA journal_mode = WAL` precisely because it is read while being
-//! written, so a reader keeps seeing the old ranking until the commit and
-//! the new one afterwards, and the daemon picks it up through the existing
-//! `reload` control-socket verb.
+//! archive reads only (ARCHITECTURE.md#settings-and-config). The promoted
+//! database is already stamped `PRAGMA journal_mode = WAL` precisely
+//! because it is read while being written, so a reader keeps seeing the
+//! old ranking until the commit and the new one afterwards, and the
+//! daemon picks it up through the existing `reload` control-socket verb.
 
 use crate::dict::frequency::{lookup_freq, reduce, FreqSource, FreqTable, RankingStrategy};
 use anyhow::{Context, Result};

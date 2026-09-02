@@ -129,7 +129,7 @@ CREATE TABLE reported_freq (     -- one dictionary's own claim, per headword
     -- enabled dictionaries said about one headword and gets a handful of
     -- rows back. `term.freq` is still the reduced Frequency rank
     -- denormalised onto the hot row, so nothing on the term path comes here
-    -- at all (ADR-0015).
+    -- at all (ARCHITECTURE.md#dictionary-and-lookup).
 );
 
 CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
@@ -166,7 +166,7 @@ CREATE TABLE pitch (             -- one dictionary's Pitch pattern, per reading
     -- only read is one probe per shown card, and both columns are always
     -- given. Nothing on the term path comes here at all - pitch is per
     -- reading, so it cannot ride on a `term` row and must not widen one
-    -- (ADR-0014).
+    -- (ARCHITECTURE.md#dictionary-and-lookup).
 );
 ";
 
@@ -636,11 +636,12 @@ fn build_into(
     // *and* terms is in both lists and is one Dictionary, so its claims go
     // under the `dict_id` it was already given rather than under a second
     // row wearing the same name - a role set means one archive can arrive
-    // twice here (ADR-0014). A frequency archive `terms` does not name gets
-    // its own row, after the term dictionaries so that a term archive's
-    // `dict_id` is still its position in `terms`. The reduction the claims
-    // were just reduced by is recorded beside them, so a reader knows which
-    // dictionaries the ranks in `term` actually came from.
+    // twice here (ARCHITECTURE.md#dictionary-and-lookup). A frequency
+    // archive `terms` does not name gets its own row, after the term
+    // dictionaries so that a term archive's `dict_id` is still its
+    // position in `terms`. The reduction the claims were just reduced by
+    // is recorded beside them, so a reader knows which dictionaries the
+    // ranks in `term` actually came from.
     let mut order = Vec::with_capacity(tables.len());
     let mut appended: i64 = 0;
     for (i, (name, table)) in names.iter().zip(&tables).enumerate() {
@@ -696,9 +697,10 @@ fn build_into(
 /// carries terms, and one that also carries frequency data all store their
 /// accents here, under the one `dict` row they already have. Which of them a
 /// reader consults and in what order is the enabled pitch list's business,
-/// which is config's and never a build input (ADR-0014) - the same split
-/// `reported_freq` takes, where every dictionary's claims are stored and the
-/// enabled list decides what they mean.
+/// which is config's and never a build input
+/// (ARCHITECTURE.md#dictionary-and-lookup) - the same split
+/// `reported_freq` takes, where every dictionary's claims are stored and
+/// the enabled list decides what they mean.
 ///
 /// Returns the accents stored across every archive, for the progress line.
 fn store_archive_pitch(

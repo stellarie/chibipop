@@ -31,7 +31,8 @@ impl DetBox {
 
     /// meikiocr's own routing rule, and the only place verticality is
     /// decided. It stays inside the engine: core's `orientation_of` is the
-    /// orientation authority the rest of chibipop sees (ADR-0009).
+    /// orientation authority the rest of chibipop sees
+    /// (ARCHITECTURE.md#ocr-engine).
     pub fn is_vertical(&self) -> bool {
         self.h() > self.w()
     }
@@ -43,8 +44,8 @@ impl DetBox {
 /// needs to build `orig_target_sizes`. The image is fitted to the box and
 /// pinned to its top-left corner; the remainder stays black. Note that
 /// small crops are scaled *up* here - that is meikiocr's fixed input
-/// geometry, not the capture-side upscale ADR-0009 forbids, which is why
-/// the amendment measures 1x as the better of the two.
+/// geometry, not the capture-side upscale the adapter never does, which is
+/// why 1x measures better than 2x (ARCHITECTURE.md#ocr-engine).
 pub fn preprocess(img: &Bgr) -> (Vec<f32>, f64) {
     let scale = (INPUT_W as f64 / img.w as f64).min(INPUT_H as f64 / img.h as f64);
     // `int(...)`, i.e. truncation, exactly as the harness sizes it.

@@ -67,7 +67,8 @@ fn a_fixture_library_builds_and_reports_done() {
     let db = SqliteDictionary::open(&out).unwrap();
     assert_eq!(3, db.entries(&[1, 2, 3, 4]).unwrap().len(), "3 entries built");
     // One archive is one dictionary whatever it supplies, so the
-    // frequency archive owns a `dict` row of its own now (ADR-0014).
+    // frequency archive owns a `dict` row of its own now
+    // (ARCHITECTURE.md#dictionary-and-lookup).
     let mut names: Vec<String> =
         db.dicts().unwrap().into_iter().map(|d| d.name).collect();
     names.sort();
@@ -121,8 +122,9 @@ fn every_archive_line_renders_as_a_name_and_the_last_line_does_not() {
     let shown: Vec<String> = lines.iter().filter_map(|l| friendly(l)).collect();
     // freq.zip is named twice on purpose: it is one of the dictionaries
     // the build installs *and* an archive whose reported frequencies it
-    // loads, so it is in both of `build-dict`'s lists (ADR-0014). The
-    // archives are announced case-folded, which puts it first.
+    // loads, so it is in both of `build-dict`'s lists
+    // (ARCHITECTURE.md#dictionary-and-lookup). The archives are announced
+    // case-folded, which puts it first.
     let read: Vec<&String> = shown.iter().filter(|s| s.starts_with("Reading ")).collect();
     assert_eq!(
         vec!["Reading freq.zip…", "Reading terms.zip…", "Reading freq.zip…"],
@@ -149,8 +151,9 @@ fn a_failed_build_leaves_an_existing_output_byte_identical() {
     };
     assert!(why.contains("the builder failed"), "a real child ran: {why}");
     // An archive this build cannot read is not a dictionary and is not
-    // built (ADR-0014), so a library holding only one is a library holding
-    // nothing to build - and the child says so itself.
+    // built (ARCHITECTURE.md#dictionary-and-lookup), so a library holding
+    // only one is a library holding nothing to build - and the child says
+    // so itself.
     assert!(why.contains("no readable archives"), "the child's own error: {why}");
     assert!(
         msgs.iter().any(|m| matches!(m, Progress::Line(l) if l.contains("broken.zip"))),

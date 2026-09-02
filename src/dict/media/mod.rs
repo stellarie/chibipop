@@ -949,8 +949,9 @@ pub const SURFACE_BUDGET: usize = 8 << 20;
 /// tiny-skia's premultiplied RGBA8 pixmap on Linux, a BGRA byte buffer for
 /// `CreateBitmap` on Windows - and the only thing this type learns about it
 /// is the byte count the caller states on admission. That is why it can be
-/// shared while painting stays per-platform (ADR-0001, as amended by
-/// ADR-0004): the *policy* duplicated visibly, the pixels never did.
+/// shared while painting stays per-platform
+/// (ARCHITECTURE.md#workspace-and-seams): the *policy* duplicated
+/// visibly, the pixels never did.
 ///
 /// Insertion order, not recency, for the same reason as the parsed-tree
 /// cache in `crate::lookup::sqlite`: a hover is a sliding window over

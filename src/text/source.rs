@@ -1,6 +1,7 @@
-//! The core-internal facade over `RegionCapture` + `OcrEngine` + the shared
-//! layout/hit-scan logic: point in, text span out (ADR-0001). Platform code
-//! supplies the two seams; everything below them is shared.
+//! The core-internal facade over `RegionCapture` + `OcrEngine` + the
+//! shared layout/hit-scan logic: point in, text span out
+//! (ARCHITECTURE.md#workspace-and-seams). Platform code supplies the
+//! two seams; everything below them is shared.
 
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
@@ -16,8 +17,8 @@ use anyhow::{Context, Result};
 // The capture upscale factor is per-platform and lives in
 // `SettingsSnapshot::upscale`: the Windows engine misreads small text
 // at native resolution (it supplies 2), the Linux engine measures
-// strictly worse on upscaled crops and never upscales (ADR-0009 - it
-// supplies 1).
+// strictly worse on upscaled crops and never upscales
+// (ARCHITECTURE.md#ocr-engine - it supplies 1).
 
 // MAINTAINER NOTE - adaptive upscale retry, disabled 2026-08-08.
 // (Deliberately longer than the 30-char house rule: this records a
@@ -114,8 +115,9 @@ pub struct SettingsSnapshot {
     pub max_passes: u8,
     /// Nearest-neighbour factor applied to every grab before OCR sees
     /// it. A platform fact, not a user knob: 2 on Windows (WinRT OCR
-    /// misreads small text at 1x), 1 on Linux (ADR-0009 - meikiocr is
-    /// strictly worse on upscaled crops).
+    /// misreads small text at 1x), 1 on Linux
+    /// (ARCHITECTURE.md#ocr-engine - meikiocr is strictly worse on
+    /// upscaled crops).
     pub upscale: i32,
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
@@ -124,12 +126,13 @@ pub struct SettingsSnapshot {
 
 /// What trigger mode's press-time grab left behind.
 enum Frozen {
-    /// The frame every lookup in this hold reads (ADR-0010).
+    /// The frame every lookup in this hold reads
+    /// (ARCHITECTURE.md#hover-cadence).
     Held(FrozenFrame),
     /// The press-time grab failed. Trigger mode without a frozen frame
     /// is not trigger mode: every lookup in the hold says so, rather
     /// than quietly reading a live grab whose pixels our own popup
-    /// would be in (ADR-0008).
+    /// would be in (ARCHITECTURE.md#capture-and-masking).
     Failed(String),
 }
 
@@ -140,15 +143,16 @@ pub struct TextSource {
     settings: SettingsSnapshot,
     /// The trigger hold's press-time grab, while one is held. Every
     /// grab is served out of it and the backend is not touched at all
-    /// (ADR-0010).
+    /// (ARCHITECTURE.md#hover-cadence).
     frozen: Option<Frozen>,
     /// What this read has recognised.
     recognised: Vec<Recognised>,
     /// What the previous read did, for a dwell re-check to reuse
-    /// (ADR-0010): a damage-paced backend answers an unchanged region
-    /// with the same pixels, and OCR of the same pixels is the same
-    /// answer. Two generations, so one read's tiles cannot evict each
-    /// other; both are bounded by the passes one read makes.
+    /// (ARCHITECTURE.md#hover-cadence): a damage-paced backend answers
+    /// an unchanged region with the same pixels, and OCR of the same
+    /// pixels is the same answer. Two generations, so one read's tiles
+    /// cannot evict each other; both are bounded by the passes one read
+    /// makes.
     previous: Vec<Recognised>,
 }
 
@@ -196,7 +200,8 @@ impl TextSource {
     }
 
     /// Freeze on the output holding `at`: one full grab now, read by
-    /// every lookup until [`TextSource::thaw`] (ADR-0010).
+    /// every lookup until [`TextSource::thaw`]
+    /// (ARCHITECTURE.md#hover-cadence).
     ///
     /// Answers the box it froze. A failed grab is remembered too: the
     /// hold then reports it rather than falling back to live pixels,
@@ -279,14 +284,15 @@ impl TextSource {
     ///
     /// `mask` is white-filled in the grabbed pixels before OCR sees them,
     /// and words that touch it are dropped on the way back out
-    /// (ADR-0008). A frozen hold answers with no mask at all, whatever
-    /// the caller asked for: those pixels predate the popup, so there is
-    /// nothing in them to hide (ADR-0010).
+    /// (ARCHITECTURE.md#capture-and-masking). A frozen hold answers with
+    /// no mask at all, whatever the caller asked for: those pixels
+    /// predate the popup, so there is nothing in them to hide
+    /// (ARCHITECTURE.md#hover-cadence).
     ///
-    /// A backend that says the pixels are unchanged (ADR-0002's damage
-    /// race) skips OCR entirely: same pixels, same words. The mask is
-    /// part of that "same", because the pixels OCR sees are the grab
-    /// *after* masking - see [`CaptureMask::clipped_to`].
+    /// A backend that says the pixels are unchanged (the damage race)
+    /// skips OCR entirely: same pixels, same words. The mask is part of
+    /// that "same", because the pixels OCR sees are the grab *after*
+    /// masking - see [`CaptureMask::clipped_to`].
     pub fn recognise_at_capture(
         &mut self,
         region: PhysRect,
@@ -377,13 +383,15 @@ impl TextSource {
     /// `begin_read`/`end_read` around every pass.
     ///
     /// A frozen hold brackets nothing, because it touches no backend:
-    /// every pass is a crop of the press-time frame (ADR-0010), and
-    /// arming a damage race around pixels nobody is reading would cost
-    /// wakeups for an answer the hold ignores.
+    /// every pass is a crop of the press-time frame
+    /// (ARCHITECTURE.md#hover-cadence), and arming a damage race around
+    /// pixels nobody is reading would cost wakeups for an answer the
+    /// hold ignores.
     ///
     /// `mask` is what OCR must not read - our own popup, on a live grab
-    /// (ADR-0008) - and governs every pass of this one read. The third
-    /// element is pass 1's OCR lines, for `SentenceMode::All` capture.
+    /// (ARCHITECTURE.md#capture-and-masking) - and governs every pass of
+    /// this one read. The third element is pass 1's OCR lines, for
+    /// `SentenceMode::All` capture.
     pub fn resolve_at_tiled_scanned(
         &mut self,
         cursor: PhysPoint,
@@ -519,10 +527,11 @@ impl TextSource {
 
 /// Image-pixel word boxes to desktop pixels, mask-touching words dropped.
 ///
-/// The mask boundary is a capture edge (ADR-0008): the pixels under the
-/// mask are flat white, so a word overlapping it was read off half a
-/// glyph and goes the way of a word clipped at a tile edge - dropped,
-/// never half-recognised. Lines left with no words are dropped too, so
+/// The mask boundary is a capture edge
+/// (ARCHITECTURE.md#capture-and-masking): the pixels under the mask are
+/// flat white, so a word overlapping it was read off half a glyph and
+/// goes the way of a word clipped at a tile edge - dropped, never
+/// half-recognised. Lines left with no words are dropped too, so
 /// [`OcrEngine`]'s "no words means nothing recognised" still holds.
 fn to_desktop(
     raw: Vec<OcrLine>,
@@ -693,7 +702,7 @@ mod tests {
         assert!(!glyphs_look_small(&lines));
     }
 
-    // -- the capture mask at the seam (ADR-0008) --
+    // -- the capture mask at the seam --
 
     /// Every byte of every grab, so a mask is visible as a change.
     const DESK: u8 = 0x20;
@@ -942,10 +951,11 @@ mod tests {
     }
 
     /// The factor is the snapshot's, not a core constant: an upscale-1
-    /// platform (Linux, ADR-0009) must put native-resolution pixels in
-    /// front of its engine, and an upscale-2 one (Windows) doubled
-    /// ones - through the resolve path a real lookup takes, not just
-    /// `recognise_at_capture`'s explicit factor argument.
+    /// platform (Linux, ARCHITECTURE.md#ocr-engine) must put
+    /// native-resolution pixels in front of its engine, and an
+    /// upscale-2 one (Windows) doubled ones - through the resolve path
+    /// a real lookup takes, not just `recognise_at_capture`'s explicit
+    /// factor argument.
     #[test]
     fn resolve_reads_at_the_snapshot_upscale() {
         let region = PhysRect { x: 0, y: 0, w: 4, h: 2 };
@@ -963,7 +973,7 @@ mod tests {
         }
     }
 
-    // -- reusing an unchanged grab's words (ADR-0002/ADR-0010) --
+    // -- reusing an unchanged grab's words: damage race and dwell --
 
     fn paced(unchanged: bool) -> (TextSource, std::rc::Rc<std::cell::Cell<u32>>) {
         let runs = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -986,7 +996,7 @@ mod tests {
     const AT: PhysPoint = PhysPoint { x: 120, y: 110 };
 
     /// The whole point of the damage race: unchanged pixels must not be
-    /// recognised twice (ADR-0002).
+    /// recognised twice (ARCHITECTURE.md#capture-and-masking).
     #[test]
     fn unchanged_pixels_reuse_the_words_already_recognised() {
         let (mut source, runs) = paced(true);
@@ -1021,7 +1031,7 @@ mod tests {
 
     /// A dwell through the real read bracket: last read's words must
     /// survive into this one, or a static screen re-OCRs every period
-    /// (ADR-0010's dwell re-check would cost what it saves).
+    /// (the dwell re-check would cost what it saves).
     #[test]
     fn a_dwell_through_the_read_bracket_reuses_the_previous_read() {
         let (mut source, runs) = paced(true);
@@ -1074,7 +1084,7 @@ mod tests {
     /// the backend compares *raw* pixels, so a popup appearing over a
     /// still region is an unchanged grab whose masked pixels changed.
     /// Serving the held words there would hand the app its own popup
-    /// text - exactly what ADR-0008 exists to prevent.
+    /// text - exactly what the capture mask exists to prevent.
     #[test]
     fn an_unchanged_regrab_under_a_new_mask_is_recognised_again() {
         let (mut source, runs) = paced(true);
@@ -1154,7 +1164,7 @@ mod tests {
         assert_eq!(runs.get(), 3, "the covered box must be recognised afresh");
     }
 
-    // -- trigger mode's frozen hold (ADR-0010) --
+    // -- trigger mode's frozen hold --
 
     /// A backend whose pixels differ on every grab, so a frozen read
     /// can be told from a live one, and whose grabs are counted through

@@ -1,6 +1,7 @@
-//! The CPU crop (ADR-0002: shm buffers and CPU cropping everywhere, no
-//! GPU plumbing inside a capture backend). Pure pixel arithmetic: a
-//! strided compositor buffer in, core's tight top-down BGRA out.
+//! The CPU crop (ARCHITECTURE.md#capture-and-masking: shm buffers and
+//! CPU cropping everywhere, no GPU plumbing inside a capture backend).
+//! Pure pixel arithmetic: a strided compositor buffer in, core's tight
+//! top-down BGRA out.
 //!
 //! `wl_shm` formats name a little-endian *word*, so `Xrgb8888`'s bytes
 //! in memory are B, G, R, X - already core's `Frame` layout, which is

@@ -1,12 +1,12 @@
-//! The iced window: widgetry only (ADR-0005). Every value it edits
-//! lives on core's `SettingsForm` or on `LinuxFields`; this file just
+//! The iced window: widgetry only
+//! (ARCHITECTURE.md#settings-and-config). Every value it edits lives
+//! on core's `SettingsForm` or on `LinuxFields`; this file just
 //! renders them and routes messages back.
 //!
 //! The surface mirrors the Windows settings window's field list and
 //! grouping (`crates/chibipop-windows/src/ui/settings_window.rs`) with
-//! iced-native controls; per ADR-0012 `ocr.language` is hidden, the key
-//! fields are the Linux ones, and capture exclusion is a snippet, not a
-//! checkbox.
+//! iced-native controls; `ocr.language` is hidden, the key fields are
+//! the Linux ones, and capture exclusion is a snippet, not a checkbox.
 //!
 //! The dictionary controls stage into core's `SettingsForm` and only
 //! [`super::rebuild`] ever touches the library on disk; the window's one
@@ -122,12 +122,12 @@ fn subscription(_app: &App) -> iced::Subscription<Message> {
 /// lists it sits in.
 ///
 /// One selection across all three sections rather than one each: Remove
-/// takes a Dictionary out of every list at once (ADR-0014), so a second
-/// highlighted row somewhere else would be a second answer to the
-/// question Remove asks. The role travels with the name because Move up
-/// under Frequency may never reorder Terms, and a name alone cannot say
-/// which list the user is looking at - a mixed archive is a row in two of
-/// them.
+/// takes a Dictionary out of every list at once
+/// (ARCHITECTURE.md#dictionary-and-lookup), so a second highlighted row
+/// somewhere else would be a second answer to the question Remove asks.
+/// The role travels with the name because Move up under Frequency may
+/// never reorder Terms, and a name alone cannot say which list the user
+/// is looking at - a mixed archive is a row in two of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selected {
     role: Role,
@@ -287,9 +287,9 @@ impl App {
         }
     }
 
-    /// What the add-card chord row renders (ADR-0003's 2026-08-26
-    /// addendum: the add is a control-socket verb, so the native rung
-    /// can bind it exactly like the trigger).
+    /// What the add-card chord row renders: the add is a control-socket
+    /// verb, so the native rung can bind it exactly like the trigger
+    /// (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum).
     fn add_control(&self) -> HotkeyControl {
         self.add_channel.control(
             self.compositor,
@@ -307,7 +307,7 @@ impl App {
     /// compositor bind is its *only* global channel. Reading
     /// `self.channel` here would render the trigger's portal key under
     /// this chord - a row claiming a key it was never given, which is
-    /// the one thing ADR-0005 forbids this window.
+    /// the one thing this window must never do.
     fn static_region_control(&self) -> HotkeyControl {
         HotkeyChannel::Native.control(
             self.compositor,
@@ -364,8 +364,8 @@ impl App {
     /// The OCR-to-clipboard row's copyable bind, or `None` when there is
     /// no chord to build one from - or when this compositor has no
     /// clipboard protocol to copy *into*, because a bind that could only
-    /// ever log a refusal is the invalid line ADR-0005 forbids this
-    /// window from handing a user.
+    /// ever log a refusal is the invalid line this window must never
+    /// hand a user.
     fn ocr_clipboard_bind_snippet(&self) -> Option<String> {
         // No rung, no bind: the `?` is the guard.
         self.clipboard_rung?;
@@ -691,8 +691,9 @@ enum Message {
     DictUp(Role),
     /// This section's Move down.
     DictDown(Role),
-    /// A row's per-role checkbox. Enabling is per role, so this touches
-    /// only the list the box sits in (ADR-0014).
+    /// A row's per-role checkbox. Enabling is per role
+    /// (ARCHITECTURE.md#dictionary-and-lookup), so this touches only the
+    /// list the box sits in.
     DictEnabled(Role, String, bool),
     /// The ranking-strategy picker's label, above the Frequency list;
     /// mapped back through [`RANKING_STRATEGIES`], never by index or by
@@ -972,7 +973,8 @@ fn move_row(app: &mut App, role: Role, from: usize, to: usize) {
 /// `role` is the pressed button's section and not the selection's, so a
 /// press under Frequency while a terms row is highlighted moves nothing:
 /// each section's order is its own, and a row cannot cross into a list
-/// whose role it may not even have (ADR-0014).
+/// whose role it may not even have
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// One place, which leaves every other row exactly where it was, and the
 /// ends of the list have nowhere to go rather than wrapping round to the
@@ -1140,10 +1142,11 @@ fn line_top(index: usize, len: usize) -> f32 {
 ///
 /// Only the list the checkbox sits in: unchecking a mixed archive's
 /// definitions must not silently kill its frequency data, so enabling is
-/// per role and never per Dictionary (ADR-0014). The row keeps its
-/// position, because order and enabling are separate questions and a
-/// dictionary that loses its place every time it is parked is one whose
-/// order the user cannot curate.
+/// per role and never per Dictionary
+/// (ARCHITECTURE.md#dictionary-and-lookup). The row keeps its position,
+/// because order and enabling are separate questions and a dictionary
+/// that loses its place every time it is parked is one whose order the
+/// user cannot curate.
 ///
 /// Named rather than indexed: the press names the row the last frame
 /// drew, and a removal or a finished rebuild can have restaged the list
@@ -1215,8 +1218,8 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         .spacing(6)
         .into(),
         // The portal rung (ticket 36). There is no in-app rebind to
-        // offer and pretending otherwise would be the one thing
-        // ADR-0005 forbids here: the portal owns the binding, the
+        // offer and pretending otherwise would be the one thing this
+        // window must never do: the portal owns the binding, the
         // dialog it raises at bind time and the desktop's own
         // shortcut editor are where a key changes, and the chord
         // above is only what we ask for next time.
@@ -1444,7 +1447,8 @@ fn ranking_strategy_of(label: &str) -> RankingStrategy {
 ///
 /// Three sentences rather than one "Dictionaries" list, because the same
 /// dictionary's checkbox means a different thing in each section and this
-/// is the only place that difference is said out loud (ADR-0014).
+/// is the only place that difference is said out loud
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 fn role_caption(role: Role) -> &'static str {
     match role {
         Role::Terms => "Term Dictionaries (priority order)",
@@ -1671,8 +1675,9 @@ fn rebuild_row(app: &App) -> Element<'_, Message> {
 }
 
 fn ocr_section(app: &App) -> Element<'_, Message> {
-    // ocr.language is hidden on Linux (ADR-0012): meikiocr is JA-only;
-    // the stored value is preserved by the whole-struct save.
+    // ocr.language is hidden on Linux
+    // (ARCHITECTURE.md#settings-and-config): meikiocr is JA-only; the
+    // stored value is preserved by the whole-struct save.
     let passes: Vec<u8> = (PASSES_RANGE.0..=PASSES_RANGE.1).collect();
     section(
         "OCR",
@@ -1730,8 +1735,8 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
 /// chord typed, or no clipboard protocol on this compositor at all. The
 /// second is checked first, because a bind pasted on a session where
 /// chibipop cannot write the selection would be a key that only ever
-/// logs a refusal - and ADR-0005's rule is that this window does not
-/// hand out lines that cannot work.
+/// logs a refusal - and this window does not hand out lines that cannot
+/// work.
 fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
     if app.clipboard_rung.is_none() {
         return text(
@@ -2043,9 +2048,10 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 fn anki_section(app: &App) -> Element<'_, Message> {
     // The add-card chord's own hotkey control, the same shape the
     // trigger row has: on the native rung the compositor bind is the
-    // only thing that can reach the add at all (ADR-0003 rung 2 plus
-    // its 2026-08-26 addendum), so a row without a copyable bind was a
-    // chord the user could type and never bind.
+    // only thing that can reach the add at all
+    // (ARCHITECTURE.md#input-ladders, rung 2 plus its 2026-08-26
+    // addendum), so a row without a copyable bind was a chord the user
+    // could type and never bind.
     let add_bind: Element<'_, Message> = match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns this binding. Paste this into its config:"),
@@ -2121,9 +2127,10 @@ fn anki_section(app: &App) -> Element<'_, Message> {
     section("Anki", body)
 }
 
-/// The autostart row: stateless per ADR-0012 — the checkbox *is* the
-/// XDG autostart `.desktop` file, applied on toggle, no Apply needed
-/// and no TOML field anywhere.
+/// The autostart row: stateless per
+/// ARCHITECTURE.md#settings-and-config — the checkbox *is* the XDG
+/// autostart `.desktop` file, applied on toggle, no Apply needed and no
+/// TOML field anywhere.
 fn startup_section(app: &App) -> Element<'_, Message> {
     let body: Element<'_, Message> = match &app.autostart {
         Some(target) => column![
@@ -2149,9 +2156,9 @@ fn startup_section(app: &App) -> Element<'_, Message> {
 }
 
 /// The Updates row, mirroring the Windows window's group of the same
-/// name - and stopping where ADR-0007 says it stops. The check reports;
-/// there is no swap on this platform to offer, so the row says which
-/// asset to fetch and who owns the binary.
+/// name - and stopping where ARCHITECTURE.md#packaging-and-ci says it
+/// stops. The check reports; there is no swap on this platform to
+/// offer, so the row says which asset to fetch and who owns the binary.
 fn update_section(app: &App) -> Element<'_, Message> {
     section(
         "Updates",
@@ -2198,10 +2205,10 @@ fn status_row(app: &App) -> Element<'_, Message> {
 }
 
 /// The installed families the combo offers: fontdb's JP-capable ones
-/// (ADR-0005), sorted and deduplicated, owned by the process. The
-/// filter is the popup's own classifier ([`popup::jp_capable`]) and not
-/// a second marker table, so both halves of the product agree on what
-/// "draws Japanese" means.
+/// (ARCHITECTURE.md#settings-and-config), sorted and deduplicated,
+/// owned by the process. The filter is the popup's own classifier
+/// ([`popup::jp_capable`]) and not a second marker table, so both halves
+/// of the product agree on what "draws Japanese" means.
 ///
 /// A `static` because iced's [`iced::font::Family::Name`] takes a
 /// `&'static str`: the preview label has to name the family it paints
@@ -2221,7 +2228,7 @@ static FAMILIES: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// A machine with no Japanese face gets the whole list back: an empty
 /// combo is a control the user cannot use at all, and the popup meets
 /// the same machine by painting anyway and naming the missing package
-/// (ADR-0004's degrade-visibly posture) rather than by refusing.
+/// (the degrade-visibly posture) rather than by refusing.
 ///
 /// Pure, so the filter is testable without a font stack - the property
 /// the popup's classifier tables are written for.
@@ -2241,9 +2248,9 @@ fn offered(all: Vec<String>) -> Vec<String> {
 /// preview with it. `Owned` is the configured literal the combo would
 /// not otherwise offer - uninstalled, or installed but not a family
 /// that draws Japanese. It is still offered and still selected
-/// (ADR-0012: no sentinel semantics); it just previews as iced's
-/// default, which is where a family with no kanji in it would have
-/// ended up glyph by glyph anyway.
+/// (ARCHITECTURE.md#settings-and-config: no sentinel semantics); it
+/// just previews as iced's default, which is where a family with no
+/// kanji in it would have ended up glyph by glyph anyway.
 fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
     let mut items: Vec<Cow<'static, str>> =
         FAMILIES.iter().map(|f| Cow::Borrowed(f.as_str())).collect();
@@ -2491,7 +2498,8 @@ mod tests {
     }
 
     /// Stock GNOME: a chord that could only ever log a refusal is not a
-    /// bind this window hands out (ADR-0005), so the row withholds it
+    /// bind this window hands out
+    /// (ARCHITECTURE.md#settings-and-config), so the row withholds it
     /// even though the chord itself is perfectly well typed.
     #[test]
     fn a_session_with_no_clipboard_protocol_offers_no_ocr_clipboard_bind() {
@@ -2512,8 +2520,8 @@ mod tests {
     /// The add-card row's whole point: on the native rung the chord the
     /// user typed comes back as a bind they can paste, naming the
     /// running binary and the `anki-add` verb. Without this the chord
-    /// was uneditable into anything (ADR-0003 rung 2 is the only rung a
-    /// sway session has).
+    /// was uneditable into anything (ARCHITECTURE.md#input-ladders:
+    /// rung 2 is the only rung a sway session has).
     #[test]
     fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("addbind");
@@ -2987,9 +2995,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ADR-0005: the combo is populated from the JP-capable families,
-    /// and it borrows the popup's classifier to decide - a Chinese pan-CJK
-    /// face and a Latin "Gothic" are both out.
+    /// The combo is populated from the JP-capable families, and it
+    /// borrows the popup's classifier to decide - a Chinese pan-CJK face
+    /// and a Latin "Gothic" are both out.
     #[test]
     fn the_font_combo_offers_only_families_that_draw_japanese() {
         let installed =
@@ -3347,9 +3355,10 @@ mod tests {
 
     /// A checkbox may only affect the section it sits in: unchecking a
     /// mixed archive's definitions must not silently kill its frequency
-    /// data or its accents (ADR-0014). And it flips in place, because a
-    /// dictionary that loses its priority every time the user parks it is
-    /// one whose order the user cannot curate.
+    /// data or its accents (ARCHITECTURE.md#dictionary-and-lookup). And
+    /// it flips in place, because a dictionary that loses its priority
+    /// every time the user parks it is one whose order the user cannot
+    /// curate.
     #[test]
     fn a_checkbox_turns_off_only_the_role_of_its_own_section() {
         let dir = scratch("checkbox");
@@ -4004,7 +4013,8 @@ mod tests {
     /// What the checkbox click actually does, driven through the real
     /// message handler: the `.desktop` file appears and disappears, a
     /// reopened window reads its state back off the file, and no config
-    /// is written on the way (ADR-0012: the file is the whole state).
+    /// is written on the way (ARCHITECTURE.md#settings-and-config: the
+    /// file is the whole state).
     #[test]
     fn toggling_autostart_writes_the_file_and_leaves_the_config_alone() {
         let home = std::env::temp_dir().join(format!("chibipop_app_autostart_{}", std::process::id()));

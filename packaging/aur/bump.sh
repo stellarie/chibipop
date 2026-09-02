@@ -2,12 +2,12 @@
 # Points the AUR templates at a new tag: pkgver, pkgrel, every checksum,
 # and both .SRCINFOs.
 #
-# The templates next to this script are the only copy (ADR-0007: no
-# AUR-only PKGBUILDs, they drift), and the push to AUR stays manual - so
-# this script's whole job is the part a human should not be doing by hand,
-# which is hashing. It downloads exactly the sources the PKGBUILD declares,
-# after the version rewrite, so a URL that a new tag breaks fails here
-# instead of on a user's machine.
+# The templates next to this script are the only copy
+# (ARCHITECTURE.md#packaging-and-ci: no AUR-only PKGBUILDs, they drift),
+# and the push to AUR stays manual - so this script's whole job is the
+# part a human should not be doing by hand, which is hashing. It downloads
+# exactly the sources the PKGBUILD declares, after the version rewrite, so
+# a URL that a new tag breaks fails here instead of on a user's machine.
 #
 #   packaging/aur/bump.sh v0.9.0
 #   packaging/aur/bump.sh v0.9.0 --only chibipop-bin
@@ -63,8 +63,8 @@ done
 
 # The same shape `scripts/package-linux.sh` enforces, and for the same
 # reason: `chibipop-bin`'s source URL is the release asset name, which is a
-# forever contract (ADR-0007). A version this regex rejects would produce a
-# PKGBUILD pointing at an asset the release never published.
+# forever contract. A version this regex rejects would produce a PKGBUILD
+# pointing at an asset the release never published.
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] ||
 	die "version must look like v1.2.3, got '${version:-<none>}'"
 pkgver=${version#v}

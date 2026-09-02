@@ -1,18 +1,18 @@
 //! The Linux OCR engine: meikiocr's pipeline, ported to Rust over `ort`.
 //!
-//! ADR-0009 picked meikiocr because it is the only benchmarked candidate
-//! that clears every hard requirement at once - per-character geometry,
-//! ~22 ms warm, and it still reads the sparse three-glyph crop. This module
-//! is that pipeline with the Python removed: three ONNX sessions and the
-//! pre/post-processing around them, held to the harness in
-//! `tools/ocr-bench` by the fixture gate in `tests/ocr_gate.rs`.
+//! meikiocr is the only benchmarked candidate that clears every hard
+//! requirement at once - per-character geometry, ~22 ms warm, and it still
+//! reads the sparse three-glyph crop. This module is that pipeline with the
+//! Python removed: three ONNX sessions and the pre/post-processing around
+//! them, held to the harness in `tools/ocr-bench` by the fixture gate in
+//! `tests/ocr_gate.rs`.
 //!
 //! Two contracts shape the port:
 //!
 //! - **No upscaling.** The adapter feeds native-resolution pixels in every
-//!   orientation (ADR-0009's 2026-08-24 amendment: meiki measured 1x better
+//!   orientation (ARCHITECTURE.md#ocr-engine): meiki measured 1x better
 //!   than 2x on every slice, because its fixed 960x544 detector letterbox
-//!   undoes an upscale). The letterbox itself may scale a small crop up -
+//!   undoes an upscale. The letterbox itself may scale a small crop up -
 //!   that is the model's own input geometry, not a capture-side decision.
 //! - **Verticality stays in here.** meiki routes each line to a horizontal
 //!   or a vertical recogniser by its aspect ratio, and that decision never
@@ -49,8 +49,8 @@ const MAX_BATCH: usize = 8;
 /// One detected line and the characters read out of it.
 pub struct Line {
     pub chars: Vec<CharBox>,
-    /// Which recogniser read it. Engine-internal by ADR-0009; it is not
-    /// part of anything this module hands out.
+    /// Which recogniser read it. Engine-internal; it is not part of
+    /// anything this module hands out.
     vertical: bool,
 }
 
@@ -229,9 +229,9 @@ fn to_ocr_lines(lines: Vec<Line>) -> Vec<OcrLine> {
 /// that sit inside Japanese text - and has no second charset to swap to.
 ///
 /// The one caller left is [`chibipop::text::OcrEngine::set_language`]: a
-/// config carrying some other `ocr.language` (ADR-0012 hides the field on
-/// Linux, it does not clear it) gets read by meikiocr regardless, and the
-/// user is told so rather than silently handed nothing.
+/// config carrying some other `ocr.language` (the Linux settings UI hides
+/// the field, it does not clear it) gets read by meikiocr regardless, and
+/// the user is told so rather than silently handed nothing.
 pub fn serves_language(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     tag == "ja" || tag.starts_with("ja-")
@@ -263,7 +263,8 @@ impl chibipop::text::OcrEngine for MeikiOcr {
         "meiki-ocr"
     }
 
-    /// Per-character boxes, finer than a word rect (ADR-0009).
+    /// Per-character boxes, finer than a word rect
+    /// (ARCHITECTURE.md#ocr-engine).
     fn provides_geometry(&self) -> bool {
         true
     }

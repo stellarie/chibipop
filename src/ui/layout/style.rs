@@ -381,11 +381,10 @@ pub(super) const WEIGHT_STEP: u16 = 300;
 /// superscript position", which is a
 /// face metric, and the seam reports
 /// line and span geometry rather than
-/// a face's tables (ADR-0013). A
-/// third of an em up and a fifth down
-/// are the fallbacks a text engine
-/// uses for a face that declares
-/// neither.
+/// a face's tables. A third of an em
+/// up and a fifth down are the
+/// fallbacks a text engine uses for a
+/// face that declares neither.
 pub(super) const SUPER_RISE: f32 = 1.0 / 3.0;
 
 /// `vertical-align: sub`, likewise.
@@ -1020,7 +1019,7 @@ pub(super) fn align_of(doc: &GlossDoc, value: Scalar, em: f32) -> Option<(f32, V
 /// how tall it is and how far down it
 /// the baseline sits - so a span's own
 /// ascent is its own advance in the
-/// same proportion (ADR-0013).
+/// same proportion.
 pub(super) fn shift_on(style: Inline, line: LineBox, span_h: f32) -> f32 {
     if style.align == VAlign::Fixed || line.h <= 0.0 {
         return style.shift;

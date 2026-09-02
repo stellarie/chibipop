@@ -1526,11 +1526,11 @@ variants.default.elements.3.w: golden "46.43" -> measured "47.03"  ["Text" "ざ�
 Everything else matches: the other seven golden fixtures pass, and the rest of the suite
 is 1338 green. Clippy is exactly 1 and the release build finishes.
 
-**This is not a regression.** ADR-0011 asserts DirectWrite metrics with **no tolerance**,
-against goldens blessed on `windows-2025`, and it names the mechanism: "Drift enters only
-via runner-image font updates." Two machines with different Yu Gothic UI files measure the
-same string differently, and 0.6 px is exactly that size of difference. What the ADR did
-not anticipate is that a *developer box* is a second image, permanently.
+**This is not a regression.** The gate asserts DirectWrite metrics with **no tolerance**,
+against goldens blessed on `windows-2025`, and drift enters only via runner-image font
+updates. Two machines with different Yu Gothic UI files measure the same string
+differently, and 0.6 px is exactly that size of difference. What that rule did not
+anticipate is that a *developer box* is a second image, permanently.
 
 **The consequence is a process one.** `RELEASING.md` step 2 says "Run tier 0 locally. Do
 not tag a commit you have not gated." That instruction can no longer be satisfied on this
@@ -1542,7 +1542,7 @@ line, which is how the next real golden failure gets waved through.
 
 | Option | Why it is not free |
 |---|---|
-| Widen to a tolerance | ADR-0011 rejects this explicitly. A tolerance masks the bug class the gate exists for: rounding moved into core, off-by-one gap accounting, scroll-culling boundary shifts. |
+| Widen to a tolerance | Refused by a standing rule — no tolerance is permitted. A tolerance masks the bug class the gate exists for: rounding moved into core, off-by-one gap accounting, scroll-culling boundary shifts. |
 | Bless locally | Reds CI. The goldens are one file, shared. |
 | Skip the goldens off CI (`CI` env var) | Cheap, and it makes the local gate green — but it also means the adapter's only regression net never runs where the code is written. |
 | A second golden set per machine | Two baselines to keep honest, and nothing tells you when they disagree for a real reason. |
@@ -1554,11 +1554,11 @@ what a green run looks like on this machine: 1338 passed, 1 failed, and the fail
 
 **Evidence:** `docs/REGRESSION.md` tier 0; CI run 33111391694 (all four jobs green at
 `98b133c`); `crates/chibipop-windows/tests/geometry_goldens.rs`;
-`docs/adr/0011-layout-golden-verification.md`.
+[`ARCHITECTURE.md`](../ARCHITECTURE.md#verification).
 
 ---
 
-## 38. ~~`release.yml` runs the geometry goldens on `windows-latest`, which ADR-0011 forbids~~ — **FIXED 2026-08-29**
+## 38. ~~`release.yml` runs the geometry goldens on `windows-latest`, which the image pin forbids~~ — **FIXED 2026-08-29**
 
 > [!note] Fixed the same day it was found, on oniichan's instruction
 > `release.yml`'s Windows job is now `runs-on: windows-2025`, matching
@@ -1590,8 +1590,8 @@ change to what gets released, and that is oniichan's call, not a side effect of 
 tag. He made it the same day, and the pin landed on its own branch.
 
 **Evidence:** `.github/workflows/release.yml`; `.github/workflows/ci.yml` tier 0's
-`runs-on` and its comment; `docs/adr/0011-layout-golden-verification.md`, "tier0 pins its
-image".
+`runs-on` and its comment; [`ARCHITECTURE.md`](../ARCHITECTURE.md#verification), "The CI
+image is pinned".
 
 ---
 

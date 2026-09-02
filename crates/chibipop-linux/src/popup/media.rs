@@ -1,4 +1,4 @@
-//! The popup's decoded-surface cache (ADR-0004's paint side).
+//! The popup's decoded-surface cache (the paint side).
 //!
 //! One `MediaStore` connection of its own plus a bounded map of decoded
 //! pixmaps. Its own connection because the worker owns the dictionary on
@@ -28,8 +28,8 @@
 //! [`chibipop::dict::media::ByteBudget`], [`SURFACE_BUDGET`] and
 //! [`chibipop::dict::media::premultiplied`]. None of the three carries a
 //! pixel format, which is what lets them be shared while painting stays
-//! per-platform (ADR-0001). What stays here is the decode, the channel
-//! order, and the diagnostics.
+//! per-platform (ARCHITECTURE.md#workspace-and-seams). What stays here
+//! is the decode, the channel order, and the diagnostics.
 
 use chibipop::dict::media::{premultiplied, ByteBudget, MediaKey, Missing, SURFACE_BUDGET};
 use chibipop::lookup::sqlite::MediaStore;

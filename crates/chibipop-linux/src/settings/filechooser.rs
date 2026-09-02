@@ -1,7 +1,7 @@
 //! `org.freedesktop.portal.FileChooser`: the Add row's Browse button.
 //!
 //! **Why the portal.** The settings window is a Wayland client with no
-//! toolkit file dialog of its own (ADR-0005 keeps it iced-native), and
+//! toolkit file dialog of its own (it stays iced-native), and
 //! `OpenFile` is the one dialog every supported desktop already
 //! implements — KDE draws Plasma's, GNOME draws GTK's — so a Browse
 //! button costs a D-Bus call instead of a second widget stack. It is

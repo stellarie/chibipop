@@ -11,10 +11,7 @@ __pycache__/
 /docs/superpowers/
 /.superpowers/
 
-# Domain docs, agent docs, and issue tracker - local only.
-/AGENTS.md
-/CONTEXT.md
-/docs/agents/
+# Bless-run artifact cache - local only.
 /.scratch/
 
 # Project memory - local only.

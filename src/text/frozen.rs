@@ -1,11 +1,12 @@
-//! The press-time frame trigger mode reads (ADR-0010).
+//! The press-time frame trigger mode reads (ARCHITECTURE.md#hover-cadence).
 //!
 //! At trigger press one full grab of the output under the cursor is taken,
 //! before any popup exists, and every lookup in the hold is served out of
 //! it: no capture, no mask, and text the popup later covers stays
 //! readable. That is the read-through property Windows gets from its
-//! capture guard and a live Wayland grab cannot have (ADR-0008). Release
-//! drops the frame; each press grabs fresh.
+//! capture guard and a live Wayland grab cannot have
+//! (ARCHITECTURE.md#capture-and-masking). Release drops the frame; each
+//! press grabs fresh.
 //!
 //! Nothing here decides *when* to freeze. The bin owns the trigger and the
 //! output-crossing rule; this owns the pixels and answers boxes out of
@@ -39,7 +40,7 @@ impl FrozenFrame {
     /// its own surfaces or holds an expensive session open does it here
     /// too. The grab is the whole output on purpose: presses arrive at
     /// human cadence, so the copy is free and no out-of-region edge
-    /// case exists (ADR-0010).
+    /// case exists (ARCHITECTURE.md#hover-cadence).
     pub(crate) fn take(capture: &mut dyn RegionCapture, at: PhysPoint) -> Result<FrozenFrame> {
         let region = capture.bounds_containing(at);
         capture.begin_read();

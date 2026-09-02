@@ -40,11 +40,12 @@ pub fn block_shutdown() -> Result<Signals> {
 ///
 /// [`block_shutdown`]'s mask outlives `exec`, so without this every child
 /// the daemon spawns starts life deaf to a SIGTERM. The settings window
-/// (ADR-0005) is the one that matters — a long-lived process a session or
-/// a supervisor has to be able to stop — but the rule is cheaper to hold
-/// everywhere than to re-derive per call site. Exactly the two signals
-/// [`block_shutdown`] took are handed back: whatever the daemon's own
-/// parent chose to block is none of this function's business.
+/// (ARCHITECTURE.md#settings-and-config) is the one that matters — a
+/// long-lived process a session or a supervisor has to be able to stop —
+/// but the rule is cheaper to hold everywhere than to re-derive per call
+/// site. Exactly the two signals [`block_shutdown`] took are handed back:
+/// whatever the daemon's own parent chose to block is none of this
+/// function's business.
 pub fn unmasked(command: &mut Command) -> &mut Command {
     // SAFETY: `pre_exec` runs in the forked child, where only
     // async-signal-safe calls are allowed. `pthread_sigmask` is one

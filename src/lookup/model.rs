@@ -52,9 +52,9 @@ pub struct Entry {
     ///
     /// Resolved here, beside the parse, rather than looked up while the
     /// panel is laid out: `layout::scene` is a measure-and-arithmetic pass
-    /// with no database behind it (ADR-0004), and a size query per image
-    /// per frame would put SQLite on the paint path. A row names a handful
-    /// of assets - 字通 averages more than four - so this is a short
+    /// with no database behind it, and a size query per image per frame
+    /// would put SQLite on the paint path. A row names a handful of
+    /// assets - 字通 averages more than four - so this is a short
     /// association list a linear scan answers.
     ///
     /// An absent path means the build stored no bytes or could read no
@@ -66,10 +66,11 @@ pub struct Entry {
     /// actually published.
     ///
     /// What the popup prints, and never the reduced Frequency rank
-    /// [`TermRow::freq`] carries (ADR-0015): priority-first-wins whatever
-    /// ranking strategy the ranks were reduced under, so the figure on
-    /// screen is always something a real dictionary said and the reader can
-    /// look it up. A median of three sources is not.
+    /// [`TermRow::freq`] carries (ARCHITECTURE.md#dictionary-and-lookup):
+    /// priority-first-wins whatever ranking strategy the ranks were
+    /// reduced under, so the figure on screen is always something a real
+    /// dictionary said and the reader can look it up. A median of three
+    /// sources is not.
     ///
     /// `None` when no enabled frequency dictionary ranks the headword, and
     /// for any `Entry` with no store behind it.
@@ -134,7 +135,8 @@ pub trait Dictionary {
     /// or the kana one where there is no kanji - and `reading` is the
     /// reading it is scoped to. Which dictionaries are enabled and in what
     /// order they rank is the pitch list's question and therefore config's,
-    /// so the answer here is unfiltered and unordered (ADR-0014).
+    /// so the answer here is unfiltered and unordered
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     ///
     /// Once per card the popup builds, never on the term path: a Pitch
     /// pattern is per reading, so it cannot ride on a `term` row.

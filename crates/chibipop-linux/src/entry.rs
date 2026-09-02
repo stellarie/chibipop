@@ -30,26 +30,27 @@ enum Command {
     ///
     /// The forever verb set: reload, trigger-down, trigger-up, toggle,
     /// anki-add, screenshot, ocr-clipboard, static-region. One verb per global
-    /// action, never a scripting API (ADR-0003). Bind these in your compositor,
-    /// e.g. sway:
+    /// action, never a scripting API (ARCHITECTURE.md#input-ladders). Bind
+    /// these in your compositor, e.g. sway:
     ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
     ///   bindsym --no-repeat Mod4+a exec chibipop ctl anki-add
     ///   bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
     ///   bindsym --no-repeat Mod4+c exec chibipop ctl ocr-clipboard
     ///   bindsym --no-repeat Mod4+r exec chibipop ctl static-region
     Ctl { verb: String },
-    /// Open the settings window: its own process (ADR-0005), so a
-    /// settings crash can never take live-hover down.
+    /// Open the settings window: its own process
+    /// (ARCHITECTURE.md#settings-and-config), so a settings crash can
+    /// never take live-hover down.
     Settings,
     /// Connect to the Wayland display, print the capability report, exit.
     Probe,
     /// Grab screen regions with the capture backend and write PNGs.
     ///
-    /// A diagnostic for whichever ADR-0002 rung this session selects,
+    /// A diagnostic for whichever capture rung this session selects,
     /// like `probe`: lock-free, socket-free, safe beside a live daemon.
-    /// `CHIBIPOP_CAPTURE_BACKEND=portal` forces the fallback rung (and
-    /// its consent dialog) on a compositor that advertises screencopy.
-    /// Without `--region` it samples every output.
+    /// `CHIBIPOP_CAPTURE_BACKEND=portal` forces the fallback rung
+    /// (and its consent dialog) on a compositor that advertises
+    /// screencopy. Without `--region` it samples every output.
     CaptureDump {
         /// One box in global physical pixels: `x,y,w,h`.
         #[arg(long, value_name = "X,Y,W,H")]
@@ -58,7 +59,7 @@ enum Command {
         #[arg(long, default_value = "/tmp", value_name = "DIR")]
         out: PathBuf,
         /// Re-read the first box this many times, to watch the damage
-        /// race pace a dwell (ADR-0010).
+        /// race pace a dwell (ARCHITECTURE.md#hover-cadence).
         #[arg(long, default_value_t = 0, value_name = "N")]
         dwell: u32,
         /// Grab each output whole instead of a centred sample.

@@ -1,20 +1,20 @@
 //! Where the three meikiocr models live, and proof they are the ones the
 //! benchmark measured.
 //!
-//! ADR-0009: the models ship bundled everywhere and there is no first-run
-//! download path, so "which file is this" is answered by a committed digest
-//! rather than by a URL. The check runs once when the engine opens - about
-//! 30 ms for 44 MB - and a mismatch refuses the engine instead of quietly
-//! recognising with something else. The quality gate's numbers are only
-//! meaningful for these exact bytes.
+//! The models ship bundled everywhere and there is no first-run download
+//! path (ARCHITECTURE.md#ocr-engine), so "which file is this" is answered
+//! by a committed digest rather than by a URL. The check runs once when the
+//! engine opens - about 30 ms for 44 MB - and a mismatch refuses the engine
+//! instead of quietly recognising with something else. The quality gate's
+//! numbers are only meaningful for these exact bytes.
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// File name plus SHA-256, copied verbatim from
-/// `tools/ocr-bench/models/SHA256SUMS.txt` - the same digests ADR-0009
-/// pins the source-AUR download to. Upstream:
+/// `tools/ocr-bench/models/SHA256SUMS.txt` - the same digests the
+/// source-AUR package pins its download to. Upstream:
 /// `rtr46/meiki.text.detect.v0` and `rtr46/meiki.txt.recognition.v0` on
 /// Hugging Face (weights LGPL-3.0; see `models/meiki/LICENSE.md`).
 pub const DETECT: (&str, &str) = (

@@ -299,10 +299,10 @@ fn bump_rewrites_both_templates_for_a_new_tag() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The release asset name is a forever contract (ADR-0007) and
-/// `chibipop-bin`'s source URL is that name, so a version the contract
-/// cannot express has to stop here - not produce a PKGBUILD pointing at an
-/// asset no release will ever carry.
+/// The release asset name is a forever contract
+/// (ARCHITECTURE.md#packaging-and-ci) and `chibipop-bin`'s source URL is
+/// that name, so a version the contract cannot express has to stop here -
+/// not produce a PKGBUILD pointing at an asset no release will ever carry.
 #[test]
 fn bump_refuses_a_version_that_breaks_the_asset_name() {
     for bad in ["0.9.0", "v0.9", "release-1"] {

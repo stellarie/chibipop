@@ -55,7 +55,7 @@ pub(super) struct MarkerMetrics {
 /// re-measure, and no edit to a line
 /// box after the wrap - which is the
 /// rule a bin's own re-measure
-/// enforces (ADR-0013).
+/// enforces.
 ///
 /// Measured at the paragraph's wrap
 /// width and not at the gutter's: a

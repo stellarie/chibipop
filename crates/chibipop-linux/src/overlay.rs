@@ -15,8 +15,8 @@
 //! **Nothing here can be interacted with.** The input region is empty
 //! on every commit, so a pointer falls straight through to whatever is
 //! underneath, and `keyboard_interactivity` is `None` - the popup's
-//! inviolable setting (ADR-0004), and for the same reason: an outline
-//! that stole focus would be a bug in every possible use of it.
+//! inviolable setting, and for the same reason: an outline that stole
+//! focus would be a bug in every possible use of it.
 //!
 //! **Sized to the rects, not to the screen.** A full-output surface
 //! would mean a 33 MB buffer per output at 4K, repainted on every hover
@@ -113,10 +113,11 @@ pub fn scan_colour(kind: ScanKind, theme: &Theme) -> Px {
 /// by kind.
 ///
 /// **Outset, never inset** - the Windows overlay's rule and for its
-/// reason (ADR-0008): a stroke drawn *inside* a scan rect would land in
-/// the very pixels the next grab reads, so chibipop would OCR its own
-/// furniture. Inflating by the thickness puts the whole frame in the
-/// band around the rect and leaves the rect itself untouched.
+/// reason (ARCHITECTURE.md#capture-and-masking): a stroke drawn *inside*
+/// a scan rect would land in the very pixels the next grab reads, so
+/// chibipop would OCR its own furniture. Inflating by the thickness puts
+/// the whole frame in the band around the rect and leaves the rect
+/// itself untouched.
 pub fn scan_marks(rects: &[ScanRect], theme: &Theme) -> Vec<Mark> {
     rects
         .iter()
@@ -274,9 +275,9 @@ impl Outline {
     /// before that.
     ///
     /// `None` means this compositor advertises no `zwlr_layer_shell_v1`:
-    /// the same *state, not error* rule `Popup::bind` follows (ADR-0004,
-    /// ticket 49), so the caller reports the outline unavailable through
-    /// the channel it already has and every other channel keeps
+    /// the same *state, not error* rule `Popup::bind` follows
+    /// (ticket 49), so the caller reports the outline unavailable
+    /// through the channel it already has and every other channel keeps
     /// running.
     pub fn bind(globals: &GlobalList, qh: &QueueHandle<App>, popup: &Popup) -> Option<Outline> {
         let shell = LayerShell::bind(globals, qh).ok()?;
@@ -631,7 +632,7 @@ mod tests {
         assert_eq!(
             rect(100 - BORDER_PX, 200 - BORDER_PX, 60 + 2 * BORDER_PX, 30 + 2 * BORDER_PX),
             marks[0].rect,
-            "the frame lands in the band around the rect, never in the pixels OCR reads (ADR-0008)"
+            "the frame lands in the band around the rect, never in the pixels OCR reads"
         );
         // Every painted strip is outside the scanned box.
         for strip in strips(marks[0].rect, BORDER_PX) {

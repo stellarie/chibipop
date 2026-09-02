@@ -35,9 +35,10 @@ pub struct Card {
     /// drawn as `freq {n}` in the card's corner.
     ///
     /// One dictionary's own claim, never the reduced Frequency rank that
-    /// ordered these results (ADR-0015): the figure on screen is always
-    /// something a real dictionary said, so a reader can look it up and check
-    /// it, and switching ranking strategy does not change it.
+    /// ordered these results (ARCHITECTURE.md#dictionary-and-lookup): the
+    /// figure on screen is always something a real dictionary said, so a
+    /// reader can look it up and check it, and switching ranking strategy
+    /// does not change it.
     pub freq: Option<i64>,
     /// In display order.
     pub blocks: Vec<GlossBlock>,
@@ -124,8 +125,8 @@ pub struct GlossEntry {
     /// media store has bytes for, by the `path` the node declared.
     ///
     /// Carried rather than looked up while the panel is laid out:
-    /// `layout::scene` runs with a measurer and no database (ADR-0004), and
-    /// this is what lets it resolve an image's rect without decoding a pixel
+    /// `layout::scene` runs with a measurer and no database, and this is
+    /// what lets it resolve an image's rect without decoding a pixel
     /// (`lookup::model::Entry::media`). An absent path is what makes the
     /// `alt`-text fallback fire.
     pub media: Vec<(String, Intrinsic)>,
@@ -190,7 +191,8 @@ pub struct CollapsedRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DictInfo {
     pub dict_id: i64,
-    /// The exact name every Dictionary list names it by (ADR-0014).
+    /// The exact name every Dictionary list names it by
+    /// (ARCHITECTURE.md#dictionary-and-lookup).
     pub name: String,
 }
 
@@ -244,7 +246,7 @@ pub struct PresentConfig {
     /// Both the filter and the order, and there is nothing behind it: a
     /// name either names an installed Dictionary or does not, and an empty
     /// list is a user who turned every one of them off, not a typo to
-    /// second-guess (ADR-0014).
+    /// second-guess (ARCHITECTURE.md#dictionary-and-lookup).
     pub terms: Vec<String>,
     /// The enabled pitch Dictionaries, by exact name, highest priority
     /// first. The same filter and the same order, over accents.
@@ -513,7 +515,7 @@ fn dict_name_for(dict_id: i64, dicts: &[DictInfo]) -> String {
 /// predates is a reload the pipeline has not seen yet, not a dictionary the
 /// user switched off - a list cannot have an opinion about a name it has
 /// never been told. Nothing a user can type reaches this arm, which is what
-/// makes it different in kind from the guards ADR-0014 deleted.
+/// makes it different in kind from the deleted substring guards.
 fn enabled_for(dict_id: i64, dicts: &[DictInfo], list: &[String]) -> bool {
     match dicts.iter().find(|d| d.dict_id == dict_id) {
         Some(known) => keeps_dict(&known.name, list),
@@ -525,9 +527,10 @@ fn enabled_for(dict_id: i64, dicts: &[DictInfo], list: &[String]) -> bool {
 /// list does not name it.
 ///
 /// Equality on the exact name, which is the whole of identity now
-/// (ADR-0014): the substring `contains` this replaced could not tell two
-/// editions of one dictionary apart, so ordering or excluding one of them
-/// silently did the same to the other.
+/// (ARCHITECTURE.md#dictionary-and-lookup): the substring `contains`
+/// this replaced could not tell two editions of one dictionary apart,
+/// so ordering or excluding one of them silently did the same to the
+/// other.
 pub fn list_rank(dict_name: &str, list: &[String]) -> Option<usize> {
     list.iter().position(|listed| listed == dict_name)
 }

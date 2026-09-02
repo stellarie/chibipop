@@ -1,14 +1,14 @@
-//! The StatusNotifierItem tray (ADR-0006): Settings, Quit, and a
-//! disabled row per input channel so a user can see at a glance why
-//! something is not working.
+//! The StatusNotifierItem tray (ARCHITECTURE.md#platform-integration):
+//! Settings, Quit, and a disabled row per input channel so a user can
+//! see at a glance why something is not working.
 //!
 //! Three rules shape this module.
 //!
 //! **The daemon stays sync.** ksni runs its own D-Bus thread; we take it
 //! with `default-features = false, features = ["async-io", "blocking"]`
-//! so no tokio reaches this binary (ADR-0001, and ksni's documented
-//! feature-unification footgun). `blocking` is a thin wrapper over that
-//! same async-io runtime, not a second one.
+//! so no tokio reaches this binary (ARCHITECTURE.md#workspace-and-seams,
+//! and ksni's documented feature-unification footgun). `blocking` is a
+//! thin wrapper over that same async-io runtime, not a second one.
 //!
 //! **Nothing about the tray is fatal.** No D-Bus, no watcher, no host,
 //! a wedged bar, a dead tray thread: every one of those degrades to
@@ -133,7 +133,7 @@ impl ksni::Tray for ChibipopTray {
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
         self.ask(TrayRequest::Diagnostic(format!(
             "tray: no StatusNotifier host ({reason:?}); running trayless - every feature still works, \
-             and a bar started later picks the item up (ADR-0006)"
+             and a bar started later picks the item up"
         )));
         true
     }
@@ -191,11 +191,11 @@ impl TrayHandle {
 /// Publish the tray. Never fails: the second element is the diagnostics
 /// the daemon should log, and the handle works either way.
 ///
-/// `assume_sni_available(true)` (ADR-0006) turns "no watcher on the bus"
-/// and "nothing will show this" into soft errors routed to
-/// `watcher_offline`, so a daemon that starts before the bar — the
-/// normal case under a session manager — still gets its item shown when
-/// the bar arrives.
+/// `assume_sni_available(true)` (ARCHITECTURE.md#platform-integration)
+/// turns "no watcher on the bus" and "nothing will show this" into soft
+/// errors routed to `watcher_offline`, so a daemon that starts before
+/// the bar — the normal case under a session manager — still gets its
+/// item shown when the bar arrives.
 pub fn spawn(
     statuses: ChannelStatuses,
     requests: calloop::channel::Sender<TrayRequest>,
@@ -213,7 +213,7 @@ pub fn spawn(
         }
         Err(e) => {
             diagnostics.push(format!(
-                "tray: unavailable ({e}); running trayless - every feature still works (ADR-0006)"
+                "tray: unavailable ({e}); running trayless - every feature still works"
             ));
             (TrayHandle::trayless(statuses), diagnostics)
         }

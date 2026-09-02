@@ -1,4 +1,4 @@
-//! DirectWrite geometry-snapshot goldens (ADR-0011).
+//! DirectWrite geometry-snapshot goldens.
 //!
 //! One JSON golden per fixture under `tests/goldens/geometry/`,
 //! compared with EXACT equality - no tolerance. DirectWrite metrics
@@ -67,7 +67,7 @@ fn flatten(v: &Value, path: &str, out: &mut BTreeMap<String, String>) {
 /// belongs to, not just an index.
 ///
 /// Walks *up* until it finds one,
-/// because ADR-0013's fields nest:
+/// because the widened fields nest:
 /// `elements.3.measured.line_boxes.1.baseline`
 /// has no text of its own and the
 /// element three levels above it is
@@ -169,7 +169,7 @@ fn check(name: &str) {
     panic!(
         "geometry golden '{name}' diverged ({total} field(s)):\n{}\n\
          If this layout change is INTENTIONAL, re-bless via the CI bless dispatch and \
-         commit the reviewed diff (ADR-0011). Never widen this to a tolerance.",
+         commit the reviewed diff. Never widen this to a tolerance.",
         lines.join("\n")
     );
 }
@@ -254,19 +254,19 @@ fn geometry_golden_pitch_sources() {
     check("pitch_sources");
 }
 
-/// The ADR-0011 fixture set, pinned:
+/// The fixture set, pinned:
 /// exactly these sixteen, one golden
 /// file each. The first seven are the
 /// original set with its intent
 /// unchanged; the next six are the
-/// ones ADR-0013 requires, because the
-/// widened schema has fields no
+/// ones the widened schema requires,
+/// because it has fields no
 /// plain-string fixture can fill; the
 /// last three are ticket 02's, and
 /// they are the only thing pinning the
 /// card header's pitch geometry.
 #[test]
-fn the_fixture_set_is_the_sixteen_from_adr_0011() {
+fn the_fixture_set_is_the_pinned_sixteen() {
     let names: Vec<&str> = fixtures().iter().map(|f| f.name).collect();
     assert_eq!(
         vec![

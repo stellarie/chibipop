@@ -24,7 +24,8 @@ toml.workspace = true
 
 # Win32-only, resolved only when actually compiling for Windows so the
 # cfg-stubbed foreign-target build (see src/main.rs) pulls none of it and
-# `cargo test --workspace` works on the Linux CI runner (ADR-0007).
+# `cargo test --workspace` works on the Linux CI runner (see
+# ARCHITECTURE.md#packaging-and-ci).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
   "Win32_Graphics_Gdi",

@@ -1,5 +1,6 @@
-//! The daemon's settings-child guard (ADR-0005): at most one spawned
-//! settings process, tracked by pid.
+//! The daemon's settings-child guard
+//! (ARCHITECTURE.md#settings-and-config): at most one spawned settings
+//! process, tracked by pid.
 //!
 //! The guard is the daemon's *own* discipline; the settings-scoped
 //! flock in `super::run` is the cross-process one (a directly launched

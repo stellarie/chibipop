@@ -1,12 +1,13 @@
-//! ADR-0009's standing quality gate for the Linux OCR engine.
+//! The standing quality gate for the Linux OCR engine
+//! (ARCHITECTURE.md#ocr-engine).
 //!
 //! The 152-crop ground-truthed corpus under `tests/fixtures/ocr-corpus/`
 //! is the same one the Python benchmark harness (`tools/ocr-bench/`)
 //! measured every candidate engine on, manifest and all. This runs the
 //! ported pipeline over it and holds the result to two things at once:
 //!
-//! - **Absolute floors**, from the ADR: horizontal CER <= 5 % with
-//!   hit-scan >= 90 %, vertical CER <= 20 % with hit-scan >= 75 %.
+//! - **Absolute floors** (ARCHITECTURE.md#ocr-engine): horizontal CER <= 5 %
+//!   with hit-scan >= 90 %, vertical CER <= 20 % with hit-scan >= 75 %.
 //! - **Parity** with the harness's 1x numbers to within +-3 pp, so a
 //!   silent drift in the port - a resize rounding rule, an overlap
 //!   threshold, an ONNX Runtime upgrade - reds the gate even while the
@@ -36,9 +37,8 @@ use unicode_normalization::UnicodeNormalization;
 // Measured by `python -m bench.run_one --config meiki` on 2026-08-23 and
 // stored in `tools/ocr-bench/results/meiki.json`; the aggregation below is
 // `bench/report.py`'s (CER averaged per crop, hit-scan pooled over
-// characters). Quoted in docs/research/ocr-benchmark-results.md and
-// ADR-0009. These are the 1x numbers - ADR-0009's amendment made 1x the
-// only thing the Linux adapter feeds.
+// characters). Quoted in docs/research/ocr-benchmark-results.md. These are
+// the 1x numbers, and 1x is the production shape the Linux adapter feeds.
 
 /// Slices `smoke`, `horizontal`, `mixed` and `small` at 1x: 7 crops.
 const REF_HORIZONTAL_CER: f64 = 0.0181;
@@ -48,8 +48,8 @@ const REF_HORIZONTAL_HIT: f64 = 0.9508;
 const REF_VERTICAL_CER: f64 = 0.1250;
 /// 13 of 16 characters.
 const REF_VERTICAL_HIT: f64 = 0.8125;
-/// All 136 ADR-0008 masked variants, scored after dropping predictions
-/// whose boxes touch the mask - what chibipop's layout actually keeps.
+/// All 136 masked variants, scored after dropping predictions whose boxes
+/// touch the mask - what chibipop's layout actually keeps.
 const REF_MASKED_CER_DROPPED: f64 = 0.1410;
 /// 1435 of 1542 characters.
 const REF_MASKED_HIT: f64 = 0.9306;
@@ -58,8 +58,8 @@ const REF_MASKED_HIT: f64 = 0.9306;
 ///
 /// Worth knowing when this trips: the vertical slice is a single 16-glyph
 /// crop, so its CER moves in 6.25 pp steps. Vertical parity is therefore an
-/// exact-match assertion in practice, which is the point - ADR-0009 asks
-/// for the vertical slice to be re-measured on any upstream model change.
+/// exact-match assertion in practice, which is the point - the vertical
+/// slice must be re-measured on any upstream model change.
 const PARITY_BAND: f64 = 0.03;
 
 // -------------------------------------------------------------------- gate
@@ -76,7 +76,7 @@ const VERTICAL_HIT_FLOOR: f64 = 0.75;
 /// is not asserted here.
 const LATENCY_P50_CEILING_MS: f64 = 250.0;
 
-/// Slices that are not the vertical one. ADR-0009 gates them together.
+/// Slices that are not the vertical one. The gate scores them together.
 const HORIZONTAL_SLICES: [&str; 4] = ["smoke", "horizontal", "mixed", "small"];
 
 // ------------------------------------------------------------------ corpus
@@ -369,8 +369,9 @@ fn run() -> Report {
 
         // The harness's production-equivalent score for a masked crop:
         // chibipop's layout drops words whose rects touch the mask
-        // (ADR-0008 "the mask boundary is a capture edge"), so boundary
-        // garbage with honest geometry never reaches the lookup.
+        // (ARCHITECTURE.md#capture-and-masking: "the mask boundary is a
+        // capture edge"), so boundary garbage with honest geometry never
+        // reaches the lookup.
         let mut cer_dropped = crop_cer;
         if let Some(mask) = &crop.mask {
             if mask.pos != "outside" && !boxes.is_empty() {
@@ -522,9 +523,9 @@ fn vertical_accuracy_matches_the_python_harness() {
     near(REPORT.vertical.hit(), REF_VERTICAL_HIT, "vertical hit-scan");
 }
 
-/// ADR-0008's masked sweep, the robustness half of ticket 31: the engine
-/// must not fall apart when part of the crop is painted over, once the
-/// boundary words chibipop already discards are discarded.
+/// The masked sweep, the robustness half of ticket 31: the engine must not
+/// fall apart when part of the crop is painted over, once the boundary words
+/// chibipop already discards are discarded.
 #[test]
 fn masked_crops_match_the_python_harness() {
     near(REPORT.masked.cer_dropped(), REF_MASKED_CER_DROPPED, "masked CER after dropping clipped words");
@@ -532,7 +533,7 @@ fn masked_crops_match_the_python_harness() {
 }
 
 /// The sparse fixture is the cursor-at-crop-edge case that eliminated
-/// PP-OCRv5 (ADR-0009): three glyphs, nothing else in the frame.
+/// PP-OCRv5: three glyphs, nothing else in the frame.
 #[test]
 fn the_sparse_fixture_is_read_exactly() {
     assert_eq!(REPORT.smoke_gt, REPORT.smoke_pred, "the three-glyph smoke crop must come back verbatim{}", REPORT.table);

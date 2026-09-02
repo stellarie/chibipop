@@ -134,8 +134,7 @@ impl<'a> Pass<'a> {
         // together, so a bold word and
         // a normal one beside it in the
         // source share a line and the
-        // paragraph rewraps as one unit
-        // (ADR-0013).
+        // paragraph rewraps as one unit.
         self.run.clear();
         self.run.extend(flow.styled_spans(font));
         // The images first, because an

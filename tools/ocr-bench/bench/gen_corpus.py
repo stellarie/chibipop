@@ -11,9 +11,10 @@
 3. tests/fixtures/japanese_bgra.bin (exact production BGRA byte format) is the
    smoke case; its per-char boxes are recovered by ink-projection.
 4. Every crop gets a 2x nearest-neighbour variant (src/text/capture.rs
-   upscale_by). Masked variants per ADR-0008 are composited onto the 2x crops:
-   positions edge/interior/outside-control x fills black/white/gray/mean x
-   hard/1px-feather edges. Masked ground truth = chars not intersecting the mask.
+   upscale_by). Masked variants (ARCHITECTURE.md#capture-and-masking) are
+   composited onto the 2x crops: positions edge/interior/outside-control x
+   fills black/white/gray/mean x hard/1px-feather edges. Masked ground truth
+   = chars not intersecting the mask.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ HORIZONTAL = {
     "s12": "small",
 }
 VERTICAL = {"vert": "vertical"}
-# Masked variants are generated for every 2x base crop (ADR-0008).
+# Masked variants are generated for every 2x base crop.
 MASK_FILLS = ("black", "white", "gray", "mean")
 MASK_EDGES = ("hard", "feather")
 
@@ -260,7 +261,7 @@ def main() -> None:
             })
             if scale != 2:
                 continue
-            # ADR-0008 masked variants on the production (2x) shape.
+            # Masked variants on the production (2x) shape.
             horizontal = img.shape[1] >= img.shape[0]
             rects = mask_rects(img.shape[1], img.shape[0], horizontal)
             variants = [("outside", "gray", "hard")] + [

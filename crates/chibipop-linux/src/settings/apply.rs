@@ -1,4 +1,4 @@
-//! Apply = save-then-`reload` (ADR-0005).
+//! Apply = save-then-`reload` (ARCHITECTURE.md#settings-and-config).
 //!
 //! The config file is the sole source of truth: Apply writes the whole
 //! struct, then sends one `reload` verb. The socket's presence *is* the
@@ -22,16 +22,18 @@ use rusqlite::OpenFlags;
 use std::path::Path;
 
 /// The fields the shared form does not model: Linux platform fields
-/// (ADR-0012) plus the lookup-log gate, edited straight on `Config`.
+/// (ARCHITECTURE.md#settings-and-config) plus the lookup-log gate,
+/// edited straight on `Config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinuxFields {
     /// Advisory on the native channel; the portal binding later (36).
     pub trigger_key_linux: String,
     pub add_key_linux: String,
-    /// The static-region chord. Native-channel only (ADR-0003's
-    /// 2026-08-26 addendum): nothing registers it with the portal, so it
-    /// exists to be rendered as a copyable `ctl static-region` bind.
-    /// Empty means no chord, exactly as `add_key_linux` does.
+    /// The static-region chord. Native-channel only
+    /// (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum): nothing
+    /// registers it with the portal, so it exists to be rendered as a
+    /// copyable `ctl static-region` bind. Empty means no chord, exactly
+    /// as `add_key_linux` does.
     pub static_region_key_linux: String,
     /// The mining screenshot's chord, native-channel only for the same
     /// reason as the static-region one above. `Option`, not a `String`
@@ -331,7 +333,8 @@ mod tests {
 
     /// And with neither chord the section goes away rather than being
     /// written as a table full of `None`: absence stays absence
-    /// (ADR-0012, `upstream-merge-fallout` ticket 06).
+    /// (ARCHITECTURE.md#settings-and-config, `upstream-merge-fallout`
+    /// ticket 06).
     #[test]
     fn an_ocr_clipboard_section_with_neither_chord_is_dropped() {
         let dir = scratch("ocrclip_dropped");

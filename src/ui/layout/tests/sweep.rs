@@ -6,7 +6,8 @@
 //! and checks a render invariant over every scene it gets. It lives here
 //! rather than in a tool because the invariants are the layout suite's own
 //! property checks turned on input nobody wrote down: the only thing the
-//! corpus adds is shapes. The spec is `.scratch/render-sweep/spec.md`.
+//! corpus adds is shapes. A sweep asserts nothing new - it widens the input
+//! the existing assertions see.
 //!
 //! Nothing here runs in CI. [`corpus_render_sweep`] is `#[ignore]`d and asks
 //! for a corpus directory by environment variable, and the corpus never enters

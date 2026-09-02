@@ -1,4 +1,4 @@
-//! The PipeWire half of ADR-0002's fallback rung: one video stream,
+//! The PipeWire half of the fallback capture rung: one video stream,
 //! consumed on PipeWire's own thread, parked in [`super::frame`].
 //!
 //! **Why dlopen and not the `pipewire` crate.** `pipewire-sys` is a
@@ -8,9 +8,9 @@
 //! to the point, a *build-time* dependency on PipeWire would make the
 //! release tarball unbuildable on machines that will never run the
 //! portal rung. So the library is opened at runtime, exactly the
-//! bargain ADR-0009 already struck for `ort`'s system path: absent
-//! `libpipewire-0.3.so.0` is a rung that is not there, named in a
-//! diagnostic, and the ladder moves on.
+//! bargain ARCHITECTURE.md#ocr-engine already struck for `ort`'s
+//! system path: absent `libpipewire-0.3.so.0` is a rung that is not
+//! there, named in a diagnostic, and the ladder moves on.
 //!
 //! **What that costs.** Every `spa_pod_builder_*` helper is a
 //! `static inline` in a header and therefore unreachable through
@@ -21,17 +21,17 @@
 //! `struct pw_stream_events` version 2, all of which PipeWire treats
 //! as ABI.
 //!
-//! **Threading (ADR-0001).** `pw_thread_loop` *is* the dedicated
-//! thread: PipeWire starts it, dispatches on it, and calls back into
+//! **Threading.** `pw_thread_loop` *is* the dedicated thread: PipeWire
+//! starts it, dispatches on it, and calls back into
 //! `process`/`param_changed` from it with its own lock held. Nothing
 //! here touches the daemon's calloop pump, and the only value crossing
 //! back is a cursor position, handed over through the caller's sink
 //! (which the daemon backs with a calloop channel).
 //!
 //! **Power.** The stream stays active for as long as the backend
-//! lives, because ADR-0003's rung 2 reads the cursor off it and a
-//! paused stream has no cursor. That is the portal tier's standing
-//! cost and it is why ADR-0002 keeps wlr-screencopy the primary
+//! lives, because the cursor ladder's rung 2 reads the cursor off it
+//! and a paused stream has no cursor. That is the portal tier's
+//! standing cost and it is why wlr-screencopy stays the primary rung
 //! wherever it exists. Our own per-frame cost is a pointer swap: see
 //! [`super::frame`].
 
@@ -772,7 +772,7 @@ unsafe fn inspect_metas(spa: *const SpaBuffer) -> (bool, Option<(i32, i32)>) {
                     }
                     let c = &*(meta.data as *const SpaMetaCursor);
                     // id 0 means "no new cursor data"; a stale position
-                    // is worse than none (ADR-0003's rung must not drag
+                    // is worse than none (the cursor rung must not drag
                     // hover to wherever the pointer last was).
                     if c.id != 0 {
                         cursor = Some((c.x, c.y));
@@ -839,7 +839,7 @@ mod tests {
     }
 
     /// An absent PipeWire is a rung that is not there, named in the
-    /// error - never a panic (ADR-0002).
+    /// error - never a panic.
     #[test]
     fn a_missing_library_is_an_error_naming_the_soname() {
         // The real library may well be installed on a dev box, so this

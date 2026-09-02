@@ -2,10 +2,11 @@
 //! compositor, when there is one.
 //!
 //! Sibling of `popup_live.rs` and the same shape: CI is headless
-//! (ADR-0007), so this skips without `WAYLAND_DISPLAY` - and skips again
-//! on a compositor advertising no layer shell, fractional scale or
-//! viewporter, because those are the globals ADR-0004 makes mandatory
-//! and their absence is a compositor verdict, not a test failure.
+//! (ARCHITECTURE.md#packaging-and-ci), so this skips without
+//! `WAYLAND_DISPLAY` - and skips again on a compositor advertising no
+//! layer shell, fractional scale or viewporter, because those globals
+//! are mandatory and their absence is a compositor verdict, not a test
+//! failure.
 //!
 //! It drives a whole daemon through `CHIBIPOP_SURFACE_PROBE=1`, which
 //! feeds two known scan rects through the shipped
@@ -38,7 +39,7 @@ use std::time::{Duration, Instant};
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
 
-/// The globals ADR-0004 requires for a crisp surface.
+/// The globals a crisp surface requires.
 const NEEDED: [&str; 3] =
     ["zwlr_layer_shell_v1", "wp_fractional_scale_manager_v1", "wp_viewporter"];
 
@@ -48,10 +49,10 @@ const NEEDED: [&str; 3] =
 const OUTLINED: [(i32, i32, i32, i32); 2] = [(100, 100, 240, 60), (500, 300, 80, 80)];
 
 /// Each frame is drawn *outside* the rect it marks - a stroke inside
-/// would land in the very pixels the next grab reads (ADR-0008,
-/// `overlay::scan_marks`) - so the box the compositor is asked to size
-/// its surface to is the outset one, two physical px bigger on every
-/// side.
+/// would land in the very pixels the next grab reads
+/// (ARCHITECTURE.md#capture-and-masking, `overlay::scan_marks`) - so
+/// the box the compositor is asked to size its surface to is the
+/// outset one, two physical px bigger on every side.
 const OUTSET: i32 = 2;
 
 /// A private XDG environment plus the daemon running inside it.
@@ -244,8 +245,8 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
         );
     }
 
-    // The selector: the exception to ADR-0004's keyboard rule, and the
-    // only surface here that asks for focus.
+    // The selector: the one exception to the popup's keyboard rule,
+    // and the only surface here allowed to take focus.
     let picker = session.wait_for("select: 1 full-output surface(s) mapped");
     assert!(picker.contains("overlay layer"), "{picker}");
     assert!(picker.contains("keyboard exclusive"), "{picker}");
@@ -282,7 +283,7 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
     session.wait_for("probe: pick answered false");
     session.wait_for("probe: outline hidden, 0 rect(s) left");
 
-    // ADR-0004's inviolable setting is untouched: the popup still takes
+    // The popup's own inviolable setting is untouched: it still takes
     // no keyboard, whatever the selector asked for.
     let popup = session.wait_for("popup: layer surface 0 on ");
     assert!(popup.contains("keyboard none"), "the popup must never take focus: {popup}");

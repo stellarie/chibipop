@@ -1,10 +1,10 @@
 //! The portal capture rung against a real session, when there is one.
 //!
-//! CI is headless (ADR-0007), so everything here skips without
+//! CI is headless, so everything here skips without
 //! `WAYLAND_DISPLAY` - and skips again when no
 //! `org.freedesktop.portal.ScreenCast` answers on the session bus,
-//! because an absent rung is a rung the ladder walks past (ADR-0002),
-//! not a failure.
+//! because an absent rung is a rung the ladder walks past, not a
+//! failure.
 //!
 //! The assertions that read a *frame* skip once more when this session's
 //! outputs are not being repainted - an unattended dev box whose panel
@@ -17,8 +17,8 @@
 //!
 //! **Nothing here opens a consent dialog by default.** A test suite
 //! that puts a permission prompt on a developer's screen every time it
-//! runs is a test suite people stop running, and the one dialog
-//! ADR-0002 budgets for belongs in a launch, not in `cargo test`. So
+//! runs is a test suite people stop running, and the one dialog the
+//! portal rung budgets for belongs in a launch, not in `cargo test`. So
 //! the tests below exercise everything reachable without consent - the
 //! ladder's choice, the override, the refusal path - and the single
 //! test that really does prompt is behind
@@ -173,7 +173,7 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
         return;
     }
     assert!(
-        stdout.contains("capture: wlr-screencopy region capture (promptless - ADR-0002 rung 1)"),
+        stdout.contains("capture: wlr-screencopy region capture (promptless - ladder rung 1)"),
         "auto must pick rung 1 while screencopy is advertised: {stdout}"
     );
     assert!(
@@ -193,8 +193,8 @@ fn a_session_with_both_rungs_still_takes_the_promptless_one() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// The empty ladder is a status, not a crash (ADR-0002): the daemon
-/// stays up and the diagnostic names both rungs.
+/// The empty ladder is a status, not a crash: the daemon stays up and
+/// the diagnostic names both rungs.
 #[test]
 fn an_empty_ladder_names_both_rungs_and_fails_cleanly() {
     if skip() {
@@ -245,9 +245,9 @@ fn an_unknown_backend_override_is_reported_and_ignored() {
 /// The whole rung, end to end, dialog and all. Opt-in: see the module
 /// doc.
 ///
-/// Up to two runs. The second one proves ADR-0002's "silent launches
-/// after" by reusing the restore token the first rotated in - but only
-/// where a restore token can exist at all. `persist_mode` is a
+/// Up to two runs. The second one proves the portal rung's "silent
+/// launches after" by reusing the restore token the first rotated in -
+/// but only where a restore token can exist at all. `persist_mode` is a
 /// ScreenCast v4 key, and a v3 portal (xdg-desktop-portal-hyprland
 /// today) cannot remember a grant, so a second run there would open a
 /// second dialog and prove nothing. That case asserts the honest
@@ -273,8 +273,8 @@ fn the_portal_rung_streams_frames_and_makes_the_next_launch_silent() {
 
     if !first.status.success() {
         // The denial/timeout path is a first-class outcome, not a test
-        // failure: ADR-0002 says a refusal is an actionable state and
-        // the app keeps running. Assert *that*, and say so loudly.
+        // failure: a refusal is an actionable state and the app keeps
+        // running. Assert *that*, and say so loudly.
         assert!(
             stderr.contains("retry") || stderr.contains("settings"),
             "a refusal must name the way back: {stderr}"

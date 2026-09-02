@@ -1,4 +1,6 @@
-//! Autostart: the `.desktop` file *is* the state (ADR-0006, ADR-0012).
+//! Autostart: the `.desktop` file *is* the state
+//! (ARCHITECTURE.md#platform-integration and
+//! ARCHITECTURE.md#settings-and-config).
 //!
 //! The checkbox reads and writes `$XDG_CONFIG_HOME/autostart/chibipop.desktop`
 //! directly — there is no TOML field, so nothing can desync from a user
@@ -18,7 +20,8 @@ use crate::paths::{self, Env};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The autostart entry's file name, per ADR-0006.
+/// The autostart entry's file name, per
+/// ARCHITECTURE.md#platform-integration.
 pub const FILE_NAME: &str = "chibipop.desktop";
 
 /// The autostart directory the spec defines, relative to the config root.

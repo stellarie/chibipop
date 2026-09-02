@@ -1,4 +1,5 @@
-//! Diagnostics and the lookup log (ADR-0006).
+//! Diagnostics and the lookup log
+//! (ARCHITECTURE.md#platform-integration).
 //!
 //! Diagnostics go to stderr always (terminal; journal under a systemd
 //! unit) plus a logfile truncated on start — bounded without rotation

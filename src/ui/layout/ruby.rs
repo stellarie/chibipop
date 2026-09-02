@@ -61,7 +61,7 @@ pub(super) struct RubyMetrics {
 /// So the run itself asks for the
 /// taller line, through the one rule
 /// both engines already answer to and
-/// ADR-0013 already documents: a line
+/// the seam already reports: a line
 /// is as tall as its tallest span. A
 /// [`RUBY_FILLER`] beside each base
 /// carries no ink and no advance and
@@ -454,13 +454,13 @@ pub(super) const NO_RUBY: u32 = u32::MAX;
 /// its base that the line above must
 /// not overlap, and the only thing
 /// that grows a line is a taller span
-/// on it (ADR-0013). This character
-/// is that span. Two properties earn
-/// it the job, and both were probed
-/// against the real shaper rather
-/// than assumed: it shapes to a glyph
-/// of zero advance, so it costs the
-/// line no width, and it is a *word
+/// on it. This character is that
+/// span. Two properties earn it the
+/// job, and both were probed against
+/// the real shaper rather than
+/// assumed: it shapes to a glyph of
+/// zero advance, so it costs the line
+/// no width, and it is a *word
 /// joiner*, so no wrap can separate
 /// it from the base whose line it
 /// grows.

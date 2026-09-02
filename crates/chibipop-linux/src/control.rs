@@ -1,14 +1,14 @@
-//! Control socket (ADR-0003): a UNIX socket at
+//! Control socket (ARCHITECTURE.md#input-ladders): a UNIX socket at
 //! `$XDG_RUNTIME_DIR/chibipop/run-$WAYLAND_DISPLAY.sock` — keyed exactly
 //! like the instance lock, so lock and socket always name the same
 //! instance — speaking the minimal forever verb set.
 //!
-//! **One verb per global action, and nothing else** (ADR-0003's
-//! 2026-08-26 addendum). A verb exists if and only if it names something
-//! a user can bind a key to: no verb reads state, none takes an
-//! argument, none composes. This is transport for keys the compositor
-//! or the portal presses, not a scripting API — the settings window's
-//! status read lives in `shortcuts::state` for exactly that reason.
+//! **One verb per global action, and nothing else.** A verb exists if
+//! and only if it names something a user can bind a key to: no verb
+//! reads state, none takes an argument, none composes. This is transport
+//! for keys the compositor or the portal presses, not a scripting API —
+//! the settings window's status read lives in `shortcuts::state` for
+//! exactly that reason.
 //!
 //! Wire format: one request line (`trigger-down\n`), one reply line
 //! (`OK …` / `ERR …`). Boring on purpose: `bindsym` lines shell out to
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The minimal forever verb set: one verb per global action, never a
-/// scripting API (ADR-0003 and its 2026-08-26 addendum).
+/// scripting API (ARCHITECTURE.md#input-ladders).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Reload,
@@ -42,8 +42,8 @@ pub enum Verb {
     OcrClipboard,
     /// Draw the box [`chibipop::config::SentenceMode::Static`] reads the
     /// Anki sentence from. Native-channel only: the portal id set stays
-    /// at exactly two (ADR-0003's addendum), so this verb *is* the
-    /// action's only global channel.
+    /// at exactly two, so this verb *is* the action's only global
+    /// channel.
     StaticRegion,
 }
 
@@ -269,7 +269,7 @@ mod tests {
     }
 
     /// `anki-add` is spelled exactly like the portal shortcut id, so
-    /// rung 1 and rung 2 of ADR-0003 name one action, not two.
+    /// rung 1 and rung 2 name one action, not two.
     #[test]
     fn the_add_verb_and_the_portal_shortcut_id_share_one_name() {
         assert_eq!(crate::shortcuts::ShortcutId::AnkiAdd.as_str(), Verb::AnkiAdd.as_str());

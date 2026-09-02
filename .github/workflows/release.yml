@@ -50,14 +50,14 @@ jobs:
 
   # Pinned to windows-2025, matching ci.yml's tier0 job, and for its
   # reason: the Tests step below runs the geometry goldens, which assert
-  # exact DirectWrite metrics with no tolerance (ADR-0011). The runner
-  # image's font files are part of that baseline. `windows-latest`
-  # resolves to windows-2025 today, so this was green - but the label
-  # migrates, and the failure it would cause is the worst-shaped one
-  # available: the tag is already pushed and permanent, the release job
-  # reds on a test unrelated to the release, and no asset is produced.
-  # Move this pin only together with ci.yml's, in the same commit as the
-  # re-blessed goldens. See docs/BACKLOG.md 38.
+  # exact DirectWrite metrics with no tolerance. The runner image's font
+  # files are part of that baseline. `windows-latest` resolves to
+  # windows-2025 today, so this was green - but the label migrates, and
+  # the failure it would cause is the worst-shaped one available: the tag
+  # is already pushed and permanent, the release job reds on a test
+  # unrelated to the release, and no asset is produced. Move this pin
+  # only together with ci.yml's, in the same commit as the re-blessed
+  # goldens. See docs/BACKLOG.md 38.
   windows:
     name: Build and package (Windows)
     runs-on: windows-2025
@@ -113,16 +113,17 @@ jobs:
           path: dist/chibipop-${{ needs.version.outputs.version }}-windows-x64.zip
           if-no-files-found: error
 
-  # ADR-0007's second release asset. Pinned, not ubuntu-latest, and the
+  # The second release asset. Pinned, not ubuntu-latest, and the
   # pin is the point: the Wayland/tray/OCR stack is pure Rust over a
   # statically linked ONNX Runtime, so the image's glibc and libstdc++ are
   # the only floor this binary imposes on a user's distro, and
   # ubuntu-latest would raise that floor silently on every image
   # migration.
   #
-  # ubuntu-24.04, not the older ubuntu-22.04 the ADR named. 22.04 is still
-  # hosted and still schedules - it was tried, on this workflow, and it
-  # cannot build this crate at all:
+  # ubuntu-24.04, not the older ubuntu-22.04 that the packaging policy
+  # first named (ARCHITECTURE.md#packaging-and-ci). 22.04 is still hosted
+  # and still schedules - it was tried, on this workflow, and it cannot
+  # build this crate at all:
   # https://github.com/unusualcrow/chibipop/actions/runs/32933219451
   # `ort`'s pinned prebuilt ONNX Runtime is compiled against a newer
   # toolchain than 22.04 ships, so linking the static archive there fails
@@ -131,8 +132,7 @@ jobs:
   # not the runner catalogue, is what sets the floor - so "oldest
   # supported runner" means the oldest image `ort` can be linked on, and
   # moving this pin forward when 24.04 retires is a deliberate, documented
-  # bump of the supported-distro floor (docs/RELEASING.md, ADR-0007
-  # addendum).
+  # bump of the supported-distro floor (docs/RELEASING.md).
   linux:
     name: Build and package (Linux)
     runs-on: ubuntu-24.04
@@ -152,16 +152,16 @@ jobs:
       - name: Tests
         run: cargo test --workspace --exclude chibipop-windows
 
-      # ADR-0009's standing OCR gate. `test = false` keeps it out of the
-      # sweep above, and a release must not ship an OCR engine that has
-      # drifted off its measured floors.
+      # The standing OCR gate (ARCHITECTURE.md#ocr-engine). `test = false`
+      # keeps it out of the sweep above, and a release must not ship an OCR
+      # engine that has drifted off its measured floors.
       - name: OCR quality gate
         run: cargo test -p chibipop-linux --test ocr_gate -- --nocapture
 
       # Default features: `bundled-onnxruntime`, which is `ort`'s pinned
       # download-binaries. On linux-x64 that prebuilt is a static archive,
       # so the ONNX Runtime ends up inside `chibipop` and the asset carries
-      # no `libonnxruntime.so` and needs no rpath (ADR-0009, amended).
+      # no `libonnxruntime.so` and needs no rpath.
       - name: Build
         run: cargo build --release --workspace --exclude chibipop-windows
 

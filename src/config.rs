@@ -396,7 +396,7 @@ pub fn resolve_font(
 /// arrays and no records: position in an array is priority within that
 /// role, membership of the `_disabled` twin is the checkbox, and both
 /// platforms' TOML writers round-trip the pair with no new struct
-/// (ADR-0014).
+/// (ARCHITECTURE.md#dictionary-and-lookup).
 ///
 /// Every name is a Dictionary's **exact** name, matched by equality. A name
 /// no installed Dictionary answers to is kept and ignored, so unplugging
@@ -815,9 +815,9 @@ fn default_static_region_key() -> String {
     String::new()
 }
 
-/// Unbound, like its Windows twin: ADR-0003 keeps the portal's shortcut
-/// list to the trigger and the Anki add, so a chord shipped here would
-/// claim a system-wide grab that nothing binds.
+/// Unbound, like its Windows twin: the portal's shortcut list is
+/// limited to the trigger and the Anki add, so a chord shipped here
+/// would claim a system-wide grab that nothing binds.
 fn default_static_region_key_linux() -> String {
     String::new()
 }
@@ -884,12 +884,12 @@ pub struct ScreenshotConfig {
     pub hotkey: String,
     /// Same action on Linux; absent leaves it unbound.
     ///
-    /// Not portal syntax, unlike `anki.add_key_linux`: ADR-0003 fixes the
-    /// portal's shortcut ids at exactly two forever, so this action rides
-    /// the control socket instead (spec D1) and the chord here is the
-    /// compositor bind the Linux settings window hands out as a copyable
-    /// snippet. `Option`, mirroring the ocr-clipboard twin, so absence
-    /// stays typed rather than an empty-string sentinel.
+    /// Not portal syntax, unlike `anki.add_key_linux`: the portal's
+    /// shortcut ids are fixed at exactly two forever, so this action
+    /// rides the control socket instead (spec D1) and the chord here is
+    /// the compositor bind the Linux settings window hands out as a
+    /// copyable snippet. `Option`, mirroring the ocr-clipboard twin, so
+    /// absence stays typed rather than an empty-string sentinel.
     #[serde(default)]
     pub hotkey_linux: Option<String>,
     #[serde(default = "default_screenshot_save_dir")]
@@ -1079,7 +1079,8 @@ impl Config {
     /// against a substring that matched nothing and blanked the popup. An
     /// exact name either names an installed Dictionary or does not, an
     /// unchecked row was unchecked on purpose, and none of that reasoning
-    /// belongs on the presentation path (ADR-0014). If one of them has to
+    /// belongs on the presentation path
+    /// (ARCHITECTURE.md#dictionary-and-lookup). If one of them has to
     /// come back, the identity model is wrong rather than under-guarded.
     ///
     /// `dictionaries.per_language[ocr.language]` still narrows the terms
@@ -2147,15 +2148,15 @@ mod tests {
         assert_eq!(c.dictionaries.per_language, back.dictionaries.per_language);
     }
 
-    /// ADR-0012: the creation-time font is a per-platform literal.
+    /// The creation-time font is a per-platform literal.
     #[test]
     fn each_platform_creates_its_own_default_font() {
         assert_eq!("Yu Gothic UI", Platform::Windows.default_font());
         assert_eq!("Noto Sans CJK JP", Platform::Linux.default_font());
     }
 
-    /// ADR-0012: every field serializes on every platform, so a config
-    /// exercising both platforms' fields survives a save/load unchanged.
+    /// Every field serializes on every platform, so a config exercising
+    /// both platforms' fields survives a save/load unchanged.
     #[test]
     fn a_config_with_both_platforms_fields_round_trips_losslessly() {
         let p = tmp("both_platforms_round_trip");
@@ -2436,8 +2437,8 @@ mod tests {
         assert_eq!("IPAexGothic", choice.family());
     }
 
-    /// ADR-0004/0012: an unresolvable literal falls back to the
-    /// platform default, naming what was asked for.
+    /// An unresolvable literal falls back to the platform default,
+    /// naming what was asked for.
     #[test]
     fn an_unresolvable_font_falls_back_to_the_platform_default() {
         let choice = resolve_font("Yu Gothic UI", Platform::Linux, |_| false);
@@ -2599,7 +2600,8 @@ mod tests {
         assert_eq!(None, cfg.actions.ocr_clipboard);
     }
 
-    /// Both platforms' chords ride the one nested section (ADR-0012).
+    /// Both platforms' chords ride the one nested section
+    /// (ARCHITECTURE.md#settings-and-config).
     #[test]
     fn ocr_clipboard_hotkey_round_trips() {
         let mut cfg = Config::default();

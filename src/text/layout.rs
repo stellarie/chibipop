@@ -24,9 +24,10 @@ pub struct OcrLine {
 ///
 /// In core rather than in a bin because both bins now copy a region's
 /// text to the clipboard (`ocr-clipboard`) and one rule cannot be two
-/// implementations (ADR-0001). Byte-for-byte the joined shape the
-/// Windows action shipped - one `String` instead of a `Vec<String>` and
-/// a `join`, because a clipboard payload is built once and read once.
+/// implementations (ARCHITECTURE.md#workspace-and-seams). Byte-for-byte
+/// the joined shape the Windows action shipped - one `String` instead of
+/// a `Vec<String>` and a `join`, because a clipboard payload is built
+/// once and read once.
 pub fn join_lines(lines: &[OcrLine]) -> String {
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {

@@ -607,7 +607,7 @@ fn plan_edits(form: &SettingsForm, dicts: &[DictInfo], lib: &Library) -> EditPla
                 // Whatever it supplies: one archive is one `dict` row, so
                 // a frequency archive has one to delete like any other and
                 // the name simply finds nothing when it does not
-                // (ADR-0014).
+                // (ARCHITECTURE.md#dictionary-and-lookup).
                 dict_id: dicts.iter().find(|d| &d.name == name).map(|d| d.dict_id),
                 file: entry.as_ref().map(|e| e.file.clone()),
                 roles,
@@ -669,9 +669,10 @@ fn edit_status(report: &EditReport) -> String {
 /// The one archive shape with no banks of its own to insert: anything
 /// supplying terms or pitch owns a `dict` row those rows hang off, while a
 /// frequency-only archive's claims are stored and dropped by the frequency
-/// pass instead (ADR-0015). Roles replaced a single-valued kind, so this
-/// is a question about the whole set - an archive carrying a term bank
-/// beside its frequency data is a term dictionary that also reports.
+/// pass instead (ARCHITECTURE.md#dictionary-and-lookup). Roles replaced
+/// a single-valued kind, so this is a question about the whole set - an
+/// archive carrying a term bank beside its frequency data is a term
+/// dictionary that also reports.
 fn frequency_only(roles: Roles) -> bool {
     roles == Roles::only(&[Role::Frequency])
 }
@@ -2494,7 +2495,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
         // Windows keeps its own popup out of its own captures at the OS
         // level - WDA_EXCLUDEFROMCAPTURE or the hide/reshow capture guard
         // - so it supplies no mask rects and `popup` goes unread here
-        // (ADR-0008).
+        // (ARCHITECTURE.md#capture-and-masking).
         Command::RequestLookup {
             id,
             point,
@@ -3806,8 +3807,9 @@ mod tests {
     /// A frequency archive is a dictionary: it is what the user orders and
     /// enables, its own reported frequencies are stored under its own
     /// `dict_id`, and removing it drops them through the same `DICT_KEYED`
-    /// walk every other dictionary-keyed table takes (ADR-0015). What it
-    /// still contributes is no `entry` row at all.
+    /// walk every other dictionary-keyed table takes
+    /// (ARCHITECTURE.md#dictionary-and-lookup). What it still contributes
+    /// is no `entry` row at all.
     #[test]
     fn a_frequency_addition_owns_a_dictionary_row_and_contributes_no_entries() {
         let (dir, _guard) = edit_scratch("add_frequency");

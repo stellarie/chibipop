@@ -1,4 +1,5 @@
-//! Keeping chibipop's own popup out of its own OCR input (ADR-0008).
+//! Keeping chibipop's own popup out of its own OCR input
+//! (ARCHITECTURE.md#capture-and-masking).
 //!
 //! No portable protocol-level surface exclusion exists on Wayland, so the
 //! Worker masks in core: before OCR, the captured frame's overlap with the
@@ -19,7 +20,8 @@ use crate::geom::PhysRect;
 /// A live grab happens while the popup may be on screen, so the popup must
 /// be masked out of it. A frozen grab predates the popup by construction -
 /// trigger mode captures at trigger press, before anything is shown - so a
-/// frozen buffer never self-contaminates and is left untouched (ADR-0008).
+/// frozen buffer never self-contaminates and is left untouched
+/// (ARCHITECTURE.md#capture-and-masking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureMode {
     /// Grabbed while the popup may be visible: mask it.
@@ -44,7 +46,7 @@ impl CaptureMask {
     pub const NONE: CaptureMask = CaptureMask { popup: None };
 
     /// Mask `popup` out of live grabs; frozen grabs predate the popup
-    /// and stay maskless (ADR-0008).
+    /// and stay maskless (ARCHITECTURE.md#capture-and-masking).
     pub fn for_mode(mode: CaptureMode, popup: Option<PhysRect>) -> CaptureMask {
         match mode {
             CaptureMode::Live => CaptureMask { popup },
@@ -78,8 +80,9 @@ impl CaptureMask {
     /// Whether a recognised word's box touches the mask.
     ///
     /// The mask boundary is a capture edge: a word intersecting it must be
-    /// dropped rather than half-recognised (ADR-0008). `rect` is in
-    /// desktop pixels, like the mask.
+    /// dropped rather than half-recognised
+    /// (ARCHITECTURE.md#capture-and-masking). `rect` is in desktop
+    /// pixels, like the mask.
     pub fn hides(&self, rect: PhysRect) -> bool {
         self.popup.is_some_and(|p| p.intersection(rect).is_some())
     }

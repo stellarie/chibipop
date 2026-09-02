@@ -1,5 +1,4 @@
-//! The rotating ScreenCast restore token (ADR-0002's fallback capture
-//! rung).
+//! The rotating ScreenCast restore token (the fallback capture rung).
 //!
 //! The portal asks the user for consent, and consent is the one thing a
 //! background daemon cannot re-ask for politely: a dialog on every

@@ -99,7 +99,8 @@ pub enum Event {
     /// A gate-accepted cursor sample.
     CursorMoved { pos: PhysPoint },
     /// The dwell deadline passed with
-    /// the cursor still (ADR-0010).
+    /// the cursor still
+    /// (ARCHITECTURE.md#hover-cadence).
     DwellElapsed,
     /// The worker answered.
     LookupResult { id: RequestId, outcome: LookupOutcome },
@@ -126,7 +127,8 @@ pub enum Command {
     /// `popup` is our own popup's on-screen rect while the lookup runs,
     /// or `None` when nothing is shown: what a live grab must mask out of
     /// its own OCR input where the platform cannot exclude the surface
-    /// (ADR-0008). A bin whose platform already excludes it ignores this.
+    /// (ARCHITECTURE.md#capture-and-masking). A bin whose platform
+    /// already excludes it ignores this.
     RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
     /// Dictionary-only lookup.
     RequestDrillDown { id: RequestId, text: String },
@@ -405,8 +407,7 @@ impl Controller {
     ///
     /// [`Controller::popup`] answers only once a rect is known, but a
     /// bin that paints the affordance *into* the popup rather than
-    /// beside it needs this state to raster the very first frame
-    /// (ADR-0004).
+    /// beside it needs this state to raster the very first frame.
     pub fn anki(&self) -> Option<&AnkiPopupState> {
         self.surface.as_ref().map(|s| &s.anki)
     }
@@ -645,8 +646,8 @@ impl Controller {
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
 
-    /// ADR-0010's dwell re-check: re-ask the question the shown popup
-    /// is the answer to, at the point that asked it.
+    /// The dwell re-check: re-ask the question the shown popup is the
+    /// answer to, at the point that asked it.
     ///
     /// Deliberately past the freeze gate - the whole premise is that
     /// the cursor has *not* moved and the screen under it may have. The
@@ -666,7 +667,7 @@ impl Controller {
 
     /// Whether a dwell re-check has anything to watch, which is what
     /// the bin arms its dwell watch from: nothing shown must cost no
-    /// watch at all (ADR-0010's zero idle wakeups).
+    /// watch at all (zero idle wakeups).
     ///
     /// Trigger mode has no re-check by construction - its frozen grab
     /// cannot change - and a drill-down is not screen content: a
@@ -1246,7 +1247,7 @@ mod tests {
                 id: RequestId(2),
                 point: away,
                 // The shown popup travels with the request: what the
-                // grab must mask out of its own OCR input (ADR-0008).
+                // grab must mask out of its own OCR input.
                 popup: Some(POPUP),
             }],
             c.handle(Event::CursorMoved { pos: away })
@@ -1271,7 +1272,7 @@ mod tests {
     // -- the dwell re-check --
 
     /// The divergence in one test: the sticky region silences moves,
-    /// and the dwell re-check still asks (ADR-0010).
+    /// and the dwell re-check still asks (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn a_dwell_re_asks_the_question_the_popup_answers() {
         let mut c = Controller::new(cfg());
@@ -1281,7 +1282,7 @@ mod tests {
             vec![Command::RequestLookup {
                 id: RequestId(2),
                 point: PhysPoint { x: 110, y: 110 },
-                // Live grabs mask our own popup out (ADR-0008).
+                // Live grabs mask our own popup out.
                 popup: Some(POPUP),
             }],
             c.handle(Event::DwellElapsed)
@@ -1332,7 +1333,8 @@ mod tests {
     }
 
     /// Trigger mode reads a press-time grab, which cannot change:
-    /// there is no dwell re-check in it by construction (ADR-0010).
+    /// there is no dwell re-check in it by construction
+    /// (ARCHITECTURE.md#hover-cadence).
     #[test]
     fn trigger_mode_has_no_dwell_re_check() {
         let mut c = Controller::new(hold_cfg());

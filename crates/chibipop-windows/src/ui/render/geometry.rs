@@ -1,5 +1,5 @@
-//! Geometry-snapshot capture for the layout goldens (ADR-0011, widened
-//! by ADR-0013).
+//! Geometry-snapshot capture for the layout goldens (schema widened by
+//! ARCHITECTURE.md#popup-and-measurement).
 //!
 //! A snapshot is everything `layout_pass` computes for one fixture
 //! `Presentation`, as JSON with fixed-precision floats: element rects,
@@ -8,7 +8,7 @@
 //! from. Capture is the measure-only walk - no window, no render
 //! target, no painting - so it runs on the unmodified build.
 //!
-//! **ADR-0013 widened the schema.** An element now also projects its
+//! **What the widening added.** An element now also projects its
 //! styled spans, the line and span geometry the measurer reported for
 //! them, its box record, its readings, its list markers, its dictionary
 //! address, and its image's media key. Those fields are why the
@@ -22,8 +22,8 @@
 //! the goldens keep exact equality - see [`px`].
 //!
 //! The fixtures live here, not in the test, so the golden test and the
-//! `CHIBIPOP_BLESS=1` bless path share one code path (ADR-0011: capture
-//! and verify must not drift apart).
+//! `CHIBIPOP_BLESS=1` bless path share one code path - capture and
+//! verify must not drift apart.
 
 use super::*;
 use crate::dict::media::{Intrinsic, MediaFormat};
@@ -82,12 +82,12 @@ pub struct Fixture {
     pub variants: Vec<(&'static str, Spec)>,
 }
 
-/// The sixteen ADR-0011 fixtures.
+/// The sixteen pinned fixtures.
 ///
 /// Seven from the original set, whose
 /// intent is unchanged, then the six
-/// ADR-0013 requires: the widened
-/// schema has fields no plain-string
+/// that the widened schema requires:
+/// it has fields no plain-string
 /// fixture can ever fill, and an
 /// unfilled field gates nothing. The
 /// last three are ticket 02's, for the
@@ -97,6 +97,11 @@ pub struct Fixture {
 /// build that drew none, and these
 /// three are the only thing pinning
 /// the card header's marks.
+///
+/// The per-fixture prose - what each
+/// one is for - lives in
+/// `ARCHITECTURE.md#verification`,
+/// and grows with this list.
 pub fn fixtures() -> Vec<Fixture> {
     vec![
         wrapping_heavy(),
@@ -268,8 +273,8 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
 /// One element, whole.
 ///
 /// `pen` rides along with the rect
-/// because every field ADR-0013 added
-/// below it - the readings, the
+/// because every field the widening
+/// added below it - the readings, the
 /// markers, and the measurer's own
 /// line and span boxes - is
 /// *run-relative*, and a run-relative
@@ -562,7 +567,7 @@ fn rect_json(r: PhysRect) -> Value {
     json!({ "x": r.x, "y": r.y, "w": r.w, "h": r.h })
 }
 
-// ---- fixtures (ADR-0011 §Fixture set) ----
+// ---- fixtures ----
 
 fn card(
     written: Option<&str>,
@@ -890,9 +895,9 @@ fn kitchen_sink() -> Fixture {
     Fixture { name: "kitchen_sink", variants: vec![("default", spec)] }
 }
 
-// ---- the six ADR-0013 added ----
+// ---- the six added by the widening ----
 //
-// Authored, not captured. ADR-0011's capture property - "capturable from
+// Authored, not captured. The capture property - "capturable from
 // the unmodified pre-refactor build" - does not reach styled content,
 // because the unmodified build had no styled spans to capture. Every
 // tree below is a real corpus shape out of `docs/research/dict-shapes.md`
@@ -901,7 +906,7 @@ fn kitchen_sink() -> Fixture {
 
 /// 8. Mixed styling inside one wrapped paragraph.
 ///
-/// The single fact ADR-0013 exists to change: before it a run boundary
+/// The single fact the widening changed: before it a run boundary
 /// was always a line boundary, so bold text and normal text could not
 /// share a wrapped line. This paragraph makes five style changes without
 /// a break, and the narrow box forces the mix to wrap.
@@ -975,8 +980,7 @@ fn styled_spans() -> Fixture {
 ///   the shape that used to lose its box entirely, because the
 ///   paragraph the block opened was flushed empty before it could carry
 ///   one. It now draws the same single box as the first. See the
-///   fixture-set note in
-///   `docs/adr/0011-layout-golden-verification.md`.
+///   fixture-set note in `ARCHITECTURE.md#verification`.
 fn bordered_pill() -> Fixture {
     let jitendex = concat!(
         r#"{"tag":"div","data":{"content":"glossary"},"content":["#,

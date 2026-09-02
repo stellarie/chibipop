@@ -4,12 +4,11 @@ Census of 97 Yomitan archives (a working Japanese dictionary library), taken
 2026-08-29 with [tools/dict-census](../../tools/dict-census/README.md). Every
 `term_bank_*.json` glossary tree walked, first 30 000 term rows per dictionary.
 
-This doc exists to size the rendering work in
-[.scratch/dict-render-parity/spec.md](../../.scratch/dict-render-parity/spec.md).
-The Yomitan schema permits far more than any dictionary uses, so ranking the
-schema by what it *allows* sizes the work wrong. Everything below is ranked by
-**how many dictionaries use a feature** - the number that decides whether
-skipping it is free or visible.
+This doc exists to size the rendering work in the dictionary render-parity
+effort. The Yomitan schema permits far more than any dictionary uses, so
+ranking the schema by what it *allows* sizes the work wrong. Everything below
+is ranked by **how many dictionaries use a feature** - the number that decides
+whether skipping it is free or visible.
 
 Regenerate with:
 

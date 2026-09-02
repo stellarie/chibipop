@@ -5,7 +5,7 @@
 //! picture lands in, and the AnkiConnect call that files it. The bins
 //! own only the OS work either side - hide the windows, pick a region,
 //! grab the pixels, put them back - because none of the rules here is a
-//! platform fact (ADR-0001).
+//! platform fact (ARCHITECTURE.md#workspace-and-seams).
 
 use crate::config::{AnkiConfig, Config};
 use crate::controller::PopupView;

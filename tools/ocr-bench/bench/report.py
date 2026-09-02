@@ -123,7 +123,7 @@ def main() -> None:
     md.append(table(["config", "construction ms (min–max across cold runs)", "peak RSS MiB (full run)"], body))
 
     # --------------------------------------------------------- masked deltas
-    md.append("\n## ADR-0008 masked variants — ΔCER vs the unmasked 2x base (pp)\n")
+    md.append("\n## Masked variants — ΔCER vs the unmasked 2x base (pp)\n")
     md.append("Positive = mask made it worse. `ΔCER-dropped` = same delta after "
               "removing predicted chunks whose boxes intersect the mask, i.e. "
               "what survives chibipop's layout.rs clipped-word exclusion "

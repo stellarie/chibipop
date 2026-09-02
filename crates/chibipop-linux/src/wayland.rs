@@ -1,7 +1,7 @@
-//! Startup capability probe scaffold (ADR-0002/0003): list what the
-//! compositor advertises, and name exactly what is missing so a
-//! compositor upgrade self-heals. No capture, no surfaces yet — later
-//! tickets bind these globals; this one only reports.
+//! Startup capability probe scaffold: list what the compositor
+//! advertises, and name exactly what is missing so a compositor upgrade
+//! self-heals. No capture, no surfaces yet — later tickets bind these
+//! globals; this one only reports.
 
 use std::collections::BTreeMap;
 use wayland_client::protocol::wl_registry;
@@ -41,20 +41,21 @@ pub const REQUIRED: &[Requirement] = &[
 pub const LAYER_SHELL: Requirement =
     Requirement { interface: "zwlr_layer_shell_v1", why: "the popup overlay surface" };
 
-/// Wanted, not needed. ADR-0004 lays out and rasters the popup in
-/// physical pixels, so these two are what let it raster at the
-/// fractional scale and declare the logical size that stands for;
-/// without them a 1.5x desktop can only be served an integer-scaled
-/// panel that looks soft. `Popup::bind` binds them optionally and says
-/// the same thing in its own note - this tier is that posture stated at
-/// startup, before any surface exists.
+/// Wanted, not needed. The popup lays out and rasters in physical
+/// pixels, so these two are what let it raster at the fractional scale
+/// and declare the logical size that stands for; without them a 1.5x
+/// desktop can only be served an integer-scaled panel that looks soft.
+/// `Popup::bind` binds them optionally and says the same thing in its
+/// own note - this tier is that posture stated at startup, before any
+/// surface exists.
 pub const SHARPNESS: &[Requirement] = &[
     Requirement { interface: "wp_fractional_scale_manager_v1", why: "the popup's fractional scale" },
     Requirement { interface: "wp_viewporter", why: "the popup's logical size at that scale" },
 ];
 
-/// The capture ladder (ADR-0003): any one rung will do; the portal rung
-/// is not a registry global, so its absence here is a note, not a verdict.
+/// The capture ladder (ARCHITECTURE.md#input-ladders): any one rung will
+/// do; the portal rung is not a registry global, so its absence here is a
+/// note, not a verdict.
 pub const CAPTURE_RUNGS: &[Requirement] = &[
     Requirement { interface: "ext_image_copy_capture_manager_v1", why: "cursor/content capture, first rung" },
     Requirement { interface: "zwlr_screencopy_manager_v1", why: "content capture, wlr fallback rung" },
