@@ -1,218 +1,233 @@
 # chibipop
 
-Hover a word anywhere on screen; chibipop captures it, OCRs it, and pops up a Japanese
-dictionary entry. One shared core, one binary per platform.
+Hover the cursor over a word on the screen. The application captures the word, reads it
+with OCR, and shows a Japanese dictionary entry in a popup. The system has one shared core
+and one binary per platform.
 
 ## Language
 
 ### Architecture
 
 **Core**:
-The platform-neutral crate (`chibipop`): controller, worker pipeline, lookup, dictionary
-build, settings model, presentation, geometry, theme.
+The platform-neutral crate (`chibipop`) contains the controller, the worker pipeline,
+lookup, and dictionary build. It also contains the settings model, presentation, geometry,
+and the theme.
 _Avoid_: shared lib, common
 
 **Platform bin**:
-A per-OS binary crate (`chibipop-windows`, `chibipop-linux`) owning the real OS event
-loop and all OS-coupled code. The bin *is* the platform adapter.
+A per-OS binary crate (`chibipop-windows`, `chibipop-linux`) that owns the real OS event
+loop and all OS-coupled code. The bin is the platform adapter.
 _Avoid_: platform layer crate, backend crate
 
 **Controller**:
-The core-owned hover/popup state machine: `Event`s in, `Command`s out.
+The hover and popup state machine that the core owns. The state machine receives `Event`
+objects and returns `Command` objects.
 _Avoid_: app, orchestrator, message loop
 
 **Event**:
-An input to the Controller, synthesized by the platform bin: tick, cursor move, trigger
-key, scroll, click, worker result, popup placed, tray action, quit.
+An input to the Controller that the platform bin synthesizes. Examples are ticks, cursor
+moves, trigger keys, scrolls, clicks, worker results, placed popups, tray actions, and
+quit events.
 
 **Command**:
-An instruction the Controller returns for the platform bin to execute: request lookup,
-show/move/hide popup, set cursor shape, arm scroll/click, open settings, exit.
+An instruction that the Controller returns for the platform bin to execute. Examples are
+requests for lookup, commands to show, move, or hide popups, and cursor shape changes.
+Other examples are scroll or click arming, settings commands, and exit commands.
 _Avoid_: effect, action
 
 **Worker**:
-The core-owned background pipeline (capture → OCR → lookup → present); fed `Trigger`s,
-yields `WorkerResult`s.
+The background pipeline that the core owns (capture → OCR → lookup → present). The
+pipeline receives `Trigger` objects and returns `WorkerResult` objects.
 
 ### Seams
 
 **RegionCapture**:
-The capture seam: the most recent content of a physical-pixel region, never blocking on
-damage.
+The capture seam that returns the newest content of a physical-pixel region. The seam
+never blocks on damage.
 _Avoid_: screen grabber, screenshot
 
 **Capture backend**:
-A RegionCapture implementation, selected at runtime by advertised capability.
+An implementation of RegionCapture that the system selects at runtime by advertised
+capability.
 _Avoid_: capture provider, capture driver
 
 **OcrEngine**:
-The recognition seam: image in, lines with per-word geometry out.
+The recognition seam that accepts an image and returns text lines with per-word geometry.
 
 **TextSource**:
-The core-internal facade over RegionCapture + OcrEngine + shared layout: point in, text
-span out.
+The core-internal facade over RegionCapture + OcrEngine + shared layout. The facade
+accepts a point and returns a text span.
 
 **Capture mask**:
-The core-side blanking of chibipop's own on-screen rects from a captured image before
-OCR. Words touching a mask edge are dropped, as at a capture edge.
+The core blanks its own on-screen rectangles from a captured image before OCR. The engine
+drops words that touch a mask edge, as at a capture edge.
 _Avoid_: redaction, popup filter
 
 **Capture guard**:
-The Windows-only hide/reshow of chibipop's windows around a grab. Not built on Linux.
+The Windows-only hide and reshow of chibipop windows around a grab. The capture guard is
+not built on Linux.
 _Avoid_: capture lock
 
 **Dwell re-check**:
-The damage-gated watch kept while the cursor rests on a shown popup; the popup refreshes
-when the screen changes beneath it. Live mode only.
+The damage-gated watch kept while the cursor rests on a shown popup. The popup refreshes
+when the screen changes beneath it. The watch runs in live mode only.
 _Avoid_: polling loop, refresh timer
 
 **Frozen grab**:
-Trigger mode's press-time full-output capture. All lookups while held read it — taken
-before the popup exists, so it needs no mask and reads through the popup.
+The press-time full-output capture in trigger mode. All lookups while the user holds the
+key read this capture. The capture happens before the popup exists, so it needs no mask
+and reads through the popup.
 _Avoid_: snapshot, screenshot buffer
 
 **TextMeasure**:
-The measurement seam: an ordered list of styled spans plus a wrap width in, per-line and
-per-span geometry plus a baseline per line out. The seam is measure-only and never paints.
+The measurement seam that accepts an ordered list of styled spans and a wrap width. The
+seam returns per-line and per-span geometry plus a baseline per line. The TextMeasure seam
+never paints.
 _Avoid_: text renderer, font backend
 
 **Styled span**:
-A run of text with one resolved style — family, size, weight, italic, colour — and the
-finest unit the measurement seam addresses. Colour rides along for the bin's
-paint walk; no geometry depends on it.
+A run of text with one resolved style: family, size, weight, italic, and color. It is the
+finest unit that the measurement seam addresses. Color travels with the span for the paint
+walk of the bin. No geometry depends on color.
 _Avoid_: text run (ambiguous with a PopupScene's positioned runs)
 
 **Line box**:
-One wrapped line's geometry as the measurer reports it: top, width, height, and the
-baseline its spans hang from. A line is as tall as its tallest span.
+The geometry of one wrapped line that the measurer reports: top, width, height, and the
+baseline for its spans. A line is as tall as its tallest span.
 _Avoid_: line metrics (that names the whole reply, not one line's share)
 
 **Block box**:
-The margin, border, padding and fill a block tag draws around **all** of its content,
-as a browser does: a bordered `div` holding three paragraphs draws one border around
-all three.
+A block tag draws margin, border, padding, and fill around **all** of its content, as a
+browser does. For example, a bordered `div` that holds three paragraphs draws one border
+around all three paragraphs.
 _Avoid_: paragraph box, block_box on a run (a box belongs to the block, not to a line)
 
 ### Dictionary
 
 **Dictionary**:
-One installed archive, identified by its exact name — the thing a user orders and
-enables. Distinct from an Entry, which is one Dictionary's record for one headword.
+One installed archive that its exact name identifies. A user orders and enables this
+archive. A Dictionary is distinct from an Entry, which is one record in a Dictionary for
+one headword.
 _Avoid_: dict (fine in code, not in prose), source, library (that's all of them)
 
 **Dictionary role**:
-What a Dictionary provides: terms, frequency, or pitch. A *set*, not one value — an
-archive carrying both a term bank and frequency data holds two roles — and always read
-from the archive's banks, never from its filename and never declared by the user.
+A capability that a Dictionary provides: terms, frequency, or pitch. A role is a set and
+not one value. An archive that carries both a term bank and frequency data holds two
+roles. The system always reads the role set from the archive banks and never from a
+filename. A user never declares a role.
 _Avoid_: kind, type, Editorial role (that classifies GlossDoc nodes, not Dictionaries)
 
 **Dictionary list**:
-The ordered, independently-managed list of Dictionaries holding one role. Position is
-priority; each list carries its own enabled state, so one Dictionary can lead the
-frequency list while sitting disabled in the terms list.
+The ordered and independently managed list of Dictionaries that hold one role. Position
+sets priority. Each list carries its own enabled state. Thus, one Dictionary can lead the
+frequency list while disabled in the terms list.
 _Avoid_: display order (one list among three), priority list, section (a UI word)
 
 **Entry**:
-One dictionary's record for one headword — the unit a lookup returns. Carries the
-headword's glosses and its part-of-speech labels.
+One record in a Dictionary for one headword. A lookup returns this unit. The Entry carries
+the glosses and the part-of-speech labels of the headword.
 _Avoid_: definition, sense (an Entry contains senses; it is not one)
 
 **Sense**:
-One distinct meaning within an Entry. Senses live *inside* the gloss content as
-sibling blocks, not as separate Entries: a headword lookup returns one Entry whose
-content holds every sense.
+One distinct meaning in an Entry. Senses live inside the gloss content as sibling blocks,
+not as separate Entries. A headword lookup returns one Entry that holds every sense.
 _Avoid_: gloss (a Sense may have several), definition
 
 **Gloss**:
-One phrasing of one Sense's meaning. A Sense with three synonyms has three glosses.
+One phrasing of the meaning of a Sense. A Sense with three synonyms has three glosses.
 
 **GlossDoc**:
-An Entry's gloss content as a typed tree, parsed once from the dictionary's structured
-content. Core's only gloss representation; the popup, the Anki card, and plain text are
-all renderers over it.
+The gloss content of an Entry as a typed tree. The core parses this tree once from the
+structured content of the dictionary. This tree is the only gloss representation in core.
+The popup, the Anki card, and plain text are all renderers over it.
 _Avoid_: glossary HTML, gloss string, structured content (that's the source format)
 
 **Editorial role**:
-A GlossDoc node's classified purpose — example, attribution, part-of-speech, or
-ordinary content. What the render settings filter on.
+The classified purpose of a GlossDoc node: example, attribution, part-of-speech, or
+ordinary content. The render settings filter on this purpose.
 _Avoid_: drop list
 
 **Media store**:
-The assets extracted from dictionary archives at build time, with their intrinsic
-dimensions recorded. Inline gaiji resolve against it.
+The assets that the build extracts from dictionary archives, with their intrinsic
+dimensions recorded. Inline gaiji resolve against this store.
 _Avoid_: image cache (that's the per-bin decoded-surface one)
 
 **Reported frequency**:
-One Dictionary's own claim about how common a headword is. What the popup shows — always
-a real Dictionary's number, never a computed one.
+The claim of one Dictionary about how common a headword is. The Reported frequency the
+popup shows is always a real Dictionary's number and never a computed number.
 _Avoid_: freq (ambiguous with Frequency rank), rank
 
 **Frequency rank**:
-The single commonness number a lookup ranks results by, reduced from every Reported
-frequency by the Ranking strategy.
+The single commonness number that a lookup uses to rank results. The Ranking strategy
+reduces every Reported frequency to this number.
 _Avoid_: frequency (that's one Dictionary's claim), score (that's the ranker's output)
 
 **Ranking strategy**:
-The rule reducing many Reported frequencies to one Frequency rank: best rank, priority,
-or median. A Dictionary that lacks the word is not a data point.
+The rule that reduces many Reported frequencies to one Frequency rank: best rank,
+priority, or median. A Dictionary that lacks the word is not a data point.
 _Avoid_: frequency mode (Yomitan's archive field), algorithm
 
 **Reindex**:
-The recompute of every Frequency rank from Reported frequencies already in the database —
-one in-place transaction, no archive read. What a Ranking strategy, order, or enable
-change costs. Never a rebuild.
+The recalculation of every Frequency rank from Reported frequencies already in the
+database. Reindex is one in-place transaction and never reads an archive. This transaction
+is the cost of a change to a Ranking strategy, order, or enabled state. A reindex is never
+a rebuild.
 _Avoid_: rebuild (that reads archives and swaps the file), refresh, rerank
 
 **Pitch pattern**:
-One Dictionary's accent for one reading: the mora the pitch drops after, plus the nasal
-and devoiced moras recorded alongside it. A reading may carry several, and a Dictionary
-may report several for one reading.
+The accent that one Dictionary records for one reading. This pattern includes the mora
+after which the pitch drops, plus the nasal and devoiced moras recorded with it. A reading
+can carry several patterns. A Dictionary can report several patterns for one reading.
 _Avoid_: accent (overloaded), pitch accent data, downstep (that's one field of it)
 
 ### Actions
 
 **Mining screenshot**:
-The user-drawn PNG saved beside a mined card, attached to the Anki note as a picture.
-Core owns the rule (guards, filename, picture field, the AnkiConnect call); each bin only
-picks a region and grabs pixels.
+The user-drawn PNG file saved beside a mined card, attached to the Anki note as a picture.
+Core owns the rule with its guards, filename, picture field, and the AnkiConnect call.
+Each bin only picks a region and grabs pixels.
 _Avoid_: capture (that's RegionCapture), context image
 
 **Region selector**:
-The full-output surface a user drags a rectangle on: dimmed screen, cleared selection,
-Esc or right-click cancels. Windows' modal picker window; Linux's `Overlay`-layer surface,
-the one surface allowed keyboard focus.
+The full-output surface where a user drags a rectangle. The surface shows a dimmed screen,
+clears the selection, and Esc or right-click cancels. On Windows, this is a modal picker
+window. On Linux, this is an `Overlay`-layer surface, and it is the one surface allowed
+keyboard focus.
 _Avoid_: crosshair, snipping tool
 
 **Outline overlay**:
-The click-through frame-only surface that draws rects over the screen: scan boxes, the
-matched word, the static region. Never takes input.
+The click-through frame-only surface that draws rects over the screen. It draws scan
+boxes, the matched word, and the static region. It never takes input.
 _Avoid_: highlight window, debug overlay
 
 **Static region**:
-The fixed rect `SentenceMode::Static` reads its sentence from, drawn once by the user and
-persisted in config. Independent of the mode, so switching modes cannot lose it.
+The fixed rect where `SentenceMode::Static` reads its sentence. The user draws the rect
+once, and the software saves it in the configuration. It is independent of the mode, so a
+mode change cannot cause data loss.
 _Avoid_: sentence box, capture region
 
 **Clipboard rung**:
-The Wayland protocol chibipop takes the selection with — `ext-data-control-v1`, then
-`wlr-data-control-unstable-v1`. Neither advertised is a state, not an error: the action
-says so and stays off.
+The Wayland protocol that chibipop uses to take the selection. It tries
+`ext-data-control-v1`, and then it tries `wlr-data-control-unstable-v1`. If the compositor
+advertises neither protocol, this is a state and not an error. The action reports this
+state and stays off.
 _Avoid_: clipboard backend
 
 ### Popup
 
 **PopupScene**:
-The measured popup: positioned text runs, rects, and hit targets in one uniform pixel
-space, unit-agnostic — whatever the platform hands in (physical pixels on Linux, DIPs on
-Windows); core never sees a scale factor.
+The measured popup that contains positioned text runs, rects, and hit targets in one
+uniform pixel space. It is unit-agnostic and uses the units that the platform provides.
+These units are physical pixels on Linux and DIPs on Windows. Core never sees a scale
+factor.
 _Avoid_: draw list, render tree, draw-command IR
 
 **Layer surface**:
-The popup's Wayland surface.
+The Wayland surface of the popup.
 _Avoid_: popup window (that's the Win32 HWND)
 
 **Panel**:
-The popup's visible rounded rect.
+The visible rounded rect of the popup.
 
 **Hit target**:
 A rect in a PopupScene that accepts a click.
@@ -221,103 +236,109 @@ _Avoid_: button, widget
 ### Input
 
 **Cursor channel**:
-The source of global cursor position on Linux.
+The source of the global cursor position on Linux.
 _Avoid_: mouse hook, pointer tracker
 
 **Trigger channel**:
-The source of trigger-key press/release on Linux.
+The source of trigger-key press and trigger-key release events on Linux.
 _Avoid_: keyboard hook, hotkey listener
 
 **Control socket**:
-The UNIX socket where verbs arrive from outside the daemon: `chibipop ctl` from compositor
-keybinds, `reload` from the settings process. One verb per global action — the portal
-registers only `trigger` and `anki-add`, so every other action is bound natively. Still
-transport, not a scripting API.
+The UNIX socket where verbs arrive from outside the daemon. Keybinds from the compositor
+send `chibipop ctl`, and the settings process sends `reload`. One verb exists for each
+global action. The portal registers only `trigger` and `anki-add`, so the system binds
+each other action natively. The socket is a transport mechanism, not a scripting API.
 _Avoid_: IPC server, command socket
 
 **Settings process**:
-The separate `chibipop settings` process that owns the settings window on Linux; applies
-by saving config and sending `reload`.
+The separate `chibipop settings` process that owns the settings window on Linux. It
+applies changes when it saves the configuration and sends `reload`.
 _Avoid_: settings thread, settings dialog
 
 ### Platform
 
 **Portable mode**:
-Everything lives beside the executable, selected by a config file existing there.
-Never mixed with XDG mode — one or the other, decidable from that file alone.
+A mode where all files stay beside the executable. The existence of a configuration file
+beside the executable activates this mode. It never mixes with XDG mode. A system uses one
+mode or the other mode, which the configuration file alone determines.
 _Avoid_: beside-exe fallback
 
 **Instance lock**:
-The per-display guard ensuring one daemon per compositor session.
+The per-display guard that permits only one daemon for each compositor session.
 _Avoid_: mutex, pidfile
 
 **Lookup log**:
-The opt-in record of looked-up words — screen content, never written without the
-opt-in. Distinct from diagnostics, which are always on.
+The opt-in record of looked-up words that contains screen content. The software never
+writes this record without the opt-in setting. The log is distinct from diagnostics, which
+are always on.
 _Avoid_: debug log (that's diagnostics)
 
 **Portable field**:
-A setting rendered and honored on every platform; one shared value.
+A setting that every platform renders and honors as one shared value.
 
 **Platform field**:
-A setting only one platform renders and honors; the others carry it untouched so a
-config file round-trips.
+A setting that only one platform renders and honors. Other platforms preserve the setting
+untouched so that a configuration file round-trips.
 _Avoid_: windows-only setting, linux extension
 
 ### Verification
 
 **Geometry snapshot**:
-A committed per-fixture record of measured popup geometry — element rects, hit targets,
-content height — compared exactly against a later build.
+A committed per-fixture record of measured popup geometry. It contains element rects, hit
+targets, and content height. The verification process compares this record exactly against
+a later build.
 _Avoid_: screenshot test, image golden
 
 **Bless run**:
-The CI dispatch that rewrites geometry snapshots from the current build for human review;
-the only way goldens change.
+The CI dispatch that rewrites geometry snapshots from the current build for human review.
+A bless run is the only way a golden changes.
 _Avoid_: golden update script
 
 **Render parity**:
-Agreement with Yomitan's intended rendering semantics — what its CSS and defaults say an
-entry should look like — not pixel equality with a browser.
+Agreement with the intended rendering semantics of Yomitan. It matches what the CSS and
+defaults of Yomitan define for an entry. It is not pixel equality with a browser.
 _Avoid_: pixel parity, screenshot parity
 
 **Sweep**:
-A local-only run that renders real corpus entries headlessly and flags every render
-invariant violation as a candidate. The corpus never enters the repo or CI.
+A local-only run that renders real corpus entries headlessly. It records every render
+invariant violation as a candidate. The corpus never enters the repository or CI.
 _Avoid_: fuzzer, crawler
 
 **Candidate**:
-A deduplicated invariant violation awaiting adjudication: one shape signature, one
-exemplar entry, an occurrence count. Never committed.
+A deduplicated invariant violation that waits for adjudication. It contains one shape
+signature, one exemplar entry, and an occurrence count. A candidate is never committed.
 _Avoid_: finding, hit
 
 **Shape signature**:
-The fingerprint that makes two violations the same candidate: the violated invariant
-plus the structural path and resolved selectors around the violation.
+The fingerprint that identifies two violations as the same candidate. It contains the
+violated invariant, the structural path, and the resolved selectors around the violation.
 _Avoid_: hash, dedupe key
 
 **Suppression list**:
-The committed memory of adjudicated non-bugs, keyed by shape signature with a one-line
-reason each; the sweep skips and counts them.
+The committed memory of adjudicated non-bugs. It is keyed by shape signature, and each
+entry has a one-line reason. The sweep skips and counts these entries.
 _Avoid_: ignore list, allowlist
 
 **Render invariant**:
-A self-consistency property every rendered scene must hold — no dropped text, no orphan
-fragment, bounded gaps, no overflow. A violation is a candidate, not yet a bug.
+A self-consistency property that every rendered scene must obey. Required properties
+include no dropped text, no orphan fragment, bounded gaps, and no overflow. A violation is
+a candidate and is not yet a bug.
 _Avoid_: assertion, lint
 
 **Adjudication**:
-The judgment that turns a candidate into a bug or a non-bug, reasoned from render
-parity and the dictionary author's evident intent.
+The judgment that decides if a candidate is a bug or a non-bug. A developer reasons from
+render parity and the clear intent of the dictionary author.
 _Avoid_: triage (that word is the issue-tracker role flow)
 
 **Fragment test**:
-The regression form every confirmed bug distills to: the minimal verbatim JSON and CSS
-quoted from the real archive, geometry pinned to one number.
+The regression form that represents each confirmed bug. It uses minimal verbatim JSON and
+CSS taken from the real archive, and it pins geometry to one number.
 _Avoid_: corpus golden, snapshot test
 
 ### Geometry
 
 **Physical pixels**:
-Core's only coordinate space (`PhysPoint`/`PhysRect`) — the pixels OCR actually sees.
+The only coordinate space (`PhysPoint`/`PhysRect`) in core. These are the pixels that OCR
+actually sees.
 _Avoid_: logical coordinates (in core), DIPs
+
