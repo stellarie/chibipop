@@ -1176,6 +1176,19 @@ def first_target(targets: list[Target]) -> Target | None:
     return targets[0] if targets else None
 
 
+def authorized_mutation_targets(targets: list[Target], args: argparse.Namespace) -> list[Target]:
+    disposable = [target for target in targets if target.disposable]
+    real = [target for target in targets if not target.disposable]
+    if args.allow_destructive and disposable and real and not args.allow_real_target_destructive:
+        raise ValueError(
+            "mixed disposable and real targets require --allow-real-target-destructive "
+            "when --allow-destructive is set"
+        )
+    if args.allow_real_target_destructive:
+        return targets
+    return disposable
+
+
 def auto_probe_pipeline(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target], points: dict[str, tuple[int, int]]) -> Result:
     target = first_target(targets)
     point = point_arg(points, "pipeline")
@@ -1558,6 +1571,13 @@ def auto_plugin_cli(check: Check, args: argparse.Namespace, logs_dir: Path, targ
         return unavailable(check, "needs --target")
     if not args.allow_plugin_fixtures:
         return unavailable(check, "needs --allow-plugin-fixtures")
+    if not target.disposable and not (
+        args.allow_destructive and args.allow_real_target_destructive
+    ):
+        return unavailable(
+            check,
+            "plugin fixtures on a real target require --allow-destructive and --allow-real-target-destructive",
+        )
     image = normalize_path(args.plugin_image, args.repo_root) if args.plugin_image else args.repo_root / "docs" / "fixtures" / "plugin-sample.png"
     if not image.exists():
         return unavailable(check, "missing docs/fixtures/plugin-sample.png")
@@ -1858,6 +1878,7 @@ def main() -> int:
     targets: list[Target] = []
     snapshots: dict[str, dict[str, object]] = {}
     backups: dict[str, Path] = {}
+    mutation_targets: list[Target] = []
     run_error = False
     cleanup_failed = False
 
@@ -1882,6 +1903,7 @@ def main() -> int:
             targets.extend(parse_target(spec, args.repo_root) for spec in args.target)
             if not targets and not explicit_targets:
                 targets = [default_target(args.repo_root)]
+            mutation_targets = authorized_mutation_targets(targets, args)
             if args.test_install and args.allow_destructive and all(target.disposable for target in targets):
                 args.allow_config_write = True
                 args.allow_dictionary_mutation = True
@@ -1896,7 +1918,7 @@ def main() -> int:
             has_destructive = any(check.destructive for check in selected)
             if has_destructive and args.allow_destructive:
                 args.artifacts_dir.mkdir(parents=True, exist_ok=True)
-                for target in targets:
+                for target in mutation_targets:
                     backup_root, snapshot = backup_protected_state(target, args.artifacts_dir)
                     backups[target.name] = backup_root
                     snapshots[target.name] = {"before": snapshot, "backup": rel(backup_root, args.repo_root)}
@@ -1907,7 +1929,8 @@ def main() -> int:
             if args.stop_target_strays:
                 record_result(results, stop_target_strays(args.repo_root))
 
-            for target in targets:
+            observed_targets = targets if not args.allow_destructive else mutation_targets
+            for target in observed_targets:
                 snapshots.setdefault(target.name, {"before": snapshot_target(target)})
 
         for check in selected:
@@ -1984,7 +2007,8 @@ def main() -> int:
                 )
             )
 
-    for target in targets:
+    observed_targets = targets if not args.allow_destructive else mutation_targets
+    for target in observed_targets:
         try:
             after = snapshot_target(target)
         except Exception as exc:

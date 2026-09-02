@@ -844,6 +844,88 @@ class ManualRegressionTests(unittest.TestCase):
 
         self.assertEqual(ctypes.sizeof(ctypes.c_ssize_t), ctypes.sizeof(ctypes.c_void_p))
 
+    def test_mixed_destructive_scope_is_rejected_without_real_permission(self) -> None:
+        targets = [
+            manual_regression.Target("test", Path("test/chibipop.exe"), True),
+            manual_regression.Target("real", Path("real/chibipop.exe"), False),
+        ]
+        args = type("Args", (), {
+            "allow_destructive": True,
+            "allow_real_target_destructive": False,
+        })()
+        with self.assertRaises(ValueError):
+            manual_regression.authorized_mutation_targets(targets, args)
+
+    def test_real_target_is_never_mutation_eligible_without_real_permission(self) -> None:
+        real = manual_regression.Target("real", Path("real/chibipop.exe"), False)
+        disposable = manual_regression.Target("test", Path("test/chibipop.exe"), True)
+        args = type("Args", (), {
+            "allow_destructive": True,
+            "allow_real_target_destructive": False,
+        })()
+        self.assertEqual(
+            manual_regression.authorized_mutation_targets([real], args),
+            [],
+        )
+        args.allow_destructive = False
+        self.assertEqual(
+            manual_regression.authorized_mutation_targets([disposable, real], args),
+            [disposable],
+        )
+
+    def test_plugin_fixture_handler_refuses_real_target_without_real_permission(self) -> None:
+        check = manual_regression.Check("1.25", "1", "Plugin", "auto", "", "")
+        target = manual_regression.Target("real", Path("real/chibipop.exe"), False)
+        args = type("Args", (), {
+            "allow_plugin_fixtures": True,
+            "allow_destructive": True,
+            "allow_real_target_destructive": False,
+            "plugin_image": None,
+            "repo_root": Path("."),
+        })()
+        with mock.patch.object(Path, "mkdir", side_effect=AssertionError("must not write")):
+            result = manual_regression.auto_plugin_cli(check, args, Path("."), [target])
+        self.assertEqual(result.status, "SKIP")
+        self.assertIn("--allow-real-target-destructive", result.detail)
+
+    def test_mixed_main_never_touches_real_target_without_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            real.mkdir()
+            (real / "chibipop.exe").write_text("real", encoding="utf-8")
+            disposable = manual_regression.Target(
+                "test-install",
+                root / ".scratch" / "regression-test-install" / "chibipop.exe",
+                True,
+            )
+            argv = [
+                "manual_regression.py",
+                "--repo-root", str(root),
+                "--test-install",
+                "--target", f"real={real}",
+                "--allow-destructive",
+                "--only", "2.14",
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                manual_regression,
+                "seed_test_install",
+                return_value=(disposable, manual_regression.Result("preflight.test-install", "preflight", "seed", "auto", "PASS")),
+            ), mock.patch.object(manual_regression, "backup_protected_state") as backup, mock.patch.object(
+                manual_regression, "restore_protected_state"
+            ) as restore, mock.patch.object(manual_regression, "snapshot_target") as snapshot, mock.patch.object(
+                manual_regression, "ensure_fixture_database"
+            ) as seed_fixture, mock.patch.object(manual_regression, "cleanup_test_install", return_value=None), mock.patch.object(
+                manual_regression, "release_test_install_lock", return_value=None
+            ), mock.patch.object(manual_regression, "write_report"):
+                code = manual_regression.main()
+            self.assertEqual(code, 1)
+            backup.assert_not_called()
+            restore.assert_not_called()
+            snapshot.assert_not_called()
+            seed_fixture.assert_not_called()
+            self.assertEqual((real / "chibipop.exe").read_text(encoding="utf-8"), "real")
+
     def test_source_does_not_embed_local_machine_paths(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         slash_user = "/c/" + "Users" + "/"

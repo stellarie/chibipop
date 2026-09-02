@@ -62,6 +62,8 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 > `Documents\chibipop-nightly`, `Documents\chibipop-nightly-jp`, or any other
 > real install. Destructive checks against non-disposable targets require the
 > extra `--allow-real-target-destructive` flag.
+> A destructive run cannot mix disposable and real targets without that flag.
+> The runner rejects the invocation before backup, fixture seeding, or checks.
 >
 > The disposable install is marker-gated. A per-run token binds its exclusive
 > lock, marker, process, path, and directory identity. Cleanup first renames the
