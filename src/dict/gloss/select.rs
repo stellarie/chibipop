@@ -116,21 +116,29 @@ pub fn extent(doc: &GlossDoc, roles: RoleFilter) -> Option<DocRange> {
 
 /// Returns the visible range for the sense that contains `addr`.
 ///
-/// Dictionaries do not agree on how a sense looks. Jitendex uses `ol > li`.
-/// 三省堂 and 大辞林 use a `div` whose first span holds `①`. 広辞苑 nests
-/// `①` divs under a `❶` div. 大辞泉 starts a sense div with a bare `1`.
-/// 新和英 is one text leaf whose lines start with `1 `. 国語辞典オンライン
-/// has plain sibling divs and no numbers at all. One rule for `ol > li`
-/// therefore selected a whole Entry in every other dictionary.
+/// Dictionaries do not agree on how a sense looks. Jitendex marks a sense with
+/// `data.content = "sense"`, as an `ol > li` or as one `div`. 三省堂 and
+/// 大辞林 use a `div` whose first span holds `①`. 広辞苑 nests `①` divs under
+/// a `❶` div. 大辞泉 starts a sense div with a bare `1`. 新和英 is one text
+/// leaf whose lines start with `1 `. 国語辞典オンライン numbers a sense with
+/// an image. 明鏡 puts each sense's examples in a `details` after the sense
+/// div. One rule for `ol > li` therefore selected a whole Entry in every
+/// other dictionary.
 ///
 /// The rules, innermost first:
 ///
 /// 1. A line of a multi-line text leaf that starts with a sense marker.
-/// 2. The innermost block ancestor that is an `li` in an `ol`, or whose first
-///    visible text starts with a sense marker. A nested `①` therefore wins
-///    over its `❶` group when the address sits inside it.
-/// 3. The innermost block ancestor with a sibling of the same tag and `data`.
-/// 4. The top-level glossary item.
+/// 2. The innermost marked block ancestor, with the per-sense blocks that
+///    follow it. A marked block is an `li` in an `ol`, a block with
+///    `data.content = "sense"`, or a block whose first text or image is a
+///    sense number. A nested `①` therefore wins over its `❶` group when the
+///    address sits inside it. See [`sibling_sense`].
+/// 3. The top-level glossary item.
+///
+/// A block with a same-shaped sibling was once a sense too. That made an
+/// example line, a gloss `li`, or a 表記 note into a sense in a single-sense
+/// Entry, which is the common marker-less shape. An Entry without numbers has
+/// one sense, so it selects whole.
 pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     let nodes = path_nodes(doc, addr.path)?;
     let text = leaf_text(doc, addr.path);
@@ -145,25 +153,112 @@ pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<D
     }
 
     let all = leaves(doc, roles);
-    let mut twin = None;
     for depth in (0..nodes.len()).rev() {
         let id = nodes[depth];
         if !is_block(doc, id) {
             continue;
         }
-        let root = path_prefix(addr.path, depth + 1)?;
-        let listed = doc.node(id).tag == Tag::Li
-            && depth > 0
-            && doc.node(nodes[depth - 1]).tag == Tag::Ol;
-        if listed || first_text(doc, &all, root).is_some_and(has_sense_marker) {
-            return subtree_range(&all, root);
-        }
-        if twin.is_none() && depth > 0 && has_twin(doc, nodes[depth - 1], id) {
-            twin = Some(root);
+        let Some(&parent) = (depth > 0).then(|| &nodes[depth - 1]) else {
+            if is_marked_block(doc, id, None) {
+                return subtree_range(&all, path_prefix(addr.path, 1)?);
+            }
+            continue;
+        };
+        let parent_path = path_prefix(addr.path, depth)?;
+        let index = *addr.path.steps().get(depth)? as usize;
+        if let Some(range) = sibling_sense(doc, &all, parent, parent_path, index) {
+            return Some(range);
         }
     }
-    let root = twin.or_else(|| NodePath::ROOT.child(*addr.path.steps().first()? as usize))?;
-    subtree_range(&all, root)
+    subtree_range(&all, path_prefix(addr.path, 1)?)
+}
+
+/// The sense among the children of `parent` that contains child `index`.
+///
+/// A marked child starts a sense. The sense continues through the unmarked
+/// blocks that follow it when the same block shape follows at least two
+/// marked siblings. 明鏡 places each sense's examples in a `details` after its
+/// `❶` div, so a click in an example selects `❶` with its examples. A note
+/// that appears once after the last sense, such as 大辞泉's `補説`, does not
+/// join that sense.
+///
+/// Returns `None` when child `index` is not marked and does not attach to a
+/// preceding marked sibling. The caller then climbs to the next block.
+fn sibling_sense(
+    doc: &GlossDoc,
+    all: &[Leaf],
+    parent: NodeId,
+    parent_path: NodePath,
+    index: usize,
+) -> Option<DocRange> {
+    let parent_tag = doc.node(parent).tag;
+    let children: Vec<(NodeId, NodePath, bool)> = doc
+        .children(parent)
+        .enumerate()
+        .map(|(i, child)| {
+            let marked = is_block(doc, child) && is_marked_block(doc, child, Some(parent_tag));
+            (child, parent_path.child(i).unwrap_or(parent_path), marked)
+        })
+        .collect();
+    if !children.iter().any(|(_, _, marked)| *marked) {
+        return None;
+    }
+
+    // A shape that follows two or more marked siblings belongs to each sense.
+    // Each entry holds a representative, the last marked sibling it followed,
+    // and how many distinct marked siblings it followed.
+    let mut followers: Vec<(NodeId, NodeId, usize)> = Vec::new();
+    let mut after_marked = None;
+    for &(child, _, marked) in &children {
+        if marked {
+            after_marked = Some(child);
+            continue;
+        }
+        let Some(owner) = after_marked else { continue };
+        if !is_block(doc, child) {
+            continue;
+        }
+        match followers.iter_mut().find(|(other, _, _)| same_shape(doc, *other, child)) {
+            Some((_, last_owner, count)) => {
+                if *last_owner != owner {
+                    *last_owner = owner;
+                    *count += 1;
+                }
+            }
+            None => followers.push((child, owner, 1)),
+        }
+    }
+    let attaches = |child: NodeId| {
+        is_block(doc, child)
+            && followers.iter().any(|(other, _, count)| *count >= 2 && same_shape(doc, *other, child))
+    };
+
+    let mut start = index;
+    while !children[start].2 {
+        if start == 0 || !attaches(children[start].0) {
+            return None;
+        }
+        start -= 1;
+    }
+    let mut end = start;
+    while end + 1 < children.len() && !children[end + 1].2 && attaches(children[end + 1].0) {
+        end += 1;
+    }
+    let first = subtree_range(all, children[start].1)?;
+    let last = subtree_range(all, children[end].1)?;
+    Some(DocRange { start: first.start, end: last.end })
+}
+
+/// Whether the block `id` is a sense by its own shape.
+fn is_marked_block(doc: &GlossDoc, id: NodeId, parent: Option<Tag>) -> bool {
+    if (doc.node(id).tag == Tag::Li && parent == Some(Tag::Ol)) || doc.marker(id) == Some("sense") {
+        return true;
+    }
+    match first_item(doc, id) {
+        Some(FirstItem::Text(text)) => has_sense_marker(text),
+        Some(FirstItem::Image(image)) => image_is_numeral(doc, image),
+        None => false,
+    }
 }
 
 /// A node that starts its own line: a `div`, a list item, a `details`, or an
@@ -172,12 +267,68 @@ fn is_block(doc: &GlossDoc, id: NodeId) -> bool {
     matches!(doc.node(id).tag, Tag::Div | Tag::Li | Tag::Details) || doc.has_marker(id)
 }
 
-/// The first non-blank leaf text under `root`, with leading whitespace removed.
-fn first_text<'a>(doc: &'a GlossDoc, all: &[Leaf], root: NodePath) -> Option<&'a str> {
-    all.iter()
-        .filter(|leaf| is_prefix(root, leaf.path))
-        .map(|leaf| leaf_text(doc, leaf.path).trim_start())
-        .find(|text| !text.is_empty())
+/// The first thing a reader sees in a block.
+enum FirstItem<'a> {
+    Text(&'a str),
+    Image(NodeId),
+}
+
+/// The first non-blank text or image under `id` in document order.
+fn first_item(doc: &GlossDoc, id: NodeId) -> Option<FirstItem<'_>> {
+    let node = doc.node(id);
+    if matches!(node.tag, Tag::Rt | Tag::Rp) {
+        return None;
+    }
+    if node.kind == Kind::Image {
+        return Some(FirstItem::Image(id));
+    }
+    if node.kind == Kind::Text {
+        let text = doc.text(id).trim_start();
+        return (!text.is_empty()).then_some(FirstItem::Text(text));
+    }
+    doc.children(id).find_map(|child| first_item(doc, child))
+}
+
+/// Whether an image stands for a sense number.
+///
+/// 国語辞典オンライン numbers a sense with `img` whose `title` is `１番` and
+/// whose file is `１-fill.svg`. A `title` or `alt` that starts with a numeral
+/// counts. A file stem counts only under the text rule, because a hash-named
+/// file such as `1a2b.png` also starts with a digit.
+fn image_is_numeral(doc: &GlossDoc, id: NodeId) -> bool {
+    let attr = |key: &str| doc.attr_of(id, key).and_then(|v| doc.scalar_str(v));
+    if ["title", "alt"].into_iter().filter_map(attr).any(starts_with_numeral) {
+        return true;
+    }
+    attr("path")
+        .map(|path| path.rsplit('/').next().unwrap_or(path))
+        .map(|file| file.split_once('.').map_or(file, |(stem, _)| stem))
+        .is_some_and(has_sense_marker)
+}
+
+/// Whether `text` starts with a digit, an enclosed numeral, or a kanji numeral.
+fn starts_with_numeral(text: &str) -> bool {
+    let Some(first) = text.trim_start().chars().next() else { return false };
+    first.is_ascii_digit()
+        || ('\u{ff10}'..='\u{ff19}').contains(&first)
+        || is_enclosed_numeral(first)
+        || "一二三四五六七八九十".contains(first)
+}
+
+/// Whether `c` is an enclosed numeral such as `①`, `❶`, `⑴`, `Ⅰ`, `㊀`, `㋐`, or `Ⓐ`.
+fn is_enclosed_numeral(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2460}'..='\u{249b}'
+            | '\u{24b6}'..='\u{24f4}'
+            | '\u{2776}'..='\u{2793}'
+            | '\u{2160}'..='\u{216f}'
+            | '\u{3220}'..='\u{3229}'
+            | '\u{3251}'..='\u{325f}'
+            | '\u{3280}'..='\u{3289}'
+            | '\u{32b1}'..='\u{32bf}'
+            | '\u{32d0}'..='\u{32fe}'
+    )
 }
 
 /// The range from the first visible leaf under `root` to the end of the last.
@@ -190,25 +341,22 @@ fn subtree_range(all: &[Leaf], root: NodePath) -> Option<DocRange> {
     })
 }
 
-/// Whether another child of `parent` has the same tag and `data` map as `id`.
-fn has_twin(doc: &GlossDoc, parent: NodeId, id: NodeId) -> bool {
-    let node = doc.node(id);
-    let same_data = |other: NodeId| {
-        let mine = doc.data(id);
-        let theirs = doc.data(other);
-        mine.len() == theirs.len()
-            && mine.iter().zip(theirs).all(|((key, value), (other_key, other_value))| {
-                key == other_key
-                    && match (doc.scalar_str(*value), doc.scalar_str(*other_value)) {
-                        (Some(a), Some(b)) => a == b,
-                        (None, None) => value == other_value,
-                        _ => false,
-                    }
-            })
-    };
-    doc.children(parent).any(|other| {
-        other != id && doc.node(other).tag == node.tag && doc.node(other).kind == node.kind && same_data(other)
-    })
+/// Whether two nodes share a tag, a kind, and a `data` map.
+fn same_shape(doc: &GlossDoc, a: NodeId, b: NodeId) -> bool {
+    let (left, right) = (doc.node(a), doc.node(b));
+    if left.tag != right.tag || left.kind != right.kind {
+        return false;
+    }
+    let (mine, theirs) = (doc.data(a), doc.data(b));
+    mine.len() == theirs.len()
+        && mine.iter().zip(theirs).all(|((key, value), (other_key, other_value))| {
+            key == other_key
+                && match (doc.scalar_str(*value), doc.scalar_str(*other_value)) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => value == other_value,
+                    _ => false,
+                }
+        })
 }
 
 /// The line of `text` that contains `byte`, without its line break.
@@ -233,18 +381,7 @@ fn has_sense_marker(text: &str) -> bool {
     let text = text.trim_start();
     let mut chars = text.chars();
     let Some(first) = chars.next() else { return false };
-    if matches!(
-        first,
-        '\u{2460}'..='\u{249b}'
-            | '\u{24b6}'..='\u{24f4}'
-            | '\u{2776}'..='\u{2793}'
-            | '\u{2160}'..='\u{216f}'
-            | '\u{3220}'..='\u{3229}'
-            | '\u{3251}'..='\u{325f}'
-            | '\u{3280}'..='\u{3289}'
-            | '\u{32b1}'..='\u{32bf}'
-            | '\u{32d0}'..='\u{32fe}'
-    ) {
+    if is_enclosed_numeral(first) {
         return true;
     }
     let digit = |c: char| c.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&c);
@@ -582,22 +719,104 @@ mod tests {
     }
 
     #[test]
-    fn sense_range_falls_back_to_a_sibling_block_without_markers() {
-        // The 国語辞典オンライン shape: plain sibling divs.
+    fn sense_range_reads_a_numeral_image_as_a_marker() {
+        // The 国語辞典オンライン shape: each sense div starts with a number image.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
-                {"tag": "div", "content": "離れている物を手に持つ。"},
-                {"tag": "div", "content": "付いている物をはずす。"},
-                {"tag": "div", "data": {"name": "参照"}, "content": "⇒"}
+                {"tag": "div", "content": [
+                    {"tag": "img", "path": "jitenon-kokugo/１-fill.svg", "title": "１番"},
+                    {"tag": "span", "content": "離れている物を手に持つ。"}
+                ]},
+                {"tag": "div", "content": [
+                    {"tag": "img", "path": "jitenon-kokugo/２-fill.svg", "title": "２番"},
+                    {"tag": "span", "content": "付いている物をはずす。"}
+                ]}
             ]
         }}]));
-        let second = path(&[0, 0, 1, 0]);
+        let second = path(&[0, 0, 1, 1, 0]);
         assert_eq!(
             span(at(second, 0), at(second, "付いている物をはずす。".len() as u32)),
             sense_range(&d, RoleFilter::CARD, at(second, 0))
         );
-        // A block with no twin is not a sense. The whole item remains.
-        let note = path(&[0, 0, 2, 0]);
-        assert_eq!(span(at(path(&[0, 0, 0, 0]), 0), at(note, "⇒".len() as u32)), sense_range(&d, RoleFilter::CARD, at(note, 0)));
+        // A hash-named image is not a number.
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                {"tag": "div", "content": [{"tag": "img", "path": "images/1a2b3c.png"}, {"tag": "span", "content": "one"}]},
+                {"tag": "div", "content": [{"tag": "img", "path": "images/4d5e6f.png"}, {"tag": "span", "content": "two"}]}
+            ]
+        }}]));
+        let two = path(&[0, 0, 1, 1, 0]);
+        assert_eq!(span(at(path(&[0, 0, 0, 1, 0]), 0), at(two, 3)), sense_range(&d, RoleFilter::CARD, at(two, 0)));
+    }
+
+    #[test]
+    fn sense_range_keeps_a_marker_less_entry_whole() {
+        // The single-sense shape of 新明解 and 現代国語例解: one line per div,
+        // no numbers. Twins are lines of one sense, not senses.
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                {"tag": "div", "content": "「だけ」の意のやや改まった表現。"},
+                {"tag": "div", "content": "「学歴━を問題にすべきでない」"},
+                {"tag": "div", "content": [{"tag": "span", "content": "表記"}, "漢文での表記は「耳」。"]}
+            ]
+        }}]));
+        let first = path(&[0, 0, 0, 0]);
+        let last = path(&[0, 0, 2, 1]);
+        let whole = span(at(first, 0), at(last, "漢文での表記は「耳」。".len() as u32));
+        assert_eq!(whole, sense_range(&d, RoleFilter::CARD, at(path(&[0, 0, 1, 0]), 2)));
+        assert_eq!(whole, sense_range(&d, RoleFilter::CARD, at(last, 0)));
+    }
+
+    #[test]
+    fn sense_range_attaches_the_example_block_that_follows_each_sense() {
+        // The 明鏡 shape: a numbered div, then a details with its examples,
+        // for each sense. A single trailing note joins no sense.
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                {"tag": "div", "data": {"meaning": ""}, "content": "❶限定を表す。"},
+                {"tag": "details", "content": [{"tag": "summary", "content": "例文３件"}, {"tag": "div", "content": "「君のみが頼りだ」"}]},
+                {"tag": "div", "data": {"meaning": ""}, "content": "❷…だけだ。"},
+                {"tag": "details", "content": [{"tag": "summary", "content": "例文１件"}, {"tag": "div", "content": "「待つのみだ」"}]},
+                {"tag": "div", "data": {"note": ""}, "content": "補説"}
+            ]
+        }}]));
+        let first = path(&[0, 0, 0, 0]);
+        let first_example = path(&[0, 0, 1, 1, 0]);
+        let second = path(&[0, 0, 2, 0]);
+        let second_example = path(&[0, 0, 3, 1, 0]);
+        let expected = span(at(first, 0), at(first_example, "「君のみが頼りだ」".len() as u32));
+        assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(first, 3)));
+        assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(first_example, 3)));
+        assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(path(&[0, 0, 1, 0, 0]), 0)));
+        // The last sense keeps its examples and leaves the note alone.
+        assert_eq!(
+            span(at(second, 0), at(second_example, "「待つのみだ」".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(second_example, 0))
+        );
+        let note = path(&[0, 0, 4, 0]);
+        assert_eq!(span(at(first, 0), at(note, "補説".len() as u32)), sense_range(&d, RoleFilter::CARD, at(note, 0)));
+    }
+
+    #[test]
+    fn sense_range_takes_a_content_sense_block_and_not_its_gloss_items() {
+        // The Jitendex single-sense shape: no `ol`, one `div` marked `sense`,
+        // glosses in a `ul`, and an attribution after it.
+        let d = doc(&json!([{"type": "structured-content", "content": [
+            {"tag": "div", "data": {"content": "sense-group"}, "content": [
+                {"tag": "div", "data": {"content": "sense"}, "content": [
+                    {"tag": "ul", "data": {"content": "glossary"}, "content": [
+                        {"tag": "li", "content": "only"},
+                        {"tag": "li", "content": "nothing but"}
+                    ]}
+                ]}
+            ]},
+            {"tag": "div", "data": {"content": "attribution"}, "content": "JMdict"}
+        ]}]));
+        let only = path(&[0, 0, 0, 0, 0, 0]);
+        let nothing = path(&[0, 0, 0, 0, 1, 0]);
+        assert_eq!(
+            span(at(only, 0), at(nothing, "nothing but".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(nothing, 2))
+        );
     }
 }
