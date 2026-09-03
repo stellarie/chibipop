@@ -4,7 +4,7 @@
 //! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{
-    LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, FIELD_SOURCES,
+    LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, TripleClick, FIELD_SOURCES,
 };
 use crate::dict::frequency::RankingStrategy;
 use crate::library::Role;
@@ -187,6 +187,8 @@ const ID_EDGE_AUTOSCROLL: i32 = 177;
 const ID_SELECTION_BUTTONS: i32 = 178;
 /// The selection separator combo box.
 const ID_SELECTION_SEPARATOR: i32 = 179;
+/// The triple-click combo box.
+const ID_TRIPLE_CLICK: i32 = 180;
 
 /// The first field-map combo identifier.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -289,6 +291,13 @@ const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::ListItems, "List items"),
 ];
 
+/// The triple-click combo box in fill order.
+const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
+    (TripleClick::Sense, "Sense"),
+    (TripleClick::SenseWithExamples, "Sense with examples"),
+    (TripleClick::Line, "Line"),
+];
+
 fn selection_buttons_at(selection: isize) -> SelectionButtons {
     usize::try_from(selection)
         .ok()
@@ -301,6 +310,13 @@ fn selection_separator_at(selection: isize) -> SelectionSeparator {
         .ok()
         .and_then(|i| SELECTION_SEPARATORS.get(i))
         .map_or(SelectionSeparator::Ellipsis, |&(value, _)| value)
+}
+
+fn triple_click_at(selection: isize) -> TripleClick {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| TRIPLE_CLICKS.get(i))
+        .map_or(TripleClick::SenseWithExamples, |&(value, _)| value)
 }
 
 
@@ -4500,6 +4516,35 @@ impl SettingsWindow {
                 SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(0)), None);
             }
             y += ROW_H;
+            ank.push(label("Triple-click", y)?);
+            let triple_click = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X,
+                y,
+                FIELD_W,
+                180,
+                ID_TRIPLE_CLICK,
+                f,
+            )?;
+            ank.push(triple_click);
+            for (i, (value, text)) in TRIPLE_CLICKS.iter().enumerate() {
+                SendMessageW(
+                    triple_click,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)),
+                );
+                if form.triple_click == *value {
+                    SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(triple_click, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(1)), None);
+            }
+            y += ROW_H;
             ank.push(label("Sentence capture", y)?);
             let sentence_combo = child(
                 page,
@@ -4914,6 +4959,7 @@ impl SettingsWindow {
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let selection_buttons = selection_buttons_at(combo_index(ID_SELECTION_BUTTONS));
             let selection_separator = selection_separator_at(combo_index(ID_SELECTION_SEPARATOR));
+            let triple_click = triple_click_at(combo_index(ID_TRIPLE_CLICK));
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
@@ -5043,6 +5089,7 @@ impl SettingsWindow {
                 first_dict_only: checked(ID_FIRST_DICT_ONLY),
                 selection_buttons,
                 selection_separator,
+                triple_click,
                 enabled_plugins: self
                     .plugin_names
                     .iter()
@@ -5213,8 +5260,12 @@ mod tests {
         for (index, &(separator, _)) in SELECTION_SEPARATORS.iter().enumerate() {
             assert_eq!(separator, selection_separator_at(index as isize));
         }
+        for (index, &(triple_click, _)) in TRIPLE_CLICKS.iter().enumerate() {
+            assert_eq!(triple_click, triple_click_at(index as isize));
+        }
         assert_eq!(SelectionButtons::PrimaryAdditive, selection_buttons_at(-1));
         assert_eq!(SelectionSeparator::Ellipsis, selection_separator_at(-1));
+        assert_eq!(TripleClick::SenseWithExamples, triple_click_at(-1));
     }
 
     /// The X button quits standalone chibipop.

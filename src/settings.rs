@@ -5,7 +5,7 @@
 
 use crate::config::{
     Config, FieldMapping, LayoutMode, OcrClipboardConfig, SelectionButtons, SelectionSeparator,
-    SentenceMode, TriggerMode,
+    SentenceMode, TriggerMode, TripleClick,
 };
 use crate::dict::frequency::RankingStrategy;
 use crate::library::{roles_of, Library, Pending, Role, Roles};
@@ -106,6 +106,8 @@ pub struct SettingsForm {
     pub selection_buttons: SelectionButtons,
     /// Which separator joins selected glossary fragments.
     pub selection_separator: SelectionSeparator,
+    /// What a triple-click selects.
+    pub triple_click: TripleClick,
     pub enabled_plugins: Vec<String>,
 }
 
@@ -455,6 +457,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
         selection_separator: cfg.anki.selection_separator,
+        triple_click: cfg.anki.triple_click,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
@@ -524,6 +527,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.first_dict_only = form.first_dict_only;
     out.anki.selection_buttons = form.selection_buttons;
     out.anki.selection_separator = form.selection_separator;
+    out.anki.triple_click = form.triple_click;
     // The form renders only the Windows chord, so the Linux chord stays unchanged.
     // The section stays when either chord has a value. The code can clear one
     // chord and keep the other.
@@ -1004,6 +1008,7 @@ mod tests {
         cfg.anki.notify_on_add = false;
         cfg.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
         cfg.anki.selection_separator = SelectionSeparator::ListItems;
+        cfg.anki.triple_click = TripleClick::Line;
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }

@@ -5,7 +5,11 @@
 //! Card and applies the returned effects to platform commands.
 
 use crate::analysis::{word_at, WordMap};
-use crate::dict::gloss::{extent, grapheme_range, leaf_text, sense_range, DocAddr, NodePath, RoleFilter};
+use crate::config::TripleClick;
+use crate::dict::gloss::{
+    extent, grapheme_range, leaf_text, line_range, sense_core_range, sense_range, DocAddr,
+    NodePath, RoleFilter,
+};
 use crate::geom::PhysPoint;
 use crate::present::{Card, GlossEntry};
 
@@ -101,6 +105,7 @@ enum ItemSourceKind<'a> {
     Card {
         card: &'a Card,
         roles: RoleFilter,
+        triple_click: TripleClick,
         words: Option<&'a WordMap>,
     },
     Resolver(&'a dyn Fn(GestureStage, TextAddr) -> Option<SelRange>),
@@ -108,9 +113,14 @@ enum ItemSourceKind<'a> {
 
 impl<'a> ItemSource<'a> {
     /// Builds a resolver for one Card and its current analysis result.
-    pub fn new(card: &'a Card, roles: RoleFilter, words: Option<&'a WordMap>) -> Self {
+    pub fn new(
+        card: &'a Card,
+        roles: RoleFilter,
+        triple_click: TripleClick,
+        words: Option<&'a WordMap>,
+    ) -> Self {
         Self {
-            source: ItemSourceKind::Card { card, roles, words },
+            source: ItemSourceKind::Card { card, roles, triple_click, words },
         }
     }
 
@@ -125,7 +135,9 @@ impl<'a> ItemSource<'a> {
     pub fn item(&self, stage: GestureStage, addr: TextAddr) -> Option<SelRange> {
         match self.source {
             ItemSourceKind::Resolver(resolver) => resolver(stage, addr),
-            ItemSourceKind::Card { card, roles, words } => resolve_card(card, roles, words, stage, addr),
+            ItemSourceKind::Card { card, roles, triple_click, words } => {
+                resolve_card(card, roles, triple_click, words, stage, addr)
+            }
         }
     }
 }
@@ -133,6 +145,7 @@ impl<'a> ItemSource<'a> {
 fn resolve_card(
     card: &Card,
     roles: RoleFilter,
+    triple_click: TripleClick,
     words: Option<&WordMap>,
     stage: GestureStage,
     addr: TextAddr,
@@ -156,7 +169,11 @@ fn resolve_card(
                 end: DocAddr { path: addr.addr.path, byte: bytes.end as u32 },
             }
         }
-        GestureStage::Sense => sense_range(&entry.doc, roles, addr.addr)?,
+        GestureStage::Sense => match triple_click {
+            TripleClick::Sense => sense_core_range(&entry.doc, roles, addr.addr)?,
+            TripleClick::SenseWithExamples => sense_range(&entry.doc, roles, addr.addr)?,
+            TripleClick::Line => line_range(&entry.doc, roles, addr.addr)?,
+        },
         GestureStage::Entry => extent(&entry.doc, roles)?,
     };
     Some(SelRange {
@@ -518,6 +535,26 @@ mod tests {
         SelRange { start: addr(start), end: addr(end) }
     }
 
+    fn text_addr(path: &[usize], byte: u32) -> TextAddr {
+        let path = path
+            .iter()
+            .try_fold(NodePath::ROOT, |path, &step| path.child(step))
+            .expect("path fits");
+        TextAddr { entry: 0, addr: DocAddr { path, byte } }
+    }
+
+    fn selection_card(glossary: &str) -> Card {
+        Card {
+            written: Some("食べる".to_string()),
+            reading: Some("たべる".to_string()),
+            pos: Vec::new(),
+            freq: None,
+            blocks: vec![crate::present::GlossBlock::parse("Test", glossary)],
+            match_len: 3,
+            pitch: Vec::new(),
+        }
+    }
+
     fn input_press(tick: u64, addr: Option<TextAddr>, button: Button, link: bool) -> GestureInput {
         GestureInput::Press(PressInput {
             addr,
@@ -569,6 +606,42 @@ mod tests {
                 assert!(effects.is_empty());
             }
             gesture.handle(input_release(tick, Button::Primary), ENV, &source, &mut selection);
+        }
+    }
+
+    #[test]
+    fn triple_click_mode_selects_the_configured_unit() {
+        let glossary = serde_json::json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                {"tag": "div", "content": [
+                    {"tag": "span", "content": "①"},
+                    {"tag": "span", "content": "食物を口に入れる。"},
+                    {"tag": "div", "data": {"content": "example-sentence"}, "content": "菓子を食べる。"}
+                ]}
+            ]
+        }}])
+        .to_string();
+        let card = selection_card(&glossary);
+        let click = text_addr(&[0, 0, 0, 2, 0], 3);
+        let number = text_addr(&[0, 0, 0, 0, 0], 0);
+        let definition = text_addr(&[0, 0, 0, 1, 0], "食物を口に入れる。".len() as u32);
+        let example_start = text_addr(&[0, 0, 0, 2, 0], 0);
+        let example_end = text_addr(&[0, 0, 0, 2, 0], "菓子を食べる。".len() as u32);
+
+        let expected = [
+            (TripleClick::Sense, SelRange { start: number, end: definition }),
+            (
+                TripleClick::SenseWithExamples,
+                SelRange { start: number, end: example_end },
+            ),
+            (
+                TripleClick::Line,
+                SelRange { start: example_start, end: example_end },
+            ),
+        ];
+        for (mode, range) in expected {
+            let source = ItemSource::new(&card, RoleFilter::CARD, mode, None);
+            assert_eq!(Some(range), source.item(GestureStage::Sense, click));
         }
     }
 

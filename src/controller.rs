@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::{TextKey, WordMap};
-use crate::config::TriggerMode;
+use crate::config::{TriggerMode, TripleClick};
 use crate::dict::gloss::{
     extent, leaf_text, leaves, RoleFilter, Separator,
 };
@@ -239,6 +239,8 @@ pub struct ControllerConfig {
     pub primary_additive: bool,
     /// The separator between disjoint selected fragments in one container.
     pub separator: Separator,
+    /// What a triple-click selects.
+    pub triple_click: TripleClick,
 }
 
 /// This freeze applies only in Live mode.
@@ -735,7 +737,7 @@ impl Controller {
             let Some(s) = self.surface.as_mut() else { return Vec::new() };
             let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
             let words = s.analysis.as_ref().map(|(_, words)| words);
-            let source = ItemSource::new(card, roles, words);
+            let source = ItemSource::new(card, roles, self.cfg.triple_click, words);
             let selection = s.selection.card_mut(0);
             s.gesture.handle(input, env, &source, selection)
         };
@@ -1294,6 +1296,7 @@ mod tests {
             edge_autoscroll: true,
             primary_additive: true,
             separator: Separator::Ellipsis,
+            triple_click: TripleClick::SenseWithExamples,
         }
     }
 

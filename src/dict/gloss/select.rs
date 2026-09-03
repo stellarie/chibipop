@@ -140,15 +140,73 @@ pub fn extent(doc: &GlossDoc, roles: RoleFilter) -> Option<DocRange> {
 /// Entry, which is the common marker-less shape. An Entry without numbers has
 /// one sense, so it selects whole.
 pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
+    sense(doc, roles, addr).map(|sense| sense.with_examples)
+}
+
+/// Returns the sense that contains `addr` without its examples.
+///
+/// The range stops before the first example leaf inside the marked block.
+/// It also excludes the per-sense blocks that follow the marked block.
+/// Examples follow the definition in every Dictionary shape seen. The cut
+/// keeps the definition and a note that precedes an example. It drops a note
+/// that follows an example because one range cannot skip a middle.
+pub fn sense_core_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
+    let own = sense(doc, roles, addr)?.own;
+    let content = leaves(doc, RoleFilter { examples: false, ..roles });
+    let mut end = None;
+    for leaf in leaves(doc, roles) {
+        let at = DocAddr { path: leaf.path, byte: 0 };
+        if at < own.start {
+            continue;
+        }
+        if at >= own.end {
+            break;
+        }
+        if !content.iter().any(|kept| kept.path == leaf.path) {
+            break;
+        }
+        end = Some(DocAddr { path: leaf.path, byte: leaf.len });
+    }
+    Some(DocRange { start: own.start, end: end.map_or(own.end, |end| end.min(own.end)) })
+}
+
+/// Returns the line that contains `addr`: a text line of a multi-line leaf,
+/// or the innermost block ancestor.
+///
+/// This is the paragraph rule of a browser's triple-click. It ignores sense
+/// markers, so an example line in 新明解 or a note in 三省堂 selects alone.
+pub fn line_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
+    let nodes = path_nodes(doc, addr.path)?;
+    let text = leaf_text(doc, addr.path);
+    if text.contains('\n') {
+        let line = line_at(text, addr.byte as usize);
+        return Some(DocRange {
+            start: DocAddr { path: addr.path, byte: line.start as u32 },
+            end: DocAddr { path: addr.path, byte: line.end as u32 },
+        });
+    }
+    let all = leaves(doc, roles);
+    let depth = (0..nodes.len()).rev().find(|&depth| is_block(doc, nodes[depth])).unwrap_or(0);
+    subtree_range(&all, path_prefix(addr.path, depth + 1)?)
+}
+
+/// One resolved sense: the marked block alone, and with its per-sense followers.
+struct Sense {
+    own: DocRange,
+    with_examples: DocRange,
+}
+
+fn sense(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Sense> {
     let nodes = path_nodes(doc, addr.path)?;
     let text = leaf_text(doc, addr.path);
     if text.contains('\n') {
         let line = line_at(text, addr.byte as usize);
         if has_sense_marker(&text[line.clone()]) {
-            return Some(DocRange {
+            let range = DocRange {
                 start: DocAddr { path: addr.path, byte: line.start as u32 },
                 end: DocAddr { path: addr.path, byte: line.end as u32 },
-            });
+            };
+            return Some(Sense { own: range, with_examples: range });
         }
     }
 
@@ -160,17 +218,19 @@ pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<D
         }
         let Some(&parent) = (depth > 0).then(|| &nodes[depth - 1]) else {
             if is_marked_block(doc, id, None) {
-                return subtree_range(&all, path_prefix(addr.path, 1)?);
+                let range = subtree_range(&all, path_prefix(addr.path, 1)?)?;
+                return Some(Sense { own: range, with_examples: range });
             }
             continue;
         };
         let parent_path = path_prefix(addr.path, depth)?;
         let index = *addr.path.steps().get(depth)? as usize;
-        if let Some(range) = sibling_sense(doc, &all, parent, parent_path, index) {
-            return Some(range);
+        if let Some(sense) = sibling_sense(doc, &all, parent, parent_path, index) {
+            return Some(sense);
         }
     }
-    subtree_range(&all, path_prefix(addr.path, 1)?)
+    let range = subtree_range(&all, path_prefix(addr.path, 1)?)?;
+    Some(Sense { own: range, with_examples: range })
 }
 
 /// The sense among the children of `parent` that contains child `index`.
@@ -190,7 +250,7 @@ fn sibling_sense(
     parent: NodeId,
     parent_path: NodePath,
     index: usize,
-) -> Option<DocRange> {
+) -> Option<Sense> {
     let parent_tag = doc.node(parent).tag;
     let children: Vec<(NodeId, NodePath, bool)> = doc
         .children(parent)
@@ -244,9 +304,9 @@ fn sibling_sense(
     while end + 1 < children.len() && !children[end + 1].2 && attaches(children[end + 1].0) {
         end += 1;
     }
-    let first = subtree_range(all, children[start].1)?;
+    let own = subtree_range(all, children[start].1)?;
     let last = subtree_range(all, children[end].1)?;
-    Some(DocRange { start: first.start, end: last.end })
+    Some(Sense { own, with_examples: DocRange { start: own.start, end: last.end } })
 }
 
 /// Whether the block `id` is a sense by its own shape.
@@ -664,6 +724,51 @@ mod tests {
         assert_eq!(
             span(at(second_number, 0), at(second_text, "生活する。".len() as u32)),
             sense_range(&d, RoleFilter::CARD, at(second_text, 0))
+        );
+    }
+
+    #[test]
+    fn sense_modes_include_or_exclude_examples() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": [
+                {"tag": "div", "content": [
+                    {"tag": "span", "content": "①"},
+                    {"tag": "span", "content": "食物を口に入れる。"},
+                    {"tag": "div", "data": {"content": "example-sentence"}, "content": "菓子を食べる。"}
+                ]},
+                {"tag": "div", "content": [
+                    {"tag": "span", "content": "②"},
+                    {"tag": "span", "content": "生活する。"},
+                    {"tag": "div", "data": {"content": "example-sentence"}, "content": "筆一本で食べる。"}
+                ]}
+            ]
+        }}]));
+        let number = path(&[0, 0, 0, 0, 0]);
+        let definition = path(&[0, 0, 0, 1, 0]);
+        let example = path(&[0, 0, 0, 2, 0]);
+        let core = span(at(number, 0), at(definition, "食物を口に入れる。".len() as u32));
+        let full = span(at(number, 0), at(example, "菓子を食べる。".len() as u32));
+
+        assert_eq!(core, sense_core_range(&d, RoleFilter::CARD, at(definition, 3)));
+        assert_eq!(core, sense_core_range(&d, RoleFilter::CARD, at(example, 3)));
+        assert_eq!(full, sense_range(&d, RoleFilter::CARD, at(definition, 3)));
+        assert_eq!(full, sense_range(&d, RoleFilter::CARD, at(example, 3)));
+        assert_eq!(
+            span(at(example, 0), at(example, "菓子を食べる。".len() as u32)),
+            line_range(&d, RoleFilter::CARD, at(example, 3))
+        );
+    }
+
+    #[test]
+    fn line_range_selects_one_line_in_plain_text() {
+        let text = "headword\nfirst line\nsecond line";
+        let d = doc(&json!([text]));
+        let leaf = path(&[0]);
+        let start = text.find("first").unwrap() as u32;
+        let end = text.find("\nsecond").unwrap() as u32;
+        assert_eq!(
+            span(at(leaf, start), at(leaf, end)),
+            line_range(&d, RoleFilter::CARD, at(leaf, start + 2))
         );
     }
 

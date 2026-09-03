@@ -24,7 +24,8 @@ use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
     FieldMapping, LayoutMode, PopupLayer, SelectionButtons, SelectionSeparator, SentenceMode,
-    TriggerMode, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+    TriggerMode, TripleClick, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
+    SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
 use chibipop::library::Role;
@@ -697,6 +698,8 @@ enum Message {
     SelectionButtonsPicked(String),
     /// The selection separator picker label. [`SELECTION_SEPARATORS`] maps it back.
     SelectionSeparatorPicked(String),
+    /// The triple-click picker label. [`TRIPLE_CLICKS`] maps it back.
+    TripleClickPicked(String),
     /// Whether an add carries a mining picture. The core gate is
     /// `chibipop::shot::plan_add`.
     IncludeScreenshot(bool),
@@ -807,6 +810,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::SelectionSeparatorPicked(label) => {
             app.form.selection_separator = selection_separator_of(&label);
+        }
+        Message::TripleClickPicked(label) => {
+            app.form.triple_click = triple_click_of(&label);
         }
         Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
         // This is the only place where empty text becomes `None`. The config field
@@ -1344,6 +1350,31 @@ fn selection_separator_of(label: &str) -> SelectionSeparator {
         .iter()
         .find(|&&(_, value)| value == label)
         .map_or(SelectionSeparator::Ellipsis, |&(separator, _)| separator)
+}
+
+/// The triple-click picker items, in display order.
+const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
+    (TripleClick::Sense, "Sense"),
+    (TripleClick::SenseWithExamples, "Sense with examples"),
+    (TripleClick::Line, "Line"),
+];
+
+fn triple_click_labels() -> Vec<String> {
+    TRIPLE_CLICKS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn triple_click_label(value: TripleClick) -> &'static str {
+    TRIPLE_CLICKS
+        .iter()
+        .find(|&&(item, _)| item == value)
+        .map_or(TRIPLE_CLICKS[1].1, |&(_, label)| label)
+}
+
+fn triple_click_of(label: &str) -> TripleClick {
+    TRIPLE_CLICKS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(TripleClick::SenseWithExamples, |&(value, _)| value)
 }
 
 /// The picker's items, in table order.
@@ -2075,6 +2106,14 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 Message::SelectionSeparatorPicked,
             ),
         ),
+        labeled(
+            "Triple-click",
+            pick_list(
+                triple_click_labels(),
+                Some(triple_click_label(app.form.triple_click).to_string()),
+                Message::TripleClickPicked,
+            ),
+        ),
         column(screenshot_rows(app)).spacing(10),
         column(sentence_rows(app)).spacing(10),
         text("Field mappings").size(14),
@@ -2404,6 +2443,7 @@ mod tests {
             &mut app,
             Message::SelectionSeparatorPicked("List items".to_string()),
         );
+        let _ = update(&mut app, Message::TripleClickPicked("Line".to_string()));
         let out = chibipop::settings::apply_to(&app.form, &cfg);
         assert_eq!(
             chibipop::config::SelectionButtons::PrimaryReplacing,
@@ -2412,6 +2452,10 @@ mod tests {
         assert_eq!(
             chibipop::config::SelectionSeparator::ListItems,
             out.anki.selection_separator
+        );
+        assert_eq!(
+            chibipop::config::TripleClick::Line,
+            out.anki.triple_click
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

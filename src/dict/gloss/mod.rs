@@ -69,8 +69,8 @@ pub(crate) use parse::tag_for;
 pub use path::{NodePath, Selection};
 pub use plain::{plain_items, plain_selected, pos_labels, renders_text};
 pub use select::{
-    extent, grapheme_range, leaf_text, leaves, sense_range, snap_ceil, snap_floor, DocAddr,
-    DocRange, Leaf, Separator,
+    extent, grapheme_range, leaf_text, leaves, line_range, sense_core_range, sense_range,
+    snap_ceil, snap_floor, DocAddr, DocRange, Leaf, Separator,
 };
 
 /// An index into the node vector of [`GlossDoc`].

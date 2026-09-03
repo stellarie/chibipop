@@ -379,6 +379,43 @@ impl From<SelectionSeparator> for crate::dict::gloss::Separator {
     }
 }
 
+/// Selects what a triple-click on glossary text selects.
+///
+/// A Sense without examples keeps the definition for a card. A Sense with
+/// examples is the block a reader sees as one meaning. A line is the browser
+/// paragraph rule, which ignores sense markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TripleClick {
+    /// Selects the Sense without its examples.
+    Sense,
+    /// Selects the Sense with the examples that belong to it.
+    #[default]
+    SenseWithExamples,
+    /// Selects the block or the text line under the pointer.
+    Line,
+}
+
+impl TripleClick {
+    /// Returns the kebab-case value stored in TOML.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TripleClick::Sense => "sense",
+            TripleClick::SenseWithExamples => "sense-with-examples",
+            TripleClick::Line => "line",
+        }
+    }
+
+    /// Returns the label shown by settings windows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            TripleClick::Sense => "Sense",
+            TripleClick::SenseWithExamples => "Sense with examples",
+            TripleClick::Line => "Line",
+        }
+    }
+}
+
 impl PopupConfig {
     /// Returns the popup render settings that the scene builder uses.
     ///
@@ -857,6 +894,9 @@ pub struct AnkiConfig {
     /// Selects the separator between selected glossary fragments.
     #[serde(default)]
     pub selection_separator: SelectionSeparator,
+    /// Selects what a triple-click selects.
+    #[serde(default)]
+    pub triple_click: TripleClick,
 }
 
 
@@ -958,6 +998,7 @@ impl Default for AnkiConfig {
             first_dict_only: false,
             selection_buttons: SelectionButtons::default(),
             selection_separator: SelectionSeparator::default(),
+            triple_click: TripleClick::default(),
         }
     }
 }
@@ -1732,29 +1773,34 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_are_primary_additive_and_ellipsis() {
+    fn selection_defaults_are_primary_additive_ellipsis_and_sense_with_examples() {
         let anki = &Config::default().anki;
         assert_eq!(SelectionButtons::PrimaryAdditive, anki.selection_buttons);
         assert_eq!(SelectionSeparator::Ellipsis, anki.selection_separator);
+        assert_eq!(TripleClick::SenseWithExamples, anki.triple_click);
     }
 
     #[test]
     fn selection_enum_names_match_toml_values() {
         assert_eq!("primary-replacing", SelectionButtons::PrimaryReplacing.as_str());
         assert_eq!("line-break", SelectionSeparator::LineBreak.as_str());
+        assert_eq!("sense-with-examples", TripleClick::SenseWithExamples.as_str());
         // `toml` refuses a bare scalar at the top level, so wrap the enums.
         #[derive(serde::Serialize)]
         struct Wrap {
             buttons: SelectionButtons,
             separator: SelectionSeparator,
+            triple: TripleClick,
         }
         let text = toml::to_string(&Wrap {
             buttons: SelectionButtons::PrimaryReplacing,
             separator: SelectionSeparator::LineBreak,
+            triple: TripleClick::Line,
         })
         .unwrap();
         assert!(text.contains("buttons = \"primary-replacing\""), "{text}");
         assert!(text.contains("separator = \"line-break\""), "{text}");
+        assert!(text.contains("triple = \"line\""), "{text}");
     }
 
     #[test]
@@ -1765,11 +1811,13 @@ mod tests {
         c.anki.first_dict_only = true;
         c.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
         c.anki.selection_separator = SelectionSeparator::ListItems;
+        c.anki.triple_click = TripleClick::Sense;
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert!(back.anki.first_dict_only);
         assert_eq!(SelectionButtons::PrimaryReplacing, back.anki.selection_buttons);
         assert_eq!(SelectionSeparator::ListItems, back.anki.selection_separator);
+        assert_eq!(TripleClick::Sense, back.anki.triple_click);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1786,6 +1834,7 @@ mod tests {
         let anki = &load_or_create(&p).expect("an old Anki config must load").anki;
         assert_eq!(SelectionButtons::PrimaryAdditive, anki.selection_buttons);
         assert_eq!(SelectionSeparator::Ellipsis, anki.selection_separator);
+        assert_eq!(TripleClick::SenseWithExamples, anki.triple_click);
         let _ = std::fs::remove_file(&p);
     }
 

@@ -1,7 +1,9 @@
 //! The Windows platform bin uses a pump thread, a Worker thread, and an analysis thread.
 
 use crate::anki;
-use crate::config::{resolve_engine, Config, EngineChoice, SelectionButtons, SelectionSeparator};
+use crate::config::{
+    resolve_engine, Config, EngineChoice, SelectionButtons, SelectionSeparator, TripleClick,
+};
 use crate::controller::{
     Button, Command, Controller, ControllerConfig, Event, PopupView, RequestId, TrayAction,
 };
@@ -2545,6 +2547,7 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
         edge_autoscroll: live.popup.edge_autoscroll,
         primary_additive: live.selection_buttons == SelectionButtons::PrimaryAdditive,
         separator: live.selection_separator.into(),
+        triple_click: live.triple_click,
     }
 }
 
@@ -2955,6 +2958,7 @@ struct LiveSettings {
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
     selection_separator: SelectionSeparator,
+    triple_click: TripleClick,
 }
 
 impl LiveSettings {
@@ -3032,6 +3036,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
         selection_separator: cfg.anki.selection_separator,
+        triple_click: cfg.anki.triple_click,
     }
 }
 

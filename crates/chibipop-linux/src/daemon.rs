@@ -2448,6 +2448,7 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         primary_additive: config.anki.selection_buttons
             == chibipop::config::SelectionButtons::PrimaryAdditive,
         separator: config.anki.selection_separator.into(),
+        triple_click: config.anki.triple_click,
     }
 }
 

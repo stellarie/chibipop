@@ -120,8 +120,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   per Card at the `all_cards` index and swaps with `swap_top`.
 - `select::gesture::Gesture` owns click chains, drags, and deferred plain-click clear.
   Ticks provide its clock.
-- A drag snaps to the unit of the press that started it: grapheme, word, Sense, or
-  Entry. A word drag snaps to graphemes until the analysis answers.
+- A drag snaps to the unit of the press that started it: grapheme, word, configured
+  triple-click unit, or Entry. A word drag snaps to graphemes until the analysis answers.
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
   `PopupScene::text_hit`. A bin never decides a gesture.
 - `gloss::select::sense_range` finds a Sense by shape, not by Dictionary. A Sense is the
@@ -129,6 +129,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   that starts with a sense number as text or as an image. The per-Sense blocks that
   follow it, such as an example `details`, join it. A marked line of plain text is also
   a Sense. An Entry without any marker has one Sense: the whole Entry.
+- `sense_core_range` stops a Sense before its first example. `line_range` selects the
+  innermost block or one newline-delimited text line.
 - `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.
 - `Selection::Ranges` prunes the Anki HTML and plain renderers. It keeps selected
   leaf bytes and valid ancestors.
@@ -136,8 +138,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Layout computes highlights and `Check` elements only when
   `SceneRequest::selection` is `Some`. Windows geometry goldens pass `None`, so they do
   not move.
-- `popup.edge_autoscroll`, `anki.selection_buttons`, and `anki.selection_separator`
-  configure selection. Theme `accent` supplies highlight and check color.
+- `popup.edge_autoscroll`, `anki.selection_buttons`, `anki.selection_separator`, and
+  `anki.triple_click` configure selection. Theme `accent` supplies highlight and check color.
 
 ## Hover cadence
 

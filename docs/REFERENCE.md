@@ -372,6 +372,7 @@ show_static_overlay = true
 first_dict_only = false
 selection_buttons = "primary-additive"  # "primary-additive" | "primary-replacing"
 selection_separator = "ellipsis"       # "ellipsis" | "space" | "line-break" | "list-items"
+triple_click = "sense-with-examples"   # "sense" | "sense-with-examples" | "line"
 
 [[anki.field_map]]          # one block per Anki field
 anki_field = "Expression"
@@ -402,10 +403,13 @@ Anki must be enabled before the popup can select glossary text.
 - Dragging selects grapheme clusters.
 - Double-clicking selects a word. A word is a full conjugation or a compound
   noun, for example 食べられませんでした or 日本語教師.
-- Triple-clicking selects a Sense.
+- Triple-clicking selects the unit set by `anki.triple_click`.
+- `sense` selects a Sense without its examples.
+- `sense-with-examples` selects a Sense and its examples. This value is the default.
+- `line` selects the nearest block or the newline-delimited text line.
 - Quadruple-clicking selects an Entry.
-- A drag that starts from a double-click grows by words. A drag that starts
-  from a triple-click grows by Senses.
+- A drag that starts from a double-click grows by words.
+- A drag that starts from a triple-click grows by the configured triple-click unit.
 - The Entry checkbox selects or clears the full Entry.
 - The primary button adds to the selection by default.
 - The secondary button replaces the selection by default.
