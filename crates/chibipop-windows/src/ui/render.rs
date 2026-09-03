@@ -17,7 +17,9 @@
 //! The scale conversion stays in this module.
 
 use crate::controller::HitAction;
+use crate::geom::PhysPoint;
 use crate::present::Presentation;
+use chibipop::select::{Selections, TextAddr};
 use crate::ui::layout::{
     self, Align, ElemKind, GlyphBox, HitTarget, LineBox, MeasureError, MeasureRun, Measured,
     Metrics, PopupScene, RenderSettings, SceneElem, SceneImage, SceneRect, SceneRequest, SpanBox,
@@ -422,6 +424,7 @@ fn scene_of(
     show_back: bool,
     side_panel: bool,
     render: RenderSettings,
+    selection: Option<&Selections>,
 ) -> Result<PopupScene> {
     // On Windows, the Anki control is a child window with its own font and size.
     // Windows therefore draws the label itself, and this call leaves core's `anki` slot empty.
@@ -435,6 +438,7 @@ fn scene_of(
             side_panel,
             render,
             anki: None,
+            selection,
         },
         &mut text.measurer(),
     )
@@ -465,6 +469,12 @@ pub struct Renderer {
     target: Option<ID2D1HwndRenderTarget>,
     /// The hit targets from the last paint pass, in DIPs, exactly as the scene reported them.
     hits: RefCell<Vec<HitTarget>>,
+    /// The scene from the last successful paint pass.
+    ///
+    /// Pointer text hits must use the same measured runs as the pixels on screen.
+    scene: Option<PopupScene>,
+    /// The font that the cached scene used.
+    scene_font: String,
     /// The painter's decoded-asset cache, or `None` when this build cannot open the dictionary
     /// database.
     ///
@@ -504,6 +514,8 @@ impl Renderer {
             text: Text::new()?,
             target: None,
             hits: RefCell::new(Vec::new()),
+            scene: None,
+            scene_font: String::new(),
             media: RefCell::new(media),
         })
     }
@@ -536,6 +548,27 @@ impl Renderer {
             .map(|r| r.action.clone())
     }
 
+    /// Resolves a popup-local physical point to the cached glossary address.
+    ///
+    /// The cache comes from the last paint pass, so text hit testing and
+    /// DirectWrite output use one scene. A point has no address before paint.
+    pub fn text_hit(
+        &mut self,
+        local: PhysPoint,
+        scroll_phys: i32,
+    ) -> std::result::Result<Option<TextAddr>, MeasureError> {
+        let Some(scene) = self.scene.as_ref() else {
+            return Ok(None);
+        };
+        let scale = self.dpi_scale();
+        scene.text_hit(
+            (local.x as f32 / scale, local.y as f32 / scale),
+            scroll_phys as f32 / scale,
+            &self.scene_font,
+            &mut self.text.measurer(),
+        )
+    }
+
     /// Returns `(width, view_h, content_h)`.
     ///
     /// This function returns all three values in physical pixels.
@@ -551,6 +584,7 @@ impl Renderer {
         show_back: bool,
         side_panel: bool,
         render: RenderSettings,
+        selection: Option<&Selections>,
     ) -> Result<(i32, i32, i32)> {
         let (max_w, max_h) = box_phys;
         let scale = self.dpi_scale();
@@ -562,6 +596,7 @@ impl Renderer {
             show_back,
             side_panel,
             render,
+            selection,
         )?;
         Ok(popup_size(&scene, scale, max_w))
     }
@@ -579,6 +614,7 @@ impl Renderer {
         show_back: bool,
         side_panel: bool,
         render: RenderSettings,
+        selection: Option<&Selections>,
     ) -> Result<()> {
         let (cw, ch) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(cw, ch).context("preparing the D2D render target")?;
@@ -588,8 +624,16 @@ impl Renderer {
         let h = (ch as f32 / scale) as i32;
         let scroll = (scroll as f32 / scale) as i32;
 
-        let scene =
-            scene_of(&self.text, p, theme, (w as f32, h as f32), show_back, side_panel, render)?;
+        let scene = scene_of(
+            &self.text,
+            p,
+            theme,
+            (w as f32, h as f32),
+            show_back,
+            side_panel,
+            render,
+            selection,
+        )?;
         *self.hits.borrow_mut() = scene.hit_targets();
 
         if let Err(e) = self.paint_once(&scene, theme, w, h, scroll) {
@@ -603,6 +647,8 @@ impl Renderer {
                 return Err(e).context("D2D paint failed");
             }
         }
+        self.scene_font.clone_from(&theme.font_name);
+        self.scene = Some(scene);
         Ok(())
     }
 
@@ -693,6 +739,21 @@ impl Renderer {
                 let border_brush = target.CreateSolidColorBrush(&color_f(theme.border), None)?;
                 target.DrawRoundedRectangle(&panel, &border_brush, theme.border_width, None);
             }
+            if !scene.highlights.is_empty() {
+                let mut color = color_f(theme.accent);
+                color.a = layout::HIGHLIGHT_ALPHA;
+                let brush = unsafe { target.CreateSolidColorBrush(&color, None) }?;
+                for highlight in &scene.highlights {
+                    let rect = D2D_RECT_F {
+                        left: highlight.x,
+                        top: highlight.y - scroll as f32,
+                        right: highlight.x + highlight.w,
+                        bottom: highlight.y + highlight.h - scroll as f32,
+                    };
+                    unsafe { target.FillRectangle(&rect, &brush) };
+                }
+            }
+
 
             // One buffer holds the spans for every element.
             // A rich entry therefore needs no allocation for each element on each frame.
@@ -792,6 +853,10 @@ impl Renderer {
         for b in elem.boxes() {
             self.draw_box(target, b, dy)?;
         }
+        if elem.kind == ElemKind::Check && elem.spans.is_empty() {
+            return Ok(());
+        }
+
         // An image uses a ladder.
         // It tries the asset when this build can decode it, then the `alt` run that the element
         // already carries, and then an outlined box.

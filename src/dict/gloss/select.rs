@@ -91,7 +91,7 @@ fn collect_leaves(
 }
 
 /// Returns the text for a text leaf, or an empty string for another path.
-pub fn leaf_text<'a>(doc: &'a GlossDoc, path: NodePath) -> &'a str {
+pub fn leaf_text(doc: &GlossDoc, path: NodePath) -> &str {
     let Some(nodes) = path_nodes(doc, path) else { return "" };
     let Some(&id) = nodes.last() else { return "" };
     let node = doc.node(id);
@@ -189,7 +189,7 @@ fn snap(doc: &GlossDoc, addr: DocAddr, ceil: bool) -> DocAddr {
 /// Returns the grapheme cluster that contains `addr`.
 pub fn grapheme_range(doc: &GlossDoc, addr: DocAddr) -> Option<DocRange> {
     let nodes = path_nodes(doc, addr.path)?;
-    let Some(&id) = nodes.last() else { return None };
+    let id = *nodes.last()?;
     let node = doc.node(id);
     if node.tag == Tag::Ruby
         && !nodes[..nodes.len() - 1]

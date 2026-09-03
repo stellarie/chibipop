@@ -1269,6 +1269,7 @@ mod tests {
                 side_panel: true,
                 render: Default::default(),
                 anki: None,
+                selection: None,
             },
             &mut engine,
         )

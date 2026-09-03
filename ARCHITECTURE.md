@@ -15,6 +15,8 @@ src/                    Core lib `chibipop`: all behavior, no OS calls.
   lookup/               Deconjugation, SQLite queries, scoring, model.
   dict/                 Import, build, reindex, gloss, media, pitch.
   ui/layout/            Measured layout pass. Builds a PopupScene.
+  analysis/             Japanese analysis over the committed IPADIC model.
+  select/               Card selection state and the Gesture machine.
   config.rs settings.rs Shared Config and SettingsForm.
   present.rs            Unmeasured view model fed to the layout pass.
 crates/chibipop-linux/src/    Linux bin: a calloop daemon.
@@ -30,6 +32,7 @@ crates/chibipop-windows/src/  Windows bin: a GetMessageW loop.
 tests/                  Core integration tests, fixtures, render sweep.
 docs/                   REFERENCE, REGRESSION, RELEASING, LINUX, research.
 themes/ plugins/ data/  CSS themes; bundled meikiocr; deconjugator.json.
+  data/ipadic/          Committed IPADIC model, digest pins, and license files.
 packaging/aur/ extras/  PKGBUILDs; desktop file, systemd unit, snippet.
 tools/ scripts/         Benchmarks and censuses; package-linux.sh.
 ```
@@ -102,12 +105,32 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The inline layout pass remains a private module inside `src/ui/layout/`. Exactly one
   implementation exists, so it never becomes a trait.
 - Both platform bins adapt to any measurer-contract change in the same commit.
+- `TextMeasure` has exactly three methods: `measure`, `caret_boxes`, and `hit_offset`.
+  `hit_offset` maps a run-relative point to a UTF-16 caret offset.
 - `PopupScene` is the measured popup in one uniform, unit-agnostic pixel space. Core
   never receives a scale factor.
 - The platform bin measures and places the popup. The Controller learns the result as
   `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
+
+## Selection
+
+- Selection state lives in core as `select::Selections`. It stores one `CardSelection`
+  per Card at the `all_cards` index and swaps with `swap_top`.
+- `select::gesture::Gesture` owns click chains, drags, and deferred plain-click clear.
+  Ticks provide its clock.
+- Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
+  `PopupScene::text_hit`. A bin never decides a gesture.
+- `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.
+- `Selection::Ranges` prunes the Anki HTML and plain renderers. It keeps selected
+  leaf bytes and valid ancestors.
+- An active `CardSelection` overrides `first_dict_only` for the Anki glossary fields.
+- Layout computes highlights and `Check` elements only when
+  `SceneRequest::selection` is `Some`. Windows geometry goldens pass `None`, so they do
+  not move.
+- `popup.edge_autoscroll`, `anki.selection_buttons`, and `anki.selection_separator`
+  configure selection. Theme `accent` supplies highlight and check color.
 
 ## Hover cadence
 
@@ -138,6 +161,21 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   sets no rpath.
 - The source-AUR path keeps `--features system-onnxruntime` active. This feature opens
   the distribution library with dlopen.
+
+## Japanese analysis
+
+- `src/analysis/` is one concrete core module over Vibrato 0.5.2. It has no trait
+  and no separate crate.
+- `data/ipadic/system.dic` is the committed 47,788,814-byte IPADIC model. Its digest
+  is pinned in `analysis::MODEL_SHA256` and `data/ipadic/SHA256SUMS.txt`.
+- `data/ipadic/COPYING` and `data/ipadic/NOTICE` ship with the model in both packagings.
+- One `std::thread` in `analysis::Service` loads the model lazily after the first paint.
+  It analyzes only the top Card.
+- Requests use latest-wins behavior. A stale generation is dropped.
+- A load or digest failure falls back to UAX #29 word boundaries and emits one diagnostic.
+- Word grouping merges auxiliaries, suffixes, and conjugation chains for double-click.
+  Fine morphemes remain available for issue #52.
+- The model has no download path. The application stays offline-first.
 
 ## Settings and config
 

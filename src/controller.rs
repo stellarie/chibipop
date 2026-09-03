@@ -6,9 +6,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::analysis::{TextKey, WordMap};
 use crate::config::TriggerMode;
+use crate::dict::gloss::{
+    extent, leaf_text, leaves, RoleFilter, Separator,
+};
 use crate::geom::{in_sticky, PhysPoint, PhysRect, ScanRect};
 use crate::present::{self, AnkiPopupState, Presentation};
+use crate::select::gesture::PressInput;
+use crate::select::{
+    entries, CardSelection, Coverage, Gesture, GestureEffect, GestureEnv, GestureInput, ItemSource,
+    Selections, TextAddr,
+};
 use crate::text::layout::Orientation;
 
 /// The cursor must move more than this many physical pixels on one axis.
@@ -42,6 +51,22 @@ pub enum HitAction {
     OpenUrl(String),
     /// Return to the previous history entry.
     Back,
+    /// Select or clear the whole glossary of entry `e` of the top Card.
+    ///
+    /// The Entry-header checkbox emits this action. `e` is the ordinal from
+    /// [`crate::select::entries`].
+    ToggleEntry(u32),
+}
+
+/// A pointer button by role, not by physical code.
+///
+/// The platform bin maps its button codes here. The Controller decides which
+/// role adds to a selection and which role replaces it from the
+/// `primary_additive` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Primary,
+    Secondary,
 }
 
 /// The result of one lookup.
@@ -80,9 +105,21 @@ pub enum Event {
     Tick { cursor: PhysPoint, button_h: i32 },
     /// The number of complete wheel notches. Up is `+`.
     Scrolled { notches: i32 },
-    /// A click in popup-local coordinates. The platform bin performs the hit
-    /// test because it owns the paint.
-    Clicked { local: PhysPoint, hit: Option<HitAction> },
+    /// A button press in popup-local coordinates. The platform bin performs
+    /// the hit test because it owns the paint. `text` is the gloss address
+    /// under the point from [`PopupScene::text_hit`], or `None` when the scene
+    /// has no gloss text.
+    ///
+    /// [`PopupScene::text_hit`]: crate::ui::layout::PopupScene::text_hit
+    PointerDown { local: PhysPoint, button: Button, hit: Option<HitAction>, text: Option<TextAddr> },
+    /// A pointer move while a button is held. `local` can lie outside the
+    /// popup during a drag.
+    PointerMoved { local: PhysPoint, text: Option<TextAddr> },
+    /// A button release.
+    PointerUp { local: PhysPoint, button: Button },
+    /// Word boundaries for the top Card from the analysis thread.
+    /// A stale `generation` is ignored.
+    AnalysisReady { generation: u64, words: WordMap },
     /// A request from the Anki button or its hotkey.
     AddRequested,
     /// A request from the Back button or Escape.
@@ -165,6 +202,12 @@ pub enum Command {
     /// scheme because the URL comes from a dictionary file that chibipop did
     /// not write.
     OpenUrl(String),
+    /// Analyze the text leaves of the top Card on the analysis thread.
+    /// The reply arrives as [`Event::AnalysisReady`] with the same generation.
+    RequestAnalysis { generation: u64, texts: Vec<(TextKey, String)> },
+    /// A selection drag started (`true`) or ended (`false`). The platform bin
+    /// keeps forwarding pointer moves outside the popup while it is `true`.
+    SetDragging(bool),
     OpenSettings,
     Exit,
 }
@@ -179,11 +222,23 @@ pub struct ControllerConfig {
     pub anki_enabled: bool,
     /// Send only the first Dictionary's glossary block to Anki.
     /// This matches upstream 0.9.x "first dict only".
+    /// An active glossary selection overrides this setting.
     pub first_dict_only: bool,
     pub summary_chars: usize,
     pub log_lookups: bool,
     /// The platform bin dispatch interval, in milliseconds.
     pub tick_ms: u32,
+    /// The editorial roles that the popup shows. A selection addresses only
+    /// this content.
+    pub roles: RoleFilter,
+    /// Scroll the popup while a selection drag reaches its edge.
+    /// `scroll_popup = false` disables this too.
+    pub edge_autoscroll: bool,
+    /// The physical primary button adds to a selection. When false, it
+    /// replaces the selection and the secondary button adds.
+    pub primary_additive: bool,
+    /// The separator between disjoint selected fragments in one container.
+    pub separator: Separator,
 }
 
 /// This freeze applies only in Live mode.
@@ -236,6 +291,8 @@ pub fn hold_region(
 ///
 /// `expr` uses `written` when present and `reading` otherwise.
 /// Include blocks from the first Dictionary only when `first_dict_only` is true.
+/// A non-empty selection always includes every selected Entry.
+/// The caller passes an empty selection only when it wants the whole-card path.
 /// Include the captured sentence when it exists.
 ///
 /// The Controller and the platform bins use one rule for screenshot fields.
@@ -243,6 +300,8 @@ pub fn hold_region(
 pub fn note_payload(
     p: &Presentation,
     first_dict_only: bool,
+    selection: &CardSelection,
+    separator: Separator,
 ) -> (String, HashMap<String, String>) {
     let Some(card) = p.top.as_ref() else {
         return (String::new(), HashMap::new());
@@ -253,12 +312,16 @@ pub fn note_payload(
         .or(card.reading.as_deref())
         .unwrap_or("")
         .to_string();
-    let blocks_to_send = if first_dict_only {
-        &card.blocks[..1.min(card.blocks.len())]
+    let mut fields = if selection.is_empty() {
+        let blocks_to_send = if first_dict_only {
+            &card.blocks[..1.min(card.blocks.len())]
+        } else {
+            &card.blocks[..]
+        };
+        crate::anki::fields_from_card(card, blocks_to_send)
     } else {
-        &card.blocks[..]
+        crate::anki::fields_from_selection(card, selection, separator)
     };
-    let mut fields = crate::anki::fields_from_card(card, blocks_to_send);
     if let Some(sentence) = &p.sentence {
         fields.insert("sentence".to_string(), sentence.clone());
     }
@@ -310,6 +373,23 @@ struct Surface {
     scroll: i32,
     /// The generation that guards against stale duplicate results.
     generation: u64,
+    /// The selected ranges for every card in the presentation.
+    selection: Selections,
+    /// The current click chain and drag state.
+    gesture: Gesture,
+    /// The analysis result for the current generation.
+    analysis: Option<(u64, WordMap)>,
+    /// Whether a Reshow must refresh analysis and gesture state.
+    ///
+    /// Content changes set this flag before placement so a marker-only Reshow
+    /// can retain the current analysis and active gesture.
+    analysis_stale: bool,
+    /// The generation that the current analysis request uses.
+    analysis_generation: u64,
+    /// The last deferred link action from a primary pointer press.
+    pressed_link: Option<HitAction>,
+    /// The last popup-local pointer point during a drag.
+    last_drag_point: Option<PhysPoint>,
     /// The placement result stays `None` until the platform sends `PopupPlaced`.
     placed: Option<Placed>,
 }
@@ -325,6 +405,7 @@ pub struct PopupView<'a> {
     pub presentation: &'a Presentation,
     pub anki: &'a AnkiPopupState,
     pub show_back: bool,
+    pub selection: &'a Selections,
 }
 
 /// The Controller state machine for hover and popup events.
@@ -351,6 +432,8 @@ pub struct Controller {
     next_id: u64,
     latest: RequestId,
     generation: u64,
+    /// The monotonic dispatch tick used by pointer gesture timing.
+    clock: u64,
 }
 
 impl Controller {
@@ -369,6 +452,7 @@ impl Controller {
             next_id: 0,
             latest: RequestId(0),
             generation: 0,
+            clock: 0,
         }
     }
 
@@ -385,6 +469,7 @@ impl Controller {
             presentation: &s.presentation,
             anki: &s.anki,
             show_back: !s.history.is_empty(),
+            selection: &s.selection,
         })
     }
 
@@ -397,6 +482,11 @@ impl Controller {
         self.surface.as_ref().map(|s| &s.anki)
     }
 
+    /// The selection state for the shown surface, before or after placement.
+    pub fn selection(&self) -> Option<&Selections> {
+        self.surface.as_ref().map(|s| &s.selection)
+    }
+
     /// A popup exists whether placement is complete or not.
     pub fn is_shown(&self) -> bool {
         self.surface.is_some()
@@ -407,7 +497,11 @@ impl Controller {
         match event {
             Event::Tick { cursor, button_h } => self.tick(cursor, button_h),
             Event::Scrolled { notches } => self.scrolled(notches),
-            Event::Clicked { local, hit } => self.clicked(local, hit),
+            Event::PointerDown { local, button, hit, text } => {
+                self.pointer_down(local, button, hit, text)
+            }
+            Event::PointerMoved { local, text } => self.pointer_moved(local, text),
+            Event::PointerUp { local, button } => self.pointer_up(local, button),
             Event::AddRequested => self.add_requested(),
             Event::BackRequested => self.pop_history(),
             Event::TriggerDown => {
@@ -423,6 +517,7 @@ impl Controller {
             }
             Event::PopupPlaceFailed => self.place_failed(),
             Event::DupesChecked { generation, dupes } => self.dupes_checked(generation, dupes),
+            Event::AnalysisReady { generation, words } => self.analysis_ready(generation, words),
             Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
             Event::ConfigReloaded(cfg) => {
                 self.cfg = *cfg;
@@ -442,6 +537,8 @@ impl Controller {
     }
 
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
+        self.clock = self.clock.wrapping_add(1);
+        let tick = self.clock;
         self.button_h = button_h;
         let placed = self.surface.as_ref().and_then(|s| s.placed);
         // Use the popup's own rectangle.
@@ -474,6 +571,8 @@ impl Controller {
             });
         }
         out.push(Command::SetBackArmed(self.has_history()));
+        out.extend(self.run_gesture(GestureInput::Tick { tick }));
+        out.extend(self.edge_autoscroll());
         out
     }
 
@@ -501,27 +600,215 @@ impl Controller {
         }]
     }
 
-    fn clicked(&mut self, local: PhysPoint, hit: Option<HitAction>) -> Vec<Command> {
+    fn pointer_down(
+        &mut self,
+        local: PhysPoint,
+        button: Button,
+        hit: Option<HitAction>,
+        text: Option<TextAddr>,
+    ) -> Vec<Command> {
+        let Some(s) = self.surface.as_ref() else { return Vec::new() };
+        let Some(p) = s.placed else { return Vec::new() };
+        if !self.cfg.anki_enabled {
+            return self.action_on_press(local, hit);
+        }
+
+        match hit {
+            Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
+            Some(HitAction::Back) => self.pop_history(),
+            Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
+            Some(HitAction::DrillDown(query)) if text.is_none() => {
+                let id = self.next_request();
+                vec![Command::RequestDrillDown { id, text: query }]
+            }
+            None if text.is_none() && local.y >= p.popup.h => self.start_add(),
+            hit => {
+                let link = matches!(hit, Some(HitAction::OpenUrl(_)) | Some(HitAction::DrillDown(_)));
+                let s = self.surface.as_mut().expect("checked above");
+                s.pressed_link = link.then_some(hit).flatten();
+                if text.is_some() || link {
+                    if let Some(s) = self.surface.as_mut() {
+                        s.last_drag_point = Some(local);
+                    }
+                    self.run_gesture(GestureInput::Press(PressInput {
+                        addr: text,
+                        link,
+                        button,
+                        local,
+                        tick: self.clock,
+                    }))
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn pointer_moved(&mut self, local: PhysPoint, text: Option<TextAddr>) -> Vec<Command> {
+        if !self.cfg.anki_enabled {
+            return Vec::new();
+        }
+        if let Some(s) = self.surface.as_mut() {
+            if s.placed.is_none() {
+                return Vec::new();
+            }
+            s.last_drag_point = Some(local);
+        } else {
+            return Vec::new();
+        }
+        self.run_gesture(GestureInput::Move { addr: text, local, tick: self.clock })
+    }
+
+    fn pointer_up(&mut self, local: PhysPoint, button: Button) -> Vec<Command> {
+        if !self.cfg.anki_enabled {
+            return Vec::new();
+        }
+        if self.surface.as_ref().is_none_or(|s| s.placed.is_none()) {
+            return Vec::new();
+        }
+        let out = self.run_gesture(GestureInput::Release { button, local, tick: self.clock });
+        if let Some(s) = self.surface.as_mut() {
+            s.last_drag_point = None;
+        }
+        out
+    }
+
+    fn action_on_press(&mut self, local: PhysPoint, hit: Option<HitAction>) -> Vec<Command> {
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
         match hit {
-            Some(HitAction::ExpandEntry(i)) => {
-                let summary = self.cfg.summary_chars;
-                let s = self.surface.as_mut().expect("checked above");
-                present::swap_top(&mut s.presentation, i, summary);
-                s.scroll = 0;
-                self.begin_place(PlaceKind::Reshow)
-            }
+            Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
             Some(HitAction::DrillDown(text)) => {
                 let id = self.next_request();
                 vec![Command::RequestDrillDown { id, text }]
             }
             Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
             Some(HitAction::Back) => self.pop_history(),
+            Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
             // A click below the popup targets the button.
             None if local.y >= p.popup.h && self.cfg.anki_enabled => self.start_add(),
             None => Vec::new(),
         }
+    }
+
+    fn expand_entry(&mut self, index: usize) -> Vec<Command> {
+        let summary = self.cfg.summary_chars;
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        let card_index = index.saturating_add(1);
+        if card_index >= s.presentation.all_cards.len() {
+            return Vec::new();
+        }
+        present::swap_top(&mut s.presentation, index, summary);
+        s.selection.card_mut(card_index);
+        s.selection.swap(0, card_index);
+        s.analysis_stale = true;
+        s.gesture.reset();
+        s.pressed_link = None;
+        s.last_drag_point = None;
+        s.scroll = 0;
+        self.begin_place(PlaceKind::Reshow)
+    }
+
+    fn toggle_entry(&mut self, entry: u32) -> Vec<Command> {
+        let roles = self.cfg.roles;
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
+        let Some(gloss) = entries(card).find_map(|(ordinal, value)| (ordinal == entry).then_some(value)) else {
+            return Vec::new();
+        };
+        let Some(extent) = extent(&gloss.doc, roles) else { return Vec::new() };
+        let selection = s.selection.card_mut(0);
+        let on = selection.coverage(entry, extent) != Coverage::All;
+        selection.set_entry(entry, extent, on);
+        s.gesture.reset();
+        s.pressed_link = None;
+        vec![Command::RepaintPopup {
+            scroll: s.scroll,
+            show_back: !s.history.is_empty(),
+        }]
+    }
+
+    fn run_gesture(&mut self, input: GestureInput) -> Vec<Command> {
+        let env = self.gesture_env();
+        let roles = self.cfg.roles;
+        let effects = {
+            let Some(s) = self.surface.as_mut() else { return Vec::new() };
+            let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
+            let words = s.analysis.as_ref().map(|(_, words)| words);
+            let source = ItemSource::new(card, roles, words);
+            let selection = s.selection.card_mut(0);
+            s.gesture.handle(input, env, &source, selection)
+        };
+        self.gesture_commands(effects)
+    }
+    fn gesture_env(&self) -> GestureEnv {
+        let tick_ms = u64::from(self.cfg.tick_ms.max(1));
+        GestureEnv {
+            chain_ticks: 500_u64.div_ceil(tick_ms),
+            threshold_px: ANCHOR_JITTER_PX,
+            primary_additive: self.cfg.primary_additive,
+        }
+    }
+
+    fn gesture_commands(&mut self, effects: Vec<GestureEffect>) -> Vec<Command> {
+        let mut out = Vec::new();
+        for effect in effects {
+            match effect {
+                GestureEffect::Repaint => {
+                    if let Some(s) = self.surface.as_ref() {
+                        out.push(Command::RepaintPopup {
+                            scroll: s.scroll,
+                            show_back: !s.history.is_empty(),
+                        });
+                    }
+                }
+                GestureEffect::OpenLink => {
+                    let action = self.surface.as_mut().and_then(|s| s.pressed_link.take());
+                    match action {
+                        Some(HitAction::OpenUrl(url)) => out.push(Command::OpenUrl(url)),
+                        Some(HitAction::DrillDown(text)) => {
+                            let id = self.next_request();
+                            out.push(Command::RequestDrillDown { id, text });
+                        }
+                        _ => {}
+                    }
+                }
+                GestureEffect::DragStarted => out.push(Command::SetDragging(true)),
+                GestureEffect::DragEnded => out.push(Command::SetDragging(false)),
+                GestureEffect::NeedWord { .. } => {}
+            }
+        }
+        out
+    }
+
+    fn edge_autoscroll(&mut self) -> Vec<Command> {
+        if !self.cfg.anki_enabled || !self.cfg.edge_autoscroll || !self.cfg.scroll_popup {
+            return Vec::new();
+        }
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        let Some(p) = s.placed else { return Vec::new() };
+        if !s.gesture.dragging() {
+            return Vec::new();
+        }
+        let Some(local) = s.last_drag_point else { return Vec::new() };
+        let (direction, overshoot) = if local.y < 0 {
+            (-1, -local.y)
+        } else if local.y > p.view_h {
+            (1, local.y - p.view_h)
+        } else {
+            return Vec::new();
+        };
+        let step = (overshoot / 4).clamp(1, SCROLL_STEP_PX);
+        let span = (p.content_h - p.view_h).max(0);
+        let next = s.scroll.saturating_add(direction * step).clamp(0, span);
+        if next == s.scroll {
+            return Vec::new();
+        }
+        s.scroll = next;
+        vec![Command::RepaintPopup {
+            scroll: next,
+            show_back: !s.history.is_empty(),
+        }]
     }
 
     fn add_requested(&mut self) -> Vec<Command> {
@@ -531,8 +818,10 @@ impl Controller {
         self.start_add()
     }
 
-    /// Apply the same guard as the click path.
+    /// Apply the same guard as the pointer path.
     fn start_add(&mut self) -> Vec<Command> {
+        let first_dict_only = self.cfg.first_dict_only;
+        let separator = self.cfg.separator;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
             return Vec::new();
@@ -540,7 +829,9 @@ impl Controller {
         if s.presentation.top.is_none() {
             return Vec::new();
         }
-        let (expr, fields) = note_payload(&s.presentation, self.cfg.first_dict_only);
+        let selection = s.selection.card(0).cloned().unwrap_or_default();
+        let (expr, fields) =
+            note_payload(&s.presentation, first_dict_only, &selection, separator);
         if s.anki.adding || s.anki.added.contains(&expr) {
             return Vec::new();
         }
@@ -564,6 +855,12 @@ impl Controller {
         let Some(entry) = s.history.pop() else { return Vec::new() };
         s.presentation = entry.presentation;
         s.anki = entry.anki;
+        s.selection = Selections::default();
+        s.gesture.reset();
+        s.analysis = None;
+        s.analysis_stale = true;
+        s.pressed_link = None;
+        s.last_drag_point = None;
         s.scroll = 0;
         let show_back = !s.history.is_empty();
         let mut out = self.begin_place(PlaceKind::Reshow);
@@ -748,8 +1045,16 @@ impl Controller {
             history: Vec::new(),
             scroll: 0,
             generation: 0,
+            selection: Selections::default(),
+            gesture: Gesture::default(),
+            analysis: None,
+            analysis_stale: true,
+            analysis_generation: 0,
+            pressed_link: None,
+            last_drag_point: None,
             placed: None,
         });
+
         self.pending_scan = scan;
         out.extend(self.begin_place(PlaceKind::Fresh));
         out
@@ -766,7 +1071,12 @@ impl Controller {
             presentation: std::mem::replace(&mut s.presentation, presentation),
             anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled)),
         });
-        s.scroll = 0;
+        s.selection = Selections::default();
+        s.gesture.reset();
+        s.analysis = None;
+        s.analysis_stale = true;
+        s.pressed_link = None;
+        s.last_drag_point = None;
         let mut out = self.begin_place(PlaceKind::DrillDown);
         out.push(Command::SetBackArmed(true));
         out
@@ -794,52 +1104,81 @@ impl Controller {
             return Vec::new();
         }
         let anki_enabled = self.cfg.anki_enabled;
+        let roles = self.cfg.roles;
         let generation = self.generation.wrapping_add(1);
-        let s = self.surface.as_mut().expect("checked above");
-        s.placed = Some(Placed { popup: rect, content_h, view_h });
-        let span = (content_h - view_h).max(0);
-        if s.scroll > span {
-            s.scroll = span;
-        }
+        self.generation = generation;
 
         let mut out = Vec::new();
         let mut exprs: Vec<String> = Vec::new();
-        match kind {
-            PlaceKind::Fresh => {
-                out.push(Command::DiscardScroll);
-                out.push(Command::ShowScanOverlay {
-                    rects: std::mem::take(&mut self.pending_scan),
-                });
-                out.push(Command::SyncAnkiButton);
-                if let Some(card) = &s.presentation.top {
-                    if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
-                        exprs.push(e.to_string());
-                    }
-                }
-                for row in &s.presentation.collapsed {
-                    if let Some(e) = row.written.as_deref().or(row.reading.as_deref()) {
-                        exprs.push(e.to_string());
-                    }
-                }
+        let mut analysis_texts: Vec<(TextKey, String)> = Vec::new();
+        let refresh_analysis = {
+            let s = self.surface.as_mut().expect("checked above");
+            s.placed = Some(Placed { popup: rect, content_h, view_h });
+            let span = (content_h - view_h).max(0);
+            if s.scroll > span {
+                s.scroll = span;
             }
-            PlaceKind::DrillDown => {
-                out.push(Command::SyncAnkiButton);
-                if let Some(card) = &s.presentation.top {
-                    if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
-                        exprs.push(e.to_string());
-                    }
-                }
+            let refresh_analysis = kind != PlaceKind::Reshow || s.analysis_stale;
+            if refresh_analysis {
+                s.analysis = None;
+                s.analysis_generation = generation;
+                s.gesture.reset();
+                s.pressed_link = None;
+                s.last_drag_point = None;
             }
-            PlaceKind::Reshow => out.push(Command::SyncAnkiButton),
-        }
+            s.analysis_stale = false;
 
-        if !matches!(kind, PlaceKind::Reshow) && anki_enabled {
-            self.generation = generation;
+            match kind {
+                PlaceKind::Fresh => {
+                    out.push(Command::DiscardScroll);
+                    out.push(Command::ShowScanOverlay {
+                        rects: std::mem::take(&mut self.pending_scan),
+                    });
+                    out.push(Command::SyncAnkiButton);
+                    if let Some(card) = &s.presentation.top {
+                        if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
+                            exprs.push(e.to_string());
+                        }
+                    }
+                    for row in &s.presentation.collapsed {
+                        if let Some(e) = row.written.as_deref().or(row.reading.as_deref()) {
+                            exprs.push(e.to_string());
+                        }
+                    }
+                }
+                PlaceKind::DrillDown => {
+                    out.push(Command::SyncAnkiButton);
+                    if let Some(card) = &s.presentation.top {
+                        if let Some(e) = card.written.as_deref().or(card.reading.as_deref()) {
+                            exprs.push(e.to_string());
+                        }
+                    }
+                }
+                PlaceKind::Reshow => out.push(Command::SyncAnkiButton),
+            }
+
+            if anki_enabled && refresh_analysis {
+                if let Some(card) = &s.presentation.top {
+                    for (entry, gloss) in entries(card) {
+                        for leaf in leaves(&gloss.doc, roles) {
+                            let text = leaf_text(&gloss.doc, leaf.path);
+                            if !text.is_empty() {
+                                analysis_texts.push(((entry, leaf.path), text.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            refresh_analysis
+        };
+
+        if refresh_analysis && anki_enabled {
             let s = self.surface.as_mut().expect("checked above");
             s.generation = generation;
             if !exprs.is_empty() {
                 out.push(Command::CheckDupes { generation, exprs });
             }
+            out.push(Command::RequestAnalysis { generation, texts: analysis_texts });
         }
 
         // Hold this cursor move until popup placement completes.
@@ -857,6 +1196,7 @@ impl Controller {
                 self.surface = None;
                 self.pending_scan.clear();
                 self.pending_cursor = None;
+
                 vec![
                     Command::HidePopup,
                     Command::SetScrollArmed(false),
@@ -873,6 +1213,18 @@ impl Controller {
                 }
             }
         }
+    }
+
+    fn analysis_ready(&mut self, generation: u64, words: WordMap) -> Vec<Command> {
+        if !self.cfg.anki_enabled {
+            return Vec::new();
+        }
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        if s.placed.is_none() || s.analysis_generation != generation {
+            return Vec::new();
+        }
+        s.analysis = Some((generation, words));
+        self.run_gesture(GestureInput::Analysis)
     }
 
     fn dupes_checked(
@@ -925,6 +1277,7 @@ fn same_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::select::SelRange;
     use crate::present::{Card, CollapsedRow, GlossBlock};
 
     fn cfg() -> ControllerConfig {
@@ -937,6 +1290,10 @@ mod tests {
             summary_chars: 60,
             log_lookups: false,
             tick_ms: 20,
+            roles: RoleFilter::default(),
+            edge_autoscroll: true,
+            primary_additive: true,
+            separator: Separator::Ellipsis,
         }
     }
 
@@ -986,6 +1343,17 @@ mod tests {
         Event::PopupPlaced { rect, content_h, view_h }
     }
 
+    fn click(
+        c: &mut Controller,
+        local: PhysPoint,
+        button: Button,
+        hit: Option<HitAction>,
+    ) -> Vec<Command> {
+        let out = c.handle(Event::PointerDown { local, button, hit, text: None });
+        c.handle(Event::PointerUp { local, button });
+        out
+    }
+
     /// Show a placed popup with the default size.
     fn shown(c: &mut Controller) {
         shown_sized(c, 200, 200);
@@ -1006,6 +1374,40 @@ mod tests {
             },
         });
         c.handle(placed(POPUP, content_h, view_h));
+    }
+
+    fn presentation_with_card(card: Card, all_cards: Vec<Card>) -> Presentation {
+        Presentation {
+            top: Some(card),
+            collapsed: Vec::new(),
+            all_cards,
+            sentence: None,
+        }
+    }
+
+    fn shown_card(c: &mut Controller, presentation: Presentation) {
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
+        let id = c.latest;
+        c.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(presentation),
+                anchor: ANCHOR,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        c.handle(placed(POPUP, 200, 200));
+    }
+
+    fn gloss_card(first: &str, second: &str) -> Card {
+        let glossary = serde_json::json!([first, second]).to_string();
+        Card {
+            written: Some(first.to_string()),
+            blocks: vec![GlossBlock::parse("Test", &glossary)],
+            ..card(first)
+        }
     }
 
     // -- armed controls --
@@ -1334,10 +1736,12 @@ mod tests {
     fn a_drill_down_is_never_re_checked() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        c.handle(Event::Clicked {
-            local: PhysPoint { x: 10, y: 10 },
-            hit: Some(HitAction::DrillDown("\u{732B}".into())),
-        });
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("\u{732B}".into())),
+        );
         c.handle(Event::LookupResult {
             id: c.latest,
             outcome: LookupOutcome::DrillDown(Box::new(presentation_of("\u{5B57}"))),
@@ -1480,12 +1884,13 @@ mod tests {
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         assert!(c.handle(Event::Scrolled { notches: -3 }).is_empty());
-        assert!(c
-            .handle(Event::Clicked {
-                local: PhysPoint { x: 10, y: 10 },
-                hit: Some(HitAction::Back),
-            })
-            .is_empty());
+        assert!(click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::Back),
+        )
+        .is_empty());
         assert!(c.handle(Event::BackRequested).is_empty());
     }
 
@@ -1511,11 +1916,12 @@ mod tests {
     fn a_failed_reshow_leaves_the_popup_where_it_was() {
         let mut c = Controller::new(cfg());
         shown_sized(&mut c, 500, 200);
-        c.handle(Event::Scrolled { notches: -1 });
-        c.handle(Event::Clicked {
-            local: PhysPoint { x: 10, y: 10 },
-            hit: Some(HitAction::ExpandEntry(0)),
-        });
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::ExpandEntry(0)),
+        );
         assert!(c.handle(Event::PopupPlaceFailed).is_empty());
         assert_eq!(POPUP, c.popup().expect("still placed").popup);
     }
@@ -1556,11 +1962,12 @@ mod tests {
     fn an_expanded_entry_starts_back_at_the_top() {
         let mut c = Controller::new(cfg());
         shown_sized(&mut c, 500, 200);
-        c.handle(Event::Scrolled { notches: -4 });
-        c.handle(Event::Clicked {
-            local: PhysPoint { x: 10, y: 10 },
-            hit: Some(HitAction::ExpandEntry(0)),
-        });
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::ExpandEntry(0)),
+        );
         c.handle(placed(POPUP, 250, 200));
         assert_eq!(0, c.popup().expect("placed").scroll);
     }
@@ -1571,10 +1978,12 @@ mod tests {
     fn a_drill_down_click_asks_the_worker() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        let out = c.handle(Event::Clicked {
-            local: PhysPoint { x: 10, y: 10 },
-            hit: Some(HitAction::DrillDown("\u{732B}".into())),
-        });
+        let out = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("\u{732B}".into())),
+        );
         assert_eq!(
             out,
             vec![Command::RequestDrillDown {
@@ -1588,10 +1997,12 @@ mod tests {
     fn a_drill_down_answer_pushes_history_and_back_pops_it() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        c.handle(Event::Clicked {
-            local: PhysPoint { x: 10, y: 10 },
-            hit: Some(HitAction::DrillDown("\u{732B}".into())),
-        });
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("\u{732B}".into())),
+        );
         let out = c.handle(Event::LookupResult {
             id: c.latest,
             outcome: LookupOutcome::DrillDown(Box::new(presentation_of("\u{5B57}"))),
@@ -1635,11 +2046,11 @@ mod tests {
         let mut c = Controller::new(cfg());
         shown(&mut c);
         let below = PhysPoint { x: 10, y: POPUP.h + 5 };
-        assert!(c.handle(Event::Clicked { local: below, hit: None }).is_empty());
+        assert!(click(&mut c, below, Button::Primary, None).is_empty());
 
         let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
-        let out = c.handle(Event::Clicked { local: below, hit: None });
+        let out = click(&mut c, below, Button::Primary, None);
         assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
         // Allow only one add request at a time.
         assert!(c.handle(Event::AddRequested).is_empty());
@@ -1685,9 +2096,7 @@ mod tests {
     fn a_click_outside_any_region_does_nothing() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
-        assert!(c
-            .handle(Event::Clicked { local: PhysPoint { x: 10, y: 10 }, hit: None })
-            .is_empty());
+        assert!(click(&mut c, PhysPoint { x: 10, y: 10 }, Button::Primary, None).is_empty());
     }
 
     // -- duplicate checks --
@@ -1736,6 +2145,49 @@ mod tests {
         assert!(view.anki.connected);
         assert!(!view.anki.checking);
         assert!(view.anki.dupes.contains("\u{732B}"));
+    }
+
+    #[test]
+    fn a_marker_only_reshow_keeps_analysis_without_a_new_request() {
+        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let card = gloss_card("first", "second");
+        shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
+        let generation = c.surface.as_ref().expect("surface").analysis_generation;
+        let words = WordMap::new();
+        c.handle(Event::AnalysisReady { generation, words: words.clone() });
+        assert_eq!(
+            c.surface.as_ref().expect("surface").analysis,
+            Some((generation, words.clone()))
+        );
+
+        let out = c.handle(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
+        assert!(out.iter().any(|cmd| matches!(cmd, Command::ShowPopup { .. })));
+        let out = c.handle(placed(POPUP, 200, 200));
+        assert!(!out.iter().any(|cmd| matches!(cmd, Command::RequestAnalysis { .. })));
+        assert_eq!(c.surface.as_ref().expect("surface").analysis, Some((generation, words)));
+    }
+
+    #[test]
+    fn expanding_entry_requests_analysis_once() {
+        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let top = gloss_card("top", "top two");
+        let second = gloss_card("second", "second two");
+        shown_card(&mut c, presentation_with_card(top.clone(), vec![top, second]));
+        let out = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::ExpandEntry(0)),
+        );
+        assert!(out.iter().any(|cmd| matches!(cmd, Command::ShowPopup { .. })));
+
+        let out = c.handle(placed(POPUP, 200, 200));
+        assert_eq!(
+            out.iter()
+                .filter(|cmd| matches!(cmd, Command::RequestAnalysis { .. }))
+                .count(),
+            1
+        );
     }
 
     // -- Worker outcomes --
@@ -1954,6 +2406,155 @@ mod tests {
         assert!(!c.handle(Event::AddRequested).is_empty());
     }
 
+    // -- selection/controller behavior --
+    #[test]
+    fn a_drag_over_two_glosses_updates_the_public_selection() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = Controller::new(config);
+        let card = gloss_card("first", "second");
+        shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
+        let first_path = crate::select::DocAddr {
+            path: crate::dict::gloss::NodePath::ROOT.child(0).unwrap(),
+            byte: 0,
+        };
+        let second_path = crate::select::DocAddr {
+            path: crate::dict::gloss::NodePath::ROOT.child(1).unwrap(),
+            byte: 0,
+        };
+        let first = TextAddr { entry: 0, addr: first_path };
+        let second_end = TextAddr { entry: 0, addr: crate::select::DocAddr { path: second_path.path, byte: 1 } };
+        c.handle(Event::PointerDown {
+            local: PhysPoint { x: 0, y: 0 },
+            button: Button::Primary,
+            hit: None,
+            text: Some(first),
+        });
+        let out = c.handle(Event::PointerMoved {
+            local: PhysPoint { x: 5, y: 0 },
+            text: Some(second_end),
+        });
+        assert!(out.contains(&Command::SetDragging(true)));
+        let selected = c
+            .selection()
+            .and_then(|selection| selection.card(0))
+            .expect("drag selection");
+        assert_eq!(selected.items().len(), 1);
+        assert_eq!(selected.items()[0].start, first);
+        assert_eq!(selected.items()[0].end.addr.path, second_path.path);
+        assert!(selected.items()[0].end.addr.byte > 0);
+        assert!(c
+            .handle(Event::PointerUp { local: PhysPoint { x: 5, y: 0 }, button: Button::Primary })
+            .contains(&Command::SetDragging(false)));
+    }
+
+    #[test]
+    fn a_new_lookup_clears_the_current_selection() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = Controller::new(config);
+        let card = gloss_card("first", "second");
+        shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
+        let path = crate::dict::gloss::NodePath::ROOT.child(0).unwrap();
+        let text = TextAddr {
+            entry: 0,
+            addr: crate::select::DocAddr { path, byte: 0 },
+        };
+        c.handle(Event::PointerDown {
+            local: PhysPoint { x: 0, y: 0 },
+            button: Button::Primary,
+            hit: None,
+            text: Some(text),
+        });
+        c.handle(Event::PointerMoved {
+            local: PhysPoint { x: 5, y: 0 },
+            text: Some(TextAddr {
+                entry: 0,
+                addr: crate::select::DocAddr { path, byte: 1 },
+            }),
+        });
+        c.handle(Event::PointerUp { local: PhysPoint { x: 5, y: 0 }, button: Button::Primary });
+        assert!(!c.selection().unwrap().card(0).unwrap().is_empty());
+        c.handle(ready_id(c.latest, "犬", ANCHOR));
+        assert!(c.selection().unwrap().card(0).is_none_or(CardSelection::is_empty));
+    }
+
+    #[test]
+    fn expanding_a_collapsed_entry_swaps_its_selection() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = Controller::new(config);
+        let top = gloss_card("top", "top two");
+        let second = gloss_card("second", "second two");
+        let presentation = presentation_with_card(top.clone(), vec![top, second]);
+        shown_card(&mut c, presentation);
+        let path = crate::dict::gloss::NodePath::ROOT.child(0).unwrap();
+        let text = TextAddr {
+            entry: 0,
+            addr: crate::select::DocAddr { path, byte: 0 },
+        };
+        {
+            let surface = c.surface.as_mut().unwrap();
+            surface.selection.card_mut(0).replace(SelRange {
+                start: text,
+                end: TextAddr {
+                    entry: 0,
+                    addr: crate::select::DocAddr { path, byte: 3 },
+                },
+            });
+        }
+        click(&mut c, PhysPoint { x: 10, y: 10 }, Button::Primary, Some(HitAction::ExpandEntry(0)));
+        let selections = c.selection().unwrap();
+        assert!(selections.card(0).is_none_or(CardSelection::is_empty));
+        assert!(!selections.card(1).unwrap().is_empty());
+        assert_eq!(
+            c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(),
+            Some("second"),
+        );
+    }
+
+    #[test]
+    fn stale_analysis_ready_is_ignored() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = Controller::new(config);
+        shown(&mut c);
+        let generation = c.surface.as_ref().unwrap().analysis_generation;
+        assert!(c
+            .handle(Event::AnalysisReady {
+                generation: generation.saturating_sub(1),
+                words: WordMap::new(),
+            })
+            .is_empty());
+        assert!(c.surface.as_ref().unwrap().analysis.is_none());
+    }
+
+    #[test]
+    fn a_selected_note_ignores_first_dictionary_only() {
+        let block = |name: &str, gloss: &str| {
+            GlossBlock::parse(name, &serde_json::json!([gloss]).to_string())
+        };
+        let p = Presentation {
+            top: Some(Card {
+                blocks: vec![block("A", "cat"), block("B", "feline")],
+                ..card("猫")
+            }),
+            collapsed: Vec::new(),
+            all_cards: Vec::new(),
+            sentence: None,
+        };
+        let mut selection = CardSelection::default();
+        selection.replace(SelRange {
+            start: TextAddr { entry: 0, addr: crate::select::DocAddr::START },
+            end: TextAddr { entry: 1, addr: crate::select::DocAddr::END },
+        });
+        let (_, fields) = note_payload(&p, true, &selection, Separator::Ellipsis);
+        assert!(fields["glossary"].contains("cat"));
+        assert!(fields["glossary"].contains("feline"));
+        assert!(fields["glossary_html"].contains("cat"));
+        assert!(fields["glossary_html"].contains("feline"));
+    }
+
     /// One payload rule covers the expression fallback, block trim, and empty card.
     #[test]
     fn the_note_payload_trims_to_the_first_dict_and_carries_the_sentence() {
@@ -1973,19 +2574,23 @@ mod tests {
         };
 
         // The `reading` value replaces the missing `written` value.
-        let (expr, fields) = note_payload(&p, false);
+        let empty = CardSelection::default();
+        let (expr, fields) = note_payload(&p, false, &empty, Separator::Ellipsis);
         assert_eq!("\u{306D}\u{3053}", expr);
         assert_eq!(Some(&"\u{732B}\u{304C}\u{3044}\u{308B}".to_string()), fields.get("sentence"));
         let both = fields.get("glossary").expect("glossary field");
         assert!(both.contains("cat") && both.contains("feline"), "{both}");
 
         // The first Dictionary excludes all later blocks.
-        let (_, trimmed) = note_payload(&p, true);
+        let (_, trimmed) = note_payload(&p, true, &empty, Separator::Ellipsis);
         let first = trimmed.get("glossary").expect("glossary field");
         assert!(first.contains("cat") && !first.contains("feline"), "{first}");
 
         // Without a top card, the payload has nothing to add.
         p.top = None;
-        assert_eq!((String::new(), HashMap::new()), note_payload(&p, false));
+        assert_eq!(
+            (String::new(), HashMap::new()),
+            note_payload(&p, false, &empty, Separator::Ellipsis),
+        );
     }
 }

@@ -22,6 +22,9 @@ cargo test --workspace --exclude chibipop-linux     # Windows
 # The OCR quality gate. `test = false` keeps it out of the default sweep.
 cargo test -p chibipop-linux --test ocr_gate -- --nocapture
 
+# Japanese analysis unit tests.
+cargo test -p chibipop analysis::
+
 # Required after any change under crates/chibipop-linux/src/ocr/.
 cargo clippy -p chibipop-linux --test ocr_gate
 
@@ -70,6 +73,8 @@ of `workflow_dispatch` with `bless=true` rewrites the goldens into an artifact. 
 
 ```
 src/                     core library `chibipop`: behavior, no OS calls
+src/analysis/            Japanese analysis service and model checks
+src/select/              Card selection and gesture state
 crates/chibipop-linux/   Wayland bin, tray, OCR engine under src/ocr/
 crates/chibipop-windows/ Win32 bin, DirectWrite measurement, geometry goldens
 docs/                    REFERENCE, LINUX, REGRESSION, RELEASING, BACKLOG
@@ -146,6 +151,18 @@ defines the terms. Do not restate these files.
    (`#verification`)
 10. Never delete a failing test to make a gate pass. The failing test is the
     finding. (`#verification`)
+
+11. Never add a fourth `TextMeasure` method that paints. `TextMeasure` has exactly
+    three methods: `measure`, `caret_boxes`, and `hit_offset`. (`#popup-and-measurement`)
+12. Never let a bin decide a gesture. `select::gesture::Gesture` owns gesture state.
+    (`#selection`)
+13. Never let `RequestAnalysis` analyze a Card other than the top Card.
+    (`#japanese-analysis`)
+14. Never change the IPADIC model without updating both digest pins and the license files.
+    The pins are `analysis::MODEL_SHA256` and `SHA256SUMS.txt`. The license files are
+    `COPYING` and `NOTICE`. (`#japanese-analysis`)
+15. Never build `Check` elements or highlights when `SceneRequest::selection` is `None`.
+    (`#selection`)
 
 Never commit a secret. Never edit a vendored or generated directory by hand.
 You must change the generator instead.

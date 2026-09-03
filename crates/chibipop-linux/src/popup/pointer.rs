@@ -32,14 +32,15 @@
 use super::place::Visibility;
 use super::{forward, Popup};
 use crate::daemon::App;
-use chibipop::controller::HitAction;
+use chibipop::controller::{Button, HitAction};
 use chibipop::geom::PhysPoint;
+use chibipop::select::TextAddr;
 use chibipop::ui::layout::{HitTarget, PopupScene, SceneRect};
 use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::globals::GlobalData;
 use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
 use smithay_client_toolkit::seat::pointer::{
-    AxisScroll, PointerData, PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT,
+    AxisScroll, PointerData, PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT, BTN_RIGHT,
 };
 use smithay_client_toolkit::seat::{Capability, SeatData, SeatHandler, SeatState};
 use std::sync::Arc;
@@ -83,10 +84,22 @@ pub enum Hit {
 pub enum Interaction {
     /// Whole wheel notches, in core's sign: wheel-up is positive.
     Scroll { notches: i32 },
-    /// A left click on the panel. `hit` is `None` for a click that
-    /// landed on no target, which the Controller ignores.
-    Click { local: PhysPoint, hit: Option<HitAction> },
-    /// A left click on the Anki slot.
+    /// A button press on the panel. `hit` is `None` when the press landed on
+    /// no target, and `text` is the gloss address under the pointer.
+    Down {
+        local: PhysPoint,
+        button: Button,
+        hit: Option<HitAction>,
+        text: Option<TextAddr>,
+    },
+    /// A pointer move while a button is held or a drag is active.
+    Move { local: PhysPoint, text: Option<TextAddr> },
+    /// A button release.
+    Up { local: PhysPoint, button: Button },
+    /// A primary press on the Anki strip.
+    ///
+    /// Linux paints this strip inside the panel, so it needs a separate
+    /// interaction before the Controller receives `AddRequested`.
     Anki { local: PhysPoint },
 }
 
@@ -126,14 +139,14 @@ impl HitScene {
         }
     }
 
-    /// Convert surface-local logical coordinates to panel-local
-    /// physical coordinates. `Event::Clicked` counts its position in
-    /// this same physical space.
+    /// Convert surface-local logical coordinates to panel-local physical coordinates.
     ///
-    /// This function floors the result instead of rounding it. The
-    /// answer names the pixel that holds the pointer. For example, a
-    /// pointer at 0.9 logical px is inside physical pixel 1 at 1.5x
-    /// scale, not pixel 2.
+    /// `PointerDown` and `PointerMoved` use this same physical space.
+    ///
+    /// This function floors the result instead of rounding it. The answer names the pixel
+    /// that holds the pointer. For example, a pointer at 0.9 logical px is inside physical
+    /// pixel 1 at 1.5x scale, not pixel 2.
+    ///
     pub fn local(&self, pos: (f64, f64)) -> PhysPoint {
         PhysPoint {
             x: (pos.0 * self.scale).floor() as i32,
@@ -277,7 +290,18 @@ pub struct Focus {
     pub pos: (f64, f64),
 }
 
+fn button_mask(button: Button) -> u8 {
+    match button {
+        Button::Primary => 1,
+        Button::Secondary => 2,
+    }
+}
+
 /// The popup's pointer: the seat objects, the focus, and the bank.
+///
+/// The button bank is separate from surface focus. Wayland keeps delivering
+/// motion through its implicit grab after a press, so the popup forwards
+/// that motion even after a leave event.
 pub struct Pointer {
     seats: SeatState,
     /// `wp_cursor_shape_v1`, where the compositor advertises it. Where
@@ -289,6 +313,10 @@ pub struct Pointer {
     /// The last `enter` serial, which `set_shape` has to quote.
     serial: Option<u32>,
     focus: Option<Focus>,
+    /// Buttons currently held on the popup.
+    buttons: u8,
+    /// Core requested pointer capture for a selection drag.
+    dragging: bool,
     bank: Wheelbank,
     /// The last shape that the code asked for. A hover across one
     /// target then costs one request, instead of one for each motion
@@ -315,6 +343,8 @@ impl Pointer {
             device: None,
             serial: None,
             focus: None,
+            buttons: 0,
+            dragging: false,
             bank: Wheelbank::default(),
             shape: None,
             wheel_enabled,
@@ -334,6 +364,38 @@ impl Pointer {
 
     pub fn focus(&self) -> Option<Focus> {
         self.focus
+    }
+
+    /// Record the Controller's pointer-capture state.
+    pub fn set_dragging(&mut self, dragging: bool) {
+        self.dragging = dragging;
+    }
+
+    /// Return whether motion must reach the Controller.
+    pub fn forwards_motion(&self) -> bool {
+        self.dragging || self.buttons != 0
+    }
+
+    /// Record a supported button press.
+    pub fn button_down(&mut self, button: Button) {
+        self.buttons |= button_mask(button);
+    }
+
+    /// Record a supported button release and return whether it was held.
+    pub fn button_up(&mut self, button: Button) -> bool {
+        let mask = button_mask(button);
+        let held = self.buttons & mask != 0;
+        self.buttons &= !mask;
+        held
+    }
+
+    /// Forget button and focus state when the popup hides.
+    pub fn cancel(&mut self) {
+        self.buttons = 0;
+        self.dragging = false;
+        self.focus = None;
+        self.bank.discard();
+        self.shape = None;
     }
 
     pub fn set_wheel_enabled(&mut self, on: bool) {
@@ -382,6 +444,8 @@ impl Pointer {
         self.pointer = pointer;
         self.serial = None;
         self.focus = None;
+        self.buttons = 0;
+        self.dragging = false;
         self.shape = None;
     }
 
@@ -414,7 +478,7 @@ impl Pointer {
     }
 
     pub fn leave(&mut self, panel: usize) {
-        if self.focus.is_some_and(|f| f.panel == panel) {
+        if self.focus.is_some_and(|f| f.panel == panel) && !self.forwards_motion() {
             self.focus = None;
             self.bank.discard();
             self.shape = None;
@@ -451,17 +515,21 @@ impl Pointer {
     }
 }
 
-/// One left click, resolved against the frame on screen.
+/// Resolve one button press against a painted frame.
 ///
-/// This function is free of the Wayland half, so the code can test
-/// the resolution on plain data. The same call serves a real
-/// `wl_pointer.button` event and a scripted one.
-pub fn click(hits: &HitScene, at: (f64, f64)) -> Interaction {
-    let local = hits.local(at);
-    match hits.hit(local) {
-        Some(Hit::Anki) => Interaction::Anki { local },
-        Some(Hit::Action(action)) => Interaction::Click { local, hit: Some(action) },
-        None => Interaction::Click { local, hit: None },
+/// This function stays free of Wayland state, so tests can cover button roles,
+/// hit targets, and text addresses with plain data.
+pub fn press(
+    local: PhysPoint,
+    button: Button,
+    hit: Option<Hit>,
+    text: Option<TextAddr>,
+) -> Interaction {
+    match hit {
+        Some(Hit::Anki) if button == Button::Primary => Interaction::Anki { local },
+        Some(Hit::Anki) => Interaction::Down { local, button, hit: None, text: None },
+        Some(Hit::Action(action)) => Interaction::Down { local, button, hit: Some(action), text },
+        None => Interaction::Down { local, button, hit: None, text },
     }
 }
 
@@ -566,26 +634,57 @@ pub fn script_from_env() -> (Vec<Vec<Step>>, Vec<String>) {
 pub fn frame(popup: &mut Popup, events: &[PointerEvent]) -> Vec<Interaction> {
     let mut out = Vec::new();
     for event in events {
-        let Some(panel) = popup.panel_of(&event.surface) else { continue };
+        let panel = popup.panel_of(&event.surface);
         match &event.kind {
             PointerEventKind::Enter { serial } => {
-                popup.pointer_enter(panel, event.position, Some(*serial));
+                if let Some(panel) = panel {
+                    popup.pointer_enter(panel, event.position, Some(*serial));
+                }
             }
-            PointerEventKind::Leave { .. } => popup.pointer_leave(panel),
-            PointerEventKind::Motion { .. } => popup.pointer_motion(event.position),
-            // Press, not release. The Windows hook fires on
-            // `WM_LBUTTONDOWN`, so the popup also answers when the
-            // button goes down.
-            PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
-                out.extend(popup.pointer_button(event.position));
+            PointerEventKind::Leave { .. } => {
+                if let Some(panel) = panel {
+                    popup.pointer_leave(panel);
+                }
+            }
+            PointerEventKind::Motion { .. } => {
+                if panel.is_some() || popup.pointer_forwards_motion() {
+                    if let Some(interaction) = popup.pointer_move(event.position) {
+                        out.push(interaction);
+                    }
+                }
+            }
+            PointerEventKind::Press { button, .. } => {
+                let Some(button) = button_role(*button) else { continue };
+                if panel.is_some() {
+                    if let Some(interaction) = popup.pointer_press(event.position, button) {
+                        out.push(interaction);
+                    }
+                }
+            }
+            PointerEventKind::Release { button, .. } => {
+                let Some(button) = button_role(*button) else { continue };
+                if panel.is_some() || popup.pointer_forwards_motion() {
+                    if let Some(interaction) = popup.pointer_release(event.position, button) {
+                        out.push(interaction);
+                    }
+                }
             }
             PointerEventKind::Axis { vertical, .. } => {
-                out.extend(popup.pointer_wheel(vertical));
+                if panel.is_some() {
+                    out.extend(popup.pointer_wheel(vertical));
+                }
             }
-            _ => {}
         }
     }
     out
+}
+
+fn button_role(button: u32) -> Option<Button> {
+    match button {
+        BTN_LEFT => Some(Button::Primary),
+        BTN_RIGHT => Some(Button::Secondary),
+        _ => None,
+    }
 }
 
 // ---- the dispatch plumbing ----
@@ -664,6 +763,7 @@ mod tests {
     use super::*;
     use crate::popup::place::{Placement, Shown};
     use chibipop::geom::PhysRect;
+    use chibipop::dict::gloss::{DocAddr, NodePath};
     use chibipop::ui::layout::{AnkiSlot, HitTarget};
 
     fn shown_on(panel: usize) -> Visibility {
@@ -785,6 +885,7 @@ mod tests {
                     connected: true,
                     ..chibipop::present::AnkiPopupState::disabled()
                 }),
+                selection: None,
             },
             &mut FixedMetrics,
         )
@@ -999,24 +1100,65 @@ mod tests {
     }
 
     #[test]
-    fn a_click_carries_the_local_point_whether_or_not_it_hit() {
-        let hits = canned_hits(0, 0.0, 1.5);
+    fn a_press_carries_its_button_hit_and_text() {
         assert_eq!(
-            Interaction::Click {
+            Interaction::Down {
                 local: PhysPoint { x: 30, y: 15 },
+                button: Button::Primary,
                 hit: Some(HitAction::Back),
+                text: None,
             },
-            click(&hits, (20.0, 10.0))
+            press(
+                PhysPoint { x: 30, y: 15 },
+                Button::Primary,
+                Some(Hit::Action(HitAction::Back)),
+                None,
+            )
         );
         // The strip is physical y 200..228, so at 1.5x the pointer
         // reaches it just past logical 133.
         assert_eq!(
             Interaction::Anki { local: PhysPoint { x: 150, y: 205 } },
-            click(&hits, (100.0, 137.0))
+            press(PhysPoint { x: 150, y: 205 }, Button::Primary, Some(Hit::Anki), None)
         );
         assert_eq!(
-            Interaction::Click { local: PhysPoint { x: 435, y: 165 }, hit: None },
-            click(&hits, (290.0, 110.0))
+            Interaction::Down {
+                local: PhysPoint { x: 435, y: 165 },
+                button: Button::Primary,
+                hit: None,
+                text: None,
+            },
+            press(PhysPoint { x: 435, y: 165 }, Button::Primary, None, None)
+        );
+
+        let text = TextAddr {
+            entry: 0,
+            addr: DocAddr { path: NodePath::ROOT, byte: 0 },
+        };
+        let right = press(
+            PhysPoint { x: 30, y: 15 },
+            Button::Secondary,
+            Some(Hit::Action(HitAction::Back)),
+            None,
+        );
+        assert_eq!(
+            Interaction::Down {
+                local: PhysPoint { x: 30, y: 15 },
+                button: Button::Secondary,
+                hit: Some(HitAction::Back),
+                text: None,
+            },
+            right
+        );
+        assert!(!matches!(right, Interaction::Anki { .. }), "secondary presses stay in the popup");
+        assert_eq!(
+            Interaction::Down {
+                local: PhysPoint { x: 30, y: 15 },
+                button: Button::Primary,
+                hit: None,
+                text: Some(text),
+            },
+            press(PhysPoint { x: 30, y: 15 }, Button::Primary, None, Some(text))
         );
     }
 
@@ -1046,6 +1188,7 @@ mod tests {
             content_h: 160.0,
             view_h: 100.0,
             panel_w: None,
+            highlights: Vec::new(),
         };
         let hits = HitScene::of(3, &scene, 24.0, 1.5);
         assert_eq!(3, hits.panel);

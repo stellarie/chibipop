@@ -158,6 +158,18 @@ struct PlainPlan {
     indexes: HashMap<NodePath, usize>,
 }
 
+/// Shared inputs for one selected plain-text tree walk.
+///
+/// Copying this context keeps recursive calls focused on node-specific state.
+#[derive(Clone, Copy)]
+struct PlainWalk<'a> {
+    doc: &'a GlossDoc,
+    plan: &'a PlainPlan,
+    roles: RoleFilter,
+    separator: Separator,
+}
+
+
 fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
     let mut prefix = NodePath::ROOT;
     for &step in addr.path.steps() {
@@ -245,24 +257,26 @@ fn selected_item(
     if doc.node(id).item_type == ItemType::Image {
         return PlainRendered::empty();
     }
+    let walk = PlainWalk { doc, plan, roles, separator };
     if doc.node(id).item_type == ItemType::StructuredContent {
-        return selected_children(doc, id, path, plan, roles, separator, true, path);
+        return selected_children(&walk, id, path, true, path);
     }
-    selected_node(doc, id, path, path, plan, roles, separator, true, false, None)
+    selected_node(&walk, id, path, path, true, false, None)
 }
 
 fn selected_node(
-    doc: &GlossDoc,
+    walk: &PlainWalk<'_>,
     id: NodeId,
     path: NodePath,
     item_path: NodePath,
-    plan: &PlainPlan,
-    roles: RoleFilter,
-    separator: Separator,
     top_level: bool,
     prose: bool,
     number: Option<usize>,
 ) -> PlainRendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let roles = walk.roles;
+    let separator = walk.separator;
     let node = doc.node(id);
     if !roles.allows(node.role) || matches!(node.tag, Tag::Rt | Tag::Rp) {
         return PlainRendered::empty();
@@ -337,16 +351,7 @@ fn selected_node(
         return PlainRendered::empty();
     }
     let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
-    let children = selected_children(
-        doc,
-        id,
-        path,
-        plan,
-        roles,
-        separator,
-        own_container,
-        item_path,
-    );
+    let children = selected_children(walk, id, path, own_container, item_path);
     if children.text.is_empty() {
         return PlainRendered::empty();
     }
@@ -377,15 +382,15 @@ fn selected_node(
 }
 
 fn selected_children(
-    doc: &GlossDoc,
+    walk: &PlainWalk<'_>,
     id: NodeId,
     path: NodePath,
-    plan: &PlainPlan,
-    roles: RoleFilter,
-    separator: Separator,
     container: bool,
     item_path: NodePath,
 ) -> PlainRendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let separator = walk.separator;
     let mut children = Vec::new();
     let mut prose = doc.prose(id);
     for (index, child) in doc.children(id).enumerate() {
@@ -393,9 +398,7 @@ fn selected_children(
         let number = (doc.node(id).tag == Tag::Ol).then_some(
             children.iter().filter(|child: &&PlainRendered| child.boundary).count() + 1,
         );
-        let selected = selected_node(
-            doc, child, child_path, item_path, plan, roles, separator, false, prose, number,
-        );
+        let selected = selected_node(walk, child, child_path, item_path, false, prose, number);
         prose = prose || doc.inline_prose(child);
         if !selected.text.is_empty() {
             children.push(selected);

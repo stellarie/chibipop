@@ -102,6 +102,48 @@ browser does. For example, a bordered `div` that holds three paragraphs draws on
 around all three paragraphs.
 _Avoid_: paragraph box, block_box on a run (a box belongs to the block, not to a line)
 
+### Selection
+
+**Card selection**:
+The ranges that a user selects in one Card. `Selections` stores one `CardSelection` for
+each `all_cards` index.
+_Avoid_: selected text, text selection
+
+**Text address**:
+A position in a Card. It combines an Entry ordinal with a `DocAddr` in document order.
+_Avoid_: screen coordinate, cursor position
+
+**Click chain**:
+A sequence of presses within 500 ms and 4 physical pixels. Each stage selects a grapheme,
+word, Sense, or Entry.
+_Avoid_: multi-click
+
+**Selection highlight**:
+A rectangle that layout derives from selected source bytes. The platform bin paints it with
+the theme `accent`.
+_Avoid_: text marker, selection overlay
+
+**Entry check**:
+The tri-state checkbox for one Entry. It shows None, Partial, or All coverage.
+_Avoid_: selection button, checkbox
+
+### Analysis
+
+**Japanese analysis**:
+The core module that uses Vibrato and the IPADIC model to return Morphemes and Word groups
+for glossary selection.
+_Avoid_: tokenizer, segmentation
+
+**Morpheme**:
+A fine token from Japanese analysis. It stores a text range, surface, lemma, reading,
+inflection, part of speech, and labels.
+_Avoid_: word
+
+**Word group**:
+A range that Japanese analysis builds from morphemes for double-click selection. It can
+include auxiliaries, suffixes, and conjugation chains.
+_Avoid_: token, morpheme
+
 ### Dictionary
 
 **Dictionary**:

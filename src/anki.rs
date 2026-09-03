@@ -1,6 +1,7 @@
 //! This module sends requests to AnkiConnect v6.
 
-use crate::dict::gloss::{render_html, RoleFilter, Selection};
+use crate::dict::gloss::{plain_selected, render_html, RoleFilter, Selection, Separator};
+use crate::select::CardSelection;
 use crate::dict::pitch::marked_morae;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -293,22 +294,19 @@ pub fn fields_from_card(
     card: &crate::present::Card,
     blocks: &[crate::present::GlossBlock],
 ) -> HashMap<String, String> {
-    let expression = card.written.as_deref()
-        .or(card.reading.as_deref())
-        .unwrap_or("")
-        .to_string();
-    let reading = card.reading.as_deref()
-        .unwrap_or("")
-        .to_string();
-    let glossary = blocks.iter()
+    let glossary = blocks
+        .iter()
         .map(plain_dict_group)
         .collect::<Vec<_>>()
         .join("\n\n");
     // A newline has no effect in HTML, so use <li> tags.
     // Build this field here because card mining occurs once. This avoids work during each hover.
-    let glossary_html = blocks.iter()
+    let glossary_html = blocks
+        .iter()
         .map(|b| {
-            let items: String = b.entries.iter()
+            let items: String = b
+                .entries
+                .iter()
                 .flat_map(|e| render_html(&e.doc, Selection::Whole, RoleFilter::CARD))
                 .map(|g| format!("<li>{g}</li>"))
                 .collect();
@@ -319,6 +317,77 @@ pub fn fields_from_card(
         })
         .collect::<Vec<_>>()
         .join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">");
+    fields_with_glossary(card, glossary, glossary_html)
+}
+
+/// Builds field values from the selected ranges of every Entry.
+///
+/// The Controller calls this function only for a non-empty selection. This
+/// guard keeps an empty selection on the existing whole-card path.
+pub fn fields_from_selection(
+    card: &crate::present::Card,
+    selection: &CardSelection,
+    separator: Separator,
+) -> HashMap<String, String> {
+    let mut plain_groups = Vec::new();
+    let mut html_groups = Vec::new();
+    let mut ordinal = 0u32;
+    for block in &card.blocks {
+        let mut plain = Vec::new();
+        let mut html = Vec::new();
+        for entry in &block.entries {
+            let ranges = selection.entry_ranges(ordinal);
+            ordinal += 1;
+            if ranges.is_empty() {
+                continue;
+            }
+            plain.extend(plain_selected(&entry.doc, &ranges, RoleFilter::CARD, separator));
+            html.extend(
+                render_html(
+                    &entry.doc,
+                    Selection::Ranges { ranges: &ranges, separator },
+                    RoleFilter::CARD,
+                )
+                .into_iter()
+                .map(|value| format!("<li>{value}</li>")),
+            );
+        }
+        if !plain.is_empty() {
+            let numbered = plain
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| format!("{}. {value}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            plain_groups.push(format!("[{}]\n{numbered}", block.dict_name));
+        }
+        if !html.is_empty() {
+            html_groups.push(format!(
+                "<b>{}</b><ol style=\"margin:2px 0 2px 20px;padding:0\">{}</ol>",
+                escape_html(&block.dict_name),
+                html.concat()
+            ));
+        }
+    }
+    fields_with_glossary(
+        card,
+        plain_groups.join("\n\n"),
+        html_groups.join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">"),
+    )
+}
+
+fn fields_with_glossary(
+    card: &crate::present::Card,
+    glossary: String,
+    glossary_html: String,
+) -> HashMap<String, String> {
+    let expression = card
+        .written
+        .as_deref()
+        .or(card.reading.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let reading = card.reading.as_deref().unwrap_or("").to_string();
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
@@ -464,6 +533,44 @@ mod tests {
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
+    }
+
+    #[test]
+    fn fields_from_selection_keeps_only_the_second_sense() {
+        let block = block(
+            "Jitendex",
+            json!([{
+                "tag": "ol",
+                "content": [
+                    {"tag": "li", "content": "first sense"},
+                    {"tag": "li", "content": "second sense"}
+                ]
+            }]),
+        );
+        let mut selected_card = card(Some("猫"), Some("ねこ"), None);
+        selected_card.blocks = vec![block];
+        let entry = &selected_card.blocks[0].entries[0];
+        let leaves = crate::dict::gloss::leaves(&entry.doc, RoleFilter::CARD);
+        let second = leaves[1];
+        let sense = crate::dict::gloss::sense_range(
+            &entry.doc,
+            RoleFilter::CARD,
+            crate::dict::gloss::DocAddr { path: second.path, byte: 0 },
+        )
+        .expect("second sense");
+        let mut selection = CardSelection::default();
+        selection.replace(crate::select::SelRange {
+            start: crate::select::TextAddr { entry: 0, addr: sense.start },
+            end: crate::select::TextAddr { entry: 0, addr: sense.end },
+        });
+
+        let fields = fields_from_selection(&selected_card, &selection, Separator::Ellipsis);
+        let plain = fields.get("glossary").expect("plain selection");
+        let html = fields.get("glossary_html").expect("html selection");
+        assert!(plain.contains("second sense"), "{plain}");
+        assert!(!plain.contains("first sense"), "{plain}");
+        assert!(html.contains("second sense"), "{html}");
+        assert!(!html.contains("first sense"), "{html}");
     }
 
     #[test]

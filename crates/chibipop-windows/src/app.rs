@@ -1,10 +1,11 @@
-//! The Windows platform bin uses two threads: a pump thread and a worker thread.
+//! The Windows platform bin uses a pump thread, a Worker thread, and an analysis thread.
 
 use crate::anki;
-use crate::config::{resolve_engine, Config, EngineChoice};
+use crate::config::{resolve_engine, Config, EngineChoice, SelectionButtons, SelectionSeparator};
 use crate::controller::{
-    Command, Controller, ControllerConfig, Event, PopupView, RequestId, TrayAction,
+    Button, Command, Controller, ControllerConfig, Event, PopupView, RequestId, TrayAction,
 };
+use chibipop::select::TextAddr;
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
 use crate::input::hooks::Hooks;
 use crate::library::{Library, Pending, Role, Roles};
@@ -77,6 +78,9 @@ const WM_APP_SAVED: u32 = WM_APP + 9;
 
 /// The screenshot worker posts this message after it finishes.
 const WM_APP_SCREENSHOT_DONE: u32 = WM_APP + 11;
+
+/// The analysis service posts this message after it pushes a result.
+const WM_APP_ANALYSIS: u32 = WM_APP + 12;
 /// The interval for the cursor poll, in milliseconds.
 const DISPATCH_TICK_MS: u32 = 20;
 
@@ -1182,6 +1186,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             let _ = PostThreadMessageW(main_tid, WM_APP_RESULT, WPARAM(0), LPARAM(0));
         },
     )?;
+    // The analysis service loads the bundled model only when the first Card needs it.
+    let analysis_service = chibipop::analysis::Service::spawn(
+        crate::paths::data_file(chibipop::analysis::MODEL_FILE),
+        move || unsafe {
+            let _ = PostThreadMessageW(main_tid, WM_APP_ANALYSIS, WPARAM(0), LPARAM(0));
+        },
+    );
     // Queue the pixels and wake the Worker in one operation.
     // The Worker waits for jobs instead of repeated checks.
     let ocr_jobs = crate::action::OcrJobs::new(ocr_tx, worker.serve_nudge());
@@ -1358,6 +1369,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut pending_shot: Option<PendingShot> = None;
     // Track each key edge.
     let mut trigger_was_held = false;
+    // Track popup pointer edges and the latest drag point.
+    let mut pointer_buttons = 0u8;
+    let mut last_pointer: Option<PhysPoint> = None;
+    let mut last_pointer_text = None;
     // Visibility of the static overlay.
     let sr_prev_visible = std::cell::Cell::new(false);
     let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
@@ -1490,6 +1505,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     want_settings: &mut want_settings,
                     pending_shot: &mut pending_shot,
                     dupe_cache: &dupe_cache,
+                    analysis: &analysis_service,
+                    pointer_buttons: &mut pointer_buttons,
+                    last_pointer: &mut last_pointer,
+                    last_pointer_text: &mut last_pointer_text,
                 },
             )
         };
@@ -1598,18 +1617,61 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 drive!(Event::Scrolled { notches });
             }
 
-            if let Some(click) = Hooks::take_click() {
-                // The platform bin does hit-tests because it owns the painted layout.
-                let local_hit = controller.popup().map(|view| {
-                    let local = PhysPoint {
-                        x: click.x - view.popup.x,
-                        y: click.y - view.popup.y,
-                    };
-                    (local, renderer.hit_test(local.x, local.y, view.scroll))
-                });
-                if let Some((local, hit)) = local_hit {
-                    drive!(Event::Clicked { local, hit });
+            let mut pointer_move = Hooks::take_pointer_move();
+            for edge in Hooks::take_pointer_events() {
+                let (button, bit) = match edge.button {
+                    crate::input::hooks::PointerButton::Left => (Button::Primary, 1u8),
+                    crate::input::hooks::PointerButton::Right => (Button::Secondary, 2u8),
+                };
+                if edge.down {
+                    pointer_buttons |= bit;
+                    if let Some((local, scroll)) = popup_local(&controller, edge.point) {
+                        if anki_button_hit(&controller, anki_button.as_ref(), edge.point) {
+                            if button == Button::Primary {
+                                drive!(Event::AddRequested);
+                            }
+                            continue;
+                        }
+                        let hit = renderer.hit_test(local.x, local.y, scroll);
+                        let text = popup_text_hit(&mut renderer, local, scroll);
+                        last_pointer = Some(local);
+                        last_pointer_text = text;
+                        drive!(Event::PointerDown { local, button, hit, text });
+                    }
+                } else {
+                    if pointer_buttons != 0 {
+                        if let Some(point) = pointer_move.take() {
+                            if let Some((local, scroll)) = popup_local(&controller, point) {
+                                let text = popup_text_hit(&mut renderer, local, scroll);
+                                last_pointer = Some(local);
+                                last_pointer_text = text;
+                                drive!(Event::PointerMoved { local, text });
+                            }
+                        }
+                    }
+                    pointer_buttons &= !bit;
+                    let local = popup_local(&controller, edge.point)
+                        .map(|(local, _)| local)
+                        .or(last_pointer);
+                    if let Some(local) = local {
+                        drive!(Event::PointerUp { local, button });
+                    }
                 }
+            }
+            if pointer_buttons != 0 {
+                if let Some(point) = pointer_move {
+                    if let Some((local, scroll)) = popup_local(&controller, point) {
+                        let text = popup_text_hit(&mut renderer, local, scroll);
+                        last_pointer = Some(local);
+                        last_pointer_text = text;
+                        drive!(Event::PointerMoved { local, text });
+                    }
+                }
+            }
+            if controller.popup().is_none() {
+                pointer_buttons = 0;
+                last_pointer = None;
+                last_pointer_text = None;
             }
 
             // Use direct WM_LBUTTONDOWN as a fallback.
@@ -1754,14 +1816,28 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
                     theme = theme_from_config(&live.popup);
                     if let Some(v) = controller.popup() {
-                        let _ = renderer.paint(
+                        let selection = controller.selection();
+                        let scroll = v.scroll;
+                        let painted = renderer.paint(
                             v.presentation,
                             &theme,
-                            v.scroll,
+                            scroll,
                             v.show_back,
                             live.side_panel,
                             live.popup.render_settings(),
+                            selection,
                         );
+                        // The view borrow ends here. A drag re-resolves the
+                        // pointer against the repainted scene.
+                        if painted.is_ok() && pointer_buttons != 0 {
+                            if let Some(local) = last_pointer {
+                                let text = popup_text_hit(&mut renderer, local, scroll);
+                                if text != last_pointer_text {
+                                    last_pointer_text = text;
+                                    drive!(Event::PointerMoved { local, text });
+                                }
+                            }
+                        }
                     }
                 }
                 if !ed.is_visible() {
@@ -1986,6 +2062,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     id: result.id,
                     outcome: result.outcome
                 });
+            }
+        } else if msg.message == WM_APP_ANALYSIS {
+            while let Ok((generation, words)) = analysis_service.results().try_recv() {
+                drive!(Event::AnalysisReady { generation, words });
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
@@ -2230,6 +2310,7 @@ fn show_presentation(
     show_back: bool,
     side_panel: bool,
     render: chibipop::ui::layout::RenderSettings,
+    selection: Option<&chibipop::select::Selections>,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
@@ -2237,13 +2318,29 @@ fn show_presentation(
 
     // Use `view_h` below, not `content_h`.
     let (w, view_h, content_h) = renderer
-        .measure(presentation, theme, (max_w, max_h), show_back, side_panel, render)
+        .measure(
+            presentation,
+            theme,
+            (max_w, max_h),
+            show_back,
+            side_panel,
+            render,
+            selection,
+        )
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
     renderer
-        .paint(presentation, theme, scroll, show_back, side_panel, render)
+        .paint(
+            presentation,
+            theme,
+            scroll,
+            show_back,
+            side_panel,
+            render,
+            selection,
+        )
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
@@ -2336,6 +2433,45 @@ fn cursor_now() -> PhysPoint {
     }
     PhysPoint { x: pt.x, y: pt.y }
 }
+/// Convert a screen point into popup-local physical coordinates.
+fn popup_local(controller: &Controller, screen: PhysPoint) -> Option<(PhysPoint, i32)> {
+    let view = controller.popup()?;
+    Some((
+        PhysPoint {
+            x: screen.x - view.popup.x,
+            y: screen.y - view.popup.y,
+        },
+        view.scroll,
+    ))
+}
+
+/// Hit-test the cached popup scene without turning measurement errors into input failures.
+fn popup_text_hit(renderer: &mut Renderer, local: PhysPoint, scroll: i32) -> Option<TextAddr> {
+    match renderer.text_hit(local, scroll) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("chibipop: popup text hit failed: {e}");
+            None
+        }
+    }
+}
+/// Returns whether a screen point is inside the separate Anki button.
+fn anki_button_hit(
+    controller: &Controller,
+    button: Option<&AnkiButton>,
+    screen: PhysPoint,
+) -> bool {
+    let Some(button) = button.filter(|b| b.is_visible()) else {
+        return false;
+    };
+    let Some(view) = controller.popup() else {
+        return false;
+    };
+    screen.x >= view.popup.x
+        && screen.x < view.popup.x + view.popup.w
+        && screen.y >= view.popup.y + view.popup.h
+        && screen.y < view.popup.y + view.popup.h + button.height_phys()
+}
 
 /// Returns the monitor that contains the anchor.
 fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
@@ -2405,6 +2541,10 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
         summary_chars: live.summary_chars,
         log_lookups: live.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
+        roles: live.popup.render_settings().roles,
+        edge_autoscroll: live.popup.edge_autoscroll,
+        primary_additive: live.selection_buttons == SelectionButtons::PrimaryAdditive,
+        separator: live.selection_separator.into(),
     }
 }
 
@@ -2443,6 +2583,12 @@ struct Exec<'a> {
     pending_shot: &'a mut Option<PendingShot>,
     /// This cache is read-only here. The pump owns all writes.
     dupe_cache: &'a HashMap<String, bool>,
+    /// The Japanese analysis service lives beside the Worker for the process lifetime.
+    analysis: &'a chibipop::analysis::Service,
+    /// Button bits and the last local point let repaint feedback keep a drag alive.
+    pointer_buttons: &'a mut u8,
+    last_pointer: &'a mut Option<PhysPoint>,
+    last_pointer_text: &'a mut Option<TextAddr>,
 }
 
 /// Drives one Event until the state machine has no more work.
@@ -2496,6 +2642,10 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             });
             None
         }
+        Command::RequestAnalysis { generation, texts } => {
+            x.analysis.request(generation, texts);
+            None
+        }
         Command::ShowPopup {
             presentation,
             anchor,
@@ -2514,6 +2664,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 show_back,
                 x.live.side_panel,
                 x.live.popup.render_settings(),
+                controller.selection(),
             ) {
                 Ok((rect, content_h, view_h)) => Some(Event::PopupPlaced {
                     rect,
@@ -2527,20 +2678,35 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             }
         }
         Command::RepaintPopup { scroll, show_back } => {
+            let mut feedback = None;
             if let Some(view) = controller.popup() {
-                let painted = x.renderer.paint(
+                let selection = controller.selection();
+                match x.renderer.paint(
                     view.presentation,
                     x.theme,
                     scroll,
                     show_back,
                     x.live.side_panel,
                     x.live.popup.render_settings(),
-                );
-                if let Err(e) = painted {
-                    eprintln!("chibipop: repainting the popup failed: {e:#}");
+                    selection,
+                ) {
+                    Ok(()) => {
+                        if *x.pointer_buttons != 0 {
+                            if let Some(local) = *x.last_pointer {
+                                let text = popup_text_hit(x.renderer, local, scroll);
+                                if text != *x.last_pointer_text {
+                                    *x.last_pointer_text = text;
+                                    feedback = Some(Event::PointerMoved { local, text });
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("chibipop: repainting the popup failed: {e:#}");
+                    }
                 }
             }
-            None
+            feedback
         }
         Command::HidePopup => {
             let _ = x.popup.hide();
@@ -2569,7 +2735,18 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::SetClickArmed(armed) => {
-            Hooks::set_click_armed(armed);
+            // Keep the low-level hook armed through a captured drag outside
+            // the popup. The release clears `pointer_buttons` before this
+            // command runs.
+            Hooks::set_click_armed(armed || *x.pointer_buttons != 0);
+            None
+        }
+        Command::SetDragging(dragging) => {
+            if dragging {
+                x.popup.capture_pointer();
+            } else {
+                x.popup.release_pointer();
+            }
             None
         }
         Command::SetAddArmed(armed) => {
@@ -2776,6 +2953,8 @@ struct LiveSettings {
     actions_screenshot_hotkey: String,
     actions_ocr_clipboard_hotkey: Option<String>,
     first_dict_only: bool,
+    selection_buttons: SelectionButtons,
+    selection_separator: SelectionSeparator,
 }
 
 impl LiveSettings {
@@ -2851,6 +3030,8 @@ fn derive(cfg: &Config) -> LiveSettings {
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
         first_dict_only: cfg.anki.first_dict_only,
+        selection_buttons: cfg.anki.selection_buttons,
+        selection_separator: cfg.anki.selection_separator,
     }
 }
 

@@ -144,6 +144,7 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
         spec.show_back,
         spec.side_panel,
         RenderSettings::default(),
+        None,
     )?;
     let (total_w, view_h, content_h) = popup_size(&scene, scale, spec.max_w);
 

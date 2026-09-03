@@ -166,6 +166,11 @@ pub(crate) struct App {
     /// The state covers an absent capture protocol, OCR models, or portal consent.
     /// The daemon still runs and reports the cause.
     worker: Option<Worker>,
+    /// Japanese word-boundary analysis for the shown Card.
+    ///
+    /// The service loads its model lazily and uses the Worker wake source,
+    /// so analysis never blocks the calloop pump.
+    analysis: chibipop::analysis::Service,
     /// Data that a spawn needs. A granted portal retry gives a new session to a
     /// new pipeline from this data.
     worker_setup: worker::Setup,
@@ -640,6 +645,26 @@ impl App {
     /// assumptions.
     pub(crate) fn popup_can_draw(&self) -> bool {
         self.popup.as_ref().is_some_and(Popup::available)
+    }
+
+    /// Return the selection state that the popup may render.
+    ///
+    /// The layout must receive no selection when Anki is disabled, even if
+    /// an old Controller surface still has selection data.
+    fn popup_selection(&self) -> Option<chibipop::select::Selections> {
+        if self.config.anki.enabled {
+            self.controller.selection().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Re-run text hit testing after a drag repaint.
+    fn refresh_drag_text(&mut self) {
+        let interaction = self.popup.as_mut().and_then(Popup::drag_move);
+        if let Some(interaction) = interaction {
+            self.pointer_interactions(vec![interaction]);
+        }
     }
 
     /// Move popup diagnostics into the log. The popup owns no log, so this
@@ -1127,7 +1152,11 @@ impl App {
         let Some(req) = self.popup.as_ref().and_then(Popup::request).cloned() else {
             return;
         };
-        self.show_popup(&ShowRequest { anki: self.controller.anki().cloned(), ..req });
+        self.show_popup(&ShowRequest {
+            anki: self.controller.anki().cloned(),
+            selection: self.popup_selection(),
+            ..req
+        });
     }
 
     // ---- OCR to clipboard ----
@@ -1367,6 +1396,7 @@ impl App {
             self.flush_popup_notes();
             // A resize paints here instead of in `show`, so a scripted pointer
             // pass finds its frame here.
+            self.refresh_drag_text();
             self.run_pointer_script();
         }
     }
@@ -1410,6 +1440,7 @@ impl App {
         }
         self.popup_mut().frame_done(surface);
         self.flush_popup_notes();
+        self.refresh_drag_text();
         self.run_pointer_script();
     }
 
@@ -1448,7 +1479,10 @@ impl App {
         let outcome = self.popup.as_mut().map(Popup::reshow);
         self.flush_popup_notes();
         match outcome {
-            Some(Ok(Some(placed))) => self.placed(placed),
+            Some(Ok(Some(placed))) => {
+                self.placed(placed);
+                self.refresh_drag_text();
+            }
             Some(Err(e)) => self.log.diag(&format!("popup: re-render failed: {e:#}")),
             _ => {}
         }
@@ -1456,8 +1490,8 @@ impl App {
 
     /// Popup-local pointer input becomes Controller Events.
     ///
-    /// Wayland has no global wheel or click channel.
-    /// These Events come only from the popup input region.
+    /// Wayland has no global wheel or pointer channel. These Events come only
+    /// from the popup input region or its implicit pointer grab.
     pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
         for interaction in interactions {
             match interaction {
@@ -1465,9 +1499,9 @@ impl App {
                     self.log.diag(&format!("pointer: wheel {notches:+} notch(es) over the panel"));
                     self.feed(Event::Scrolled { notches });
                 }
-                popup::Interaction::Click { local, hit } => {
+                popup::Interaction::Down { local, button, hit, text } => {
                     self.log.diag(&format!(
-                        "pointer: click at panel {},{} -> {}",
+                        "pointer: {button:?} down at {},{} -> {}",
                         local.x,
                         local.y,
                         match &hit {
@@ -1475,13 +1509,19 @@ impl App {
                             None => "no target".to_string(),
                         }
                     ));
-                    self.feed(Event::Clicked { local, hit });
+                    self.feed(Event::PointerDown { local, button, hit, text });
+                }
+                popup::Interaction::Move { local, text } => {
+                    self.feed(Event::PointerMoved { local, text });
+                }
+                popup::Interaction::Up { local, button } => {
+                    self.feed(Event::PointerUp { local, button });
                 }
                 // Core reserves the slot and the painter fills it.
-                // The Controller decides whether the click becomes an add.
+                // The Controller decides whether the press becomes an add.
                 popup::Interaction::Anki { local } => {
                     self.log.diag(&format!(
-                        "pointer: click at panel {},{} -> the Anki slot",
+                        "pointer: primary down at panel {},{} -> the Anki slot",
                         local.x, local.y
                     ));
                     self.feed(Event::AddRequested);
@@ -1521,37 +1561,43 @@ impl App {
         if self.popup.is_none() {
             return;
         }
-        let interaction = match step {
+        let mut interactions = Vec::new();
+        match step {
             popup::Step::Enter(x, y) => {
                 self.log.diag(&format!("pointer: script enter at {x},{y} logical"));
                 self.popup_mut().pointer_enter(panel, (x, y), None);
-                None
             }
             popup::Step::Motion(x, y) => {
                 self.popup_mut().pointer_motion((x, y));
                 let at = self.popup_mut().hit_at((x, y));
                 self.log.diag(&format!("pointer: script motion at {x},{y} logical -> {at}"));
-                None
             }
             popup::Step::Click(x, y) => {
                 self.log.diag(&format!("pointer: script click at {x},{y} logical"));
-                self.popup_mut().pointer_button((x, y))
+                if let Some(interaction) = self.popup_mut().pointer_button((x, y)) {
+                    interactions.push(interaction);
+                }
+                if let Some(interaction) =
+                    self.popup_mut().pointer_release((x, y), chibipop::controller::Button::Primary)
+                {
+                    interactions.push(interaction);
+                }
             }
             popup::Step::Wheel(value120) => {
                 self.log.diag(&format!("pointer: script wheel value120 {value120}"));
-                self.popup_mut().pointer_wheel_120(value120)
+                if let Some(interaction) = self.popup_mut().pointer_wheel_120(value120) {
+                    interactions.push(interaction);
+                }
             }
             popup::Step::Leave => {
                 self.popup_mut().pointer_leave(panel);
-                None
             }
             popup::Step::Dump => {
                 self.popup_mut().dump_hits();
-                None
             }
-        };
+        }
         self.flush_popup_notes();
-        self.pointer_interactions(interaction.into_iter().collect());
+        self.pointer_interactions(interactions);
     }
 
     /// Send one Event through the Controller and run each Command it returns.
@@ -1652,18 +1698,29 @@ impl App {
                     // The slot is part of the panel, not a separate Windows
                     // window. Every raster carries its state.
                     anki: self.controller.anki().cloned(),
+                    selection: self.popup_selection(),
                 });
             }
             Command::RepaintPopup { scroll, show_back } => {
                 let anki = self.controller.anki().cloned();
+                let selection = self.popup_selection();
                 let req = self.popup.as_ref().and_then(Popup::request).map(|req| ShowRequest {
                     scroll,
                     show_back,
                     anki,
+                    selection,
                     ..req.clone()
                 });
                 if let Some(req) = req {
                     self.show_popup(&req);
+                }
+            }
+            Command::RequestAnalysis { generation, texts } => {
+                self.analysis.request(generation, texts);
+            }
+            Command::SetDragging(dragging) => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.set_dragging(dragging);
                 }
             }
             // A glossary citation uses desktop `xdg-open` to choose a browser.
@@ -1741,9 +1798,9 @@ impl App {
         }
     }
 
-    /// The Worker answered. Only the freshest queued result matters:
-    /// the older ones were superseded before they arrived (latest-wins,
-    /// as on Windows).
+    /// Drain the Worker and Japanese analysis results. Only the freshest queued
+    /// result from each service matters because newer requests supersede older
+    /// requests before they reach the event loop.
     fn drain_results(&mut self) {
         let mut freshest = None;
         if let Some(worker) = self.worker.as_ref() {
@@ -1751,8 +1808,15 @@ impl App {
                 freshest = Some(result);
             }
         }
+        let mut freshest_analysis = None;
+        while let Ok(result) = self.analysis.results().try_recv() {
+            freshest_analysis = Some(result);
+        }
         if let Some(result) = freshest {
             self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
+        }
+        if let Some((generation, words)) = freshest_analysis {
+            self.feed(Event::AnalysisReady { generation, words });
         }
     }
 
@@ -1860,7 +1924,11 @@ impl App {
         let Some(req) = req.filter(|req| req.anki.as_ref() != Some(&want)).cloned() else {
             return;
         };
-        self.show_popup(&ShowRequest { anki: Some(want), ..req });
+        self.show_popup(&ShowRequest {
+            anki: Some(want),
+            selection: self.popup_selection(),
+            ..req
+        });
     }
 
     /// Measure, place, raster, and commit. Then tell the Controller where the
@@ -1891,6 +1959,7 @@ impl App {
                 self.placed(placed);
                 // A same-size show rasters at once, so the scripted pass
                 // already has its frame.
+                self.refresh_drag_text();
                 self.run_pointer_script();
             }
             Err(e) => {
@@ -1986,6 +2055,7 @@ impl App {
                 connected: true,
                 ..chibipop::present::AnkiPopupState::disabled()
             }),
+            selection: self.popup_selection(),
         });
     }
 
@@ -2338,6 +2408,11 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         summary_chars: config.popup.summary_chars,
         log_lookups: config.debug.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
+        roles: config.popup.render_settings().roles,
+        edge_autoscroll: config.popup.edge_autoscroll,
+        primary_additive: config.anki.selection_buttons
+            == chibipop::config::SelectionButtons::PrimaryAdditive,
+        separator: config.anki.selection_separator.into(),
     }
 }
 
@@ -2814,6 +2889,13 @@ pub fn run(paths: Paths) -> Result<()> {
     // The pump stays sync.
     let (worker_ping, worker_pings) =
         calloop::ping::make_ping().context("creating the worker wake")?;
+    let analysis = chibipop::analysis::Service::spawn(
+        chibipop::paths::data_file(chibipop::analysis::MODEL_FILE),
+        {
+            let ping = worker_ping.clone();
+            move || ping.ping()
+        },
+    );
 
     // AnkiConnect answers come from the call threads.
     // Selected-region pixels come from the grab thread.
@@ -2869,6 +2951,7 @@ pub fn run(paths: Paths) -> Result<()> {
         settings: SettingsChild::new(),
         tray: tray_handle,
         worker: None,
+        analysis,
         worker_setup: worker::Setup {
             globals: globals.clone(),
             backend: capture_selection.backend(),
@@ -3218,6 +3301,10 @@ mod tests {
     ) -> App {
         let capture = capture_backend::Selection::Backend(Backend::WlrScreencopy);
         let (worker_ping, _pings) = calloop::ping::make_ping().unwrap();
+        let analysis = chibipop::analysis::Service::spawn(
+            dir.join("missing-analysis-model"),
+            || {},
+        );
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
@@ -3252,6 +3339,7 @@ mod tests {
                 tray::status::popup_state(true),
             )),
             worker: None,
+            analysis,
             worker_setup: worker::Setup {
                 globals: Vec::new(),
                 backend: Some(Backend::WlrScreencopy),

@@ -30,7 +30,7 @@
 use crate::popup::{DrawRun, PanelText, PANEL_ALPHA};
 use chibipop::ui::layout::StyledSpan;
 use chibipop::ui::layout::{Align, ElemBox, ElemKind, Measured, MeasureRun};
-use chibipop::ui::layout::{PopupScene, Rgb, SceneElem, SceneImage, SceneRect};
+use chibipop::ui::layout::{HIGHLIGHT_ALPHA, PopupScene, Rgb, SceneElem, SceneImage, SceneRect};
 use chibipop::ui::theme::{Theme, SCROLLBAR_W};
 // The decoded-surface cache sits beside the other popup code on disk.
 // The library entry point declares it instead of `popup/mod.rs`, so its tests can
@@ -90,10 +90,31 @@ pub fn panel(
         target.stroke_path(&edge, &solid(theme.border), &stroke, Transform::identity(), None);
     }
 
-    // 4. Draw elements in scene order with scroll applied.
+    // 4. Draw selection highlights under every element.
+    // The scene stores these boxes in unscrolled panel space. Clip them to
+    // the body view so a scrolled highlight cannot paint the Anki strip.
+    for highlight in &scene.highlights {
+        let y = highlight.y - p.scroll;
+        let top = y.max(0.0);
+        let bottom = (y + highlight.h).min(scene.view_h);
+        if bottom > top {
+            fill_alpha(
+                target,
+                highlight.x,
+                top,
+                highlight.w,
+                bottom - top,
+                theme.accent,
+                HIGHLIGHT_ALPHA,
+            );
+        }
+    }
+
+    // 5. Draw elements in scene order with scroll applied.
     // Core already culls off-panel runs.
     // One paragraph remains one run despite its styles, so the painter uses the wrap
     // that the scene measured (ARCHITECTURE.md#popup-and-measurement).
+
     let mut spans: Vec<StyledSpan<'_>> = Vec::new();
     let mut shifts: Vec<f32> = Vec::new();
     for painted in scene.visible(p.scroll, scene.view_h) {
@@ -346,6 +367,35 @@ fn fill(target: &mut PixmapMut<'_>, x: f32, y: f32, w: f32, h: f32, color: Rgb) 
     }
     let Some(rect) = Rect::from_xywh(x, y, w, h) else { return };
     target.fill_rect(rect, &solid(color), Transform::identity(), None);
+}
+
+/// Creates paint with one source alpha.
+fn translucent((r, g, b): Rgb, alpha: f32) -> Paint<'static> {
+    let color = Color::from_rgba(
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+        alpha.clamp(0.0, 1.0),
+    )
+    .expect("the highlight alpha is finite");
+    Paint { shader: Shader::SolidColor(color), ..Paint::default() }
+}
+
+/// Fills one translucent box, or returns when its dimensions are degenerate.
+fn fill_alpha(
+    target: &mut PixmapMut<'_>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: Rgb,
+    alpha: f32,
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let Some(rect) = Rect::from_xywh(x, y, w, h) else { return };
+    target.fill_rect(rect, &translucent(color, alpha), Transform::identity(), None);
 }
 
 /// This constant stores the cubic handle length for a circular-arc approximation with radius 1.
@@ -726,6 +776,7 @@ mod tests {
             inline_boxes: Vec::new(),
             origin: None,
             image: None,
+            sources: Vec::new(),
         }
     }
 
@@ -742,6 +793,7 @@ mod tests {
             content_h: 100.0,
             view_h: 100.0,
             panel_w: None,
+            highlights: Vec::new(),
         }
     }
 
@@ -762,7 +814,23 @@ mod tests {
         assert_eq!(faded_red(theme.background), centre.red());
 
         let corner = pix.pixel(0, 0).unwrap();
+
         assert_eq!(0, corner.alpha(), "outside the corner radius nothing is drawn at all");
+    }
+    #[test]
+    fn selection_highlight_fills_the_scene_box_with_the_theme_accent() {
+        let theme = Theme::dark();
+        let mut scene = plain_scene();
+        scene.highlights.push(SceneRect { x: 48.0, y: 40.0, w: 24.0, h: 12.0 });
+        let mut pix = Pixmap::new(200, 100).unwrap();
+        let mut text = Fake::default();
+        panel(&painter(&scene, &theme, 0.0, 1.0), &mut text, None, &mut pix.as_mut());
+
+        let highlighted = pix.pixel(54, 46).unwrap();
+        let background = pix.pixel(150, 46).unwrap();
+        assert!(highlighted.alpha() >= background.alpha());
+        assert!(highlighted.red() > background.red(), "{highlighted:?} vs {background:?}");
+        assert!(highlighted.blue() > background.blue(), "{highlighted:?} vs {background:?}");
     }
 
     #[test]
@@ -974,6 +1042,7 @@ mod tests {
                 side_panel: false,
                 render: chibipop::ui::layout::RenderSettings::default(),
                 anki: None,
+                selection: None,
             },
             &mut text,
         )

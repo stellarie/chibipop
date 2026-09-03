@@ -21,16 +21,19 @@
 //! click resolves against.
 
 use super::place::{self, Placement, Screen, Shown, Visibility};
-use super::pointer::{self, HitScene, InputRegion, Interaction, Pointer, Step};
+use super::pointer::{self, Hit, HitScene, InputRegion, Interaction, Pointer, Step};
 use super::{paint, physical_theme, text::TextEngine};
 use crate::cursor::outputs::OutputGeometry;
 use crate::daemon::App;
 use anyhow::{anyhow, Context, Result};
 use chibipop::config::{Config, PopupLayer};
+use chibipop::geom::PhysPoint;
 use chibipop::geom::PhysRect;
+use chibipop::controller::Button;
 use chibipop::present::{AnkiPopupState, Presentation};
-use chibipop::ui::layout::{self, PopupScene, SceneRequest};
+use chibipop::select::{Selections, TextAddr};
 use chibipop::ui::theme::Theme;
+use chibipop::ui::layout::{self, PopupScene, SceneRequest};
 use smithay_client_toolkit::compositor::{
     CompositorHandler, CompositorState, FrameCallbackData, Region, SurfaceData,
 };
@@ -103,6 +106,11 @@ pub struct ShowRequest {
     /// `Some` reserves the Anki slot. Linux paints the slot in the
     /// panel.
     pub anki: Option<AnkiPopupState>,
+    /// The Controller's selection state for the shown surface.
+    ///
+    /// The request owns a copy because the popup can repaint after the
+    /// Controller returns and because the current request survives reshow.
+    pub selection: Option<Selections>,
 }
 
 /// What one show produced.
@@ -231,6 +239,15 @@ pub struct Popup {
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
+    /// The latest painted scene, used for text hit testing.
+    ///
+    /// `current` is only the unmeasured request. The scene carries source
+    /// spans, so the popup retains it beside the hit frame.
+    scene: Option<PopupScene>,
+    /// Whether the Controller has an active selection drag.
+    dragging: bool,
+    /// Text address sent with the last pointer interaction.
+    last_text: Option<TextAddr>,
     /// The seat's pointer, and where the pointer is. Wayland has no
     /// machine-wide mouse hook, so this field holds the whole input
     /// state of the popup (ARCHITECTURE.md#input-ladders).
@@ -367,6 +384,9 @@ impl Popup {
             render: config.popup.render_settings(),
             vis: Visibility::Hidden,
             current: None,
+            scene: None,
+            dragging: false,
+            last_text: None,
             pointer,
             hits: None,
             notes,
@@ -558,14 +578,115 @@ impl Popup {
         self.hover();
     }
 
-    /// A left press on the panel, resolved against the frame on screen.
-    pub fn pointer_button(&mut self, pos: (f64, f64)) -> Option<Interaction> {
+    /// Resolve a button press against the frame on screen.
+    pub fn pointer_press(&mut self, pos: (f64, f64), button: Button) -> Option<Interaction> {
         self.pointer.motion(pos);
-        let hits = self.hits.as_ref()?;
-        if self.pointer.focus()?.panel != hits.panel {
+        let (local, hit) = {
+            let hits = self.hits.as_ref()?;
+            if self.pointer.focus()?.panel != hits.panel {
+                return None;
+            }
+            let local = hits.local(pos);
+            (local, hits.hit(local))
+        };
+        self.pointer.button_down(button);
+        let text = if matches!(&hit, Some(Hit::Anki)) { None } else { self.text_hit(local) };
+        self.last_text = text;
+        Some(pointer::press(local, button, hit, text))
+    }
+
+    /// Resolve a button release against the frame on screen.
+    pub fn pointer_release(&mut self, pos: (f64, f64), button: Button) -> Option<Interaction> {
+        self.pointer.motion(pos);
+        let held = self.pointer.button_up(button);
+        if !held {
             return None;
         }
-        Some(pointer::click(hits, pos))
+        let local = {
+            let hits = self.hits.as_ref()?;
+            if self.pointer.focus()?.panel != hits.panel {
+                return None;
+            }
+            hits.local(pos)
+        };
+        self.last_text = None;
+        Some(Interaction::Up { local, button })
+    }
+
+    /// Resolve a motion while a button is held or a drag is active.
+    pub fn pointer_move(&mut self, pos: (f64, f64)) -> Option<Interaction> {
+        self.pointer.motion(pos);
+        self.hover();
+        if !self.pointer.forwards_motion() {
+            return None;
+        }
+        let local = {
+            let hits = self.hits.as_ref()?;
+            if self.pointer.focus()?.panel != hits.panel {
+                return None;
+            }
+            hits.local(pos)
+        };
+        let text = self.text_hit(local);
+        self.last_text = text;
+        Some(Interaction::Move { local, text })
+    }
+
+    /// Resolve the current pointer against the latest painted scene.
+    pub fn drag_move(&mut self) -> Option<Interaction> {
+        if !self.dragging {
+            return None;
+        }
+        let pos = self.pointer.focus()?.pos;
+        let local = {
+            let hits = self.hits.as_ref()?;
+            if self.pointer.focus()?.panel != hits.panel {
+                return None;
+            }
+            hits.local(pos)
+        };
+        let text = self.text_hit(local);
+        if self.last_text == text {
+            return None;
+        }
+        self.last_text = text;
+        Some(Interaction::Move { local, text })
+    }
+
+    /// Tell the pointer that the Controller started or ended a selection drag.
+    pub fn set_dragging(&mut self, dragging: bool) {
+        self.dragging = dragging;
+        self.pointer.set_dragging(dragging);
+        if !dragging {
+            self.last_text = None;
+        }
+    }
+
+    pub fn pointer_forwards_motion(&self) -> bool {
+        self.pointer.forwards_motion()
+    }
+
+    /// Resolve one panel-local physical point to a gloss address.
+    ///
+    /// The surface keeps the scene and the text engine together, so the
+    /// pointer never measures a scene from a different repaint.
+    pub fn text_hit(&mut self, local: PhysPoint) -> Option<TextAddr> {
+        let scroll = self.hits.as_ref()?.scroll;
+        let scene = self.scene.as_ref()?;
+        scene
+            .text_hit(
+                (local.x as f32, local.y as f32),
+                scroll,
+                &self.theme.font_name,
+                &mut self.text,
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// The scripted path's primary-button press.
+    pub fn pointer_button(&mut self, pos: (f64, f64)) -> Option<Interaction> {
+        self.pointer_press(pos, Button::Primary)
     }
 
     /// A wheel frame over the panel.
@@ -864,6 +985,7 @@ impl Popup {
                 side_panel: self.side_panel,
                 render: self.render,
                 anki,
+                selection: req.selection.as_ref(),
             },
             &mut self.text,
         )
@@ -1022,6 +1144,10 @@ impl Popup {
             to_argb(pixmap.data_mut());
         }
 
+        // Keep the exact scene that reached the buffer. Text hit testing
+        // must use the same source geometry as this painted frame.
+        self.scene = Some(pending.scene.clone());
+
         // The targets that a click resolves against come from the
         // frame that the code paints right now, never from a
         // remembered frame. This rule keeps a hit honest across a
@@ -1076,7 +1202,10 @@ impl Popup {
         if self.hits.as_ref().is_some_and(|h| h.panel == self.panels[idx].id) {
             self.hits = None;
         }
-        self.pointer.leave(self.panels[idx].id);
+        self.scene = None;
+        self.dragging = false;
+        self.last_text = None;
+        self.pointer.cancel();
         self.hidden_frame(idx, logical);
     }
 

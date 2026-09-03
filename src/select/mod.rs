@@ -10,6 +10,11 @@
 //! Entry ordinal.
 
 pub use crate::dict::gloss::{DocAddr, DocRange, Separator};
+pub mod gesture;
+pub use gesture::{
+    Button, Button as GestureButton, Gesture, GestureEffect, GestureEnv, GestureInput, GestureStage,
+    ItemSource, Stage,
+};
 
 use crate::present::{Card, GlossEntry};
 

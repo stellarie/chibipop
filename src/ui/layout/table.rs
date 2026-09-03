@@ -76,7 +76,12 @@ pub(super) struct Cell {
 impl Cell {
     /// The location of the cell in its dictionary.
     pub(super) fn origin(&self, grid: &Grid) -> GlossOrigin {
-        GlossOrigin { dict_id: grid.dict_id, entry_id: grid.entry_id, path: self.path }
+        GlossOrigin {
+            dict_id: grid.dict_id,
+            entry_id: grid.entry_id,
+            entry: grid.entry,
+            path: self.path,
+        }
     }
 }
 
@@ -100,12 +105,18 @@ pub(super) struct Grid {
     pub(super) path: Option<NodePath>,
     pub(super) dict_id: i64,
     pub(super) entry_id: i64,
+    pub(super) entry: u32,
 }
 
 impl Grid {
     /// The location of the table in its dictionary.
     pub(super) fn origin(&self) -> GlossOrigin {
-        GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
+        GlossOrigin {
+            dict_id: self.dict_id,
+            entry_id: self.entry_id,
+            entry: self.entry,
+            path: self.path,
+        }
     }
 
     /// The fields that every block container shares, in the form that
@@ -357,6 +368,7 @@ impl Paragraphs<'_> {
             path: ctx.path,
             dict_id: 0,
             entry_id: 0,
+            entry: 0,
         }));
     }
 

@@ -252,6 +252,18 @@ struct RangePlan {
     indexes: HashMap<NodePath, usize>,
 }
 
+/// Shared inputs for one selected HTML tree walk.
+///
+/// Copying this context keeps recursive calls focused on node-specific state.
+#[derive(Clone, Copy)]
+struct RangeWalk<'a> {
+    doc: &'a GlossDoc,
+    plan: &'a RangePlan,
+    roles: RoleFilter,
+    separator: super::Separator,
+}
+
+
 fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
     let mut prefix = NodePath::ROOT;
     for &step in addr.path.steps() {
@@ -350,37 +362,31 @@ fn render_ranges(
         return;
     }
     let plan = RangePlan { leaves: visible, intervals, indexes };
+    let walk = RangeWalk { doc, plan: &plan, roles, separator };
     for (index, id) in doc.items().enumerate() {
         let Some(path) = NodePath::ROOT.child(index) else { continue };
-        let rendered = render_range_item(doc, id, path, &plan, roles, separator);
+        let rendered = render_range_item(&walk, id, path);
         push(rendered.html, out);
     }
 }
-
-fn render_range_item(
-    doc: &GlossDoc,
-    id: NodeId,
-    path: NodePath,
-    plan: &RangePlan,
-    roles: RoleFilter,
-    separator: super::Separator,
-) -> Rendered {
-    if doc.node(id).item_type == ItemType::StructuredContent {
-        return render_range_children(doc, id, path, plan, roles, separator, true);
+fn render_range_item(walk: &RangeWalk<'_>, id: NodeId, path: NodePath) -> Rendered {
+    if walk.doc.node(id).item_type == ItemType::StructuredContent {
+        return render_range_children(walk, id, path, true);
     }
-    render_range_node(doc, id, path, path, plan, roles, separator, true)
+    render_range_node(walk, id, path, path, true)
 }
 
 fn render_range_node(
-    doc: &GlossDoc,
+    walk: &RangeWalk<'_>,
     id: NodeId,
     path: NodePath,
     active_container: NodePath,
-    plan: &RangePlan,
-    roles: RoleFilter,
-    separator: super::Separator,
     top_level: bool,
 ) -> Rendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let roles = walk.roles;
+    let separator = walk.separator;
     let node = doc.node(id);
     if matches!(node.tag, Tag::Rt | Tag::Rp)
         || (node.kind != Kind::Text
@@ -443,8 +449,7 @@ fn render_range_node(
     }
     let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
     let child_container = if own_container { path } else { active_container };
-    let content =
-        render_range_children(doc, id, child_container, plan, roles, separator, own_container);
+    let content = render_range_children(walk, id, child_container, own_container);
     if content.html.is_empty() {
         return Rendered::empty();
     }
@@ -494,19 +499,18 @@ fn wrap_part(doc: &GlossDoc, id: NodeId, tag: Tag, inner: &str) -> String {
 
 
 fn render_range_children(
-    doc: &GlossDoc,
+    walk: &RangeWalk<'_>,
     id: NodeId,
     active_container: NodePath,
-    plan: &RangePlan,
-    roles: RoleFilter,
-    separator: super::Separator,
     container: bool,
 ) -> Rendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let separator = walk.separator;
     let mut children = Vec::new();
     for child in doc.children(id) {
         let Some(path) = NodePath::of(doc, child) else { continue };
-        let rendered =
-            render_range_node(doc, child, path, active_container, plan, roles, separator, false);
+        let rendered = render_range_node(walk, child, path, active_container, false);
         if !rendered.html.is_empty() {
             children.push(rendered);
         }
