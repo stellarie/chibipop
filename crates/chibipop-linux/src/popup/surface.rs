@@ -754,7 +754,7 @@ impl Popup {
     /// The frame's hit targets, in the logical coordinates that a
     /// pointer event carries. A scripted pass needs these coordinates
     /// to aim at anything.
-    pub fn dump_hits(&mut self) {
+    pub fn dump_hits(&mut self, selection: Option<&Selections>) {
         let Some(hits) = self.hits.clone() else {
             self.notes.push("pointer: no frame to dump".to_string());
             return;
@@ -766,6 +766,13 @@ impl Popup {
             hits.scroll,
             hits.view_h,
             hits.targets.len(),
+        ));
+        let items = selection
+            .and_then(|all| all.card(0))
+            .map_or(0, |card| card.items().len());
+        let highlights = self.scene.as_ref().map_or(0, |scene| scene.highlights.len());
+        self.notes.push(format!(
+            "pointer: selection: card 0 items={items} highlights={highlights}"
         ));
         for target in &hits.targets {
             let top = (f64::from(target.y - hits.scroll) / hits.scale).round();
@@ -1146,6 +1153,13 @@ impl Popup {
 
         // Keep the exact scene that reached the buffer. Text hit testing
         // must use the same source geometry as this painted frame.
+        // A frame with a selection says so. A human tester or a scripted
+        // pass reads this line because a coalesced repaint rasters later
+        // than the interaction that requested it.
+        let highlights = pending.scene.highlights.len();
+        if highlights > 0 {
+            self.notes.push(format!("popup: painted {highlights} selection highlight box(es)"));
+        }
         self.scene = Some(pending.scene.clone());
 
         // The targets that a click resolves against come from the

@@ -539,16 +539,21 @@ pub fn press(
 ///
 /// Coordinates are surface-local logical units, exactly what
 /// `wl_pointer` delivers. `Wheel` is a raw `axis_value120` value,
-/// which counts positive downward. The script exists so a developer
-/// can drive the handlers on a live compositor without synthesizing
-/// any seat input. The script never touches, warps, or steals focus
-/// from the human's own pointer. It enters through the same entry
-/// points that a real frame uses.
+/// which counts positive downward. `Press` and `Release` use the
+/// primary button, while `Press2` and `Release2` use the secondary
+/// button. `Drag` is a motion while a button is held. The script
+/// exists so a developer can drive the handlers on a live compositor
+/// without synthesizing any seat input. The script never touches,
+/// warps, or steals focus from the human's own pointer. It enters
+/// through the same entry points that a real frame uses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
     Enter(f64, f64),
     Motion(f64, f64),
     Click(f64, f64),
+    Press(f64, f64, Button),
+    Release(f64, f64, Button),
+    Drag(f64, f64),
     Wheel(i32),
     Leave,
     /// Log the frame's hit targets in logical coordinates, so the next
@@ -584,6 +589,11 @@ pub fn parse_script(text: &str) -> (Vec<Vec<Step>>, Vec<String>) {
                 "enter" => point(arg).map(|(x, y)| Step::Enter(x, y)),
                 "motion" => point(arg).map(|(x, y)| Step::Motion(x, y)),
                 "click" => point(arg).map(|(x, y)| Step::Click(x, y)),
+                "press" => point(arg).map(|(x, y)| Step::Press(x, y, Button::Primary)),
+                "release" => point(arg).map(|(x, y)| Step::Release(x, y, Button::Primary)),
+                "press2" => point(arg).map(|(x, y)| Step::Press(x, y, Button::Secondary)),
+                "release2" => point(arg).map(|(x, y)| Step::Release(x, y, Button::Secondary)),
+                "drag" => point(arg).map(|(x, y)| Step::Drag(x, y)),
                 "wheel" => arg.parse().ok().map(Step::Wheel),
                 "leave" if arg.is_empty() => Some(Step::Leave),
                 "dump" if arg.is_empty() => Some(Step::Dump),
@@ -924,6 +934,50 @@ mod tests {
         let hidden = InputRegion::of(Visibility::Hidden, 1, (200, 134));
         assert_eq!(InputRegion::Empty, hidden);
         assert_eq!(None, hidden.rect());
+    }
+
+    /// A drag over the canned gloss must paint. The text hit on the frame
+    /// and the highlight boxes of the next frame use one source table.
+    #[test]
+    fn a_drag_range_over_the_canned_gloss_produces_highlights() {
+        use chibipop::select::{SelRange, Selections};
+        let scale = 1.0;
+        let scene = scene_at(scale);
+        let font = chibipop::ui::theme::Theme::dark().font_name;
+        let gloss: Vec<&chibipop::ui::layout::SceneElem> =
+            scene.elems.iter().filter(|e| !e.sources.is_empty()).collect();
+        assert!(!gloss.is_empty(), "the canned popup has gloss text");
+        let first = gloss[0];
+        let y = first.pen.1 + 2.0;
+        let start = scene
+            .text_hit((first.pen.0 + 1.0, y), 0.0, &font, &mut FixedMetrics)
+            .unwrap()
+            .expect("a gloss address");
+        let end = scene
+            .text_hit((first.pen.0 + 40.0, y), 0.0, &font, &mut FixedMetrics)
+            .unwrap()
+            .expect("a gloss address");
+        assert!(start < end, "{start:?} < {end:?}");
+        let mut all = Selections::default();
+        all.card_mut(0).replace(SelRange { start, end });
+        let theme = crate::popup::physical_theme(&chibipop::ui::theme::Theme::dark(), scale);
+        let selected = chibipop::ui::layout::scene(
+            &chibipop::ui::layout::SceneRequest {
+                presentation: &crate::popup::canned(),
+                theme: &theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: true,
+                side_panel: false,
+                render: Default::default(),
+                anki: None,
+                selection: Some(&all),
+            },
+            &mut FixedMetrics,
+        )
+        .unwrap();
+        assert!(!selected.highlights.is_empty(), "items {:?}", all.card(0));
+        assert!(selected.elems.iter().any(|e| e.kind == chibipop::ui::layout::ElemKind::Check));
     }
 
     /// A coalesced repaint can outlive the show that queued it. If
@@ -1276,13 +1330,18 @@ mod tests {
     #[test]
     fn a_script_parses_the_steps_it_recognises_and_rejects_the_rest() {
         let (passes, rejects) =
-            parse_script("enter:10,20; motion:10.5,20.5 ;wheel:-360;click:11,21;leave;dump;;");
+            parse_script("enter:10,20; motion:10.5,20.5 ;wheel:-360;click:11,21;press:12,22;release:12,22;press2:13,23;release2:13,23;drag:14,24;leave;dump;;");
         assert_eq!(
             vec![vec![
                 Step::Enter(10.0, 20.0),
                 Step::Motion(10.5, 20.5),
                 Step::Wheel(-360),
                 Step::Click(11.0, 21.0),
+                Step::Press(12.0, 22.0, Button::Primary),
+                Step::Release(12.0, 22.0, Button::Primary),
+                Step::Press(13.0, 23.0, Button::Secondary),
+                Step::Release(13.0, 23.0, Button::Secondary),
+                Step::Drag(14.0, 24.0),
                 Step::Leave,
                 Step::Dump,
             ]],
@@ -1290,10 +1349,11 @@ mod tests {
         );
         assert!(rejects.is_empty());
 
-        let (passes, rejects) = parse_script("hover:1,2;click:1;wheel:x;leave:3");
+        let (passes, rejects) = parse_script("hover:1,2;click:1;wheel:x;leave:3;press:");
         assert!(passes.is_empty(), "a pass of nothing but rejects is no pass");
-        assert_eq!(4, rejects.len(), "every bad step says so and none of them run");
+        assert_eq!(5, rejects.len(), "every bad step says so and none of them run");
     }
+
 
     /// The second pass clicks the affordance that the first pass's
     /// click produced. This sequence is the whole reason that passes

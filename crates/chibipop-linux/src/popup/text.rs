@@ -1429,4 +1429,46 @@ mod tests {
         draw(&mut target, &mut engine, (-4000.0, -4000.0));
         assert!(guard.iter().all(|&b| b == 0), "wrote past the pixmap");
     }
+
+    /// The canned popup with the real engine: a drag range from `text_hit`
+    /// must come back as highlight boxes on the next scene. The fixed
+    /// metrics of the pointer tests cannot see a shaping mismatch here.
+    #[test]
+    fn a_drag_over_the_canned_gloss_paints_with_the_real_engine() {
+        use chibipop::select::{SelRange, Selections};
+        use chibipop::ui::layout::{scene, SceneRequest};
+        let Some(mut engine) = jp_engine() else { return };
+        let theme = chibipop::ui::theme::Theme { font_name: JP.to_string(), ..chibipop::ui::theme::Theme::dark() };
+        let canned = crate::popup::canned();
+        fn request<'a>(
+            canned: &'a chibipop::present::Presentation,
+            theme: &'a chibipop::ui::theme::Theme,
+            selection: Option<&'a Selections>,
+        ) -> SceneRequest<'a> {
+            SceneRequest {
+                presentation: canned,
+                theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: false,
+                side_panel: false,
+                render: Default::default(),
+                anki: None,
+                selection,
+            }
+        }
+        let empty = Selections::default();
+        let plain = scene(&request(&canned, &theme, Some(&empty)), &mut engine).unwrap();
+        let first = plain.elems.iter().find(|e| !e.sources.is_empty()).expect("gloss text");
+        let y = first.pen.1 + first.rect.h / 2.0;
+        let start = plain.text_hit((first.pen.0 + 1.0, y), 0.0, JP, &mut engine).unwrap().unwrap();
+        let end = plain.text_hit((first.pen.0 + 60.0, y), 0.0, JP, &mut engine).unwrap().unwrap();
+        assert!(start < end, "{start:?} < {end:?}");
+        let mut all = Selections::default();
+        all.card_mut(0).replace(SelRange { start, end });
+        let selected = scene(&request(&canned, &theme, Some(&all)), &mut engine).unwrap();
+        assert!(!selected.highlights.is_empty(), "{start:?}..{end:?} on {:?}", first.text);
+        let box_ = selected.highlights[0];
+        assert!(box_.w > 0.0 && box_.h > 0.0, "{box_:?}");
+    }
 }

@@ -33,10 +33,10 @@ use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
-use chibipop::controller::{Command, Controller, ControllerConfig, Event, RequestId};
+use chibipop::controller::{Command, Controller, ControllerConfig, Event, LookupOutcome, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use chibipop::present::DictInfo;
-use chibipop::text::layout::OcrLine;
+use chibipop::text::layout::{OcrLine, Orientation};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::text::Frame;
 use chibipop::worker::{Hover, Trigger, TriggerKind, Worker};
@@ -463,7 +463,7 @@ impl App {
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
-            Verb::TriggerUp if self.demo.armed => self.hide_popup(),
+            Verb::TriggerUp if self.demo.armed => self.demo_hide(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
@@ -1583,6 +1583,24 @@ impl App {
                     interactions.push(interaction);
                 }
             }
+            popup::Step::Press(x, y, button) => {
+                self.log.diag(&format!("pointer: script {button:?} press at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_press((x, y), button) {
+                    interactions.push(interaction);
+                }
+            }
+            popup::Step::Release(x, y, button) => {
+                self.log.diag(&format!("pointer: script {button:?} release at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_release((x, y), button) {
+                    interactions.push(interaction);
+                }
+            }
+            popup::Step::Drag(x, y) => {
+                self.log.diag(&format!("pointer: script drag at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_move((x, y)) {
+                    interactions.push(interaction);
+                }
+            }
             popup::Step::Wheel(value120) => {
                 self.log.diag(&format!("pointer: script wheel value120 {value120}"));
                 if let Some(interaction) = self.popup_mut().pointer_wheel_120(value120) {
@@ -1593,7 +1611,8 @@ impl App {
                 self.popup_mut().pointer_leave(panel);
             }
             popup::Step::Dump => {
-                self.popup_mut().dump_hits();
+                let selection = self.controller.selection().cloned();
+                self.popup_mut().dump_hits(selection.as_ref());
             }
         }
         self.flush_popup_notes();
@@ -1672,6 +1691,20 @@ impl App {
             // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).
             // Wayland lacks surface exclusion, so this mask is the complete
             // mechanism.
+            Command::RequestLookup { id, .. } if self.demo.armed => {
+                let anchor = self.demo_anchor();
+                self.demo.request = Some(id);
+                self.feed(Event::LookupResult {
+                    id,
+                    outcome: LookupOutcome::Ready {
+                        presentation: Box::new(popup::canned()),
+                        anchor,
+                        orientation: Orientation::Horizontal,
+                        matched: None,
+                        scan: Vec::new(),
+                    },
+                });
+            }
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
                 self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
@@ -2029,34 +2062,36 @@ impl App {
         self.flush_surface_notes();
     }
 
-    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the lookup path:
-    /// measure, place, commit, and `PopupPlaced`.
+    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the same Controller
+    /// path as a real lookup, but answers its lookup with canned data.
+    /// It does not need capture, OCR, or a Dictionary.
     fn demo_show(&mut self) {
-        let anchor = self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR);
+        let anchor = self.demo_anchor();
         self.log.diag(&format!(
             "popup: demo show at anchor {},{} {}x{}",
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
-        // The demo bypasses the Controller. It arms the scripted pointer pass
-        // itself.
-        if let Some(popup) = self.popup.as_mut() {
-            popup.arm_script();
+        let point = PhysPoint { x: anchor.x, y: anchor.y };
+        self.feed(Event::TriggerDown);
+        self.feed(Event::CursorMoved { pos: point });
+    }
+
+    /// Hide the canned popup through the Controller.
+    ///
+    /// A key release hides only in a hold mode. The demo answers its own
+    /// lookup, so it can also answer `Hide` for that lookup. That path hides
+    /// in Live mode too, and the Controller forgets the surface with it.
+    fn demo_hide(&mut self) {
+        self.feed(Event::TriggerUp);
+        if let Some(id) = self.demo.request.take() {
+            self.feed(Event::LookupResult { id, outcome: LookupOutcome::Hide });
         }
-        self.show_popup(&ShowRequest {
-            presentation: popup::canned(),
-            anchor,
-            scroll: 0,
-            show_back: false,
-            // The demo requests the slot so the panel paints the Anki slot for
-            // inspection.
-            // Production requests it only after an AnkiConnect answer.
-            anki: Some(chibipop::present::AnkiPopupState {
-                enabled: true,
-                connected: true,
-                ..chibipop::present::AnkiPopupState::disabled()
-            }),
-            selection: self.popup_selection(),
-        });
+    }
+
+    /// Resolve the demo's anchor from its override, the latest cursor sample,
+    /// or the fixed fallback.
+    fn demo_anchor(&mut self) -> PhysRect {
+        self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR)
     }
 
     /// Return the last cursor sample as an anchor box, so the demo popup lands

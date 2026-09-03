@@ -21,6 +21,10 @@ pub struct Demo {
     /// `CHIBIPOP_POPUP_DEMO_ANCHOR=x,y,w,h` sets an anchor in global physical pixels.
     /// A fixed anchor makes the smoke test repeatable without seat input.
     pub anchor: Option<PhysRect>,
+    /// The lookup that the demo answered last. A demo `trigger-up` hides
+    /// through the Controller with this id, so the hide works in every
+    /// trigger mode. Live mode ignores a key release.
+    pub request: Option<chibipop::controller::RequestId>,
 }
 
 impl Demo {
@@ -30,7 +34,7 @@ impl Demo {
     pub fn from_env() -> Demo {
         let armed = std::env::var(Demo::ENV).is_ok_and(|v| v == "1");
         let anchor = std::env::var(Demo::ANCHOR_ENV).ok().as_deref().and_then(parse_anchor);
-        Demo { armed, anchor }
+        Demo { armed, anchor, request: None }
     }
 }
 
