@@ -124,6 +124,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   Entry. A word drag snaps to graphemes until the analysis answers.
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
   `PopupScene::text_hit`. A bin never decides a gesture.
+- `gloss::select::sense_range` finds a Sense by shape, not by Dictionary. It takes the
+  innermost block that is an `li` in an `ol` or that starts with a sense number, then a
+  block with a same-shaped sibling, then the top-level item. A marked line of plain text
+  is also a Sense.
 - `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.
 - `Selection::Ranges` prunes the Anki HTML and plain renderers. It keeps selected
   leaf bytes and valid ancestors.

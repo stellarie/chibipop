@@ -173,7 +173,8 @@ _Avoid_: definition, sense (an Entry contains senses; it is not one)
 
 **Sense**:
 One distinct meaning in an Entry. Senses live inside the gloss content as sibling blocks,
-not as separate Entries. A headword lookup returns one Entry that holds every sense.
+not as separate Entries. A headword lookup returns one Entry that holds every sense. Most
+Dictionaries number a sense with `①`, `❶`, `㋐`, or `1`. A nested number is a sub-sense.
 _Avoid_: gloss (a Sense may have several), definition
 
 **Gloss**:
