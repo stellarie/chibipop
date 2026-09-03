@@ -411,34 +411,38 @@ fn span_heights(spans: &[StyledSpan<'_>], out: &mut Measured) {
     }
 }
 
-/// Builds one popup scene in DIPs.
+/// The caller's half of a [`SceneRequest`].
 ///
-/// The `box_dip` parameter packs both halves of the box into one argument.
-/// The function always resolves and passes both halves together.
-/// This packing leaves room for the `render` parameter without a seventh loose parameter.
-fn scene_of(
-    text: &Text,
-    p: &Presentation,
-    theme: &Theme,
-    box_dip: (f32, f32),
-    show_back: bool,
-    side_panel: bool,
-    render: RenderSettings,
-    selection: Option<&Selections>,
-) -> Result<PopupScene> {
+/// [`Renderer`] resolves the box and the scale itself, so a caller cannot
+/// build a `SceneRequest` in DIPs. This struct carries every other input
+/// that measure and paint share. One argument keeps each entry point
+/// under the clippy argument cap without a tuple pack.
+#[derive(Clone, Copy)]
+pub struct SceneInputs<'a> {
+    pub presentation: &'a Presentation,
+    pub theme: &'a Theme,
+    pub show_back: bool,
+    pub side_panel: bool,
+    pub render: RenderSettings,
+    /// See [`SceneRequest::selection`].
+    pub selection: Option<&'a Selections>,
+}
+
+/// Builds one popup scene in DIPs.
+fn scene_of(text: &Text, inputs: SceneInputs<'_>, box_dip: (f32, f32)) -> Result<PopupScene> {
     // On Windows, the Anki control is a child window with its own font and size.
     // Windows therefore draws the label itself, and this call leaves core's `anki` slot empty.
     layout::scene(
         &SceneRequest {
-            presentation: p,
-            theme,
+            presentation: inputs.presentation,
+            theme: inputs.theme,
             max_w: box_dip.0,
             max_h: box_dip.1,
-            show_back,
-            side_panel,
-            render,
+            show_back: inputs.show_back,
+            side_panel: inputs.side_panel,
+            render: inputs.render,
             anki: None,
-            selection,
+            selection: inputs.selection,
         },
         &mut text.measurer(),
     )
@@ -573,32 +577,15 @@ impl Renderer {
     /// Returns `(width, view_h, content_h)`.
     ///
     /// This function returns all three values in physical pixels.
-    /// The `box_phys` parameter also uses physical pixels and packs both halves into one argument,
-    /// as [`scene_of`] does.
-    /// The function always resolves and passes both halves together.
-    /// Separate parameters would exceed the clippy argument cap without improving clarity.
+    /// The `box_phys` parameter also uses physical pixels.
     pub fn measure(
         &mut self,
-        p: &Presentation,
-        theme: &Theme,
+        inputs: SceneInputs<'_>,
         box_phys: (i32, i32),
-        show_back: bool,
-        side_panel: bool,
-        render: RenderSettings,
-        selection: Option<&Selections>,
     ) -> Result<(i32, i32, i32)> {
         let (max_w, max_h) = box_phys;
         let scale = self.dpi_scale();
-        let scene = scene_of(
-            &self.text,
-            p,
-            theme,
-            (max_w as f32 / scale, max_h as f32 / scale),
-            show_back,
-            side_panel,
-            render,
-            selection,
-        )?;
+        let scene = scene_of(&self.text, inputs, (max_w as f32 / scale, max_h as f32 / scale))?;
         Ok(popup_size(&scene, scale, max_w))
     }
 
@@ -607,16 +594,7 @@ impl Renderer {
     /// A device loss triggers one retry.
     /// The function builds the scene before the retry loop because only paint can lose a device.
     /// Measure cannot lose a device.
-    pub fn paint(
-        &mut self,
-        p: &Presentation,
-        theme: &Theme,
-        scroll: i32,
-        show_back: bool,
-        side_panel: bool,
-        render: RenderSettings,
-        selection: Option<&Selections>,
-    ) -> Result<()> {
+    pub fn paint(&mut self, inputs: SceneInputs<'_>, scroll: i32) -> Result<()> {
         let (cw, ch) = self.client_size().context("querying the popup's client size")?;
         self.ensure_target(cw, ch).context("preparing the D2D render target")?;
 
@@ -624,17 +602,9 @@ impl Renderer {
         let w = (cw as f32 / scale) as i32;
         let h = (ch as f32 / scale) as i32;
         let scroll = (scroll as f32 / scale) as i32;
+        let theme = inputs.theme;
 
-        let scene = scene_of(
-            &self.text,
-            p,
-            theme,
-            (w as f32, h as f32),
-            show_back,
-            side_panel,
-            render,
-            selection,
-        )?;
+        let scene = scene_of(&self.text, inputs, (w as f32, h as f32))?;
         *self.hits.borrow_mut() = scene.hit_targets();
 
         if let Err(e) = self.paint_once(&scene, theme, w, h, scroll) {

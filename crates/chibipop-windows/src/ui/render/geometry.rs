@@ -136,15 +136,18 @@ fn capture(fixture: &str, variant: &str, spec: &Spec) -> Result<Value> {
     // Do not exercise a render knob in a fixture. The layout tests assert those
     // settings through `layout::scene` with the layout fake. The fake needs no
     // font stack (`src/ui/layout/tests.rs`).
+    // Geometry captures pass `selection: None`, so selection never moves a golden.
     let scene = scene_of(
         &text,
-        &spec.p,
-        &spec.theme,
+        SceneInputs {
+            presentation: &spec.p,
+            theme: &spec.theme,
+            show_back: spec.show_back,
+            side_panel: spec.side_panel,
+            render: RenderSettings::default(),
+            selection: None,
+        },
         (spec.max_w as f32 / scale, spec.max_h as f32 / scale),
-        spec.show_back,
-        spec.side_panel,
-        RenderSettings::default(),
-        None,
     )?;
     let (total_w, view_h, content_h) = popup_size(&scene, scale, spec.max_w);
 

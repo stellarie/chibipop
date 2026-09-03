@@ -20,7 +20,7 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::plugin::manifest::Manifest;
 use crate::plugin::text::PluginText;
 use crate::plugin::{discover, host};
-use crate::present::{DictInfo, PresentConfig, Presentation};
+use crate::present::{DictInfo, PresentConfig};
 use crate::rebuild::{self, Progress};
 use crate::settings::{self, SettingsForm};
 use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAPTURE_GUARD};
@@ -29,7 +29,7 @@ use crate::text::mask::CaptureMask;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
 use crate::ui::layout::anki_button_label;
 use crate::ui::overlay::Overlay;
-use crate::ui::render::Renderer;
+use crate::ui::render::{Renderer, SceneInputs};
 use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::theme::Theme;
@@ -1821,13 +1821,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         let selection = controller.selection();
                         let scroll = v.scroll;
                         let painted = renderer.paint(
-                            v.presentation,
-                            &theme,
+                            SceneInputs {
+                                presentation: v.presentation,
+                                theme: &theme,
+                                show_back: v.show_back,
+                                side_panel: live.side_panel,
+                                render: live.popup.render_settings(),
+                                selection,
+                            },
                             scroll,
-                            v.show_back,
-                            live.side_panel,
-                            live.popup.render_settings(),
-                            selection,
                         );
                         // The view borrow ends here. A drag resolves the
                         // pointer against the repainted scene.
@@ -2299,20 +2301,14 @@ fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<Plu
     }
 }
 /// Measures, places, shows, and paints the popup.
-#[allow(clippy::too_many_arguments)]
 fn show_presentation(
     popup: &Popup,
     renderer: &mut Renderer,
-    theme: &Theme,
     max_height_percent: i32,
     max_width_percent: i32,
-    presentation: &Presentation,
+    inputs: SceneInputs<'_>,
     anchor: PhysRect,
     scroll: i32,
-    show_back: bool,
-    side_panel: bool,
-    render: chibipop::ui::layout::RenderSettings,
-    selection: Option<&chibipop::select::Selections>,
 ) -> Result<(PhysRect, i32, i32)> {
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
@@ -2320,29 +2316,13 @@ fn show_presentation(
 
     // Use `view_h` below, not `content_h`.
     let (w, view_h, content_h) = renderer
-        .measure(
-            presentation,
-            theme,
-            (max_w, max_h),
-            show_back,
-            side_panel,
-            render,
-            selection,
-        )
+        .measure(inputs, (max_w, max_h))
         .context("measuring popup content")?;
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
     renderer
-        .paint(
-            presentation,
-            theme,
-            scroll,
-            show_back,
-            side_panel,
-            render,
-            selection,
-        )
+        .paint(inputs, scroll)
         .context("painting the popup")?;
     Ok((rect, content_h, view_h))
 }
@@ -2661,16 +2641,18 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             match show_presentation(
                 x.popup,
                 x.renderer,
-                x.theme,
                 x.live.max_height_percent,
                 x.live.max_width_percent,
-                &presentation,
+                SceneInputs {
+                    presentation: &presentation,
+                    theme: x.theme,
+                    show_back,
+                    side_panel: x.live.side_panel,
+                    render: x.live.popup.render_settings(),
+                    selection: controller.selection(),
+                },
                 anchor,
                 scroll,
-                show_back,
-                x.live.side_panel,
-                x.live.popup.render_settings(),
-                controller.selection(),
             ) {
                 Ok((rect, content_h, view_h)) => Some(Event::PopupPlaced {
                     rect,
@@ -2688,13 +2670,15 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             if let Some(view) = controller.popup() {
                 let selection = controller.selection();
                 match x.renderer.paint(
-                    view.presentation,
-                    x.theme,
+                    SceneInputs {
+                        presentation: view.presentation,
+                        theme: x.theme,
+                        show_back,
+                        side_panel: x.live.side_panel,
+                        render: x.live.popup.render_settings(),
+                        selection,
+                    },
                     scroll,
-                    show_back,
-                    x.live.side_panel,
-                    x.live.popup.render_settings(),
-                    selection,
                 ) {
                     Ok(()) => {
                         if *x.pointer_buttons != 0 {
