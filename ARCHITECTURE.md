@@ -125,10 +125,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
   `PopupScene::text_hit`. A bin never decides a gesture.
 - `gloss::select::sense_range` finds a Sense by shape, not by Dictionary. A Sense is an
-  ordered-list item, an unordered-list item without an explicit Sense ancestor, a marked
-  block, or a block that starts with a sense number. An explicit Sense owns its nested
-  glossary list. The per-Sense follower blocks join it. A marked plain-text line is also
-  a Sense. An Entry without a marker has one Sense: the whole Entry.
+  ordered-list item, an unordered-list item, a marked block, or a block that starts with
+  a sense number. A nested glossary item wins over its explicit Sense ancestor. The
+  per-Sense follower blocks join it. A marked plain-text line is also a Sense. Without a
+  marker, the innermost block or newline-delimited line is the Sense. This fallback
+  excludes sibling headword lines.
 - `sense_core_range` stops a Sense before its first example. `line_range` selects the
   innermost block or one newline-delimited text line.
 - `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.

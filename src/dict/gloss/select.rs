@@ -127,17 +127,16 @@ pub fn extent(doc: &GlossDoc, roles: RoleFilter) -> Option<DocRange> {
 /// The rules, innermost first:
 ///
 /// 1. A line of a multi-line text leaf that starts with a sense marker.
-/// 2. The innermost marked block ancestor, with the per-sense blocks that
-///    follow it. A marked block is an `li` in an `ol`, an unowned `li` in a
-///    `ul`, a block with `data.content = "sense"`, or a block whose first text
-///    or image is a sense number. An explicit Sense owns its nested glossary
-///    list. A nested `①` wins over its `❶` group. See [`sibling_sense`].
-/// 3. The top-level glossary item.
-///
-/// A block with a same-shaped sibling was once a sense too. That made an
-/// example block or a 表記 note into a sense in a single-sense Entry, which is
-/// the common marker-less shape. An Entry without a boundary has one sense, so
-/// it selects whole.
+/// 2. An `li` in a `ul`. Jitendex groups separate selectable gloss lines under
+///    one explicit Sense, so the inner list item wins.
+/// 3. The innermost marked block ancestor, with the per-sense blocks that
+///    follow it. A marked block is an `li` in an `ol`, a block with
+///    `data.content = "sense"`, or a block whose first text or image is a
+///    sense number. A nested `①` wins over its `❶` group. See
+///    [`sibling_sense`].
+/// 4. The innermost block or newline-delimited line. Marker-free Dictionaries
+///    often put a repeated headword beside the definition. Selecting the whole
+///    glossary item would include that unrelated line.
 pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     sense(doc, roles, addr).map(|sense| sense.with_examples)
 }
@@ -222,10 +221,7 @@ fn sense(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Sense> {
             }
             continue;
         };
-        if doc.node(id).tag == Tag::Li
-            && doc.node(parent).tag == Tag::Ul
-            && !has_marked_ancestor(doc, &nodes[..depth])
-        {
+        if doc.node(id).tag == Tag::Li && doc.node(parent).tag == Tag::Ul {
             let range = subtree_range(&all, path_prefix(addr.path, depth + 1)?)?;
             return Some(Sense { own: range, with_examples: range });
         }
@@ -235,7 +231,7 @@ fn sense(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Sense> {
             return Some(sense);
         }
     }
-    let range = subtree_range(&all, path_prefix(addr.path, 1)?)?;
+    let range = line_range(doc, roles, addr)?;
     Some(Sense { own: range, with_examples: range })
 }
 
@@ -313,13 +309,6 @@ fn sibling_sense(
     let own = subtree_range(all, children[start].1)?;
     let last = subtree_range(all, children[end].1)?;
     Some(Sense { own, with_examples: DocRange { start: own.start, end: last.end } })
-}
-
-fn has_marked_ancestor(doc: &GlossDoc, nodes: &[NodeId]) -> bool {
-    nodes.iter().enumerate().any(|(depth, &id)| {
-        let parent = (depth > 0).then(|| doc.node(nodes[depth - 1]).tag);
-        is_block(doc, id) && is_marked_block(doc, id, parent)
-    })
 }
 
 /// Whether the block `id` is a sense by its own shape.
@@ -713,6 +702,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zatsudan_definition_excludes_the_headword_line() {
+        let d = doc(&json!([{"type": "structured-content", "content": [
+            {"tag": "span", "content": "ざつだん【雑談】"},
+            {"tag": "div", "content": "とりとめのない話。"}
+        ]}]));
+        let definition = path(&[0, 1, 0]);
+        assert_eq!(
+            span(at(definition, 0), at(definition, "とりとめのない話。".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(definition, 2))
+        );
+    }
+
     fn at(path: NodePath, byte: u32) -> DocAddr {
         DocAddr { path, byte }
     }
@@ -852,8 +854,9 @@ mod tests {
             span(at(leaf, second), at(leaf, text.len() as u32)),
             sense_range(&d, RoleFilter::CARD, at(leaf, second + 4))
         );
-        // The headword line has no marker, so the whole item remains.
-        assert_eq!(span(at(leaf, 0), at(leaf, text.len() as u32)), sense_range(&d, RoleFilter::CARD, at(leaf, 1)));
+        // Without a marker, the clicked headword line remains independent.
+        let headword_end = text.find('\n').unwrap() as u32;
+        assert_eq!(span(at(leaf, 0), at(leaf, headword_end)), sense_range(&d, RoleFilter::CARD, at(leaf, 1)));
     }
 
     #[test]
@@ -884,13 +887,13 @@ mod tests {
             ]
         }}]));
         let two = path(&[0, 0, 1, 1, 0]);
-        assert_eq!(span(at(path(&[0, 0, 0, 1, 0]), 0), at(two, 3)), sense_range(&d, RoleFilter::CARD, at(two, 0)));
+        assert_eq!(span(at(two, 0), at(two, 3)), sense_range(&d, RoleFilter::CARD, at(two, 0)));
     }
 
     #[test]
-    fn sense_range_keeps_a_marker_less_entry_whole() {
-        // The single-sense shape of 新明解 and 現代国語例解: one line per div,
-        // no numbers. Twins are lines of one sense, not senses.
+    fn sense_range_selects_one_marker_less_block() {
+        // Marker-free Dictionaries use sibling blocks for a definition,
+        // example, and note. The clicked block remains independent.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": "「だけ」の意のやや改まった表現。"},
@@ -898,11 +901,17 @@ mod tests {
                 {"tag": "div", "content": [{"tag": "span", "content": "表記"}, "漢文での表記は「耳」。"]}
             ]
         }}]));
-        let first = path(&[0, 0, 0, 0]);
-        let last = path(&[0, 0, 2, 1]);
-        let whole = span(at(first, 0), at(last, "漢文での表記は「耳」。".len() as u32));
-        assert_eq!(whole, sense_range(&d, RoleFilter::CARD, at(path(&[0, 0, 1, 0]), 2)));
-        assert_eq!(whole, sense_range(&d, RoleFilter::CARD, at(last, 0)));
+        let example = path(&[0, 0, 1, 0]);
+        assert_eq!(
+            span(at(example, 0), at(example, "「学歴━を問題にすべきでない」".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(example, 2))
+        );
+        let note = path(&[0, 0, 2, 0, 0]);
+        let note_body = path(&[0, 0, 2, 1]);
+        assert_eq!(
+            span(at(note, 0), at(note_body, "漢文での表記は「耳」。".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(note_body, 0))
+        );
     }
 
     #[test]
@@ -936,25 +945,24 @@ mod tests {
     }
 
     #[test]
-    fn sense_range_takes_a_content_sense_block_and_not_its_gloss_items() {
-        // The Jitendex single-sense shape: no `ol`, one `div` marked `sense`,
-        // glosses in a `ul`, and an attribution after it.
+    fn zatsudan_gloss_lines_select_separately_inside_a_content_sense() {
+        // Jitendex puts separate selectable gloss lines in one `ul` inside
+        // a `div` marked `sense`.
         let d = doc(&json!([{"type": "structured-content", "content": [
             {"tag": "div", "data": {"content": "sense-group"}, "content": [
                 {"tag": "div", "data": {"content": "sense"}, "content": [
                     {"tag": "ul", "data": {"content": "glossary"}, "content": [
-                        {"tag": "li", "content": "only"},
-                        {"tag": "li", "content": "nothing but"}
+                        {"tag": "li", "content": "chatting"},
+                        {"tag": "li", "content": "idle talk"}
                     ]}
                 ]}
             ]},
             {"tag": "div", "data": {"content": "attribution"}, "content": "JMdict"}
         ]}]));
-        let only = path(&[0, 0, 0, 0, 0, 0]);
-        let nothing = path(&[0, 0, 0, 0, 1, 0]);
+        let idle = path(&[0, 0, 0, 0, 1, 0]);
         assert_eq!(
-            span(at(only, 0), at(nothing, "nothing but".len() as u32)),
-            sense_range(&d, RoleFilter::CARD, at(nothing, 2))
+            span(at(idle, 0), at(idle, "idle talk".len() as u32)),
+            sense_range(&d, RoleFilter::CARD, at(idle, 2))
         );
     }
 }
