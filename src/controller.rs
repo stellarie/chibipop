@@ -530,6 +530,10 @@ impl Controller {
             Event::BackRequested => self.pop_history(),
             Event::TriggerDown => {
                 self.trigger_held = true;
+                // A press asks for a lookup at the current cursor. The press-time
+                // sample must pass the movement gate without cursor motion, even
+                // when the last accepted point is the same point.
+                self.last_accepted = None;
                 Vec::new()
             }
             Event::TriggerUp => self.trigger_up(),
@@ -1625,6 +1629,27 @@ mod tests {
         shown(&mut c);
         assert!(c.handle(Event::TriggerUp).is_empty());
         assert!(c.is_shown());
+    }
+
+    /// The daemon feeds a press and then the press-time cursor sample. The
+    /// canned demo and the control socket both press twice at one fixed point.
+    /// The second press must pass the movement gate without cursor motion.
+    #[test]
+    fn a_second_press_at_the_same_point_looks_up_again_in_live_mode() {
+        let mut c = Controller::new(cfg());
+        let point = PhysPoint { x: 110, y: 110 };
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        c.handle(Event::TriggerUp);
+        let id = c.latest;
+        c.handle(Event::LookupResult { id, outcome: LookupOutcome::Hide });
+        assert!(!c.is_shown());
+        c.handle(Event::TriggerDown);
+        let out = c.handle(Event::CursorMoved { pos: point });
+        assert_eq!(
+            out,
+            vec![Command::RequestLookup { id: RequestId(2), point, popup: None }]
+        );
     }
 
     #[test]

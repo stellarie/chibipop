@@ -1238,7 +1238,8 @@ fn bodies(s: &PopupScene) -> Vec<&SceneElem> {
 #[test]
 fn a_plain_string_gloss_is_one_element_of_one_span() {
     let theme = Theme::dark();
-    let (s, asked) = measured(&theme, &one_card(&[], None), false);
+    let p = one_card(&[], None);
+    let (s, asked) = measured(&theme, &p, false);
     let gloss = s.elems.iter().find(|e| e.text == "chatting").expect("the gloss");
 
     assert_eq!(ElemKind::Text, gloss.kind);
@@ -1256,6 +1257,14 @@ fn a_plain_string_gloss_is_one_element_of_one_span() {
         gloss.spans
     );
     assert_eq!(1, asked.iter().filter(|a| a.text == "chatting").count());
+
+    // The item opens no block. Its path is the only scene-element path, so a
+    // sense picker can address the plain string. `TextSource` maps bytes to a
+    // leaf, but it does not supply `GlossOrigin::path`.
+    let doc = &p.top.as_ref().unwrap().blocks[0].entries[0].doc;
+    let path = gloss.origin.expect("a gloss element names its row").path;
+    let id = path.expect("and the plain string it renders").resolve(doc).expect("which exists");
+    assert!(doc.is_plain_string(id), "the item itself, not an ancestor");
 }
 
 /// Two top-level glossary items measure as one span, not three.
@@ -4787,6 +4796,10 @@ fn a_stored_asset_carries_both_its_key_and_its_alt_fallback() {
     assert_eq!("[\u{5bfe}]", img.text, "the fallback a painter draws");
     assert_eq!(1, img.spans.len());
     assert_eq!(BOX_EM, img.spans[0].size, "at the text size it stands in for");
+    // Both bins remeasure a non-empty span at `wrap_w` before paint.
+    // The fallback wraps inside the image box, never at zero width.
+    assert!(img.rect.w > 0.0);
+    assert_eq!(img.rect.w, img.wrap_w, "the fallback wraps at the image width");
 }
 
 /// An image gets inline space because a `span` asks the measurer for it. The

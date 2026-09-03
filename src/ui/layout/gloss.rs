@@ -268,6 +268,12 @@ impl Paragraphs<'_> {
     pub(super) fn item(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
         // An item opens no block. It receives the path of the paragraph that it enters.
+        // In 20 census dictionaries that emit one plain string per item, this path is the
+        // only scene-element path. A nested block takes the path. The `TextSource` that
+        // `text` records maps bytes to leaves. It does not supply `GlossOrigin::path`.
+        if self.cur.text.is_empty() {
+            self.cur.path = ctx.path;
+        }
         match doc.node(id).item_type {
             // A `type: image` item has no tag and acts as a replaced element.
             // It takes space on the current line. It does not open a new line.

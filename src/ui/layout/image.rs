@@ -185,7 +185,9 @@ pub(super) fn place_images(
             weight: img.style.weight,
             italic: img.style.italic,
             top_gap: 0.0,
-            wrap_w: 0.0,
+            // The fallback wraps inside the image box. Both bins remeasure a non-empty
+            // span at `wrap_w`, so a zero width has no meaning.
+            wrap_w: w.max(1.0),
             align: Align::Leading,
             pen: (rect.x, rect.y),
             rect,
