@@ -265,11 +265,20 @@ impl App {
         )
     }
 
-    /// The add-card row's copyable bind, or `None` when no chord exists.
-    /// The row uses the same value for its button and text, so they cannot disagree.
+    /// The add-card row's copyable bind, or `None` when desktop settings own the key.
+    /// Hyprland always gets a control-socket bind. A portal namespace depends on the
+    /// process that launched the daemon, but the control socket has one stable path.
     fn add_bind_snippet(&self) -> Option<String> {
         match self.add_control() {
             HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { current: None } if self.compositor == Compositor::Hyprland => {
+                Some(snippets::bind_snippet(
+                    self.compositor,
+                    &self.linux.add_key_linux,
+                    &self.exe,
+                    snippets::Bind::Press(Verb::AnkiAdd),
+                ))
+            }
             HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
         }
     }
@@ -2024,10 +2033,9 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 }
 
 fn anki_section(app: &App) -> Element<'_, Message> {
-    // The add-card row uses the same hotkey control as the trigger row. On the
-    // native rung, the compositor bind is the only path to the add
-    // (ARCHITECTURE.md#input-ladders, rung 2 plus its 2026-08-26 addendum).
-    // Without a copyable bind, a typed chord could never reach the add.
+    // The add-card row uses the same hotkey control as the trigger row.
+    // Native sessions call the control socket. XDPH sessions require a
+    // compositor `global` bind because Hyprland has no shortcut editor.
     let add_bind: Element<'_, Message> = match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns this binding. Paste this into its config:"),
@@ -2036,22 +2044,44 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // The portal published the key for the *add-card* id. Use the trigger row's
-        // status vocabulary because both values describe portal ownership. `current:
-        // None` means that the desktop reported no key or did not answer for this id.
-        HotkeyControl::Rebind { current } => column![
-            text("Portal channel: the GlobalShortcuts portal owns this binding."),
-            text(match &current {
-                Some(key) => format!("Current key: {key}"),
-                None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
-            }),
-            text(
-                "The chord above is the preferred add-card key, offered to the portal at the next start; your desktop's shortcut editor has the last word."
-            )
-            .size(13),
-        ]
-        .spacing(6)
-        .into(),
+        // XDPH cannot assign a key, and its namespace depends on the process
+        // that launched the daemon. Give Hyprland the stable control-socket route.
+        // KDE and GNOME keep the desktop-owned rebind flow.
+        HotkeyControl::Rebind { current } => {
+            let rebind: Element<'_, Message> = match app.add_bind_snippet() {
+                Some(snippet) => column![
+                    text(
+                        "Hyprland has no global-shortcut editor. Use this control-socket bind \
+                         in hyprland.conf:"
+                    ),
+                    container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+                    button("Copy add-card bind").on_press(Message::CopyAddBind),
+                    text(
+                        "This route reaches the same add action and does not depend on the \
+                         portal app ID."
+                    )
+                    .size(13),
+                ]
+                .spacing(6)
+                .into(),
+                None => text(
+                    "Use your desktop's global-shortcut settings to see or change the key. \
+                     The chord above is the preferred add-card key for the next start."
+                )
+                .size(13)
+                .into(),
+            };
+            column![
+                text("Portal channel: the GlobalShortcuts portal registered this action."),
+                text(match &current {
+                    Some(key) => format!("Current key: {key}"),
+                    None => "Current key: the portal does not report one.".to_string(),
+                }),
+                rebind,
+            ]
+            .spacing(6)
+            .into()
+        }
         HotkeyControl::NoChord => text(
             "No add-card chord is set, so there is no bind to copy - type one above."
         )
@@ -2365,22 +2395,20 @@ mod tests {
         }
     }
 
-    /// The add-card row uses the trigger row's status vocabulary. On the portal
-    /// rung, it names the key published for `anki-add` and offers no snippet.
-    /// A pasted compositor bind does not own that key.
+    /// A development launch can register under its terminal's portal app ID.
+    /// The Hyprland row must use the control socket, which has no portal
+    /// namespace and reaches the same add-card path.
     #[test]
-    fn the_add_card_row_reports_the_portals_own_add_key() {
+    fn the_hyprland_portal_add_row_offers_its_native_bind() {
         let dir = scratch("addportalrow");
         let mut app = app(&dir);
-        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
+        app.add_channel = HotkeyChannel::Portal { current_binding: None };
 
+        assert_eq!(HotkeyControl::Rebind { current: None }, app.add_control());
         assert_eq!(
-            HotkeyControl::Rebind { current: Some("Meta+A".into()) },
-            app.add_control()
+            Some("bind = ALT, A, exec, /usr/bin/chibipop ctl anki-add".to_string()),
+            app.add_bind_snippet()
         );
-        // No copy button: a portal row must not offer a bind that differs from the
-        // active key.
-        assert_eq!(None, app.add_bind_snippet());
 
         // The trigger row keeps its own key. The two rows use two channels.
         app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
