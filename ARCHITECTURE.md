@@ -124,11 +124,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   triple-click unit, or Entry. A word drag snaps to graphemes until the analysis answers.
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
   `PopupScene::text_hit`. A bin never decides a gesture.
-- `gloss::select::sense_range` finds a Sense by shape, not by Dictionary. A Sense is the
-  innermost block that is an `li` in an `ol`, that carries `data.content = "sense"`, or
-  that starts with a sense number as text or as an image. The per-Sense blocks that
-  follow it, such as an example `details`, join it. A marked line of plain text is also
-  a Sense. An Entry without any marker has one Sense: the whole Entry.
+- `gloss::select::sense_range` finds a Sense by shape, not by Dictionary. A Sense is an
+  ordered-list item, an unordered-list item without an explicit Sense ancestor, a marked
+  block, or a block that starts with a sense number. An explicit Sense owns its nested
+  glossary list. The per-Sense follower blocks join it. A marked plain-text line is also
+  a Sense. An Entry without a marker has one Sense: the whole Entry.
 - `sense_core_range` stops a Sense before its first example. `line_range` selects the
   innermost block or one newline-delimited text line.
 - `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.

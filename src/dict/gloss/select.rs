@@ -117,28 +117,27 @@ pub fn extent(doc: &GlossDoc, roles: RoleFilter) -> Option<DocRange> {
 /// Returns the visible range for the sense that contains `addr`.
 ///
 /// Dictionaries do not agree on how a sense looks. Jitendex marks a sense with
-/// `data.content = "sense"`, as an `ol > li` or as one `div`. 三省堂 and
+/// `data.content = "sense"`, as a list item, or as one `div`. 三省堂 and
 /// 大辞林 use a `div` whose first span holds `①`. 広辞苑 nests `①` divs under
 /// a `❶` div. 大辞泉 starts a sense div with a bare `1`. 新和英 is one text
 /// leaf whose lines start with `1 `. 国語辞典オンライン numbers a sense with
 /// an image. 明鏡 puts each sense's examples in a `details` after the sense
-/// div. One rule for `ol > li` therefore selected a whole Entry in every
-/// other dictionary.
+/// div.
 ///
 /// The rules, innermost first:
 ///
 /// 1. A line of a multi-line text leaf that starts with a sense marker.
 /// 2. The innermost marked block ancestor, with the per-sense blocks that
-///    follow it. A marked block is an `li` in an `ol`, a block with
-///    `data.content = "sense"`, or a block whose first text or image is a
-///    sense number. A nested `①` therefore wins over its `❶` group when the
-///    address sits inside it. See [`sibling_sense`].
+///    follow it. A marked block is an `li` in an `ol`, an unowned `li` in a
+///    `ul`, a block with `data.content = "sense"`, or a block whose first text
+///    or image is a sense number. An explicit Sense owns its nested glossary
+///    list. A nested `①` wins over its `❶` group. See [`sibling_sense`].
 /// 3. The top-level glossary item.
 ///
 /// A block with a same-shaped sibling was once a sense too. That made an
-/// example line, a gloss `li`, or a 表記 note into a sense in a single-sense
-/// Entry, which is the common marker-less shape. An Entry without numbers has
-/// one sense, so it selects whole.
+/// example block or a 表記 note into a sense in a single-sense Entry, which is
+/// the common marker-less shape. An Entry without a boundary has one sense, so
+/// it selects whole.
 pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     sense(doc, roles, addr).map(|sense| sense.with_examples)
 }
@@ -223,6 +222,13 @@ fn sense(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Sense> {
             }
             continue;
         };
+        if doc.node(id).tag == Tag::Li
+            && doc.node(parent).tag == Tag::Ul
+            && !has_marked_ancestor(doc, &nodes[..depth])
+        {
+            let range = subtree_range(&all, path_prefix(addr.path, depth + 1)?)?;
+            return Some(Sense { own: range, with_examples: range });
+        }
         let parent_path = path_prefix(addr.path, depth)?;
         let index = *addr.path.steps().get(depth)? as usize;
         if let Some(sense) = sibling_sense(doc, &all, parent, parent_path, index) {
@@ -309,9 +315,18 @@ fn sibling_sense(
     Some(Sense { own, with_examples: DocRange { start: own.start, end: last.end } })
 }
 
+fn has_marked_ancestor(doc: &GlossDoc, nodes: &[NodeId]) -> bool {
+    nodes.iter().enumerate().any(|(depth, &id)| {
+        let parent = (depth > 0).then(|| doc.node(nodes[depth - 1]).tag);
+        is_block(doc, id) && is_marked_block(doc, id, parent)
+    })
+}
+
 /// Whether the block `id` is a sense by its own shape.
 fn is_marked_block(doc: &GlossDoc, id: NodeId, parent: Option<Tag>) -> bool {
-    if (doc.node(id).tag == Tag::Li && parent == Some(Tag::Ol)) || doc.marker(id) == Some("sense") {
+    if (doc.node(id).tag == Tag::Li && parent == Some(Tag::Ol))
+        || doc.marker(id) == Some("sense")
+    {
         return true;
     }
     match first_item(doc, id) {
@@ -677,6 +692,24 @@ mod tests {
                 end: DocAddr { path: two, byte: 3 },
             }),
             sense_range(&plain, RoleFilter::CARD, DocAddr { path: two, byte: 1 })
+        );
+    }
+
+    #[test]
+    fn sense_range_picks_one_unordered_list_item() {
+        let list = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "ul", "content": [
+                {"tag": "li", "content": "first sense"},
+                {"tag": "li", "content": "second sense"}
+            ]
+        }}]));
+        let second = path(&[0, 0, 1, 0]);
+        assert_eq!(
+            Some(DocRange {
+                start: DocAddr { path: second, byte: 0 },
+                end: DocAddr { path: second, byte: "second sense".len() as u32 },
+            }),
+            sense_range(&list, RoleFilter::CARD, DocAddr { path: second, byte: 2 })
         );
     }
 
