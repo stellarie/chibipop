@@ -117,6 +117,8 @@ still reads through it. Moving onto another monitor mid-hold grabs that one.
 `trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the
 hands-free version — it freezes at toggle-on and stays frozen until you toggle
 off.
+Toggle mode in the settings window selects this path for the portal channel and prints the
+one-line press bind for the native channel.
 
 **One Hyprland defect to know about** (present through at least 0.55.4,
 verified in source and live): if you release the modifier before the key —
@@ -132,6 +134,7 @@ wedge:
 ```
 bind = ALT, F, exec, chibipop ctl toggle
 ```
+Toggle mode cannot wedge on Hyprland because it has no release bind.
 
 sway is not affected — it arms the release binding at press time and fires it
 on whichever key of the chord comes up first.

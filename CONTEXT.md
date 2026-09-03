@@ -74,8 +74,8 @@ when the screen changes beneath it. The watch runs in live mode only.
 _Avoid_: polling loop, refresh timer
 
 **Frozen grab**:
-The press-time full-output capture in trigger mode. All lookups while the user holds the
-key read this capture. The capture happens before the popup exists, so it needs no mask
+The press-time full-output capture in trigger mode. All lookups before the trigger mode drops
+the grab read this capture. The capture happens before the popup exists, so it needs no mask
 and reads through the popup.
 _Avoid_: snapshot, screenshot buffer
 
@@ -286,6 +286,12 @@ _Avoid_: mouse hook, pointer tracker
 **Trigger channel**:
 The source of trigger-key press and trigger-key release events on Linux.
 _Avoid_: keyboard hook, hotkey listener
+
+**Toggle mode**:
+One trigger-key press shows the popup and latches the Frozen grab, then the next press hides
+the popup and drops the grab. The user can release the key and move onto the popup.
+Per-character lookup is inert in this mode, as in hold-key mode.
+_Avoid_: latch mode, sticky mode
 
 **Control socket**:
 The UNIX socket where verbs arrive from outside the daemon. Keybinds from the compositor

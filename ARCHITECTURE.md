@@ -94,8 +94,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - One control-socket verb exists for each global action. A verb exists only if a user
   can bind a key to it. No verb reads state, takes an argument, or composes.
 - A portal press event and its native-bind verb use one code path.
-  `shortcuts::action` maps the identifier to a `Verb`, and `App::apply_verb` is the only
-  target function.
+  `shortcuts::action` maps the identifier and trigger mode to a `Verb`. In Toggle mode,
+  it maps the trigger identifier to the `toggle` verb. `App::apply_verb` is the only target
+  function.
 
 ## Popup and measurement
 
@@ -152,7 +153,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - At key press, trigger mode freezes one full grab of the output under the cursor
   before any popup exists. No capture and no mask run while the user holds the key.
 - Release drops the frozen buffer, and each press captures again. The `toggle` command
-  captures at toggle-on and holds the buffer until toggle-off.
+  captures at toggle-on and holds the buffer until toggle-off. Toggle mode uses this path on
+  both platforms: Linux sends the `toggle` verb, and Windows flips the hook latch.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine

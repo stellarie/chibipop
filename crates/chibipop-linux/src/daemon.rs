@@ -505,7 +505,7 @@ impl App {
                     if activated { "activated" } else { "deactivated" },
                     id.as_str()
                 ));
-                match shortcuts::action(id, activated) {
+                match shortcuts::action(id, activated, self.config.trigger.mode) {
                     shortcuts::Action::Verb(verb) => self.apply_verb(verb),
                     shortcuts::Action::Nothing => {}
                 }

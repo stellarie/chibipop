@@ -446,7 +446,9 @@ pub struct Controller {
     last_accepted: Option<PhysPoint>,
     /// The point of the newest lookup. The dwell re-check uses this point.
     last_dispatch: Option<PhysPoint>,
-    /// Whether the trigger key is down.
+    /// Whether the trigger is active. In `HoldKey` mode, this is the key state.
+    /// In `Toggle` mode, the bin sends `TriggerDown` at toggle-on and `TriggerUp`
+    /// at toggle-off, so this is the latch. `Live` mode ignores it.
     trigger_held: bool,
     /// The Anki button height from the latest tick.
     button_h: i32,

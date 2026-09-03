@@ -38,8 +38,11 @@ static PENDING: AtomicI64 = AtomicI64::new(NO_POINT);
 /// Stores the configured virtual-key code for the trigger key.
 static TRIGGER_VK: AtomicU16 = AtomicU16::new(0x10);
 
-/// Stores whether the trigger key is held.
+/// Stores whether the trigger is active for popup display.
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tracks physical trigger edges so Windows autorepeat does not toggle the latch.
+static TRIGGER_PHYSICAL: AtomicBool = AtomicBool::new(false);
 
 /// The main thread resets this flag on each tick.
 /// A stuck `true` value blocks every wheel event.
@@ -179,14 +182,15 @@ fn mode_to_u8(m: TriggerMode) -> u8 {
     match m {
         TriggerMode::Live => 0,
         TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
+        TriggerMode::Toggle => 2,
     }
 }
 
 fn u8_to_mode(v: u8) -> TriggerMode {
-    if v == 1 {
-        TriggerMode::HoldKey
-    } else {
-        TriggerMode::Live
+    match v {
+        1 => TriggerMode::HoldKey,
+        2 => TriggerMode::Toggle,
+        _ => TriggerMode::Live,
     }
 }
 
@@ -195,6 +199,37 @@ fn mode_currently_eligible() -> bool {
     match u8_to_mode(MODE.load(Ordering::SeqCst)) {
         TriggerMode::Live => true,
         _ => KEY_DOWN.load(Ordering::SeqCst),
+    }
+}
+
+/// Updates trigger state without calling Win32 APIs.
+///
+/// Windows sends autorepeat key-down events, so the physical edge state filters
+/// repeats. Toggle mode keeps its latch across release, and toggle-off resets
+/// the movement gate before the next capture.
+fn transition_trigger_state(down: bool, still_held: bool, mode: TriggerMode) {
+    if down {
+        if TRIGGER_PHYSICAL.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if mode == TriggerMode::Toggle {
+            if KEY_DOWN.fetch_xor(true, Ordering::SeqCst) {
+                LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+                PENDING.store(NO_POINT, Ordering::SeqCst);
+            }
+        } else {
+            KEY_DOWN.store(true, Ordering::SeqCst);
+        }
+    } else if !still_held {
+        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+        if mode == TriggerMode::Toggle {
+            return;
+        }
+        KEY_DOWN.store(false, Ordering::SeqCst);
+        if mode != TriggerMode::Live {
+            LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
+            PENDING.store(NO_POINT, Ordering::SeqCst);
+        }
     }
 }
 
@@ -327,7 +362,8 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
         return;
     }
     if down {
-        KEY_DOWN.store(true, Ordering::SeqCst);
+        let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
+        transition_trigger_state(true, false, mode);
     } else {
         // For a modifier with left and right variants, clear the state only
         // when both sides are up.
@@ -346,14 +382,8 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
                 & 0x8000)
                 != 0
         });
-        if !still_held {
-            KEY_DOWN.store(false, Ordering::SeqCst);
-            let hold = u8_to_mode(MODE.load(Ordering::SeqCst)) != TriggerMode::Live;
-            if hold {
-                LAST_ACCEPTED.store(NO_POINT, Ordering::SeqCst);
-                PENDING.store(NO_POINT, Ordering::SeqCst);
-            }
-        }
+        let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
+        transition_trigger_state(false, still_held, mode);
     }
 }
 
@@ -572,11 +602,10 @@ impl Hooks {
         SCROLL_ARMED.load(Ordering::SeqCst)
     }
 
-    /// Returns whether the trigger key is down now.
+    /// Returns whether the trigger latch is active.
     ///
-    /// Hold mode rejects moves while the key is up.
-    /// Therefore, no move retracts the popup.
-    /// The `Controller` hides it when the key changes from down to up.
+    /// Toggle mode keeps this latch active after key release.
+    /// Hold mode clears it when the key changes from down to up.
     pub fn trigger_held() -> bool {
         KEY_DOWN.load(Ordering::SeqCst)
     }
@@ -651,8 +680,15 @@ impl Hooks {
     }
 
     /// Sets the mode that controls the trigger gate.
+    ///
+    /// A mode change clears the physical edge and latch state so a Toggle
+    /// latch cannot survive a settings change into another mode.
     pub fn set_mode(m: TriggerMode) {
-        MODE.store(mode_to_u8(m), Ordering::SeqCst);
+        let mode = mode_to_u8(m);
+        if MODE.swap(mode, Ordering::SeqCst) != mode {
+            KEY_DOWN.store(false, Ordering::SeqCst);
+            TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+        }
     }
 
     /// Takes the stored candidate point.
@@ -789,6 +825,60 @@ mod tests {
 
     fn pointer_guard() -> std::sync::MutexGuard<'static, ()> {
         POINTER_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The tests share trigger transition state.
+    static TRIGGER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
+        TRIGGER_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn toggle_transitions_latch_and_reset_gate_on_toggle_off() {
+        let _g = trigger_guard();
+        KEY_DOWN.store(false, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+        LAST_ACCEPTED.store(1, Ordering::SeqCst);
+        PENDING.store(2, Ordering::SeqCst);
+
+        transition_trigger_state(true, false, TriggerMode::Toggle);
+        assert!(Hooks::trigger_held());
+        transition_trigger_state(false, false, TriggerMode::Toggle);
+        assert!(Hooks::trigger_held());
+        assert_eq!(1, LAST_ACCEPTED.load(Ordering::SeqCst));
+        assert_eq!(2, PENDING.load(Ordering::SeqCst));
+
+        transition_trigger_state(true, false, TriggerMode::Toggle);
+        assert!(!Hooks::trigger_held());
+        assert_eq!(NO_POINT, LAST_ACCEPTED.load(Ordering::SeqCst));
+        assert_eq!(NO_POINT, PENDING.load(Ordering::SeqCst));
+        transition_trigger_state(false, false, TriggerMode::Toggle);
+    }
+
+    #[test]
+    fn toggle_ignores_repeated_key_down_without_release() {
+        let _g = trigger_guard();
+        KEY_DOWN.store(false, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+
+        transition_trigger_state(true, false, TriggerMode::Toggle);
+        transition_trigger_state(true, false, TriggerMode::Toggle);
+        assert!(Hooks::trigger_held());
+
+        transition_trigger_state(false, false, TriggerMode::Toggle);
+    }
+
+    #[test]
+    fn hold_key_transitions_follow_press_and_release() {
+        let _g = trigger_guard();
+        KEY_DOWN.store(false, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+
+        transition_trigger_state(true, false, TriggerMode::HoldKey);
+        assert!(Hooks::trigger_held());
+        transition_trigger_state(false, false, TriggerMode::HoldKey);
+        assert!(!Hooks::trigger_held());
     }
 
     #[test]

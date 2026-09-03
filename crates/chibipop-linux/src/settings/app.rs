@@ -255,13 +255,13 @@ impl App {
         }
     }
 
-    /// `bind_snippet` returns the trigger row's copyable press and release bind.
+    /// `bind_snippet` returns the trigger row's copyable bind for the selected mode.
     fn bind_snippet(&self) -> String {
         snippets::bind_snippet(
             self.compositor,
             &self.linux.trigger_key_linux,
             &self.exe,
-            snippets::Bind::Hold,
+            snippets::trigger_bind(self.form.mode),
         )
     }
 
@@ -1162,6 +1162,8 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 fn trigger_section(app: &App) -> Element<'_, Message> {
     let selected = if app.form.mode == TriggerMode::Live {
         TriggerMode::Live
+    } else if app.form.mode == TriggerMode::Toggle {
+        TriggerMode::Toggle
     } else {
         // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
         TriggerMode::HoldKey
@@ -1169,6 +1171,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     let mode = row![
         radio("Live", TriggerMode::Live, Some(selected), Message::Mode),
         radio("Hold key", TriggerMode::HoldKey, Some(selected), Message::Mode),
+        radio("Toggle", TriggerMode::Toggle, Some(selected), Message::Mode),
     ]
     .spacing(20);
 
@@ -1176,7 +1179,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         app.compositor,
         &app.linux.trigger_key_linux,
         &app.exe,
-        snippets::Bind::Hold,
+        snippets::trigger_bind(app.form.mode),
     ) {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns the binding. Paste this into its config:"),
@@ -2419,7 +2422,6 @@ mod tests {
             app.add_bind_snippet()
         );
 
-        // The trigger row keeps its own key. The two rows use two channels.
         app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
         assert_eq!(
             HotkeyControl::Rebind { current: Some("Meta+F".into()) },
@@ -2427,12 +2429,25 @@ mod tests {
                 app.compositor,
                 &app.linux.trigger_key_linux,
                 &app.exe,
-                snippets::Bind::Hold,
+                snippets::trigger_bind(app.form.mode),
             )
         );
         // The full window still builds both portal rows. The status block is a widget
         // tree, not only a control value.
         let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toggle_trigger_row_offers_a_single_toggle_bind() {
+        let dir = scratch("togglebind");
+        let mut app = app(&dir);
+        let _ = update(&mut app, Message::Mode(TriggerMode::Toggle));
+
+        let snippet = app.bind_snippet();
+        assert!(snippet.contains("ctl toggle"), "{snippet}");
+        assert!(!snippet.contains("trigger-down"), "{snippet}");
+        assert!(!snippet.contains("trigger-up"), "{snippet}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

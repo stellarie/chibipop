@@ -308,8 +308,8 @@ them.
 
 ```toml
 [trigger]
-mode = "live"               # "live" | "hold-key" | "hold-shift" (legacy)
-trigger_key = "shift"       # Windows: the key held in hold-key mode
+mode = "live"               # "live" | "hold-key" | "toggle" | "hold-shift" (legacy)
+trigger_key = "shift"       # Windows: the key for hold-key and toggle mode
 trigger_key_linux = "ALT+F" # Linux: the chord, in portal syntax
 per_character_lookup = false
 
