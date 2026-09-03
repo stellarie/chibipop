@@ -119,7 +119,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Selection state lives in core as `select::Selections`. It stores one `CardSelection`
   per Card at the `all_cards` index and swaps with `swap_top`.
 - `select::gesture::Gesture` owns click chains, drags, and deferred plain-click clear.
-  Ticks provide its clock.
+  Windows dispatch ticks provide its clock. Linux starts a temporary clock after pointer
+  input and retires it after the click chain expires.
 - A drag snaps to the unit of the press that started it: grapheme, word, configured
   triple-click unit, or Entry. A word drag snaps to graphemes until the analysis answers.
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from

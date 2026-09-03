@@ -33,7 +33,9 @@ use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
-use chibipop::controller::{Command, Controller, ControllerConfig, Event, LookupOutcome, RequestId};
+use chibipop::controller::{
+    Command, Controller, ControllerConfig, Event, LookupOutcome, RequestId, CLICK_CHAIN_MS,
+};
 use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{OcrLine, Orientation};
@@ -63,10 +65,13 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 
-/// Controller tick length. Linux has no dispatch timer.
-/// ARCHITECTURE.md#hover-cadence defines event-paced hover with Worker throttle.
-/// The Controller uses this value to derive alert arithmetic from ticks.
+/// Controller clock quantum.
+///
+/// Linux has no dispatch timer. A temporary timer advances only gesture state
+/// after pointer input and retires after the click chain expires.
 const DISPATCH_TICK_MS: u32 = 20;
+const GESTURE_TIMER_TICKS: u64 =
+    CLICK_CHAIN_MS.div_ceil(DISPATCH_TICK_MS as u64).saturating_add(1);
 
 /// The environment hook for the surface probe and its pick deadline.
 /// See [`App::probe_surfaces`].
@@ -236,13 +241,17 @@ pub(crate) struct App {
     /// Every value that the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
     /// Handle that receives new sources.
-    /// The dwell watch is the only source that this daemon adds or removes at
-    /// runtime.
-    /// The decision state must therefore reach the pump handle.
+    ///
+    /// The dwell watch and temporary gesture clock are the only sources that
+    /// this daemon adds or removes at runtime.
     pump: LoopHandle<'static, App>,
     /// Dwell re-check timer while it is armed
     /// (ARCHITECTURE.md#hover-cadence).
     dwell: Option<RegistrationToken>,
+    /// Temporary clock that keeps core gesture deadlines live.
+    gesture_tick: Option<RegistrationToken>,
+    /// Ticks before the temporary gesture clock retires.
+    gesture_ticks_left: u64,
 }
 
 /// One popup job. It blocks the thread that runs it.
@@ -1510,12 +1519,14 @@ impl App {
                         }
                     ));
                     self.feed(Event::PointerDown { local, button, hit, text });
+                    self.arm_gesture_clock();
                 }
                 popup::Interaction::Move { local, text } => {
                     self.feed(Event::PointerMoved { local, text });
                 }
                 popup::Interaction::Up { local, button } => {
                     self.feed(Event::PointerUp { local, button });
+                    self.arm_gesture_clock();
                 }
                 // Core reserves the slot and the painter fills it.
                 // The Controller decides whether the press becomes an add.
@@ -1627,6 +1638,35 @@ impl App {
             self.execute(cmd);
         }
         self.sync_dwell();
+    }
+
+    /// Keep gesture time live only around pointer input.
+    ///
+    /// One extra tick makes the inclusive click-chain deadline expire. A new
+    /// press or release extends the same timer instead of adding another source.
+    fn arm_gesture_clock(&mut self) {
+        self.gesture_ticks_left = GESTURE_TIMER_TICKS;
+        if self.gesture_tick.is_some() {
+            return;
+        }
+        let interval = Duration::from_millis(u64::from(DISPATCH_TICK_MS));
+        match self.pump.insert_source(Timer::from_duration(interval), |_, _, app: &mut App| {
+            app.gesture_tick()
+        }) {
+            Ok(token) => self.gesture_tick = Some(token),
+            Err(e) => self.log.diag(&format!("gesture: no clock could be armed - {e}")),
+        }
+    }
+
+    /// Advance one core gesture tick and retire after the click deadline.
+    fn gesture_tick(&mut self) -> TimeoutAction {
+        self.feed(Event::GestureTick);
+        self.gesture_ticks_left = self.gesture_ticks_left.saturating_sub(1);
+        if self.gesture_ticks_left == 0 {
+            self.gesture_tick = None;
+            return TimeoutAction::Drop;
+        }
+        TimeoutAction::ToDuration(Duration::from_millis(u64::from(DISPATCH_TICK_MS)))
     }
 
     /// Return whether the dwell re-check has something to watch now.
@@ -2975,6 +3015,8 @@ pub fn run(paths: Paths) -> Result<()> {
         fatal: None,
         pump: event_loop.handle(),
         dwell: None,
+        gesture_tick: None,
+        gesture_ticks_left: 0,
         cursor: CursorState::default(),
         controller: Controller::new(controller_config(&config)),
         trace,
@@ -3362,6 +3404,8 @@ mod tests {
             fatal: None,
             pump: event_loop.handle(),
             dwell: None,
+            gesture_tick: None,
+            gesture_ticks_left: 0,
             settings: SettingsChild::new(),
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
@@ -4620,6 +4664,90 @@ mod tests {
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert_eq!(1, written.matches("dwell: deadline").count(), "log was: {written}");
         assert!(written.contains("watch retired"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Linux has no permanent dispatch timer. Its temporary gesture clock must
+    /// still deliver the deferred clear from one primary click.
+    #[test]
+    fn one_plain_click_clears_a_glossary_selection_on_linux() {
+        use chibipop::config::SelectionButtons;
+        use chibipop::controller::{Button, HitAction};
+        use chibipop::dict::gloss::NodePath;
+        use chibipop::select::{DocAddr, TextAddr};
+
+        let dir = scratch("gestureclock");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.config.anki.enabled = true;
+        app.config.anki.selection_buttons = SelectionButtons::PrimaryAdditive;
+        app.controller = Controller::new(controller_config(&app.config));
+
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+        app.controller.handle(Event::CursorMoved { pos: AT });
+        app.controller.handle(Event::LookupResult {
+            id: RequestId(1),
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(popup::canned()),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 150, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        app.controller.handle(Event::PointerDown {
+            local: PhysPoint { x: 10, y: 10 },
+            button: Button::Primary,
+            hit: Some(HitAction::ToggleEntry(0)),
+            text: None,
+        });
+        assert!(!app.controller.selection().unwrap().card(0).unwrap().is_empty());
+
+        let text = TextAddr {
+            entry: 0,
+            addr: DocAddr { path: NodePath::ROOT.child(0).unwrap(), byte: 0 },
+        };
+        app.hold = Some(Hold {
+            output: PhysRect { x: 0, y: 0, w: 1920, h: 1080 },
+            latched: false,
+        });
+        app.pointer_interactions(vec![
+            popup::Interaction::Down {
+                local: PhysPoint { x: 20, y: 20 },
+                button: Button::Primary,
+                hit: None,
+                text: Some(text),
+            },
+            popup::Interaction::Up {
+                local: PhysPoint { x: 20, y: 20 },
+                button: Button::Primary,
+            },
+        ]);
+        assert!(!app.controller.selection().unwrap().card(0).unwrap().is_empty());
+        assert!(app.gesture_tick.is_some(), "the pointer click must arm the clock");
+
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        event_loop
+            .run(
+                Some(Duration::from_millis(u64::from(DISPATCH_TICK_MS))),
+                &mut app,
+                |app| {
+                    passes += 1;
+                    if app.gesture_tick.is_none() || passes > GESTURE_TIMER_TICKS + 5 {
+                        escape.stop();
+                    }
+                },
+            )
+            .unwrap();
+
+        assert!(app.gesture_tick.is_none(), "the gesture clock must retire");
+        assert!(app.controller.selection().unwrap().card(0).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

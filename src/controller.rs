@@ -23,6 +23,12 @@ use crate::text::layout::Orientation;
 /// The cursor must move more than this many physical pixels on one axis.
 const MOVEMENT_GATE_PX: i64 = 4;
 
+/// A click chain expires after this many milliseconds.
+///
+/// Linux uses this value to retire its temporary gesture clock. Keep the
+/// platform deadline and the core resolver on one duration.
+pub const CLICK_CHAIN_MS: u64 = 500;
+
 /// This four-pixel limit accounts for the `UPSCALE` value of 2.
 const ANCHOR_JITTER_PX: i32 = 4;
 
@@ -103,6 +109,11 @@ pub enum Event {
     /// A dispatch tick with the live cursor and the Anki button height.
     /// The height is zero when the button is not visible.
     Tick { cursor: PhysPoint, button_h: i32 },
+    /// A gesture-only tick from a platform without a dispatch timer.
+    ///
+    /// Linux sends these ticks only after pointer input. This keeps click chains
+    /// and deferred plain-click clears live without waking the idle daemon.
+    GestureTick,
     /// The number of complete wheel notches. Up is `+`.
     Scrolled { notches: i32 },
     /// A button press in popup-local coordinates. The platform bin performs
@@ -507,6 +518,7 @@ impl Controller {
     pub fn handle(&mut self, event: Event) -> Vec<Command> {
         match event {
             Event::Tick { cursor, button_h } => self.tick(cursor, button_h),
+            Event::GestureTick => self.gesture_tick(),
             Event::Scrolled { notches } => self.scrolled(notches),
             Event::PointerDown { local, button, hit, text } => {
                 self.pointer_down(local, button, hit, text)
@@ -585,6 +597,11 @@ impl Controller {
         out.extend(self.run_gesture(GestureInput::Tick { tick }));
         out.extend(self.edge_autoscroll());
         out
+    }
+
+    fn gesture_tick(&mut self) -> Vec<Command> {
+        self.clock = self.clock.wrapping_add(1);
+        self.run_gesture(GestureInput::Tick { tick: self.clock })
     }
 
     fn has_history(&self) -> bool {
@@ -755,7 +772,7 @@ impl Controller {
     fn gesture_env(&self) -> GestureEnv {
         let tick_ms = u64::from(self.cfg.tick_ms.max(1));
         GestureEnv {
-            chain_ticks: 500_u64.div_ceil(tick_ms),
+            chain_ticks: CLICK_CHAIN_MS.div_ceil(tick_ms),
             threshold_px: ANCHOR_JITTER_PX,
             primary_additive: self.cfg.primary_additive,
         }
