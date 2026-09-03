@@ -46,7 +46,7 @@ magic=$(od -An -N4 -tx1 -- "$binary" | tr -d ' \n')
 name="chibipop-$version-linux-x64"
 stage="$out/$name"
 rm -rf -- "$stage"
-mkdir -p -- "$stage/data" "$stage/models/meiki" "$stage/extras"
+mkdir -p -- "$stage/data" "$stage/data/ipadic" "$stage/models/meiki" "$stage/extras"
 
 # The Windows zip's shape, mirrored: the binary, the deconjugator table it
 # needs at runtime, README, LICENSE. The dictionary database is not here
@@ -55,6 +55,14 @@ mkdir -p -- "$stage/data" "$stage/models/meiki" "$stage/extras"
 install -m755 -- "$binary" "$stage/chibipop"
 install -m644 -- "$repo/data/deconjugator.json" "$stage/data/"
 install -m644 -- "$repo/README.md" "$repo/LICENSE" "$stage/"
+# The decoded IPADIC model is part of the offline-first runtime. Its licence
+# notices ride along with the model, and the staged copy gets the same hash
+# check as the meiki model before the tarball is created.
+ipadic=$repo/data/ipadic
+install -m644 -- "$ipadic/system.dic" "$ipadic/COPYING" "$ipadic/NOTICE" \
+	"$ipadic/SHA256SUMS.txt" "$stage/data/ipadic/"
+(cd -- "$stage/data/ipadic" && sha256sum --check --strict -- SHA256SUMS.txt)
+
 
 # `models/meiki` beside the binary is the first layout `models::locate()`
 # searches (crates/chibipop-linux/src/ocr/models.rs). It is not a

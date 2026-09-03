@@ -1,6 +1,10 @@
 /* chibipop popup theme */
 /* Sakura Light — pink accents on clean white. */
 /* Best on: light base theme. */
+:root {
+  --accent: #0078ff;
+}
+
 
 /* Panel background, border, shape */
 .popup {

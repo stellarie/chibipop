@@ -4,7 +4,8 @@
 //! The core keeps Dictionary roles, language lists, and staged changes here.
 
 use crate::config::{
-    Config, FieldMapping, LayoutMode, OcrClipboardConfig, SentenceMode, TriggerMode,
+    Config, FieldMapping, LayoutMode, OcrClipboardConfig, SelectionButtons, SelectionSeparator,
+    SentenceMode, TriggerMode,
 };
 use crate::dict::frequency::RankingStrategy;
 use crate::library::{roles_of, Library, Pending, Role, Roles};
@@ -31,8 +32,8 @@ pub struct SettingsForm {
     pub summary_chars: usize,
     pub highlight_match: bool,
     pub scroll_popup: bool,
+    pub edge_autoscroll: bool,
     pub side_panel: bool,
-    /// The popup layout mode.
     pub layout_mode: LayoutMode,
     pub dictionary_styling: bool,
     pub show_examples: bool,
@@ -101,7 +102,10 @@ pub struct SettingsForm {
     pub include_screenshot: bool,
     /// Whether the note uses only the top Dictionary's Entry.
     pub first_dict_only: bool,
-    /// The plugin names that can run.
+    /// Which physical button applies a glossary selection.
+    pub selection_buttons: SelectionButtons,
+    /// Which separator joins selected glossary fragments.
+    pub selection_separator: SelectionSeparator,
     pub enabled_plugins: Vec<String>,
 }
 
@@ -401,6 +405,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         summary_chars: cfg.popup.summary_chars,
         highlight_match: cfg.popup.highlight_match,
         scroll_popup: cfg.popup.scroll_popup,
+        edge_autoscroll: cfg.popup.edge_autoscroll,
         side_panel: cfg.popup.side_panel,
         layout_mode: cfg.popup.layout_mode,
         dictionary_styling: cfg.popup.dictionary_styling,
@@ -448,6 +453,8 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
         first_dict_only: cfg.anki.first_dict_only,
+        selection_buttons: cfg.anki.selection_buttons,
+        selection_separator: cfg.anki.selection_separator,
         enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
@@ -482,6 +489,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup.summary_chars = form.summary_chars.clamp(SUMMARY_RANGE.0, SUMMARY_RANGE.1);
     out.popup.highlight_match = form.highlight_match;
     out.popup.scroll_popup = form.scroll_popup;
+    out.popup.edge_autoscroll = form.edge_autoscroll;
     out.popup.side_panel = form.side_panel;
     out.popup.layout_mode = form.layout_mode;
     out.popup.dictionary_styling = form.dictionary_styling;
@@ -514,6 +522,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
     out.anki.first_dict_only = form.first_dict_only;
+    out.anki.selection_buttons = form.selection_buttons;
+    out.anki.selection_separator = form.selection_separator;
     // The form renders only the Windows chord, so the Linux chord stays unchanged.
     // The section stays when either chord has a value. The code can clear one
     // chord and keep the other.
@@ -969,6 +979,7 @@ mod tests {
         cfg.popup.summary_chars = 25;
         cfg.popup.highlight_match = false;
         cfg.popup.scroll_popup = false;
+        cfg.popup.edge_autoscroll = false;
         cfg.popup.side_panel = true;
         cfg.popup.exclude_from_capture = true;
         cfg.popup.layout_mode = LayoutMode::Compact;
@@ -991,6 +1002,8 @@ mod tests {
         cfg.anki.model = "Custom".into();
         cfg.anki.add_key = "f2".into();
         cfg.anki.notify_on_add = false;
+        cfg.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
+        cfg.anki.selection_separator = SelectionSeparator::ListItems;
         let form = from_config(&cfg, &dicts());
         assert_eq!(cfg, apply_to(&form, &cfg));
     }

@@ -23,8 +23,8 @@ use crate::lock::{self, LockError};
 use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
-    FieldMapping, LayoutMode, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES,
-    MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+    FieldMapping, LayoutMode, PopupLayer, SelectionButtons, SelectionSeparator, SentenceMode,
+    TriggerMode, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
 use chibipop::library::Role;
@@ -629,6 +629,7 @@ enum Message {
     Summary(u16),
     Highlight(bool),
     Scroll(bool),
+    EdgeAutoscroll(bool),
     SidePanel(bool),
     LayerPicked(String),
     /// The layout-mode picker label. [`LAYOUT_MODES`] maps the label back,
@@ -692,6 +693,10 @@ enum Message {
     AnkiModel(String),
     AnkiAddKey(String),
     FirstDictOnly(bool),
+    /// The selection button-mode picker label. [`SELECTION_BUTTONS`] maps it back.
+    SelectionButtonsPicked(String),
+    /// The selection separator picker label. [`SELECTION_SEPARATORS`] maps it back.
+    SelectionSeparatorPicked(String),
     /// Whether an add carries a mining picture. The core gate is
     /// `chibipop::shot::plan_add`.
     IncludeScreenshot(bool),
@@ -750,6 +755,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Summary(v) => app.form.summary_chars = v as usize,
         Message::Highlight(on) => app.form.highlight_match = on,
         Message::Scroll(on) => app.form.scroll_popup = on,
+        Message::EdgeAutoscroll(on) => app.form.edge_autoscroll = on,
         Message::SidePanel(on) => app.form.side_panel = on,
         Message::LayerPicked(layer) => {
             app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
@@ -796,6 +802,12 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiModel(v) => app.form.anki_model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
         Message::FirstDictOnly(v) => app.form.first_dict_only = v,
+        Message::SelectionButtonsPicked(label) => {
+            app.form.selection_buttons = selection_buttons_of(&label);
+        }
+        Message::SelectionSeparatorPicked(label) => {
+            app.form.selection_separator = selection_separator_of(&label);
+        }
         Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
         // This is the only place where empty text becomes `None`. The config field
         // uses `Option`, so absence has a distinct value. An empty chord would be a
@@ -1258,6 +1270,9 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.scroll_popup)
                 .label("Scroll long entries with the wheel")
                 .on_toggle(Message::Scroll),
+            checkbox(app.form.edge_autoscroll)
+                .label("Auto-scroll while dragging at the popup edge")
+                .on_toggle(Message::EdgeAutoscroll),
             checkbox(app.form.side_panel)
                 .label("Show related words beside the popup")
                 .on_toggle(Message::SidePanel),
@@ -1280,6 +1295,56 @@ const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
     (LayoutMode::Roomy, "Roomy (one item per line)"),
     (LayoutMode::Compact, "Compact (one line per dictionary)"),
 ];
+
+/// The button-mode picker items, in display order.
+const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
+    (SelectionButtons::PrimaryAdditive, "Primary additive"),
+    (SelectionButtons::PrimaryReplacing, "Primary replacing"),
+];
+
+fn selection_button_labels() -> Vec<String> {
+    SELECTION_BUTTONS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn selection_button_label(buttons: SelectionButtons) -> &'static str {
+    SELECTION_BUTTONS
+        .iter()
+        .find(|&&(value, _)| value == buttons)
+        .map_or(SELECTION_BUTTONS[0].1, |&(_, label)| label)
+}
+
+fn selection_buttons_of(label: &str) -> SelectionButtons {
+    SELECTION_BUTTONS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(SelectionButtons::PrimaryAdditive, |&(buttons, _)| buttons)
+}
+
+/// The separator picker items, in display order.
+const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
+    (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
+    (SelectionSeparator::Space, "Space"),
+    (SelectionSeparator::LineBreak, "Line break"),
+    (SelectionSeparator::ListItems, "List items"),
+];
+
+fn selection_separator_labels() -> Vec<String> {
+    SELECTION_SEPARATORS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn selection_separator_label(separator: SelectionSeparator) -> &'static str {
+    SELECTION_SEPARATORS
+        .iter()
+        .find(|&&(value, _)| value == separator)
+        .map_or(SELECTION_SEPARATORS[0].1, |&(_, label)| label)
+}
+
+fn selection_separator_of(label: &str) -> SelectionSeparator {
+    SELECTION_SEPARATORS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(SelectionSeparator::Ellipsis, |&(separator, _)| separator)
+}
 
 /// The picker's items, in table order.
 fn layout_labels() -> Vec<String> {
@@ -1994,6 +2059,22 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         checkbox(app.form.first_dict_only)
             .label("First dictionary only")
             .on_toggle(Message::FirstDictOnly),
+        labeled(
+            "Selection buttons",
+            pick_list(
+                selection_button_labels(),
+                Some(selection_button_label(app.form.selection_buttons).to_string()),
+                Message::SelectionButtonsPicked,
+            ),
+        ),
+        labeled(
+            "Selection separator",
+            pick_list(
+                selection_separator_labels(),
+                Some(selection_separator_label(app.form.selection_separator).to_string()),
+                Message::SelectionSeparatorPicked,
+            ),
+        ),
         column(screenshot_rows(app)).spacing(10),
         column(sentence_rows(app)).spacing(10),
         text("Field mappings").size(14),
@@ -2307,6 +2388,41 @@ mod tests {
 
         let _ = update(&mut app, Message::FirstDictOnly(false));
         assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selection_controls_round_trip_into_the_config() {
+        let dir = scratch("selectioncontrols");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        let _ = update(
+            &mut app,
+            Message::SelectionButtonsPicked("Primary replacing".to_string()),
+        );
+        let _ = update(
+            &mut app,
+            Message::SelectionSeparatorPicked("List items".to_string()),
+        );
+        let out = chibipop::settings::apply_to(&app.form, &cfg);
+        assert_eq!(
+            chibipop::config::SelectionButtons::PrimaryReplacing,
+            out.anki.selection_buttons
+        );
+        assert_eq!(
+            chibipop::config::SelectionSeparator::ListItems,
+            out.anki.selection_separator
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edge_autoscroll_toggle_round_trips_into_the_config() {
+        let dir = scratch("edgeautoscroll");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        let _ = update(&mut app, Message::EdgeAutoscroll(false));
+        assert!(!chibipop::settings::apply_to(&app.form, &cfg).popup.edge_autoscroll);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -222,6 +222,10 @@ line. The formatted version numbers them.
 top dictionary's definitions. It keeps cards short when several
 dictionaries match the same word.
 
+The *Anki* tab also sets how glossary selection works. The default makes the
+primary button additive and the secondary button replacing. It joins selected
+fragments with an ellipsis. Choose another button mode or separator when needed.
+
 A small notification confirms each card. Turn it off with **Show
 notification when a card is added**.
 

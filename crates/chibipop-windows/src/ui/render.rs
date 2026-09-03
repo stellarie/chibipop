@@ -350,6 +350,27 @@ impl TextMeasure for Measurer<'_> {
         }
         Ok(())
     }
+
+    fn hit_offset(
+        &mut self,
+        run: MeasureRun<'_>,
+        x: f32,
+        y: f32,
+    ) -> std::result::Result<u32, MeasureError> {
+        let layout = self.0.layout(run).map_err(refused)?;
+        let total = ranges(run.spans).map(|range| range.length).sum::<u32>();
+        let mut trailing = BOOL::default();
+        let mut inside = BOOL::default();
+        let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+        // SAFETY: DirectWrite writes the hit flags and metrics into these
+        // stack values, and the layout owns the text being hit.
+        unsafe { layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut metrics) }
+            .map_err(refused)?;
+        let offset = metrics
+            .textPosition
+            .saturating_add(if trailing.as_bool() { metrics.length } else { 0 });
+        Ok(offset.min(total))
+    }
 }
 
 /// Returns the height that each span gets from its line.

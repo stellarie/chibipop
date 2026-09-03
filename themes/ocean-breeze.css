@@ -1,6 +1,10 @@
 /* chibipop popup theme */
 /* Ocean Breeze — cool blue-green on deep navy. */
 /* Best on: dark base theme. */
+:root {
+  --accent: #50beff;
+}
+
 
 /* Panel background, border, shape */
 .popup {

@@ -172,6 +172,11 @@ pub struct PopupConfig {
     /// Lets the user scroll a long popup with the wheel.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
+    /// Auto-scrolls while a selection drag reaches the popup edge.
+    ///
+    /// `scroll_popup = false` disables edge auto-scroll too.
+    #[serde(default = "default_edge_autoscroll")]
+    pub edge_autoscroll: bool,
     /// Places collapsed rows beside the entry instead of below it.
     #[serde(default)]
     pub side_panel: bool,
@@ -226,6 +231,11 @@ fn default_highlight_match() -> bool {
 
 /// Enables popup scroll by default.
 fn default_scroll_popup() -> bool {
+    true
+}
+
+/// Enables edge auto-scroll by default.
+fn default_edge_autoscroll() -> bool {
     true
 }
 
@@ -290,6 +300,83 @@ pub enum LayoutMode {
     /// `li { display: inline }` and a separator after the first item.
     /// The separator follows the first item only.
     Compact,
+}
+
+/// Selects which physical button applies a glossary selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionButtons {
+    /// Makes the primary button add to the current selection.
+    #[default]
+    PrimaryAdditive,
+    /// Makes the primary button replace the current selection.
+    PrimaryReplacing,
+}
+
+impl SelectionButtons {
+    /// Returns the kebab-case value stored in TOML.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SelectionButtons::PrimaryAdditive => "primary-additive",
+            SelectionButtons::PrimaryReplacing => "primary-replacing",
+        }
+    }
+
+    /// Returns the label shown by settings windows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SelectionButtons::PrimaryAdditive => "Primary additive",
+            SelectionButtons::PrimaryReplacing => "Primary replacing",
+        }
+    }
+}
+
+/// Selects the separator between selected glossary fragments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionSeparator {
+    /// Joins fragments with an ellipsis.
+    #[default]
+    Ellipsis,
+    /// Joins fragments with one space.
+    Space,
+    /// Joins fragments with a line break.
+    LineBreak,
+    /// Joins fragments as separate list items.
+    ListItems,
+}
+
+impl SelectionSeparator {
+    /// Returns the kebab-case value stored in TOML.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SelectionSeparator::Ellipsis => "ellipsis",
+            SelectionSeparator::Space => "space",
+            SelectionSeparator::LineBreak => "line-break",
+            SelectionSeparator::ListItems => "list-items",
+        }
+    }
+
+    /// Returns the label shown by settings windows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SelectionSeparator::Ellipsis => "Ellipsis (…)",
+            SelectionSeparator::Space => "Space",
+            SelectionSeparator::LineBreak => "Line break",
+            SelectionSeparator::ListItems => "List items",
+        }
+    }
+}
+
+impl From<SelectionSeparator> for crate::dict::gloss::Separator {
+    fn from(separator: SelectionSeparator) -> Self {
+        match separator {
+            SelectionSeparator::Ellipsis => crate::dict::gloss::Separator::Ellipsis,
+            SelectionSeparator::Space => crate::dict::gloss::Separator::Space,
+            SelectionSeparator::LineBreak => crate::dict::gloss::Separator::LineBreak,
+            SelectionSeparator::ListItems => crate::dict::gloss::Separator::ListItems,
+        }
+    }
 }
 
 impl PopupConfig {
@@ -764,7 +851,14 @@ pub struct AnkiConfig {
     /// Uses only the entry from the top Dictionary.
     #[serde(default)]
     pub first_dict_only: bool,
+    /// Selects whether the primary button adds to or replaces a selection.
+    #[serde(default)]
+    pub selection_buttons: SelectionButtons,
+    /// Selects the separator between selected glossary fragments.
+    #[serde(default)]
+    pub selection_separator: SelectionSeparator,
 }
+
 
 /// The default Anki URL.
 fn default_anki_url() -> String {
@@ -775,12 +869,10 @@ fn default_anki_url() -> String {
 fn default_anki_deck() -> String {
     "Default".to_string()
 }
-
 /// The default Anki model name.
 fn default_anki_model() -> String {
     "Lapis".to_string()
 }
-
 /// The default Anki add key.
 fn default_anki_add_key() -> String {
     "a".to_string()
@@ -864,6 +956,8 @@ impl Default for AnkiConfig {
             static_region: None,
             show_static_overlay: default_show_static_overlay(),
             first_dict_only: false,
+            selection_buttons: SelectionButtons::default(),
+            selection_separator: SelectionSeparator::default(),
         }
     }
 }
@@ -990,6 +1084,7 @@ impl Default for Config {
                 font: Platform::current().default_font().to_string(),
                 highlight_match: default_highlight_match(),
                 scroll_popup: default_scroll_popup(),
+                edge_autoscroll: default_edge_autoscroll(),
                 side_panel: false,
                 layer: PopupLayer::default(),
                 layout_mode: LayoutMode::default(),
@@ -1413,13 +1508,21 @@ mod tests {
     }
 
     #[test]
+    fn edge_autoscrolling_defaults_on() {
+        assert!(Config::default().popup.edge_autoscroll);
+    }
+
+    #[test]
     fn disabled_scrolling_round_trips() {
         let p = tmp("scroll_off");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
         c.popup.scroll_popup = false;
+        c.popup.edge_autoscroll = false;
         c.save(&p).unwrap();
-        assert!(!load_or_create(&p).unwrap().popup.scroll_popup);
+        let back = load_or_create(&p).unwrap();
+        assert!(!back.popup.scroll_popup);
+        assert!(!back.popup.edge_autoscroll);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1465,6 +1568,7 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-scroll_popup config must still load");
         assert!(c.popup.scroll_popup, "a missing field must take the field default");
+        assert!(c.popup.edge_autoscroll, "a missing edge field must take the field default");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1628,13 +1732,60 @@ mod tests {
     }
 
     #[test]
-    fn first_dict_only_round_trips() {
-        let p = tmp("first_dict_only_rt");
+    fn selection_defaults_are_primary_additive_and_ellipsis() {
+        let anki = &Config::default().anki;
+        assert_eq!(SelectionButtons::PrimaryAdditive, anki.selection_buttons);
+        assert_eq!(SelectionSeparator::Ellipsis, anki.selection_separator);
+    }
+
+    #[test]
+    fn selection_enum_names_match_toml_values() {
+        assert_eq!("primary-replacing", SelectionButtons::PrimaryReplacing.as_str());
+        assert_eq!("line-break", SelectionSeparator::LineBreak.as_str());
+        // `toml` refuses a bare scalar at the top level, so wrap the enums.
+        #[derive(serde::Serialize)]
+        struct Wrap {
+            buttons: SelectionButtons,
+            separator: SelectionSeparator,
+        }
+        let text = toml::to_string(&Wrap {
+            buttons: SelectionButtons::PrimaryReplacing,
+            separator: SelectionSeparator::LineBreak,
+        })
+        .unwrap();
+        assert!(text.contains("buttons = \"primary-replacing\""), "{text}");
+        assert!(text.contains("separator = \"line-break\""), "{text}");
+    }
+
+    #[test]
+    fn selection_settings_round_trip() {
+        let p = tmp("selection_settings_rt");
         let _ = std::fs::remove_file(&p);
         let mut c = Config::default();
         c.anki.first_dict_only = true;
+        c.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
+        c.anki.selection_separator = SelectionSeparator::ListItems;
         c.save(&p).unwrap();
-        assert!(load_or_create(&p).unwrap().anki.first_dict_only);
+        let back = load_or_create(&p).unwrap();
+        assert!(back.anki.first_dict_only);
+        assert_eq!(SelectionButtons::PrimaryReplacing, back.anki.selection_buttons);
+        assert_eq!(SelectionSeparator::ListItems, back.anki.selection_separator);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_anki_section_without_selection_settings_uses_defaults() {
+        let p = tmp("anki_no_selection_settings");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let anki = &load_or_create(&p).expect("an old Anki config must load").anki;
+        assert_eq!(SelectionButtons::PrimaryAdditive, anki.selection_buttons);
+        assert_eq!(SelectionSeparator::Ellipsis, anki.selection_separator);
         let _ = std::fs::remove_file(&p);
     }
 

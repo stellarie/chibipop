@@ -21,7 +21,11 @@
 //! plain sentence text stays on its line. [`GlossDoc::prose`] identifies this
 //! case.
 
-use super::{GlossDoc, ItemType, Kind, NodeId, Role, RoleFilter, Tag};
+use super::{
+    leaves, DocAddr, DocRange, GlossDoc, ItemType, Kind, Leaf, NodeId, NodePath, Role, RoleFilter,
+    Separator, Tag,
+};
+use std::collections::HashMap;
 
 /// A line-break mark that waits in the render buffer for [`tidy`].
 ///
@@ -92,6 +96,547 @@ pub fn plain_items(doc: &GlossDoc) -> Vec<String> {
         }
     }
     out
+}
+/// Renders selected ranges into one plain string for each top-level item.
+///
+/// The walk keeps the line rules of [`plain_items`]. The caller supplies the
+/// role filter because an Anki card and a popup can keep different roles.
+pub fn plain_selected(
+    doc: &GlossDoc,
+    ranges: &[DocRange],
+    roles: RoleFilter,
+    separator: Separator,
+) -> Vec<String> {
+    let Some(plan) = PlainPlan::new(doc, ranges, roles) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (index, id) in doc.items().enumerate() {
+        let Some(path) = NodePath::ROOT.child(index) else { continue };
+        let selected = selected_item(doc, id, path, &plan, roles, separator);
+        let text = tidy(&selected.text);
+        if !text.is_empty() {
+            out.push(text);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PlainPosition {
+    leaf: usize,
+    byte: u32,
+}
+
+#[derive(Clone)]
+struct PlainFragment {
+    text: String,
+    start: PlainPosition,
+    end: PlainPosition,
+}
+
+struct PlainRendered {
+    text: String,
+    first: Option<PlainPosition>,
+    last: Option<PlainPosition>,
+    fragments: Vec<PlainFragment>,
+    boundary: bool,
+}
+impl PlainRendered {
+    fn empty() -> Self {
+        PlainRendered {
+            text: String::new(),
+            first: None,
+            last: None,
+            fragments: Vec::new(),
+            boundary: false,
+        }
+    }
+}
+
+struct PlainPlan {
+    leaves: Vec<Leaf>,
+    intervals: HashMap<NodePath, Vec<(u32, u32)>>,
+    indexes: HashMap<NodePath, usize>,
+}
+
+fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
+    let mut prefix = NodePath::ROOT;
+    for &step in addr.path.steps() {
+        let Some(next) = prefix.child(step as usize) else { break };
+        prefix = next;
+        if prefix.resolve(doc).is_some_and(|id| doc.node(id).tag == Tag::Ruby) {
+            return DocAddr { path: prefix, byte: end as u32 };
+        }
+    }
+    addr
+}
+
+impl PlainPlan {
+    fn new(doc: &GlossDoc, ranges: &[DocRange], roles: RoleFilter) -> Option<Self> {
+        let mut union: Vec<DocRange> = ranges
+            .iter()
+            .copied()
+            .map(|range| DocRange {
+                start: atomic_endpoint(doc, range.start, false),
+                end: atomic_endpoint(doc, range.end, true),
+            })
+            .collect();
+        union.retain(|range| range.start < range.end);
+        union.sort_by_key(|range| (range.start, range.end));
+        let mut merged: Vec<DocRange> = Vec::with_capacity(union.len());
+        for range in union {
+            if let Some(last) = merged.last_mut() {
+                if range.start <= last.end {
+                    if range.end > last.end {
+                        last.end = range.end;
+                    }
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+        if merged.is_empty() {
+            return None;
+        }
+        let visible = leaves(doc, roles);
+        if visible.is_empty() {
+            return None;
+        }
+        let mut intervals = HashMap::new();
+        let mut indexes = HashMap::new();
+        for (index, leaf) in visible.iter().copied().enumerate() {
+            indexes.insert(leaf.path, index);
+            let leaf_start = DocAddr { path: leaf.path, byte: 0 };
+            let leaf_end = DocAddr { path: leaf.path, byte: leaf.len };
+            let mut covered: Vec<(u32, u32)> = Vec::new();
+            for range in &merged {
+                if range.end <= leaf_start || range.start >= leaf_end {
+                    continue;
+                }
+                let start =
+                    if range.start.path < leaf.path { 0 } else { range.start.byte.min(leaf.len) };
+                let end =
+                    if range.end.path > leaf.path { leaf.len } else { range.end.byte.min(leaf.len) };
+                if start < end {
+                    if let Some(previous) = covered.last_mut() {
+                        if start <= previous.1 {
+                            previous.1 = previous.1.max(end);
+                            continue;
+                        }
+                    }
+                    covered.push((start, end));
+                }
+            }
+            if !covered.is_empty() {
+                intervals.insert(leaf.path, covered);
+            }
+        }
+        (!intervals.is_empty()).then_some(PlainPlan { leaves: visible, intervals, indexes })
+    }
+}
+
+fn selected_item(
+    doc: &GlossDoc,
+    id: NodeId,
+    path: NodePath,
+    plan: &PlainPlan,
+    roles: RoleFilter,
+    separator: Separator,
+) -> PlainRendered {
+    if doc.node(id).item_type == ItemType::Image {
+        return PlainRendered::empty();
+    }
+    if doc.node(id).item_type == ItemType::StructuredContent {
+        return selected_children(doc, id, path, plan, roles, separator, true, path);
+    }
+    selected_node(doc, id, path, path, plan, roles, separator, true, false, None)
+}
+
+fn selected_node(
+    doc: &GlossDoc,
+    id: NodeId,
+    path: NodePath,
+    item_path: NodePath,
+    plan: &PlainPlan,
+    roles: RoleFilter,
+    separator: Separator,
+    top_level: bool,
+    prose: bool,
+    number: Option<usize>,
+) -> PlainRendered {
+    let node = doc.node(id);
+    if !roles.allows(node.role) || matches!(node.tag, Tag::Rt | Tag::Rp) {
+        return PlainRendered::empty();
+    }
+    if node.tag == Tag::Ruby {
+        let Some(index) = plan.indexes.get(&path).copied() else { return PlainRendered::empty() };
+        if !plan.intervals.contains_key(&path) {
+            return PlainRendered::empty();
+        }
+        let mut text = String::new();
+        ruby_into_roles(doc, id, roles, &mut text);
+        if text.trim().is_empty() {
+            return PlainRendered::empty();
+        }
+        let fragment = PlainFragment {
+            text: text.clone(),
+            start: PlainPosition { leaf: index, byte: 0 },
+            end: PlainPosition { leaf: index, byte: 1 },
+        };
+        return PlainRendered {
+            text,
+            first: Some(fragment.start),
+            last: Some(fragment.end),
+            fragments: vec![fragment],
+            boundary: false,
+        };
+    }
+    if node.kind == Kind::Text {
+        let Some(covered) = plan.intervals.get(&path) else { return PlainRendered::empty() };
+        let Some(index) = plan.indexes.get(&path).copied() else { return PlainRendered::empty() };
+        let source = doc.text(id);
+        let fragments: Vec<PlainFragment> = covered
+            .iter()
+            .filter_map(|&(start, end)| {
+                let text = source.get(start as usize..end as usize)?;
+                (!text.is_empty()).then(|| PlainFragment {
+                    text: text.to_string(),
+                    start: PlainPosition { leaf: index, byte: start },
+                    end: PlainPosition { leaf: index, byte: end },
+                })
+            })
+            .collect();
+        let text = if top_level && separator == Separator::ListItems {
+            list_text(&fragments)
+        } else {
+            join_plain_fragments(&fragments, separator, plan)
+        };
+        return PlainRendered {
+            text,
+            first: fragments.first().map(|fragment| fragment.start),
+            last: fragments.last().map(|fragment| fragment.end),
+            fragments,
+            boundary: false,
+        };
+    }
+    if node.kind == Kind::Image {
+        return PlainRendered::empty();
+    }
+    if node.tag == Tag::Br {
+        if break_between(path, item_path, plan) {
+            return PlainRendered {
+                text: "\n".to_string(),
+                first: None,
+                last: None,
+                fragments: Vec::new(),
+                boundary: false,
+            };
+        }
+        return PlainRendered::empty();
+    }
+    if !has_selected_child(doc, id, path, plan) {
+        return PlainRendered::empty();
+    }
+    let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
+    let children = selected_children(
+        doc,
+        id,
+        path,
+        plan,
+        roles,
+        separator,
+        own_container,
+        item_path,
+    );
+    if children.text.is_empty() {
+        return PlainRendered::empty();
+    }
+    let mut text = String::new();
+    if node.tag.is_block() || (doc.has_marker(id) && !prose) {
+        text.push_str(BLOCK_MARK);
+    }
+    if let Some(number) = number {
+        text.push_str(&format!("{number}. "));
+    }
+    text.push_str(&children.text);
+    let fragments = if own_container {
+        vec![PlainFragment {
+            text: text.clone(),
+            start: children.first.expect("selected content has a first leaf"),
+            end: children.last.expect("selected content has a last leaf"),
+        }]
+    } else {
+        children.fragments
+    };
+    PlainRendered {
+        text,
+        first: children.first,
+        last: children.last,
+        fragments,
+        boundary: own_container,
+    }
+}
+
+fn selected_children(
+    doc: &GlossDoc,
+    id: NodeId,
+    path: NodePath,
+    plan: &PlainPlan,
+    roles: RoleFilter,
+    separator: Separator,
+    container: bool,
+    item_path: NodePath,
+) -> PlainRendered {
+    let mut children = Vec::new();
+    let mut prose = doc.prose(id);
+    for (index, child) in doc.children(id).enumerate() {
+        let Some(child_path) = path.child(index) else { continue };
+        let number = (doc.node(id).tag == Tag::Ol).then_some(
+            children.iter().filter(|child: &&PlainRendered| child.boundary).count() + 1,
+        );
+        let selected = selected_node(
+            doc, child, child_path, item_path, plan, roles, separator, false, prose, number,
+        );
+        prose = prose || doc.inline_prose(child);
+        if !selected.text.is_empty() {
+            children.push(selected);
+        }
+    }
+    if children.is_empty() {
+        return PlainRendered::empty();
+    }
+    if container && doc.is_string_list(id) {
+        let mut text = String::new();
+        for (index, child) in children.iter().enumerate() {
+            if index != 0 {
+                text.push_str(BLOCK_MARK);
+            }
+            if separator == Separator::ListItems {
+                text.push_str("- ");
+            }
+            text.push_str(&child.text);
+        }
+        return PlainRendered {
+            text,
+            first: children.first().and_then(|child| child.first),
+            last: children.last().and_then(|child| child.last),
+            fragments: children
+                .iter()
+                .filter_map(|child| {
+                    Some(PlainFragment {
+                        text: child.text.clone(),
+                        start: child.first?,
+                        end: child.last?,
+                    })
+                })
+                .collect(),
+            boundary: false,
+        };
+    }
+    if container && separator == Separator::ListItems {
+        let mut text = String::new();
+        let mut pending = Vec::new();
+        let mut fragments = Vec::new();
+        for child in &children {
+            if child.boundary {
+                if !pending.is_empty() {
+                    text.push_str(&list_text(&pending));
+                    fragments.append(&mut pending);
+                }
+                text.push_str(&child.text);
+                if let (Some(start), Some(end)) = (child.first, child.last) {
+                    fragments.push(PlainFragment { text: child.text.clone(), start, end });
+                }
+            } else if child.fragments.is_empty() {
+                if let (Some(start), Some(end)) = (child.first, child.last) {
+                    pending.push(PlainFragment { text: child.text.clone(), start, end });
+                }
+            } else {
+                pending.extend(child.fragments.iter().cloned());
+            }
+        }
+        if !pending.is_empty() {
+            text.push_str(&list_text(&pending));
+            fragments.append(&mut pending);
+        }
+        let first = fragments.first().map(|fragment| fragment.start);
+        let last = fragments.last().map(|fragment| fragment.end);
+        return PlainRendered { text, first, last, fragments, boundary: false };
+    }
+    let mut text = String::new();
+    for (index, child) in children.iter().enumerate() {
+        if index != 0 {
+            let previous = &children[index - 1];
+            if !previous.boundary
+                && !child.boundary
+                && has_plain_gap(previous.last, child.first, plan)
+            {
+                text.push_str(plain_separator(separator));
+            }
+        }
+        text.push_str(&child.text);
+    }
+    let first = children.first().and_then(|child| child.first);
+    let last = children.last().and_then(|child| child.last);
+    let fragments = children
+        .iter()
+        .filter_map(|child| {
+            Some(PlainFragment {
+                text: child.text.clone(),
+                start: child.first?,
+                end: child.last?,
+            })
+        })
+        .collect();
+    PlainRendered { text, first, last, fragments, boundary: false }
+}
+
+fn list_text(fragments: &[PlainFragment]) -> String {
+    let mut text = String::new();
+    for (index, fragment) in fragments.iter().enumerate() {
+        if index != 0 {
+            text.push_str(BLOCK_MARK);
+        }
+        text.push_str("- ");
+        text.push_str(&fragment.text);
+    }
+    text
+}
+
+fn join_plain_fragments(
+    fragments: &[PlainFragment],
+    separator: Separator,
+    plan: &PlainPlan,
+) -> String {
+    let mut text = String::new();
+    for (index, fragment) in fragments.iter().enumerate() {
+        if index != 0 && has_plain_gap(Some(fragments[index - 1].end), Some(fragment.start), plan) {
+            text.push_str(plain_separator(separator));
+        }
+        text.push_str(&fragment.text);
+    }
+    text
+}
+
+fn plain_separator(separator: Separator) -> &'static str {
+    match separator {
+        Separator::Ellipsis => "…",
+        Separator::Space => " ",
+        Separator::LineBreak => "\n",
+        Separator::ListItems => "",
+    }
+}
+
+fn has_plain_gap(
+    previous: Option<PlainPosition>,
+    current: Option<PlainPosition>,
+    plan: &PlainPlan,
+) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else { return false };
+    if current.leaf == previous.leaf {
+        return previous.byte < current.byte;
+    }
+    if current.leaf == previous.leaf + 1 {
+        return previous.byte < plan.leaves[previous.leaf].len || current.byte > 0;
+    }
+    true
+}
+
+fn has_selected_child(doc: &GlossDoc, id: NodeId, path: NodePath, plan: &PlainPlan) -> bool {
+    if plan.intervals.contains_key(&path) {
+        return true;
+    }
+    doc.children(id).enumerate().any(|(index, child)| {
+        path.child(index)
+            .is_some_and(|child_path| has_selected_child(doc, child, child_path, plan))
+    })
+}
+
+fn break_between(path: NodePath, item_path: NodePath, plan: &PlainPlan) -> bool {
+    let before = plan.intervals.keys().any(|leaf| is_prefix(item_path, *leaf) && *leaf < path);
+    let after = plan.intervals.keys().any(|leaf| is_prefix(item_path, *leaf) && *leaf > path);
+    before && after
+}
+
+fn is_prefix(prefix: NodePath, path: NodePath) -> bool {
+    prefix.len() <= path.len() && prefix.steps() == &path.steps()[..prefix.len()]
+}
+
+fn ruby_into_roles(doc: &GlossDoc, id: NodeId, roles: RoleFilter, out: &mut String) {
+    let fenced = doc.children(id).any(|child| doc.node(child).tag == Tag::Rp);
+    let mut prose = doc.prose(id);
+    for child in doc.children(id) {
+        if doc.node(child).tag != Tag::Rt {
+            full_node_into(doc, child, prose, roles, out);
+            prose = prose || doc.inline_prose(child);
+            continue;
+        }
+        let mut reading = String::new();
+        full_children_into(doc, child, false, roles, &mut reading);
+        let reading = reading.trim();
+        if reading.is_empty() {
+            continue;
+        }
+        if fenced || bracketed(reading) {
+            out.push_str(reading);
+        } else {
+            out.push('(');
+            out.push_str(reading);
+            out.push(')');
+        }
+    }
+}
+
+fn full_node_into(
+    doc: &GlossDoc,
+    id: NodeId,
+    prose: bool,
+    roles: RoleFilter,
+    out: &mut String,
+) {
+    let node = doc.node(id);
+    if !roles.allows(node.role) || node.kind == Kind::Image {
+        return;
+    }
+    if node.tag == Tag::Ruby {
+        ruby_into_roles(doc, id, roles, out);
+        return;
+    }
+    if node.tag == Tag::Br {
+        out.push('\n');
+        return;
+    }
+    if node.kind == Kind::Text && node.tag == Tag::None {
+        out.push_str(doc.text(id));
+        return;
+    }
+    if node.tag.is_block() || (doc.has_marker(id) && !prose) {
+        out.push_str(BLOCK_MARK);
+    }
+    full_children_into(doc, id, !node.tag.is_inline(), roles, out);
+}
+
+fn full_children_into(
+    doc: &GlossDoc,
+    id: NodeId,
+    block_ctx: bool,
+    roles: RoleFilter,
+    out: &mut String,
+) {
+    if block_ctx && doc.is_string_list(id) {
+        for child in doc.children(id) {
+            if !roles.allows(doc.role(child)) {
+                continue;
+            }
+            out.push_str(BLOCK_MARK);
+            out.push_str(doc.text(child));
+        }
+        return;
+    }
+    let mut prose = doc.prose(id);
+    for child in doc.children(id) {
+        full_node_into(doc, child, prose, roles, out);
+        prose = prose || doc.inline_prose(child);
+    }
 }
 
 /// Tests whether any glossary item produces plain-text output.
@@ -764,5 +1309,76 @@ mod tests {
                 "renders_text disagreed with plain_items on {g}"
             );
         }
+    }
+    fn path(steps: &[usize]) -> NodePath {
+        steps
+            .iter()
+            .try_fold(NodePath::ROOT, |path, &step| path.child(step))
+            .expect("path fits")
+    }
+
+    fn range(path: NodePath, start: u32, end: u32) -> DocRange {
+        DocRange {
+            start: DocAddr { path, byte: start },
+            end: DocAddr { path, byte: end },
+        }
+    }
+
+    #[test]
+    fn selected_fragments_use_the_requested_plain_separator() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": "abcdef"
+        }}]));
+        let ranges = [range(path(&[0, 0, 0]), 1, 2), range(path(&[0, 0, 0]), 4, 5)];
+        assert_eq!(
+            vec!["b…e".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::Ellipsis)
+        );
+        assert_eq!(
+            vec!["b e".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::Space)
+        );
+        assert_eq!(
+            vec!["b\ne".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::LineBreak)
+        );
+        assert_eq!(
+            vec!["- b\n- e".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::ListItems)
+        );
+    }
+
+    #[test]
+    fn selected_numbered_items_renumber_from_one() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "ol", "content": [
+                {"tag": "li", "content": "first"},
+                {"tag": "li", "content": "second"},
+                {"tag": "li", "content": "third"},
+                {"tag": "li", "content": "fourth"}
+            ]
+        }}]));
+        let ranges = [
+            range(path(&[0, 0, 1, 0]), 0, 6),
+            range(path(&[0, 0, 3, 0]), 0, 6),
+        ];
+        assert_eq!(
+            vec!["1. second\n2. fourth".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::Ellipsis)
+        );
+    }
+
+    #[test]
+    fn selected_plain_output_keeps_a_line_break_between_selected_sides() {
+        let d = doc(&json!([{"type": "structured-content", "content": [
+            {"tag": "span", "content": "before"},
+            {"tag": "br"},
+            {"tag": "span", "content": "after"}
+        ]}]));
+        let ranges = [range(path(&[0, 0, 0]), 0, 6), range(path(&[0, 2, 0]), 0, 5)];
+        assert_eq!(
+            vec!["before\nafter".to_string()],
+            plain_selected(&d, &ranges, RoleFilter::CARD, Separator::Ellipsis)
+        );
     }
 }

@@ -87,6 +87,8 @@ pub struct Theme {
     pub scan_anchor: (u8, u8, u8),
     /// Overlay color for the defined chars.
     pub scan_match: (u8, u8, u8),
+    /// Selection highlight and check color.
+    pub accent: (u8, u8, u8),
 }
 
 impl Theme {
@@ -134,6 +136,7 @@ impl Theme {
             scan_tile: (240, 160, 50),
             scan_anchor: (255, 240, 120),
             scan_match: (80, 190, 255),
+            accent: (80, 190, 255),
         }
     }
 
@@ -181,6 +184,7 @@ impl Theme {
             scan_tile: (210, 110, 20),
             scan_anchor: (200, 20, 20),
             scan_match: (0, 120, 255),
+            accent: (0, 120, 255),
         }
     }
 }

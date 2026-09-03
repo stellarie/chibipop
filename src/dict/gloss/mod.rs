@@ -48,12 +48,18 @@
 //! This lossless shape supports later renderer and parser changes.
 //!
 //! The record stores the Dictionary's raw glossary JSON, and the parser runs on every hover.
+//! Selection addresses use document preorder paths and UTF-8 byte offsets.
+//! `NodePath::END` is the address after every node, so a range can use one
+//! sentinel instead of a document-specific final leaf.
+
 //! A parser or renderer fix therefore ships as a patch, not a Dictionary rebuild.
 
 mod html;
 mod parse;
 mod path;
 mod plain;
+mod select;
+
 
 #[cfg(test)]
 mod tests;
@@ -61,7 +67,11 @@ mod tests;
 pub use html::{render_html, RoleFilter};
 pub(crate) use parse::tag_for;
 pub use path::{NodePath, Selection};
-pub use plain::{plain_items, pos_labels, renders_text};
+pub use plain::{plain_items, plain_selected, pos_labels, renders_text};
+pub use select::{
+    extent, grapheme_range, leaf_text, leaves, sense_range, snap_ceil, snap_floor, DocAddr,
+    DocRange, Leaf, Separator,
+};
 
 /// An index into the node vector of [`GlossDoc`].
 pub type NodeId = u32;

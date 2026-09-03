@@ -1,6 +1,10 @@
 /* chibipop popup theme */
 /* Midnight Purple — deep violet tones. */
 
+:root {
+  --accent: #50beff;
+}
+
 /* Panel background, border, shape */
 .popup {
   background-color: #1a1a2e;

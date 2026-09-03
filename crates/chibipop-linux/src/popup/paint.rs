@@ -620,6 +620,24 @@ mod tests {
             }));
             Ok(())
         }
+
+        fn hit_offset(
+            &mut self,
+            run: MeasureRun<'_>,
+            x: f32,
+            y: f32,
+        ) -> Result<u32, MeasureError> {
+            if self.broken {
+                return Err(MeasureError::new("no fonts"));
+            }
+            let total = run.spans.iter().map(|s| s.text.encode_utf16().count()).sum::<usize>();
+            let adv = run.spans.first().map_or(0.0, |s| s.size * 0.5).max(1.0);
+            let line_h = run.spans.iter().fold(0.0f32, |h, s| h.max(s.size * 1.4)).max(1.4);
+            let per_line = (run.max_w.max(1.0) / adv).floor().max(1.0) as usize;
+            let line = (y / line_h).floor().max(0.0) as usize;
+            let local = ((x / adv) - 0.5).round().max(0.0) as usize;
+            Ok(line.saturating_mul(per_line).saturating_add(local).min(total) as u32)
+        }
     }
 
     impl PanelText for Fake {

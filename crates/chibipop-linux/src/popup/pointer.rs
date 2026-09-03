@@ -740,6 +740,22 @@ mod tests {
             }));
             Ok(())
         }
+
+        fn hit_offset(
+            &mut self,
+            run: chibipop::ui::layout::MeasureRun<'_>,
+            x: f32,
+            _y: f32,
+        ) -> Result<u32, chibipop::ui::layout::MeasureError> {
+            // The inverse of `caret_boxes`: half an em per character, one line.
+            let size = run.spans.first().map_or(0.0, |s| s.size);
+            let adv = size * 0.5;
+            let len: usize = run.spans.iter().map(|s| s.text.encode_utf16().count()).sum();
+            if adv <= 0.0 {
+                return Ok(0);
+            }
+            Ok(((x / adv).round().max(0.0) as usize).min(len) as u32)
+        }
     }
 
     /// The demo presentation, laid out the same way the surface lays

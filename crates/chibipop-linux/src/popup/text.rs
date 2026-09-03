@@ -346,6 +346,53 @@ impl TextMeasure for TextEngine {
         }
         Ok(())
     }
+
+    fn hit_offset(
+        &mut self,
+        run: MeasureRun<'_>,
+        x: f32,
+        y: f32,
+    ) -> Result<u32, MeasureError> {
+        let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
+        let first_y = buffer.layout_runs().next().map(|line| line.line_top);
+        let last = buffer
+            .layout_runs()
+            .last()
+            .map(|line| (line.line_top, line.line_height));
+        let total_bytes = run.spans.iter().map(|span| span.text.len()).sum();
+        let total = utf16_offset(run.spans, total_bytes);
+        let Some(first_y) = first_y else {
+            return Ok(total);
+        };
+        if y < first_y {
+            return Ok(0);
+        }
+        let Some((last_y, last_h)) = last else {
+            return Ok(total);
+        };
+        if y >= last_y + last_h {
+            return Ok(total);
+        }
+        let mut hit = buffer.hit(x, y);
+        if hit.is_none() {
+            // cosmic-text returns no cursor for a point outside its visible
+            // runs. Retry inside the first or last run before giving up.
+            let retry_y = y.clamp(first_y, last_y + last_h - f32::EPSILON);
+            hit = buffer.hit(x, retry_y);
+        }
+        let Some(cursor) = hit else {
+            return Ok(total);
+        };
+
+        let mut bases = LineBases::default();
+        for line in buffer.layout_runs() {
+            let base = bases.advance(run.spans, &line);
+            if line.line_i == cursor.line {
+                return Ok(utf16_offset(run.spans, base + cursor.index.min(line.text.len())));
+            }
+        }
+        Ok(total)
+    }
 }
 
 impl PanelText for TextEngine {
@@ -513,6 +560,28 @@ fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
         base += span.text.len();
     }
     base
+}
+
+/// The UTF-16 offset at a byte boundary in a run's concatenated spans.
+///
+/// cosmic-text reports a byte index within one buffer line. Hit testing first
+/// adds that line's base, then this walk restores the seam's UTF-16 address.
+fn utf16_offset(spans: &[StyledSpan<'_>], byte: usize) -> u32 {
+    let mut units = 0u32;
+    let mut base = 0usize;
+    for span in spans {
+        for (offset, ch) in span.text.char_indices() {
+            if base + offset >= byte {
+                return units;
+            }
+            units += ch.len_utf16() as u32;
+        }
+        base += span.text.len();
+        if byte <= base {
+            return units;
+        }
+    }
+    units
 }
 
 /// The span covering byte offset `at`, and its index.
@@ -1265,6 +1334,24 @@ mod tests {
         assert!(out[1].w > 0.0, "an offset in a later span still finds a glyph");
     }
 
+
+    /// Hit testing converts cosmic-text byte positions back to UTF-16 offsets.
+    #[test]
+    fn hit_offset_maps_astral_text_and_clamps_vertical_points() {
+        let Some(mut engine) = jp_engine() else { return };
+        let text = "\u{6f22}\u{1f363}\u{5bff}";
+        let spans = [span(text, 20.0)];
+        let run = MeasureRun { spans: &spans, max_w: 400.0 };
+        let mut boxes = Vec::new();
+        engine.caret_boxes(run, &[0, 1, 3], &mut boxes).expect("shapeable");
+        let y = boxes[0].y + boxes[0].h / 2.0;
+
+        assert_eq!(0, engine.hit_offset(run, boxes[0].x + 0.1, y).unwrap());
+        assert_eq!(1, engine.hit_offset(run, boxes[1].x + 0.1, y).unwrap());
+        assert_eq!(3, engine.hit_offset(run, boxes[2].x + 0.1, y).unwrap());
+        assert_eq!(0, engine.hit_offset(run, 0.0, -1.0).unwrap());
+        assert_eq!(4, engine.hit_offset(run, 0.0, 1000.0).unwrap());
+    }
     #[test]
     fn an_offset_past_the_text_answers_a_zero_width_box_rather_than_nothing() {
         let Some(mut engine) = jp_engine() else { return };

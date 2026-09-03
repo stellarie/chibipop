@@ -15,6 +15,7 @@ pub struct CssError {
 #[derive(Debug, Clone, PartialEq)]
 struct Property {
     color: Option<(u8, u8, u8)>,
+    accent: Option<(u8, u8, u8)>,
     font_size: Option<f32>,
     font_family: Option<String>,
     font_weight: Option<u16>,
@@ -30,6 +31,7 @@ impl Property {
     fn empty() -> Self {
         Self {
             color: None,
+            accent: None,
             font_size: None,
             font_family: None,
             font_weight: None,
@@ -45,6 +47,7 @@ impl Property {
 
 /// CSS class selectors that this module supports.
 const SELECTORS: &[&str] = &[
+    ":root",
     "popup",
     "headword",
     "reading",
@@ -123,6 +126,10 @@ fn parse_font_weight(s: &str) -> Option<u16> {
 /// Parse one CSS property value.
 fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), String> {
     match name {
+        "--accent" => match parse_hex_color(value) {
+            Some(c) => out.accent = Some(c),
+            None => return Err(format!("bad color: {value}")),
+        },
         "color" | "background-color" | "border-color" => match parse_hex_color(value) {
             Some(c) => out.color = Some(c),
             None => return Err(format!("bad color: {value}")),
@@ -290,6 +297,12 @@ fn apply_text_style(prop: &Property, weight: &mut u16, italic: &mut bool) {
 
 /// Apply one parsed CSS property to a Theme.
 fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
+    if name == "--accent" {
+        if let Some(c) = prop.accent {
+            theme.accent = c;
+        }
+        return;
+    }
     match class {
         "popup" => match name {
             "background-color" => {
@@ -443,6 +456,10 @@ pub fn to_css(theme: &Theme) -> String {
     let lines = [
         "/* chibipop popup theme */",
         "/* Share this file to share your theme. */",
+        "",
+        ":root {",
+        &format!("  --accent: {};", c(theme.accent)),
+        "}",
         "",
         "/* Panel background, border, shape */",
         ".popup {",
@@ -637,6 +654,7 @@ mod tests {
         assert_eq!(original.dimmed_text, rebuilt.dimmed_text);
         assert_eq!(original.frequency_text, rebuilt.frequency_text);
         assert_eq!(original.separator, rebuilt.separator);
+        assert_eq!(original.accent, rebuilt.accent);
         assert_eq!(original.font_name, rebuilt.font_name);
         assert_eq!(original.headword_size, rebuilt.headword_size);
         assert_eq!(original.body_size, rebuilt.body_size);
@@ -774,6 +792,7 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(original.background, rebuilt.background);
         assert_eq!(original.headword_text, rebuilt.headword_text);
+        assert_eq!(original.accent, rebuilt.accent);
         assert_eq!(original.font_name, rebuilt.font_name);
     }
 
@@ -781,10 +800,20 @@ mod tests {
     fn css_preserves_scan_colours_from_base() {
         let mut theme = dark();
         let original_scan = theme.scan_match;
+        let original_accent = theme.accent;
         let css = to_css(&theme);
         let errors = parse(&css, &mut theme);
         assert!(errors.is_empty());
         assert_eq!(original_scan, theme.scan_match);
+        assert_eq!(original_accent, theme.accent);
+    }
+
+    #[test]
+    fn accent_custom_property_applies() {
+        let mut theme = dark();
+        let errors = parse(":root { --accent: #123456; }", &mut theme);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((0x12, 0x34, 0x56), theme.accent);
     }
 
     #[test]

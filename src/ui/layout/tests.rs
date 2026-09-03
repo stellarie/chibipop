@@ -253,6 +253,53 @@ impl TextMeasure for FakeMeasure {
         }
         Ok(())
     }
+
+    fn hit_offset(
+        &mut self,
+        run: MeasureRun<'_>,
+        x: f32,
+        y: f32,
+    ) -> Result<u32, MeasureError> {
+        let (frags, measured) = wrap(run);
+        let total = frags.last().map_or(0, |f| f.from + f.units);
+        let Some(first) = measured.lines.first() else {
+            return Ok(0);
+        };
+        if y < first.y {
+            return Ok(0);
+        }
+        let Some(last) = measured.lines.last() else {
+            return Ok(0);
+        };
+        if y >= last.y + last.h {
+            return Ok(total as u32);
+        }
+        let line = measured
+            .lines
+            .iter()
+            .position(|line| y >= line.y && y < line.y + line.h)
+            .unwrap_or_else(|| measured.lines.len().saturating_sub(1));
+        let mut nearest: Option<(f32, usize)> = None;
+        let mut line_end = 0usize;
+        for frag in frags.iter().filter(|frag| frag.line == line) {
+            line_end = line_end.max(frag.from + frag.units);
+            for unit in 0..frag.units {
+                let centre = frag.x + (unit as f32 + 0.5) * frag.advance;
+                let distance = (x - centre).abs();
+                if nearest.is_none_or(|(best, _)| distance < best) {
+                    nearest = Some((distance, frag.from + unit));
+                }
+            }
+        }
+        // The line-end caret handles a point past the last glyph. Strict
+        // comparison keeps a glyph centre mapped to that glyph's offset.
+        let line_width = measured.lines[line].w;
+        let distance = (x - line_width).abs();
+        if nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, line_end));
+        }
+        Ok(nearest.map_or(line_end, |(_, offset)| offset.min(total)) as u32)
+    }
 }
 
 /// A measurer that refuses every run and caret probe.
@@ -270,6 +317,15 @@ impl TextMeasure for BrokenMeasure {
     ) -> Result<(), MeasureError> {
         Err(MeasureError::new("no font"))
     }
+    fn hit_offset(
+        &mut self,
+        _: MeasureRun<'_>,
+        _: f32,
+        _: f32,
+    ) -> Result<u32, MeasureError> {
+        Err(MeasureError::new("no font"))
+    }
+
 }
 
 /// The `styled` helper returns one span with only its size set.
@@ -1028,6 +1084,25 @@ fn layout_measures_each_run_at_the_width_it_reports() {
     }
 }
 
+
+/// Hit testing uses the same fixed geometry as caret boxes.
+#[test]
+fn hit_offset_round_trips_fake_caret_centres_and_clamps_vertical_points() {
+    let spans = [styled("ab", 10.0), styled("cd", 10.0)];
+    let run = MeasureRun { spans: &spans, max_w: 10.0 };
+    let mut m = FakeMeasure::default();
+    let offsets: Vec<u32> = (0..=4).collect();
+    let mut boxes = Vec::new();
+    m.caret_boxes(run, &offsets, &mut boxes).unwrap();
+
+    for (offset, glyph) in offsets.iter().zip(boxes) {
+        let x = glyph.x + glyph.w / 2.0;
+        let y = glyph.y + glyph.h / 2.0;
+        assert_eq!(*offset, m.hit_offset(run, x, y).unwrap());
+    }
+    assert_eq!(0, m.hit_offset(run, 0.0, -1.0).unwrap());
+    assert_eq!(4, m.hit_offset(run, 0.0, 100.0).unwrap());
+}
 #[test]
 fn a_refused_run_abandons_the_walk() {
     let theme = Theme::dark();
