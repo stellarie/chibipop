@@ -240,9 +240,11 @@ impl<'a> Pass<'a> {
             origin: Some(GlossOrigin {
                 dict_id: flow.dict_id,
                 entry_id: flow.entry_id,
+                entry: flow.entry,
                 path: flow.path,
             }),
             image: None,
+            sources: flow.sources.clone(),
         });
         // The pass adds images after the paragraph.
         // Each image therefore composites over its spacer run, not under it.
@@ -434,26 +436,29 @@ impl Piece {
     /// Without that address, a hit resolves to no sense.
     ///
     /// [`build_elements`]: super::chrome::build_elements
-    pub(super) fn stamp(&mut self, dict_id: i64, entry_id: i64) {
+    pub(super) fn stamp(&mut self, dict_id: i64, entry_id: i64, entry: u32) {
         match self {
             Piece::Flow(flow) => {
                 flow.dict_id = dict_id;
                 flow.entry_id = entry_id;
+                flow.entry = entry;
             }
             Piece::Table(grid) => {
                 grid.dict_id = dict_id;
                 grid.entry_id = entry_id;
+                grid.entry = entry;
                 for cell in &mut grid.cells {
                     for piece in &mut cell.body {
-                        piece.stamp(dict_id, entry_id);
+                        piece.stamp(dict_id, entry_id, entry);
                     }
                 }
             }
             Piece::Boxed(boxed) => {
                 boxed.dict_id = dict_id;
                 boxed.entry_id = entry_id;
+                boxed.entry = entry;
                 for piece in &mut boxed.body {
-                    piece.stamp(dict_id, entry_id);
+                    piece.stamp(dict_id, entry_id, entry);
                 }
             }
         }
@@ -506,12 +511,18 @@ pub(super) struct Boxed {
     pub(super) path: Option<NodePath>,
     pub(super) dict_id: i64,
     pub(super) entry_id: i64,
+    pub(super) entry: u32,
 }
 
 impl Boxed {
     /// Returns this element's `GlossOrigin` in the Dictionary.
     pub(super) fn origin(&self) -> GlossOrigin {
-        GlossOrigin { dict_id: self.dict_id, entry_id: self.entry_id, path: self.path }
+        GlossOrigin {
+            dict_id: self.dict_id,
+            entry_id: self.entry_id,
+            entry: self.entry,
+            path: self.path,
+        }
     }
 
     /// Returns the header that every block container shares with [`Pass::open_box`].

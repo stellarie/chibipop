@@ -181,10 +181,12 @@ pub(super) fn place_images(
             kind: ElemKind::Image,
             text: img.alt.clone(),
             color: img.style.color,
-            font_size: img.em,
+            font_size: img.style.size,
             weight: img.style.weight,
             italic: img.style.italic,
             top_gap: 0.0,
+            // The fallback wraps inside the image box. Both bins remeasure a non-empty
+            // span at `wrap_w`, so a zero width has no meaning.
             wrap_w: w.max(1.0),
             align: Align::Leading,
             pen: (rect.x, rect.y),
@@ -199,9 +201,11 @@ pub(super) fn place_images(
             origin: Some(GlossOrigin {
                 dict_id: flow.dict_id,
                 entry_id: flow.entry_id,
+                entry: flow.entry,
                 path: img.path,
             }),
             image: Some(img.scene.clone()),
+            sources: Vec::new(),
         });
     }
     out
@@ -527,12 +531,12 @@ impl Paragraphs<'_> {
         // This result matches the setting.
         if !self.render.images {
             if !alt.is_empty() {
-                self.text(&alt, style, ctx.link);
+                self.text(&alt, style, ctx.link, None, 0);
             }
             return;
         }
         if recorded.is_none() && !alt.is_empty() {
-            return self.text(&alt, style, ctx.link);
+            return self.text(&alt, style, ctx.link, None, 0);
         }
         let scene = SceneImage {
             // Give a key only to a stored asset.
@@ -578,9 +582,8 @@ impl Paragraphs<'_> {
     /// Otherwise, [`place_images`] would read a box that also contains the adjacent word.
     pub(super) fn reserve(&mut self, img: FlowImage, link: u32) {
         // An image counts as an item separator and a list marker, like text.
-        // An image is content, so `<li><img></li>` draws its bullet.
         if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
-            self.push(ITEM_SEPARATOR, img.style, link);
+            self.push(ITEM_SEPARATOR, img.style, link, None);
         }
         self.mark();
         let slot = self.images.len() as u32;

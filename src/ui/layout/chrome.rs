@@ -11,10 +11,10 @@
 //! Every element here belongs to the panel, not to a Dictionary.
 //! Each chrome element has one style and one span.
 //! Each element uses the seam as before the inline pass.
-
-use crate::dict::gloss::RoleFilter;
+use crate::dict::gloss::{extent, DocAddr, DocRange, RoleFilter};
 use crate::dict::pitch::marked_morae;
-use crate::present::{AnkiPopupState, PitchRow, Presentation};
+use crate::present::{AnkiPopupState, Card, PitchRow, Presentation};
+use crate::select::{Coverage, Selections};
 use crate::ui::theme::Theme;
 use super::flow::Flow;
 use super::gloss::{paragraphs, Assets, Render};
@@ -178,6 +178,7 @@ pub(super) fn text_elem(
         // Chrome elements do not use an asset.
         origin: None,
         image: None,
+        sources: Vec::new(),
     }
 }
 
@@ -336,6 +337,7 @@ pub(super) fn pitch_elem(
         // An accent belongs to a reading, not to a tree node, so it has no node address.
         origin: None,
         image: None,
+        sources: Vec::new(),
     })
 }
 
@@ -438,6 +440,7 @@ pub(super) fn is_kanji(c: char) -> bool {
 ///
 /// The code creates a new `Line` each time.
 /// It does not cache this structure.
+#[derive(Clone)]
 pub(super) struct Line {
     pub(super) text: String,
     pub(super) color: Rgb,
@@ -494,6 +497,12 @@ pub(super) enum Elem {
     /// It removes width from the next element.
     Corner(Line),
     Separator { top_gap: f32 },
+    /// A Check element that uses the next line's top gap.
+    Check {
+        entry: Option<u32>,
+        coverage: Coverage,
+        top_gap: f32,
+    },
     /// A collapsed row that accepts clicks.
     Collapsed(usize, Line),
     /// One click target for each character.
@@ -555,6 +564,7 @@ pub(super) fn build_elements(
     show_back: bool,
     side_panel: bool,
     render: RenderSettings,
+    selection: Option<&Selections>,
 ) -> (Vec<Elem>, Vec<SideEntry>) {
     let mut out = Vec::new();
 
@@ -640,16 +650,19 @@ pub(super) fn build_elements(
                 italic: theme.dimmed_italic,
             }));
         }
-
+        let mut entry_ordinal = 0u32;
         for block in &card.blocks {
-            out.push(Elem::Text(Line {
+            let label = Line {
                 text: block.dict_name.clone(),
                 color: theme.dict_label_text,
                 size: theme.dict_label_size,
                 top_gap: SECTION_GAP,
                 weight: theme.dict_label_weight,
                 italic: theme.dict_label_italic,
-            }));
+            };
+            if selection.is_none() {
+                out.push(Elem::Text(label.clone()));
+            }
             // Yomitan's `<ol>` has one item for each matched term-bank row.
             // Hoshi Reader emits this list only when a Dictionary contributes more than one row.
             // Therefore, the code leaves a single row unnumbered.
@@ -658,6 +671,16 @@ pub(super) fn build_elements(
             // An outer number would add a second number.
             let numbered = block.entries.len() > 1;
             for (i, entry) in block.entries.iter().enumerate() {
+                let ordinal = entry_ordinal;
+                entry_ordinal += 1;
+                if let Some(sel) = selection {
+                    out.push(Elem::Check {
+                        entry: Some(ordinal),
+                        coverage: entry_coverage(sel, ordinal, &entry.doc, render.roles),
+                        top_gap: label.top_gap,
+                    });
+                    out.push(Elem::Text(label.clone()));
+                }
                 // An empty tag set means "same set as the row above" (see `GlossEntry`).
                 if !entry.tags.is_empty() {
                     out.push(Elem::Text(Line {
@@ -694,7 +717,7 @@ pub(super) fn build_elements(
                 // Each paragraph already carries its node path.
                 // Together, the row and node path let selection target "sense 3 of 大辞林".
                 for piece in &mut pieces {
-                    piece.stamp(block.dict_id, entry.entry_id);
+                    piece.stamp(block.dict_id, entry.entry_id, ordinal);
                 }
                 if numbered {
                     // When a row starts with a table, the code puts the number above the table.
@@ -709,6 +732,7 @@ pub(super) fn build_elements(
                                 top_gap: LINE_GAP,
                                 dict_id: block.dict_id,
                                 entry_id: entry.entry_id,
+                                entry: ordinal,
                                 ..Flow::default()
                             }),
                         );
@@ -750,11 +774,21 @@ pub(super) fn build_elements(
                 } else {
                     format!("{head} \u{2014} {}", row.summary)
                 };
+                let top_gap = if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP };
+                if let Some(sel) = selection {
+                    let coverage = p
+                        .all_cards
+                        .get(i + 1)
+                        .map_or(Coverage::None, |card| {
+                            sel.coverage_of_card(i + 1, &card_extents(card, render.roles))
+                        });
+                    out.push(Elem::Check { entry: None, coverage, top_gap });
+                }
                 out.push(Elem::Collapsed(i, Line {
                     text,
                     color: theme.collapsed_text,
                     size: theme.collapsed_size,
-                    top_gap: if i == 0 { SEPARATOR_MARGIN } else { LINE_GAP },
+                    top_gap,
                     weight: theme.collapsed_weight,
                     italic: theme.collapsed_italic,
                 }));
@@ -763,6 +797,29 @@ pub(super) fn build_elements(
     }
 
     (out, side)
+}
+
+fn entry_coverage(
+    selection: &Selections,
+    entry: u32,
+    doc: &crate::dict::gloss::GlossDoc,
+    roles: RoleFilter,
+) -> Coverage {
+    extent(doc, roles)
+        .map_or(Coverage::None, |range| {
+            selection.card(0).map_or(Coverage::None, |card| card.coverage(entry, range))
+        })
+}
+
+fn card_extents(card: &Card, roles: RoleFilter) -> Vec<DocRange> {
+    card.blocks
+        .iter()
+        .flat_map(|block| block.entries.iter())
+        .map(|entry| extent(&entry.doc, roles).unwrap_or(DocRange {
+            start: DocAddr::START,
+            end: DocAddr::START,
+        }))
+        .collect()
 }
 
 /// One inline related row's headword in the form that the panel reads.

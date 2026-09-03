@@ -1,6 +1,7 @@
 //! This module sends requests to AnkiConnect v6.
 
-use crate::dict::gloss::{render_html, RoleFilter, Selection};
+use crate::dict::gloss::{plain_selected, render_html, RoleFilter, Selection, Separator};
+use crate::select::CardSelection;
 use crate::dict::pitch::marked_morae;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -276,49 +277,142 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Numbers all glosses from one Dictionary.
+/// This value separates Dictionary groups in the HTML that Anki stores for the
+/// plain glossary.
 ///
-/// The numbers span all matched term-bank rows, so one row keeps its current output.
-fn plain_dict_group(b: &crate::present::GlossBlock) -> String {
-    let numbered = b.glosses()
-        .enumerate()
-        .map(|(i, g)| format!("{}. {g}", i + 1))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("[{}]\n{numbered}", b.dict_name)
+/// HTML collapses newlines in the source. These newlines cannot provide the
+/// visible blank line.
+const PLAIN_GROUP_SEPARATOR: &str = "<br><br>\n";
+
+/// Places a Dictionary name above its numbered plain-text definitions.
+///
+/// Anki stores field values as HTML. Square brackets can become furigana under a
+/// Japanese note template, so the name uses HTML instead of `[Dictionary]` text.
+fn plain_dictionary_group(name: &str, numbered: String, include_dictionary_name: bool) -> String {
+    if include_dictionary_name {
+        format!("<b>{}</b><br>\n{numbered}", escape_html(name))
+    } else {
+        numbered
+    }
+}
+
+/// Places one Dictionary's formatted definitions under its optional heading.
+fn html_dictionary_group(name: &str, items: String, include_dictionary_name: bool) -> String {
+    let heading =
+        if include_dictionary_name { format!("<b>{}</b>", escape_html(name)) } else { String::new() };
+    format!("{heading}<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>")
 }
 
 /// Builds field values from a card.
 pub fn fields_from_card(
     card: &crate::present::Card,
     blocks: &[crate::present::GlossBlock],
+    include_dictionary_name: bool,
 ) -> HashMap<String, String> {
-    let expression = card.written.as_deref()
-        .or(card.reading.as_deref())
-        .unwrap_or("")
-        .to_string();
-    let reading = card.reading.as_deref()
-        .unwrap_or("")
-        .to_string();
-    let glossary = blocks.iter()
-        .map(plain_dict_group)
+    let glossary = blocks
+        .iter()
+        .map(|b| {
+            let numbered = b
+                .glosses()
+                .enumerate()
+                .map(|(i, g)| format!("{}. {g}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            plain_dictionary_group(&b.dict_name, numbered, include_dictionary_name)
+        })
         .collect::<Vec<_>>()
-        .join("\n\n");
+        .join(PLAIN_GROUP_SEPARATOR);
     // A newline has no effect in HTML, so use <li> tags.
     // Build this field here because card mining occurs once. This avoids work during each hover.
-    let glossary_html = blocks.iter()
+    let glossary_html = blocks
+        .iter()
         .map(|b| {
-            let items: String = b.entries.iter()
+            let items: String = b
+                .entries
+                .iter()
                 .flat_map(|e| render_html(&e.doc, Selection::Whole, RoleFilter::CARD))
                 .map(|g| format!("<li>{g}</li>"))
                 .collect();
-            format!(
-                "<b>{}</b><ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>",
-                escape_html(&b.dict_name)
-            )
+            html_dictionary_group(&b.dict_name, items, include_dictionary_name)
         })
         .collect::<Vec<_>>()
         .join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">");
+    fields_with_glossary(card, glossary, glossary_html)
+}
+
+/// Builds field values from the selected ranges of every Entry.
+///
+/// The Controller calls this function only for a non-empty selection. This
+/// guard keeps an empty selection on the existing whole-card path.
+pub fn fields_from_selection(
+    card: &crate::present::Card,
+    selection: &CardSelection,
+    separator: Separator,
+    include_dictionary_name: bool,
+) -> HashMap<String, String> {
+    let mut plain_groups = Vec::new();
+    let mut html_groups = Vec::new();
+    let mut ordinal = 0u32;
+    for block in &card.blocks {
+        let mut plain = Vec::new();
+        let mut html = Vec::new();
+        for entry in &block.entries {
+            let ranges = selection.entry_ranges(ordinal);
+            ordinal += 1;
+            if ranges.is_empty() {
+                continue;
+            }
+            plain.extend(plain_selected(&entry.doc, &ranges, RoleFilter::CARD, separator));
+            html.extend(
+                render_html(
+                    &entry.doc,
+                    Selection::Ranges { ranges: &ranges, separator },
+                    RoleFilter::CARD,
+                )
+                .into_iter()
+                .map(|value| format!("<li>{value}</li>")),
+            );
+        }
+        if !plain.is_empty() {
+            let numbered = plain
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| format!("{}. {value}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            plain_groups.push(plain_dictionary_group(
+                &block.dict_name,
+                numbered,
+                include_dictionary_name,
+            ));
+        }
+        if !html.is_empty() {
+            html_groups.push(html_dictionary_group(
+                &block.dict_name,
+                html.concat(),
+                include_dictionary_name,
+            ));
+        }
+    }
+    fields_with_glossary(
+        card,
+        plain_groups.join(PLAIN_GROUP_SEPARATOR),
+        html_groups.join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">"),
+    )
+}
+
+fn fields_with_glossary(
+    card: &crate::present::Card,
+    glossary: String,
+    glossary_html: String,
+) -> HashMap<String, String> {
+    let expression = card
+        .written
+        .as_deref()
+        .or(card.reading.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let reading = card.reading.as_deref().unwrap_or("").to_string();
     let mut fields = HashMap::from([
         ("expression".to_string(), expression),
         ("reading".to_string(), reading),
@@ -452,11 +546,14 @@ mod tests {
                 ]),
             ),
         ];
-        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks, true);
         assert_eq!(Some(&"猫".to_string()), f.get("expression"));
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
-            Some(&"[大辞林]\n1. ネコ科の哺乳類。\n\n[Jitendex]\n1. cat\n2. feline".to_string()),
+            Some(
+                &"<b>大辞林</b><br>\n1. ネコ科の哺乳類。<br><br>\n<b>Jitendex</b><br>\n1. cat\n2. feline"
+                    .to_string()
+            ),
             f.get("glossary"),
         );
         assert_eq!(
@@ -467,9 +564,53 @@ mod tests {
     }
 
     #[test]
-    fn glossary_html_escapes_a_dictionary_name_with_markup_looking_characters() {
+    fn fields_from_selection_keeps_only_the_second_sense() {
+        let block = block(
+            "Jitendex",
+            json!([{
+                "tag": "ol",
+                "content": [
+                    {"tag": "li", "content": "first sense"},
+                    {"tag": "li", "content": "second sense"}
+                ]
+            }]),
+        );
+        let mut selected_card = card(Some("猫"), Some("ねこ"), None);
+        selected_card.blocks = vec![block];
+        let entry = &selected_card.blocks[0].entries[0];
+        let leaves = crate::dict::gloss::leaves(&entry.doc, RoleFilter::CARD);
+        let second = leaves[1];
+        let sense = crate::dict::gloss::sense_range(
+            &entry.doc,
+            RoleFilter::CARD,
+            crate::dict::gloss::DocAddr { path: second.path, byte: 0 },
+        )
+        .expect("second sense");
+        let mut selection = CardSelection::default();
+        selection.replace(crate::select::SelRange {
+            start: crate::select::TextAddr { entry: 0, addr: sense.start },
+            end: crate::select::TextAddr { entry: 0, addr: sense.end },
+        });
+
+        let fields = fields_from_selection(&selected_card, &selection, Separator::Ellipsis, false);
+        let plain = fields.get("glossary").expect("plain selection");
+        let html = fields.get("glossary_html").expect("html selection");
+        assert!(plain.contains("second sense"), "{plain}");
+        assert!(!plain.contains("first sense"), "{plain}");
+        assert!(!plain.contains("Jitendex"), "{plain}");
+        assert!(html.contains("second sense"), "{html}");
+        assert!(!html.contains("first sense"), "{html}");
+        assert!(!html.contains("Jitendex"), "{html}");
+    }
+
+    #[test]
+    fn a_dictionary_name_is_html_not_furigana_syntax() {
         let blocks = vec![block("A & B <dict>", json!(["cat"]))];
-        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
+        assert_eq!(
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>\n1. cat".to_string()),
+            f.get("glossary"),
+        );
         assert_eq!(
             Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
             f.get("glossary_html"),
@@ -477,9 +618,20 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_names_can_be_omitted_from_both_glossary_fields() {
+        let blocks = vec![block("Jitendex", json!(["cat"]))];
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks, false);
+        assert_eq!(Some(&"1. cat".to_string()), f.get("glossary"));
+        assert_eq!(
+            Some(&"<ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
+            f.get("glossary_html"),
+        );
+    }
+
+    #[test]
     fn glossary_html_wraps_one_dictionary_in_a_list_with_no_divider() {
         let blocks = vec![block("Wenlin", json!(["supper", "dinner"]))];
-        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li><li>dinner</li></ol>",
@@ -494,7 +646,7 @@ mod tests {
             block("Wenlin", json!(["supper"])),
             block("CC-CEDICT", json!(["evening meal"])),
         ];
-        let f = fields_from_card(&card(Some("猫"), None, None), &blocks);
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
             "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
@@ -505,27 +657,26 @@ mod tests {
     }
 
     #[test]
-    fn glossary_separates_dictionaries_with_headers_and_dividers() {
+    fn plain_glossary_separates_dictionary_headings_with_html_breaks() {
         let blocks = vec![
-            block("大辞林", json!(["イヌ科の哺乳類。"])),
-            block("Jitendex", json!(["dog"])),
+            block("NEW斎藤和英大辞典", json!(["first definition"])),
+            block("新和英", json!(["second definition"])),
         ];
-        let f = fields_from_card(&card(Some("犬"), Some("いぬ"), None), &blocks);
+        let f = fields_from_card(&card(Some("雑談"), Some("ざつだん"), None), &blocks, true);
 
-        let glossary = f.get("glossary").unwrap();
-        assert!(glossary.contains("[大辞林]"));
-        assert!(glossary.contains("[Jitendex]"));
-        assert!(glossary.contains("\n\n"), "blank line between groups");
-
-        let html = f.get("glossary_html").unwrap();
-        assert!(html.contains("<b>大辞林</b>"));
-        assert!(html.contains("<b>Jitendex</b>"));
-        assert!(html.contains("<hr"), "divider between groups");
+        assert_eq!(
+            concat!(
+                "<b>NEW斎藤和英大辞典</b><br>\n1. first definition",
+                "<br><br>\n",
+                "<b>新和英</b><br>\n1. second definition",
+            ),
+            f["glossary"],
+        );
     }
 
     #[test]
     fn fields_falls_back_to_reading() {
-        let f = fields_from_card(&card(None, Some("ねこ"), None), &[]);
+        let f = fields_from_card(&card(None, Some("ねこ"), None), &[], true);
         assert_eq!(Some(&"ねこ".to_string()), f.get("expression"));
         assert_eq!(None, f.get("frequency"));
     }
@@ -544,8 +695,8 @@ mod tests {
                 ]}
             ]}]),
         )];
-        let f = fields_from_card(&card(Some("食べる"), None, None), &blocks);
-        assert_eq!(Some(&"[Jitendex]\n1. to eat".to_string()), f.get("glossary"));
+        let f = fields_from_card(&card(Some("食べる"), None, None), &blocks, true);
+        assert_eq!(Some(&"<b>Jitendex</b><br>\n1. to eat".to_string()), f.get("glossary"));
         let html = f.get("glossary_html").expect("the html field");
         assert!(html.contains("ご飯を食べる"), "the card keeps the example: {html}");
     }
@@ -562,7 +713,7 @@ mod tests {
                 {"tag": "span", "content": "to scold"}
             ]}]),
         )];
-        let f = fields_from_card(&card(Some("𠮟る"), None, None), &blocks);
+        let f = fields_from_card(&card(Some("𠮟る"), None, None), &blocks, true);
         let html = f.get("glossary_html").expect("the html field");
         assert!(html.contains("𠮟<span>to scold</span>"), "the alt text stands in: {html}");
         for (name, value) in &f {
@@ -578,9 +729,9 @@ mod tests {
     #[test]
     fn both_fields_number_a_dictionarys_matched_rows_continuously() {
         let blocks = vec![rows("大辞林", [json!(["to run"]), json!(["to flow", "to stream"])])];
-        let f = fields_from_card(&card(Some("走る"), None, None), &blocks);
+        let f = fields_from_card(&card(Some("走る"), None, None), &blocks, true);
         assert_eq!(
-            Some(&"[大辞林]\n1. to run\n2. to flow\n3. to stream".to_string()),
+            Some(&"<b>大辞林</b><br>\n1. to run\n2. to flow\n3. to stream".to_string()),
             f.get("glossary"),
         );
         let html = f.get("glossary_html").expect("the html field");
@@ -1022,7 +1173,7 @@ mod tests {
         let mut mined = card(Some("猫"), Some("ねこ"), None);
         mined.pitch = vec![pitch_row(1, &["NHK"])];
 
-        let f = fields_from_card(&mined, &[]);
+        let f = fields_from_card(&mined, &[], true);
 
         let mark = "border-top:1px solid currentColor;border-right:1px solid currentColor";
         let want = format!(
@@ -1043,7 +1194,7 @@ mod tests {
         mined.pitch =
             vec![pitch_row(0, &["大辞林", "NHK"]), pitch_row(2, &["三省堂"])];
 
-        let f = fields_from_card(&mined, &[]);
+        let f = fields_from_card(&mined, &[], true);
         let html = f.get("pitch_html").expect("a pitch field");
 
         assert_eq!(2, html.matches("<li>").count(), "{html}");
@@ -1059,7 +1210,7 @@ mod tests {
     /// The plain-text fields stay unchanged because marked kana *is* markup.
     #[test]
     fn a_card_with_no_accent_mines_no_pitch_field_and_no_plain_text_one() {
-        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), None), &[]);
+        let f = fields_from_card(&card(Some("猫"), Some("ねこ"), None), &[], true);
 
         assert_eq!(None, f.get("pitch_html"));
         assert_eq!(None, f.get("pitch"));
@@ -1074,8 +1225,8 @@ mod tests {
         let mut mined = card(Some("猫"), Some("ねこ"), Some(42));
         mined.pitch = vec![pitch_row(1, &["NHK"])];
 
-        let with_accent = fields_from_card(&mined, &blocks);
-        let without = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks);
+        let with_accent = fields_from_card(&mined, &blocks, true);
+        let without = fields_from_card(&card(Some("猫"), Some("ねこ"), Some(42)), &blocks, true);
 
         for field in ["expression", "reading", "glossary", "glossary_html", "frequency"] {
             assert_eq!(
@@ -1095,7 +1246,7 @@ mod tests {
         let mut mined = card(Some("猫"), Some("ねこ"), None);
         mined.pitch = vec![pitch_row(1, &["<b>evil</b> & co"])];
 
-        let html = fields_from_card(&mined, &[]).remove("pitch_html").expect("a pitch field");
+        let html = fields_from_card(&mined, &[], true).remove("pitch_html").expect("a pitch field");
 
         assert!(html.contains("&lt;b&gt;evil&lt;/b&gt; &amp; co"), "{html}");
     }

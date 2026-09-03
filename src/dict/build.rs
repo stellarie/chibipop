@@ -2887,7 +2887,7 @@ mod tests {
         );
 
         // The Anki note carries the same accents that the header shows.
-        let fields = crate::anki::fields_from_card(&neko, &neko.blocks);
+        let fields = crate::anki::fields_from_card(&neko, &neko.blocks, true);
         let html = fields.get("pitch_html").expect("an HTML pitch field");
         assert!(html.contains("border-top"), "{html}");
         assert!(html.contains("FixturePitch \u{b7} FixturePitchTwo"), "{html}");

@@ -23,8 +23,9 @@ use crate::lock::{self, LockError};
 use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
-    FieldMapping, LayoutMode, PopupLayer, SentenceMode, TriggerMode, FIELD_SOURCES,
-    MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
+    FieldMapping, LayoutMode, PopupLayer, SelectionButtons, SelectionSeparator, SentenceMode,
+    TriggerMode, TripleClick, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
+    SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
 use chibipop::library::Role;
@@ -264,11 +265,21 @@ impl App {
         )
     }
 
-    /// The add-card row's copyable bind, or `None` when no chord exists.
-    /// The row uses the same value for its button and text, so they cannot disagree.
+    /// Return the add-card row's copyable bind.
+    /// Return `None` when desktop settings own the key.
+    /// Hyprland always gets a control socket bind. A portal namespace depends on
+    /// the process that starts the daemon. The control socket has one stable path.
     fn add_bind_snippet(&self) -> Option<String> {
         match self.add_control() {
             HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::Rebind { current: None } if self.compositor == Compositor::Hyprland => {
+                Some(snippets::bind_snippet(
+                    self.compositor,
+                    &self.linux.add_key_linux,
+                    &self.exe,
+                    snippets::Bind::Press(Verb::AnkiAdd),
+                ))
+            }
             HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
         }
     }
@@ -629,6 +640,7 @@ enum Message {
     Summary(u16),
     Highlight(bool),
     Scroll(bool),
+    EdgeAutoscroll(bool),
     SidePanel(bool),
     LayerPicked(String),
     /// The layout-mode picker label. [`LAYOUT_MODES`] maps the label back,
@@ -691,7 +703,17 @@ enum Message {
     AnkiDeck(String),
     AnkiModel(String),
     AnkiAddKey(String),
+    IncludeDictionaryName(bool),
     FirstDictOnly(bool),
+    /// This label identifies a selection button mode.
+    /// [`SELECTION_BUTTONS`] maps the label to a value.
+    SelectionButtonsPicked(String),
+    /// This label identifies a selection separator.
+    /// [`SELECTION_SEPARATORS`] maps the label to a value.
+    SelectionSeparatorPicked(String),
+    /// This label identifies a triple-click mode.
+    /// [`TRIPLE_CLICKS`] maps the label to a value.
+    TripleClickPicked(String),
     /// Whether an add carries a mining picture. The core gate is
     /// `chibipop::shot::plan_add`.
     IncludeScreenshot(bool),
@@ -750,6 +772,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Summary(v) => app.form.summary_chars = v as usize,
         Message::Highlight(on) => app.form.highlight_match = on,
         Message::Scroll(on) => app.form.scroll_popup = on,
+        Message::EdgeAutoscroll(on) => app.form.edge_autoscroll = on,
         Message::SidePanel(on) => app.form.side_panel = on,
         Message::LayerPicked(layer) => {
             app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
@@ -795,7 +818,17 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiDeck(v) => app.form.anki_deck = v,
         Message::AnkiModel(v) => app.form.anki_model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
+        Message::IncludeDictionaryName(on) => app.form.include_dictionary_name = on,
         Message::FirstDictOnly(v) => app.form.first_dict_only = v,
+        Message::SelectionButtonsPicked(label) => {
+            app.form.selection_buttons = selection_buttons_of(&label);
+        }
+        Message::SelectionSeparatorPicked(label) => {
+            app.form.selection_separator = selection_separator_of(&label);
+        }
+        Message::TripleClickPicked(label) => {
+            app.form.triple_click = triple_click_of(&label);
+        }
         Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
         // This is the only place where empty text becomes `None`. The config field
         // uses `Option`, so absence has a distinct value. An empty chord would be a
@@ -1258,6 +1291,9 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.scroll_popup)
                 .label("Scroll long entries with the wheel")
                 .on_toggle(Message::Scroll),
+            checkbox(app.form.edge_autoscroll)
+                .label("Auto-scroll while dragging at the popup edge")
+                .on_toggle(Message::EdgeAutoscroll),
             checkbox(app.form.side_panel)
                 .label("Show related words beside the popup")
                 .on_toggle(Message::SidePanel),
@@ -1280,6 +1316,81 @@ const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
     (LayoutMode::Roomy, "Roomy (one item per line)"),
     (LayoutMode::Compact, "Compact (one line per dictionary)"),
 ];
+
+/// This table lists selection button modes in display order.
+const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
+    (SelectionButtons::PrimaryAdditive, "Primary additive"),
+    (SelectionButtons::PrimaryReplacing, "Primary replacing"),
+];
+
+fn selection_button_labels() -> Vec<String> {
+    SELECTION_BUTTONS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn selection_button_label(buttons: SelectionButtons) -> &'static str {
+    SELECTION_BUTTONS
+        .iter()
+        .find(|&&(value, _)| value == buttons)
+        .map_or(SELECTION_BUTTONS[0].1, |&(_, label)| label)
+}
+
+fn selection_buttons_of(label: &str) -> SelectionButtons {
+    SELECTION_BUTTONS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(SelectionButtons::PrimaryAdditive, |&(buttons, _)| buttons)
+}
+
+/// This table lists selection separators in display order.
+const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
+    (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
+    (SelectionSeparator::Space, "Space"),
+    (SelectionSeparator::LineBreak, "Line break"),
+    (SelectionSeparator::ListItems, "List items"),
+];
+
+fn selection_separator_labels() -> Vec<String> {
+    SELECTION_SEPARATORS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn selection_separator_label(separator: SelectionSeparator) -> &'static str {
+    SELECTION_SEPARATORS
+        .iter()
+        .find(|&&(value, _)| value == separator)
+        .map_or(SELECTION_SEPARATORS[0].1, |&(_, label)| label)
+}
+
+fn selection_separator_of(label: &str) -> SelectionSeparator {
+    SELECTION_SEPARATORS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(SelectionSeparator::Ellipsis, |&(separator, _)| separator)
+}
+
+/// This table lists triple-click modes in display order.
+const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
+    (TripleClick::Sense, "Sense"),
+    (TripleClick::SenseWithExamples, "Sense with examples"),
+    (TripleClick::Line, "Line"),
+];
+
+fn triple_click_labels() -> Vec<String> {
+    TRIPLE_CLICKS.iter().map(|&(_, label)| label.to_string()).collect()
+}
+
+fn triple_click_label(value: TripleClick) -> &'static str {
+    TRIPLE_CLICKS
+        .iter()
+        .find(|&&(item, _)| item == value)
+        .map_or(TRIPLE_CLICKS[1].1, |&(_, label)| label)
+}
+
+fn triple_click_of(label: &str) -> TripleClick {
+    TRIPLE_CLICKS
+        .iter()
+        .find(|&&(_, value)| value == label)
+        .map_or(TripleClick::SenseWithExamples, |&(value, _)| value)
+}
 
 /// The picker's items, in table order.
 fn layout_labels() -> Vec<String> {
@@ -1928,10 +2039,9 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 }
 
 fn anki_section(app: &App) -> Element<'_, Message> {
-    // The add-card row uses the same hotkey control as the trigger row. On the
-    // native rung, the compositor bind is the only path to the add
-    // (ARCHITECTURE.md#input-ladders, rung 2 plus its 2026-08-26 addendum).
-    // Without a copyable bind, a typed chord could never reach the add.
+    // The add-card row uses the same hotkey control as the trigger row.
+    // Native sessions call the control socket. XDPH sessions need a
+    // compositor `global` bind because Hyprland has no shortcut editor.
     let add_bind: Element<'_, Message> = match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns this binding. Paste this into its config:"),
@@ -1940,22 +2050,44 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // The portal published the key for the *add-card* id. Use the trigger row's
-        // status vocabulary because both values describe portal ownership. `current:
-        // None` means that the desktop reported no key or did not answer for this id.
-        HotkeyControl::Rebind { current } => column![
-            text("Portal channel: the GlobalShortcuts portal owns this binding."),
-            text(match &current {
-                Some(key) => format!("Current key: {key}"),
-                None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
-            }),
-            text(
-                "The chord above is the preferred add-card key, offered to the portal at the next start; your desktop's shortcut editor has the last word."
-            )
-            .size(13),
-        ]
-        .spacing(6)
-        .into(),
+        // XDPH cannot assign a key. Its namespace depends on the process
+        // that starts the daemon. Give Hyprland the stable control socket path.
+        // KDE and GNOME keep the desktop rebind path.
+        HotkeyControl::Rebind { current } => {
+            let rebind: Element<'_, Message> = match app.add_bind_snippet() {
+                Some(snippet) => column![
+                    text(
+                        "Hyprland has no global-shortcut editor. Use this control-socket bind \
+                         in hyprland.conf:"
+                    ),
+                    container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+                    button("Copy add-card bind").on_press(Message::CopyAddBind),
+                    text(
+                        "This route reaches the same add action and does not depend on the \
+                         portal app ID."
+                    )
+                    .size(13),
+                ]
+                .spacing(6)
+                .into(),
+                None => text(
+                    "Use your desktop's global-shortcut settings to see or change the key. \
+                     The chord above is the preferred add-card key for the next start."
+                )
+                .size(13)
+                .into(),
+            };
+            column![
+                text("Portal channel: the GlobalShortcuts portal registered this action."),
+                text(match &current {
+                    Some(key) => format!("Current key: {key}"),
+                    None => "Current key: the portal does not report one.".to_string(),
+                }),
+                rebind,
+            ]
+            .spacing(6)
+            .into()
+        }
         HotkeyControl::NoChord => text(
             "No add-card chord is set, so there is no bind to copy - type one above."
         )
@@ -1988,12 +2120,39 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .width(200),
         ),
         add_bind,
+        checkbox(app.form.include_dictionary_name)
+            .label("Include dictionary name")
+            .on_toggle(Message::IncludeDictionaryName),
         // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
         // The daemon reads `anki.first_dict_only`, so this row lets the user change it
         // without a TOML edit.
         checkbox(app.form.first_dict_only)
             .label("First dictionary only")
             .on_toggle(Message::FirstDictOnly),
+        labeled(
+            "Selection buttons",
+            pick_list(
+                selection_button_labels(),
+                Some(selection_button_label(app.form.selection_buttons).to_string()),
+                Message::SelectionButtonsPicked,
+            ),
+        ),
+        labeled(
+            "Selection separator",
+            pick_list(
+                selection_separator_labels(),
+                Some(selection_separator_label(app.form.selection_separator).to_string()),
+                Message::SelectionSeparatorPicked,
+            ),
+        ),
+        labeled(
+            "Triple-click",
+            pick_list(
+                triple_click_labels(),
+                Some(triple_click_label(app.form.triple_click).to_string()),
+                Message::TripleClickPicked,
+            ),
+        ),
         column(screenshot_rows(app)).spacing(10),
         column(sentence_rows(app)).spacing(10),
         text("Field mappings").size(14),
@@ -2245,22 +2404,20 @@ mod tests {
         }
     }
 
-    /// The add-card row uses the trigger row's status vocabulary. On the portal
-    /// rung, it names the key published for `anki-add` and offers no snippet.
-    /// A pasted compositor bind does not own that key.
+    /// A development launch can use its terminal's portal app ID.
+    /// The Hyprland row must use the control socket, which has no portal
+    /// namespace and reaches the same add-card path.
     #[test]
-    fn the_add_card_row_reports_the_portals_own_add_key() {
+    fn the_hyprland_portal_add_row_offers_its_native_bind() {
         let dir = scratch("addportalrow");
         let mut app = app(&dir);
-        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
+        app.add_channel = HotkeyChannel::Portal { current_binding: None };
 
+        assert_eq!(HotkeyControl::Rebind { current: None }, app.add_control());
         assert_eq!(
-            HotkeyControl::Rebind { current: Some("Meta+A".into()) },
-            app.add_control()
+            Some("bind = ALT, A, exec, /usr/bin/chibipop ctl anki-add".to_string()),
+            app.add_bind_snippet()
         );
-        // No copy button: a portal row must not offer a bind that differs from the
-        // active key.
-        assert_eq!(None, app.add_bind_snippet());
 
         // The trigger row keeps its own key. The two rows use two channels.
         app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
@@ -2293,6 +2450,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_dictionary_name_checkbox_round_trips_into_the_config() {
+        let dir = scratch("dictionaryname");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        assert!(app.form.include_dictionary_name, "the default keeps existing card output");
+
+        let _ = update(&mut app, Message::IncludeDictionaryName(false));
+        assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
+
+        let _ = update(&mut app, Message::IncludeDictionaryName(true));
+        assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The checkbox matters only if it reaches the config. This toggle writes
     /// `anki.first_dict_only`, which the Linux daemon already reads.
     #[test]
@@ -2307,6 +2479,46 @@ mod tests {
 
         let _ = update(&mut app, Message::FirstDictOnly(false));
         assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selection_controls_round_trip_into_the_config() {
+        let dir = scratch("selectioncontrols");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        let _ = update(
+            &mut app,
+            Message::SelectionButtonsPicked("Primary replacing".to_string()),
+        );
+        let _ = update(
+            &mut app,
+            Message::SelectionSeparatorPicked("List items".to_string()),
+        );
+        let _ = update(&mut app, Message::TripleClickPicked("Line".to_string()));
+        let out = chibipop::settings::apply_to(&app.form, &cfg);
+        assert_eq!(
+            chibipop::config::SelectionButtons::PrimaryReplacing,
+            out.anki.selection_buttons
+        );
+        assert_eq!(
+            chibipop::config::SelectionSeparator::ListItems,
+            out.anki.selection_separator
+        );
+        assert_eq!(
+            chibipop::config::TripleClick::Line,
+            out.anki.triple_click
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edge_autoscroll_toggle_round_trips_into_the_config() {
+        let dir = scratch("edgeautoscroll");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        let _ = update(&mut app, Message::EdgeAutoscroll(false));
+        assert!(!chibipop::settings::apply_to(&app.form, &cfg).popup.edge_autoscroll);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

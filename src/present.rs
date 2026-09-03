@@ -1084,7 +1084,14 @@ mod tests {
         let mut p = build(&[hit("猫", "ねこ", 1, "cat")], &dicts(), &cfg(), &no_pitch());
         p.sentence = Some("その猫はかわいい。".to_string());
 
-        let (_, fields) = crate::controller::note_payload(&p, false);
+        let none = crate::select::CardSelection::default();
+        let (_, fields) = crate::controller::note_payload(
+            &p,
+            false,
+            true,
+            &none,
+            crate::dict::gloss::Separator::Ellipsis,
+        );
 
         assert_eq!(Some(&"その猫はかわいい。".to_string()), fields.get("sentence"));
     }

@@ -95,7 +95,11 @@ jobs:
         run: |
           name="chibipop-$VERSION-windows-x64"
           echo "PKG=$name" >> "$GITHUB_ENV"
-          mkdir -p "dist/$name/data"
+          mkdir -p "dist/$name/data/ipadic"
+          cp data/ipadic/system.dic    "dist/$name/data/ipadic/"
+          cp data/ipadic/COPYING       "dist/$name/data/ipadic/"
+          cp data/ipadic/NOTICE        "dist/$name/data/ipadic/"
+          cp data/ipadic/SHA256SUMS.txt "dist/$name/data/ipadic/"
           cp target/release/chibipop.exe "dist/$name/"
           cp data/deconjugator.json     "dist/$name/data/"
           cp README.md                  "dist/$name/"

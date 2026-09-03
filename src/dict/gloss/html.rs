@@ -31,7 +31,11 @@
 //! It therefore builds owned strings.
 //! It does not pass a scratch buffer through the recursion.
 
-use super::{GlossDoc, ItemType, Kind, NodeId, NodePath, Role, Scalar, Selection, StyleKey, Tag};
+use super::{
+    leaves, DocAddr, DocRange, GlossDoc, ItemType, Kind, Leaf, NodeId, NodePath, Role,
+    Scalar, Selection, StyleKey, Tag,
+};
+use std::collections::HashMap;
 
 /// The editorial roles that reach the output.
 ///
@@ -187,7 +191,6 @@ fn css_name(key: StyleKey) -> &'static str {
         StyleKey::PaddingLeft => "padding-left",
     }
 }
-
 /// Returns one HTML fragment for each selected node.
 ///
 /// [`plain_items`](super::plain_items) uses a whole-document walk.
@@ -196,6 +199,9 @@ fn css_name(key: StyleKey) -> &'static str {
 /// `src/anki.rs` puts each fragment in one `<li>` element.
 /// [`Selection::Nodes`] gives one fragment per selected node in document order.
 /// Each fragment is byte-for-byte the markup that the whole document emits for that subtree.
+///
+/// A range separator applies only inside the nearest kept block tag, list item,
+/// table cell, or top-level item. Container boundaries never receive a separator.
 pub fn render_html(doc: &GlossDoc, select: Selection<'_>, roles: RoleFilter) -> Vec<String> {
     let mut out = Vec::new();
     match select {
@@ -212,8 +218,415 @@ pub fn render_html(doc: &GlossDoc, select: Selection<'_>, roles: RoleFilter) -> 
                 collect(doc, id, path, wanted, roles, &mut out);
             }
         }
+        Selection::Ranges { ranges, separator } => {
+            render_ranges(doc, ranges, separator, roles, &mut out);
+        }
     }
     out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Position {
+    leaf: usize,
+    byte: u32,
+}
+
+#[derive(Clone)]
+struct Part {
+    html: String,
+    start: Position,
+    end: Position,
+}
+
+struct Rendered {
+    html: String,
+    first: Option<Position>,
+    last: Option<Position>,
+    parts: Vec<Part>,
+    boundary: bool,
+}
+
+struct RangePlan {
+    leaves: Vec<Leaf>,
+    intervals: HashMap<NodePath, Vec<(u32, u32)>>,
+    indexes: HashMap<NodePath, usize>,
+}
+
+/// Shared inputs for one selected HTML tree walk.
+///
+/// This context keeps recursive calls focused on node-specific state.
+#[derive(Clone, Copy)]
+struct RangeWalk<'a> {
+    doc: &'a GlossDoc,
+    plan: &'a RangePlan,
+    roles: RoleFilter,
+    separator: super::Separator,
+}
+
+
+fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
+    let mut prefix = NodePath::ROOT;
+    for &step in addr.path.steps() {
+        let Some(next) = prefix.child(step as usize) else { break };
+        prefix = next;
+        if prefix.resolve(doc).is_some_and(|id| doc.node(id).tag == Tag::Ruby) {
+            return DocAddr { path: prefix, byte: end as u32 };
+        }
+    }
+    addr
+}
+
+fn render_ranges(
+    doc: &GlossDoc,
+    ranges: &[DocRange],
+    separator: super::Separator,
+    roles: RoleFilter,
+    out: &mut Vec<String>,
+) {
+    let mut union: Vec<DocRange> = ranges
+        .iter()
+        .copied()
+        .map(|range| DocRange {
+            start: atomic_endpoint(doc, range.start, false),
+            end: atomic_endpoint(doc, range.end, true),
+        })
+        .collect();
+    union.retain(|range| range.start < range.end);
+    union.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<DocRange> = Vec::with_capacity(union.len());
+    for range in union {
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    if merged.is_empty() {
+        return;
+    }
+
+    let visible = leaves(doc, roles);
+    if visible.is_empty() {
+        return;
+    }
+    let mut intervals = HashMap::new();
+    let mut indexes = HashMap::new();
+    for (index, leaf) in visible.iter().copied().enumerate() {
+        indexes.insert(leaf.path, index);
+        let leaf_start = DocAddr { path: leaf.path, byte: 0 };
+        let leaf_end = DocAddr { path: leaf.path, byte: leaf.len };
+        let mut covered: Vec<(u32, u32)> = Vec::new();
+        for range in &merged {
+            if range.end <= leaf_start || range.start >= leaf_end {
+                continue;
+            }
+            let start = if range.start.path < leaf.path {
+                0
+            } else {
+                range.start.byte.min(leaf.len)
+            };
+            let end = if range.end.path > leaf.path {
+                leaf.len
+            } else {
+                range.end.byte.min(leaf.len)
+            };
+            if start < end {
+                if let Some(previous) = covered.last_mut() {
+                    if start <= previous.1 {
+                        previous.1 = previous.1.max(end);
+                        continue;
+                    }
+                }
+                covered.push((start, end));
+            }
+        }
+        if !covered.is_empty() {
+            intervals.insert(leaf.path, covered);
+        }
+    }
+    if intervals.is_empty() {
+        return;
+    }
+    if visible.iter().all(|leaf| {
+        intervals
+            .get(&leaf.path)
+            .is_some_and(|covered| covered.len() == 1 && covered[0] == (0, leaf.len))
+    }) {
+        for id in doc.items() {
+            push(item_html(doc, id, roles), out);
+        }
+        return;
+    }
+    let plan = RangePlan { leaves: visible, intervals, indexes };
+    let walk = RangeWalk { doc, plan: &plan, roles, separator };
+    for (index, id) in doc.items().enumerate() {
+        let Some(path) = NodePath::ROOT.child(index) else { continue };
+        let rendered = render_range_item(&walk, id, path);
+        push(rendered.html, out);
+    }
+}
+fn render_range_item(walk: &RangeWalk<'_>, id: NodeId, path: NodePath) -> Rendered {
+    if walk.doc.node(id).item_type == ItemType::StructuredContent {
+        return render_range_children(walk, id, path, true);
+    }
+    render_range_node(walk, id, path, path, true)
+}
+
+fn render_range_node(
+    walk: &RangeWalk<'_>,
+    id: NodeId,
+    path: NodePath,
+    active_container: NodePath,
+    top_level: bool,
+) -> Rendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let roles = walk.roles;
+    let separator = walk.separator;
+    let node = doc.node(id);
+    if matches!(node.tag, Tag::Rt | Tag::Rp)
+        || (node.kind != Kind::Text
+            && node.tag != Tag::Ruby
+            && !has_selected_child(doc, id, path, plan))
+    {
+        return Rendered::empty();
+    }
+    if node.tag == Tag::Ruby {
+        if !plan.intervals.contains_key(&path) || !roles.allows(node.role) {
+            return Rendered::empty();
+        }
+        let html = node_html(doc, id, roles);
+        if html.trim().is_empty() {
+            return Rendered::empty();
+        }
+        let index = plan.indexes[&path];
+        let part = Part {
+            html: html.clone(),
+            start: Position { leaf: index, byte: 0 },
+            end: Position { leaf: index, byte: 1 },
+        };
+        return Rendered {
+            html,
+            first: Some(part.start),
+            last: Some(part.end),
+            parts: vec![part],
+            boundary: false,
+        };
+    }
+    if node.kind == Kind::Text {
+        let Some(covered) = plan.intervals.get(&path) else { return Rendered::empty() };
+        if !roles.allows(node.role) {
+            return Rendered::empty();
+        }
+        let text = doc.text(id);
+        let index = plan.indexes[&path];
+        let parts: Vec<Part> = covered
+            .iter()
+            .filter_map(|&(start, end)| {
+                let slice = text.get(start as usize..end as usize)?;
+                (!slice.is_empty()).then(|| Part {
+                    html: escape_text(slice),
+                    start: Position { leaf: index, byte: start },
+                    end: Position { leaf: index, byte: end },
+                })
+            })
+            .collect();
+        let html = join_parts(&parts, separator, plan);
+        return Rendered {
+            html,
+            first: parts.first().map(|part| part.start),
+            last: parts.last().map(|part| part.end),
+            parts,
+            boundary: false,
+        };
+    }
+    if node.kind == Kind::Image || node.tag == Tag::Br {
+        return Rendered::empty();
+    }
+    let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
+    let child_container = if own_container { path } else { active_container };
+    let content = render_range_children(walk, id, child_container, own_container);
+    if content.html.is_empty() {
+        return Rendered::empty();
+    }
+    let parts = if own_container {
+        vec![Part {
+            html: match html_tag(node.tag) {
+                Some(tag) => format!("<{tag}{}>{}</{tag}>", html_attrs(doc, id, node.tag), content.html),
+                None => content.html.clone(),
+            },
+            start: content.first.expect("selected content has a first leaf"),
+            end: content.last.expect("selected content has a last leaf"),
+        }]
+    } else {
+        content
+            .parts
+            .into_iter()
+            .map(|part| Part { html: wrap_part(doc, id, node.tag, &part.html), ..part })
+            .collect()
+    };
+    if parts.is_empty() {
+        return Rendered::empty();
+    }
+    let html = if own_container {
+        parts[0].html.clone()
+    } else {
+        join_parts(&parts, separator, plan)
+    };
+    if html.trim().is_empty() {
+        return Rendered::empty();
+    }
+    let boundary = own_container;
+    Rendered {
+        html,
+        first: content.first,
+        last: content.last,
+        parts,
+        boundary,
+    }
+}
+fn wrap_part(doc: &GlossDoc, id: NodeId, tag: Tag, inner: &str) -> String {
+    match html_tag(tag) {
+        Some("br") => "<br>".to_string(),
+        Some(tag_name) => format!("<{tag_name}{}>{inner}</{tag_name}>", html_attrs(doc, id, tag)),
+        None => inner.to_string(),
+    }
+}
+
+
+fn render_range_children(
+    walk: &RangeWalk<'_>,
+    id: NodeId,
+    active_container: NodePath,
+    container: bool,
+) -> Rendered {
+    let doc = walk.doc;
+    let plan = walk.plan;
+    let separator = walk.separator;
+    let mut children = Vec::new();
+    for child in doc.children(id) {
+        let Some(path) = NodePath::of(doc, child) else { continue };
+        let rendered = render_range_node(walk, child, path, active_container, false);
+        if !rendered.html.is_empty() {
+            children.push(rendered);
+        }
+    }
+    if children.is_empty() {
+        return Rendered::empty();
+    }
+    if container && separator == super::Separator::ListItems {
+        let mut html = String::new();
+        let mut pending = Vec::new();
+        let mut parts = Vec::new();
+        for child in &children {
+            if child.boundary {
+                if !pending.is_empty() {
+                    html.push_str(&list_html(&pending));
+                    pending.clear();
+                }
+                html.push_str(&child.html);
+                if let (Some(start), Some(end)) = (child.first, child.last) {
+                    parts.push(Part { html: child.html.clone(), start, end });
+                }
+            } else if child.parts.is_empty() {
+                if let (Some(start), Some(end)) = (child.first, child.last) {
+                    pending.push(Part { html: child.html.clone(), start, end });
+                }
+            } else {
+                pending.extend(child.parts.iter().cloned());
+            }
+        }
+        if !pending.is_empty() {
+            html.push_str(&list_html(&pending));
+            parts.extend(pending);
+        }
+        let first = children.iter().find_map(|child| child.first);
+        let last = children.iter().rev().find_map(|child| child.last);
+        return Rendered { html, first, last, parts, boundary: false };
+    }
+    let mut joined = String::new();
+    for (index, child) in children.iter().enumerate() {
+        if index != 0 {
+            let previous = &children[index - 1];
+            if !previous.boundary
+                && !child.boundary
+                && has_gap(previous.last, child.first, plan)
+            {
+                joined.push_str(separator_text(separator));
+            }
+        }
+        joined.push_str(&child.html);
+    }
+    let first = children.first().and_then(|child| child.first);
+    let last = children.last().and_then(|child| child.last);
+    let mut parts = Vec::new();
+    for child in &children {
+        if child.parts.is_empty() {
+            if let (Some(start), Some(end)) = (child.first, child.last) {
+                parts.push(Part { html: child.html.clone(), start, end });
+            }
+        } else {
+            parts.extend(child.parts.iter().cloned());
+        }
+    }
+    Rendered { html: joined, first, last, parts, boundary: false }
+}
+fn list_html(parts: &[Part]) -> String {
+    format!(
+        "<ul>{}</ul>",
+        parts.iter().map(|part| format!("<li>{}</li>", part.html)).collect::<String>()
+    )
+}
+
+fn has_selected_child(doc: &GlossDoc, id: NodeId, path: NodePath, plan: &RangePlan) -> bool {
+    if plan.intervals.contains_key(&path) {
+        return true;
+    }
+    doc.children(id).enumerate().any(|(index, child)| {
+        path.child(index)
+            .is_some_and(|child_path| has_selected_child(doc, child, child_path, plan))
+    })
+}
+
+fn separator_text(separator: super::Separator) -> &'static str {
+    match separator {
+        super::Separator::Ellipsis => "…",
+        super::Separator::Space => " ",
+        super::Separator::LineBreak => "<br>",
+        super::Separator::ListItems => "",
+    }
+}
+
+fn join_parts(parts: &[Part], separator: super::Separator, plan: &RangePlan) -> String {
+    let mut out = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index != 0 && has_gap(Some(parts[index - 1].end), Some(part.start), plan) {
+            out.push_str(separator_text(separator));
+        }
+        out.push_str(&part.html);
+    }
+    out
+}
+
+fn has_gap(previous: Option<Position>, current: Option<Position>, plan: &RangePlan) -> bool {
+    let (Some(previous), Some(current)) = (previous, current) else { return false };
+    if current.leaf == previous.leaf {
+        return previous.byte < current.byte;
+    }
+    if current.leaf == previous.leaf + 1 {
+        return previous.byte < plan.leaves[previous.leaf].len || current.byte > 0;
+    }
+    true
+}
+
+impl Rendered {
+    fn empty() -> Self {
+        Rendered { html: String::new(), first: None, last: None, parts: Vec::new(), boundary: false }
+    }
 }
 
 /// Emits each selected node at or under `id` in document order.
@@ -448,6 +861,7 @@ fn escape_attr(s: &str) -> String {
 mod tests {
     use super::super::plain_items;
     use super::super::tests::doc;
+    use super::super::{extent, Separator};
     use super::*;
     use serde_json::{json, Value};
 
@@ -1003,5 +1417,141 @@ mod tests {
             vec!["<span style=\"font-weight:bold\">x</span><b>y</b>".to_string()],
             html(&g),
         );
+    }
+
+    fn path(steps: &[usize]) -> NodePath {
+        steps
+            .iter()
+            .try_fold(NodePath::ROOT, |path, &step| path.child(step))
+            .expect("path fits")
+    }
+
+    fn range(path: NodePath, start: u32, end: u32) -> DocRange {
+        DocRange {
+            start: DocAddr { path, byte: start },
+            end: DocAddr { path, byte: end },
+        }
+    }
+
+    #[test]
+    fn a_partial_link_keeps_its_href_wrapper() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "a", "href": "?query=見出し語", "content": "見出し語"
+        }}]));
+        let selected = range(path(&[0, 0, 0]), 6, 12);
+        assert_eq!(
+            vec!["<a href=\"?query=見出し語\">し語</a>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &[selected], separator: Separator::Ellipsis }, RoleFilter::CARD)
+        );
+    }
+
+    #[test]
+    fn a_partial_text_keeps_its_bold_ancestor() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "b", "content": "bold text"
+        }}]));
+        let selected = range(path(&[0, 0, 0]), 5, 9);
+        assert_eq!(
+            vec!["<b>text</b>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &[selected], separator: Separator::Ellipsis }, RoleFilter::CARD)
+        );
+    }
+
+    #[test]
+    fn a_range_inside_a_ruby_base_keeps_the_atomic_ruby_and_reading() {
+        let d = doc(&json!([{"type": "structured-content", "content": [
+            {"tag": "ruby", "content": [
+                {"tag": "span", "content": "猫"},
+                {"tag": "rt", "content": "ねこ"}
+            ]},
+            {"tag": "span", "content": "tail"}
+        ]}]));
+        let start = DocAddr { path: path(&[0, 0, 0, 0]), byte: 1 };
+        let end_path = path(&[0, 1, 0]);
+        let selected = DocRange { start, end: DocAddr { path: end_path, byte: 4 } };
+        assert_eq!(
+            vec!["<ruby><span>猫</span><rt>ねこ</rt></ruby><span>tail</span>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &[selected], separator: Separator::Ellipsis }, RoleFilter::CARD)
+        );
+    }
+
+    #[test]
+    fn each_separator_applies_between_fragments_in_one_container() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "div", "content": "abcdef"
+        }}]));
+        let ranges = [range(path(&[0, 0, 0]), 1, 2), range(path(&[0, 0, 0]), 4, 5)];
+        assert_eq!(
+            vec!["<div>b…e</div>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &ranges, separator: Separator::Ellipsis }, RoleFilter::CARD)
+        );
+        assert_eq!(
+            vec!["<div>b e</div>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &ranges, separator: Separator::Space }, RoleFilter::CARD)
+        );
+        assert_eq!(
+            vec!["<div>b<br>e</div>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &ranges, separator: Separator::LineBreak }, RoleFilter::CARD)
+        );
+        assert_eq!(
+            vec!["<div><ul><li>b</li><li>e</li></ul></div>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &ranges, separator: Separator::ListItems }, RoleFilter::CARD)
+        );
+    }
+
+    #[test]
+    fn separators_do_not_cross_list_item_containers() {
+        let d = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "ol", "content": [
+                {"tag": "li", "content": "first"},
+                {"tag": "li", "content": "second"}
+            ]
+        }}]));
+        let ranges = [range(path(&[0, 0, 0, 0]), 0, 3), range(path(&[0, 0, 1, 0]), 0, 3)];
+        assert_eq!(
+            vec!["<ol><li>fir</li><li>sec</li></ol>".to_string()],
+            render_html(&d, Selection::Ranges { ranges: &ranges, separator: Separator::Ellipsis }, RoleFilter::CARD)
+        );
+    }
+
+    #[test]
+    fn a_full_extent_range_matches_whole_for_plain_and_ol_shapes() {
+        let plain = doc(&json!(["first", "second"]));
+        let plain_extent = extent(&plain, RoleFilter::CARD).expect("plain extent");
+        assert_eq!(
+            render_html(&plain, Selection::Whole, RoleFilter::CARD),
+            render_html(
+                &plain,
+                Selection::Ranges { ranges: &[plain_extent], separator: Separator::Ellipsis },
+                RoleFilter::CARD,
+            )
+        );
+
+        let ol = doc(&json!([{"type": "structured-content", "content": {
+            "tag": "ol", "content": [
+                {"tag": "li", "content": "first"},
+                {"tag": "li", "content": "second"}
+            ]
+        }}]));
+        let ol_extent = extent(&ol, RoleFilter::CARD).expect("ol extent");
+        assert_eq!(
+            render_html(&ol, Selection::Whole, RoleFilter::CARD),
+            render_html(
+                &ol,
+                Selection::Ranges { ranges: &[ol_extent], separator: Separator::Space },
+                RoleFilter::CARD,
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_range_union_renders_nothing() {
+        let d = doc(&json!(["text"]));
+        assert!(render_html(
+            &d,
+            Selection::Ranges { ranges: &[], separator: Separator::Ellipsis },
+            RoleFilter::CARD,
+        )
+        .is_empty());
     }
 }

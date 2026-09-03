@@ -876,3 +876,33 @@ fn a_repeated_data_key_is_interned_once() {
         .count();
     assert_eq!(3, hits, "three nodes, one key id");
 }
+
+#[test]
+fn full_selection_extent_matches_whole_for_two_fixture_shapes() {
+    let plain = doc(&json!(["first", "second"]));
+    let plain_extent = extent(&plain, RoleFilter::CARD).expect("plain extent");
+    assert_eq!(
+        render_html(&plain, Selection::Whole, RoleFilter::CARD),
+        render_html(
+            &plain,
+            Selection::Ranges { ranges: &[plain_extent], separator: Separator::Ellipsis },
+            RoleFilter::CARD,
+        )
+    );
+
+    let jitendex = doc(&json!([{"type": "structured-content", "content": {
+        "tag": "ol", "content": [
+            {"tag": "li", "content": "first"},
+            {"tag": "li", "content": "second"}
+        ]
+    }}]));
+    let jitendex_extent = extent(&jitendex, RoleFilter::CARD).expect("ol extent");
+    assert_eq!(
+        render_html(&jitendex, Selection::Whole, RoleFilter::CARD),
+        render_html(
+            &jitendex,
+            Selection::Ranges { ranges: &[jitendex_extent], separator: Separator::Space },
+            RoleFilter::CARD,
+        )
+    );
+}

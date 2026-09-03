@@ -32,8 +32,17 @@ pub struct ShotPlan {
 /// popup add state. It does not apply [`plan_add`]'s guards or read
 /// `include_on_add`.
 pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> ShotPlan {
-    let (expr, fields) =
-        crate::controller::note_payload(view.presentation, cfg.anki.first_dict_only);
+    // The Mining screenshot plan uses the same note as the Anki button.
+    // It applies the same Card selection.
+    let empty = crate::select::CardSelection::default();
+    let selection = view.selection.card(0).unwrap_or(&empty);
+    let (expr, fields) = crate::controller::note_payload(
+        view.presentation,
+        cfg.anki.first_dict_only,
+        cfg.anki.include_dictionary_name,
+        selection,
+        cfg.anki.selection_separator.into(),
+    );
     let path = save_root.join(format!("{}_{now}.png", sanitize_filename(&expr)));
     let picture_field = cfg
         .anki
@@ -200,6 +209,8 @@ mod tests {
     }
 
     fn view<'a>(p: &'a Presentation, anki: &'a AnkiPopupState) -> PopupView<'a> {
+        static NONE: std::sync::LazyLock<crate::select::Selections> =
+            std::sync::LazyLock::new(crate::select::Selections::default);
         PopupView {
             popup: PhysRect { x: 0, y: 0, w: 300, h: 200 },
             anchor: PhysRect { x: 0, y: 0, w: 20, h: 20 },
@@ -209,6 +220,7 @@ mod tests {
             presentation: p,
             anki,
             show_back: false,
+            selection: &NONE,
         }
     }
 

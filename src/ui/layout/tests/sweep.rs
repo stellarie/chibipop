@@ -1043,7 +1043,8 @@ fn stack_of(kind: ElemKind) -> Option<Stack> {
         | ElemKind::Collapsed
         | ElemKind::Headword
         | ElemKind::Pitch
-        | ElemKind::BackButton => Some(Stack::Flow),
+        | ElemKind::BackButton
+        | ElemKind::Check => Some(Stack::Flow),
         ElemKind::Image => Some(Stack::Assets),
         ElemKind::Corner | ElemKind::Block | ElemKind::Table | ElemKind::Cell => None,
     }
@@ -1854,6 +1855,7 @@ fn sweep_scene(p: &Presentation, max_w: f32) -> PopupScene {
             side_panel: false,
             render: sweep_settings(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )

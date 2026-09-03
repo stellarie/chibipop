@@ -8,9 +8,11 @@
 use crate::config::TriggerMode;
 use crate::geom::PhysPoint;
 use anyhow::{anyhow, Context, Result};
+use std::collections::VecDeque;
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::*;
@@ -48,9 +50,52 @@ static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
 
 /// Arms click capture on the popup area.
 static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
+/// This state stores button bits while the pointer is held.
+static POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
-/// Stores screen coordinates for the click.
-static PENDING_CLICK: AtomicI64 = AtomicI64::new(NO_POINT);
+/// This state stores the latest move while a popup button is held.
+static PENDING_POINTER_MOVE: AtomicI64 = AtomicI64::new(NO_POINT);
+
+/// This constant limits the queue of edges from the hook to the pump.
+const POINTER_QUEUE_CAPACITY: usize = 32;
+
+/// A `PointerButton` represents one physical mouse button that the popup can consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Right,
+}
+
+/// A `PointerEvent` represents one button edge that the low-level mouse hook captures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerEvent {
+    pub button: PointerButton,
+    pub down: bool,
+    pub point: PhysPoint,
+}
+
+/// This queue stores button edges until the message loop drains them.
+static POINTER_EVENTS: LazyLock<Mutex<VecDeque<PointerEvent>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(POINTER_QUEUE_CAPACITY)));
+
+fn pointer_events() -> &'static Mutex<VecDeque<PointerEvent>> {
+    &POINTER_EVENTS
+}
+
+fn pointer_button_bit(button: PointerButton) -> u8 {
+    match button {
+        PointerButton::Left => 1,
+        PointerButton::Right => 2,
+    }
+}
+
+fn queue_pointer_event(event: PointerEvent) {
+    let mut queue = pointer_events().lock().unwrap_or_else(|e| e.into_inner());
+    if queue.len() == POINTER_QUEUE_CAPACITY {
+        queue.pop_front();
+    }
+    queue.push_back(event);
+}
 
 /// Defines the number of `WHEEL_DELTA` units from `winuser.h`.
 const WHEEL_DELTA_UNITS: i32 = 120;
@@ -235,6 +280,10 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
         y: data.pt.y,
     };
 
+    if POINTER_BUTTONS.load(Ordering::SeqCst) != 0 {
+        PENDING_POINTER_MOVE.store(pack(p), Ordering::SeqCst);
+    }
+
     if selection_active() {
         return;
     }
@@ -308,17 +357,20 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     }
 }
 
-/// Stores the click point in screen coordinates.
-unsafe fn record_click(lparam: LPARAM) {
-    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
-    // `wparam == WM_LBUTTONDOWN`. The `WH_MOUSE_LL` contract guarantees that
-    // `lparam` points to a valid, aligned `MSLLHOOKSTRUCT` for this call.
+/// This function stores one popup button edge in screen coordinates.
+unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM) {
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and the
+    // message is one of the four button edges below. The `WH_MOUSE_LL`
+    // contract guarantees a valid, aligned `MSLLHOOKSTRUCT` for this call.
     let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-    let p = PhysPoint {
-        x: data.pt.x,
-        y: data.pt.y,
-    };
-    PENDING_CLICK.store(pack(p), Ordering::SeqCst);
+    let point = PhysPoint { x: data.pt.x, y: data.pt.y };
+    let bit = pointer_button_bit(button);
+    if down {
+        POINTER_BUTTONS.fetch_or(bit, Ordering::SeqCst);
+    } else {
+        POINTER_BUTTONS.fetch_and(!bit, Ordering::SeqCst);
+    }
+    queue_pointer_event(PointerEvent { button, down, point });
 }
 
 /// Stores one wheel event's delta.
@@ -343,17 +395,35 @@ fn accumulate_wheel(delta: i32) {
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         match wparam.0 as u32 {
-            // A panic must not unwind through this callback.
-            // Unwinding through this callback causes undefined behavior.
             WM_MOUSEMOVE => {
                 let _ = catch_unwind(|| unsafe { record_mouse_move(lparam) });
             }
-            WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
-                let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
+            WM_LBUTTONDOWN if CLICK_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe {
+                    record_pointer_event(PointerButton::Left, true, lparam)
+                });
                 return LRESULT(1);
             }
-            WM_LBUTTONDOWN if CLICK_ARMED.load(Ordering::SeqCst) => {
-                let _ = catch_unwind(|| unsafe { record_click(lparam) });
+            WM_LBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe {
+                    record_pointer_event(PointerButton::Left, false, lparam)
+                });
+                return LRESULT(1);
+            }
+            WM_RBUTTONDOWN if CLICK_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe {
+                    record_pointer_event(PointerButton::Right, true, lparam)
+                });
+                return LRESULT(1);
+            }
+            WM_RBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe {
+                    record_pointer_event(PointerButton::Right, false, lparam)
+                });
+                return LRESULT(1);
+            }
+            WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
                 return LRESULT(1);
             }
             _ => {}
@@ -550,19 +620,34 @@ impl Hooks {
         PENDING_SCROLL.store(0, Ordering::SeqCst);
     }
 
-    /// Arms or disarms click capture.
+    /// This function arms or disarms popup pointer capture.
     pub fn set_click_armed(armed: bool) {
-        CLICK_ARMED.store(armed, Ordering::SeqCst);
+        let changed = CLICK_ARMED.swap(armed, Ordering::SeqCst) != armed;
+        if changed && !armed {
+            POINTER_BUTTONS.store(0, Ordering::SeqCst);
+        }
+        if changed {
+            pointer_events()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            PENDING_POINTER_MOVE.store(NO_POINT, Ordering::SeqCst);
+        }
     }
 
-    /// Takes one stored click.
-    pub fn take_click() -> Option<PhysPoint> {
-        let v = PENDING_CLICK.swap(NO_POINT, Ordering::SeqCst);
-        if v == NO_POINT {
-            None
-        } else {
-            Some(unpack(v))
-        }
+    /// This function takes all queued popup button edges in callback order.
+    pub fn take_pointer_events() -> Vec<PointerEvent> {
+        pointer_events()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    /// This function takes the latest popup move when a button was held since the last tick.
+    pub fn take_pointer_move() -> Option<PhysPoint> {
+        let v = PENDING_POINTER_MOVE.swap(NO_POINT, Ordering::SeqCst);
+        (v != NO_POINT).then(|| unpack(v))
     }
 
     /// Sets the mode that controls the trigger gate.
@@ -638,6 +723,12 @@ impl Drop for Hooks {
     fn drop(&mut self) {
         SCROLL_ARMED.store(false, Ordering::SeqCst);
         CLICK_ARMED.store(false, Ordering::SeqCst);
+        POINTER_BUTTONS.store(0, Ordering::SeqCst);
+        pointer_events()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        PENDING_POINTER_MOVE.store(NO_POINT, Ordering::SeqCst);
         ANKI_ADD_ARMED.store(false, Ordering::SeqCst);
         BACK_ARMED.store(false, Ordering::SeqCst);
         let posted = stop_hook_thread(self.thread_id);
@@ -692,6 +783,43 @@ mod tests {
 
     fn wheel_guard() -> std::sync::MutexGuard<'static, ()> {
         WHEEL_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The tests share the popup pointer queue.
+    static POINTER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn pointer_guard() -> std::sync::MutexGuard<'static, ()> {
+        POINTER_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn armed_pointer_edges_are_swallowed_and_queued() {
+        let _g = pointer_guard();
+        Hooks::set_click_armed(false);
+        Hooks::set_click_armed(true);
+        let edges = [
+            (WM_LBUTTONDOWN, PointerButton::Left, true, POINT { x: 10, y: 20 }),
+            (WM_LBUTTONUP, PointerButton::Left, false, POINT { x: 11, y: 21 }),
+            (WM_RBUTTONDOWN, PointerButton::Right, true, POINT { x: 12, y: 22 }),
+            (WM_RBUTTONUP, PointerButton::Right, false, POINT { x: 13, y: 23 }),
+        ];
+        for &(message, _, _, point) in &edges {
+            let data = MSLLHOOKSTRUCT {
+                pt: point,
+                ..Default::default()
+            };
+            let lparam = LPARAM(&data as *const MSLLHOOKSTRUCT as isize);
+            // SAFETY: `data` is live and aligned for this callback, like the
+            // structure supplied by the low-level mouse hook.
+            let result = unsafe { mouse_hook_proc(0, WPARAM(message as usize), lparam) };
+            assert_eq!(1, result.0, "an armed button edge must be swallowed");
+        }
+        let got = Hooks::take_pointer_events();
+        let want: Vec<_> = edges
+            .into_iter()
+            .map(|(_, button, down, point)| PointerEvent { button, down, point: PhysPoint { x: point.x, y: point.y } })
+            .collect();
+        assert_eq!(want, got);
+        Hooks::set_click_armed(false);
     }
 
     #[test]

@@ -120,7 +120,10 @@ fn the_asset_extracts_to_a_tree_the_binary_can_find_its_models_in() {
     // Name each file because a user notices each missing file.
     for rel in [
         "chibipop",
-        "data/deconjugator.json",
+        "data/ipadic/system.dic",
+        "data/ipadic/COPYING",
+        "data/ipadic/NOTICE",
+        "data/ipadic/SHA256SUMS.txt",
         "README.md",
         "LICENSE",
         "models/meiki/LICENSE.md",

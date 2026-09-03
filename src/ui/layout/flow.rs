@@ -20,6 +20,7 @@ use super::image::{FlowImage, NO_IMAGE};
 use super::marker::FlowMarker;
 use super::measure::StyledSpan;
 use super::ruby::{FlowRuby, NO_RUBY};
+use super::scene::TextSource;
 use super::style::{Block, BoxStyle, Inline};
 
 /// An index in [`Flow::links`], or `NO_LINK` when no link exists.
@@ -142,6 +143,11 @@ pub(super) struct Flow {
     pub(super) top_gap: f32,
     pub(super) text: String,
     pub(super) spans: Vec<FlowSpan>,
+    /// This table records the Dictionary leaf bytes for each text range.
+    ///
+    /// The layout pass keeps this table separate from spans because one styled span
+    /// can contain text from several leaves.
+    pub(super) sources: Vec<TextSource>,
     /// One entry for each `<a>` with a hit target.
     /// [`FlowSpan::link`] stores its index.
     pub(super) links: Vec<HitAction>,
@@ -172,8 +178,10 @@ pub(super) struct Flow {
     /// [`GlossOrigin`]: super::scene::GlossOrigin
     pub(super) dict_id: i64,
     pub(super) entry_id: i64,
-}
+    /// This field stores the flattened Entry ordinal for the current Card.
+    pub(super) entry: u32,
 
+}
 impl Flow {
     /// Returns the spans in the form that the seam takes.
     ///
@@ -214,6 +222,9 @@ impl Flow {
         self.text.insert_str(0, &label);
         for span in &mut self.spans {
             span.at += shift;
+        }
+        for source in &mut self.sources {
+            source.at += shift;
         }
         match self.spans.first_mut() {
             Some(first)
@@ -289,5 +300,16 @@ pub(super) fn trim(flow: &mut Flow) {
         span.at = at.saturating_sub(start);
         span.len = to.saturating_sub(at);
         span.len > 0
+    });
+    flow.sources.retain_mut(|source| {
+        let old_at = source.at;
+        let at = old_at.max(start);
+        let to = (old_at + source.len).min(end);
+        if !source.atomic {
+            source.byte += at.saturating_sub(old_at);
+        }
+        source.at = at.saturating_sub(start);
+        source.len = to.saturating_sub(at);
+        source.len > 0
     });
 }

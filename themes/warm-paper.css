@@ -1,6 +1,10 @@
 /* chibipop popup theme */
 /* Warm Paper — soft cream on dark brown, like aged paper. */
 /* Best on: dark base theme. */
+:root {
+  --accent: #50beff;
+}
+
 
 /* Panel background, border, shape */
 .popup {

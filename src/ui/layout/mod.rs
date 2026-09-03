@@ -50,6 +50,7 @@ mod link;
 mod marker;
 mod measure;
 mod pass;
+mod pick;
 mod pill;
 mod ruby;
 mod scene;
@@ -67,12 +68,13 @@ pub use measure::{
 pub use scene::{
     Align, AnkiSlot, Appearance, ElemBox, ElemKind, ElemSpan, GlossOrigin, HitTarget, MarkerBox,
     Painted, PaintedRow, PopupScene, Rgb, RubyBox, SceneElem, SceneImage, SceneRect, SideRow,
-    SidePanel, Tint,
+    SidePanel, TextSource, Tint,
 };
 pub use style::{BorderStyle, BoxStyle, Edges};
 
 use crate::controller::HitAction;
 use crate::present::{AnkiPopupState, Presentation};
+use crate::select::{Coverage, Selections};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
 use chrome::{
     build_elements, is_kanji, measure_line, one_span, pitch_elem, side_panel, span, text_elem,
@@ -80,6 +82,7 @@ use chrome::{
 };
 use measure::measure_text;
 use pass::Pass;
+use pick::highlights;
 use style::REGULAR_WEIGHT;
 
 /// Input for the complete layout of one popup.
@@ -96,7 +99,19 @@ pub struct SceneRequest<'a> {
     pub render: RenderSettings,
     /// A `Some` value reserves the Anki slot.
     pub anki: Option<&'a AnkiPopupState>,
+    /// The stored selection of every Card, or `None` when Anki is off.
+    ///
+    /// `None` produces the same scene as a build without selection:
+    /// no [`ElemKind::Check`] element, no highlight, and no `ToggleEntry` hit.
+    /// Geometry snapshots pass `None`, so they do not move.
+    pub selection: Option<&'a Selections>,
 }
+
+/// The opacity of a selection highlight box over the panel background.
+///
+/// The accent at full strength hides the text under it.
+/// One value keeps both bins at the same tint.
+pub const HIGHLIGHT_ALPHA: f32 = 0.35;
 
 /// Build the measured scene for one popup.
 pub fn scene(
@@ -107,9 +122,14 @@ pub fn scene(
     let font = theme.font_name.as_str();
     let pad = theme.padding as f32;
     let origin = pad;
-
-    let (elems, entries) =
-        build_elements(req.presentation, theme, req.show_back, req.side_panel, req.render);
+    let (elems, entries) = build_elements(
+        req.presentation,
+        theme,
+        req.show_back,
+        req.side_panel,
+        req.render,
+        req.selection,
+    );
     let has_side = !entries.is_empty();
     let side_extra = if has_side {
         SIDE_GAP + SEPARATOR_THICKNESS + SIDE_GAP + SIDE_PANEL_W
@@ -133,6 +153,7 @@ pub fn scene(
         out: Vec::with_capacity(elems.len()),
         hits: Vec::new(),
     };
+    let mut check_shift = 0.0f32;
 
     for elem in &elems {
         let advance = match elem {
@@ -160,6 +181,7 @@ pub fn scene(
                     inline_boxes: Vec::new(),
                     origin: None,
                     image: None,
+                    sources: Vec::new(),
                 });
                 h
             }
@@ -193,24 +215,48 @@ pub fn scene(
                     inline_boxes: Vec::new(),
                     origin: None,
                     image: None,
+                    sources: Vec::new(),
                 });
                 reserved_w = met.w + CORNER_GAP;
                 0.0
             }
+            Elem::Check { entry, coverage, top_gap } => {
+                let check = check_elem(theme, *coverage, origin, origin + y + *top_gap);
+                if let Some(entry) = entry {
+                    pass.hits.push(HitTarget {
+                        x: Some(check.rect.x - 4.0),
+                        y: check.rect.y - 4.0,
+                        w: Some(check.rect.w + 8.0),
+                        h: check.rect.h + 8.0,
+                        action: HitAction::ToggleEntry(*entry),
+                    });
+                }
+                pass.out.push(check);
+                check_shift = theme.body_size * 1.3;
+                0.0
+            }
             Elem::Text(line) => {
-                let avail_w = take_avail(content_w, &mut reserved_w);
+                let shift = std::mem::take(&mut check_shift);
+                let avail_w = (take_avail(content_w, &mut reserved_w) - shift).max(1.0);
                 let met = measure_line(m, font, line, avail_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                pass.out.push(text_elem(ElemKind::Text, line, &met, origin, y, avail_w));
+                let mut elem = text_elem(ElemKind::Text, line, &met, origin, y, avail_w);
+                elem.pen.0 += shift;
+                elem.rect.x += shift;
+                pass.out.push(elem);
                 h
             }
             Elem::Collapsed(idx, line) => {
-                let avail_w = take_avail(content_w, &mut reserved_w);
+                let shift = std::mem::take(&mut check_shift);
+                let avail_w = (take_avail(content_w, &mut reserved_w) - shift).max(1.0);
                 let met = measure_line(m, font, line, avail_w, &mut pass.measured)?;
                 let h = met.h;
                 y += line.top_gap;
-                pass.out.push(text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w));
+                let mut elem = text_elem(ElemKind::Collapsed, line, &met, origin, y, avail_w);
+                elem.pen.0 += shift;
+                elem.rect.x += shift;
+                pass.out.push(elem);
                 pass.hits.push(HitTarget {
                     x: None,
                     y: origin + y,
@@ -349,7 +395,7 @@ pub fn scene(
         None => None,
     };
 
-    Ok(PopupScene {
+    let mut result = PopupScene {
         origin,
         content_w,
         elems: pass.out,
@@ -360,7 +406,58 @@ pub fn scene(
         content_h,
         view_h,
         panel_w,
-    })
+        highlights: Vec::new(),
+    };
+    if let Some(selection) = req.selection.and_then(|all| all.card(0)) {
+        result.highlights = highlights(&result, selection, font, m)?;
+    }
+    Ok(result)
+}
+
+/// Build one selection checkbox without adding a line to the layout stream.
+///
+/// The following label or collapsed row owns the line gap. This element only
+/// reserves the leading square and paints its state through the block box.
+fn check_elem(theme: &Theme, coverage: Coverage, origin: f32, y: f32) -> SceneElem {
+    let side = theme.body_size * 0.8;
+    let rect = SceneRect { x: origin, y, w: side, h: side };
+    let background = match coverage {
+        Coverage::All => Some(theme.accent),
+        Coverage::Partial => Some(theme.dimmed_text),
+        Coverage::None => None,
+    };
+    SceneElem {
+        kind: ElemKind::Check,
+        text: String::new(),
+        color: theme.accent,
+        font_size: theme.body_size,
+        weight: REGULAR_WEIGHT,
+        italic: false,
+        top_gap: 0.0,
+        wrap_w: 0.0,
+        align: Align::Leading,
+        pen: (origin, y),
+        rect,
+        lines: 0,
+        advance: 0.0,
+        spans: Vec::new(),
+        ruby: Vec::new(),
+        marker: Vec::new(),
+        block_box: Some(ElemBox {
+            rect,
+            style: BoxStyle {
+                border: Edges::all(1.0),
+                border_style: Edges::all(BorderStyle::Solid),
+                border_color: theme.accent,
+                background,
+                ..BoxStyle::default()
+            },
+        }),
+        inline_boxes: Vec::new(),
+        origin: None,
+        image: None,
+        sources: Vec::new(),
+    }
 }
 
 /// Return the width for the next element and clear the corner reservation.

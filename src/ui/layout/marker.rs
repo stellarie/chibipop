@@ -455,7 +455,7 @@ impl Paragraphs<'_> {
         let slot = std::mem::replace(&mut self.open_ruby, NO_RUBY);
         for mark in owed {
             self.barrier = true;
-            self.push(&mark.text, mark.style, NO_LINK);
+            self.push(&mark.text, mark.style, NO_LINK, None);
         }
         self.barrier = true;
         self.open_ruby = slot;

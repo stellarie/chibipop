@@ -155,36 +155,39 @@ requires modifier-plus-key — which is why `ALT+F` is the default everywhere.
 **The portal route** is the alternative that cannot lose a release. Launched
 with an app id — the desktop entry, the systemd user unit, or a uwsm session —
 chibipop registers its trigger on the GlobalShortcuts portal. On KDE and
-GNOME that is the whole story (the desktop shows a consent dialog and owns the
-binding). On Hyprland, with `xdg-desktop-portal-hyprland` running, the key
-stays in your config but rides the `global` dispatcher instead of `exec`:
+GNOME that is the whole story. The desktop shows a consent dialog and owns the
+binding.
 
-```
-bind = ALT, F, global, chibipop:trigger
-```
+On Hyprland, XDPH registers the shortcut but does not assign its key. Run
+`hyprctl globalshortcuts` to get the active namespace. An installed desktop
+launch normally registers `chibipop:trigger`, but a development launch can
+inherit another app ID. For example, a launch from VS Code can register
+`code:trigger`. Bind the exact name that `hyprctl` reports.
 
 Hyprland delivers the portal release keyed to the pressed shortcut itself,
 independent of the modifier state, so either release order retracts the popup.
-A daemon started from a bare shell has no app id and the portal refuses it —
-chibipop's status row says so, and the socket keeps serving meanwhile.
+The socket keeps serving as a namespace-free fallback.
 
-**The add-card chord is the same story.** The popup never takes focus, so the
-"add this word to Anki" key is global too — and on a session with no portal the
-compositor bind is the only thing that can reach it. It is one press, one verb,
-with no release line to lose:
+**The add-card chord is a one-shot action.** The popup never takes focus, so
+the key must be global. On Hyprland, use the control socket even when XDPH is
+available:
 
 ```
 bind = ALT, A, exec, chibipop ctl anki-add
 ```
 
+The settings window shows and copies this line. It does not guess the portal
+namespace because that namespace depends on how the daemon started. The socket
+and the portal both reach the same add-card code path.
+
+On sway, use its equivalent:
+
 ```
 bindsym --no-repeat Mod1+a exec chibipop ctl anki-add
 ```
 
-Where the portal is running it registers `anki-add` itself and the bind above is
-a second, equivalent route to the same add: both land on one code path, so a
-card added by either is the same card, and the popup's own Anki button is that
-path too.
+KDE and GNOME own the portal key through their desktop shortcut settings. The
+popup's Anki button uses the same add-card code path on every desktop.
 
 **The mining screenshot's key is the same story again.** `chibipop ctl
 screenshot` grabs a region for the popup on screen and files it as that card's

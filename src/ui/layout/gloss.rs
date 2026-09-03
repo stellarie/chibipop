@@ -29,6 +29,7 @@ use super::image::{FlowImage, NO_IMAGE};
 use super::link::link_action;
 use super::marker::FlowMarker;
 use super::pass::{Boxed, Piece};
+use super::scene::TextSource;
 use super::pill::{reserves, rooms, spacers, PILL_SPACER};
 use super::ruby::{FlowRuby, NO_RUBY};
 use super::scene::Rgb;
@@ -113,6 +114,11 @@ pub(super) struct Paragraphs<'a> {
     pub(super) links: Vec<HitAction>,
     /// This flag marks an item separator owed to the next text in this paragraph.
     pub(super) pending_sep: bool,
+    /// This field stores the path of the active ruby node.
+    ///
+    /// Ruby base text addresses the ruby node as one atomic leaf. The field
+    /// applies only while [`Paragraphs::ruby`] walks that node's children.
+    pub(super) ruby_path: Option<NodePath>,
     /// This list stores readings found so far.
     /// [`Flow`] receives the readings for their bases with local indexes.
     /// This slot names the current text's reading. It is [`NO_RUBY`] outside a `ruby`.
@@ -221,6 +227,7 @@ pub(super) fn paragraphs(
         cur: Flow::default(),
         links: Vec::new(),
         pending_sep: false,
+        ruby_path: None,
         rubies: Vec::new(),
         open_ruby: NO_RUBY,
         barrier: false,
@@ -262,7 +269,8 @@ impl Paragraphs<'_> {
         let doc = self.doc;
         // An item opens no block. It receives the path of the paragraph that it enters.
         // In 20 census dictionaries that emit one plain string per item, this path is the
-        // only scene-element path. A nested block takes the path.
+        // only scene-element path. A nested block takes the path. The `TextSource` that
+        // `text` records maps bytes to leaves. It does not supply `GlossOrigin::path`.
         if self.cur.text.is_empty() {
             self.cur.path = ctx.path;
         }
@@ -270,11 +278,12 @@ impl Paragraphs<'_> {
             // A `type: image` item has no tag and acts as a replaced element.
             // It takes space on the current line. It does not open a new line.
             ItemType::Image => self.image(id, ctx),
-            ItemType::Text => self.text(doc.text(id), ctx.inline, ctx.link),
+            ItemType::Text => self.text(doc.text(id), ctx.inline, ctx.link, ctx.path, 0),
             // Yomitan places children of a `structured-content` item in a block container.
             // The item itself does not open a paragraph or take part in drop rules.
             ItemType::StructuredContent => self.children(id, ctx),
-            _ if doc.is_plain_string(id) => self.text(doc.text(id), ctx.inline, ctx.link),
+            _ if doc.is_plain_string(id) =>
+                self.text(doc.text(id), ctx.inline, ctx.link, ctx.path, 0),
             _ => self.node(id, ctx, false),
         }
     }
@@ -312,7 +321,7 @@ impl Paragraphs<'_> {
             Tag::Ruby => return self.ruby(id, ctx),
             // Both engines break on a newline.
             // A dictionary break stays inside the paragraph and does not split it.
-            Tag::Br => return self.text("\n", ctx.inline, ctx.link),
+            Tag::Br => return self.text("\n", ctx.inline, ctx.link, None, 0),
             // A table forms a grid of lines, and each word belongs to a cell.
             // This branch handles the whole subtree through `tr`.
             // The plain-text walk treats `tr` as a block because a row breaks a line.
@@ -323,7 +332,7 @@ impl Paragraphs<'_> {
             return self.image(id, ctx);
         }
         if node.kind == Kind::Text && node.tag == Tag::None {
-            return self.text(doc.text(id), ctx.inline, ctx.link);
+            return self.text(doc.text(id), ctx.inline, ctx.link, ctx.path, 0);
         }
         let inline = self.styled(id, ctx.inline);
         let block = self.boxed(id, ctx.block, inline);
@@ -474,6 +483,7 @@ impl Paragraphs<'_> {
                 path: ctx.path,
                 dict_id: 0,
                 entry_id: 0,
+                entry: 0,
             }));
         }
         // The box closes its line. A run after it opens a new paragraph in the block around
@@ -586,8 +596,9 @@ impl Paragraphs<'_> {
         let doc = self.doc;
         if !doc.node(id).tag.is_inline() && doc.is_string_list(id) {
             for (i, child) in doc.children(id).enumerate() {
-                self.open(ctx.at(i).path, ctx.block);
-                self.text(doc.text(child), ctx.inline, ctx.link);
+                let child_ctx = ctx.at(i);
+                self.open(child_ctx.path, ctx.block);
+                self.text(doc.text(child), ctx.inline, ctx.link, child_ctx.path, 0);
             }
             return;
         }
@@ -638,12 +649,22 @@ impl Paragraphs<'_> {
     }
 
     /// Appends text after it pays any owed item separator and list marker.
-    pub(super) fn text(&mut self, text: &str, style: Inline, link: u32) {
+    ///
+    /// The `path` value addresses the real text leaf. Synthetic text uses `None`,
+    /// so separators, breaks, and image alternatives never become selection sources.
+    pub(super) fn text(
+        &mut self,
+        text: &str,
+        style: Inline,
+        link: u32,
+        path: Option<NodePath>,
+        byte: u32,
+    ) {
         if text.is_empty() {
             return;
         }
         if std::mem::take(&mut self.pending_sep) && !self.cur.text.is_empty() {
-            self.push(ITEM_SEPARATOR, style, link);
+            self.push(ITEM_SEPARATOR, style, link, None);
         }
         // A marker waits for text that deserves a mark.
         // `<li><br>a</li>` puts it on `a`, not on the break.
@@ -651,7 +672,17 @@ impl Paragraphs<'_> {
         if !text.trim().is_empty() {
             self.mark();
         }
-        self.push(text, style, link);
+        let source = path.map(|path| {
+            let atomic = self.ruby_path.is_some();
+            TextSource {
+                at: self.cur.text.len() as u32,
+                len: text.len() as u32,
+                path: self.ruby_path.unwrap_or(path),
+                byte: if atomic { 0 } else { byte },
+                atomic,
+            }
+        });
+        self.push(text, style, link, source);
     }
 
     /// Appends one run and joins it to the previous span when all properties match.
@@ -659,7 +690,13 @@ impl Paragraphs<'_> {
     /// When this function joins spans, it saves more than memory. A gloss from one plain
     /// string then measures as one span, byte for byte like the panel request before this
     /// pass existed. Geometry goldens therefore do not move.
-    pub(super) fn push(&mut self, text: &str, style: Inline, link: u32) {
+    pub(super) fn push(
+        &mut self,
+        text: &str,
+        style: Inline,
+        link: u32,
+        source: Option<TextSource>,
+    ) {
         let at = self.cur.text.len() as u32;
         let len = text.len() as u32;
         let ruby = self.open_ruby;
@@ -686,6 +723,10 @@ impl Paragraphs<'_> {
                 filler: false,
                 image: NO_IMAGE,
             }),
+        }
+        if let Some(mut source) = source {
+            source.at = at;
+            self.cur.sources.push(source);
         }
     }
 

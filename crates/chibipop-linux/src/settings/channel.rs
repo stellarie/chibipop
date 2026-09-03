@@ -5,10 +5,10 @@
 //! Both rungs of the trigger ladder (ARCHITECTURE.md#input-ladders) operate here.
 //! On the native rung, the compositor binding is the authority and the configuration
 //! chord is advisory. The control shows the snippet to copy. On the portal rung,
-//! the GlobalShortcuts session owns and reports the binding. The control shows
-//! the key from the portal and points to the desktop editor. The daemon publishes
-//! the resolved channel (`shortcuts::state`), because bus inspection cannot
-//! differentiate the two rungs.
+//! the GlobalShortcuts session owns and reports the portal shortcut. The control reports
+//! the portal key. The settings window then gives the correct desktop-specific
+//! change path. The daemon publishes the resolved channel (`shortcuts::state`)
+//! because bus inspection cannot distinguish the two rungs.
 //!
 //! The same two rungs serve every global action. Each action has a control-socket
 //! verb. One row structure serves all actions. The native rung selects the

@@ -322,6 +322,7 @@ summary_chars = 40          # 10-200; collapsed-row summary length
 font = "Yu Gothic UI"
 highlight_match = true      # box the characters the popup is defining
 scroll_popup = true         # let the wheel scroll a popup that overflows
+edge_autoscroll = true      # auto-scroll while a selection drag reaches the edge
 side_panel = false
 layer = "overlay"           # Linux: "overlay" | "top" (below fullscreen clients)
 layout_mode = "roomy"       # "roomy" | "compact"; how much room an entry gets
@@ -368,7 +369,11 @@ sentence_mode = "line"      # "line" | "all" | "static"
 static_region_key = ""      # Windows; empty leaves it unbound
 static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
 show_static_overlay = true
+include_dictionary_name = true
 first_dict_only = false
+selection_buttons = "primary-additive"  # "primary-additive" | "primary-replacing"
+selection_separator = "ellipsis"       # "ellipsis" | "space" | "line-break" | "list-items"
+triple_click = "sense-with-examples"   # "sense" | "sense-with-examples" | "line"
 
 [[anki.field_map]]          # one block per Anki field
 anki_field = "Expression"
@@ -391,6 +396,28 @@ include_on_add = false
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`
 and `FreqSort`/`frequency`.
+
+### Selecting glossary text
+
+Anki must be enabled before the popup can select glossary text.
+
+- Dragging selects grapheme clusters.
+- Double-clicking selects a word. A word is a full conjugation or a compound
+  noun, for example 食べられませんでした or 日本語教師.
+- Triple-clicking selects the unit set by `anki.triple_click`.
+- `sense` selects a Sense without its examples.
+- `sense-with-examples` selects a Sense and its examples. This value is the default.
+- `line` selects the nearest block or the newline-delimited text line.
+- Quadruple-clicking selects an Entry.
+- A drag that starts from a double-click grows by words.
+- A drag that starts from a triple-click grows by the configured triple-click unit.
+- The Entry checkbox selects or clears the full Entry.
+- The primary button adds to the selection by default.
+- The secondary button replaces the selection by default.
+- A plain primary click clears the current Card after 500 ms.
+
+The selection replaces the `glossary` and `glossary_html` fields for that Card.
+When no selection exists, the card keeps the full glossary.
 
 **Every setting is read once at startup.** Edit the file with chibipop
 stopped, or use the settings window — pressing Apply there rewrites the whole

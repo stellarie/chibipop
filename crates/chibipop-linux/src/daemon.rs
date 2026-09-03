@@ -33,10 +33,12 @@ use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
-use chibipop::controller::{Command, Controller, ControllerConfig, Event, RequestId};
+use chibipop::controller::{
+    Command, Controller, ControllerConfig, Event, LookupOutcome, RequestId, CLICK_CHAIN_MS,
+};
 use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use chibipop::present::DictInfo;
-use chibipop::text::layout::OcrLine;
+use chibipop::text::layout::{OcrLine, Orientation};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::text::Frame;
 use chibipop::worker::{Hover, Trigger, TriggerKind, Worker};
@@ -63,10 +65,13 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 
-/// Controller tick length. Linux has no dispatch timer.
-/// ARCHITECTURE.md#hover-cadence defines event-paced hover with Worker throttle.
-/// The Controller uses this value to derive alert arithmetic from ticks.
+/// This value sets the Controller tick interval.
+///
+/// Linux has no dispatch timer. A temporary timer advances only gesture state
+/// after pointer input and stops after the click chain expires.
 const DISPATCH_TICK_MS: u32 = 20;
+const GESTURE_TIMER_TICKS: u64 =
+    CLICK_CHAIN_MS.div_ceil(DISPATCH_TICK_MS as u64).saturating_add(1);
 
 /// The environment hook for the surface probe and its pick deadline.
 /// See [`App::probe_surfaces`].
@@ -166,6 +171,11 @@ pub(crate) struct App {
     /// The state covers an absent capture protocol, OCR models, or portal consent.
     /// The daemon still runs and reports the cause.
     worker: Option<Worker>,
+    /// The service finds Japanese word boundaries for the shown Card.
+    ///
+    /// The service loads its model lazily and uses the Worker wake source,
+    /// so analysis never blocks the calloop pump.
+    analysis: chibipop::analysis::Service,
     /// Data that a spawn needs. A granted portal retry gives a new session to a
     /// new pipeline from this data.
     worker_setup: worker::Setup,
@@ -231,13 +241,17 @@ pub(crate) struct App {
     /// Every value that the portal retry needs to run again from here.
     portal_retry: Option<PortalRetry>,
     /// Handle that receives new sources.
-    /// The dwell watch is the only source that this daemon adds or removes at
-    /// runtime.
-    /// The decision state must therefore reach the pump handle.
+    ///
+    /// The dwell watch and temporary gesture clock are the only sources that
+    /// this daemon adds or removes at runtime.
     pump: LoopHandle<'static, App>,
     /// Dwell re-check timer while it is armed
     /// (ARCHITECTURE.md#hover-cadence).
     dwell: Option<RegistrationToken>,
+    /// The temporary clock keeps core gesture deadlines active.
+    gesture_tick: Option<RegistrationToken>,
+    /// This value counts ticks until the temporary gesture clock stops.
+    gesture_ticks_left: u64,
 }
 
 /// One popup job. It blocks the thread that runs it.
@@ -458,7 +472,7 @@ impl App {
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
-            Verb::TriggerUp if self.demo.armed => self.hide_popup(),
+            Verb::TriggerUp if self.demo.armed => self.demo_hide(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
@@ -640,6 +654,26 @@ impl App {
     /// assumptions.
     pub(crate) fn popup_can_draw(&self) -> bool {
         self.popup.as_ref().is_some_and(Popup::available)
+    }
+
+    /// Return the selection state that the popup can render.
+    ///
+    /// The layout must receive no selection when Anki is disabled, even if
+    /// an old Controller surface still has selection data.
+    fn popup_selection(&self) -> Option<chibipop::select::Selections> {
+        if self.config.anki.enabled {
+            self.controller.selection().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Repeat text hit checks after a drag repaint.
+    fn refresh_drag_text(&mut self) {
+        let interaction = self.popup.as_mut().and_then(Popup::drag_move);
+        if let Some(interaction) = interaction {
+            self.pointer_interactions(vec![interaction]);
+        }
     }
 
     /// Move popup diagnostics into the log. The popup owns no log, so this
@@ -1127,7 +1161,11 @@ impl App {
         let Some(req) = self.popup.as_ref().and_then(Popup::request).cloned() else {
             return;
         };
-        self.show_popup(&ShowRequest { anki: self.controller.anki().cloned(), ..req });
+        self.show_popup(&ShowRequest {
+            anki: self.controller.anki().cloned(),
+            selection: self.popup_selection(),
+            ..req
+        });
     }
 
     // ---- OCR to clipboard ----
@@ -1367,6 +1405,7 @@ impl App {
             self.flush_popup_notes();
             // A resize paints here instead of in `show`, so a scripted pointer
             // pass finds its frame here.
+            self.refresh_drag_text();
             self.run_pointer_script();
         }
     }
@@ -1410,6 +1449,7 @@ impl App {
         }
         self.popup_mut().frame_done(surface);
         self.flush_popup_notes();
+        self.refresh_drag_text();
         self.run_pointer_script();
     }
 
@@ -1448,7 +1488,10 @@ impl App {
         let outcome = self.popup.as_mut().map(Popup::reshow);
         self.flush_popup_notes();
         match outcome {
-            Some(Ok(Some(placed))) => self.placed(placed),
+            Some(Ok(Some(placed))) => {
+                self.placed(placed);
+                self.refresh_drag_text();
+            }
             Some(Err(e)) => self.log.diag(&format!("popup: re-render failed: {e:#}")),
             _ => {}
         }
@@ -1456,8 +1499,8 @@ impl App {
 
     /// Popup-local pointer input becomes Controller Events.
     ///
-    /// Wayland has no global wheel or click channel.
-    /// These Events come only from the popup input region.
+    /// Wayland has no global wheel or pointer channel. These Events come only
+    /// from the popup input region or its implicit pointer grab.
     pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
         for interaction in interactions {
             match interaction {
@@ -1465,9 +1508,9 @@ impl App {
                     self.log.diag(&format!("pointer: wheel {notches:+} notch(es) over the panel"));
                     self.feed(Event::Scrolled { notches });
                 }
-                popup::Interaction::Click { local, hit } => {
+                popup::Interaction::Down { local, button, hit, text } => {
                     self.log.diag(&format!(
-                        "pointer: click at panel {},{} -> {}",
+                        "pointer: {button:?} down at {},{} -> {}",
                         local.x,
                         local.y,
                         match &hit {
@@ -1475,13 +1518,21 @@ impl App {
                             None => "no target".to_string(),
                         }
                     ));
-                    self.feed(Event::Clicked { local, hit });
+                    self.feed(Event::PointerDown { local, button, hit, text });
+                    self.arm_gesture_clock();
+                }
+                popup::Interaction::Move { local, text } => {
+                    self.feed(Event::PointerMoved { local, text });
+                }
+                popup::Interaction::Up { local, button } => {
+                    self.feed(Event::PointerUp { local, button });
+                    self.arm_gesture_clock();
                 }
                 // Core reserves the slot and the painter fills it.
-                // The Controller decides whether the click becomes an add.
+                // The Controller decides whether the press becomes an add.
                 popup::Interaction::Anki { local } => {
                     self.log.diag(&format!(
-                        "pointer: click at panel {},{} -> the Anki slot",
+                        "pointer: primary down at panel {},{} -> the Anki slot",
                         local.x, local.y
                     ));
                     self.feed(Event::AddRequested);
@@ -1521,37 +1572,62 @@ impl App {
         if self.popup.is_none() {
             return;
         }
-        let interaction = match step {
+        let mut interactions = Vec::new();
+        match step {
             popup::Step::Enter(x, y) => {
                 self.log.diag(&format!("pointer: script enter at {x},{y} logical"));
                 self.popup_mut().pointer_enter(panel, (x, y), None);
-                None
             }
             popup::Step::Motion(x, y) => {
                 self.popup_mut().pointer_motion((x, y));
                 let at = self.popup_mut().hit_at((x, y));
                 self.log.diag(&format!("pointer: script motion at {x},{y} logical -> {at}"));
-                None
             }
             popup::Step::Click(x, y) => {
                 self.log.diag(&format!("pointer: script click at {x},{y} logical"));
-                self.popup_mut().pointer_button((x, y))
+                if let Some(interaction) = self.popup_mut().pointer_button((x, y)) {
+                    interactions.push(interaction);
+                }
+                if let Some(interaction) =
+                    self.popup_mut().pointer_release((x, y), chibipop::controller::Button::Primary)
+                {
+                    interactions.push(interaction);
+                }
+            }
+            popup::Step::Press(x, y, button) => {
+                self.log.diag(&format!("pointer: script {button:?} press at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_press((x, y), button) {
+                    interactions.push(interaction);
+                }
+            }
+            popup::Step::Release(x, y, button) => {
+                self.log.diag(&format!("pointer: script {button:?} release at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_release((x, y), button) {
+                    interactions.push(interaction);
+                }
+            }
+            popup::Step::Drag(x, y) => {
+                self.log.diag(&format!("pointer: script drag at {x},{y} logical"));
+                if let Some(interaction) = self.popup_mut().pointer_move((x, y)) {
+                    interactions.push(interaction);
+                }
             }
             popup::Step::Wheel(value120) => {
                 self.log.diag(&format!("pointer: script wheel value120 {value120}"));
-                self.popup_mut().pointer_wheel_120(value120)
+                if let Some(interaction) = self.popup_mut().pointer_wheel_120(value120) {
+                    interactions.push(interaction);
+                }
             }
             popup::Step::Leave => {
                 self.popup_mut().pointer_leave(panel);
-                None
             }
             popup::Step::Dump => {
-                self.popup_mut().dump_hits();
-                None
+                let selection = self.controller.selection().cloned();
+                self.popup_mut().dump_hits(selection.as_ref());
             }
-        };
+        }
         self.flush_popup_notes();
-        self.pointer_interactions(interaction.into_iter().collect());
+        self.pointer_interactions(interactions);
     }
 
     /// Send one Event through the Controller and run each Command it returns.
@@ -1562,6 +1638,36 @@ impl App {
             self.execute(cmd);
         }
         self.sync_dwell();
+    }
+
+    /// Keep the gesture clock active only around pointer input.
+    ///
+    /// One extra tick lets the inclusive click-chain deadline expire.
+    /// A new press or release resets the same timer.
+    /// The daemon does not add another source.
+    fn arm_gesture_clock(&mut self) {
+        self.gesture_ticks_left = GESTURE_TIMER_TICKS;
+        if self.gesture_tick.is_some() {
+            return;
+        }
+        let interval = Duration::from_millis(u64::from(DISPATCH_TICK_MS));
+        match self.pump.insert_source(Timer::from_duration(interval), |_, _, app: &mut App| {
+            app.gesture_tick()
+        }) {
+            Ok(token) => self.gesture_tick = Some(token),
+            Err(e) => self.log.diag(&format!("gesture: no clock could be armed - {e}")),
+        }
+    }
+
+    /// Advance one core gesture tick and stop after the click deadline.
+    fn gesture_tick(&mut self) -> TimeoutAction {
+        self.feed(Event::GestureTick);
+        self.gesture_ticks_left = self.gesture_ticks_left.saturating_sub(1);
+        if self.gesture_ticks_left == 0 {
+            self.gesture_tick = None;
+            return TimeoutAction::Drop;
+        }
+        TimeoutAction::ToDuration(Duration::from_millis(u64::from(DISPATCH_TICK_MS)))
     }
 
     /// Return whether the dwell re-check has something to watch now.
@@ -1626,6 +1732,20 @@ impl App {
             // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).
             // Wayland lacks surface exclusion, so this mask is the complete
             // mechanism.
+            Command::RequestLookup { id, .. } if self.demo.armed => {
+                let anchor = self.demo_anchor();
+                self.demo.request = Some(id);
+                self.feed(Event::LookupResult {
+                    id,
+                    outcome: LookupOutcome::Ready {
+                        presentation: Box::new(popup::canned()),
+                        anchor,
+                        orientation: Orientation::Horizontal,
+                        matched: None,
+                        scan: Vec::new(),
+                    },
+                });
+            }
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
                 self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
@@ -1652,18 +1772,29 @@ impl App {
                     // The slot is part of the panel, not a separate Windows
                     // window. Every raster carries its state.
                     anki: self.controller.anki().cloned(),
+                    selection: self.popup_selection(),
                 });
             }
             Command::RepaintPopup { scroll, show_back } => {
                 let anki = self.controller.anki().cloned();
+                let selection = self.popup_selection();
                 let req = self.popup.as_ref().and_then(Popup::request).map(|req| ShowRequest {
                     scroll,
                     show_back,
                     anki,
+                    selection,
                     ..req.clone()
                 });
                 if let Some(req) = req {
                     self.show_popup(&req);
+                }
+            }
+            Command::RequestAnalysis { generation, texts } => {
+                self.analysis.request(generation, texts);
+            }
+            Command::SetDragging(dragging) => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.set_dragging(dragging);
                 }
             }
             // A glossary citation uses desktop `xdg-open` to choose a browser.
@@ -1741,9 +1872,9 @@ impl App {
         }
     }
 
-    /// The Worker answered. Only the freshest queued result matters:
-    /// the older ones were superseded before they arrived (latest-wins,
-    /// as on Windows).
+    /// Drain the Worker and Japanese analysis results. Keep only the newest queued
+    /// result from each service. Newer requests replace older requests before they
+    /// reach the event loop.
     fn drain_results(&mut self) {
         let mut freshest = None;
         if let Some(worker) = self.worker.as_ref() {
@@ -1751,8 +1882,15 @@ impl App {
                 freshest = Some(result);
             }
         }
+        let mut freshest_analysis = None;
+        while let Ok(result) = self.analysis.results().try_recv() {
+            freshest_analysis = Some(result);
+        }
         if let Some(result) = freshest {
             self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
+        }
+        if let Some((generation, words)) = freshest_analysis {
+            self.feed(Event::AnalysisReady { generation, words });
         }
     }
 
@@ -1860,7 +1998,11 @@ impl App {
         let Some(req) = req.filter(|req| req.anki.as_ref() != Some(&want)).cloned() else {
             return;
         };
-        self.show_popup(&ShowRequest { anki: Some(want), ..req });
+        self.show_popup(&ShowRequest {
+            anki: Some(want),
+            selection: self.popup_selection(),
+            ..req
+        });
     }
 
     /// Measure, place, raster, and commit. Then tell the Controller where the
@@ -1891,6 +2033,7 @@ impl App {
                 self.placed(placed);
                 // A same-size show rasters at once, so the scripted pass
                 // already has its frame.
+                self.refresh_drag_text();
                 self.run_pointer_script();
             }
             Err(e) => {
@@ -1960,33 +2103,37 @@ impl App {
         self.flush_surface_notes();
     }
 
-    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the lookup path:
-    /// measure, place, commit, and `PopupPlaced`.
+    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the same Controller
+    /// path as a real lookup, but answers its lookup with canned data.
+    /// It does not need capture, OCR, or a Dictionary.
     fn demo_show(&mut self) {
-        let anchor = self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR);
+        let anchor = self.demo_anchor();
         self.log.diag(&format!(
             "popup: demo show at anchor {},{} {}x{}",
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
-        // The demo bypasses the Controller. It arms the scripted pointer pass
-        // itself.
-        if let Some(popup) = self.popup.as_mut() {
-            popup.arm_script();
+        let point = PhysPoint { x: anchor.x, y: anchor.y };
+        self.feed(Event::TriggerDown);
+        self.feed(Event::CursorMoved { pos: point });
+    }
+
+    /// Hide the canned popup with the Controller.
+    ///
+    /// A key release hides the popup only in a hold mode. The demo answers its
+    /// own lookup, so it can also answer `Hide` for that lookup. That answer
+    /// hides the popup in Live mode. The Controller forgets the surface after
+    /// it hides the popup.
+    fn demo_hide(&mut self) {
+        self.feed(Event::TriggerUp);
+        if let Some(id) = self.demo.request.take() {
+            self.feed(Event::LookupResult { id, outcome: LookupOutcome::Hide });
         }
-        self.show_popup(&ShowRequest {
-            presentation: popup::canned(),
-            anchor,
-            scroll: 0,
-            show_back: false,
-            // The demo requests the slot so the panel paints the Anki slot for
-            // inspection.
-            // Production requests it only after an AnkiConnect answer.
-            anki: Some(chibipop::present::AnkiPopupState {
-                enabled: true,
-                connected: true,
-                ..chibipop::present::AnkiPopupState::disabled()
-            }),
-        });
+    }
+
+    /// Resolve the demo's anchor from its override, the latest cursor sample,
+    /// or the fixed fallback.
+    fn demo_anchor(&mut self) -> PhysRect {
+        self.demo.anchor.or_else(|| self.cursor_anchor()).unwrap_or(DEMO_ANCHOR)
     }
 
     /// Return the last cursor sample as an anchor box, so the demo popup lands
@@ -2334,10 +2481,17 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
         anki_enabled: config.anki.enabled,
+        include_dictionary_name: config.anki.include_dictionary_name,
         first_dict_only: config.anki.first_dict_only,
         summary_chars: config.popup.summary_chars,
         log_lookups: config.debug.show_lookup_log,
         tick_ms: DISPATCH_TICK_MS,
+        roles: config.popup.render_settings().roles,
+        edge_autoscroll: config.popup.edge_autoscroll,
+        primary_additive: config.anki.selection_buttons
+            == chibipop::config::SelectionButtons::PrimaryAdditive,
+        separator: config.anki.selection_separator.into(),
+        triple_click: config.anki.triple_click,
     }
 }
 
@@ -2814,6 +2968,13 @@ pub fn run(paths: Paths) -> Result<()> {
     // The pump stays sync.
     let (worker_ping, worker_pings) =
         calloop::ping::make_ping().context("creating the worker wake")?;
+    let analysis = chibipop::analysis::Service::spawn(
+        chibipop::paths::data_file(chibipop::analysis::MODEL_FILE),
+        {
+            let ping = worker_ping.clone();
+            move || ping.ping()
+        },
+    );
 
     // AnkiConnect answers come from the call threads.
     // Selected-region pixels come from the grab thread.
@@ -2856,6 +3017,8 @@ pub fn run(paths: Paths) -> Result<()> {
         fatal: None,
         pump: event_loop.handle(),
         dwell: None,
+        gesture_tick: None,
+        gesture_ticks_left: 0,
         cursor: CursorState::default(),
         controller: Controller::new(controller_config(&config)),
         trace,
@@ -2869,6 +3032,7 @@ pub fn run(paths: Paths) -> Result<()> {
         settings: SettingsChild::new(),
         tray: tray_handle,
         worker: None,
+        analysis,
         worker_setup: worker::Setup {
             globals: globals.clone(),
             backend: capture_selection.backend(),
@@ -3218,6 +3382,10 @@ mod tests {
     ) -> App {
         let capture = capture_backend::Selection::Backend(Backend::WlrScreencopy);
         let (worker_ping, _pings) = calloop::ping::make_ping().unwrap();
+        let analysis = chibipop::analysis::Service::spawn(
+            dir.join("missing-analysis-model"),
+            || {},
+        );
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
@@ -3238,6 +3406,8 @@ mod tests {
             fatal: None,
             pump: event_loop.handle(),
             dwell: None,
+            gesture_tick: None,
+            gesture_ticks_left: 0,
             settings: SettingsChild::new(),
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
@@ -3252,6 +3422,7 @@ mod tests {
                 tray::status::popup_state(true),
             )),
             worker: None,
+            analysis,
             worker_setup: worker::Setup {
                 globals: Vec::new(),
                 backend: Some(Backend::WlrScreencopy),
@@ -4495,6 +4666,90 @@ mod tests {
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert_eq!(1, written.matches("dwell: deadline").count(), "log was: {written}");
         assert!(written.contains("watch retired"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Linux has no permanent dispatch timer. Its temporary gesture clock must
+    /// still deliver the deferred clear from one primary click.
+    #[test]
+    fn one_plain_click_clears_a_glossary_selection_on_linux() {
+        use chibipop::config::SelectionButtons;
+        use chibipop::controller::{Button, HitAction};
+        use chibipop::dict::gloss::NodePath;
+        use chibipop::select::{DocAddr, TextAddr};
+
+        let dir = scratch("gestureclock");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.config.anki.enabled = true;
+        app.config.anki.selection_buttons = SelectionButtons::PrimaryAdditive;
+        app.controller = Controller::new(controller_config(&app.config));
+
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+        app.controller.handle(Event::CursorMoved { pos: AT });
+        app.controller.handle(Event::LookupResult {
+            id: RequestId(1),
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(popup::canned()),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 150, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        app.controller.handle(Event::PointerDown {
+            local: PhysPoint { x: 10, y: 10 },
+            button: Button::Primary,
+            hit: Some(HitAction::ToggleEntry(0)),
+            text: None,
+        });
+        assert!(!app.controller.selection().unwrap().card(0).unwrap().is_empty());
+
+        let text = TextAddr {
+            entry: 0,
+            addr: DocAddr { path: NodePath::ROOT.child(0).unwrap(), byte: 0 },
+        };
+        app.hold = Some(Hold {
+            output: PhysRect { x: 0, y: 0, w: 1920, h: 1080 },
+            latched: false,
+        });
+        app.pointer_interactions(vec![
+            popup::Interaction::Down {
+                local: PhysPoint { x: 20, y: 20 },
+                button: Button::Primary,
+                hit: None,
+                text: Some(text),
+            },
+            popup::Interaction::Up {
+                local: PhysPoint { x: 20, y: 20 },
+                button: Button::Primary,
+            },
+        ]);
+        assert!(!app.controller.selection().unwrap().card(0).unwrap().is_empty());
+        assert!(app.gesture_tick.is_some(), "the pointer click must arm the clock");
+
+        let escape = event_loop.get_signal();
+        let mut passes = 0;
+        event_loop
+            .run(
+                Some(Duration::from_millis(u64::from(DISPATCH_TICK_MS))),
+                &mut app,
+                |app| {
+                    passes += 1;
+                    if app.gesture_tick.is_none() || passes > GESTURE_TIMER_TICKS + 5 {
+                        escape.stop();
+                    }
+                },
+            )
+            .unwrap();
+
+        assert!(app.gesture_tick.is_none(), "the gesture clock must retire");
+        assert!(app.controller.selection().unwrap().card(0).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

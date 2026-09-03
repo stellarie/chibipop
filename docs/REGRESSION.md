@@ -1529,8 +1529,8 @@ This box has `en-US`, `ja`, `zh-Hans-CN`, `zh-Hant-TW`. **PowerShell 7 cannot lo
 ### 1.22 The Anki card carries HTML, if the field map asks for it — **added 2026-08-17, run**
 
 The `[[anki.field_map]]` `source` values are `expression`, `reading`, `glossary`, `glossary_html`,
-`frequency` (`src/anki.rs:228-234`). **`glossary` is plain text; `glossary_html` is the formatted
-one.** They are different fields, and picking the wrong one fails silently.
+`frequency` (`src/anki.rs:228-234`). **`glossary` has numbered text with an optional HTML
+heading. `glossary_html` keeps the Dictionary formatting.** Picking the wrong one fails silently.
 
 Mined 2026-08-17 into a sample deck, 12 notes over three languages, `glossary_html` mapped:
 
@@ -2222,6 +2222,22 @@ a restart.
 14f. **Apply from `chibipop settings` while a `chibipop run` holds the database** → `Another
     chibipop is running. Close it, then Apply again.` ✅ **Agent-verified 2026-07-29** with the
     database held open without `FILE_SHARE_DELETE`: every archive is still there afterwards.
+15. **Glossary selection** — Enable Anki and open a popup with multiple Entries.
+15a. Drag across gloss text. Confirm that the highlight follows only the selected text.
+15b. Double-click a word. Confirm that the selection contains one Word group.
+15c. Triple-click a Sense. Confirm that the selection contains that Sense.
+15d. Quadruple-click an Entry. Confirm that the selection contains that Entry.
+15e. Select part of an Entry. Confirm that its Entry check shows Partial, All, and None as
+    coverage changes.
+15f. With the primary button set to add, press the right button on a new range. Confirm that
+    it replaces the current selection.
+15g. Plain-click selected gloss text with the additive button. Wait 500 ms. Confirm that the
+    current Card selection clears.
+15h. Drag while you use the wheel. Move the pointer beyond the top and bottom popup edges.
+    Confirm that wheel scroll and edge auto-scroll both work.
+15i. Select text, then click a collapsed row to swap it to the top. Confirm that the selection
+    stays with its Card.
+15j. Add the Card. Inspect Anki's `glossary` field. Confirm that it contains only the selection.
 
 ---
 

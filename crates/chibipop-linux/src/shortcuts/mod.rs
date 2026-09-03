@@ -68,9 +68,9 @@ impl ShortcutId {
     /// fixed-size array makes the identifier set part of the application.
     pub const ALL: [ShortcutId; 2] = [ShortcutId::Trigger, ShortcutId::AnkiAdd];
 
-    /// The stable identifier on the wire. A compositor keybind uses this
-    /// identifier: `bind = ALT, F, global, chibipop:trigger`. A rename breaks
-    /// current user configurations without an error.
+    /// This function returns the stable identifier on the wire. Hyprland prefixes
+    /// this value with the portal app ID. The ID can depend on the process that
+    /// starts the daemon. A rename breaks portal registrations without an error.
     pub fn as_str(self) -> &'static str {
         match self {
             ShortcutId::Trigger => "trigger",

@@ -14,6 +14,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Popup corner radius in pixels.
@@ -216,6 +217,22 @@ impl Popup {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+    /// Capture pointer input for a selection drag.
+    pub fn capture_pointer(&self) {
+        // SAFETY: `create` made this live popup HWND, and the caller runs on
+        // the thread that owns its message queue.
+        unsafe {
+            let _ = SetCapture(self.hwnd);
+        }
+    }
+
+    /// Release pointer capture after a selection drag.
+    pub fn release_pointer(&self) {
+        // SAFETY: `ReleaseCapture` has no preconditions.
+        unsafe {
+            let _ = ReleaseCapture();
+        }
     }
 
     /// Return the current capture exclusion state.

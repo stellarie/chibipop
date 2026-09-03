@@ -672,7 +672,7 @@ mod tests {
             assert_eq!(Some(42), card.freq, "freq.zip leads and says 42: {strategy:?}");
             assert_eq!(
                 Some(&"42".to_string()),
-                crate::anki::fields_from_card(&card, &card.blocks).get("frequency"),
+                crate::anki::fields_from_card(&card, &card.blocks, true).get("frequency"),
                 "and a mined note carries the same number: {strategy:?}"
             );
         }

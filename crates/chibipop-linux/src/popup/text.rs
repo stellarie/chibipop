@@ -346,6 +346,54 @@ impl TextMeasure for TextEngine {
         }
         Ok(())
     }
+
+    fn hit_offset(
+        &mut self,
+        run: MeasureRun<'_>,
+        x: f32,
+        y: f32,
+    ) -> Result<u32, MeasureError> {
+        let buffer = TextEngine::shape(&mut self.fonts, run.spans, run.max_w);
+        let first_y = buffer.layout_runs().next().map(|line| line.line_top);
+        let last = buffer
+            .layout_runs()
+            .last()
+            .map(|line| (line.line_top, line.line_height));
+        let total_bytes = run.spans.iter().map(|span| span.text.len()).sum();
+        let total = utf16_offset(run.spans, total_bytes);
+        let Some(first_y) = first_y else {
+            return Ok(total);
+        };
+        if y < first_y {
+            return Ok(0);
+        }
+        let Some((last_y, last_h)) = last else {
+            return Ok(total);
+        };
+        if y >= last_y + last_h {
+            return Ok(total);
+        }
+        let mut hit = buffer.hit(x, y);
+        if hit.is_none() {
+            // cosmic-text returns no cursor for a point outside its visible
+            // runs. Retry inside the first or last run before the function
+            // returns.
+            let retry_y = y.clamp(first_y, last_y + last_h - f32::EPSILON);
+            hit = buffer.hit(x, retry_y);
+        }
+        let Some(cursor) = hit else {
+            return Ok(total);
+        };
+
+        let mut bases = LineBases::default();
+        for line in buffer.layout_runs() {
+            let base = bases.advance(run.spans, &line);
+            if line.line_i == cursor.line {
+                return Ok(utf16_offset(run.spans, base + cursor.index.min(line.text.len())));
+            }
+        }
+        Ok(total)
+    }
 }
 
 impl PanelText for TextEngine {
@@ -515,6 +563,29 @@ fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
     base
 }
 
+/// The UTF-16 offset at a byte boundary in a run's concatenated spans.
+///
+/// cosmic-text reports a byte index within one buffer line.
+/// The hit operation first adds that line's base.
+/// This walk then restores the seam's UTF-16 address.
+fn utf16_offset(spans: &[StyledSpan<'_>], byte: usize) -> u32 {
+    let mut units = 0u32;
+    let mut base = 0usize;
+    for span in spans {
+        for (offset, ch) in span.text.char_indices() {
+            if base + offset >= byte {
+                return units;
+            }
+            units += ch.len_utf16() as u32;
+        }
+        base += span.text.len();
+        if byte <= base {
+            return units;
+        }
+    }
+    units
+}
+
 /// The span covering byte offset `at`, and its index.
 ///
 /// The search is linear. A paragraph carries a handful of spans, and a
@@ -535,10 +606,10 @@ fn span_at<'a, 's>(
 
 /// The box of the cluster covering UTF-16 offset `utf16`.
 ///
-/// Two kinds of offset match no glyph: an offset past the end of the
-/// text, and an offset inside a cluster boundary core did not expect.
-/// Such an offset answers a zero-width box at the end of the last
-/// line. This function never panics, and it never skips the offset.
+/// An offset at a hard line break matches no glyph.
+/// It answers the zero-width end of the line before the break.
+/// An offset past the text or inside an unexpected cluster answers the end
+/// of the last line. This function never skips an offset.
 fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox {
     let target = byte_offset(spans, utf16);
     // A run with no lines at all has no shaped height to report, so
@@ -548,6 +619,11 @@ fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox 
     let mut bases = LineBases::default();
     for run in buffer.layout_runs() {
         let base = bases.advance(spans, &run);
+        // cosmic-text strips a hard line break. When the next line moves the
+        // base past `target`, the previous visual run owns that caret.
+        if target < base {
+            return end;
+        }
         // The caret is as tall as the line it lands on. A small span
         // beside a large one therefore still gives a full-height hit
         // target.
@@ -1200,6 +1276,7 @@ mod tests {
                 side_panel: true,
                 render: Default::default(),
                 anki: None,
+                selection: None,
             },
             &mut engine,
         )
@@ -1265,6 +1342,41 @@ mod tests {
         assert!(out[1].w > 0.0, "an offset in a later span still finds a glyph");
     }
 
+    #[test]
+    fn caret_at_a_hard_line_end_stays_on_that_line() {
+        let Some(mut engine) = jp_engine() else { return };
+        let text = "① first sense\n② second sense";
+        let spans = [span(text, 20.0)];
+        let run = MeasureRun { spans: &spans, max_w: 400.0 };
+        let measured = measured(&mut engine, &spans, run.max_w);
+        let newline = text.find('\n').expect("hard line end");
+        let offset = text[..newline].encode_utf16().count() as u32;
+        let mut out = Vec::new();
+        engine.caret_boxes(run, &[offset], &mut out).expect("shapeable");
+
+        assert_eq!(0.0, out[0].w);
+        assert_eq!(measured.lines[0].y, out[0].y);
+        assert_eq!(measured.lines[0].w, out[0].x);
+    }
+
+
+    /// The hit operation converts cosmic-text byte positions to UTF-16 offsets.
+    #[test]
+    fn hit_offset_maps_astral_text_and_clamps_vertical_points() {
+        let Some(mut engine) = jp_engine() else { return };
+        let text = "\u{6f22}\u{1f363}\u{5bff}";
+        let spans = [span(text, 20.0)];
+        let run = MeasureRun { spans: &spans, max_w: 400.0 };
+        let mut boxes = Vec::new();
+        engine.caret_boxes(run, &[0, 1, 3], &mut boxes).expect("shapeable");
+        let y = boxes[0].y + boxes[0].h / 2.0;
+
+        assert_eq!(0, engine.hit_offset(run, boxes[0].x + 0.1, y).unwrap());
+        assert_eq!(1, engine.hit_offset(run, boxes[1].x + 0.1, y).unwrap());
+        assert_eq!(3, engine.hit_offset(run, boxes[2].x + 0.1, y).unwrap());
+        assert_eq!(0, engine.hit_offset(run, 0.0, -1.0).unwrap());
+        assert_eq!(4, engine.hit_offset(run, 0.0, 1000.0).unwrap());
+    }
     #[test]
     fn an_offset_past_the_text_answers_a_zero_width_box_rather_than_nothing() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1340,5 +1452,47 @@ mod tests {
         draw(&mut target, &mut engine, (-8.0, -8.0));
         draw(&mut target, &mut engine, (-4000.0, -4000.0));
         assert!(guard.iter().all(|&b| b == 0), "wrote past the pixmap");
+    }
+
+    /// The real engine tests the canned popup.
+    /// A drag range from `text_hit` must produce highlight boxes on the next scene.
+    /// Fixed metrics in pointer tests cannot show a mismatch in glyph placement.
+    #[test]
+    fn a_drag_over_the_canned_gloss_paints_with_the_real_engine() {
+        use chibipop::select::{SelRange, Selections};
+        use chibipop::ui::layout::{scene, SceneRequest};
+        let Some(mut engine) = jp_engine() else { return };
+        let theme = chibipop::ui::theme::Theme { font_name: JP.to_string(), ..chibipop::ui::theme::Theme::dark() };
+        let canned = crate::popup::canned();
+        fn request<'a>(
+            canned: &'a chibipop::present::Presentation,
+            theme: &'a chibipop::ui::theme::Theme,
+            selection: Option<&'a Selections>,
+        ) -> SceneRequest<'a> {
+            SceneRequest {
+                presentation: canned,
+                theme,
+                max_w: 424.0,
+                max_h: 4000.0,
+                show_back: false,
+                side_panel: false,
+                render: Default::default(),
+                anki: None,
+                selection,
+            }
+        }
+        let empty = Selections::default();
+        let plain = scene(&request(&canned, &theme, Some(&empty)), &mut engine).unwrap();
+        let first = plain.elems.iter().find(|e| !e.sources.is_empty()).expect("gloss text");
+        let y = first.pen.1 + first.rect.h / 2.0;
+        let start = plain.text_hit((first.pen.0 + 1.0, y), 0.0, JP, &mut engine).unwrap().unwrap();
+        let end = plain.text_hit((first.pen.0 + 60.0, y), 0.0, JP, &mut engine).unwrap().unwrap();
+        assert!(start < end, "{start:?} < {end:?}");
+        let mut all = Selections::default();
+        all.card_mut(0).replace(SelRange { start, end });
+        let selected = scene(&request(&canned, &theme, Some(&all)), &mut engine).unwrap();
+        assert!(!selected.highlights.is_empty(), "{start:?}..{end:?} on {:?}", first.text);
+        let box_ = selected.highlights[0];
+        assert!(box_.w > 0.0 && box_.h > 0.0, "{box_:?}");
     }
 }

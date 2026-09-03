@@ -22,7 +22,7 @@
 //! returns `None` at the first step that does not exist. A path from another
 //! document cannot address an unrelated node.
 
-use super::{GlossDoc, NodeId};
+use super::{DocRange, GlossDoc, NodeId, Separator};
 
 /// The maximum number of steps that a [`NodePath`] can hold.
 ///
@@ -60,14 +60,21 @@ impl NodePath {
     /// A glossary is a forest of top-level items. A tree walk starts at this
     /// root. `NodePath::ROOT.child(i)` addresses glossary item `i`.
     pub const ROOT: NodePath = NodePath { steps: [0; MAX_STEPS], len: 0 };
+    /// The address after every real node in document order.
+    ///
+    /// Every step has its maximum value. This path sorts after every path that
+    /// [`child`](Self::child) can create.
+    pub const END: NodePath = NodePath { steps: [u16::MAX; MAX_STEPS], len: MAX_STEPS as u8 };
+
 
     /// Appends one child index to this path.
     ///
-    /// Returns `None` when the new step does not fit.
+    /// Returns `None` when the new step does not fit or when the index is the
+    /// sentinel reserved by [`END`](Self::END).
     pub fn child(self, index: usize) -> Option<NodePath> {
         let step = u16::try_from(index).ok()?;
         let at = self.len as usize;
-        if at == MAX_STEPS {
+        if at == MAX_STEPS || step == u16::MAX {
             return None;
         }
         let mut next = self;
@@ -146,6 +153,11 @@ pub enum Selection<'a> {
     /// nodes. A selected node includes its selected descendants. A picker
     /// therefore does not need to sort paths or remove duplicate paths.
     Nodes(&'a [NodePath]),
+    /// Only the bytes inside these ranges.
+    ///
+    /// The renderer computes the union of the ranges and uses `separator`
+    /// between fragments inside one text container.
+    Ranges { ranges: &'a [DocRange], separator: Separator },
 }
 
 #[cfg(test)]
@@ -252,5 +264,13 @@ mod tests {
     fn a_node_that_is_not_in_the_document_has_no_path() {
         let d = two_senses();
         assert_eq!(None, NodePath::of(&d, d.all_nodes().len() as NodeId));
+    }
+    #[test]
+    fn end_is_after_every_real_path() {
+        let path = NodePath::ROOT.child(0).expect("the first item");
+        assert_eq!(NodePath::MAX_STEPS, NodePath::END.len());
+        assert!(path < NodePath::END);
+        assert!(NodePath::ROOT < NodePath::END);
+        assert_eq!(None, NodePath::END.resolve(&two_senses()));
     }
 }

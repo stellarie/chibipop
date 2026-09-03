@@ -110,6 +110,15 @@ pub enum ElemKind {
     ///
     /// [`collapsed`]: super::table::collapsed
     Cell,
+    /// The Entry check for an Entry header or a collapsed row.
+    ///
+    /// The element draws only its `block_box`: an accent border, an accent
+    /// fill for `All`, a dimmed fill for `Partial`, or no fill for `None`.
+    /// It has no text, so both bins paint it through the box loop they use.
+    /// Layout builds it only when [`SceneRequest::selection`] is `Some`.
+    ///
+    /// [`SceneRequest::selection`]: super::SceneRequest::selection
+    Check,
 }
 
 impl ElemKind {
@@ -127,6 +136,7 @@ impl ElemKind {
             ElemKind::Block => "Block",
             ElemKind::Table => "Table",
             ElemKind::Cell => "Cell",
+            ElemKind::Check => "Check",
         }
     }
 }
@@ -398,6 +408,13 @@ pub struct ElemBox {
 pub struct GlossOrigin {
     pub dict_id: i64,
     pub entry_id: i64,
+    /// The ordinal of this element's [`GlossEntry`] in the Card, from
+    /// [`crate::select::entries`]. A Card selection uses this ordinal because
+    /// a demo or a fixture gives every row [`NO_ROW`] as `entry_id`.
+    ///
+    /// [`GlossEntry`]: crate::present::GlossEntry
+    /// [`NO_ROW`]: crate::present::NO_ROW
+    pub entry: u32,
     /// The node that this element renders, or `None` when it has no address.
     ///
     /// A [`NodePath`] reaches 16 levels and 65 536 siblings. Past either limit,
@@ -405,6 +422,22 @@ pub struct GlossOrigin {
     /// unaddressable node is a correct selection result. A silently aliased
     /// node is not.
     pub path: Option<NodePath>,
+}
+
+/// One run of [`SceneElem::text`] and the Dictionary leaf that supplied it.
+///
+/// `at..at + len` is a byte range in the element text.
+/// For a text leaf, it maps to bytes `byte..byte + len` of that leaf.
+/// For a ruby node, `atomic` is true.
+/// The run is the base text, and `byte` is zero.
+/// A selection takes the whole reading or none of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextSource {
+    pub at: u32,
+    pub len: u32,
+    pub path: NodePath,
+    pub byte: u32,
+    pub atomic: bool,
 }
 
 /// One measured element with a position.
@@ -498,6 +531,14 @@ pub struct SceneElem {
     /// and must round-trip verbatim. The scene stores the path once instead of
     /// copying it for every element on every frame.
     pub image: Option<SceneImage>,
+    /// The leaf bytes that supply each run of `text`, in text order.
+    ///
+    /// A Card selection addresses a Dictionary node and a byte in it, not a
+    /// screen position. This table maps a hit in `text` back to that address and
+    /// maps a stored selection forward to a highlight.
+    /// Separators, markers, pill spacers, ruby fillers, image spacers, and row
+    /// numbers have no source. Panel chrome has no source. See [`TextSource`].
+    pub sources: Vec<TextSource>,
 }
 
 impl SceneElem {
@@ -643,6 +684,16 @@ pub struct PopupScene {
     /// Width that the panel requests, or `None` to keep the offered width.
     /// `None` means the main column fills the width, so no side column exists.
     pub panel_w: Option<f32>,
+    /// Selection highlight boxes in the same unscrolled panel space as
+    /// `elems[].rect`, one box per touched line.
+    ///
+    /// A bin fills each box with `theme.accent` at [`HIGHLIGHT_ALPHA`] after
+    /// the panel background and before every element. Layout computes the
+    /// boxes because only layout knows which run bytes a selection covers.
+    /// The vector is empty when the request carries no selection.
+    ///
+    /// [`HIGHLIGHT_ALPHA`]: super::HIGHLIGHT_ALPHA
+    pub highlights: Vec<SceneRect>,
 }
 
 /// One element that a bin can paint.
@@ -750,6 +801,7 @@ pub(super) fn box_elem(
         inline_boxes: Vec::new(),
         origin: Some(origin),
         image: None,
+        sources: Vec::new(),
     }
 }
 

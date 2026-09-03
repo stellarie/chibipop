@@ -253,6 +253,53 @@ impl TextMeasure for FakeMeasure {
         }
         Ok(())
     }
+
+    fn hit_offset(
+        &mut self,
+        run: MeasureRun<'_>,
+        x: f32,
+        y: f32,
+    ) -> Result<u32, MeasureError> {
+        let (frags, measured) = wrap(run);
+        let total = frags.last().map_or(0, |f| f.from + f.units);
+        let Some(first) = measured.lines.first() else {
+            return Ok(0);
+        };
+        if y < first.y {
+            return Ok(0);
+        }
+        let Some(last) = measured.lines.last() else {
+            return Ok(0);
+        };
+        if y >= last.y + last.h {
+            return Ok(total as u32);
+        }
+        let line = measured
+            .lines
+            .iter()
+            .position(|line| y >= line.y && y < line.y + line.h)
+            .unwrap_or_else(|| measured.lines.len().saturating_sub(1));
+        let mut nearest: Option<(f32, usize)> = None;
+        let mut line_end = 0usize;
+        for frag in frags.iter().filter(|frag| frag.line == line) {
+            line_end = line_end.max(frag.from + frag.units);
+            for unit in 0..frag.units {
+                let centre = frag.x + (unit as f32 + 0.5) * frag.advance;
+                let distance = (x - centre).abs();
+                if nearest.is_none_or(|(best, _)| distance < best) {
+                    nearest = Some((distance, frag.from + unit));
+                }
+            }
+        }
+        // The line-end caret handles a point beyond the last glyph. A strict
+        // comparison maps a glyph center to that glyph's offset.
+        let line_width = measured.lines[line].w;
+        let distance = (x - line_width).abs();
+        if nearest.is_none_or(|(best, _)| distance < best) {
+            nearest = Some((distance, line_end));
+        }
+        Ok(nearest.map_or(line_end, |(_, offset)| offset.min(total)) as u32)
+    }
 }
 
 /// A measurer that refuses every run and caret probe.
@@ -270,6 +317,15 @@ impl TextMeasure for BrokenMeasure {
     ) -> Result<(), MeasureError> {
         Err(MeasureError::new("no font"))
     }
+    fn hit_offset(
+        &mut self,
+        _: MeasureRun<'_>,
+        _: f32,
+        _: f32,
+    ) -> Result<u32, MeasureError> {
+        Err(MeasureError::new("no font"))
+    }
+
 }
 
 /// The `styled` helper returns one span with only its size set.
@@ -411,6 +467,7 @@ fn laid_out(p: &Presentation, max_w: f32, max_h: f32, show_back: bool, side: boo
             side_panel: side,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -463,6 +520,7 @@ fn measured(theme: &Theme, p: &Presentation, side: bool) -> (PopupScene, Vec<Ask
             side_panel: side,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -930,6 +988,7 @@ fn a_connected_anki_reserves_a_strip_under_the_panel() {
             side_panel: false,
             render: RenderSettings::default(),
             anki: Some(&anki),
+            selection: None,
         },
         &mut m,
     )
@@ -959,6 +1018,7 @@ fn a_disabled_anki_reserves_no_slot() {
             side_panel: false,
             render: RenderSettings::default(),
             anki: Some(&anki),
+            selection: None,
         },
         &mut m,
     )
@@ -983,6 +1043,7 @@ fn the_anki_strip_matches_the_panel_the_side_column_widened() {
             side_panel: true,
             render: RenderSettings::default(),
             anki: Some(&anki),
+            selection: None,
         },
         &mut m,
     )
@@ -1009,6 +1070,7 @@ fn layout_measures_each_run_at_the_width_it_reports() {
             side_panel: false,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -1028,6 +1090,25 @@ fn layout_measures_each_run_at_the_width_it_reports() {
     }
 }
 
+
+/// The hit test uses the same fixed geometry as caret boxes.
+#[test]
+fn hit_offset_round_trips_fake_caret_centres_and_clamps_vertical_points() {
+    let spans = [styled("ab", 10.0), styled("cd", 10.0)];
+    let run = MeasureRun { spans: &spans, max_w: 10.0 };
+    let mut m = FakeMeasure::default();
+    let offsets: Vec<u32> = (0..=4).collect();
+    let mut boxes = Vec::new();
+    m.caret_boxes(run, &offsets, &mut boxes).unwrap();
+
+    for (offset, glyph) in offsets.iter().zip(boxes) {
+        let x = glyph.x + glyph.w / 2.0;
+        let y = glyph.y + glyph.h / 2.0;
+        assert_eq!(*offset, m.hit_offset(run, x, y).unwrap());
+    }
+    assert_eq!(0, m.hit_offset(run, 0.0, -1.0).unwrap());
+    assert_eq!(4, m.hit_offset(run, 0.0, 100.0).unwrap());
+}
 #[test]
 fn a_refused_run_abandons_the_walk() {
     let theme = Theme::dark();
@@ -1042,6 +1123,7 @@ fn a_refused_run_abandons_the_walk() {
             side_panel: false,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut BrokenMeasure,
     )
@@ -1156,7 +1238,8 @@ fn bodies(s: &PopupScene) -> Vec<&SceneElem> {
 #[test]
 fn a_plain_string_gloss_is_one_element_of_one_span() {
     let theme = Theme::dark();
-    let (s, asked) = measured(&theme, &one_card(&[], None), false);
+    let p = one_card(&[], None);
+    let (s, asked) = measured(&theme, &p, false);
     let gloss = s.elems.iter().find(|e| e.text == "chatting").expect("the gloss");
 
     assert_eq!(ElemKind::Text, gloss.kind);
@@ -1174,6 +1257,14 @@ fn a_plain_string_gloss_is_one_element_of_one_span() {
         gloss.spans
     );
     assert_eq!(1, asked.iter().filter(|a| a.text == "chatting").count());
+
+    // The item opens no block. Its path is the only scene-element path, so a
+    // sense picker can address the plain string. `TextSource` maps bytes to a
+    // leaf, but it does not supply `GlossOrigin::path`.
+    let doc = &p.top.as_ref().unwrap().blocks[0].entries[0].doc;
+    let path = gloss.origin.expect("a gloss element names its row").path;
+    let id = path.expect("and the plain string it renders").resolve(doc).expect("which exists");
+    assert!(doc.is_plain_string(id), "the item itself, not an ancestor");
 }
 
 /// Two top-level glossary items measure as one span, not three.
@@ -1689,6 +1780,7 @@ fn rich_content_leaves_the_existing_hit_targets_alone() {
                 side_panel: false,
                 render: RenderSettings::default(),
                 anki: Some(&anki),
+                selection: None,
             },
             &mut FakeMeasure::default(),
         )
@@ -3305,6 +3397,7 @@ fn grid_scene(p: &Presentation, max_w: f32, side: bool) -> PopupScene {
             side_panel: side,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -3506,6 +3599,7 @@ fn a_cell_rule_scales_with_the_font_size() {
             side_panel: false,
             render: RenderSettings::default(),
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -3942,6 +4036,7 @@ fn the_box_model_leaves_the_panels_own_hit_targets_alone() {
                 side_panel: false,
                 render: RenderSettings::default(),
                 anki: Some(&anki),
+                selection: None,
             },
             &mut FakeMeasure::default(),
         )
@@ -4013,7 +4108,7 @@ fn an_even_border_strokes_once_and_an_uneven_one_fills_each_edge() {
 #[test]
 fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
     let theme = Theme::dark();
-    let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], Some(7671)), &theme, false, false, RenderSettings::default(), None);
     match &elems[0] {
         Elem::Corner(line) => {
             assert_eq!("freq 7671", line.text);
@@ -4025,14 +4120,14 @@ fn frequency_leads_as_a_corner_so_it_shares_the_headword_line() {
 
 #[test]
 fn an_unranked_entry_draws_no_corner() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default(), None);
     assert!(!elems.iter().any(|e| matches!(e, Elem::Corner(_))));
 }
 
 #[test]
 fn part_of_speech_is_dimmed_metadata_not_body_text() {
     let theme = Theme::dark();
-    let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&["noun", "suru"], Some(1)), &theme, false, false, RenderSettings::default(), None);
     let pos = elems
         .iter()
         .find_map(|e| match e {
@@ -4053,7 +4148,7 @@ fn part_of_speech_is_dimmed_metadata_not_body_text() {
 #[test]
 fn each_role_takes_its_own_size() {
     let theme = roled_theme();
-    let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&["noun"], Some(7671)), &theme, true, false, RenderSettings::default(), None);
     let size_of = |want: &str| -> f32 {
         elems
             .iter()
@@ -4188,7 +4283,7 @@ fn the_theme_sets_the_separator_height_but_not_the_side_rule() {
 /// 大辞林 has no POS markup.
 #[test]
 fn an_entry_without_part_of_speech_draws_no_pos_line() {
-    let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], Some(1)), &Theme::dark(), false, false, RenderSettings::default(), None);
     assert!(!elems
         .iter()
         .any(|e| matches!(e, Elem::Text(line) if line.text.contains('·'))));
@@ -4196,7 +4291,7 @@ fn an_entry_without_part_of_speech_draws_no_pos_line() {
 
 #[test]
 fn the_headword_is_a_headword_element_not_text() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default(), None);
     assert!(
         elems.iter().any(|e| matches!(e, Elem::Headword { .. })),
         "expected a Headword element for the headword"
@@ -4205,7 +4300,7 @@ fn the_headword_is_a_headword_element_not_text() {
 
 #[test]
 fn headword_prefix_u16_is_zero_without_anki_marks() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default(), None);
     let hw = elems.iter().find_map(|e| match e {
         Elem::Headword { prefix_u16, .. } => Some(*prefix_u16),
         _ => None,
@@ -4215,13 +4310,13 @@ fn headword_prefix_u16_is_zero_without_anki_marks() {
 
 #[test]
 fn show_back_adds_a_back_button_element() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), true, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), true, false, RenderSettings::default(), None);
     assert!(matches!(&elems[0], Elem::BackButton(_)));
 }
 
 #[test]
 fn no_back_button_without_show_back() {
-    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&one_card(&[], None), &Theme::dark(), false, false, RenderSettings::default(), None);
     assert!(!elems.iter().any(|e| matches!(e, Elem::BackButton(_))));
 }
 
@@ -4237,7 +4332,7 @@ fn is_kanji_covers_cjk_unified() {
 /// Collapsed rows have no duplicate marks.
 #[test]
 fn collapsed_rows_carry_no_dupe_marks() {
-    let (elems, _) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default(), None);
     for e in &elems {
         if let Elem::Collapsed(_, line) = e {
             assert!(!line.text.starts_with('\u{2713}'), "no check marks on collapsed rows");
@@ -4247,14 +4342,14 @@ fn collapsed_rows_carry_no_dupe_marks() {
 
 #[test]
 fn side_panel_false_keeps_collapsed_rows_inline() {
-    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default());
+    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, false, RenderSettings::default(), None);
     assert!(side.is_empty());
     assert!(elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
 }
 
 #[test]
 fn side_panel_true_moves_collapsed_rows_to_side() {
-    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
+    let (elems, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default(), None);
     assert!(!elems.iter().any(|e| matches!(e, Elem::Collapsed(..))));
     assert_eq!(2, side.len());
     assert!(side[0].text.contains('\u{96D1}'));
@@ -4262,14 +4357,14 @@ fn side_panel_true_moves_collapsed_rows_to_side() {
 
 #[test]
 fn side_entries_carry_expand_indices() {
-    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
+    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default(), None);
     assert_eq!(0, side[0].idx);
     assert_eq!(1, side[1].idx);
 }
 
 #[test]
 fn side_entries_show_headword_only() {
-    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default());
+    let (_, side) = build_elements(&with_collapsed(), &Theme::dark(), false, true, RenderSettings::default(), None);
     assert!(!side[0].text.contains("noise"));
     assert!(!side[1].text.contains("magazine"));
 }
@@ -4328,7 +4423,7 @@ fn a_rows_tags_draw_a_dimmed_line_and_an_empty_set_draws_none() {
         dict_id: crate::present::NO_ROW,
         entries: vec![entry(&["ある"], &["noun", "suru"]), entry(&["いる"], &[])],
     }]);
-    let (elems, _) = build_elements(&p, &theme, false, false, RenderSettings::default());
+    let (elems, _) = build_elements(&p, &theme, false, false, RenderSettings::default(), None);
     let tag = elems
         .iter()
         .find_map(|e| match e {
@@ -4701,6 +4796,10 @@ fn a_stored_asset_carries_both_its_key_and_its_alt_fallback() {
     assert_eq!("[\u{5bfe}]", img.text, "the fallback a painter draws");
     assert_eq!(1, img.spans.len());
     assert_eq!(BOX_EM, img.spans[0].size, "at the text size it stands in for");
+    // Both bins remeasure a non-empty span at `wrap_w` before paint.
+    // The fallback wraps inside the image box, never at zero width.
+    assert!(img.rect.w > 0.0);
+    assert_eq!(img.rect.w, img.wrap_w, "the fallback wraps at the image width");
 }
 
 /// An image gets inline space because a `span` asks the measurer for it. The
@@ -5126,6 +5225,7 @@ fn shown(p: &Presentation, render: RenderSettings) -> PopupScene {
             side_panel: false,
             render,
             anki: None,
+            selection: None,
         },
         &mut m,
     )
@@ -5501,6 +5601,7 @@ fn a_taller_entry_still_clamps_to_the_height_cap_and_scrolls() {
                 side_panel: false,
                 render,
                 anki: None,
+                selection: None,
             },
             &mut m,
         )
@@ -5832,6 +5933,7 @@ fn styling_off_drops_a_stylesheet_box_as_well_as_an_inline_one() {
                 side_panel: false,
                 render: RenderSettings { styling, ..RenderSettings::default() },
                 anki: None,
+                selection: None,
             },
             &mut m,
         )

@@ -3,7 +3,9 @@
 //! The window is modeless. Refer to decision D9.
 //! Numeric fields use combo boxes instead of spin controls.
 
-use crate::config::{LayoutMode, SentenceMode, FIELD_SOURCES};
+use crate::config::{
+    LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, TripleClick, FIELD_SOURCES,
+};
 use crate::dict::frequency::RankingStrategy;
 use crate::library::Role;
 use crate::settings::{
@@ -179,6 +181,17 @@ const ID_PITCH_ADD: i32 = 174;
 const ID_PITCH_REMOVE: i32 = 175;
 /// The Ranking strategy combo box on the Dictionaries tab.
 const ID_RANKING: i32 = 176;
+/// This identifier names the checkbox for `edge_autoscroll`.
+const ID_EDGE_AUTOSCROLL: i32 = 177;
+/// This identifier names the combo box for `selection_buttons`.
+const ID_SELECTION_BUTTONS: i32 = 178;
+/// This identifier names the combo box for `selection_separator`.
+const ID_SELECTION_SEPARATOR: i32 = 179;
+/// This identifier names the combo box for `triple_click`.
+const ID_TRIPLE_CLICK: i32 = 180;
+/// This identifier names the checkbox for `include_dictionary_name`.
+const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
+
 
 /// The first field-map combo identifier.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -266,6 +279,49 @@ fn layout_mode_at(selection: isize) -> LayoutMode {
         .and_then(|i| LAYOUT_MODES.get(i))
         .map_or(LayoutMode::Roomy, |&(mode, _)| mode)
 }
+
+/// The table lists selection button modes in combo box order.
+const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
+    (SelectionButtons::PrimaryAdditive, "Primary additive"),
+    (SelectionButtons::PrimaryReplacing, "Primary replacing"),
+];
+
+/// The table lists selection separators in combo box order.
+const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
+    (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
+    (SelectionSeparator::Space, "Space"),
+    (SelectionSeparator::LineBreak, "Line break"),
+    (SelectionSeparator::ListItems, "List items"),
+];
+
+/// The table lists triple-click modes in combo box order.
+const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
+    (TripleClick::Sense, "Sense"),
+    (TripleClick::SenseWithExamples, "Sense with examples"),
+    (TripleClick::Line, "Line"),
+];
+
+fn selection_buttons_at(selection: isize) -> SelectionButtons {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| SELECTION_BUTTONS.get(i))
+        .map_or(SelectionButtons::PrimaryAdditive, |&(value, _)| value)
+}
+
+fn selection_separator_at(selection: isize) -> SelectionSeparator {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| SELECTION_SEPARATORS.get(i))
+        .map_or(SelectionSeparator::Ellipsis, |&(value, _)| value)
+}
+
+fn triple_click_at(selection: isize) -> TripleClick {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| TRIPLE_CLICKS.get(i))
+        .map_or(TripleClick::SenseWithExamples, |&(value, _)| value)
+}
+
 
 /// The ranking strategy combo box in fill order.
 ///
@@ -3655,10 +3711,9 @@ impl SettingsWindow {
             gen.push(group_start(
                 "Popup",
                 y,
-                6 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30,
+                7 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30,
             )?);
             y += 20;
-
             gen.push(label("Theme", y)?);
             let theme = child(
                 page,
@@ -3834,6 +3889,13 @@ impl SettingsWindow {
                 "Scroll long entries with the wheel",
                 ID_SCROLL,
                 form.scroll_popup,
+                y,
+            )?);
+            y += ROW_H;
+            gen.push(check(
+                "Auto-scroll while dragging at the popup edge",
+                ID_EDGE_AUTOSCROLL,
+                form.edge_autoscroll,
                 y,
             )?);
             y += ROW_H;
@@ -4283,7 +4345,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 9 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 12 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(
                 page,
@@ -4393,11 +4455,105 @@ impl SettingsWindow {
             )?);
             y += ROW_H;
             ank.push(check(
+                "Include dictionary name",
+                ID_INCLUDE_DICTIONARY_NAME,
+                form.include_dictionary_name,
+                y,
+            )?);
+            y += ROW_H;
+            ank.push(check(
                 "First dictionary only",
                 ID_FIRST_DICT_ONLY,
                 form.first_dict_only,
                 y,
             )?);
+            y += ROW_H;
+            ank.push(label("Selection buttons", y)?);
+            let selection_buttons = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X,
+                y,
+                FIELD_W,
+                180,
+                ID_SELECTION_BUTTONS,
+                f,
+            )?;
+            ank.push(selection_buttons);
+            for (i, (value, text)) in SELECTION_BUTTONS.iter().enumerate() {
+                SendMessageW(
+                    selection_buttons,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)),
+                );
+                if form.selection_buttons == *value {
+                    SendMessageW(selection_buttons, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(selection_buttons, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(selection_buttons, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            y += ROW_H;
+            ank.push(label("Selection separator", y)?);
+            let selection_separator = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X,
+                y,
+                FIELD_W,
+                180,
+                ID_SELECTION_SEPARATOR,
+                f,
+            )?;
+            ank.push(selection_separator);
+            for (i, (value, text)) in SELECTION_SEPARATORS.iter().enumerate() {
+                SendMessageW(
+                    selection_separator,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)),
+                );
+                if form.selection_separator == *value {
+                    SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(selection_separator, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            y += ROW_H;
+            ank.push(label("Triple-click", y)?);
+            let triple_click = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X,
+                y,
+                FIELD_W,
+                180,
+                ID_TRIPLE_CLICK,
+                f,
+            )?;
+            ank.push(triple_click);
+            for (i, (value, text)) in TRIPLE_CLICKS.iter().enumerate() {
+                SendMessageW(
+                    triple_click,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(text).as_ptr() as isize)),
+                );
+                if form.triple_click == *value {
+                    SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(triple_click, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(1)), None);
+            }
             y += ROW_H;
             ank.push(label("Sentence capture", y)?);
             let sentence_combo = child(
@@ -4811,6 +4967,9 @@ impl SettingsWindow {
                 "dark"
             };
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
+            let selection_buttons = selection_buttons_at(combo_index(ID_SELECTION_BUTTONS));
+            let selection_separator = selection_separator_at(combo_index(ID_SELECTION_SEPARATOR));
+            let triple_click = triple_click_at(combo_index(ID_TRIPLE_CLICK));
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
@@ -4894,6 +5053,7 @@ impl SettingsWindow {
                     as usize,
                 highlight_match: checked(ID_HIGHLIGHT),
                 scroll_popup: checked(ID_SCROLL),
+                edge_autoscroll: checked(ID_EDGE_AUTOSCROLL),
                 side_panel: checked(ID_SIDE_PANEL),
                 layout_mode: layout_mode_at(combo_index(ID_LAYOUT_MODE)),
                 dictionary_styling: checked(ID_DICT_STYLING),
@@ -4936,7 +5096,11 @@ impl SettingsWindow {
                 show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 ocr_clipboard_key,
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
+                include_dictionary_name: checked(ID_INCLUDE_DICTIONARY_NAME),
                 first_dict_only: checked(ID_FIRST_DICT_ONLY),
+                selection_buttons,
+                selection_separator,
+                triple_click,
                 enabled_plugins: self
                     .plugin_names
                     .iter()
@@ -5098,6 +5262,22 @@ fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<Dic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_combo_tables_cover_all_modes() {
+        for (index, &(buttons, _)) in SELECTION_BUTTONS.iter().enumerate() {
+            assert_eq!(buttons, selection_buttons_at(index as isize));
+        }
+        for (index, &(separator, _)) in SELECTION_SEPARATORS.iter().enumerate() {
+            assert_eq!(separator, selection_separator_at(index as isize));
+        }
+        for (index, &(triple_click, _)) in TRIPLE_CLICKS.iter().enumerate() {
+            assert_eq!(triple_click, triple_click_at(index as isize));
+        }
+        assert_eq!(SelectionButtons::PrimaryAdditive, selection_buttons_at(-1));
+        assert_eq!(SelectionSeparator::Ellipsis, selection_separator_at(-1));
+        assert_eq!(TripleClick::SenseWithExamples, triple_click_at(-1));
+    }
 
     /// The X button quits standalone chibipop.
     #[test]

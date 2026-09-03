@@ -474,6 +474,7 @@ impl Paragraphs<'_> {
         let link = self.link_of(id, ctx.link);
         let slot = self.open_slot(style);
         let outer = std::mem::replace(&mut self.open_ruby, slot);
+        let outer_path = std::mem::replace(&mut self.ruby_path, ctx.path);
         // The `rp` element holds parentheses that HTML provides for a renderer
         // that cannot draw ruby.
         // This renderer can draw ruby, so layout does not add `rp` text yet.
@@ -507,9 +508,10 @@ impl Paragraphs<'_> {
             }
         }
         self.open_ruby = outer;
+        self.ruby_path = outer_path;
         if !read {
             for (text, style) in &fallback {
-                self.text(text, *style, link);
+                self.text(text, *style, link, None, 0);
             }
         }
     }

@@ -60,6 +60,16 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 toml = "1.1.3"
 ureq = { version = "3", features = ["json"] }
+# Vibrato's default `train` feature adds rucrf and 40 crates.
+# The dependency declaration disables that feature.
+# `Dictionary::read` takes the decoded model without zstd. The v0.5.0 release
+# notes confirm that this model loads with version 0.5.2.
+vibrato = { version = "=0.5.2", default-features = false }
+# UAX #29 provides graphemes and word boundaries.
+# The application uses its word boundaries as the fallback for non-Japanese text.
+# UAX #29 alone splits every ideograph and hiragana code point, so Vibrato
+# provides Japanese morphology for glossary word selection.
+unicode-segmentation = "=1.13.3"
 
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # Linux bin only; listed here to keep the one-pin rule.
@@ -221,6 +231,13 @@ path = "src/lib.rs"
 # are named only by the bins. This crate builds on stable Linux.
 [dependencies]
 anyhow.workspace = true
+# The `vibrato` dependency provides Japanese morphology for glossary word selection.
+vibrato.workspace = true
+# The `unicode-segmentation` dependency provides graphemes and word boundaries.
+unicode-segmentation.workspace = true
+# Japanese analysis uses `sha2` to make sure that the bundled IPADIC model matches its
+# digest before use.
+sha2.workspace = true
 # The Anki picture payload: AnkiConnect takes attachments as base64.
 base64.workspace = true
 # The one PNG encoder (src/image.rs) and the first of
