@@ -189,6 +189,9 @@ const ID_SELECTION_BUTTONS: i32 = 178;
 const ID_SELECTION_SEPARATOR: i32 = 179;
 /// The triple-click combo box.
 const ID_TRIPLE_CLICK: i32 = 180;
+/// The Include dictionary name checkbox.
+const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
+
 
 /// The first field-map combo identifier.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -4342,7 +4345,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 11 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 12 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(
                 page,
@@ -4448,6 +4451,13 @@ impl SettingsWindow {
                 "Include screenshot when adding",
                 ID_INCLUDE_SCREENSHOT,
                 form.include_screenshot,
+                y,
+            )?);
+            y += ROW_H;
+            ank.push(check(
+                "Include dictionary name",
+                ID_INCLUDE_DICTIONARY_NAME,
+                form.include_dictionary_name,
                 y,
             )?);
             y += ROW_H;
@@ -5086,6 +5096,7 @@ impl SettingsWindow {
                 show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 ocr_clipboard_key,
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
+                include_dictionary_name: checked(ID_INCLUDE_DICTIONARY_NAME),
                 first_dict_only: checked(ID_FIRST_DICT_ONLY),
                 selection_buttons,
                 selection_separator,

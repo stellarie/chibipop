@@ -197,6 +197,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   widgets only.
 - Live-apply saves the configuration and sends `reload` over the control socket. It never
   uses a structured push.
+- `anki.include_dictionary_name` controls headings in both Anki glossary fields. The plain
+  definitions use an HTML heading because square brackets can become furigana in Anki.
 - Any setting that must round-trip is a field on the shared `Config`. It is never a
   platform-interpreted field, and never a `[linux]` side table.
 - The configuration uses no sentinel values. An unresolvable `popup.font` value falls

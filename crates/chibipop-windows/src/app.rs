@@ -2539,6 +2539,7 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
         per_character_lookup: live.per_character_lookup,
         scroll_popup: live.scroll_popup,
         anki_enabled: live.anki_enabled,
+        include_dictionary_name: live.include_dictionary_name,
         first_dict_only: live.first_dict_only,
         summary_chars: live.summary_chars,
         log_lookups: live.show_lookup_log,
@@ -2955,6 +2956,7 @@ struct LiveSettings {
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
     actions_ocr_clipboard_hotkey: Option<String>,
+    include_dictionary_name: bool,
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
     selection_separator: SelectionSeparator,
@@ -3033,6 +3035,7 @@ fn derive(cfg: &Config) -> LiveSettings {
             .ocr_clipboard
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
+        include_dictionary_name: cfg.anki.include_dictionary_name,
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
         selection_separator: cfg.anki.selection_separator,

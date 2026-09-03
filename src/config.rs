@@ -885,6 +885,9 @@ pub struct AnkiConfig {
     /// Makes the teal border visible.
     #[serde(default = "default_show_static_overlay")]
     pub show_static_overlay: bool,
+    /// Includes each Dictionary name above its Anki glossary group.
+    #[serde(default = "default_include_dictionary_name")]
+    pub include_dictionary_name: bool,
     /// Uses only the entry from the top Dictionary.
     #[serde(default)]
     pub first_dict_only: bool,
@@ -968,6 +971,11 @@ fn default_show_static_overlay() -> bool {
     true
 }
 
+/// Existing configurations keep the Dictionary headings that earlier versions always added.
+fn default_include_dictionary_name() -> bool {
+    true
+}
+
 /// Returns the Lapis field mapping.
 fn default_field_map() -> Vec<FieldMapping> {
     vec![
@@ -995,6 +1003,7 @@ impl Default for AnkiConfig {
             static_region_key_linux: default_static_region_key_linux(),
             static_region: None,
             show_static_overlay: default_show_static_overlay(),
+            include_dictionary_name: default_include_dictionary_name(),
             first_dict_only: false,
             selection_buttons: SelectionButtons::default(),
             selection_separator: SelectionSeparator::default(),
@@ -1768,6 +1777,11 @@ mod tests {
     }
 
     #[test]
+    fn include_dictionary_name_defaults_to_true() {
+        assert!(Config::default().anki.include_dictionary_name);
+    }
+
+    #[test]
     fn first_dict_only_defaults_to_false() {
         assert!(!Config::default().anki.first_dict_only);
     }
@@ -1851,6 +1865,21 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-first_dict_only config must load");
         assert!(!c.anki.first_dict_only, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_anki_section_without_include_dictionary_name_keeps_dictionary_headings() {
+        let p = tmp("anki_no_include_dictionary_name");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-toggle Anki config must load");
+        assert!(c.anki.include_dictionary_name, "a missing key keeps the old output");
         let _ = std::fs::remove_file(&p);
     }
 

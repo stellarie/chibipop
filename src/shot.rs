@@ -39,6 +39,7 @@ pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> S
     let (expr, fields) = crate::controller::note_payload(
         view.presentation,
         cfg.anki.first_dict_only,
+        cfg.anki.include_dictionary_name,
         selection,
         cfg.anki.selection_separator.into(),
     );

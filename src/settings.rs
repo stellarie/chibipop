@@ -100,6 +100,8 @@ pub struct SettingsForm {
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
+    /// Whether Anki glossary fields include each Dictionary name.
+    pub include_dictionary_name: bool,
     /// Whether the note uses only the top Dictionary's Entry.
     pub first_dict_only: bool,
     /// Which physical button applies a glossary selection.
@@ -454,6 +456,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
+        include_dictionary_name: cfg.anki.include_dictionary_name,
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
         selection_separator: cfg.anki.selection_separator,
@@ -524,6 +527,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.anki.sentence_mode = form.sentence_mode;
     out.anki.static_region_key = form.static_region_key.clone();
     out.anki.show_static_overlay = form.show_static_overlay;
+    out.anki.include_dictionary_name = form.include_dictionary_name;
     out.anki.first_dict_only = form.first_dict_only;
     out.anki.selection_buttons = form.selection_buttons;
     out.anki.selection_separator = form.selection_separator;
@@ -1223,6 +1227,16 @@ mod tests {
             Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("SUPER+C".into()) }),
             apply_to(&form, &cfg).actions.ocr_clipboard
         );
+    }
+
+    #[test]
+    fn include_dictionary_name_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.include_dictionary_name = false;
+        let form = from_config(&cfg, &dicts());
+        assert!(!form.include_dictionary_name);
+        let out = apply_to(&form, &cfg);
+        assert!(!out.anki.include_dictionary_name);
     }
 
     #[test]

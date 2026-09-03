@@ -1088,6 +1088,7 @@ mod tests {
         let (_, fields) = crate::controller::note_payload(
             &p,
             false,
+            true,
             &none,
             crate::dict::gloss::Separator::Ellipsis,
         );

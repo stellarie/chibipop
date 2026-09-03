@@ -1529,8 +1529,8 @@ This box has `en-US`, `ja`, `zh-Hans-CN`, `zh-Hant-TW`. **PowerShell 7 cannot lo
 ### 1.22 The Anki card carries HTML, if the field map asks for it — **added 2026-08-17, run**
 
 The `[[anki.field_map]]` `source` values are `expression`, `reading`, `glossary`, `glossary_html`,
-`frequency` (`src/anki.rs:228-234`). **`glossary` is plain text; `glossary_html` is the formatted
-one.** They are different fields, and picking the wrong one fails silently.
+`frequency` (`src/anki.rs:228-234`). **`glossary` has numbered text with an optional HTML
+heading. `glossary_html` keeps the Dictionary formatting.** Picking the wrong one fails silently.
 
 Mined 2026-08-17 into a sample deck, 12 notes over three languages, `glossary_html` mapped:
 

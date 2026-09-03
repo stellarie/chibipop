@@ -369,6 +369,7 @@ sentence_mode = "line"      # "line" | "all" | "static"
 static_region_key = ""      # Windows; empty leaves it unbound
 static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
 show_static_overlay = true
+include_dictionary_name = true
 first_dict_only = false
 selection_buttons = "primary-additive"  # "primary-additive" | "primary-replacing"
 selection_separator = "ellipsis"       # "ellipsis" | "space" | "line-break" | "list-items"

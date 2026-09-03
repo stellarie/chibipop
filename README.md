@@ -209,18 +209,18 @@ below.
 |---|---|
 | `expression` | the word itself |
 | `reading` | how it is read |
-| `glossary` | the definitions, as plain text |
-| `glossary_html` | the definitions, with formatting |
+| `glossary` | numbered definitions, with only the optional heading formatted |
+| `glossary_html` | the definitions, with Dictionary formatting |
 | `frequency` | how common the word is |
 | `sentence` | the sentence the word came from |
 | `screenshot` | a picture of what you were reading |
 
-Definitions from different dictionaries are separated by a heading and a
-line. The formatted version numbers them.
+Definitions from different Dictionaries are separated by a heading and a line.
+Use **Include dictionary name** to show or hide these headings. A heading uses
+HTML instead of square brackets, which Anki can interpret as furigana.
 
-**First dictionary only** — tick this on the *Anki* tab to use just your
-top dictionary's definitions. It keeps cards short when several
-dictionaries match the same word.
+Use **First dictionary only** to send only the top Dictionary's definitions.
+This setting keeps cards short when several Dictionaries match the same word.
 
 The *Anki* tab also sets how glossary selection works. The default makes the
 primary button additive and the secondary button replacing. It joins selected

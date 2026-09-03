@@ -220,6 +220,8 @@ pub struct ControllerConfig {
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
+    /// Include each Dictionary name in both Anki glossary fields.
+    pub include_dictionary_name: bool,
     /// Send only the first Dictionary's glossary block to Anki.
     /// This matches upstream 0.9.x "first dict only".
     /// An active glossary selection overrides this setting.
@@ -293,6 +295,7 @@ pub fn hold_region(
 ///
 /// `expr` uses `written` when present and `reading` otherwise.
 /// Include blocks from the first Dictionary only when `first_dict_only` is true.
+/// Include Dictionary headings only when `include_dictionary_name` is true.
 /// A non-empty selection always includes every selected Entry.
 /// The caller passes an empty selection only when it wants the whole-card path.
 /// Include the captured sentence when it exists.
@@ -302,6 +305,7 @@ pub fn hold_region(
 pub fn note_payload(
     p: &Presentation,
     first_dict_only: bool,
+    include_dictionary_name: bool,
     selection: &CardSelection,
     separator: Separator,
 ) -> (String, HashMap<String, String>) {
@@ -320,9 +324,14 @@ pub fn note_payload(
         } else {
             &card.blocks[..]
         };
-        crate::anki::fields_from_card(card, blocks_to_send)
+        crate::anki::fields_from_card(card, blocks_to_send, include_dictionary_name)
     } else {
-        crate::anki::fields_from_selection(card, selection, separator)
+        crate::anki::fields_from_selection(
+            card,
+            selection,
+            separator,
+            include_dictionary_name,
+        )
     };
     if let Some(sentence) = &p.sentence {
         fields.insert("sentence".to_string(), sentence.clone());
@@ -823,6 +832,7 @@ impl Controller {
     /// Apply the same guard as the pointer path.
     fn start_add(&mut self) -> Vec<Command> {
         let first_dict_only = self.cfg.first_dict_only;
+        let include_dictionary_name = self.cfg.include_dictionary_name;
         let separator = self.cfg.separator;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
@@ -832,8 +842,13 @@ impl Controller {
             return Vec::new();
         }
         let selection = s.selection.card(0).cloned().unwrap_or_default();
-        let (expr, fields) =
-            note_payload(&s.presentation, first_dict_only, &selection, separator);
+        let (expr, fields) = note_payload(
+            &s.presentation,
+            first_dict_only,
+            include_dictionary_name,
+            &selection,
+            separator,
+        );
         if s.anki.adding || s.anki.added.contains(&expr) {
             return Vec::new();
         }
@@ -1288,6 +1303,7 @@ mod tests {
             per_character_lookup: false,
             scroll_popup: true,
             anki_enabled: false,
+            include_dictionary_name: true,
             first_dict_only: false,
             summary_chars: 60,
             log_lookups: false,
@@ -2060,6 +2076,27 @@ mod tests {
     }
 
     #[test]
+    fn an_add_command_honors_the_dictionary_name_setting() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        config.include_dictionary_name = false;
+        let mut controller = Controller::new(config);
+        let card = gloss_card("cat", "feline");
+        shown_card(&mut controller, presentation_with_card(card.clone(), vec![card]));
+
+        let commands = controller.handle(Event::AddRequested);
+        let fields = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::AddNote { fields, .. } => Some(fields),
+                _ => None,
+            })
+            .expect("the add command");
+        assert!(!fields["glossary"].contains("Test"));
+        assert!(!fields["glossary_html"].contains("Test"));
+    }
+
+    #[test]
     fn an_added_note_is_never_added_twice() {
         let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
@@ -2551,9 +2588,14 @@ mod tests {
             start: TextAddr { entry: 0, addr: crate::select::DocAddr::START },
             end: TextAddr { entry: 1, addr: crate::select::DocAddr::END },
         });
-        let (_, fields) = note_payload(&p, true, &selection, Separator::Ellipsis);
+        let (_, fields) = note_payload(&p, true, true, &selection, Separator::Ellipsis);
         assert!(fields["glossary"].contains("cat"));
         assert!(fields["glossary"].contains("feline"));
+        assert!(
+            fields["glossary"].contains("cat<br><br>\n<b>B</b><br>"),
+            "selected Dictionary groups need an HTML break: {}",
+            fields["glossary"],
+        );
         assert!(fields["glossary_html"].contains("cat"));
         assert!(fields["glossary_html"].contains("feline"));
     }
@@ -2578,14 +2620,14 @@ mod tests {
 
         // The `reading` value replaces the missing `written` value.
         let empty = CardSelection::default();
-        let (expr, fields) = note_payload(&p, false, &empty, Separator::Ellipsis);
+        let (expr, fields) = note_payload(&p, false, true, &empty, Separator::Ellipsis);
         assert_eq!("\u{306D}\u{3053}", expr);
         assert_eq!(Some(&"\u{732B}\u{304C}\u{3044}\u{308B}".to_string()), fields.get("sentence"));
         let both = fields.get("glossary").expect("glossary field");
         assert!(both.contains("cat") && both.contains("feline"), "{both}");
 
         // The first Dictionary excludes all later blocks.
-        let (_, trimmed) = note_payload(&p, true, &empty, Separator::Ellipsis);
+        let (_, trimmed) = note_payload(&p, true, true, &empty, Separator::Ellipsis);
         let first = trimmed.get("glossary").expect("glossary field");
         assert!(first.contains("cat") && !first.contains("feline"), "{first}");
 
@@ -2593,7 +2635,7 @@ mod tests {
         p.top = None;
         assert_eq!(
             (String::new(), HashMap::new()),
-            note_payload(&p, false, &empty, Separator::Ellipsis),
+            note_payload(&p, false, true, &empty, Separator::Ellipsis),
         );
     }
 }

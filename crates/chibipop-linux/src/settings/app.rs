@@ -702,6 +702,7 @@ enum Message {
     AnkiDeck(String),
     AnkiModel(String),
     AnkiAddKey(String),
+    IncludeDictionaryName(bool),
     FirstDictOnly(bool),
     /// The selection button-mode picker label. [`SELECTION_BUTTONS`] maps it back.
     SelectionButtonsPicked(String),
@@ -813,6 +814,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiDeck(v) => app.form.anki_deck = v,
         Message::AnkiModel(v) => app.form.anki_model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
+        Message::IncludeDictionaryName(on) => app.form.include_dictionary_name = on,
         Message::FirstDictOnly(v) => app.form.first_dict_only = v,
         Message::SelectionButtonsPicked(label) => {
             app.form.selection_buttons = selection_buttons_of(&label);
@@ -2114,6 +2116,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .width(200),
         ),
         add_bind,
+        checkbox(app.form.include_dictionary_name)
+            .label("Include dictionary name")
+            .on_toggle(Message::IncludeDictionaryName),
         // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
         // The daemon reads `anki.first_dict_only`, so this row lets the user change it
         // without a TOML edit.
@@ -2438,6 +2443,21 @@ mod tests {
             app.add_control()
         );
         assert!(app.add_bind_snippet().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_dictionary_name_checkbox_round_trips_into_the_config() {
+        let dir = scratch("dictionaryname");
+        let mut app = app(&dir);
+        let cfg = chibipop::config::Config::default();
+        assert!(app.form.include_dictionary_name, "the default keeps existing card output");
+
+        let _ = update(&mut app, Message::IncludeDictionaryName(false));
+        assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
+
+        let _ = update(&mut app, Message::IncludeDictionaryName(true));
+        assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

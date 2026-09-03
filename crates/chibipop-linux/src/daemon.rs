@@ -2439,6 +2439,7 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
         anki_enabled: config.anki.enabled,
+        include_dictionary_name: config.anki.include_dictionary_name,
         first_dict_only: config.anki.first_dict_only,
         summary_chars: config.popup.summary_chars,
         log_lookups: config.debug.show_lookup_log,
