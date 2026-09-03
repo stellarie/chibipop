@@ -50,7 +50,7 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 > `docs/fixtures/scroll-test.html` is the companion for 1.7; it prints `window.scrollY` to its title.
 >
 > ```bash
-> chrome --user-data-dir=/tmp/kiosk --no-first-run --kiosk file:///C:/Users/Stella/chibipop/docs/fixtures/ocr-corpus.html
+> chrome --user-data-dir=/tmp/kiosk --no-first-run --kiosk "file:///<repo-root>/docs/fixtures/ocr-corpus.html"
 > ```
 
 ---
@@ -704,8 +704,8 @@ catches this — it regressed to **19× the oracle's** and every test stayed gre
 $out = Join-Path $env:TEMP "mem_check.sqlite"
 $log = Join-Path $env:TEMP "mem_check.log"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath "C:\Users\Stella\chibipop\target\release\chibipop.exe" -PassThru -NoNewWindow `
-     -ArgumentList @('build-dict', '--library', 'C:\Users\Stella\Documents\dicts', '--out', $out) `
+$p = Start-Process -FilePath ".\target\release\chibipop.exe" -PassThru -NoNewWindow `
+     -ArgumentList @('build-dict', '--library', "$env:USERPROFILE\Documents\dicts", '--out', $out) `
      -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 $peak = 0
 while (-not $p.HasExited) { try { $p.Refresh(); $w = $p.WorkingSet64; if ($w -gt $peak) { $peak = $w } } catch {}; Start-Sleep -Milliseconds 100 }
@@ -1411,7 +1411,7 @@ step 8 is the case that most reliably breaks it.
     the prose on one line, the CRLF was lost and the user cannot read the command.
 
 > [!important] The `.new` left on this machine is now inert — delete it
-> `C:\Users\Stella\chibipop\data\chibipop.sqlite.new` is **133,390,336 bytes** and still sits beside
+> `<repo-root>\data\chibipop.sqlite.new` is **133,390,336 bytes** and still sits beside
 > the live 242 MB `chibipop.sqlite`. Until v0.8.0, startup printed a stderr line naming it. **That
 > notice is deleted along with the staged-file lifecycle, so nothing will ever mention that file
 > again and no code path will ever adopt or overwrite it.** It is inert and harmless, and it is
@@ -1712,7 +1712,7 @@ $ echo $?
 1
 
 $ ./target/release/chibipop.exe plugin test nosuchplugin --image docs/fixtures/plugin-sample.png
-no plugin named "nosuchplugin" under C:\Users\Stella\chibipop\.claude\worktrees\plugin-system\target\release\plugins
+no plugin named "nosuchplugin" under <repo-root>\target\release\plugins
 $ echo $?
 2
 
