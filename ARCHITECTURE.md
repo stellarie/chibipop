@@ -120,6 +120,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   per Card at the `all_cards` index and swaps with `swap_top`.
 - `select::gesture::Gesture` owns click chains, drags, and deferred plain-click clear.
   Ticks provide its clock.
+- A drag snaps to the unit of the press that started it: grapheme, word, Sense, or
+  Entry. A word drag snaps to graphemes until the analysis answers.
 - Bins send `PointerDown`, `PointerMoved`, and `PointerUp` with a `TextAddr` from
   `PopupScene::text_hit`. A bin never decides a gesture.
 - `DocAddr` uses document order on role-visible leaves. A ruby node is atomic.
@@ -173,8 +175,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   It analyzes only the top Card.
 - Requests use latest-wins behavior. A stale generation is dropped.
 - A load or digest failure falls back to UAX #29 word boundaries and emits one diagnostic.
-- Word grouping merges auxiliaries, suffixes, and conjugation chains for double-click.
-  Fine morphemes remain available for issue #52.
+- Word grouping merges auxiliaries, suffixes, verb suffixes, bound verbs, conjunctive
+  particles, `する` after a verbal noun, and adjacent general or proper nouns. The unit
+  for double-click is a full conjugation or a compound noun. Fine morphemes remain
+  available for issue #52.
 - The model has no download path. The application stays offline-first.
 
 ## Settings and config

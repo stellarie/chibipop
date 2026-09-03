@@ -249,6 +249,26 @@ fn grouped_words(text: &str, morphemes: &[Morpheme]) -> Vec<Range<usize>> {
     words
 }
 
+/// Decide whether `current` continues the word that `previous` ends.
+///
+/// A word is what a double-click selects. The unit is a full conjugation
+/// (stem plus every attached auxiliary, verb suffix, and bound verb) or a
+/// compound noun. IPADIC splits both into morphemes, so this function joins
+/// them back. The rules, in order:
+///
+/// - Never join across a symbol, whitespace, or overlapping ranges.
+/// - A prefix joins the next morpheme (`お茶`, `全世界`).
+/// - An auxiliary verb or a suffix joins the previous morpheme
+///   (`食べた`, `会社員`).
+/// - A verb suffix such as `られ` or `させ` joins its stem (`食べられた`).
+/// - A bound verb or adjective (`非自立`) joins its stem (`読み終わる`,
+///   `食べている`).
+/// - A conjunctive particle after a verb, adjective, or auxiliary joins the
+///   chain (`飲んで`, `行かなければ`).
+/// - A `する` verb joins a verbal noun (`勉強する`).
+/// - Two general or proper nouns join into one compound (`日本語教師`,
+///   `東京都庁`). Pronouns, adverbial nouns, and bound nouns stay separate
+///   because `今日私` and `食べること` are not words.
 fn can_merge(text: &str, previous: &Morpheme, current: &Morpheme) -> bool {
     if previous.pos == PartOfSpeech::Symbol || current.pos == PartOfSpeech::Symbol {
         return false;
@@ -268,13 +288,38 @@ fn can_merge(text: &str, previous: &Morpheme, current: &Morpheme) -> bool {
         return true;
     }
     if matches!(current.pos, PartOfSpeech::Verb | PartOfSpeech::Adjective)
-        && current.labels.iter().any(|label| label.starts_with("非自立"))
+        && current.labels.iter().any(|label| label.starts_with("非自立") || label == "接尾")
     {
         return true;
     }
-    current.pos == PartOfSpeech::Particle
+    if current.pos == PartOfSpeech::Particle
         && current.labels.iter().any(|label| label == "接続助詞")
-        && previous.pos == PartOfSpeech::Verb
+        && matches!(
+            previous.pos,
+            PartOfSpeech::Verb | PartOfSpeech::Adjective | PartOfSpeech::AuxiliaryVerb
+        )
+    {
+        return true;
+    }
+    if current.pos == PartOfSpeech::Verb
+        && current.lemma == "する"
+        && previous.pos == PartOfSpeech::Noun
+        && previous.labels.iter().any(|label| label == "サ変接続")
+    {
+        return true;
+    }
+    compound_noun(previous) && compound_noun(current)
+}
+
+/// Report whether a morpheme can form one side of a compound noun.
+fn compound_noun(morpheme: &Morpheme) -> bool {
+    match morpheme.pos {
+        PartOfSpeech::ProperNoun => true,
+        PartOfSpeech::Noun => {
+            morpheme.labels.iter().any(|label| label == "一般" || label == "サ変接続")
+        }
+        _ => false,
+    }
 }
 
 fn wordish(cluster: &str) -> bool {
@@ -361,4 +406,26 @@ mod tests {
     }
 
 
+    #[test]
+    fn grouped_words_cover_conjugations_and_compound_nouns() {
+        let Some(analyzer) = bundled_analyzer() else {
+            return;
+        };
+        let mut analyzer = analyzer.lock().unwrap();
+        let cases: [(&str, &[&str]); 8] = [
+            ("食べられませんでした", &["食べられませんでした"]),
+            ("行かなければならない", &["行かなければならない"]),
+            ("勉強している人", &["勉強している", "人"]),
+            ("読み終わった本", &["読み終わった", "本"]),
+            ("日本語教師になりたい", &["日本語教師", "に", "なりたい"]),
+            ("東京都庁", &["東京都庁"]),
+            ("今日私は", &["今日", "私", "は"]),
+            ("食べることが", &["食べる", "こと", "が"]),
+        ];
+        for (text, expected) in cases {
+            let analysis = analyzer.analyze(text);
+            let words: Vec<&str> = analysis.words.iter().map(|range| &text[range.clone()]).collect();
+            assert_eq!(expected, words.as_slice(), "{text}");
+        }
+    }
 }

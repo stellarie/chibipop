@@ -400,9 +400,12 @@ and `FreqSort`/`frequency`.
 Anki must be enabled before the popup can select glossary text.
 
 - Dragging selects grapheme clusters.
-- Double-clicking selects a word.
+- Double-clicking selects a word. A word is a full conjugation or a compound
+  noun, for example 食べられませんでした or 日本語教師.
 - Triple-clicking selects a Sense.
 - Quadruple-clicking selects an Entry.
+- A drag that starts from a double-click grows by words. A drag that starts
+  from a triple-click grows by Senses.
 - The Entry checkbox selects or clears the full Entry.
 - The primary button adds to the selection by default.
 - The secondary button replaces the selection by default.

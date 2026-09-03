@@ -140,8 +140,9 @@ inflection, part of speech, and labels.
 _Avoid_: word
 
 **Word group**:
-A range that Japanese analysis builds from morphemes for double-click selection. It can
-include auxiliaries, suffixes, and conjugation chains.
+A range that Japanese analysis builds from morphemes for double-click selection. It is a
+full conjugation or a compound noun. It includes auxiliaries, suffixes, bound verbs, and
+conjunctive particles.
 _Avoid_: token, morpheme
 
 ### Dictionary

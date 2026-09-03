@@ -179,6 +179,9 @@ pub struct Gesture {
     active_button: Option<Button>,
     current_link: bool,
     dragging: bool,
+    /// The last pointer address during a drag. A word result that arrives
+    /// mid-drag recomputes the range from here.
+    drag_addr: Option<TextAddr>,
     last_press: Option<PressPoint>,
     pending_clear: Option<u64>,
     pending_word: Option<PendingWord>,
@@ -306,6 +309,7 @@ impl Gesture {
                 return Vec::new();
             }
             self.dragging = true;
+            self.drag_addr = addr;
             let mut effects = vec![GestureEffect::DragStarted];
             if let Some(item) = self.drag_item(addr, source) {
                 self.apply(selection, item, button, env);
@@ -314,25 +318,54 @@ impl Gesture {
             return effects;
         }
 
+        self.drag_addr = addr;
         let Some(item) = self.drag_item(addr, source) else { return Vec::new() };
         self.apply(selection, item, button, env);
         vec![GestureEffect::Repaint]
     }
 
+    /// The item that a drag snaps to.
+    ///
+    /// A drag from a plain press snaps to graphemes. A drag from a chained
+    /// press keeps the stage of that press, so a double-click drag grows by
+    /// words and a triple-click drag grows by senses. This matches the
+    /// browser convention that the chain sets the unit of the drag.
+    fn drag_stage(&self) -> GestureStage {
+        match self.stage {
+            0 | 1 => GestureStage::Grapheme,
+            2 => GestureStage::Word,
+            3 => GestureStage::Sense,
+            _ => GestureStage::Entry,
+        }
+    }
+
     fn drag_item(&self, addr: Option<TextAddr>, source: &ItemSource<'_>) -> Option<SelRange> {
         let anchor = self.anchor?;
         let current = addr?;
-        let (start, end) = if anchor <= current { (anchor, current) } else { (current, anchor) };
-        let start = source
-            .item(GestureStage::Grapheme, start)
-            .map(|item| item.start)
-            .unwrap_or(start);
-        let end = source
-            .item(GestureStage::Grapheme, end)
+        let stage = self.drag_stage();
+        // A word is not known until the analysis answers, so a word drag
+        // snaps to graphemes until then.
+        let snap = |addr: TextAddr| {
+            source
+                .item(stage, addr)
+                .or_else(|| source.item(GestureStage::Grapheme, addr))
+        };
+        let (mut start, mut end) = if anchor <= current { (anchor, current) } else { (current, anchor) };
+        start = snap(start).map(|item| item.start).unwrap_or(start);
+        end = snap(end)
             .map(|item| if item.start == end { end } else { item.end })
             .unwrap_or(end);
+        // A chained press already selected the anchor item. The drag never
+        // shrinks below it, even when the anchor sits on its first caret.
+        if stage != GestureStage::Grapheme {
+            if let Some(item) = snap(anchor) {
+                start = start.min(item.start);
+                end = end.max(item.end);
+            }
+        }
         (start < end).then_some(SelRange { start, end })
     }
+
     fn release(
         &mut self,
         button: Button,
@@ -347,6 +380,7 @@ impl Gesture {
         self.active_button = None;
         if self.dragging {
             self.dragging = false;
+            self.drag_addr = None;
             self.stage = 0;
             self.anchor = None;
             self.press_point = None;
@@ -381,6 +415,13 @@ impl Gesture {
         selection: &mut CardSelection,
     ) -> Vec<GestureEffect> {
         let Some(pending) = self.pending_word.take() else { return Vec::new() };
+        // A drag that began before the answer already owns the selection.
+        // Re-snap that drag to words instead of replacing it with one word.
+        if self.dragging {
+            let Some(item) = self.drag_item(self.drag_addr, source) else { return Vec::new() };
+            self.apply(selection, item, pending.button, env);
+            return vec![GestureEffect::Repaint];
+        }
         let Some(item) = source.item(GestureStage::Word, pending.addr) else {
             self.pending_word = Some(pending);
             return Vec::new();
@@ -625,6 +666,109 @@ mod tests {
             let gesture = Gesture { anchor: Some(addr(anchor)), ..Gesture::default() };
             assert_eq!(gesture.drag_item(Some(addr(current)), &source), Some(expected));
         }
+    }
+
+    /// Graphemes are two bytes wide. Words are four bytes wide. Senses are
+    /// eight bytes wide. `words` gates the word stage so a test can model an
+    /// analysis that has not answered yet.
+    fn staged_resolver(words: bool) -> impl Fn(GestureStage, TextAddr) -> Option<SelRange> {
+        move |stage: GestureStage, value: TextAddr| {
+            let width = match stage {
+                GestureStage::Grapheme => 2,
+                GestureStage::Word if words => 4,
+                GestureStage::Word => return None,
+                GestureStage::Sense => 8,
+                GestureStage::Entry => 16,
+            };
+            let start = value.addr.byte / width * width;
+            Some(range(start, start + width))
+        }
+    }
+
+    fn press_at(gesture: &mut Gesture, source: &ItemSource<'_>, selection: &mut CardSelection, tick: u64, byte: u32) {
+        gesture.handle(
+            GestureInput::Press(PressInput {
+                addr: Some(addr(byte)),
+                link: false,
+                button: Button::Primary,
+                local: PhysPoint { x: 0, y: 0 },
+                tick,
+            }),
+            ENV,
+            source,
+            selection,
+        );
+    }
+
+    fn move_to(gesture: &mut Gesture, source: &ItemSource<'_>, selection: &mut CardSelection, tick: u64, byte: u32, x: i32) -> Vec<GestureEffect> {
+        gesture.handle(
+            GestureInput::Move { addr: Some(addr(byte)), local: PhysPoint { x, y: 0 }, tick },
+            ENV,
+            source,
+            selection,
+        )
+    }
+
+    #[test]
+    fn a_double_click_drag_grows_by_words_in_both_directions() {
+        let resolver = staged_resolver(true);
+        let source = ItemSource::from_fn(&resolver);
+        let mut gesture = Gesture::default();
+        let mut selection = CardSelection::default();
+        press_at(&mut gesture, &source, &mut selection, 0, 9);
+        press_at(&mut gesture, &source, &mut selection, 1, 9);
+        assert_eq!(selection.items(), &[range(8, 12)]);
+
+        // Rightward: the pointer at byte 13 is inside word 12..16.
+        move_to(&mut gesture, &source, &mut selection, 2, 13, 8);
+        assert_eq!(selection.items(), &[range(8, 16)]);
+        // Leftward past the anchor: the anchor word stays whole.
+        move_to(&mut gesture, &source, &mut selection, 3, 5, -8);
+        assert_eq!(selection.items(), &[range(4, 12)]);
+        // A pointer on a word's first caret does not take that word.
+        move_to(&mut gesture, &source, &mut selection, 4, 16, 16);
+        assert_eq!(selection.items(), &[range(8, 16)]);
+
+        gesture.handle(input_release(5, Button::Primary), ENV, &source, &mut selection);
+        assert_eq!(selection.items(), &[range(8, 16)]);
+    }
+
+    #[test]
+    fn a_triple_click_drag_grows_by_senses() {
+        let resolver = staged_resolver(true);
+        let source = ItemSource::from_fn(&resolver);
+        let mut gesture = Gesture::default();
+        let mut selection = CardSelection::default();
+        press_at(&mut gesture, &source, &mut selection, 0, 9);
+        press_at(&mut gesture, &source, &mut selection, 1, 9);
+        press_at(&mut gesture, &source, &mut selection, 2, 9);
+        assert_eq!(selection.items(), &[range(8, 16)]);
+        move_to(&mut gesture, &source, &mut selection, 3, 17, 8);
+        assert_eq!(selection.items(), &[range(8, 24)]);
+    }
+
+    #[test]
+    fn a_word_drag_snaps_to_graphemes_until_the_analysis_answers() {
+        let before = staged_resolver(false);
+        let after = staged_resolver(true);
+        let source = ItemSource::from_fn(&before);
+        let mut gesture = Gesture::default();
+        let mut selection = CardSelection::default();
+        press_at(&mut gesture, &source, &mut selection, 0, 9);
+        press_at(&mut gesture, &source, &mut selection, 1, 9);
+        assert!(selection.is_empty(), "no word yet: {:?}", selection.items());
+
+        move_to(&mut gesture, &source, &mut selection, 2, 13, 8);
+        assert_eq!(selection.items(), &[range(8, 14)]);
+
+        let source = ItemSource::from_fn(&after);
+        assert_eq!(
+            gesture.handle(GestureInput::Analysis, ENV, &source, &mut selection),
+            vec![GestureEffect::Repaint]
+        );
+        assert_eq!(selection.items(), &[range(8, 16)]);
+        move_to(&mut gesture, &source, &mut selection, 3, 17, 12);
+        assert_eq!(selection.items(), &[range(8, 20)]);
     }
 
     #[test]
