@@ -4283,6 +4283,7 @@ impl SettingsWindow {
                 PAD,
                 y,
                 WIN_W - 2 * PAD - 20,
+                28,
                 0,
                 f,
             )?);
