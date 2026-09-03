@@ -101,16 +101,16 @@ pub struct SceneRequest<'a> {
     pub anki: Option<&'a AnkiPopupState>,
     /// The stored selection of every Card, or `None` when Anki is off.
     ///
-    /// `None` produces the scene that a build without selection produced:
-    /// no [`ElemKind::Check`] element, no highlight, no `ToggleEntry` hit.
-    /// The geometry goldens pass `None`, so they do not move.
+    /// `None` produces the same scene as a build without selection:
+    /// no [`ElemKind::Check`] element, no highlight, and no `ToggleEntry` hit.
+    /// Geometry snapshots pass `None`, so they do not move.
     pub selection: Option<&'a Selections>,
 }
 
 /// The opacity of a selection highlight box over the panel background.
 ///
-/// The accent at full strength hides the text under it. One value here keeps
-/// both bins at the same tint.
+/// The accent at full strength hides the text under it.
+/// One value keeps both bins at the same tint.
 pub const HIGHLIGHT_ALPHA: f32 = 0.35;
 
 /// Build the measured scene for one popup.

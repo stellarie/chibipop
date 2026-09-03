@@ -110,12 +110,12 @@ pub enum ElemKind {
     ///
     /// [`collapsed`]: super::table::collapsed
     Cell,
-    /// The selection checkbox of an Entry header or a collapsed row.
+    /// The Entry check for an Entry header or a collapsed row.
     ///
     /// The element draws only its `block_box`: an accent border, an accent
-    /// fill for `All`, a dimmed fill for `Partial`, no fill for `None`. It has
-    /// no text, so both bins paint it through the box loop they already run.
-    /// A layout builds it only when [`SceneRequest::selection`] is `Some`.
+    /// fill for `All`, a dimmed fill for `Partial`, or no fill for `None`.
+    /// It has no text, so both bins paint it through the box loop they use.
+    /// Layout builds it only when [`SceneRequest::selection`] is `Some`.
     ///
     /// [`SceneRequest::selection`]: super::SceneRequest::selection
     Check,
@@ -409,7 +409,7 @@ pub struct GlossOrigin {
     pub dict_id: i64,
     pub entry_id: i64,
     /// The ordinal of this element's [`GlossEntry`] in the Card, from
-    /// [`crate::select::entries`]. A selection keys on this ordinal because
+    /// [`crate::select::entries`]. A Card selection uses this ordinal because
     /// a demo or a fixture gives every row [`NO_ROW`] as `entry_id`.
     ///
     /// [`GlossEntry`]: crate::present::GlossEntry
@@ -426,10 +426,11 @@ pub struct GlossOrigin {
 
 /// One run of [`SceneElem::text`] and the Dictionary leaf that supplied it.
 ///
-/// `at..at + len` is a byte range in the element text. For a text leaf it
-/// maps to bytes `byte..byte + len` of that leaf. For a ruby node, `atomic`
-/// is true, the run is the base text, and `byte` is zero: a selection takes
-/// the whole reading or none of it.
+/// `at..at + len` is a byte range in the element text.
+/// For a text leaf, it maps to bytes `byte..byte + len` of that leaf.
+/// For a ruby node, `atomic` is true.
+/// The run is the base text, and `byte` is zero.
+/// A selection takes the whole reading or none of it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextSource {
     pub at: u32,
@@ -530,13 +531,13 @@ pub struct SceneElem {
     /// and must round-trip verbatim. The scene stores the path once instead of
     /// copying it for every element on every frame.
     pub image: Option<SceneImage>,
-    /// Which leaf bytes each run of `text` came from, in text order.
+    /// The leaf bytes that supply each run of `text`, in text order.
     ///
-    /// A selection addresses a Dictionary node and a byte in it, not a screen
-    /// position. This table maps a hit in `text` back to that address and maps
-    /// a stored selection forward to a highlight. Separators, markers, pill
-    /// spacers, ruby fillers, image spacers, and row numbers have no source.
-    /// Panel chrome has no source. See [`TextSource`].
+    /// A Card selection addresses a Dictionary node and a byte in it, not a
+    /// screen position. This table maps a hit in `text` back to that address and
+    /// maps a stored selection forward to a highlight.
+    /// Separators, markers, pill spacers, ruby fillers, image spacers, and row
+    /// numbers have no source. Panel chrome has no source. See [`TextSource`].
     pub sources: Vec<TextSource>,
 }
 
@@ -689,7 +690,7 @@ pub struct PopupScene {
     /// A bin fills each box with `theme.accent` at [`HIGHLIGHT_ALPHA`] after
     /// the panel background and before every element. Layout computes the
     /// boxes because only layout knows which run bytes a selection covers.
-    /// The vector is empty when the request carried no selection.
+    /// The vector is empty when the request carries no selection.
     ///
     /// [`HIGHLIGHT_ALPHA`]: super::HIGHLIGHT_ALPHA
     pub highlights: Vec<SceneRect>,

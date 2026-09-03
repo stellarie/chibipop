@@ -100,15 +100,15 @@ pub struct SettingsForm {
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
-    /// Whether Anki glossary fields include each Dictionary name.
+    /// This setting controls whether Anki glossary fields include each Dictionary name.
     pub include_dictionary_name: bool,
     /// Whether the note uses only the top Dictionary's Entry.
     pub first_dict_only: bool,
-    /// Which physical button applies a glossary selection.
+    /// This setting selects the physical button that applies a glossary selection.
     pub selection_buttons: SelectionButtons,
-    /// Which separator joins selected glossary fragments.
+    /// This setting selects the separator that joins selected glossary fragments.
     pub selection_separator: SelectionSeparator,
-    /// What a triple-click selects.
+    /// This setting selects the content for a triple-click.
     pub triple_click: TripleClick,
     pub enabled_plugins: Vec<String>,
 }

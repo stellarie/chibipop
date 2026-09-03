@@ -497,7 +497,7 @@ pub(super) enum Elem {
     /// It removes width from the next element.
     Corner(Line),
     Separator { top_gap: f32 },
-    /// A selection checkbox that shares the next line's top gap.
+    /// A Check element that uses the next line's top gap.
     Check {
         entry: Option<u32>,
         coverage: Coverage,

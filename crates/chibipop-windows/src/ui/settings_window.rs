@@ -181,15 +181,15 @@ const ID_PITCH_ADD: i32 = 174;
 const ID_PITCH_REMOVE: i32 = 175;
 /// The Ranking strategy combo box on the Dictionaries tab.
 const ID_RANKING: i32 = 176;
-/// The edge auto-scroll checkbox.
+/// This identifier names the checkbox for `edge_autoscroll`.
 const ID_EDGE_AUTOSCROLL: i32 = 177;
-/// The selection button mode combo box.
+/// This identifier names the combo box for `selection_buttons`.
 const ID_SELECTION_BUTTONS: i32 = 178;
-/// The selection separator combo box.
+/// This identifier names the combo box for `selection_separator`.
 const ID_SELECTION_SEPARATOR: i32 = 179;
-/// The triple-click combo box.
+/// This identifier names the combo box for `triple_click`.
 const ID_TRIPLE_CLICK: i32 = 180;
-/// The Include dictionary name checkbox.
+/// This identifier names the checkbox for `include_dictionary_name`.
 const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 
 
@@ -280,13 +280,13 @@ fn layout_mode_at(selection: isize) -> LayoutMode {
         .map_or(LayoutMode::Roomy, |&(mode, _)| mode)
 }
 
-/// The selection button mode combo box in fill order.
+/// The table lists selection button modes in combo box order.
 const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
     (SelectionButtons::PrimaryAdditive, "Primary additive"),
     (SelectionButtons::PrimaryReplacing, "Primary replacing"),
 ];
 
-/// The selection separator combo box in fill order.
+/// The table lists selection separators in combo box order.
 const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
     (SelectionSeparator::Space, "Space"),
@@ -294,7 +294,7 @@ const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::ListItems, "List items"),
 ];
 
-/// The triple-click combo box in fill order.
+/// The table lists triple-click modes in combo box order.
 const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
     (TripleClick::Sense, "Sense"),
     (TripleClick::SenseWithExamples, "Sense with examples"),

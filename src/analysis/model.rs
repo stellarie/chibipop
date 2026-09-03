@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::MODEL_SHA256;
 
-/// Read one model and reject bytes that do not match the pinned release.
+/// Read one model. Reject bytes that do not match the pinned release digest.
 pub(super) fn read(path: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let got = hex(Sha256::digest(&bytes).as_slice());

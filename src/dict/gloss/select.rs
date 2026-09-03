@@ -114,40 +114,40 @@ pub fn extent(doc: &GlossDoc, roles: RoleFilter) -> Option<DocRange> {
     })
 }
 
-/// Returns the visible range for the sense that contains `addr`.
+/// Returns the visible range for the Sense that contains `addr`.
 ///
-/// Dictionaries do not agree on how a sense looks. Jitendex marks a sense with
+/// Dictionaries do not agree on how a Sense looks. Jitendex marks a Sense with
 /// `data.content = "sense"`, as a list item, or as one `div`. 三省堂 and
 /// 大辞林 use a `div` whose first span holds `①`. 広辞苑 nests `①` divs under
-/// a `❶` div. 大辞泉 starts a sense div with a bare `1`. 新和英 is one text
-/// leaf whose lines start with `1 `. 国語辞典オンライン numbers a sense with
-/// an image. 明鏡 puts each sense's examples in a `details` after the sense
-/// div.
+/// a `❶` div. 大辞泉 starts a Sense `div` with a bare `1`. 新和英 is one text
+/// leaf whose lines start with `1 `. 国語辞典オンライン numbers a Sense with
+/// an image. 明鏡 puts each Sense's examples in a `details` after the Sense
+/// `div`.
 ///
 /// The rules, innermost first:
 ///
-/// 1. A line of a multi-line text leaf that starts with a sense marker.
+/// 1. A line of a multi-line text leaf that starts with a Sense marker.
 /// 2. An `li` in a `ul`. Jitendex groups separate selectable gloss lines under
 ///    one explicit Sense, so the inner list item wins.
-/// 3. The innermost marked block ancestor, with the per-sense blocks that
+/// 3. The innermost marked block ancestor, with the per-Sense blocks that
 ///    follow it. A marked block is an `li` in an `ol`, a block with
 ///    `data.content = "sense"`, or a block whose first text or image is a
-///    sense number. A nested `①` wins over its `❶` group. See
+///    Sense number. A nested `①` wins over its `❶` group. See
 ///    [`sibling_sense`].
 /// 4. The innermost block or newline-delimited line. Marker-free Dictionaries
-///    often put a repeated headword beside the definition. Selecting the whole
-///    glossary item would include that unrelated line.
+///    often put a repeated headword beside the gloss. A selection of the whole
+///    `GlossDoc` would include that unrelated line.
 pub fn sense_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     sense(doc, roles, addr).map(|sense| sense.with_examples)
 }
 
-/// Returns the sense that contains `addr` without its examples.
+/// Returns the Sense that contains `addr` without its examples.
 ///
 /// The range stops before the first example leaf inside the marked block.
-/// It also excludes the per-sense blocks that follow the marked block.
-/// Examples follow the definition in every Dictionary shape seen. The cut
-/// keeps the definition and a note that precedes an example. It drops a note
-/// that follows an example because one range cannot skip a middle.
+/// It also excludes the per-Sense blocks that follow the marked block.
+/// Examples follow the gloss in every Dictionary shape seen. The cut keeps the
+/// gloss and a note that precedes an example. It drops a note that follows an
+/// example because one range cannot exclude an intermediate block.
 pub fn sense_core_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     let own = sense(doc, roles, addr)?.own;
     let content = leaves(doc, RoleFilter { examples: false, ..roles });
@@ -171,7 +171,7 @@ pub fn sense_core_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Opt
 /// Returns the line that contains `addr`: a text line of a multi-line leaf,
 /// or the innermost block ancestor.
 ///
-/// This is the paragraph rule of a browser's triple-click. It ignores sense
+/// This is the paragraph rule of a browser's triple-click. It ignores Sense
 /// markers, so an example line in 新明解 or a note in 三省堂 selects alone.
 pub fn line_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<DocRange> {
     let nodes = path_nodes(doc, addr.path)?;
@@ -188,7 +188,7 @@ pub fn line_range(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Do
     subtree_range(&all, path_prefix(addr.path, depth + 1)?)
 }
 
-/// One resolved sense: the marked block alone, and with its per-sense followers.
+/// One resolved Sense contains the marked block and its per-Sense followers.
 struct Sense {
     own: DocRange,
     with_examples: DocRange,
@@ -235,17 +235,17 @@ fn sense(doc: &GlossDoc, roles: RoleFilter, addr: DocAddr) -> Option<Sense> {
     Some(Sense { own: range, with_examples: range })
 }
 
-/// The sense among the children of `parent` that contains child `index`.
+/// The Sense among the children of `parent` that contains child `index`.
 ///
-/// A marked child starts a sense. The sense continues through the unmarked
-/// blocks that follow it when the same block shape follows at least two
-/// marked siblings. 明鏡 places each sense's examples in a `details` after its
+/// A marked child starts a Sense. The Sense includes unmarked blocks after it
+/// when the same block shape occurs after at least two marked siblings. 明鏡
+/// places each Sense's examples in a `details` after its
 /// `❶` div, so a click in an example selects `❶` with its examples. A note
-/// that appears once after the last sense, such as 大辞泉's `補説`, does not
-/// join that sense.
+/// that appears once after the last Sense, such as 大辞泉's `補説`, does not
+/// join that Sense.
 ///
-/// Returns `None` when child `index` is not marked and does not attach to a
-/// preceding marked sibling. The caller then climbs to the next block.
+/// Returns `None` when child `index` is not marked and does not attach to an
+/// earlier marked sibling. The caller then checks the next block.
 fn sibling_sense(
     doc: &GlossDoc,
     all: &[Leaf],
@@ -266,9 +266,9 @@ fn sibling_sense(
         return None;
     }
 
-    // A shape that follows two or more marked siblings belongs to each sense.
-    // Each entry holds a representative, the last marked sibling it followed,
-    // and how many distinct marked siblings it followed.
+    // A shape that follows two or more marked siblings belongs to each Sense.
+    // Each tuple stores a representative, the last marked sibling it followed,
+    // and the count of distinct marked siblings it followed.
     let mut followers: Vec<(NodeId, NodeId, usize)> = Vec::new();
     let mut after_marked = None;
     for &(child, _, marked) in &children {
@@ -311,7 +311,7 @@ fn sibling_sense(
     Some(Sense { own, with_examples: DocRange { start: own.start, end: last.end } })
 }
 
-/// Whether the block `id` is a sense by its own shape.
+/// Whether the block `id` is a Sense by its own shape.
 fn is_marked_block(doc: &GlossDoc, id: NodeId, parent: Option<Tag>) -> bool {
     if (doc.node(id).tag == Tag::Li && parent == Some(Tag::Ol))
         || doc.marker(id) == Some("sense")
@@ -325,13 +325,13 @@ fn is_marked_block(doc: &GlossDoc, id: NodeId, parent: Option<Tag>) -> bool {
     }
 }
 
-/// A node that starts its own line: a `div`, a list item, a `details`, or an
-/// inline tag with a `data.content` marker.
+/// A block starts its own line. It can be a `div`, a list item, a `details`, or
+/// an inline tag with a `data.content` marker.
 fn is_block(doc: &GlossDoc, id: NodeId) -> bool {
     matches!(doc.node(id).tag, Tag::Div | Tag::Li | Tag::Details) || doc.has_marker(id)
 }
 
-/// The first thing a reader sees in a block.
+/// The first item in a block.
 enum FirstItem<'a> {
     Text(&'a str),
     Image(NodeId),
@@ -353,12 +353,12 @@ fn first_item(doc: &GlossDoc, id: NodeId) -> Option<FirstItem<'_>> {
     doc.children(id).find_map(|child| first_item(doc, child))
 }
 
-/// Whether an image stands for a sense number.
+/// Whether an image marks a Sense number.
 ///
-/// 国語辞典オンライン numbers a sense with `img` whose `title` is `１番` and
-/// whose file is `１-fill.svg`. A `title` or `alt` that starts with a numeral
-/// counts. A file stem counts only under the text rule, because a hash-named
-/// file such as `1a2b.png` also starts with a digit.
+/// 国語辞典オンライン marks each Sense with an `img` whose `title` is `１番`
+/// and whose file is `１-fill.svg`. A `title` or `alt` that starts with a numeral
+/// counts. A file stem counts only under the text rule because a hash-named file
+/// such as `1a2b.png` also starts with a digit.
 fn image_is_numeral(doc: &GlossDoc, id: NodeId) -> bool {
     let attr = |key: &str| doc.attr_of(id, key).and_then(|v| doc.scalar_str(v));
     if ["title", "alt"].into_iter().filter_map(attr).any(starts_with_numeral) {
@@ -395,7 +395,8 @@ fn is_enclosed_numeral(c: char) -> bool {
     )
 }
 
-/// The range from the first visible leaf under `root` to the end of the last.
+/// The range from the first visible leaf under `root` to the end of the last
+/// leaf.
 fn subtree_range(all: &[Leaf], root: NodePath) -> Option<DocRange> {
     let first = all.iter().find(|leaf| is_prefix(root, leaf.path))?;
     let last = all.iter().rev().find(|leaf| is_prefix(root, leaf.path))?;
@@ -434,13 +435,13 @@ fn line_at(text: &str, byte: usize) -> std::ops::Range<usize> {
     start..end
 }
 
-/// Whether `text` starts with a sense number.
+/// Whether `text` starts with a Sense number.
 ///
-/// The set covers the enclosed numerals that Japanese dictionaries use
-/// (`①` `❶` `⓫` `⑴` `⒈` `Ⅰ` `㈠` `㊀` `㋐` `Ⓐ`), one or two digits followed by
-/// a separator (`1 `, `2.`, `３、`), and a bracketed numeral (`［一］`, `(2)`,
-/// `〔三〕`). `1980年` and `10人` are not markers because a letter follows the
-/// digits.
+/// The set covers the enclosed numerals that Japanese Dictionaries use.
+/// Examples include `①` `❶` `⓫` `⑴` `⒈` `Ⅰ` `㈠` `㊀` `㋐` and `Ⓐ`.
+/// It covers one or two digits followed by a separator, such as `1 `, `2.`,
+/// or `３、`. It covers bracketed numerals, such as `［一］`, `(2)`, or `〔三〕`.
+/// `1980年` and `10人` are not markers because a letter follows the digits.
 fn has_sense_marker(text: &str) -> bool {
     let text = text.trim_start();
     let mut chars = text.chars();
@@ -735,7 +736,7 @@ mod tests {
 
     #[test]
     fn sense_range_picks_the_marked_div_around_a_definition_or_its_example() {
-        // The 三省堂 shape: a numbered span, a definition, and an example div.
+        // The 三省堂 shape: a Sense number, a gloss, and an example `div`.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "data": {"name": "大語義"}, "content": [
                 {"tag": "div", "data": {"name": "語義"}, "content": [
@@ -809,7 +810,7 @@ mod tests {
 
     #[test]
     fn sense_range_prefers_a_nested_number_over_its_group() {
-        // The 広辞苑 shape: ❶ groups with ① members as nested divs.
+        // The 広辞苑 shape: `❶` groups `①` members in nested `div` elements.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": [
@@ -829,7 +830,7 @@ mod tests {
 
     #[test]
     fn sense_range_accepts_a_bare_digit_leaf_as_a_marker() {
-        // The 大辞泉 shape: the number is its own leaf inside the sense div.
+        // The 大辞泉 shape: the number has its own leaf inside the Sense `div`.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": [{"tag": "span", "content": "1"}, {"tag": "span", "content": "食物を口に入れる。"}]},
@@ -861,7 +862,7 @@ mod tests {
 
     #[test]
     fn sense_range_reads_a_numeral_image_as_a_marker() {
-        // The 国語辞典オンライン shape: each sense div starts with a number image.
+        // The 国語辞典オンライン shape: each Sense `div` starts with a number image.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": [
@@ -879,7 +880,7 @@ mod tests {
             span(at(second, 0), at(second, "付いている物をはずす。".len() as u32)),
             sense_range(&d, RoleFilter::CARD, at(second, 0))
         );
-        // A hash-named image is not a number.
+        // A hash-named image is not a Sense marker.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": [{"tag": "img", "path": "images/1a2b3c.png"}, {"tag": "span", "content": "one"}]},
@@ -892,8 +893,8 @@ mod tests {
 
     #[test]
     fn sense_range_selects_one_marker_less_block() {
-        // Marker-free Dictionaries use sibling blocks for a definition,
-        // example, and note. The clicked block remains independent.
+        // Marker-free Dictionaries use sibling blocks for a gloss, an example,
+        // and a note. The clicked block remains independent.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "content": "「だけ」の意のやや改まった表現。"},
@@ -916,8 +917,8 @@ mod tests {
 
     #[test]
     fn sense_range_attaches_the_example_block_that_follows_each_sense() {
-        // The 明鏡 shape: a numbered div, then a details with its examples,
-        // for each sense. A single trailing note joins no sense.
+        // The 明鏡 shape has a numbered `div` and a `details` element with
+        // examples for each Sense. A single trailing note joins no Sense.
         let d = doc(&json!([{"type": "structured-content", "content": {
             "tag": "div", "content": [
                 {"tag": "div", "data": {"meaning": ""}, "content": "❶限定を表す。"},
@@ -935,7 +936,7 @@ mod tests {
         assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(first, 3)));
         assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(first_example, 3)));
         assert_eq!(expected, sense_range(&d, RoleFilter::CARD, at(path(&[0, 0, 1, 0, 0]), 0)));
-        // The last sense keeps its examples and leaves the note alone.
+        // The last Sense keeps its examples and excludes the note.
         assert_eq!(
             span(at(second, 0), at(second_example, "「待つのみだ」".len() as u32)),
             sense_range(&d, RoleFilter::CARD, at(second_example, 0))
@@ -946,8 +947,8 @@ mod tests {
 
     #[test]
     fn zatsudan_gloss_lines_select_separately_inside_a_content_sense() {
-        // Jitendex puts separate selectable gloss lines in one `ul` inside
-        // a `div` marked `sense`.
+        // Jitendex puts separate gloss lines in one `ul` inside a `div` marked
+        // `sense`.
         let d = doc(&json!([{"type": "structured-content", "content": [
             {"tag": "div", "data": {"content": "sense-group"}, "content": [
                 {"tag": "div", "data": {"content": "sense"}, "content": [

@@ -265,9 +265,10 @@ impl App {
         )
     }
 
-    /// The add-card row's copyable bind, or `None` when desktop settings own the key.
-    /// Hyprland always gets a control-socket bind. A portal namespace depends on the
-    /// process that launched the daemon, but the control socket has one stable path.
+    /// Return the add-card row's copyable bind.
+    /// Return `None` when desktop settings own the key.
+    /// Hyprland always gets a control socket bind. A portal namespace depends on
+    /// the process that starts the daemon. The control socket has one stable path.
     fn add_bind_snippet(&self) -> Option<String> {
         match self.add_control() {
             HotkeyControl::Snippet { text } => Some(text),
@@ -704,11 +705,14 @@ enum Message {
     AnkiAddKey(String),
     IncludeDictionaryName(bool),
     FirstDictOnly(bool),
-    /// The selection button-mode picker label. [`SELECTION_BUTTONS`] maps it back.
+    /// This label identifies a selection button mode.
+    /// [`SELECTION_BUTTONS`] maps the label to a value.
     SelectionButtonsPicked(String),
-    /// The selection separator picker label. [`SELECTION_SEPARATORS`] maps it back.
+    /// This label identifies a selection separator.
+    /// [`SELECTION_SEPARATORS`] maps the label to a value.
     SelectionSeparatorPicked(String),
-    /// The triple-click picker label. [`TRIPLE_CLICKS`] maps it back.
+    /// This label identifies a triple-click mode.
+    /// [`TRIPLE_CLICKS`] maps the label to a value.
     TripleClickPicked(String),
     /// Whether an add carries a mining picture. The core gate is
     /// `chibipop::shot::plan_add`.
@@ -1313,7 +1317,7 @@ const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
     (LayoutMode::Compact, "Compact (one line per dictionary)"),
 ];
 
-/// The button-mode picker items, in display order.
+/// This table lists selection button modes in display order.
 const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
     (SelectionButtons::PrimaryAdditive, "Primary additive"),
     (SelectionButtons::PrimaryReplacing, "Primary replacing"),
@@ -1337,7 +1341,7 @@ fn selection_buttons_of(label: &str) -> SelectionButtons {
         .map_or(SelectionButtons::PrimaryAdditive, |&(buttons, _)| buttons)
 }
 
-/// The separator picker items, in display order.
+/// This table lists selection separators in display order.
 const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
     (SelectionSeparator::Space, "Space"),
@@ -1363,7 +1367,7 @@ fn selection_separator_of(label: &str) -> SelectionSeparator {
         .map_or(SelectionSeparator::Ellipsis, |&(separator, _)| separator)
 }
 
-/// The triple-click picker items, in display order.
+/// This table lists triple-click modes in display order.
 const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
     (TripleClick::Sense, "Sense"),
     (TripleClick::SenseWithExamples, "Sense with examples"),
@@ -2036,7 +2040,7 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 
 fn anki_section(app: &App) -> Element<'_, Message> {
     // The add-card row uses the same hotkey control as the trigger row.
-    // Native sessions call the control socket. XDPH sessions require a
+    // Native sessions call the control socket. XDPH sessions need a
     // compositor `global` bind because Hyprland has no shortcut editor.
     let add_bind: Element<'_, Message> = match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
@@ -2046,9 +2050,9 @@ fn anki_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .into(),
-        // XDPH cannot assign a key, and its namespace depends on the process
-        // that launched the daemon. Give Hyprland the stable control-socket route.
-        // KDE and GNOME keep the desktop-owned rebind flow.
+        // XDPH cannot assign a key. Its namespace depends on the process
+        // that starts the daemon. Give Hyprland the stable control socket path.
+        // KDE and GNOME keep the desktop rebind path.
         HotkeyControl::Rebind { current } => {
             let rebind: Element<'_, Message> = match app.add_bind_snippet() {
                 Some(snippet) => column![
@@ -2400,7 +2404,7 @@ mod tests {
         }
     }
 
-    /// A development launch can register under its terminal's portal app ID.
+    /// A development launch can use its terminal's portal app ID.
     /// The Hyprland row must use the control socket, which has no portal
     /// namespace and reaches the same add-card path.
     #[test]

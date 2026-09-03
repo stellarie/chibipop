@@ -1,8 +1,8 @@
 //! The pointer gesture state machine for glossary selection.
 //!
-//! This module owns timing, click stages, and drag transitions without reading
-//! controller state. The controller supplies an [`ItemSource`] for the current
-//! Card and applies the returned effects to platform commands.
+//! This module controls time, click stages, and drag transitions. It does not
+//! read Controller state. The Controller supplies an [`ItemSource`] for the
+//! current Card and applies the returned effects to platform commands.
 
 use crate::analysis::{word_at, WordMap};
 use crate::config::TripleClick;
@@ -23,8 +23,8 @@ pub use crate::controller::Button;
 
 /// The resolution stage for a click or drag endpoint.
 ///
-/// Grapheme resolution also supplies the snapping boundary for a drag. The
-/// other stages match the progressively larger items in a click chain.
+/// Grapheme resolution also supplies the boundary where a drag snaps. The
+/// other stages match the larger items in a click chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GestureStage {
     Grapheme,
@@ -33,7 +33,7 @@ pub enum GestureStage {
     Entry,
 }
 
-/// The short name is useful in table-driven resolver tests.
+/// The short name keeps resolver tests concise.
 pub type Stage = GestureStage;
 
 /// The payload for a pointer press.
@@ -68,7 +68,7 @@ pub enum GestureInput {
     Analysis,
 }
 
-/// Values that the controller converts into commands.
+/// Values that the Controller converts into commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GestureEffect {
     Repaint,
@@ -82,21 +82,22 @@ pub enum GestureEffect {
     },
 }
 
-/// Timing and selection settings for one gesture.
+/// Time and selection settings for one gesture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GestureEnv {
     /// The inclusive number of ticks in a click chain.
     pub chain_ticks: u64,
     /// The physical movement that changes a click into a drag.
     pub threshold_px: i32,
-    /// Whether the physical primary button adds instead of replacing.
+    /// Whether the physical primary button adds to the selection instead of
+    /// replacing it.
     pub primary_additive: bool,
 }
 
 /// Resolves a text address into one selectable item.
 ///
-/// The card constructor keeps this module independent of the Controller. Tests
-/// can instead use [`ItemSource::from_fn`] with a small table of ranges.
+/// The Card constructor keeps this module independent of the Controller. Tests
+/// can use [`ItemSource::from_fn`] with a small range table.
 pub struct ItemSource<'a> {
     source: ItemSourceKind<'a>,
 }
@@ -112,7 +113,7 @@ enum ItemSourceKind<'a> {
 }
 
 impl<'a> ItemSource<'a> {
-    /// Builds a resolver for one Card and its current analysis result.
+    /// Builds a resolver for one Card and its current Japanese analysis result.
     pub fn new(
         card: &'a Card,
         roles: RoleFilter,
@@ -196,8 +197,8 @@ pub struct Gesture {
     active_button: Option<Button>,
     current_link: bool,
     dragging: bool,
-    /// The last pointer address during a drag. A word result that arrives
-    /// mid-drag recomputes the range from here.
+    /// The last `TextAddr` during a drag. Japanese analysis can return a Word
+    /// group during the drag. The code recomputes the range from this address.
     drag_addr: Option<TextAddr>,
     last_press: Option<PressPoint>,
     pending_clear: Option<u64>,
@@ -238,7 +239,7 @@ impl Gesture {
         }
     }
 
-    /// Alias that reads naturally at the controller seam.
+    /// This alias names the call at the Controller seam.
     pub fn input(
         &mut self,
         input: GestureInput,
@@ -343,10 +344,10 @@ impl Gesture {
 
     /// The item that a drag snaps to.
     ///
-    /// A drag from a plain press snaps to graphemes. A drag from a chained
-    /// press keeps the stage of that press, so a double-click drag grows by
-    /// words and a triple-click drag grows by senses. This matches the
-    /// browser convention that the chain sets the unit of the drag.
+    /// A plain press makes a drag snap to graphemes. A chained press keeps its
+    /// stage. A double-click drag extends by Word groups. A triple-click drag
+    /// extends by the configured triple-click unit. The click chain sets the
+    /// drag unit, as in a browser.
     fn drag_stage(&self) -> GestureStage {
         match self.stage {
             0 | 1 => GestureStage::Grapheme,
@@ -360,8 +361,8 @@ impl Gesture {
         let anchor = self.anchor?;
         let current = addr?;
         let stage = self.drag_stage();
-        // A word is not known until the analysis answers, so a word drag
-        // snaps to graphemes until then.
+        // A drag at the Word stage snaps to graphemes until Japanese analysis
+        // returns a Word group.
         let snap = |addr: TextAddr| {
             source
                 .item(stage, addr)
@@ -372,8 +373,8 @@ impl Gesture {
         end = snap(end)
             .map(|item| if item.start == end { end } else { item.end })
             .unwrap_or(end);
-        // A chained press already selected the anchor item. The drag never
-        // shrinks below it, even when the anchor sits on its first caret.
+        // A chained press selected the anchor item. The drag does not select
+        // less than that item, even when the anchor is at its first caret.
         if stage != GestureStage::Grapheme {
             if let Some(item) = snap(anchor) {
                 start = start.min(item.start);
@@ -432,8 +433,9 @@ impl Gesture {
         selection: &mut CardSelection,
     ) -> Vec<GestureEffect> {
         let Some(pending) = self.pending_word.take() else { return Vec::new() };
-        // A drag that began before the answer already owns the selection.
-        // Re-snap that drag to words instead of replacing it with one word.
+        // A drag can start before Japanese analysis returns a Word group.
+        // The drag already owns the selection. Re-snap it to Word groups
+        // instead of replacing the selection with one Word group.
         if self.dragging {
             let Some(item) = self.drag_item(self.drag_addr, source) else { return Vec::new() };
             self.apply(selection, item, pending.button, env);
@@ -741,9 +743,9 @@ mod tests {
         }
     }
 
-    /// Graphemes are two bytes wide. Words are four bytes wide. Senses are
-    /// eight bytes wide. `words` gates the word stage so a test can model an
-    /// analysis that has not answered yet.
+    /// Graphemes span two bytes. Word groups span four bytes. Senses span eight
+    /// bytes. `words` controls the Word stage so a test can model Japanese
+    /// analysis before it returns a result.
     fn staged_resolver(words: bool) -> impl Fn(GestureStage, TextAddr) -> Option<SelRange> {
         move |stage: GestureStage, value: TextAddr| {
             let width = match stage {
@@ -792,13 +794,14 @@ mod tests {
         press_at(&mut gesture, &source, &mut selection, 1, 9);
         assert_eq!(selection.items(), &[range(8, 12)]);
 
-        // Rightward: the pointer at byte 13 is inside word 12..16.
+        // Rightward drag: byte 13 is inside the Word range 12..16.
         move_to(&mut gesture, &source, &mut selection, 2, 13, 8);
         assert_eq!(selection.items(), &[range(8, 16)]);
-        // Leftward past the anchor: the anchor word stays whole.
+        // Leftward past the anchor: the anchor Word group stays whole.
         move_to(&mut gesture, &source, &mut selection, 3, 5, -8);
         assert_eq!(selection.items(), &[range(4, 12)]);
-        // A pointer on a word's first caret does not take that word.
+        // A pointer at a Word group's first caret does not select that Word
+        // group.
         move_to(&mut gesture, &source, &mut selection, 4, 16, 16);
         assert_eq!(selection.items(), &[range(8, 16)]);
 

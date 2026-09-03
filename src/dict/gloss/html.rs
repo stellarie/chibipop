@@ -254,7 +254,7 @@ struct RangePlan {
 
 /// Shared inputs for one selected HTML tree walk.
 ///
-/// Copying this context keeps recursive calls focused on node-specific state.
+/// This context keeps recursive calls focused on node-specific state.
 #[derive(Clone, Copy)]
 struct RangeWalk<'a> {
     doc: &'a GlossDoc,

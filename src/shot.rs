@@ -32,8 +32,8 @@ pub struct ShotPlan {
 /// popup add state. It does not apply [`plan_add`]'s guards or read
 /// `include_on_add`.
 pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> ShotPlan {
-    // The picture plan mines the same note as the Anki button, so it honors
-    // the Card selection in the same way.
+    // The Mining screenshot plan uses the same note as the Anki button.
+    // It applies the same Card selection.
     let empty = crate::select::CardSelection::default();
     let selection = view.selection.card(0).unwrap_or(&empty);
     let (expr, fields) = crate::controller::note_payload(

@@ -199,14 +199,15 @@ pub trait TextMeasure {
 
     /// Return the UTF-16 offset nearest to a run-relative point.
     ///
-    /// The offset uses UTF-16 units across all spans. A point above the first line
-    /// returns zero. A point below the last line returns the run length. A point
-    /// past a line end returns that line's end, and the result can equal the run
-    /// length.
+    /// The offset uses UTF-16 units across all spans.
+    /// A point above the first line returns zero.
+    /// A point below the last line returns the run length.
+    /// A point past a line end returns that line's end.
+    /// The result can equal the run length.
     ///
     /// This belongs to the seam because DirectWrite `HitTestPoint` and cosmic-text
-    /// `Buffer::hit` own the shaped geometry. Probing every caret would cost O(n)
-    /// for each hover.
+    /// `Buffer::hit` own the shaped geometry.
+    /// A check of every caret costs O(n) for each hover.
     fn hit_offset(
         &mut self,
         run: MeasureRun<'_>,

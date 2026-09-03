@@ -109,7 +109,7 @@ pub struct ShowRequest {
     /// The Controller's selection state for the shown surface.
     ///
     /// The request owns a copy because the popup can repaint after the
-    /// Controller returns and because the current request survives reshow.
+    /// Controller returns. The current request also survives a reshow.
     pub selection: Option<Selections>,
 }
 
@@ -239,14 +239,14 @@ pub struct Popup {
     vis: Visibility,
     /// What is on screen, kept for a re-render at a new scale.
     current: Option<ShowRequest>,
-    /// The latest painted scene, used for text hit testing.
+    /// The latest painted scene for text address lookup.
     ///
-    /// `current` is only the unmeasured request. The scene carries source
-    /// spans, so the popup retains it beside the hit frame.
+    /// `current` holds only the unmeasured request. The scene holds source
+    /// spans, so the popup keeps this scene beside the hit frame.
     scene: Option<PopupScene>,
     /// Whether the Controller has an active selection drag.
     dragging: bool,
-    /// Text address sent with the last pointer interaction.
+    /// The text address sent with the last pointer interaction.
     last_text: Option<TextAddr>,
     /// The seat's pointer, and where the pointer is. Wayland has no
     /// machine-wide mouse hook, so this field holds the whole input
@@ -613,7 +613,7 @@ impl Popup {
         Some(Interaction::Up { local, button })
     }
 
-    /// Resolve a motion while a button is held or a drag is active.
+    /// Resolve pointer motion during a button hold or an active drag.
     pub fn pointer_move(&mut self, pos: (f64, f64)) -> Option<Interaction> {
         self.pointer.motion(pos);
         self.hover();
@@ -653,7 +653,7 @@ impl Popup {
         Some(Interaction::Move { local, text })
     }
 
-    /// Tell the pointer that the Controller started or ended a selection drag.
+    /// Tell the pointer whether the Controller has an active selection drag.
     pub fn set_dragging(&mut self, dragging: bool) {
         self.dragging = dragging;
         self.pointer.set_dragging(dragging);
@@ -668,8 +668,8 @@ impl Popup {
 
     /// Resolve one panel-local physical point to a gloss address.
     ///
-    /// The surface keeps the scene and the text engine together, so the
-    /// pointer never measures a scene from a different repaint.
+    /// The surface stores the scene and uses the text engine for that scene.
+    /// Therefore, the pointer never measures a different scene after a repaint.
     pub fn text_hit(&mut self, local: PhysPoint) -> Option<TextAddr> {
         let scroll = self.hits.as_ref()?.scroll;
         let scene = self.scene.as_ref()?;
@@ -684,7 +684,7 @@ impl Popup {
             .flatten()
     }
 
-    /// The scripted path's primary-button press.
+    /// The primary-button press for the scripted path.
     pub fn pointer_button(&mut self, pos: (f64, f64)) -> Option<Interaction> {
         self.pointer_press(pos, Button::Primary)
     }
@@ -1151,11 +1151,10 @@ impl Popup {
             to_argb(pixmap.data_mut());
         }
 
-        // Keep the exact scene that reached the buffer. Text hit testing
-        // must use the same source geometry as this painted frame.
-        // A frame with a selection says so. A human tester or a scripted
-        // pass reads this line because a coalesced repaint rasters later
-        // than the interaction that requested it.
+        // Keep the exact scene that reached the buffer.
+        // Text address lookup must use the source geometry from this painted frame.
+        // Record the highlight count for a human tester or a scripted pass.
+        // A repaint can combine several requests before it reaches the buffer.
         let highlights = pending.scene.highlights.len();
         if highlights > 0 {
             self.notes.push(format!("popup: painted {highlights} selection highlight box(es)"));

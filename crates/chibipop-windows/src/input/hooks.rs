@@ -50,23 +50,23 @@ static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
 
 /// Arms click capture on the popup area.
 static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
-/// Stores button bits while the pointer is held.
+/// This state stores button bits while the pointer is held.
 static POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
-/// Stores the latest move while a popup button is held.
+/// This state stores the latest move while a popup button is held.
 static PENDING_POINTER_MOVE: AtomicI64 = AtomicI64::new(NO_POINT);
 
-/// Bounds the hook-to-pump edge queue.
+/// This constant limits the queue of edges from the hook to the pump.
 const POINTER_QUEUE_CAPACITY: usize = 32;
 
-/// One physical mouse button that the popup can consume.
+/// A `PointerButton` represents one physical mouse button that the popup can consume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerButton {
     Left,
     Right,
 }
 
-/// One button edge captured by the low-level mouse hook.
+/// A `PointerEvent` represents one button edge that the low-level mouse hook captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerEvent {
     pub button: PointerButton,
@@ -74,7 +74,7 @@ pub struct PointerEvent {
     pub point: PhysPoint,
 }
 
-/// Stores button edges until the message loop drains them.
+/// This queue stores button edges until the message loop drains them.
 static POINTER_EVENTS: LazyLock<Mutex<VecDeque<PointerEvent>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(POINTER_QUEUE_CAPACITY)));
 
@@ -357,7 +357,7 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     }
 }
 
-/// Stores one popup button edge in screen coordinates.
+/// This function stores one popup button edge in screen coordinates.
 unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM) {
     // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and the
     // message is one of the four button edges below. The `WH_MOUSE_LL`
@@ -620,7 +620,7 @@ impl Hooks {
         PENDING_SCROLL.store(0, Ordering::SeqCst);
     }
 
-    /// Arms or disarms popup pointer capture.
+    /// This function arms or disarms popup pointer capture.
     pub fn set_click_armed(armed: bool) {
         let changed = CLICK_ARMED.swap(armed, Ordering::SeqCst) != armed;
         if changed && !armed {
@@ -635,7 +635,7 @@ impl Hooks {
         }
     }
 
-    /// Takes all queued popup button edges in callback order.
+    /// This function takes all queued popup button edges in callback order.
     pub fn take_pointer_events() -> Vec<PointerEvent> {
         pointer_events()
             .lock()
@@ -644,7 +644,7 @@ impl Hooks {
             .collect()
     }
 
-    /// Takes the latest popup move, if a button moved since the last tick.
+    /// This function takes the latest popup move when a button was held since the last tick.
     pub fn take_pointer_move() -> Option<PhysPoint> {
         let v = PENDING_POINTER_MOVE.swap(NO_POINT, Ordering::SeqCst);
         (v != NO_POINT).then(|| unpack(v))

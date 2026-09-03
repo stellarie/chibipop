@@ -55,9 +55,9 @@ mkdir -p -- "$stage/data" "$stage/data/ipadic" "$stage/models/meiki" "$stage/ext
 install -m755 -- "$binary" "$stage/chibipop"
 install -m644 -- "$repo/data/deconjugator.json" "$stage/data/"
 install -m644 -- "$repo/README.md" "$repo/LICENSE" "$stage/"
-# The decoded IPADIC model is part of the offline-first runtime. Its licence
-# notices ride along with the model, and the staged copy gets the same hash
-# check as the meiki model before the tarball is created.
+# The offline-first runtime needs the decoded IPADIC model. Keep its license
+# files beside the model. The script checks the staged files with the same
+# hash check as the meiki model before it creates the tarball.
 ipadic=$repo/data/ipadic
 install -m644 -- "$ipadic/system.dic" "$ipadic/COPYING" "$ipadic/NOTICE" \
 	"$ipadic/SHA256SUMS.txt" "$stage/data/ipadic/"

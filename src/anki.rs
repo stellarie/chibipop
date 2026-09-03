@@ -277,9 +277,11 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Separates Dictionary groups in the HTML that Anki stores for the plain glossary.
+/// This value separates Dictionary groups in the HTML that Anki stores for the
+/// plain glossary.
 ///
-/// HTML collapses source newlines, so they cannot provide the visible blank line.
+/// HTML collapses newlines in the source. These newlines cannot provide the
+/// visible blank line.
 const PLAIN_GROUP_SEPARATOR: &str = "<br><br>\n";
 
 /// Places a Dictionary name above its numbered plain-text definitions.

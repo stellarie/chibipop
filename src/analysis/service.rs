@@ -10,10 +10,11 @@ struct Request {
     texts: Vec<(TextKey, String)>,
 }
 
-/// A handle for the one-thread Japanese analysis service.
+/// This handle provides access to the one-thread Japanese analysis service.
 ///
-/// The service owns the model after its first request. It sends one result for
-/// each request that it accepts and never joins its thread during process exit.
+/// The service owns the model after its first request. It keeps only the newest
+/// queued request. It sends one result for each request that it processes. It
+/// does not join its thread when the process exits.
 pub struct Service {
     request_tx: mpsc::Sender<Request>,
     result_rx: mpsc::Receiver<(u64, WordMap)>,
@@ -58,8 +59,8 @@ impl Service {
     /// Return whether the service emitted its one load-failure diagnostic.
     ///
     /// When this is true, every request uses [`fallback_words`](super::fallback_words).
-    /// This state lets callers and tests observe the one-time diagnostic without
-    /// replacing stderr with a second logging interface.
+    /// Callers and tests can observe the one-time diagnostic through this state.
+    /// The state does not replace stderr with another interface for logs.
     pub fn fallback_active(&self) -> bool {
         self.fallback_active.load(Ordering::Acquire)
     }

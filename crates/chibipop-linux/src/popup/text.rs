@@ -376,7 +376,8 @@ impl TextMeasure for TextEngine {
         let mut hit = buffer.hit(x, y);
         if hit.is_none() {
             // cosmic-text returns no cursor for a point outside its visible
-            // runs. Retry inside the first or last run before giving up.
+            // runs. Retry inside the first or last run before the function
+            // returns.
             let retry_y = y.clamp(first_y, last_y + last_h - f32::EPSILON);
             hit = buffer.hit(x, retry_y);
         }
@@ -564,8 +565,9 @@ fn byte_offset(spans: &[StyledSpan<'_>], utf16: u32) -> usize {
 
 /// The UTF-16 offset at a byte boundary in a run's concatenated spans.
 ///
-/// cosmic-text reports a byte index within one buffer line. Hit testing first
-/// adds that line's base, then this walk restores the seam's UTF-16 address.
+/// cosmic-text reports a byte index within one buffer line.
+/// The hit operation first adds that line's base.
+/// This walk then restores the seam's UTF-16 address.
 fn utf16_offset(spans: &[StyledSpan<'_>], byte: usize) -> u32 {
     let mut units = 0u32;
     let mut base = 0usize;
@@ -604,9 +606,10 @@ fn span_at<'a, 's>(
 
 /// The box of the cluster covering UTF-16 offset `utf16`.
 ///
-/// A line-ending offset matches no glyph. It answers the zero-width end of
-/// the line before it. An offset past the text or inside an unexpected cluster
-/// answers the end of the last line. This function never skips an offset.
+/// An offset at a hard line break matches no glyph.
+/// It answers the zero-width end of the line before the break.
+/// An offset past the text or inside an unexpected cluster answers the end
+/// of the last line. This function never skips an offset.
 fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox {
     let target = byte_offset(spans, utf16);
     // A run with no lines at all has no shaped height to report, so
@@ -616,8 +619,8 @@ fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox 
     let mut bases = LineBases::default();
     for run in buffer.layout_runs() {
         let base = bases.advance(spans, &run);
-        // cosmic-text strips a hard line ending. When the next line advances
-        // the base past `target`, the prior visual run owns that caret.
+        // cosmic-text strips a hard line break. When the next line moves the
+        // base past `target`, the previous visual run owns that caret.
         if target < base {
             return end;
         }
@@ -1357,7 +1360,7 @@ mod tests {
     }
 
 
-    /// Hit testing converts cosmic-text byte positions back to UTF-16 offsets.
+    /// The hit operation converts cosmic-text byte positions to UTF-16 offsets.
     #[test]
     fn hit_offset_maps_astral_text_and_clamps_vertical_points() {
         let Some(mut engine) = jp_engine() else { return };
@@ -1451,9 +1454,9 @@ mod tests {
         assert!(guard.iter().all(|&b| b == 0), "wrote past the pixmap");
     }
 
-    /// The canned popup with the real engine: a drag range from `text_hit`
-    /// must come back as highlight boxes on the next scene. The fixed
-    /// metrics of the pointer tests cannot see a shaping mismatch here.
+    /// The real engine tests the canned popup.
+    /// A drag range from `text_hit` must produce highlight boxes on the next scene.
+    /// Fixed metrics in pointer tests cannot show a mismatch in glyph placement.
     #[test]
     fn a_drag_over_the_canned_gloss_paints_with_the_real_engine() {
         use chibipop::select::{SelRange, Selections};

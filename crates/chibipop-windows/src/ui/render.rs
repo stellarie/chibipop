@@ -365,7 +365,7 @@ impl TextMeasure for Measurer<'_> {
         let mut inside = BOOL::default();
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
         // SAFETY: DirectWrite writes the hit flags and metrics into these
-        // stack values, and the layout owns the text being hit.
+        // stack values. The layout owns the text that the call tests.
         unsafe { layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut metrics) }
             .map_err(refused)?;
         let offset = metrics
@@ -469,11 +469,11 @@ pub struct Renderer {
     target: Option<ID2D1HwndRenderTarget>,
     /// The hit targets from the last paint pass, in DIPs, exactly as the scene reported them.
     hits: RefCell<Vec<HitTarget>>,
-    /// The scene from the last successful paint pass.
+    /// This field stores the scene from the last successful paint pass.
     ///
     /// Pointer text hits must use the same measured runs as the pixels on screen.
     scene: Option<PopupScene>,
-    /// The font that the cached scene used.
+    /// This field stores the font that the cached scene used.
     scene_font: String,
     /// The painter's decoded-asset cache, or `None` when this build cannot open the dictionary
     /// database.
@@ -548,10 +548,11 @@ impl Renderer {
             .map(|r| r.action.clone())
     }
 
-    /// Resolves a popup-local physical point to the cached glossary address.
+    /// This function resolves a popup-local physical point to a cached `TextAddr`.
     ///
-    /// The cache comes from the last paint pass, so text hit testing and
-    /// DirectWrite output use one scene. A point has no address before paint.
+    /// The cache comes from the last paint pass.
+    /// Pointer hits and DirectWrite output use the same scene.
+    /// A point has no address before paint.
     pub fn text_hit(
         &mut self,
         local: PhysPoint,

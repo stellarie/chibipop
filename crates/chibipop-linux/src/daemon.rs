@@ -65,10 +65,10 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 
-/// Controller clock quantum.
+/// This value sets the Controller tick interval.
 ///
 /// Linux has no dispatch timer. A temporary timer advances only gesture state
-/// after pointer input and retires after the click chain expires.
+/// after pointer input and stops after the click chain expires.
 const DISPATCH_TICK_MS: u32 = 20;
 const GESTURE_TIMER_TICKS: u64 =
     CLICK_CHAIN_MS.div_ceil(DISPATCH_TICK_MS as u64).saturating_add(1);
@@ -171,7 +171,7 @@ pub(crate) struct App {
     /// The state covers an absent capture protocol, OCR models, or portal consent.
     /// The daemon still runs and reports the cause.
     worker: Option<Worker>,
-    /// Japanese word-boundary analysis for the shown Card.
+    /// The service finds Japanese word boundaries for the shown Card.
     ///
     /// The service loads its model lazily and uses the Worker wake source,
     /// so analysis never blocks the calloop pump.
@@ -248,9 +248,9 @@ pub(crate) struct App {
     /// Dwell re-check timer while it is armed
     /// (ARCHITECTURE.md#hover-cadence).
     dwell: Option<RegistrationToken>,
-    /// Temporary clock that keeps core gesture deadlines live.
+    /// The temporary clock keeps core gesture deadlines active.
     gesture_tick: Option<RegistrationToken>,
-    /// Ticks before the temporary gesture clock retires.
+    /// This value counts ticks until the temporary gesture clock stops.
     gesture_ticks_left: u64,
 }
 
@@ -656,7 +656,7 @@ impl App {
         self.popup.as_ref().is_some_and(Popup::available)
     }
 
-    /// Return the selection state that the popup may render.
+    /// Return the selection state that the popup can render.
     ///
     /// The layout must receive no selection when Anki is disabled, even if
     /// an old Controller surface still has selection data.
@@ -668,7 +668,7 @@ impl App {
         }
     }
 
-    /// Re-run text hit testing after a drag repaint.
+    /// Repeat text hit checks after a drag repaint.
     fn refresh_drag_text(&mut self) {
         let interaction = self.popup.as_mut().and_then(Popup::drag_move);
         if let Some(interaction) = interaction {
@@ -1640,10 +1640,11 @@ impl App {
         self.sync_dwell();
     }
 
-    /// Keep gesture time live only around pointer input.
+    /// Keep the gesture clock active only around pointer input.
     ///
-    /// One extra tick makes the inclusive click-chain deadline expire. A new
-    /// press or release extends the same timer instead of adding another source.
+    /// One extra tick lets the inclusive click-chain deadline expire.
+    /// A new press or release resets the same timer.
+    /// The daemon does not add another source.
     fn arm_gesture_clock(&mut self) {
         self.gesture_ticks_left = GESTURE_TIMER_TICKS;
         if self.gesture_tick.is_some() {
@@ -1658,7 +1659,7 @@ impl App {
         }
     }
 
-    /// Advance one core gesture tick and retire after the click deadline.
+    /// Advance one core gesture tick and stop after the click deadline.
     fn gesture_tick(&mut self) -> TimeoutAction {
         self.feed(Event::GestureTick);
         self.gesture_ticks_left = self.gesture_ticks_left.saturating_sub(1);
@@ -1871,9 +1872,9 @@ impl App {
         }
     }
 
-    /// Drain the Worker and Japanese analysis results. Only the freshest queued
-    /// result from each service matters because newer requests supersede older
-    /// requests before they reach the event loop.
+    /// Drain the Worker and Japanese analysis results. Keep only the newest queued
+    /// result from each service. Newer requests replace older requests before they
+    /// reach the event loop.
     fn drain_results(&mut self) {
         let mut freshest = None;
         if let Some(worker) = self.worker.as_ref() {
@@ -2116,11 +2117,12 @@ impl App {
         self.feed(Event::CursorMoved { pos: point });
     }
 
-    /// Hide the canned popup through the Controller.
+    /// Hide the canned popup with the Controller.
     ///
-    /// A key release hides only in a hold mode. The demo answers its own
-    /// lookup, so it can also answer `Hide` for that lookup. That path hides
-    /// in Live mode too, and the Controller forgets the surface with it.
+    /// A key release hides the popup only in a hold mode. The demo answers its
+    /// own lookup, so it can also answer `Hide` for that lookup. That answer
+    /// hides the popup in Live mode. The Controller forgets the surface after
+    /// it hides the popup.
     fn demo_hide(&mut self) {
         self.feed(Event::TriggerUp);
         if let Some(id) = self.demo.request.take() {

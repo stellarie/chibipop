@@ -84,22 +84,23 @@ pub enum Hit {
 pub enum Interaction {
     /// Whole wheel notches, in core's sign: wheel-up is positive.
     Scroll { notches: i32 },
-    /// A button press on the panel. `hit` is `None` when the press landed on
-    /// no target, and `text` is the gloss address under the pointer.
+    /// A button press on the panel.
+    /// `hit` is `None` when no target contains the press.
+    /// `text` is the gloss address under the pointer.
     Down {
         local: PhysPoint,
         button: Button,
         hit: Option<HitAction>,
         text: Option<TextAddr>,
     },
-    /// A pointer move while a button is held or a drag is active.
+    /// Pointer motion during a button hold or an active drag.
     Move { local: PhysPoint, text: Option<TextAddr> },
     /// A button release.
     Up { local: PhysPoint, button: Button },
     /// A primary press on the Anki strip.
     ///
-    /// Linux paints this strip inside the panel, so it needs a separate
-    /// interaction before the Controller receives `AddRequested`.
+    /// Linux paints this strip inside the panel. The Controller receives
+    /// `AddRequested` only after a separate interaction.
     Anki { local: PhysPoint },
 }
 
@@ -141,12 +142,12 @@ impl HitScene {
 
     /// Convert surface-local logical coordinates to panel-local physical coordinates.
     ///
-    /// `PointerDown` and `PointerMoved` use this same physical space.
+    /// `PointerDown` and `PointerMoved` use this physical space.
     ///
-    /// This function floors the result instead of rounding it. The answer names the pixel
-    /// that holds the pointer. For example, a pointer at 0.9 logical px is inside physical
-    /// pixel 1 at 1.5x scale, not pixel 2.
-    ///
+    /// This function uses floor instead of round.
+    /// The result identifies the physical pixel under the pointer.
+    /// For example, a pointer at 0.9 logical px maps to physical pixel 1 at 1.5x
+    /// scale, not pixel 2.
     pub fn local(&self, pos: (f64, f64)) -> PhysPoint {
         PhysPoint {
             x: (pos.0 * self.scale).floor() as i32,
@@ -299,9 +300,9 @@ fn button_mask(button: Button) -> u8 {
 
 /// The popup's pointer: the seat objects, the focus, and the bank.
 ///
-/// The button bank is separate from surface focus. Wayland keeps delivering
-/// motion through its implicit grab after a press, so the popup forwards
-/// that motion even after a leave event.
+/// The button state is separate from the surface focus.
+/// Wayland delivers motion through its implicit grab after a press.
+/// The popup therefore forwards motion after a leave event.
 pub struct Pointer {
     seats: SeatState,
     /// `wp_cursor_shape_v1`, where the compositor advertises it. Where
@@ -366,7 +367,7 @@ impl Pointer {
         self.focus
     }
 
-    /// Record the Controller's pointer-capture state.
+    /// Record whether the Controller requests pointer capture.
     pub fn set_dragging(&mut self, dragging: bool) {
         self.dragging = dragging;
     }
@@ -381,7 +382,8 @@ impl Pointer {
         self.buttons |= button_mask(button);
     }
 
-    /// Record a supported button release and return whether it was held.
+    /// Record a supported button release.
+    /// Return whether the button was held.
     pub fn button_up(&mut self, button: Button) -> bool {
         let mask = button_mask(button);
         let held = self.buttons & mask != 0;
@@ -389,7 +391,7 @@ impl Pointer {
         held
     }
 
-    /// Forget button and focus state when the popup hides.
+    /// Clear the button and focus state when the popup hides.
     pub fn cancel(&mut self) {
         self.buttons = 0;
         self.dragging = false;
@@ -517,7 +519,7 @@ impl Pointer {
 
 /// Resolve one button press against a painted frame.
 ///
-/// This function stays free of Wayland state, so tests can cover button roles,
+/// This function uses no Wayland state. Tests can cover button roles,
 /// hit targets, and text addresses with plain data.
 pub fn press(
     local: PhysPoint,
@@ -537,15 +539,15 @@ pub fn press(
 
 /// One step of `CHIBIPOP_POINTER_SCRIPT`.
 ///
-/// Coordinates are surface-local logical units, exactly what
-/// `wl_pointer` delivers. `Wheel` is a raw `axis_value120` value,
-/// which counts positive downward. `Press` and `Release` use the
-/// primary button, while `Press2` and `Release2` use the secondary
-/// button. `Drag` is a motion while a button is held. The script
-/// exists so a developer can drive the handlers on a live compositor
-/// without synthesizing any seat input. The script never touches,
-/// warps, or steals focus from the human's own pointer. It enters
-/// through the same entry points that a real frame uses.
+/// Coordinates are surface-local logical units, exactly as `wl_pointer`
+/// delivers them. `Wheel` is a raw `axis_value120` value that counts
+/// positive downward. `Press` and `Release` use the primary button.
+/// `Press2` and `Release2` use the secondary button.
+/// `Drag` is motion during a button hold.
+/// The script lets a developer drive the handlers on a live compositor
+/// without simulated seat input. The script never touches, warps, or
+/// steals focus from the human's own pointer.
+/// The script uses the same entry points as a real frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
     Enter(f64, f64),
@@ -857,7 +859,8 @@ mod tests {
             x: f32,
             _y: f32,
         ) -> Result<u32, chibipop::ui::layout::MeasureError> {
-            // The inverse of `caret_boxes`: half an em per character, one line.
+            // The fake metrics invert `caret_boxes`.
+            // They assign half an em to each character on one line.
             let size = run.spans.first().map_or(0.0, |s| s.size);
             let adv = size * 0.5;
             let len: usize = run.spans.iter().map(|s| s.text.encode_utf16().count()).sum();
@@ -936,8 +939,8 @@ mod tests {
         assert_eq!(None, hidden.rect());
     }
 
-    /// A drag over the canned gloss must paint. The text hit on the frame
-    /// and the highlight boxes of the next frame use one source table.
+    /// A drag over the canned gloss must produce highlight boxes.
+    /// The text hit on one frame and the next frame use the same source spans.
     #[test]
     fn a_drag_range_over_the_canned_gloss_produces_highlights() {
         use chibipop::select::{SelRange, Selections};

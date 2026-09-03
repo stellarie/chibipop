@@ -1,6 +1,6 @@
 use super::PartOfSpeech;
 
-/// The IPADIC fields needed by the analysis result.
+/// This type stores the IPADIC fields that the analysis result needs.
 ///
 /// Vibrato returns the surface as the first field for dictionary entries. Its
 /// unknown-word entries can return only the feature fields. The parser accepts
@@ -19,7 +19,7 @@ pub(super) struct Feature<'a> {
 }
 
 impl<'a> Feature<'a> {
-    /// Parse an IPADIC feature string without rejecting shortened unknown rows.
+    /// Parse an IPADIC feature string. Accept shortened unknown rows.
     pub(super) fn parse(value: &'a str) -> Self {
         let fields: Vec<&str> = value.split(',').collect();
         let offset = match (fields.first(), fields.get(1)) {

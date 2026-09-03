@@ -143,7 +143,7 @@ pub(super) struct Flow {
     pub(super) top_gap: f32,
     pub(super) text: String,
     pub(super) spans: Vec<FlowSpan>,
-    /// Which Dictionary leaf bytes each text range came from.
+    /// This table records the Dictionary leaf bytes for each text range.
     ///
     /// The layout pass keeps this table separate from spans because one styled span
     /// can contain text from several leaves.
@@ -178,7 +178,7 @@ pub(super) struct Flow {
     /// [`GlossOrigin`]: super::scene::GlossOrigin
     pub(super) dict_id: i64,
     pub(super) entry_id: i64,
-    /// The flattened Entry ordinal in the current Card.
+    /// This field stores the flattened Entry ordinal for the current Card.
     pub(super) entry: u32,
 
 }

@@ -291,8 +291,8 @@ impl TextMeasure for FakeMeasure {
                 }
             }
         }
-        // The line-end caret handles a point past the last glyph. Strict
-        // comparison keeps a glyph centre mapped to that glyph's offset.
+        // The line-end caret handles a point beyond the last glyph. A strict
+        // comparison maps a glyph center to that glyph's offset.
         let line_width = measured.lines[line].w;
         let distance = (x - line_width).abs();
         if nearest.is_none_or(|(best, _)| distance < best) {
@@ -1091,7 +1091,7 @@ fn layout_measures_each_run_at_the_width_it_reports() {
 }
 
 
-/// Hit testing uses the same fixed geometry as caret boxes.
+/// The hit test uses the same fixed geometry as caret boxes.
 #[test]
 fn hit_offset_round_trips_fake_caret_centres_and_clamps_vertical_points() {
     let spans = [styled("ab", 10.0), styled("cd", 10.0)];

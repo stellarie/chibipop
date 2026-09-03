@@ -160,7 +160,7 @@ struct PlainPlan {
 
 /// Shared inputs for one selected plain-text tree walk.
 ///
-/// Copying this context keeps recursive calls focused on node-specific state.
+/// This context keeps recursive calls focused on node-specific state.
 #[derive(Clone, Copy)]
 struct PlainWalk<'a> {
     doc: &'a GlossDoc,

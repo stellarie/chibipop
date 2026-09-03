@@ -1,11 +1,12 @@
-//! The shared Card selection model keeps both platform bins on one address machine.
+//! Both platform bins use one shared Card selection model.
 //!
-//! Selection state lives in core so Windows and Linux cannot drift in containment,
-//! clipping, or coverage rules. FakeMeasure tests cover the machine through the same
-//! measured text seam that the controller and layout use. This choice applies the
-//! issue's future mitigation note: later input changes do not need two selection rules.
+//! Selection state lives in core, so Windows and Linux use the same containment,
+//! clipping, and coverage rules. FakeMeasure tests cover this model through the
+//! same measured text seam that the Controller and layout use. This design
+//! follows the issue's note for future input changes. Later input changes need
+//! one selection rule.
 //!
-//! A document address is a role-visible leaf path and byte offset. A [`TextAddr`]
+//! A `DocAddr` is a role-visible leaf path and byte offset. A [`TextAddr`]
 //! identifies one position in a Card. It stores that address with its flattened
 //! Entry ordinal.
 
@@ -20,8 +21,8 @@ use crate::present::{Card, GlossEntry};
 
 /// One position in the current Card.
 ///
-/// `entry` is the GlossEntry ordinal in flattened display order. `addr` is a
-/// document-order address within that Entry's GlossDoc.
+/// `entry` is the `GlossEntry` ordinal in flattened display order. `addr` is a
+/// document-order address within that Entry's `GlossDoc`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct TextAddr {
     pub entry: u32,
@@ -51,7 +52,7 @@ pub enum Coverage {
     All,
 }
 
-/// Selection state for every Presentation card.
+/// Selection state for every Card in the `Presentation`.
 ///
 /// The vector index is the index in `Presentation::all_cards`.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -77,9 +78,10 @@ impl CardSelection {
 
     /// Applies an additive selection gesture.
     ///
-    /// An identical range removes the existing range. A containing range absorbs
-    /// contained ranges. A contained range replaces its containing ranges. An
-    /// overlapping range that contains neither side is added.
+    /// An identical range removes the existing range. A range that contains
+    /// selected ranges absorbs them. A range inside one or more selected ranges
+    /// replaces those ranges. The method adds a range that intersects the
+    /// existing ranges but contains none of them.
     pub fn toggle(&mut self, item: SelRange) {
         if !valid_range(item) {
             return;
@@ -172,7 +174,8 @@ impl CardSelection {
             Coverage::None
         }
     }
-    /// Removes ranges that touch `entry` and optionally selects its whole extent.
+    /// Removes ranges that touch Entry `entry`. When `on` is true, selects its
+    /// whole extent.
     pub fn set_entry(&mut self, entry: u32, extent: DocRange, on: bool) {
         let first = TextAddr {
             entry,
@@ -200,7 +203,7 @@ impl CardSelection {
         }
     }
 
-    /// Returns sorted, merged, non-overlapping selected ranges.
+    /// Returns the sorted, merged ranges with no overlap.
     pub fn union(&self) -> Vec<SelRange> {
         let mut ranges: Vec<SelRange> = self
             .items
@@ -227,12 +230,13 @@ impl CardSelection {
 }
 
 impl Selections {
-    /// Returns the selection for card `i`, when it exists.
+    /// Returns the selection for Card `i` when it exists.
     pub fn card(&self, i: usize) -> Option<&CardSelection> {
         self.cards.get(i)
     }
 
-    /// Returns the selection for card `i`, growing the vector with empty cards.
+    /// Returns the selection for Card `i`. Extends the vector with empty Card
+    /// selections when needed.
     pub fn card_mut(&mut self, i: usize) -> &mut CardSelection {
         if self.cards.len() <= i {
             self.cards.resize_with(i + 1, CardSelection::default);
@@ -240,14 +244,14 @@ impl Selections {
         &mut self.cards[i]
     }
 
-    /// Swaps two card selections when both indexes exist.
+    /// Swaps two Card selections when both indexes exist.
     pub fn swap(&mut self, a: usize, b: usize) {
         if a < self.cards.len() && b < self.cards.len() {
             self.cards.swap(a, b);
         }
     }
 
-    /// Reports aggregate coverage for a card's entry extents.
+    /// Reports aggregate coverage for a Card's Entry extents.
     pub fn coverage_of_card(&self, i: usize, extents: &[DocRange]) -> Coverage {
         let Some(card) = self.card(i) else {
             return Coverage::None;
@@ -267,7 +271,8 @@ impl Selections {
     }
 }
 
-/// Iterates every Entry in a Card in block and entry display order.
+/// Iterates through each Entry in the order of its block and its position in
+/// that block.
 pub fn entries(card: &Card) -> impl Iterator<Item = (u32, &GlossEntry)> {
     card.blocks
         .iter()

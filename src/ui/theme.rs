@@ -87,7 +87,7 @@ pub struct Theme {
     pub scan_anchor: (u8, u8, u8),
     /// Overlay color for the defined chars.
     pub scan_match: (u8, u8, u8),
-    /// Selection highlight and check color.
+    /// This field sets the color for the selection highlight and Entry check.
     pub accent: (u8, u8, u8),
 }
 

@@ -172,9 +172,9 @@ pub struct PopupConfig {
     /// Lets the user scroll a long popup with the wheel.
     #[serde(default = "default_scroll_popup")]
     pub scroll_popup: bool,
-    /// Auto-scrolls while a selection drag reaches the popup edge.
+    /// This setting enables auto-scroll when a selection drag reaches the popup edge.
     ///
-    /// `scroll_popup = false` disables edge auto-scroll too.
+    /// If `scroll_popup = false`, edge auto-scroll stays disabled.
     #[serde(default = "default_edge_autoscroll")]
     pub edge_autoscroll: bool,
     /// Places collapsed rows beside the entry instead of below it.
@@ -234,7 +234,7 @@ fn default_scroll_popup() -> bool {
     true
 }
 
-/// Enables edge auto-scroll by default.
+/// This function enables edge auto-scroll by default.
 fn default_edge_autoscroll() -> bool {
     true
 }
@@ -302,19 +302,19 @@ pub enum LayoutMode {
     Compact,
 }
 
-/// Selects which physical button applies a glossary selection.
+/// This enum selects the physical button that applies a glossary selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SelectionButtons {
-    /// Makes the primary button add to the current selection.
+    /// This variant adds to the current selection when the user uses the primary button.
     #[default]
     PrimaryAdditive,
-    /// Makes the primary button replace the current selection.
+    /// This variant replaces the current selection when the user uses the primary button.
     PrimaryReplacing,
 }
 
 impl SelectionButtons {
-    /// Returns the kebab-case value stored in TOML.
+    /// This method returns the kebab-case value stored in TOML.
     pub const fn as_str(self) -> &'static str {
         match self {
             SelectionButtons::PrimaryAdditive => "primary-additive",
@@ -322,7 +322,7 @@ impl SelectionButtons {
         }
     }
 
-    /// Returns the label shown by settings windows.
+    /// This method returns the label that the settings windows show.
     pub const fn label(self) -> &'static str {
         match self {
             SelectionButtons::PrimaryAdditive => "Primary additive",
@@ -331,23 +331,23 @@ impl SelectionButtons {
     }
 }
 
-/// Selects the separator between selected glossary fragments.
+/// This enum selects the separator between selected glossary fragments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SelectionSeparator {
-    /// Joins fragments with an ellipsis.
+    /// This variant joins fragments with an ellipsis.
     #[default]
     Ellipsis,
-    /// Joins fragments with one space.
+    /// This variant joins fragments with one space.
     Space,
-    /// Joins fragments with a line break.
+    /// This variant joins fragments with a line break.
     LineBreak,
-    /// Joins fragments as separate list items.
+    /// This variant joins fragments as separate list items.
     ListItems,
 }
 
 impl SelectionSeparator {
-    /// Returns the kebab-case value stored in TOML.
+    /// This method returns the kebab-case value stored in TOML.
     pub const fn as_str(self) -> &'static str {
         match self {
             SelectionSeparator::Ellipsis => "ellipsis",
@@ -357,7 +357,7 @@ impl SelectionSeparator {
         }
     }
 
-    /// Returns the label shown by settings windows.
+    /// This method returns the label that the settings windows show.
     pub const fn label(self) -> &'static str {
         match self {
             SelectionSeparator::Ellipsis => "Ellipsis (…)",
@@ -379,25 +379,25 @@ impl From<SelectionSeparator> for crate::dict::gloss::Separator {
     }
 }
 
-/// Selects what a triple-click on glossary text selects.
+/// This enum selects what a triple-click on glossary text selects.
 ///
-/// A Sense without examples keeps the definition for a card. A Sense with
-/// examples is the block a reader sees as one meaning. A line is the browser
-/// paragraph rule, which ignores sense markers.
+/// `Sense` selects one meaning without its examples. `SenseWithExamples` selects
+/// one meaning with the examples that belong to it. `Line` follows browser
+/// paragraph boundaries and ignores Sense markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TripleClick {
-    /// Selects the Sense without its examples.
+    /// This variant selects a Sense without its examples.
     Sense,
-    /// Selects the Sense with the examples that belong to it.
+    /// This variant selects a Sense with the examples that belong to it.
     #[default]
     SenseWithExamples,
-    /// Selects the block or the text line under the pointer.
+    /// This variant selects the block or the text line under the pointer.
     Line,
 }
 
 impl TripleClick {
-    /// Returns the kebab-case value stored in TOML.
+    /// This method returns the kebab-case value stored in TOML.
     pub const fn as_str(self) -> &'static str {
         match self {
             TripleClick::Sense => "sense",
@@ -406,7 +406,7 @@ impl TripleClick {
         }
     }
 
-    /// Returns the label shown by settings windows.
+    /// This method returns the label that the settings windows show.
     pub const fn label(self) -> &'static str {
         match self {
             TripleClick::Sense => "Sense",
@@ -885,19 +885,19 @@ pub struct AnkiConfig {
     /// Makes the teal border visible.
     #[serde(default = "default_show_static_overlay")]
     pub show_static_overlay: bool,
-    /// Includes each Dictionary name above its Anki glossary group.
+    /// This setting includes each Dictionary name above its Anki glossary group.
     #[serde(default = "default_include_dictionary_name")]
     pub include_dictionary_name: bool,
     /// Uses only the entry from the top Dictionary.
     #[serde(default)]
     pub first_dict_only: bool,
-    /// Selects whether the primary button adds to or replaces a selection.
+    /// This setting selects whether the primary button adds to or replaces a selection.
     #[serde(default)]
     pub selection_buttons: SelectionButtons,
-    /// Selects the separator between selected glossary fragments.
+    /// This setting selects the separator between selected glossary fragments.
     #[serde(default)]
     pub selection_separator: SelectionSeparator,
-    /// Selects what a triple-click selects.
+    /// This setting selects the content for a triple-click.
     #[serde(default)]
     pub triple_click: TripleClick,
 }
@@ -971,7 +971,7 @@ fn default_show_static_overlay() -> bool {
     true
 }
 
-/// Existing configurations keep the Dictionary headings that earlier versions always added.
+/// This function keeps Dictionary headings because earlier versions always added them.
 fn default_include_dictionary_name() -> bool {
     true
 }

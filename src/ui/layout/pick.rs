@@ -1,7 +1,7 @@
 //! Selection geometry for the measured popup scene.
 //!
-//! This module keeps address mapping beside the two operations that need the
-//! same source table: painting selection highlights and resolving text hits.
+//! This module keeps address mapping beside two operations that need the same
+//! source table. The operations paint selection highlights and resolve text hits.
 //! The scene owns geometry, while the CardSelection owns document ranges.
 
 use crate::dict::gloss::{DocAddr, NodePath};
@@ -153,9 +153,10 @@ fn addr_byte(addr: DocAddr, path: NodePath, byte: u32, len: u32) -> u32 {
 }
 /// One highlight box per line between the `start` caret and the `end` caret.
 ///
-/// The first line runs from the start caret to the line end, a middle line is
-/// whole, and the last line runs from the line start to the end caret. A line
-/// offset by alignment slack moves both carets by that slack.
+/// The first line runs from the start caret to the line end.
+/// Each middle line uses its full width.
+/// The last line runs from the line start to the end caret.
+/// Alignment slack moves both carets on a line by the same amount.
 fn range_rects(
     elem: &SceneElem,
     measured: &Measured,

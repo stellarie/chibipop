@@ -25,7 +25,7 @@ const MOVEMENT_GATE_PX: i64 = 4;
 
 /// A click chain expires after this many milliseconds.
 ///
-/// Linux uses this value to retire its temporary gesture clock. Keep the
+/// Linux uses this value to stop its temporary gesture clock. Keep the
 /// platform deadline and the core resolver on one duration.
 pub const CLICK_CHAIN_MS: u64 = 500;
 
@@ -57,18 +57,17 @@ pub enum HitAction {
     OpenUrl(String),
     /// Return to the previous history entry.
     Back,
-    /// Select or clear the whole glossary of entry `e` of the top Card.
+    /// Select or clear all visible gloss content for Entry `e` in the top Card.
     ///
-    /// The Entry-header checkbox emits this action. `e` is the ordinal from
+    /// The Entry header checkbox emits this action. `e` is the ordinal from
     /// [`crate::select::entries`].
     ToggleEntry(u32),
 }
 
-/// A pointer button by role, not by physical code.
+/// A pointer button has a role instead of a physical code.
 ///
-/// The platform bin maps its button codes here. The Controller decides which
-/// role adds to a selection and which role replaces it from the
-/// `primary_additive` setting.
+/// The platform bin maps button codes to this type. The Controller uses
+/// `primary_additive` to decide whether a role adds to or replaces a selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Primary,
@@ -112,7 +111,7 @@ pub enum Event {
     /// A gesture-only tick from a platform without a dispatch timer.
     ///
     /// Linux sends these ticks only after pointer input. This keeps click chains
-    /// and deferred plain-click clears live without waking the idle daemon.
+    /// and deferred plain-click clears alive. It does not wake the idle daemon.
     GestureTick,
     /// The number of complete wheel notches. Up is `+`.
     Scrolled { notches: i32 },
@@ -123,13 +122,13 @@ pub enum Event {
     ///
     /// [`PopupScene::text_hit`]: crate::ui::layout::PopupScene::text_hit
     PointerDown { local: PhysPoint, button: Button, hit: Option<HitAction>, text: Option<TextAddr> },
-    /// A pointer move while a button is held. `local` can lie outside the
+    /// A pointer move while a button is down. `local` can fall outside the
     /// popup during a drag.
     PointerMoved { local: PhysPoint, text: Option<TextAddr> },
     /// A button release.
     PointerUp { local: PhysPoint, button: Button },
-    /// Word boundaries for the top Card from the analysis thread.
-    /// A stale `generation` is ignored.
+    /// Word group boundaries for the top Card from Japanese analysis.
+    /// The Controller ignores a stale `generation`.
     AnalysisReady { generation: u64, words: WordMap },
     /// A request from the Anki button or its hotkey.
     AddRequested,
@@ -216,8 +215,8 @@ pub enum Command {
     /// Analyze the text leaves of the top Card on the analysis thread.
     /// The reply arrives as [`Event::AnalysisReady`] with the same generation.
     RequestAnalysis { generation: u64, texts: Vec<(TextKey, String)> },
-    /// A selection drag started (`true`) or ended (`false`). The platform bin
-    /// keeps forwarding pointer moves outside the popup while it is `true`.
+    /// A selection drag starts (`true`) or ends (`false`). The platform bin
+    /// forwards pointer moves outside the popup while this value is `true`.
     SetDragging(bool),
     OpenSettings,
     Exit,
@@ -235,20 +234,21 @@ pub struct ControllerConfig {
     pub include_dictionary_name: bool,
     /// Send only the first Dictionary's glossary block to Anki.
     /// This matches upstream 0.9.x "first dict only".
-    /// An active glossary selection overrides this setting.
+    /// A Card selection overrides this setting.
     pub first_dict_only: bool,
     pub summary_chars: usize,
     pub log_lookups: bool,
     /// The platform bin dispatch interval, in milliseconds.
     pub tick_ms: u32,
-    /// The editorial roles that the popup shows. A selection addresses only
-    /// this content.
+    /// The editorial roles that the popup shows. A Card selection addresses
+    /// only this content.
     pub roles: RoleFilter,
     /// Scroll the popup while a selection drag reaches its edge.
-    /// `scroll_popup = false` disables this too.
+    /// If `scroll_popup` is `false`, this option is also disabled.
     pub edge_autoscroll: bool,
-    /// The physical primary button adds to a selection. When false, it
-    /// replaces the selection and the secondary button adds.
+    /// The physical primary button adds to a selection.
+    /// When `primary_additive` is `false`, the primary button replaces the
+    /// selection. The secondary button adds to it.
     pub primary_additive: bool,
     /// The separator between disjoint selected fragments in one container.
     pub separator: Separator,
@@ -306,9 +306,10 @@ pub fn hold_region(
 ///
 /// `expr` uses `written` when present and `reading` otherwise.
 /// Include blocks from the first Dictionary only when `first_dict_only` is true.
-/// Include Dictionary headings only when `include_dictionary_name` is true.
-/// A non-empty selection always includes every selected Entry.
-/// The caller passes an empty selection only when it wants the whole-card path.
+/// The payload includes Dictionary headings when `include_dictionary_name` is
+/// `true`.
+/// A non-empty Card selection always includes every selected Entry.
+/// The caller passes an empty Card selection only for the whole-Card path.
 /// Include the captured sentence when it exists.
 ///
 /// The Controller and the platform bins use one rule for screenshot fields.
@@ -395,16 +396,16 @@ struct Surface {
     scroll: i32,
     /// The generation that guards against stale duplicate results.
     generation: u64,
-    /// The selected ranges for every card in the presentation.
+    /// The selected ranges for every Card in the `Presentation`.
     selection: Selections,
     /// The current click chain and drag state.
     gesture: Gesture,
-    /// The analysis result for the current generation.
+    /// The Japanese analysis result for the current generation.
     analysis: Option<(u64, WordMap)>,
-    /// Whether a Reshow must refresh analysis and gesture state.
+    /// Whether a `Reshow` must refresh Japanese analysis and gesture state.
     ///
-    /// Content changes set this flag before placement so a marker-only Reshow
-    /// can retain the current analysis and active gesture.
+    /// Content changes set this flag before placement. A marker-only `Reshow`
+    /// can retain the current Japanese analysis and active gesture.
     analysis_stale: bool,
     /// The generation that the current analysis request uses.
     analysis_generation: u64,
@@ -454,7 +455,7 @@ pub struct Controller {
     next_id: u64,
     latest: RequestId,
     generation: u64,
-    /// The monotonic dispatch tick used by pointer gesture timing.
+    /// The monotonic dispatch tick that times pointer gestures.
     clock: u64,
 }
 
@@ -2463,7 +2464,7 @@ mod tests {
         assert!(!c.handle(Event::AddRequested).is_empty());
     }
 
-    // -- selection/controller behavior --
+    // -- selection and Controller behavior --
     #[test]
     fn a_drag_over_two_glosses_updates_the_public_selection() {
         let mut config = cfg();

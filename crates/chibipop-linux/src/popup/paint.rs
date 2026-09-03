@@ -91,8 +91,8 @@ pub fn panel(
     }
 
     // 4. Draw selection highlights under every element.
-    // The scene stores these boxes in unscrolled panel space. Clip them to
-    // the body view so a scrolled highlight cannot paint the Anki strip.
+    // The scene stores these boxes in panel space without a scroll offset.
+    // Clip them to the body view so a highlight cannot paint the Anki strip.
     for highlight in &scene.highlights {
         let y = highlight.y - p.scroll;
         let top = y.max(0.0);
@@ -110,7 +110,7 @@ pub fn panel(
         }
     }
 
-    // 5. Draw elements in scene order with scroll applied.
+    // 5. Draw elements in scene order with the scroll offset applied.
     // Core already culls off-panel runs.
     // One paragraph remains one run despite its styles, so the painter uses the wrap
     // that the scene measured (ARCHITECTURE.md#popup-and-measurement).
@@ -369,7 +369,7 @@ fn fill(target: &mut PixmapMut<'_>, x: f32, y: f32, w: f32, h: f32, color: Rgb) 
     target.fill_rect(rect, &solid(color), Transform::identity(), None);
 }
 
-/// Creates paint with one source alpha.
+/// Create paint with one source alpha.
 fn translucent((r, g, b): Rgb, alpha: f32) -> Paint<'static> {
     let color = Color::from_rgba(
         f32::from(r) / 255.0,
@@ -381,7 +381,7 @@ fn translucent((r, g, b): Rgb, alpha: f32) -> Paint<'static> {
     Paint { shader: Shader::SolidColor(color), ..Paint::default() }
 }
 
-/// Fills one translucent box, or returns when its dimensions are degenerate.
+/// Fill one translucent box. Return when its dimensions are not positive.
 fn fill_alpha(
     target: &mut PixmapMut<'_>,
     x: f32,

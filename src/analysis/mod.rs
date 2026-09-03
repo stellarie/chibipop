@@ -1,7 +1,7 @@
-//! Japanese analysis stays in one concrete core module because issue #32 needs
-//! one shared implementation on both platforms. A trait would add a fourth
-//! seam without a second implementation, and a crate would hide the small
-//! synchronous API behind a new workspace boundary.
+//! Japanese analysis uses one concrete core module because issue #32 needs one
+//! implementation on both platforms. A trait adds a fourth seam without a second
+//! implementation. A crate puts the small synchronous API behind a new workspace
+//! boundary.
 //!
 //! The benchmark that selected Vibrato used 27 strings and 5,400 warm calls per
 //! process on Linux x86_64:
@@ -15,8 +15,8 @@
 //! | Warm p95 | 3.630 us | 7.830 us |
 //! | Characters per second | 9,180,885 | 3,339,336 |
 //!
-//! Both analyzers were fast enough after load. Vibrato also won on package
-//! size, resident memory, and cold-load cost. The benchmark did not measure
+//! Both analyzers were fast enough after load. Vibrato had a smaller package, less
+//! resident memory, and a lower cold-load cost. The benchmark did not measure
 //! Windows runtime behavior or segmentation accuracy against a gold corpus.
 //!
 //! The model is committed with its license notices and a pinned SHA-256 digest.
@@ -37,7 +37,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::dict::gloss::NodePath;
 
-/// A Japanese-focused part of speech from the IPADIC feature record.
+/// This type names a part of speech for Japanese text from the IPADIC feature
+/// record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PartOfSpeech {
     Noun,
@@ -59,14 +60,14 @@ pub enum PartOfSpeech {
     Other,
 }
 
-/// One conjugation kind and form from IPADIC.
+/// This type stores one conjugation kind and form from IPADIC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inflection {
     pub kind: String,
     pub form: String,
 }
 
-/// One fine-grained token returned by the Japanese analyzer.
+/// This type stores one Morpheme from the Japanese analyzer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Morpheme {
     pub range: Range<usize>,
@@ -79,14 +80,14 @@ pub struct Morpheme {
     pub normalized: Option<String>,
 }
 
-/// Fine morphemes and the larger words used by glossary selection.
+/// This type stores Morphemes and Word groups for glossary selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Analysis {
     pub morphemes: Vec<Morpheme>,
     pub words: Vec<Range<usize>>,
 }
 
-/// A loaded tokenizer for the committed IPADIC model.
+/// This type owns a tokenizer for the committed IPADIC model.
 ///
 /// The tokenizer owns the dictionary. `analyze` creates a short-lived Vibrato
 /// worker because the worker borrows the tokenizer and cannot live in this
@@ -96,7 +97,7 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    /// Read and verify the model at `path`, then build its tokenizer.
+    /// Read the model at `path`. Verify its digest. Build its tokenizer.
     pub fn load(path: &Path) -> Result<Analyzer> {
         let bytes = model::read(path)?;
         let dict = vibrato::Dictionary::read(&bytes[..])?;
@@ -104,7 +105,7 @@ impl Analyzer {
         Ok(Analyzer { tokenizer: Box::new(tokenizer) })
     }
 
-    /// Analyze `text` and keep both fine morphemes and grouped word ranges.
+    /// Analyze `text`. Return its Morphemes and grouped word ranges.
     pub fn analyze(&mut self, text: &str) -> Analysis {
         let mut worker = self.tokenizer.new_worker();
         worker.reset_sentence(text);
@@ -177,7 +178,8 @@ pub fn fallback_words(text: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// Return the word that contains `byte`, or one grapheme for punctuation and whitespace.
+/// Return the word that contains `byte`, or one grapheme for punctuation and
+/// whitespace.
 pub fn word_at(text: &str, words: &[Range<usize>], byte: usize) -> Range<usize> {
     let (grapheme, point) = grapheme_at(text, byte);
     if grapheme.start == grapheme.end {
@@ -249,14 +251,14 @@ fn grouped_words(text: &str, morphemes: &[Morpheme]) -> Vec<Range<usize>> {
     words
 }
 
-/// Decide whether `current` continues the word that `previous` ends.
+/// Decide whether `current` continues the Word group that ends with `previous`.
 ///
-/// A word is what a double-click selects. The unit is a full conjugation
+/// A double-click selects a Word group. The group contains a full conjugation
 /// (stem plus every attached auxiliary, verb suffix, and bound verb) or a
-/// compound noun. IPADIC splits both into morphemes, so this function joins
-/// them back. The rules, in order:
+/// compound noun. IPADIC splits both into Morphemes, so this function joins
+/// them again. The rules apply in this order:
 ///
-/// - Never join across a symbol, whitespace, or overlapping ranges.
+/// - Never join across a symbol, whitespace, or ranges that overlap.
 /// - A prefix joins the next morpheme (`お茶`, `全世界`).
 /// - An auxiliary verb or a suffix joins the previous morpheme
 ///   (`食べた`, `会社員`).
@@ -266,9 +268,9 @@ fn grouped_words(text: &str, morphemes: &[Morpheme]) -> Vec<Range<usize>> {
 /// - A conjunctive particle after a verb, adjective, or auxiliary joins the
 ///   chain (`飲んで`, `行かなければ`).
 /// - A `する` verb joins a verbal noun (`勉強する`).
-/// - Two general or proper nouns join into one compound (`日本語教師`,
+/// - Two general or proper nouns join into one compound noun (`日本語教師`,
 ///   `東京都庁`). Pronouns, adverbial nouns, and bound nouns stay separate
-///   because `今日私` and `食べること` are not words.
+///   because `今日私` and `食べること` do not form Word groups.
 fn can_merge(text: &str, previous: &Morpheme, current: &Morpheme) -> bool {
     if previous.pos == PartOfSpeech::Symbol || current.pos == PartOfSpeech::Symbol {
         return false;
@@ -311,7 +313,7 @@ fn can_merge(text: &str, previous: &Morpheme, current: &Morpheme) -> bool {
     compound_noun(previous) && compound_noun(current)
 }
 
-/// Report whether a morpheme can form one side of a compound noun.
+/// Report whether a Morpheme can form one part of a compound noun.
 fn compound_noun(morpheme: &Morpheme) -> bool {
     match morpheme.pos {
         PartOfSpeech::ProperNoun => true,
@@ -339,17 +341,17 @@ fn is_japanese(character: char) -> bool {
             | '\u{20000}'..='\u{2ffff}'
     )
 }
-/// The file name used by the platform path resolver for the bundled model.
+/// The platform path resolver uses this file name for the bundled model.
 pub const MODEL_FILE: &str = "data/ipadic/system.dic";
 
-/// The SHA-256 digest of the bundled decoded IPADIC model.
+/// This is the SHA-256 digest for the bundled decoded IPADIC model.
 pub const MODEL_SHA256: &str =
     "f3ddd9cacbd6eff696e49bb9266824eed28dceaa89c55e75e4a13384cc7f9d02";
 
-/// A text leaf key used to associate analysis with one Card entry.
+/// This text leaf key associates analysis with one Card entry.
 pub type TextKey = (u32, NodePath);
 
-/// Grouped word ranges keyed by their Card text leaf.
+/// This map contains grouped word ranges for each Card text leaf.
 pub type WordMap = std::collections::HashMap<TextKey, Vec<std::ops::Range<usize>>>;
 
 #[cfg(test)]

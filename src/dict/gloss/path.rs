@@ -62,7 +62,7 @@ impl NodePath {
     pub const ROOT: NodePath = NodePath { steps: [0; MAX_STEPS], len: 0 };
     /// The address after every real node in document order.
     ///
-    /// The all-maximum steps reserve this value above every path that
+    /// Every step has its maximum value. This path sorts after every path that
     /// [`child`](Self::child) can create.
     pub const END: NodePath = NodePath { steps: [u16::MAX; MAX_STEPS], len: MAX_STEPS as u8 };
 

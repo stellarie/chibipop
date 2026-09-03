@@ -1829,7 +1829,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             live.popup.render_settings(),
                             selection,
                         );
-                        // The view borrow ends here. A drag re-resolves the
+                        // The view borrow ends here. A drag resolves the
                         // pointer against the repainted scene.
                         if painted.is_ok() && pointer_buttons != 0 {
                             if let Some(local) = last_pointer {
@@ -2447,7 +2447,9 @@ fn popup_local(controller: &Controller, screen: PhysPoint) -> Option<(PhysPoint,
     ))
 }
 
-/// Hit-test the cached popup scene without turning measurement errors into input failures.
+/// Hit-test the cached `PopupScene`.
+///
+/// When measurement fails, return `None` so input handling can continue.
 fn popup_text_hit(renderer: &mut Renderer, local: PhysPoint, scroll: i32) -> Option<TextAddr> {
     match renderer.text_hit(local, scroll) {
         Ok(text) => text,
@@ -2457,7 +2459,7 @@ fn popup_text_hit(renderer: &mut Renderer, local: PhysPoint, scroll: i32) -> Opt
         }
     }
 }
-/// Returns whether a screen point is inside the separate Anki button.
+/// Return whether a screen point is inside the separate Anki button.
 fn anki_button_hit(
     controller: &Controller,
     button: Option<&AnkiButton>,
@@ -2587,9 +2589,9 @@ struct Exec<'a> {
     pending_shot: &'a mut Option<PendingShot>,
     /// This cache is read-only here. The pump owns all writes.
     dupe_cache: &'a HashMap<String, bool>,
-    /// The Japanese analysis service lives beside the Worker for the process lifetime.
+    /// The Japanese analysis service has the same process lifetime as the Worker.
     analysis: &'a chibipop::analysis::Service,
-    /// Button bits and the last local point let repaint feedback keep a drag alive.
+    /// Button bits and the last local point let repaint feedback continue the drag.
     pointer_buttons: &'a mut u8,
     last_pointer: &'a mut Option<PhysPoint>,
     last_pointer_text: &'a mut Option<TextAddr>,

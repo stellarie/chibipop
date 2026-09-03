@@ -114,9 +114,9 @@ pub(super) struct Paragraphs<'a> {
     pub(super) links: Vec<HitAction>,
     /// This flag marks an item separator owed to the next text in this paragraph.
     pub(super) pending_sep: bool,
-    /// The path of the active ruby node.
+    /// This field stores the path of the active ruby node.
     ///
-    /// Ruby base text addresses the ruby node as one atomic leaf. The state
+    /// Ruby base text addresses the ruby node as one atomic leaf. The field
     /// applies only while [`Paragraphs::ruby`] walks that node's children.
     pub(super) ruby_path: Option<NodePath>,
     /// This list stores readings found so far.
@@ -644,8 +644,8 @@ impl Paragraphs<'_> {
 
     /// Appends text after it pays any owed item separator and list marker.
     ///
-    /// `path` addresses the real text leaf. Synthetic text passes `None`, so
-    /// separators, breaks, and image alternatives never become selection sources.
+    /// The `path` value addresses the real text leaf. Synthetic text uses `None`,
+    /// so separators, breaks, and image alternatives never become selection sources.
     pub(super) fn text(
         &mut self,
         text: &str,
