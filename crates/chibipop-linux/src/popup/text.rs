@@ -604,10 +604,9 @@ fn span_at<'a, 's>(
 
 /// The box of the cluster covering UTF-16 offset `utf16`.
 ///
-/// Two kinds of offset match no glyph: an offset past the end of the
-/// text, and an offset inside a cluster boundary core did not expect.
-/// Such an offset answers a zero-width box at the end of the last
-/// line. This function never panics, and it never skips the offset.
+/// A line-ending offset matches no glyph. It answers the zero-width end of
+/// the line before it. An offset past the text or inside an unexpected cluster
+/// answers the end of the last line. This function never skips an offset.
 fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox {
     let target = byte_offset(spans, utf16);
     // A run with no lines at all has no shaped height to report, so
@@ -617,6 +616,11 @@ fn caret_box(buffer: &Buffer, spans: &[StyledSpan<'_>], utf16: u32) -> GlyphBox 
     let mut bases = LineBases::default();
     for run in buffer.layout_runs() {
         let base = bases.advance(spans, &run);
+        // cosmic-text strips a hard line ending. When the next line advances
+        // the base past `target`, the prior visual run owns that caret.
+        if target < base {
+            return end;
+        }
         // The caret is as tall as the line it lands on. A small span
         // beside a large one therefore still gives a full-height hit
         // target.
@@ -1333,6 +1337,23 @@ mod tests {
         assert_eq!(0.0, out[0].x, "the first kanji sits at the margin");
         assert!(out[1].x >= out[0].w, "the second kanji is in the second span: {out:?}");
         assert!(out[1].w > 0.0, "an offset in a later span still finds a glyph");
+    }
+
+    #[test]
+    fn caret_at_a_hard_line_end_stays_on_that_line() {
+        let Some(mut engine) = jp_engine() else { return };
+        let text = "① first sense\n② second sense";
+        let spans = [span(text, 20.0)];
+        let run = MeasureRun { spans: &spans, max_w: 400.0 };
+        let measured = measured(&mut engine, &spans, run.max_w);
+        let newline = text.find('\n').expect("hard line end");
+        let offset = text[..newline].encode_utf16().count() as u32;
+        let mut out = Vec::new();
+        engine.caret_boxes(run, &[offset], &mut out).expect("shapeable");
+
+        assert_eq!(0.0, out[0].w);
+        assert_eq!(measured.lines[0].y, out[0].y);
+        assert_eq!(measured.lines[0].w, out[0].x);
     }
 
 
