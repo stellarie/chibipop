@@ -417,10 +417,13 @@ fn continuation_gap(current: &OcrLine, next: &OcrLine, orientation: Orientation)
 /// The probe exists only to find a wrap.
 /// A probe with no continuation returns no answer.
 /// Pass 1's answer then stands.
+/// `orientation` comes from pass 1. A clipped probe can contain one word and cannot
+/// reliably identify a vertical column.
 pub fn resolve_wrap(
     probes: &[(PhysRect, Vec<OcrLine>)],
     cursor: PhysPoint,
     scan_alnum: bool,
+    orientation: Orientation,
     bounds: PhysRect,
 ) -> Option<Resolved> {
     let line_count: usize = probes.iter().map(|(_, lines)| lines.len()).sum();
@@ -428,8 +431,7 @@ pub fn resolve_wrap(
     for (_, lines) in probes {
         trimmed_lines.extend(lines.iter().cloned());
     }
-    let (li, _) = hit_scan(&trimmed_lines, cursor, scan_alnum)?;
-    let orientation = orientation_of(&trimmed_lines[li]);
+    hit_scan(&trimmed_lines, cursor, scan_alnum)?;
 
     let mut offset = 0;
     for (probe, lines) in probes {
@@ -439,15 +441,15 @@ pub fn resolve_wrap(
     }
 
     let combined = combine_probe_lines(&trimmed_lines, orientation);
-    resolve_wrapped(&combined, cursor, scan_alnum)
+    resolve_wrapped(&combined, cursor, scan_alnum, orientation)
         .and_then(|(resolved, wrapped)| wrapped.then_some(resolved))
 }
 
 /// Trim words at probe seams before code merges overlaps.
 ///
 /// OCR can join half a glyph at a probe seam to its neighbor.
-/// The joined box can cover more area than the clean glyph from the other probe in
-/// [`combine_probe_lines`]. It then drops the hovered word.
+/// Half-tile overlap gives a multi-character word a full interior copy in one
+/// probe, while this trim drops clipped copies from both sides of the seam.
 /// The tile path already applies this rule in [`split_at_clipped`] and [`drop_leading`].
 /// An output edge is a real screen edge. It cannot cut a glyph, so this code does not
 /// trim it.
@@ -599,7 +601,9 @@ pub fn head_and_tail(
 
 /// Resolve the text under the hover.
 pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<Resolved> {
-    resolve_wrapped(lines, cursor, scan_alnum).map(|(resolved, _)| resolved)
+    let (li, _) = hit_scan(lines, cursor, scan_alnum)?;
+    let orientation = orientation_of(&lines[li]);
+    resolve_wrapped(lines, cursor, scan_alnum, orientation).map(|(resolved, _)| resolved)
 }
 
 /// Return true when two OCR words represent the same physical word.
@@ -622,10 +626,10 @@ fn resolve_wrapped(
     lines: &[OcrLine],
     cursor: PhysPoint,
     scan_alnum: bool,
+    orientation: Orientation,
 ) -> Option<(Resolved, bool)> {
     let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
-    let orientation = orientation_of(line);
 
     // OCR does not promise an order.
     let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
@@ -685,16 +689,17 @@ fn resolve_wrapped(
     ))
 }
 
-/// Return one or two bounded probes when a wrap can hide outside pass 1's box.
+/// Return bounded probes when a wrap can hide outside pass 1's box.
 ///
 /// A wrapped word ends one line and continues at the margin of the next line.
 /// The hit lies near the hovered line's end, and the margin lies far to the left.
 /// A box centered on the cursor rarely holds both.
-/// A short output uses one probe. A wide output uses an output-margin probe and a
-/// line-end probe. Each probe is at most `2 * TILE_LEN` on its reading axis.
 ///
-/// The probe costs one or two grabs and OCR passes. Four gates keep it rare:
+/// A short output uses one probe. A wide output uses probes with half of the maximum
+/// reading-axis length overlapped across the full span from the output margin to the
+/// line end. Each probe is at most `2 * TILE_LEN` on its reading axis.
 ///
+/// The probe costs one or more grabs and OCR passes. Four gates keep it rare:
 /// - The lookup runs out at the line's end. A separator or the character cap between
 ///   the hit and the end stops the lookup first. No wrap can matter ([`runs_out`]).
 /// - The box did not clip the line. A word at the box edge is the last word that the
@@ -730,6 +735,10 @@ pub fn wrap_probe(
             region.y.saturating_add(region.h),
         ),
     };
+    let bounds_end = match orientation {
+        Orientation::Horizontal => bounds.x.saturating_add(bounds.w),
+        Orientation::Vertical => bounds.y.saturating_add(bounds.h),
+    };
     let hit_lead = lead(&hit);
     let mut tail_words: Vec<&OcrWord> =
         line.words.iter().filter(|word| lead(&word.rect) >= hit_lead).collect();
@@ -746,7 +755,7 @@ pub fn wrap_probe(
     if !runs_out(&tail) {
         return None;
     }
-    if line_end > region_end - EDGE_MARGIN {
+    if line_end > region_end.saturating_sub(EDGE_MARGIN) && region_end < bounds_end {
         return None;
     }
     if let Some(next_line) = find_continuation(lines, li, orientation) {
@@ -775,7 +784,7 @@ pub fn wrap_probe(
         Orientation::Horizontal => bounds.x,
         Orientation::Vertical => bounds.y,
     };
-    let probe_end = line_end.saturating_add(thick / 2);
+    let probe_end = line_end.saturating_add(thick / 2).min(bounds_end);
     if probe_end <= probe_start {
         return None;
     }
@@ -793,18 +802,20 @@ pub fn wrap_probe(
             h: probe_end - probe_start,
         },
     };
-
     const MAX_PROBE_LEN: i32 = 2 * TILE_LEN;
-    let span = probe_end - probe_start;
-    let mut probes = Vec::with_capacity(2);
-    let mut add = |start: i32, end: i32| {
+    // Overlap adjacent windows by half of the maximum length. This gives a
+    // multi-character OCR word a full copy away from both trim seams.
+    let overlap = MAX_PROBE_LEN / 2;
+    let step = MAX_PROBE_LEN - overlap;
+    let mut probes = Vec::new();
+    let mut add = |start: i32, len: i32| {
         let probe = match orientation {
             Orientation::Horizontal => PhysRect { x: start, ..band },
             Orientation::Vertical => PhysRect { y: start, ..band },
         };
         let probe = match orientation {
-            Orientation::Horizontal => PhysRect { w: end - start, ..probe },
-            Orientation::Vertical => PhysRect { h: end - start, ..probe },
+            Orientation::Horizontal => PhysRect { w: len, ..probe },
+            Orientation::Vertical => PhysRect { h: len, ..probe },
         };
         if let Some(probe) = clamp_tile(probe, bounds) {
             if !probes.contains(&probe) {
@@ -812,11 +823,20 @@ pub fn wrap_probe(
             }
         }
     };
-    if span <= MAX_PROBE_LEN {
-        add(probe_start, probe_end);
-    } else {
-        add(probe_start, probe_start.saturating_add(MAX_PROBE_LEN));
-        add(probe_end.saturating_sub(MAX_PROBE_LEN), probe_end);
+
+    let mut start = probe_start;
+    while start < probe_end {
+        let remaining = probe_end.saturating_sub(start);
+        let len = remaining.min(MAX_PROBE_LEN);
+        add(start, len);
+        if len == remaining {
+            break;
+        }
+        let next = start.saturating_add(step);
+        if next <= start {
+            break;
+        }
+        start = next;
     }
     if probes.is_empty() || probes.iter().all(|probe| region.intersection(*probe) == Some(*probe)) {
         return None;
@@ -2023,14 +2043,14 @@ mod tests {
         assert_eq!(
             Some(vec![
                 PhysRect { x: 0, y: 470, w: 1000, h: 270 },
-                PhysRect { x: 40, y: 470, w: 1000, h: 270 },
+                PhysRect { x: 500, y: 470, w: 540, h: 270 },
             ]),
             probes
         );
     }
 
     #[test]
-    fn wrap_probe_splits_a_wide_output_into_two_bounded_regions() {
+    fn wrap_probe_splits_a_wide_output_into_overlapping_bounded_regions() {
         let lines = vec![OcrLine {
             words: vec![
                 w("に", 1800, 480, 40, 40),
@@ -2046,9 +2066,85 @@ mod tests {
             PROBE_BOUNDS,
         )
         .expect("a wide output needs a probe");
-        assert_eq!(2, probes.len());
+        assert_eq!(3, probes.len());
         assert_eq!(PhysRect { x: 0, y: 470, w: 1000, h: 270 }, probes[0]);
-        assert_eq!(PhysRect { x: 940, y: 470, w: 1000, h: 270 }, probes[1]);
+        assert_eq!(PhysRect { x: 500, y: 470, w: 1000, h: 270 }, probes[1]);
+        assert_eq!(PhysRect { x: 1000, y: 470, w: 940, h: 270 }, probes[2]);
+        assert!(probes.iter().all(|probe| probe.w <= 2 * TILE_LEN));
+    }
+    /// A multi-character OCR word can straddle an interior probe seam.
+    #[test]
+    fn wrap_probe_keeps_a_wide_word_across_an_interior_seam() {
+        let pass_one = vec![OcrLine {
+            words: vec![w("終", 2844, 480, 40, 40)],
+        }];
+        let bounds = PhysRect { x: 0, y: 0, w: 3000, h: 1500 };
+        let probes = wrap_probe(
+            &pass_one,
+            p(2860, 500),
+            PhysRect { x: 2500, y: 450, w: 500, h: 100 },
+            true,
+            bounds,
+        )
+        .expect("the wide tail needs wrap probes");
+
+        assert!(probes.len() >= 2, "the word must cross an interior seam: {probes:?}");
+        assert!(probes.iter().all(|probe| probe.w <= 2 * TILE_LEN));
+        let seam = probes[0].x + probes[0].w;
+        assert!(bounds.x < seam && seam < bounds.x + bounds.w);
+        assert!(probes[1].x < seam && seam < probes[1].x + probes[1].w);
+        let thick = thickness(&pass_one[0], Orientation::Horizontal);
+        let word_width = thick + 2 * EDGE_MARGIN + 2;
+        let crossing = w("境界", seam - word_width + 1, 480, word_width, thick);
+        assert!(crossing.rect.w > thick + 2 * EDGE_MARGIN);
+        assert!(crossing.rect.x < seam && seam < crossing.rect.x + crossing.rect.w);
+
+        let mut captured = Vec::with_capacity(probes.len());
+        for (index, probe) in probes.iter().copied().enumerate() {
+            let mut lines = Vec::new();
+            if index < 2 {
+                lines.push(OcrLine { words: vec![crossing.clone()] });
+            }
+            if index == 0 {
+                lines.push(OcrLine { words: vec![w("続", 0, 536, 40, 40)] });
+            }
+            if index == probes.len() - 1 {
+                lines.push(OcrLine { words: vec![w("終", 2844, 480, 40, 40)] });
+            }
+            captured.push((probe, lines));
+        }
+
+        let got = resolve_wrap(
+            &captured,
+            p(2860, 500),
+            true,
+            Orientation::Horizontal,
+            bounds,
+        )
+        .expect("the probe must resolve a wrapped line");
+        assert_eq!("境界終続", got.span.text);
+    }
+
+
+    /// An indented continuation must not fall into the gap between wide probes.
+    #[test]
+    fn wrap_probe_covers_an_indented_continuation_in_a_wide_span() {
+        let lines = vec![OcrLine {
+            words: vec![
+                w("前", 1200, 480, 40, 40),
+                w("中", 2000, 480, 40, 40),
+                w("終", 2560, 480, 40, 40),
+            ],
+        }];
+        let region = PhysRect { x: 2300, y: 450, w: 500, h: 100 };
+        let bounds = PhysRect { x: 0, y: 0, w: 3000, h: 1500 };
+        let probes = wrap_probe(&lines, p(2580, 500), region, true, bounds)
+            .expect("a wide tail needs wrap probes");
+
+        assert!(
+            probes.iter().any(|probe| probe.x <= 1200 && 1200 < probe.x + probe.w),
+            "the indented continuation at x=1200 must be captured: {probes:?}"
+        );
         assert!(probes.iter().all(|probe| probe.w <= 2 * TILE_LEN));
     }
 
@@ -2065,7 +2161,7 @@ mod tests {
         assert_eq!(
             Some(vec![
                 PhysRect { x: 0, y: 470, w: 1000, h: 270 },
-                PhysRect { x: 40, y: 470, w: 1000, h: 270 },
+                PhysRect { x: 500, y: 470, w: 540, h: 270 },
             ]),
             probes
         );
@@ -2078,7 +2174,7 @@ mod tests {
         assert_eq!(
             Some(vec![
                 PhysRect { x: 0, y: 470, w: 1000, h: 270 },
-                PhysRect { x: 40, y: 470, w: 1000, h: 270 },
+                PhysRect { x: 500, y: 470, w: 540, h: 270 },
             ]),
             probes
         );
@@ -2131,6 +2227,33 @@ mod tests {
         let bounds = PhysRect { x: 500, y: 490, w: 1000, h: 100 };
         let probes = wrap_probe(&clipped_line_end(), PROBE_CURSOR, PROBE_REGION, true, bounds);
         assert_eq!(Some(vec![PhysRect { x: 500, y: 490, w: 540, h: 100 }]), probes);
+    }
+
+    #[test]
+    fn wrap_probe_fires_for_a_complete_line_ending_at_physical_bounds() {
+        let lines = vec![OcrLine {
+            words: vec![
+                w("に", 1880, 480, 40, 40),
+                w("も", 1920, 480, 40, 40),
+                w("終", 1960, 480, 40, 40),
+            ],
+        }];
+        let region = PhysRect { x: 1500, y: 450, w: 500, h: 100 };
+        let bounds = PhysRect { x: 0, y: 0, w: 2000, h: 1500 };
+        let probes = wrap_probe(&lines, p(1980, 500), region, true, bounds)
+            .expect("a line at the output edge still needs a probe");
+        assert!(probes.iter().all(|probe| {
+            probe.x >= bounds.x
+                && probe.x + probe.w <= bounds.x + bounds.w
+                && probe.w <= 2 * TILE_LEN
+        }));
+        let mut covered_end = bounds.x;
+        for probe in &probes {
+            assert!(probe.x <= covered_end, "probe gap before {probe:?}");
+            assert!(probe.x + probe.w > probe.x);
+            covered_end = covered_end.max(probe.x + probe.w);
+        }
+        assert_eq!(bounds.x + bounds.w, covered_end);
     }
 
     #[test]
@@ -2190,6 +2313,7 @@ mod tests {
             &[(probe, wrapped_lines())],
             p(190, 110),
             true,
+            Orientation::Horizontal,
             bounds,
         )
         .unwrap();
@@ -2197,7 +2321,33 @@ mod tests {
         assert_eq!(6, got.span.cursor_byte_offset);
 
         let alone = vec![(probe, vec![wrapped_lines().swap_remove(0)])];
-        assert!(resolve_wrap(&alone, p(190, 110), true, bounds).is_none());
+        assert!(resolve_wrap(&alone, p(190, 110), true, Orientation::Horizontal, bounds).is_none());
+    }
+
+    #[test]
+    fn resolve_wrap_preserves_pass_one_vertical_orientation_for_a_one_word_seam() {
+        let bounds = PhysRect { x: 0, y: 0, w: 500, h: 500 };
+        let probes = vec![
+            (
+                PhysRect { x: 100, y: 0, w: 200, h: 400 },
+                vec![OcrLine { words: vec![w("上", 200, 100, 40, 40)] }],
+            ),
+            (
+                PhysRect { x: 0, y: 0, w: 200, h: 400 },
+                vec![OcrLine { words: vec![w("左", 144, 100, 40, 40)] }],
+            ),
+        ];
+
+        let got = resolve_wrap(
+            &probes,
+            p(210, 110),
+            true,
+            Orientation::Vertical,
+            bounds,
+        )
+            .expect("the left column is the vertical continuation");
+        assert_eq!("上左", got.span.text);
+        assert_eq!(Orientation::Vertical, got.orientation);
     }
 
     #[test]
@@ -2232,7 +2382,14 @@ mod tests {
                 }],
             ),
         ];
-        let got = resolve_wrap(&probes, PROBE_CURSOR, true, PROBE_BOUNDS).unwrap();
+        let got = resolve_wrap(
+            &probes,
+            PROBE_CURSOR,
+            true,
+            Orientation::Horizontal,
+            PROBE_BOUNDS,
+        )
+        .unwrap();
         assert_eq!("にも疎かった", got.span.text);
         assert_eq!(6, got.span.cursor_byte_offset);
         assert_eq!(
@@ -2248,7 +2405,14 @@ mod tests {
             OcrLine { words: vec![w("に", 900, 480, 40, 40)] },
             OcrLine { words: vec![w("か", 0, 540, 40, 40)] },
         ];
-        let got = resolve_wrap(&[(probe, lines)], p(920, 500), true, PROBE_BOUNDS).unwrap();
+        let got = resolve_wrap(
+            &[(probe, lines)],
+            p(920, 500),
+            true,
+            Orientation::Horizontal,
+            PROBE_BOUNDS,
+        )
+        .unwrap();
         assert_eq!("にか", got.span.text);
     }
 

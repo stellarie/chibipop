@@ -20,7 +20,7 @@ const SENTENCE_CLOSERS: [char; 4] = ['」', '』', '）', ')'];
 /// It makes a perpendicular band of thirteen thicknesses around the anchor center.
 /// It reads the full `bounds` on the reading axis.
 /// It splits that axis into tiles no longer than `2 * layout::TILE_LEN`.
-/// It overlaps consecutive tiles by one anchor thickness.
+/// Consecutive tiles overlap by half of the maximum tile length.
 /// It clamps every tile to the `bounds`.
 /// The sentence probe uses a fixed reach. This limits its cost.
 /// It does not use one large tile. OCR accuracy falls when the capture is larger.
@@ -35,23 +35,27 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
         return Vec::new();
     }
 
-    let band_extent = thickness * (SENTENCE_REACH_LINES * 2 + 1);
-    let centre = anchor.center();
+    let band_extent = thickness.saturating_mul(SENTENCE_REACH_LINES * 2 + 1);
+    let centre = crate::geom::PhysPoint {
+        x: anchor.x.saturating_add(anchor.w / 2),
+        y: anchor.y.saturating_add(anchor.h / 2),
+    };
     let (perpendicular_start, axis_start, axis_end) = match orientation {
         Orientation::Horizontal => (
-            centre.y - band_extent / 2,
+            centre.y.saturating_sub(band_extent / 2),
             bounds.x,
-            bounds.x + bounds.w,
+            bounds.x.saturating_add(bounds.w),
         ),
         Orientation::Vertical => (
-            centre.x - band_extent / 2,
+            centre.x.saturating_sub(band_extent / 2),
             bounds.y,
-            bounds.y + bounds.h,
+            bounds.y.saturating_add(bounds.h),
         ),
     };
 
     let tile_len = 2 * layout::TILE_LEN;
-    let stride = tile_len - thickness;
+    let overlap = tile_len / 2;
+    let stride = tile_len - overlap;
     if tile_len <= 0 || stride <= 0 || axis_end <= axis_start {
         return Vec::new();
     }
@@ -59,7 +63,8 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
     let mut regions = Vec::new();
     let mut start = axis_start;
     while start < axis_end {
-        let len = (axis_end - start).min(tile_len);
+        let remaining = axis_end.saturating_sub(start);
+        let len = remaining.min(tile_len);
         let tile = match orientation {
             Orientation::Horizontal => PhysRect {
                 x: start,
@@ -77,22 +82,26 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
         if let Some(tile) = layout::clamp_tile(tile, bounds) {
             regions.push(tile);
         }
-        if len == axis_end - start {
+        if len == remaining {
             break;
         }
-        start += stride;
+        let next = start.saturating_add(stride);
+        if next <= start {
+            break;
+        }
+        start = next;
     }
     regions
 }
 
 /// Return the sentence that contains the word at `anchor`.
-///
 /// The function groups words by thickness and perpendicular center.
-/// It splits a row when the reading-axis gap exceeds two thicknesses.
+/// It removes high-overlap duplicates, preferring a representative that covers half the
+/// anchor and then the larger box.
 /// It finds the anchor word when its overlap covers at least half of the anchor area.
 /// It keeps rows with matching thickness and a half-extent overlap in the same column.
 /// It orders rows from top to bottom for horizontal text and from right to left for vertical text.
-/// It stops at paragraph gaps wider than `layout::WRAP_GAP_HALVES / 2` thicknesses.
+/// It stops at paragraph gaps wider than 4.5 times the larger adjacent row thickness.
 /// It joins words without separators because Japanese does not need inserted spaces.
 /// It cuts at sentence terminators and keeps the listed closing brackets.
 /// It normalizes the cut before it returns it.
@@ -104,20 +113,17 @@ pub fn sentence_at(
     anchor: PhysRect,
     orientation: Orientation,
 ) -> Option<String> {
-    let mut rows = group_rows(lines, orientation);
     let anchor_area = i64::from(anchor.w) * i64::from(anchor.h);
     if anchor_area <= 0 {
         return None;
     }
+    let mut rows = group_rows(lines, orientation);
+    dedupe_rows(&mut rows, orientation, anchor, anchor_area);
 
     let mut anchor_word = None;
     for row in &rows {
         for word in row {
-            let Some(overlap) = word.rect.intersection(anchor) else {
-                continue;
-            };
-            let overlap_area = i64::from(overlap.w) * i64::from(overlap.h);
-            if overlap_area * 2 >= anchor_area {
+            if covers_anchor(word, anchor, anchor_area) {
                 anchor_word = Some(*word);
                 break;
             }
@@ -148,10 +154,13 @@ pub fn sentence_at(
     let anchor_row_index = rows
         .iter()
         .position(|row| row.iter().any(|word| std::ptr::eq(*word, anchor_word)))?;
-    let gap_limit = anchor_thickness * layout::WRAP_GAP_HALVES / 2;
     let mut first = anchor_row_index;
     while first > 0 {
         let gap = row_forward_gap(&rows[first - 1], &rows[first], orientation);
+        let gap_limit = row_thickness(&rows[first - 1], orientation)
+            .max(row_thickness(&rows[first], orientation))
+            * layout::WRAP_GAP_HALVES
+            / 2;
         if gap > gap_limit {
             break;
         }
@@ -160,6 +169,10 @@ pub fn sentence_at(
     let mut last = anchor_row_index;
     while last + 1 < rows.len() {
         let gap = row_forward_gap(&rows[last], &rows[last + 1], orientation);
+        let gap_limit = row_thickness(&rows[last], orientation)
+            .max(row_thickness(&rows[last + 1], orientation))
+            * layout::WRAP_GAP_HALVES
+            / 2;
         if gap > gap_limit {
             break;
         }
@@ -228,6 +241,57 @@ fn group_rows(lines: &[OcrLine], orientation: Orientation) -> Vec<Vec<&OcrWord>>
         }
     }
     split_rows
+}
+
+fn dedupe_rows(
+    rows: &mut [Vec<&OcrWord>],
+    orientation: Orientation,
+    anchor: PhysRect,
+    anchor_area: i64,
+) {
+    for row in rows {
+        let mut unique: Vec<&OcrWord> = Vec::with_capacity(row.len());
+        for word in row.iter().copied() {
+            if let Some(index) = unique
+                .iter()
+                .position(|known| same_physical_word(known, word))
+            {
+                let known = unique[index];
+                let word_covers_anchor = covers_anchor(word, anchor, anchor_area);
+                let known_covers_anchor = covers_anchor(known, anchor, anchor_area);
+                if (word_covers_anchor && !known_covers_anchor)
+                    || (word_covers_anchor == known_covers_anchor
+                        && word_area(word) > word_area(known))
+                {
+                    unique[index] = word;
+                }
+            } else {
+                unique.push(word);
+            }
+        }
+        unique.sort_by_key(|word| word_lead(word, orientation));
+        *row = unique;
+    }
+}
+
+fn covers_anchor(word: &OcrWord, anchor: PhysRect, anchor_area: i64) -> bool {
+    let Some(overlap) = word.rect.intersection(anchor) else {
+        return false;
+    };
+    let overlap_area = i64::from(overlap.w) * i64::from(overlap.h);
+    overlap_area * 2 >= anchor_area
+}
+
+fn same_physical_word(a: &OcrWord, b: &OcrWord) -> bool {
+    let Some(overlap) = a.rect.intersection(b.rect) else {
+        return false;
+    };
+    let overlap_area = i64::from(overlap.w) * i64::from(overlap.h);
+    overlap_area * 2 >= word_area(a).min(word_area(b))
+}
+
+fn word_area(word: &OcrWord) -> i64 {
+    i64::from(word.rect.w) * i64::from(word.rect.h)
 }
 
 fn word_perp_centre(word: &OcrWord, orientation: Orientation) -> i32 {
@@ -385,8 +449,10 @@ mod tests {
         assert_eq!(
             vec![
                 PhysRect { x: 0, y: 240, w: 1000, h: 520 },
-                PhysRect { x: 960, y: 240, w: 1000, h: 520 },
-                PhysRect { x: 1920, y: 240, w: 640, h: 520 },
+                PhysRect { x: 500, y: 240, w: 1000, h: 520 },
+                PhysRect { x: 1000, y: 240, w: 1000, h: 520 },
+                PhysRect { x: 1500, y: 240, w: 1000, h: 520 },
+                PhysRect { x: 2000, y: 240, w: 560, h: 520 },
             ],
             probe_regions(anchor, Orientation::Horizontal, bounds)
         );
@@ -494,5 +560,116 @@ mod tests {
         let lines = vec![row("カ-。", 100, 100, 40, 40)];
         let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
         assert_eq!(Some("カー。".to_string()), sentence_at(&lines, anchor, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn probe_seam_keeps_an_ordinary_word_in_at_least_one_trimmed_tile() {
+        let anchor = PhysRect { x: 958, y: 100, w: 40, h: 40 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1960, h: 400 };
+        let word = w("語", 958, 100, 40, 40);
+
+        let retained = probe_regions(anchor, Orientation::Horizontal, bounds)
+            .into_iter()
+            .any(|tile| {
+                let mut lines = vec![OcrLine { words: vec![word.clone()] }];
+                layout::trim_probe_edges(
+                    &mut lines,
+                    tile,
+                    bounds,
+                    Orientation::Horizontal,
+                );
+                lines.iter().any(|line| !line.words.is_empty())
+            });
+
+        assert!(retained);
+    }
+
+    #[test]
+    fn sentence_at_deduplicates_a_narrow_word_overlapping_two_tiles() {
+        let anchor = PhysRect { x: 970, y: 100, w: 40, h: 40 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1960, h: 400 };
+        let mut all_lines = Vec::new();
+
+        for tile in probe_regions(anchor, Orientation::Horizontal, bounds) {
+            let mut lines = vec![OcrLine {
+                words: vec![w("語", 970, 100, 20, 40)],
+            }];
+            layout::trim_probe_edges(
+                &mut lines,
+                tile,
+                bounds,
+                Orientation::Horizontal,
+            );
+            all_lines.extend(lines);
+        }
+
+        assert_eq!(
+            Some("語".to_string()),
+            sentence_at(&all_lines, anchor, Orientation::Horizontal)
+        );
+    }
+
+    #[test]
+    fn sentence_at_keeps_a_thicker_continuation_at_a_three_and_a_half_thickness_gap() {
+        let lines = vec![
+            OcrLine {
+                words: vec![w("前", 100, 100, 40, 40)],
+            },
+            OcrLine {
+                words: vec![w("続。", 100, 300, 120, 60)],
+            },
+        ];
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+
+        assert_eq!(
+            Some("前続。".to_string()),
+            sentence_at(&lines, anchor, Orientation::Horizontal)
+        );
+    }
+
+    #[test]
+    fn sentence_at_keeps_a_wide_repeated_word_crossing_an_internal_tile_seam_once() {
+        let anchor = PhysRect { x: 970, y: 100, w: 40, h: 40 };
+        let bounds = PhysRect { x: 0, y: 0, w: 1960, h: 400 };
+        let words = vec![
+            w("語", 910, 100, 40, 40),
+            w("語語", 950, 100, 80, 40),
+            w("。", 1030, 100, 40, 40),
+        ];
+        let mut all_lines = Vec::new();
+
+        for tile in probe_regions(anchor, Orientation::Horizontal, bounds) {
+            let mut lines = vec![OcrLine { words: words.clone() }];
+            layout::trim_probe_edges(
+                &mut lines,
+                tile,
+                bounds,
+                Orientation::Horizontal,
+            );
+            all_lines.extend(lines);
+        }
+
+        assert_eq!(
+            Some("語語語。".to_string()),
+            sentence_at(&all_lines, anchor, Orientation::Horizontal)
+        );
+    }
+
+    #[test]
+    fn sentence_at_keeps_an_anchor_covering_word_from_a_jittered_duplicate_cluster() {
+        let lines = vec![OcrLine {
+            words: vec![
+                w("語", 60, 100, 40, 40),
+                w("語", 100, 100, 60, 40),
+                w("語", 130, 100, 100, 40),
+                w("。", 230, 100, 40, 40),
+            ],
+        }];
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+
+        assert_eq!(
+            Some("語語。".to_string()),
+            sentence_at(&lines, anchor, Orientation::Horizontal)
+        );
     }
 }

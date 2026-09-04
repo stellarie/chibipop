@@ -185,16 +185,20 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
   not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
   edge can be clipped and does not suppress a probe. The probe uses one bounded
-  region when the span is at most `2 * TILE_LEN`. Otherwise, it uses two bounded regions
-  at the output margin and the hovered line end. Each reading-axis length is at most
-  `2 * TILE_LEN` (1000 physical pixels). The probe geometry uses the line mean center and
-  thickness. A probe costs one or two grabs and OCR passes, independent of
-  `max_ocr_passes`. A probe stops at its first capture failure and keeps pass 1. The probe
-  drops words within `EDGE_MARGIN` of its interior edge before the merge. The tile path
-  applies the same rule. `resolve_wrap` merges probe fragments and replaces pass 1 only
-  when a continuation joins. When forward tiles add text past the box, the stitched
-  head and tail win, and the merge drops the joined wrap. When tiles add no text, pass 1's
-  answer with its geometry and any joined wrap stands.
+  region when the reading-axis span is at most `2 * TILE_LEN` (1000 physical pixels).
+  Otherwise it uses the deterministic sequence of half-overlapping regions needed to
+  cover the span from the output margin to the hovered line end. Each reading-axis
+  length is at most `2 * TILE_LEN`, and each step is `TILE_LEN` (500 physical pixels);
+  the last region can be shorter. For a positive span, the no-failure capture count is
+  one when `span <= 2 * TILE_LEN`; otherwise it is
+  `1 + ceil((span - 2 * TILE_LEN) / TILE_LEN)`. Each region costs one grab and OCR pass,
+  independent of `max_ocr_passes`. A probe stops at its first capture failure and keeps
+  pass 1. The probe drops words within `EDGE_MARGIN` of both interior edges before the
+  merge; half-tile overlap leaves a full copy of a wide word away from both seams.
+  The tile path applies the same rule. `resolve_wrap` merges probe fragments and replaces
+  pass 1 only when a continuation joins. When forward tiles add text past the box, the
+  stitched head and tail win, and the merge drops the joined wrap. When tiles add no text,
+  pass 1's answer with its geometry and any joined wrap stands.
 - A sentence probe runs on an Anki add and never on hover. The Controller answers
   `AddRequested` with `Command::RequestSentence`. The bin hides the popup and sends
   `TriggerKind::Sentence` to the Worker. The Worker reads the tiles that

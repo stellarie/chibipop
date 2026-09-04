@@ -9,7 +9,7 @@ use crate::controller::{LookupOutcome, RequestId};
 use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
-use crate::present::{self, DictInfo, PresentConfig};
+use crate::present::{self, DictInfo, OcrSurface, PresentConfig};
 use crate::text::layout::{CaptureSize, OcrLine, Orientation, Resolved};
 use crate::text::mask::CaptureMask;
 use crate::text::sentence;
@@ -379,7 +379,7 @@ fn worker_main(
                 }
                 Pre::Thaw => source.thaw(),
                 Pre::Sentence(id, probe) => {
-                    let outcome = resolve_sentence(&mut source, probe);
+                    let outcome = resolve_sentence_safe(&mut source, probe);
                     if result_tx.send(WorkerResult { id, outcome }).is_err() {
                         return;
                     }
@@ -492,6 +492,15 @@ fn resolve_sentence(source: &mut TextSource, probe: SentenceProbe) -> LookupOutc
     }
 }
 
+/// Keep a panic in a platform OCR engine from stopping later Worker requests.
+fn resolve_sentence_safe(source: &mut TextSource, probe: SentenceProbe) -> LookupOutcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve_sentence(source, probe)))
+        .unwrap_or_else(|_| {
+            eprintln!("chibipop: sentence probe panicked, using the hovered line");
+            LookupOutcome::Sentence(None)
+        })
+}
+
 /// Resolve the text under the cursor, build the presentation, and attach the
 /// Anki sentence.
 ///
@@ -521,11 +530,11 @@ fn present_lookup(
     let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
     presentation.sentence = Some(sentence());
     // `match_len` counts characters of the trimmed input, as `match_highlight` does.
+    // Keep the complete trimmed source so a promoted Card can use its own length.
     presentation.surface = presentation
         .top
         .as_ref()
-        .map(|top| text.trim_start().chars().take(top.match_len).collect::<String>())
-        .filter(|surface| !surface.is_empty());
+        .and_then(|top| OcrSurface::new(text, top.match_len));
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if outline_match {
         if let Some(rect) = matched {
@@ -594,6 +603,84 @@ mod tests {
     use crate::lookup::model::FakeDictionary;
     use crate::text::layout::{Orientation, TextGeom};
     use crate::text::TextSpan;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct ReadLog {
+        begins: AtomicUsize,
+        ends: AtomicUsize,
+        active: AtomicUsize,
+        later_begin_saw_closed: AtomicBool,
+    }
+
+    impl ReadLog {
+        fn new() -> Self {
+            Self {
+                begins: AtomicUsize::new(0),
+                ends: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                later_begin_saw_closed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    struct SentenceCapture {
+        reads: Arc<ReadLog>,
+    }
+
+    impl RegionCapture for SentenceCapture {
+        fn grab(&mut self, region: PhysRect) -> anyhow::Result<crate::text::Frame> {
+            Ok(crate::text::Frame {
+                buf: vec![0; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "sentence-test",
+                fallback: None,
+                unchanged: false,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 1000, h: 1000 }
+        }
+
+        fn begin_read(&mut self) {
+            let begin = self.reads.begins.fetch_add(1, Ordering::SeqCst);
+            if begin > 0 && self.reads.active.load(Ordering::SeqCst) == 0 {
+                self.reads.later_begin_saw_closed.store(true, Ordering::SeqCst);
+            }
+            self.reads.active.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn end_read(&mut self) {
+            self.reads.ends.fetch_add(1, Ordering::SeqCst);
+            self.reads.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PanickingOcr {
+        calls: AtomicUsize,
+    }
+
+    impl OcrEngine for PanickingOcr {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> anyhow::Result<Vec<OcrLine>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("sentence probe OCR panic");
+            }
+            Ok(Vec::new())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "panicking-ocr"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
 
     fn ws(passes: u8) -> WorkerSettings {
         WorkerSettings {
@@ -776,6 +863,73 @@ mod tests {
         assert!(matches!(pre.as_slice(), [Pre::Reload(s)] if s.max_passes == 3));
     }
 
+    #[test]
+    fn a_panicking_sentence_probe_returns_none_and_closes_live_read_before_later_hover() {
+        let mut settings = ws(1);
+        settings.present_cfg = Config::default().present_config(&[di(1, "FakeDict")]);
+        let reads = Arc::new(ReadLog::new());
+        let capture_reads = Arc::clone(&reads);
+        let (worker, _) = Worker::spawn(
+            settings,
+            move || -> anyhow::Result<WorkerParts> {
+                Ok(WorkerParts {
+                    capture: Box::new(SentenceCapture { reads: capture_reads }),
+                    ocr: Box::new(PanickingOcr { calls: AtomicUsize::new(0) }),
+                    dict: Box::new(eating_dict()),
+                    reopen_dict: None,
+                    engine: engine(),
+                    serve: None,
+                })
+            },
+            || {},
+        )
+        .expect("the Worker starts before it reads a sentence");
+
+        worker
+            .trigger()
+            .send(Trigger {
+                kind: TriggerKind::Sentence(SentenceProbe {
+                    anchor: PhysRect { x: 480, y: 480, w: 40, h: 40 },
+                    orientation: Orientation::Horizontal,
+                    mask: CaptureMask::NONE,
+                }),
+                id: RequestId(1),
+            })
+            .unwrap();
+
+        let sentence = worker
+            .results()
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a panicking sentence probe must still answer");
+        assert_eq!(RequestId(1), sentence.id);
+        assert!(matches!(sentence.outcome, LookupOutcome::Sentence(None)));
+
+        worker
+            .trigger()
+            .send(Trigger {
+                kind: TriggerKind::Hover(Hover {
+                    at: PhysPoint { x: 480, y: 480 },
+                    mask: CaptureMask::NONE,
+                }),
+                id: RequestId(2),
+            })
+            .unwrap();
+
+        let later = worker
+            .results()
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the Worker must handle a later capture request");
+        assert_eq!(RequestId(2), later.id);
+        assert!(matches!(later.outcome, LookupOutcome::Hide));
+        assert!(
+            reads.later_begin_saw_closed.load(Ordering::SeqCst),
+            "the later capture must begin after the sentence read closes",
+        );
+        assert_eq!(2, reads.begins.load(Ordering::SeqCst), "sentence and hover each open a read");
+        assert_eq!(2, reads.ends.load(Ordering::SeqCst), "every live read must end");
+        assert_eq!(0, reads.active.load(Ordering::SeqCst), "no live read may remain open");
+    }
+
     fn di(id: i64, name: &str) -> DictInfo {
         DictInfo { dict_id: id, name: name.to_string() }
     }
@@ -896,7 +1050,11 @@ mod tests {
             panic!("a hit must present something")
         };
         assert_eq!(Some("食べた。".to_string()), presentation.sentence);
-        assert_eq!(Some("食".to_string()), presentation.surface, "the on-screen form the card matched");
+        assert_eq!(
+            Some("食"),
+            presentation.surface.as_ref().and_then(OcrSurface::as_str),
+            "the on-screen form the card matched",
+        );
         assert!(matched.is_some(), "a hit with geometry has a rect to outline");
         assert_eq!(
             vec![ScanKind::Pass1, ScanKind::Match],

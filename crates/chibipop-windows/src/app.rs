@@ -116,6 +116,27 @@ fn route_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
     routed.into_iter().flatten().collect()
 }
 
+/// Returns the feedback that completes a sentence request when the Worker is gone.
+fn sentence_send_feedback(
+    id: RequestId,
+    sent: std::result::Result<(), mpsc::SendError<Trigger>>,
+) -> Option<Event> {
+    sent.err().map(|_| Event::LookupResult {
+        id,
+        outcome: LookupOutcome::Sentence(None),
+    })
+}
+
+/// Builds the Events that the timer sends for one hook poll.
+fn route_hook_events(
+    press: Option<PhysPoint>,
+    moved: Option<PhysPoint>,
+) -> [Option<Event>; 2] {
+    [
+        press.map(|pos| Event::TriggerPressed { pos }),
+        moved.map(|pos| Event::CursorMoved { pos }),
+    ]
+}
 
 /// The result of one duplicate check.
 struct AnkiDupeResult {
@@ -2072,6 +2093,28 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     drive!(Event::TriggerUp);
                 }
             }
+            let press = Hooks::take_press().then_some(cursor_pos);
+            let cursor = Hooks::take_pending().unwrap_or_else(|| {
+                let pos = cursor_pos;
+                let dominated = Hooks::poll_gate(pos);
+                if dominated {
+                    pos
+                } else {
+                    PhysPoint {
+                        x: i32::MIN,
+                        y: i32::MIN,
+                    }
+                }
+            });
+            for event in route_hook_events(
+                press,
+                (cursor.x != i32::MIN).then_some(cursor),
+            )
+            .into_iter()
+            .flatten()
+            {
+                drive!(event);
+            }
 
         } else if msg.message == WM_APP_RESULT {
             // Keep every add-time sentence result. Keep only the newest other
@@ -2210,7 +2253,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 DispatchMessageW(&msg);
             }
         }
-
         // Handle the OS half of screenshot-on-add outside every Command batch.
         // The state machine authorized the add and marked the popup for an add.
         // This code only selects a region and grabs pixels. The selector owns a
@@ -2229,10 +2271,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     .inspect_err(|e| eprintln!("chibipop: grabbing the screenshot failed: {e:#}"))
                     .ok()
             });
-            let _ = popup.show_without_activating();
-            if let Some(b) = &anki_button {
-                b.show_without_activating();
+            let view = screenshot_restore_view(&controller);
+            if view.is_some() {
+                let _ = popup.show_without_activating();
             }
+            sync_anki_button(anki_button.as_ref(), view, &theme);
             match grabbed {
                 Some(cap) => {
                     let _ = screenshot_tx.send(crate::action::ScreenshotCommand {
@@ -2507,6 +2550,12 @@ fn monitor_rect_for(anchor: PhysRect) -> PhysRect {
     }
 }
 
+
+/// Returns the current popup state for screenshot restoration.
+fn screenshot_restore_view(controller: &Controller) -> Option<PopupView<'_>> {
+    controller.popup()
+}
+
 /// Places, paints, or hides the Anki button.
 ///
 /// The button sits below the popup and has the same left and right edges.
@@ -2643,15 +2692,17 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             orientation,
             hide_popup: _,
         } => {
-            let _ = x.trigger_tx.send(Trigger {
-                kind: TriggerKind::Sentence(SentenceProbe {
-                    anchor,
-                    orientation,
-                    mask: CaptureMask::NONE,
-                }),
+            sentence_send_feedback(
                 id,
-            });
-            None
+                x.trigger_tx.send(Trigger {
+                    kind: TriggerKind::Sentence(SentenceProbe {
+                        anchor,
+                        orientation,
+                        mask: CaptureMask::NONE,
+                    }),
+                    id,
+                }),
+            )
         }
         Command::RequestDrillDown { id, text } => {
             let _ = x.trigger_tx.send(Trigger {
@@ -2848,25 +2899,24 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::AddNote { expr, fields } => {
-            // The screenshot-on-add seam receives every add path.
-            // A low-level hook click, `WM_LBUTTONDOWN`, and the add hotkey all reach
-            // this branch after `start_add` applies its guards and marks the popup for
-            // the add. This bin does not apply those guards again.
+            // The screenshot-on-add seam receives the already-authorized
+            // command payload. The popup may have moved to another Card by
+            // the time the platform performs the screenshot.
             //
             // Do not do the OS half here. The selector owns a nested
-            // `GetMessageW` pump, and a pump inside a Command batch would re-enter
-            // `drive` halfway through the batch. Park the plan, and let the loop
-            // drain it after the batch ends.
+            // `GetMessageW` pump, and a pump inside a Command batch would
+            // re-enter `drive` halfway through the batch. Park the plan, and
+            // let the loop drain it after the batch ends.
             let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
-            let pending = controller.popup().and_then(|view| {
-                let anki_connected = view.anki.connected;
-                crate::shot::plan_add(&view, x.cfg, &root, crate::shot::epoch_secs()).map(|plan| {
-                    PendingShot {
-                        plan,
-                        anki_connected,
-                    }
-                })
-            });
+            let anki_connected = controller.anki().is_some_and(|anki| anki.connected);
+            let pending = crate::shot::plan_add(
+                &expr,
+                &fields,
+                x.cfg,
+                &root,
+                crate::shot::epoch_secs(),
+            )
+            .map(|plan| PendingShot { plan, anki_connected });
             if pending.is_some() {
                 *x.pending_shot = pending;
                 return None;
@@ -4114,6 +4164,116 @@ mod tests {
         ));
         assert!(matches!(&routed[1].outcome, LookupOutcome::Hide));
         assert!(matches!(&routed[2].outcome, LookupOutcome::Sentence(None)));
+    }
+
+    #[test]
+    fn hook_events_route_press_and_accepted_cursor_move() {
+        let press = PhysPoint { x: 10, y: 20 };
+        let moved = PhysPoint { x: 30, y: 40 };
+        let events: Vec<Event> = route_hook_events(Some(press), Some(moved))
+            .into_iter()
+            .flatten()
+            .collect();
+
+        assert_eq!(
+            vec![
+                Event::TriggerPressed { pos: press },
+                Event::CursorMoved { pos: moved },
+            ],
+            events
+        );
+    }
+
+    #[test]
+    fn a_failed_sentence_send_returns_empty_sentence_feedback() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        drop(rx);
+        let sent = tx.send(Trigger {
+            kind: TriggerKind::Sentence(SentenceProbe {
+                anchor: PhysRect {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                },
+                orientation: crate::text::layout::Orientation::Horizontal,
+                mask: CaptureMask::NONE,
+            }),
+            id: RequestId(7),
+        });
+
+        assert_eq!(
+            Some(Event::LookupResult {
+                id: RequestId(7),
+                outcome: LookupOutcome::Sentence(None),
+            }),
+            sentence_send_feedback(RequestId(7), sent)
+        );
+    }
+
+    #[test]
+    fn screenshot_restore_uses_the_current_popup_state() {
+        let mut controller = Controller::new(controller_config(&derive(&Config::default())));
+        assert!(screenshot_restore_view(&controller).is_none());
+
+        let point = PhysPoint { x: 110, y: 110 };
+        let id = controller
+            .handle(Event::CursorMoved { pos: point })
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the first cursor move must request a lookup");
+        controller.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(crate::present::Presentation {
+                    top: Some(crate::present::Card {
+                        written: Some("猫".to_string()),
+                        reading: None,
+                        pos: Vec::new(),
+                        freq: None,
+                        blocks: Vec::new(),
+                        match_len: 1,
+                        pitch: Vec::new(),
+                    }),
+                    collapsed: Vec::new(),
+                    all_cards: Vec::new(),
+                    sentence: None,
+                    surface: None,
+                }),
+                anchor: PhysRect {
+                    x: 100,
+                    y: 100,
+                    w: 20,
+                    h: 20,
+                },
+                orientation: crate::text::layout::Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        controller.handle(Event::PopupPlaced {
+            rect: PhysRect {
+                x: 100,
+                y: 160,
+                w: 300,
+                h: 200,
+            },
+            content_h: 200,
+            view_h: 200,
+        });
+        assert!(screenshot_restore_view(&controller).is_some());
+
+        controller.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::Hide,
+        });
+        assert!(
+            screenshot_restore_view(&controller).is_none(),
+            "a later Hide must prevent stale native-window restoration"
+        );
     }
 
     /// Check that a new archive produces a drift notice.

@@ -53,13 +53,14 @@ use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
 use wayland_client::backend::protocol::ProtocolError;
 use wayland_client::backend::WaylandError;
 use wayland_client::delegate_dispatch;
+use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::WlPointer;
 use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::globals::registry_queue_init;
-use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, QueueHandle};
+use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
 use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1;
@@ -107,6 +108,16 @@ pub(crate) struct App {
     /// and stores the error here.
     /// [`run`] reads it after orderly shutdown and returns a non-zero exit.
     fatal: Option<ProtocolError>,
+    /// Clone of the daemon display. A temporary sentence hide uses a
+    /// `wl_display.sync` callback before its live capture starts.
+    display: Option<Connection>,
+    /// Handle for the long-lived queue that the calloop Wayland source drains.
+    /// Sentence sync callbacks must belong to this queue so they wake the pump.
+    wayland_qh: Option<QueueHandle<App>>,
+    /// The daemon-side identity of the current popup content.
+    popup_generation: u64,
+    /// True after the Controller has issued `HidePopup`.
+    controller_hidden: bool,
     /// The Wayland side of the cursor channel.
     cursor: CursorState,
     /// Cursor Events and the trigger verbs drive the Controller. The
@@ -139,8 +150,8 @@ pub(crate) struct App {
     /// Region-selector layer surfaces. This field is `None` without layer shell.
     /// The cause matches the popup shell cause. Absence is a state, not an error.
     selector: Option<Selector>,
-    /// One pick in flight while the nested pump of [`Selector::pick`] holds the
-    /// thread.
+    /// One pick in flight while the nested pump of [`Selector::pick`] holds
+    /// the thread.
     /// This field stays here because SCTK handlers target `App`, not `Selector`.
     /// The pump dispatches `&mut App` into those handlers.
     pick: Option<Pick>,
@@ -164,6 +175,17 @@ pub(crate) struct App {
     /// The catcher shares the popup layer and leaves a hole over the popup.
     /// This field is `None` when the compositor lacks layer shell or a shm pool.
     catcher: Option<Catcher>,
+
+    /// Captures that currently require the popup to stay transparent.
+    hide_owners: HideOwners,
+    /// The last popup frame hidden by a temporary capture.
+    hidden_popup: Option<HiddenPopup>,
+    /// A popup show or repaint that arrived while a capture owned the hide.
+    deferred_popup: Option<DeferredPopup>,
+    /// A sentence request waiting for the display ordering step.
+    pending_sentence: Option<PendingSentence>,
+    /// Sentence probes already accepted by the Worker.
+    sentence_requests: HashSet<u64>,
 
     /// `CHIBIPOP_POPUP_DEMO=1` makes trigger verbs show and hide the canned
     /// popup without a lookup.
@@ -200,7 +222,6 @@ pub(crate) struct App {
     shot_tx: calloop::channel::Sender<Result<Frame, String>>,
     /// The one screenshot in flight, if one exists (see [`Shot`]).
     shot: Option<Shot>,
-    /// One-off OCR queue for the Worker's thread-affine engine and its wake.
     /// Each respawn rebuilds this field because each wake belongs to one Worker.
     /// When no pipeline exists, this field is
     /// [`worker::OcrJobs::disconnected`].
@@ -355,6 +376,99 @@ impl ShotKind {
             ShotKind::Mining { files_a_card } => files_a_card,
         }
     }
+}
+
+/// The operation that currently needs the popup to stay transparent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HideOwner {
+    Sentence,
+    Screenshot,
+    Ocr,
+    Picker,
+}
+
+/// Hide ownership is counted per operation, not per surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HideOwners {
+    sentence: usize,
+    screenshot: usize,
+    ocr: usize,
+    picker: usize,
+}
+
+impl HideOwners {
+    fn count_mut(&mut self, owner: HideOwner) -> &mut usize {
+        match owner {
+            HideOwner::Sentence => &mut self.sentence,
+            HideOwner::Screenshot => &mut self.screenshot,
+            HideOwner::Ocr => &mut self.ocr,
+            HideOwner::Picker => &mut self.picker,
+        }
+    }
+
+    fn acquire(&mut self, owner: HideOwner) {
+        let count = self.count_mut(owner);
+        *count = (*count).saturating_add(1);
+    }
+    fn release(&mut self, owner: HideOwner) -> bool {
+        let count = self.count_mut(owner);
+        if *count == 0 {
+            return false;
+        }
+        *count -= 1;
+        true
+    }
+
+    fn is_empty(self) -> bool {
+        self.sentence == 0 && self.screenshot == 0 && self.ocr == 0 && self.picker == 0
+    }
+}
+
+/// Decide whether a temporary hide may restore the current popup.
+fn should_restore_popup(
+    owners: HideOwners,
+    controller_hidden: bool,
+    controller_shown: bool,
+    popup_visible: bool,
+) -> bool {
+    owners.is_empty() && !controller_hidden && controller_shown && !popup_visible
+}
+
+/// Marks belong to one daemon-side popup generation.
+fn same_popup_generation(saved: Option<u64>, current: u64) -> bool {
+    saved == Some(current)
+}
+
+#[derive(Clone)]
+struct HiddenPopup {
+    generation: u64,
+    request: ShowRequest,
+    marks: Vec<overlay::Mark>,
+}
+
+struct DeferredPopup {
+    generation: u64,
+    request: ShowRequest,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingSentence {
+    id: RequestId,
+    anchor: PhysRect,
+    orientation: Orientation,
+    mask: CaptureMask,
+    generation: u64,
+    owns_hide: bool,
+}
+
+/// User data for the asynchronous `wl_display.sync` that orders a popup hide.
+///
+/// The callback can arrive after a pending sentence was cancelled. Keep the
+/// request identity here so that such a stale callback cannot dispatch it.
+#[derive(Debug, Clone, Copy)]
+struct SentenceSync {
+    id: RequestId,
+    generation: u64,
 }
 
 impl AnkiCall {
@@ -856,6 +970,26 @@ impl App {
         self.pick.take().map_or(0, Pick::destroy)
     }
 
+    fn popup_snapshot(&self) -> Option<HiddenPopup> {
+        let request = self.popup.as_ref()?.request()?.clone();
+        let marks = self.scan_outline.as_ref().map_or_else(Vec::new, |outline| outline.marks().to_vec());
+        Some(HiddenPopup { generation: self.popup_generation, request, marks })
+    }
+
+    fn begin_capture_hide(&mut self, owner: HideOwner) {
+        if self.hide_owners.is_empty() {
+            self.hidden_popup = if self.controller_hidden { None } else { self.popup_snapshot() };
+        }
+        self.hide_owners.acquire(owner);
+        self.hide_surfaces();
+    }
+
+    fn release_capture_hide(&mut self, owner: HideOwner) {
+        if self.hide_owners.release(owner) {
+            self.restore_popup_if_ready();
+        }
+    }
+
     /// Drag a region on the dimmed screen. This function blocks until the user
     /// decides.
     /// `None` means cancel, a drag below threshold, or no selector.
@@ -864,15 +998,15 @@ impl App {
     /// The popup stays hidden while the pick runs.
     /// It must not enter the pixels that a caller grabs after the pick.
     /// The selector remains modal.
-    pub(crate) fn pick_region(&mut self, deadline: Option<Duration>) -> Option<PhysRect> {
-        let was_shown = self.popup.as_ref().and_then(Popup::shown).is_some();
-        if was_shown {
-            self.hide_popup();
-        }
+    fn pick_region(&mut self, deadline: Option<Duration>, owner: HideOwner) -> Option<PhysRect> {
+        self.begin_capture_hide(owner);
         let screens = self.screens();
         let started = Instant::now();
         let picked = Selector::pick(self, &screens, deadline);
         self.flush_surface_notes();
+        if owner == HideOwner::Picker {
+            self.release_capture_hide(owner);
+        }
         self.log.diag(&format!(
             "select: pick took {} ms and answered {}",
             started.elapsed().as_millis(),
@@ -904,7 +1038,7 @@ impl App {
         }
         // `None` uses the product deadline (`select::PICK_TIMEOUT`).
         // A second constant would conflict with the product pick duration.
-        let picked = self.pick_region(None);
+        let picked = self.pick_region(None, HideOwner::Picker);
         self.took_static_region(picked);
     }
 
@@ -1010,17 +1144,20 @@ impl App {
         self.paths.screenshots_dir(&self.config.actions.screenshot.save_dir)
     }
 
-    /// Return the picture for the add that the Controller approved, or `None`
-    /// if no picture applies.
+    /// Return the picture for the already-authorized add, or `None` when the
+    /// screenshot-on-add setting is off.
     ///
-    /// Core owns this decision (`chibipop::shot::plan_add`).
-    /// It checks `include_on_add`, the blank-expression and already-added
-    /// guards, the filename, and the picture field.
-    /// This function supplies the popup, config, and clock.
-    fn plan_shot_for_add(&self) -> Option<chibipop::shot::ShotPlan> {
-        let view = self.controller.popup()?;
+    /// The Controller has already built and authorized this `Command::AddNote`
+    /// payload. Pass it through unchanged: the popup can now hold a different
+    /// Card while the platform performs the screenshot.
+    fn plan_shot_for_add(
+        &self,
+        expr: &str,
+        fields: &HashMap<String, String>,
+    ) -> Option<chibipop::shot::ShotPlan> {
         chibipop::shot::plan_add(
-            &view,
+            expr,
+            fields,
             &self.config,
             &self.screenshots_dir(),
             chibipop::shot::epoch_secs(),
@@ -1104,7 +1241,7 @@ impl App {
         // `None` uses the product deadline (`select::PICK_TIMEOUT`), the same
         // as `static-region`.
         // A second constant would create a second pick duration.
-        let picked = self.pick_region(None);
+        let picked = self.pick_region(None, HideOwner::Screenshot);
         self.took_shot_region(picked, shot);
     }
 
@@ -1117,7 +1254,7 @@ impl App {
         match picked {
             Some(region) => self.spawn_shot(region, shot),
             None => {
-                self.restore_popup();
+                self.release_capture_hide(HideOwner::Screenshot);
                 self.shot_without_picture(shot, "no region was picked");
             }
         }
@@ -1140,7 +1277,7 @@ impl App {
             });
         if let Err(e) = spawned {
             self.log.diag(&format!("screenshot: no thread for the grab - {e}"));
-            self.restore_popup();
+            self.release_capture_hide(HideOwner::Screenshot);
             if let Some(Shot::Grabbing(shot)) = self.shot.take() {
                 self.shot_without_picture(shot, "the grab could not be started");
             }
@@ -1167,7 +1304,7 @@ impl App {
             self.log.diag("screenshot: pixels arrived with no shot waiting for them");
             return;
         };
-        self.restore_popup();
+        self.release_capture_hide(HideOwner::Screenshot);
         match grabbed {
             Ok(frame) => {
                 self.log.diag(&format!(
@@ -1212,25 +1349,157 @@ impl App {
         }
     }
 
-    /// Restore the popup after a pick or grab hides it.
-    ///
-    /// The pump can receive a newer popup while the grab runs.
-    /// If a popup exists, keep it. If the Controller hides it, do not restore it.
-    /// The Controller owns Anki state because the slot is part of the panel.
-    /// A new raster therefore uses the current state.
-    fn restore_popup(&mut self) {
-        if self.popup.as_ref().and_then(Popup::shown).is_some() || !self.controller.is_shown() {
+    fn hide_surfaces(&mut self) {
+        let started = Instant::now();
+        let was = self.popup.as_ref().and_then(Popup::shown).is_some();
+        if let Some(popup) = self.popup.as_mut() {
+            popup.hide();
+        }
+        if let Some(outline) = self.scan_outline.as_mut() {
+            outline.hide();
+        }
+        if let Some(catcher) = self.catcher.as_mut() {
+            catcher.hide();
+        }
+        self.flush_popup_notes();
+        self.flush_surface_notes();
+        if was {
+            self.log.diag(&format!("popup: hidden in {} us", started.elapsed().as_micros()));
+        }
+    }
+
+    fn restore_request(&self, saved: &ShowRequest) -> Option<ShowRequest> {
+        if let Some(view) = self.controller.popup() {
+            return Some(ShowRequest {
+                presentation: view.presentation.clone(),
+                anchor: view.anchor,
+                scroll: view.scroll,
+                show_back: view.show_back,
+                anki: self.controller.anki().cloned(),
+                selection: self.popup_selection(),
+            });
+        }
+        self.controller.is_shown().then(|| saved.clone())
+    }
+
+    fn restore_scan_outline(&mut self, generation: u64, marks: Vec<overlay::Mark>) {
+        if marks.is_empty()
+            || !same_popup_generation(Some(generation), self.popup_generation)
+            || self.controller_hidden
+            || !self.controller.is_shown()
+        {
             return;
         }
-        let Some(req) = self.popup.as_ref().and_then(Popup::request).cloned() else {
+        let screens = self.screens();
+        if let Some(outline) = self.scan_outline.as_mut() {
+            outline.show(&marks, &screens);
+        }
+        self.flush_surface_notes();
+    }
+
+    fn restore_popup_if_ready(&mut self) {
+        if !should_restore_popup(
+            self.hide_owners,
+            self.controller_hidden,
+            self.controller.is_shown(),
+            self.popup.as_ref().and_then(Popup::shown).is_some(),
+        ) {
+            return;
+        }
+        let hidden = self.hidden_popup.take();
+        let deferred = self.deferred_popup.take();
+        match deferred {
+            Some(deferred) if deferred.generation == self.popup_generation => {
+                let marks = hidden
+                    .as_ref()
+                    .filter(|saved| same_popup_generation(Some(saved.generation), deferred.generation))
+                    .map(|saved| (saved.generation, saved.marks.clone()));
+                self.show_popup(&deferred.request);
+                if let Some((generation, marks)) = marks {
+                    self.restore_scan_outline(generation, marks);
+                }
+            }
+
+            Some(_) => {}
+            None => {
+                let Some(hidden) = hidden else { return };
+                if !same_popup_generation(Some(hidden.generation), self.popup_generation) {
+                    return;
+                }
+                let Some(req) = self.restore_request(&hidden.request) else { return };
+                self.show_popup(&req);
+                self.restore_scan_outline(hidden.generation, hidden.marks);
+            }
+        }
+    }
+    /// Return the request that represents the newest popup state.
+    ///
+    /// A deferred request is newer than the hidden snapshot, which is newer
+    /// than the native surface's last request. Comparing against this order
+    /// keeps a second reshow of deferred content in the same generation.
+    fn current_popup_request(&self) -> Option<&ShowRequest> {
+        self.deferred_popup
+            .as_ref()
+            .map(|deferred| &deferred.request)
+            .or_else(|| self.hidden_popup.as_ref().map(|hidden| &hidden.request))
+            .or_else(|| self.popup.as_ref().and_then(Popup::request))
+    }
+
+    fn same_popup(
+        &self,
+        presentation: &chibipop::present::Presentation,
+        anchor: PhysRect,
+    ) -> bool {
+        if self.controller_hidden {
+            return false;
+        }
+        self.current_popup_request().is_some_and(|request| {
+            request.anchor == anchor && request.presentation == *presentation
+        })
+    }
+
+    /// Store a reshow while a capture still owns the hide.
+    ///
+    /// Unlike changed content, this keeps the hidden snapshot and its scan
+    /// marks. Only the Anki and selection values in the deferred request move.
+    fn defer_reshow(&mut self, request: ShowRequest) {
+        if let Some(deferred) = self.deferred_popup.as_mut() {
+            deferred.generation = self.popup_generation;
+            deferred.request = request;
+        } else {
+            self.deferred_popup = Some(DeferredPopup {
+                generation: self.popup_generation,
+                request,
+            });
+        }
+    }
+
+    fn defer_repaint(&mut self, scroll: i32, show_back: bool) {
+        let anki = self.controller.anki().cloned();
+        let selection = self.popup_selection();
+        if let Some(deferred) = self.deferred_popup.as_mut() {
+            deferred.request.scroll = scroll;
+            deferred.request.show_back = show_back;
+            deferred.request.anki = anki;
+            deferred.request.selection = selection;
+            return;
+        }
+        let Some(mut request) = self
+            .popup
+            .as_ref()
+            .and_then(Popup::request)
+            .cloned()
+            .or_else(|| self.hidden_popup.as_ref().map(|saved| saved.request.clone()))
+        else {
             return;
         };
-        self.show_popup(&ShowRequest {
-            anki: self.controller.anki().cloned(),
-            selection: self.popup_selection(),
-            ..req
-        });
+        request.scroll = scroll;
+        request.show_back = show_back;
+        request.anki = anki;
+        request.selection = selection;
+        self.deferred_popup = Some(DeferredPopup { generation: self.popup_generation, request });
     }
+
 
     // ---- OCR to clipboard ----
 
@@ -1255,7 +1524,7 @@ impl App {
         }
         // `None` uses the product deadline (`select::PICK_TIMEOUT`).
         // A second constant would conflict with the product pick duration.
-        let picked = self.pick_region(None);
+        let picked = self.pick_region(None, HideOwner::Ocr);
         self.took_ocr_region(picked);
     }
 
@@ -1268,7 +1537,7 @@ impl App {
     fn took_ocr_region(&mut self, picked: Option<PhysRect>) {
         let Some(region) = picked else {
             self.log.diag("ocr-clipboard: pick cancelled - the clipboard is untouched");
-            self.restore_popup();
+            self.release_capture_hide(HideOwner::Ocr);
             return;
         };
         self.ocr_job = Some(region);
@@ -1317,7 +1586,7 @@ impl App {
         if let Err(e) = spawned {
             self.log.diag(&format!("ocr-clipboard: no thread for the grab - {e}"));
             self.ocr_job = None;
-            self.restore_popup();
+            self.release_capture_hide(HideOwner::Ocr);
         }
     }
 
@@ -1330,7 +1599,7 @@ impl App {
             self.log.diag("ocr-clipboard: text arrived with no region waiting for it");
             return;
         };
-        self.restore_popup();
+        self.release_capture_hide(HideOwner::Ocr);
         let lines = match read {
             Ok(lines) => lines,
             Err(e) => {
@@ -1419,7 +1688,7 @@ impl App {
         // Leave one pick to expire without seat input.
         // This tests map, configure, paint, nested pump, deadline, and teardown
         // without input from the user's pointer.
-        let picked = self.pick_region(Some(SURFACE_PROBE_DEADLINE));
+        let picked = self.pick_region(Some(SURFACE_PROBE_DEADLINE), HideOwner::Picker);
         self.log.diag(&format!("probe: pick answered {}", picked.is_some()));
 
         // An empty vector hides on both platforms (`controller.rs`).
@@ -1819,6 +2088,115 @@ impl App {
         TimeoutAction::Drop
     }
 
+    fn cancel_pending_sentence(&mut self) {
+        let Some(pending) = self.pending_sentence.take() else { return };
+        if pending.owns_hide {
+            self.hide_owners.release(HideOwner::Sentence);
+        }
+    }
+
+    fn sentence_without_probe(&mut self, pending: PendingSentence) {
+        self.feed(Event::LookupResult {
+            id: pending.id,
+            outcome: LookupOutcome::Sentence(None),
+        });
+        if pending.owns_hide {
+            self.release_capture_hide(HideOwner::Sentence);
+        }
+    }
+
+    fn dispatch_sentence(&mut self, pending: PendingSentence) {
+        let sent = !self.demo.armed
+            && self.send_trigger(
+                TriggerKind::Sentence(SentenceProbe {
+                    anchor: pending.anchor,
+                    orientation: pending.orientation,
+                    mask: pending.mask,
+                }),
+                pending.id,
+            );
+        if sent {
+            self.sentence_requests.insert(pending.id.0);
+        } else {
+            self.sentence_without_probe(pending);
+        }
+    }
+
+    /// Dispatch the sentence only after its `wl_display.sync` callback arrives.
+    ///
+    /// The callback handler has already taken the ordering step. A stale
+    /// callback can still reach the queue after cancellation, so validate the
+    /// current popup before sending the trigger.
+    fn dispatch_pending_sentence(&mut self) {
+        let Some(pending) = self.pending_sentence.take() else { return };
+        if self.controller_hidden
+            || self.popup_generation != pending.generation
+            || !self.controller.is_shown()
+        {
+            if pending.owns_hide {
+                self.release_capture_hide(HideOwner::Sentence);
+            }
+            return;
+        }
+        self.dispatch_sentence(pending);
+    }
+
+    /// Queue the asynchronous display barrier for a live sentence capture.
+    ///
+    /// `wl_display.sync` returns an inert callback when request construction
+    /// fails. Check that proxy and the flush result so every setup failure uses
+    /// the same `Sentence(None)` fallback as a failed synchronous barrier.
+    fn queue_sentence_sync(&self, id: RequestId, generation: u64) -> Result<()> {
+        let display = self
+            .display
+            .as_ref()
+            .context("the Wayland display is unavailable")?;
+        let qh = self
+            .wayland_qh
+            .as_ref()
+            .context("the Wayland event queue is unavailable")?;
+        let callback = display.display().sync(
+            qh,
+            SentenceSync { id, generation },
+        );
+        if !callback.is_alive() {
+            bail!("creating the wl_display.sync callback failed");
+        }
+        display.flush().context("flushing the wl_display.sync request")?;
+        Ok(())
+    }
+
+    fn request_sentence(
+        &mut self,
+        id: RequestId,
+        anchor: PhysRect,
+        orientation: Orientation,
+        hide_popup: bool,
+    ) {
+        if hide_popup {
+            self.begin_capture_hide(HideOwner::Sentence);
+        }
+        let pending = PendingSentence {
+            id,
+            anchor,
+            orientation,
+            mask: CaptureMask::for_mode(self.capture_mode(), None),
+            generation: self.popup_generation,
+            owns_hide: hide_popup,
+        };
+        if hide_popup && self.display.is_some() && self.wayland_qh.is_some() && self.worker.is_some() && !self.demo.armed {
+            self.pending_sentence = Some(pending);
+            if let Err(e) = self.queue_sentence_sync(id, self.popup_generation) {
+                self.log.diag(&format!("sentence: the popup hide did not settle - {e:#}"));
+                if let Some(pending) = self.pending_sentence.take() {
+                    self.sentence_without_probe(pending);
+                }
+            }
+        } else {
+            self.dispatch_sentence(pending);
+        }
+    }
+
     fn execute(&mut self, cmd: Command) {
         match cmd {
             // OCR must not read our popup while a live grab runs.
@@ -1839,28 +2217,11 @@ impl App {
                     },
                 });
             }
-            // A sentence probe reads the frame around the hovered word.
-            // Hide the popup before the live grab.
-            // `hide_popup` commits a transparent buffer. The commit is
-            // flushed before the trigger reaches the Worker.
-            // Do not mask this popup. It covers the next lines
-            // that the sentence probe must read.
-            // A request with no pipeline gets `None` at once.
-            // The add then uses the hover-time sentence. It does not wait.
+            // A live probe owns a temporary transparent hide. The request is
+            // deferred until an asynchronous `wl_display.sync` callback proves
+            // that hide reached the compositor.
             Command::RequestSentence { id, anchor, orientation, hide_popup } => {
-                if hide_popup {
-                    self.hide_popup();
-                }
-                let mask = CaptureMask::for_mode(self.capture_mode(), None);
-                let sent = !self.demo.armed
-                    && self.send_trigger(
-                        TriggerKind::Sentence(SentenceProbe { anchor, orientation, mask }),
-                        id,
-                    );
-                if !sent {
-                    self.restore_popup();
-                    self.feed(Event::LookupResult { id, outcome: LookupOutcome::Sentence(None) });
-                }
+                self.request_sentence(id, anchor, orientation, hide_popup);
             }
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
@@ -1877,10 +2238,13 @@ impl App {
             // Do not arm a pass for `RepaintPopup`. A scroll repaint would
             // otherwise call itself.
             Command::ShowPopup { presentation, anchor, scroll, show_back } => {
-                if let Some(popup) = self.popup.as_mut() {
-                    popup.arm_script();
+                let same_popup = self.same_popup(&presentation, anchor);
+                if !same_popup {
+                    self.cancel_pending_sentence();
+                    self.popup_generation = self.popup_generation.wrapping_add(1);
                 }
-                self.show_popup(&ShowRequest {
+                self.controller_hidden = false;
+                let request = ShowRequest {
                     presentation: *presentation,
                     anchor,
                     scroll,
@@ -1889,9 +2253,40 @@ impl App {
                     // window. Every raster carries its state.
                     anki: self.controller.anki().cloned(),
                     selection: self.popup_selection(),
-                });
+                };
+                if self.hide_owners.is_empty() {
+                    // A changed popup replaces the old one. A same-popup
+                    // reshow keeps any saved state if a test or an unusual
+                    // compositor leaves a snapshot behind.
+                    if !same_popup {
+                        self.hidden_popup = None;
+                        self.deferred_popup = None;
+                        if let Some(popup) = self.popup.as_mut() {
+                            popup.arm_script();
+                        }
+                    }
+                    self.show_popup(&request);
+                } else if same_popup {
+                    // A reshow only refreshes state carried by the panel.
+                    // Keep the hidden snapshot and its scan marks.
+                    self.defer_reshow(request);
+                    self.hide_surfaces();
+                } else {
+                    // A new popup must not become visible inside another
+                    // capture. Its old scan marks are stale by definition.
+                    self.hidden_popup = None;
+                    self.deferred_popup = Some(DeferredPopup {
+                        generation: self.popup_generation,
+                        request,
+                    });
+                    self.hide_surfaces();
+                }
             }
             Command::RepaintPopup { scroll, show_back } => {
+                if !self.hide_owners.is_empty() {
+                    self.defer_repaint(scroll, show_back);
+                    return;
+                }
                 let anki = self.controller.anki().cloned();
                 let selection = self.popup_selection();
                 let req = self.popup.as_ref().and_then(Popup::request).map(|req| ShowRequest {
@@ -1953,9 +2348,9 @@ impl App {
             }
             // Screenshot-on-add seam. A plan carries a picture, so do not
             // dispatch the plain add.
-            // The picture call files the card. OS work stays in
-            // [`App::park_shot`].
-            Command::AddNote { expr, fields } => match self.plan_shot_for_add() {
+            // The picture call files the authorized command payload. OS work
+            // stays in [`App::park_shot`].
+            Command::AddNote { expr, fields } => match self.plan_shot_for_add(&expr, &fields) {
                 Some(plan) => self.park_shot(Pending { plan, kind: ShotKind::Add }),
                 None => self.spawn_anki(AnkiCall::Add { expr, fields }),
             },
@@ -2020,8 +2415,9 @@ impl App {
     /// Drain the Worker and Japanese analysis results.
     ///
     /// Every sentence result reaches the Controller. Other Worker results keep
-    /// the existing newest-only rule. A sentence result restores the popup
-    /// before the Controller sees it.
+    /// the existing newest-only rule. Sentence owners are released only after
+    /// this batch reaches the Controller, so a newer result cannot reveal an
+    /// older popup between two queued results.
     fn drain_results(&mut self) {
         let mut queued = Vec::new();
         if let Some(worker) = self.worker.as_ref() {
@@ -2033,12 +2429,17 @@ impl App {
         while let Ok(result) = self.analysis.results().try_recv() {
             freshest_analysis = Some(result);
         }
+        let mut sentence_completions = 0;
         for result in Self::route_results(queued) {
             let sentence = matches!(&result.outcome, LookupOutcome::Sentence(_));
-            if sentence {
-                self.restore_popup();
+            let id = result.id;
+            self.feed(Event::LookupResult { id, outcome: result.outcome });
+            if sentence && self.sentence_requests.remove(&id.0) {
+                sentence_completions += 1;
             }
-            self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
+        }
+        for _ in 0..sentence_completions {
+            self.release_capture_hide(HideOwner::Sentence);
         }
         if let Some((generation, words)) = freshest_analysis {
             self.feed(Event::AnalysisReady { generation, words });
@@ -2219,22 +2620,11 @@ impl App {
     /// This also covers the Linux-only caller, [`App::pick_region`], which must
     /// not leave an old frame under the region selector.
     fn hide_popup(&mut self) {
-        let started = Instant::now();
-        let was = self.popup.as_ref().and_then(Popup::shown).is_some();
-        if let Some(popup) = self.popup.as_mut() {
-            popup.hide();
-        }
-        if let Some(outline) = self.scan_outline.as_mut() {
-            outline.hide();
-        }
-        if let Some(catcher) = self.catcher.as_mut() {
-            catcher.hide();
-        }
-        self.flush_popup_notes();
-        self.flush_surface_notes();
-        if was {
-            self.log.diag(&format!("popup: hidden in {} us", started.elapsed().as_micros()));
-        }
+        self.controller_hidden = true;
+        self.cancel_pending_sentence();
+        self.hidden_popup = None;
+        self.deferred_popup = None;
+        self.hide_surfaces();
     }
 
     /// Show what this hover captured and box the word it defined.
@@ -2247,8 +2637,10 @@ impl App {
     /// The popup theme supplies colors, so the outline follows the panel theme
     /// without a second palette.
     fn show_scan_overlay(&mut self, rects: &[ScanRect]) {
+        if !self.hide_owners.is_empty() {
+            return;
+        }
         let screens = self.screens();
-        // The outline borrows the popup's `wl_shm`, `wl_compositor`,
         // `wp_viewporter` and theme, so a session has both or neither.
         let (Some(popup), Some(outline)) = (self.popup.as_ref(), self.scan_outline.as_mut()) else {
             if !rects.is_empty() {
@@ -2729,6 +3121,30 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
         }
     }
 }
+/// Completes the asynchronous barrier for a live sentence capture.
+///
+/// The hide was committed before the sync request. Dispatching here means the
+/// Worker never starts its live grab until the compositor has processed that
+/// commit. A callback for a cancelled request is ignored.
+impl Dispatch<WlCallback, SentenceSync> for App {
+    fn event(
+        app: &mut App,
+        _: &WlCallback,
+        _: <WlCallback as Proxy>::Event,
+        sync: &SentenceSync,
+        _: &Connection,
+        _: &QueueHandle<App>,
+    ) {
+        let current = app
+            .pending_sentence
+            .as_ref()
+            .is_some_and(|pending| pending.id == sync.id && pending.generation == sync.generation);
+        if current {
+            app.dispatch_pending_sentence();
+        }
+    }
+}
+
 
 /// The daemon queue runs on the pump.
 /// The daemon dispatches it instead of the callback from
@@ -3200,6 +3616,10 @@ pub fn run(paths: Paths) -> Result<()> {
         paths: paths.clone(),
         signal: event_loop.get_signal(),
         fatal: None,
+        display: Some(conn.clone()),
+        wayland_qh: Some(queue.handle()),
+        popup_generation: 0,
+        controller_hidden: true,
         pump: event_loop.handle(),
         dwell: None,
         gesture_tick: None,
@@ -3244,6 +3664,11 @@ pub fn run(paths: Paths) -> Result<()> {
         scan_outline,
         static_outline,
         catcher,
+        hide_owners: HideOwners::default(),
+        hidden_popup: None,
+        deferred_popup: None,
+        pending_sentence: None,
+        sentence_requests: HashSet::new(),
         demo,
         scripting: false,
         config,
@@ -3590,6 +4015,10 @@ mod tests {
             config: chibipop::config::Config::default(),
             signal: event_loop.get_signal(),
             fatal: None,
+            display: None,
+            wayland_qh: None,
+            popup_generation: 0,
+            controller_hidden: true,
             pump: event_loop.handle(),
             dwell: None,
             gesture_tick: None,
@@ -3642,6 +4071,11 @@ mod tests {
             scan_outline: None,
             static_outline: None,
             catcher: None,
+            hide_owners: HideOwners::default(),
+            hidden_popup: None,
+            deferred_popup: None,
+            pending_sentence: None,
+            sentence_requests: HashSet::new(),
             demo: Demo::default(),
             scripting: false,
         }
@@ -4937,6 +5371,163 @@ mod tests {
         assert!(dwell_wanted(Some(Hold { output, latched: true }), true));
         assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
     }
+
+    #[test]
+    fn hide_ownership_waits_for_every_capture_completion() {
+        let mut owners = HideOwners::default();
+        owners.acquire(HideOwner::Sentence);
+        owners.acquire(HideOwner::Screenshot);
+        owners.acquire(HideOwner::Ocr);
+
+        assert!(!should_restore_popup(owners, false, true, false));
+        assert!(owners.release(HideOwner::Sentence));
+        assert!(!should_restore_popup(owners, false, true, false));
+        assert!(owners.release(HideOwner::Screenshot));
+        assert!(!should_restore_popup(owners, false, true, false));
+        assert!(owners.release(HideOwner::Ocr));
+        assert!(should_restore_popup(owners, false, true, false));
+        assert!(!should_restore_popup(owners, true, true, false));
+    }
+
+    #[test]
+    fn scan_marks_restore_only_for_the_current_popup() {
+        assert!(same_popup_generation(Some(7), 7));
+        assert!(!same_popup_generation(Some(7), 8));
+        assert!(!same_popup_generation(None, 7));
+    }
+    /// A temporary sentence hide may receive the same popup again while its
+    /// display ordering step is still pending.
+    /// The reshow is not a new lookup, so it must not cancel that sentence.
+    #[test]
+    fn a_same_popup_reshow_keeps_a_pending_sentence_request() {
+        let dir = scratch("reshow_sentence");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let presentation = popup::canned();
+        let anchor = PhysRect { x: 600, y: 300, w: 40, h: 40 };
+
+        // Give the Controller the same shown content and anchor that the
+        // platform is about to reshow. No native surface is needed here.
+        let _ = app.controller.handle(Event::LookupResult {
+            id: RequestId(1),
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(presentation.clone()),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        let _ = app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 500, y: 400, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+
+        let generation = 7;
+        app.popup_generation = generation;
+        app.controller_hidden = false;
+        app.hide_owners.acquire(HideOwner::Sentence);
+        app.pending_sentence = Some(PendingSentence {
+            id: RequestId(42),
+            anchor,
+            orientation: Orientation::Horizontal,
+            mask: CaptureMask::NONE,
+            generation,
+            owns_hide: true,
+        });
+        app.hidden_popup = Some(HiddenPopup {
+            generation,
+            request: ShowRequest {
+                presentation: presentation.clone(),
+                anchor,
+                scroll: 0,
+                show_back: false,
+                anki: None,
+                selection: None,
+            },
+            marks: Vec::new(),
+        });
+
+        app.execute(Command::ShowPopup {
+            presentation: Box::new(presentation),
+            anchor,
+            scroll: 0,
+            show_back: false,
+        });
+
+        let pending = app.pending_sentence.as_ref().expect("the sentence must remain pending");
+        assert_eq!(RequestId(42), pending.id);
+        assert_eq!(generation, pending.generation);
+        assert_eq!(generation, app.popup_generation);
+        assert_eq!(1, app.hide_owners.sentence);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scan marks belong to the popup that a temporary capture hid.
+    /// A same-content reshow must defer that frame without dropping the marks.
+    #[test]
+    fn a_same_popup_reshow_keeps_saved_scan_marks() {
+        let dir = scratch("reshow_marks");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let presentation = popup::canned();
+        let anchor = PhysRect { x: 600, y: 300, w: 40, h: 40 };
+
+        let _ = app.controller.handle(Event::LookupResult {
+            id: RequestId(1),
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(presentation.clone()),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        let _ = app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 500, y: 400, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+
+        let generation = 7;
+        let marks = vec![overlay::Mark {
+            rect: PhysRect { x: 620, y: 320, w: 80, h: 30 },
+            colour: overlay::BORDER,
+        }];
+        app.popup_generation = generation;
+        app.controller_hidden = false;
+        app.hide_owners.acquire(HideOwner::Screenshot);
+        app.hidden_popup = Some(HiddenPopup {
+            generation,
+            request: ShowRequest {
+                presentation: presentation.clone(),
+                anchor,
+                scroll: 0,
+                show_back: false,
+                anki: None,
+                selection: None,
+            },
+            marks: marks.clone(),
+        });
+
+        app.execute(Command::ShowPopup {
+            presentation: Box::new(presentation),
+            anchor,
+            scroll: 0,
+            show_back: false,
+        });
+
+        let hidden = app.hidden_popup.as_ref().expect("the hidden popup snapshot must remain");
+        assert_eq!(generation, hidden.generation);
+        assert_eq!(marks, hidden.marks);
+        let deferred = app.deferred_popup.as_ref().expect("the reshow must be deferred");
+        assert_eq!(generation, deferred.generation);
+        assert_eq!(anchor, deferred.request.anchor);
+        assert_eq!(generation, app.popup_generation);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// A watch with no popup asks the pipeline for nothing.
     /// It expires at its deadline, so the idle daemon keeps no timed source
