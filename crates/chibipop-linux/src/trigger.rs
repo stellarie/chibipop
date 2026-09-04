@@ -1,13 +1,15 @@
-//! This module defines trigger hold transitions and requests for a new frozen grab.
+//! This module defines trigger hold transitions.
 //!
 //! The control socket has three trigger verbs.
 //! See ARCHITECTURE.md#input-ladders.
-//! Trigger mode gets its frozen grab at key press.
+//! A key hold freezes one press-time grab because the popup can cover the word
+//! during the short hold, and the frozen grab reads through the popup.
+//! A toggle latch reads live grabs with the popup masked, like Live mode.
+//! A latch can last minutes while the screen changes under it, so it must not
+//! keep stale pixels.
 //! See ARCHITECTURE.md#hover-cadence.
 //!
 //! This module returns decisions and causes no platform effect.
-//! The daemon owns the cursor, the Worker, and the popup.
-//! Tests can check the transition rules on a system with one output.
 
 use crate::capture::geometry;
 use crate::cursor::outputs::OutputGeometry;
@@ -16,48 +18,54 @@ use chibipop::geom::{PhysPoint, PhysRect};
 /// One active trigger hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hold {
-    /// The press-time frozen grab covers this output.
+    /// This output matters only for a frozen hold.
     /// A cursor on another output needs a new frozen grab.
     /// See ARCHITECTURE.md#hover-cadence.
     pub output: PhysRect,
-    /// A `toggle` started this hold, so `trigger-up` must not end it.
+    /// A latch reads live grabs with the popup masked.
+    /// It survives `trigger-up` until `toggle` releases it.
     pub latched: bool,
 }
 
 /// One change to the trigger hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Get a new frozen grab of the output under the cursor.
-    /// A press while a latched hold keeps the latch.
-    Freeze { latched: bool },
-    /// Drop the frozen grab and retract the popup.
+    /// Get a press-time frozen grab of the output under the cursor.
+    Freeze,
+    /// Start or keep a live-grab latch until `toggle` releases it.
+    Latch,
+    /// Drop the frozen grab or release the live latch, and retract the popup.
     Release,
     /// Keep the hold unchanged. The value gives the log reason.
     Nothing(&'static str),
 }
 
-/// `trigger-down` always requests a new frozen grab.
+/// `trigger-down` freezes a new hold, unless a latch already exists.
 pub fn down(hold: Option<Hold>) -> Step {
-    Step::Freeze { latched: hold.is_some_and(|h| h.latched) }
+    if hold.is_some_and(|h| h.latched) { Step::Latch } else { Step::Freeze }
 }
 
 /// `trigger-up` ends an unlatched hold.
 ///
 /// It does not end a hold that `toggle` latched.
-/// The latch lets the user release the key and keep the frozen grab.
+/// The latch lets the user release the key while live grabs continue.
 pub fn up(hold: Option<Hold>) -> Step {
     match hold {
-        Some(h) if h.latched => Step::Nothing("a toggle holds the freeze; toggle again to end it"),
+        Some(h) if h.latched => Step::Nothing("a toggle holds the live grab; toggle again to end it"),
         Some(_) => Step::Release,
         None => Step::Nothing("nothing is held"),
     }
 }
 
-/// `toggle` gets a frozen grab at toggle-on and drops it at toggle-off.
+/// `toggle` starts a live latch or releases the current hold.
+///
+/// A latch can last minutes while the screen changes under it, so it reads live
+/// grabs with the popup masked, like Live mode. A key hold still freezes because
+/// the popup can cover the word for the short hold, and the frozen grab reads through it.
 pub fn toggle(hold: Option<Hold>) -> Step {
     match hold {
         Some(_) => Step::Release,
-        None => Step::Freeze { latched: true },
+        None => Step::Latch,
     }
 }
 
@@ -107,16 +115,15 @@ mod tests {
 
     #[test]
     fn a_press_freezes_and_a_release_ends_it() {
-        assert_eq!(Step::Freeze { latched: false }, down(None));
+        assert_eq!(Step::Freeze, down(None));
         assert_eq!(Step::Release, up(held(LEFT, false)));
     }
 
-    /// Each press requests a new frozen grab.
     /// A press while a latched hold must preserve the latch.
     #[test]
     fn a_press_during_a_latched_hold_keeps_the_latch() {
-        assert_eq!(Step::Freeze { latched: true }, down(held(LEFT, true)));
-        assert_eq!(Step::Freeze { latched: false }, down(held(LEFT, false)));
+        assert_eq!(Step::Latch, down(held(LEFT, true)));
+        assert_eq!(Step::Freeze, down(held(LEFT, false)));
     }
 
     #[test]
@@ -129,10 +136,10 @@ mod tests {
         assert!(matches!(up(None), Step::Nothing(_)));
     }
 
-    /// A latch starts at toggle-on and ends at toggle-off.
+    /// A toggle starts a live latch and ends it at toggle-off.
     #[test]
-    fn toggle_freezes_until_it_is_toggled_off() {
-        assert_eq!(Step::Freeze { latched: true }, toggle(None));
+    fn toggle_latches_live_until_it_is_toggled_off() {
+        assert_eq!(Step::Latch, toggle(None));
         assert_eq!(Step::Release, toggle(held(LEFT, true)));
     }
 

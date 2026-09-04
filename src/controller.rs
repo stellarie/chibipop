@@ -1030,15 +1030,21 @@ impl Controller {
     /// uses this value to arm its dwell watch. No popup means no watch and no
     /// idle wakeups.
     ///
-    /// Trigger mode has no re-check because its frozen grab cannot change.
+    /// Hold mode has no re-check because its frozen grab cannot change. Toggle
+    /// mode reads live grabs, so the screen under a still cursor can change
+    /// while the latch is on. Press mode asks only on a press.
     /// A drill-down is not screen content. A dialogue behind it must not change
     /// the history stack that the user opened.
     pub fn dwell_armed(&self) -> bool {
-        matches!(self.cfg.trigger_mode, TriggerMode::Live)
-            && self
-                .surface
-                .as_ref()
-                .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
+        let live = match self.cfg.trigger_mode {
+            TriggerMode::Live => true,
+            TriggerMode::Toggle => self.trigger_held,
+            _ => false,
+        };
+        live && self
+            .surface
+            .as_ref()
+            .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
     }
 
     /// The core popup rectangle when it is on screen.
@@ -1924,6 +1930,28 @@ mod tests {
         assert!(c.popup().is_some(), "the hold's popup is on screen");
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
+    }
+
+    /// Toggle mode reads live grabs, so a still cursor over a changed screen
+    /// gets the same re-check as Live mode while the latch is on. The latch
+    /// off ends the watch with the popup.
+    #[test]
+    fn a_latched_toggle_keeps_the_dwell_re_check() {
+        let mut c = Controller::new(ControllerConfig {
+            trigger_mode: TriggerMode::Toggle,
+            ..cfg()
+        });
+        assert!(!c.dwell_armed());
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        assert!(c.dwell_armed(), "a latched toggle watches the screen");
+        let pos = PhysPoint { x: 110, y: 110 };
+        assert_eq!(
+            vec![Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP) }],
+            c.handle(Event::DwellElapsed)
+        );
+        c.handle(Event::TriggerUp);
+        assert!(!c.dwell_armed(), "toggle-off ends the watch");
     }
 
     /// A drill-down is not screen content. A dialogue behind it must not change

@@ -83,7 +83,7 @@ pub enum TriggerMode {
     HoldKey,
     /// Shows the popup after one key press and hides it after the next press.
     /// The trigger key latches the hold, so the user can move onto the popup
-    /// without a held key. The frozen grab lasts until the next press.
+    /// without a held key. The lookup reads live grabs with the popup masked while latched.
     Toggle,
     /// Runs one lookup at the cursor for each key press, like Yomitan. The
     /// popup stays until the next press finds no text or the user clicks

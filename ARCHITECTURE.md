@@ -159,9 +159,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The damage-gated dwell re-check runs only while a popup is visible.
 - At key press in hold-key mode, the system freezes one full grab of the output under the cursor
   before any popup exists. No capture and no mask run while the user holds the key.
-- Release drops the frozen buffer, and each hold-key press captures again. The `toggle` command
-  captures at toggle-on and holds the buffer until toggle-off. Toggle mode uses this path on
-  both platforms: Linux sends the `toggle` verb, and Windows flips the hook latch.
+- Release drops the Frozen grab, and each hold-key press captures again. The `toggle` command
+  latches the trigger and reads live grabs with the popup masked until toggle-off.
+  Toggle mode uses this path on both platforms: Linux sends the `toggle` verb, and Windows flips
+  the hook latch.
 - Press mode has no Frozen grab or Dwell re-check. Each trigger press performs one live masked
   grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
   also hides it because the mask gives no text. Cursor movement and key release do nothing, and

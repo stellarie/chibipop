@@ -114,8 +114,9 @@ In hold-key mode, `trigger-down` freezes one full grab of the monitor under the 
 the popup appears, and every lookup while you hold the chord reads that frozen screen. The popup
 can cover the very word it defines, and the next lookup still reads through it. Moving onto another
 monitor mid-hold grabs that one.
-`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the hands-free
-version: it freezes at toggle-on and stays frozen until you toggle off.
+`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the hands-free version:
+it latches the trigger and reads live grabs with the popup masked until toggle-off. Lookups see
+screen changes while the latch is on.
 Toggle mode in the settings window selects this path for the portal channel and prints the
 one-line press bind for the native channel.
 

@@ -70,14 +70,14 @@ _Avoid_: capture lock
 
 **Dwell re-check**:
 The damage-gated watch kept while the cursor rests on a shown popup. The popup refreshes
-when the screen changes beneath it. The watch runs in live mode only.
+when the screen changes beneath it. The watch runs in live mode and in a latched Toggle mode.
 _Avoid_: polling loop, refresh timer
 
 **Frozen grab**:
-The press-time full-output capture for hold-key and Toggle mode. While either mode holds the grab,
-every lookup reads this capture. The capture happens before the popup exists, so it needs no mask
-and reads through the popup. Press mode does not use Frozen grab. It reads one live masked grab for
-each press.
+The press-time full-output capture for hold-key mode. While hold-key mode holds the grab, every
+lookup reads this capture. The capture happens before the popup exists, so it needs no mask and
+reads through the popup. Toggle mode reads live grabs with the popup masked while latched. Press
+mode reads one live masked grab for each press.
 _Avoid_: snapshot, screenshot buffer
 
 **TextMeasure**:
@@ -289,9 +289,9 @@ The source of trigger-key press and trigger-key release events on Linux.
 _Avoid_: keyboard hook, hotkey listener
 
 **Toggle mode**:
-One trigger-key press shows the popup and latches the Frozen grab, then the next press hides
-the popup and drops the grab. The user can release the key and move onto the popup.
-Per-character lookup is inert in this mode, as in hold-key mode.
+One trigger-key press shows the popup and latches the trigger. While the latch is on, each lookup
+reads a live grab with the popup masked, so lookups see screen changes. The next press hides the
+popup and turns off the latch. Per-character lookup is inert in this mode, as in hold-key mode.
 _Avoid_: latch mode, sticky mode
 
 **Press mode**:

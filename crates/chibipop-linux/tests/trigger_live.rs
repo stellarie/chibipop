@@ -212,22 +212,24 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
     session.wait_for("hold released, frozen grab dropped");
     assert_eq!(1, session.count("frozen grab of output"), "one press, one grab");
 
-    // Toggle latches the hold.
-    // A stray release must not end it. A second toggle must end it.
+    // Toggle latches the hold with live grabs. It takes no frozen grab.
+    // A stray release must not end it. A second toggle must end it without a thaw.
     session.ctl("toggle");
-    assert_eq!(2, session.count("frozen grab of output"), "toggle-on grabs too");
+    session.wait_for("latched - live grabs until toggle-off");
+    assert_eq!(1, session.count("frozen grab of output"), "toggle-on takes no frozen grab");
     session.ctl("trigger-up");
-    session.wait_for("a toggle holds the freeze");
+    session.wait_for("a toggle holds the live grab");
     assert_eq!(
         1,
         session.count("hold released"),
         "the release under the latch must not have dropped it"
     );
     session.ctl("toggle");
-    assert_eq!(2, session.count("hold released"), "toggle-off ends the hold");
+    session.wait_for("latch released");
+    assert_eq!(1, session.count("frozen grab dropped"), "a latch has no frozen frame to drop");
 
     // A press without a dictionary rebuild must still create only one grab.
-    assert_eq!(2, session.count("frozen grab of output"), "no grab without a press");
+    assert_eq!(1, session.count("frozen grab of output"), "no grab without a press");
 }
 
 /// This test reproduces the reported failure with a real daemon.

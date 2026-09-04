@@ -223,8 +223,9 @@ pub(crate) struct App {
     clipboard: Option<clipboard::Clipboard>,
     /// Dictionary identities last reported by the pipeline.
     dicts: Vec<DictInfo>,
-    /// Trigger-mode hold while the user holds one
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// Trigger-mode hold.
+    /// A key hold ends on `trigger-up`; a latch survives it until `toggle` ends
+    /// the hold (ARCHITECTURE.md#hover-cadence).
     hold: Option<Hold>,
     /// Last lookup failure that the daemon logged.
     /// This record limits each repeated line to one log entry as the cursor
@@ -573,28 +574,46 @@ impl App {
     /// One trigger Verb effect (ARCHITECTURE.md#hover-cadence).
     ///
     /// A press freezes the output under the cursor and looks up text there.
-    /// A release drops the frame and retracts the popup.
-    /// Code sends the grab to the Worker before the lookup.
-    /// The Worker serves its queue in order, so the grab predates the popup by
+    /// A toggle latch keeps live grabs with the popup masked.
+    /// A latch can last minutes while the screen changes under it.
+    /// A release drops a frozen frame or releases a live latch, then retracts
+    /// the popup.
+    /// The frozen press sends its grab to the Worker before the lookup.
+    /// The Worker serves its queue in order, so that grab predates the popup by
     /// rule, not by assumption.
     fn trigger(&mut self, step: trigger::Step) {
         match step {
-            trigger::Step::Freeze { latched } => {
+            trigger::Step::Freeze => {
                 let Some(at) = self.cursor_now() else {
                     self.log.diag("trigger: no cursor sample yet - nothing to look up");
                     return;
                 };
                 let output = self.output_containing(at);
                 self.freeze_at(at, output);
-                self.hold = Some(Hold { output, latched });
+                self.hold = Some(Hold { output, latched: false });
                 self.feed(Event::TriggerDown);
                 // The press supplies the first cursor sample. The first lookup
                 // needs no cursor motion.
                 self.feed(Event::CursorMoved { pos: at });
             }
+            trigger::Step::Latch => {
+                let Some(at) = self.cursor_now() else {
+                    self.log.diag("trigger: no cursor sample yet - nothing to look up");
+                    return;
+                };
+                let output = self.output_containing(at);
+                self.hold = Some(Hold { output, latched: true });
+                self.log.diag("trigger: latched - live grabs until toggle-off");
+                self.feed(Event::TriggerDown);
+                self.feed(Event::CursorMoved { pos: at });
+            }
             trigger::Step::Release => {
+                if self.hold.is_some_and(|hold| hold.latched) {
+                    self.log.diag("trigger: latch released");
+                } else {
+                    self.thaw();
+                }
                 self.hold = None;
-                self.thaw();
                 self.feed(Event::TriggerUp);
             }
             trigger::Step::Nothing(why) => self.log.diag(&format!("trigger: {why}")),
@@ -1937,11 +1956,13 @@ impl App {
     }
 
     /// Relate lookup pixels to the popup in time.
-    /// A hold reads the press-time frame. Other modes read the current screen.
+    /// An unlatched hold reads its press-time frame.
+    /// A latched hold reads live pixels with the popup masked.
+    /// Other modes also read the current screen.
     fn capture_mode(&self) -> CaptureMode {
         match self.hold {
-            Some(_) => CaptureMode::Frozen,
-            None => CaptureMode::Live,
+            Some(h) if !h.latched => CaptureMode::Frozen,
+            _ => CaptureMode::Live,
         }
     }
 
@@ -2540,11 +2561,10 @@ impl CursorHandler for App {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
         self.last_cursor = Some(pos);
-        // When a hold crosses outputs, it needs a fresh full grab on the entered
-        // output (ARCHITECTURE.md#hover-cadence).
-        // Take it before the lookup that sees the output change.
-        // Do it here, not behind the Controller.
-        if let Some(hold) = self.hold {
+        // An unlatched hold crosses outputs with a fresh full frozen grab
+        // (ARCHITECTURE.md#hover-cadence).
+        // A latched hold reads live pixels and needs no cross-output regrab.
+        if let Some(hold) = self.hold.filter(|hold| !hold.latched) {
             if let Some(output) = trigger::regrab(hold, &self.cursor.geometries(), pos) {
                 self.log.diag("trigger: the cursor crossed onto another output");
                 self.freeze_at(pos, output);
@@ -2619,10 +2639,10 @@ fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> 
 /// `armed` belongs to the Controller: live mode, a popup rect, and no
 /// drill-down.
 /// `hold` belongs to the daemon because only it knows the frozen grab.
-/// Hold pixels predate the popup and cannot change, so trigger mode needs no
-/// re-check.
+/// A frozen hold has immutable pixels and blocks the watch.
+/// A latched hold has live pixels and allows the watch.
 fn dwell_wanted(hold: Option<Hold>, armed: bool) -> bool {
-    hold.is_none() && armed
+    !hold.is_some_and(|h| !h.latched) && armed
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -3925,26 +3945,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `toggle` lasts beyond key release.
+    /// `toggle` starts a live latch that lasts beyond key release.
+    /// The first lookup uses a live grab and does not freeze the Worker.
     /// Release while latched changes nothing. A second toggle ends the hold
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// without thawing a frozen frame (ARCHITECTURE.md#hover-cadence).
     #[test]
-    fn a_toggle_holds_the_freeze_until_it_is_toggled_off() {
+    fn a_toggle_latches_live_until_it_is_toggled_off() {
         let dir = scratch("toggle");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
 
         app.handle_request("toggle", Some(Verb::Toggle));
         assert!(app.hold.is_some_and(|h| h.latched), "toggle-on latches");
+        assert_eq!(CaptureMode::Live, app.capture_mode(), "a latch reads live grabs");
+        answer(&app);
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "toggle-on sends a live lookup, not a freeze"
+        );
+        assert!(!done(&log).iter().any(|line| line == "freeze"));
+
         app.handle_request("trigger-up", Some(Verb::TriggerUp));
         assert!(app.hold.is_some(), "a stray release must not end a toggle");
         app.handle_request("toggle", Some(Verb::Toggle));
         assert_eq!(None, app.hold, "toggle-off ends it");
 
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
-        assert!(written.contains("a toggle holds the freeze"), "log was: {written}");
+        assert!(written.contains("a toggle holds the live grab"), "log was: {written}");
+        assert!(written.contains("trigger: latch released"), "log was: {written}");
+        assert!(!written.contains("frozen grab dropped"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4691,7 +4725,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A live grab must mask the popup. A frozen hold reads through it
+    /// A live grab must mask the popup. A frozen key hold reads through it
     /// (ARCHITECTURE.md#capture-and-masking).
     /// The fake recognizer reports whether input has a mask, so both cases are
     /// observed.
@@ -4768,15 +4802,14 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
     /// Test the daemon half of the arm rule.
-    /// A hold reads immutable pixels, so trigger mode never uses a dwell watch.
+    /// A frozen hold has immutable pixels, but a latched hold reads live pixels.
     #[test]
-    fn a_frozen_hold_is_never_dwell_watched() {
+    fn a_frozen_hold_blocks_dwell_but_a_latched_hold_allows_it() {
         let output = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
         assert!(dwell_wanted(None, true), "a shown popup in live mode is watched");
         assert!(!dwell_wanted(Some(Hold { output, latched: false }), true));
-        assert!(!dwell_wanted(Some(Hold { output, latched: true }), true));
+        assert!(dwell_wanted(Some(Hold { output, latched: true }), true));
         assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
     }
 
