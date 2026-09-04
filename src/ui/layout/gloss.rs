@@ -191,6 +191,12 @@ pub(super) struct Paragraphs<'a> {
     /// step. The `separator` color matches other hairlines and tints in the panel. It is
     /// `#323238`, close to Yomitan's `#333333` on dark backgrounds.
     pub(super) tint: Rgb,
+    /// Stores the color that seeds a followable link.
+    ///
+    /// The theme has no link color. The `accent` color already marks the two other
+    /// clickable things in the panel: the selection highlight and the Entry check. One
+    /// color for every click keeps the panel legible. See [`Paragraphs::enter`].
+    pub(super) link: Rgb,
     /// Stores the popup's root font size. A `rem` in dictionary declarations uses a fraction
     /// of this size ([`Ems`]).
     ///
@@ -239,6 +245,7 @@ pub(super) fn paragraphs(
         images: Vec::new(),
         rule: theme.collapsed_text,
         tint: theme.separator,
+        link: theme.accent,
         root_em: theme.body_size,
     };
     let root = Ctx {
@@ -334,7 +341,7 @@ impl Paragraphs<'_> {
         if node.kind == Kind::Text && node.tag == Tag::None {
             return self.text(doc.text(id), ctx.inline, ctx.link, ctx.path, 0);
         }
-        let inline = self.styled(id, ctx.inline);
+        let (inline, link) = self.enter(id, ctx);
         let block = self.boxed(id, ctx.block, inline);
         // **Block box placement:**
         // A box wraps all content in its block, not only the first line.
@@ -362,7 +369,7 @@ impl Paragraphs<'_> {
         // A renderer over `SceneElem::boxes()` then painted Jitendex's
         // `span[data-sc-class="tag"]` twice.
         if doc.is_block(id) && block.style.exists() {
-            return self.wrap(id, ctx, block, inline);
+            return self.wrap(id, ctx, block, inline, link);
         }
         if doc.is_block(id) {
             self.open(ctx.path, block);
@@ -375,12 +382,7 @@ impl Paragraphs<'_> {
             // [`GlossDoc::inline_prose`]).
             self.open(ctx.path, block.inherited());
         }
-        let next = Ctx {
-            inline,
-            block: block.inherited(),
-            link: self.link_of(id, ctx.link),
-            path: ctx.path,
-        };
+        let next = Ctx { inline, block: block.inherited(), link, path: ctx.path };
         // An inline node with ink or horizontal room is a pill.
         // This pass draws the pill as an inline box. It keeps its place on the line and does
         // not break the line.
@@ -417,7 +419,7 @@ impl Paragraphs<'_> {
     /// cannot remain open for that text.
     /// This walk differs from `gloss::plain` only for a *boxed* block with inline text at the
     /// same level. A browser agrees with this walk for that case.
-    pub(super) fn wrap(&mut self, id: NodeId, ctx: Ctx, block: Block, inline: Inline) {
+    pub(super) fn wrap(&mut self, id: NodeId, ctx: Ctx, block: Block, inline: Inline, link: u32) {
         let doc = self.doc;
         let node = *doc.node(id);
         // The paragraph above the box ends before the box.
@@ -428,7 +430,7 @@ impl Paragraphs<'_> {
             // Its body uses the coordinate system that the box establishes, as a table cell
             // body does ([`Paragraphs::table`]).
             block: Block { indent: 0.0, ..block.inherited() },
-            link: self.link_of(id, ctx.link),
+            link,
             path: ctx.path,
         };
         // This box carries a marker from outside to a line *inside* the box.
@@ -810,11 +812,35 @@ impl Paragraphs<'_> {
         self.out.push(Piece::Flow(flow));
     }
 
+    /// Resolves the inline style and the link of one node together.
+    ///
+    /// A followable `a` seeds its color with the theme accent before the node's own
+    /// declarations apply. HTML colors a link in its user agent stylesheet, so a
+    /// dictionary rule on the link or on a descendant still wins. The seed lives here
+    /// and not in [`tag_style`] because only [`link_of`] knows whether the panel can
+    /// follow the `href`. A dead link keeps the body color, so it does not invite a click.
+    ///
+    /// 字通 removes the underline with `a { text-decoration: none }`, and the scene has
+    /// no underline. The color is the only cue that tells a reader where a click leads
+    /// to another Entry.
+    ///
+    /// [`tag_style`]: super::style::tag_style
+    /// [`link_of`]: Self::link_of
+    pub(super) fn enter(&mut self, id: NodeId, ctx: Ctx) -> (Inline, u32) {
+        let link = self.link_of(id, ctx.link);
+        let parent = if link == ctx.link {
+            ctx.inline
+        } else {
+            Inline { color: self.link, ..ctx.inline }
+        };
+        (self.styled(id, parent), link)
+    }
+
     /// Returns the link that contains a node's content.
     ///
     /// The node's link takes precedence over the inherited link. If the node has no usable
     /// link, this function returns the inherited link.
-    pub(super) fn link_of(&mut self, id: NodeId, inherited: u32) -> u32 {
+    fn link_of(&mut self, id: NodeId, inherited: u32) -> u32 {
         let doc = self.doc;
         if doc.node(id).kind != Kind::Link {
             return inherited;

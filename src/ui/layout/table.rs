@@ -338,7 +338,7 @@ impl Paragraphs<'_> {
         // beside it would drop the bullet.
         self.mark_inline();
         self.flush();
-        let inline = self.styled(id, ctx.inline);
+        let (inline, link) = self.enter(id, ctx);
         let block = self.boxed(id, ctx.block, inline);
         let inner = Ctx {
             inline,
@@ -347,7 +347,7 @@ impl Paragraphs<'_> {
             // same reason that [`Block::inherited`] hands a child an
             // empty box.
             block: Block { indent: 0.0, ..block.inherited() },
-            link: self.link_of(id, ctx.link),
+            link,
             path: ctx.path,
         };
         let mut rows = Vec::new();
@@ -483,12 +483,12 @@ impl Paragraphs<'_> {
     /// with no style. A browser also draws nothing for that rule.
     pub(super) fn row(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Vec<Cell> {
         let doc = self.doc;
-        let inline = self.styled(id, ctx.inline);
+        let (inline, link) = self.enter(id, ctx);
         let block = self.boxed(id, ctx.block, inline);
         let inner = Ctx {
             inline,
             block: block.inherited(),
-            link: self.link_of(id, ctx.link),
+            link,
             path: ctx.path,
         };
         let mut out = Vec::new();
@@ -562,7 +562,7 @@ impl Paragraphs<'_> {
     /// inside a conjugation table resolves to that cell's subtree.
     pub(super) fn cell(&mut self, id: NodeId, ctx: Ctx, head: bool) -> Cell {
         let doc = self.doc;
-        let inline = self.styled(id, ctx.inline);
+        let (inline, link) = self.enter(id, ctx);
         // Yomitan tints a `th` tag and everything inside a `thead` tag.
         // `tag_style` owns the bold half of the same rule, so a `td` in
         // a header row inherits its weight from the `thead`. No second
@@ -573,7 +573,7 @@ impl Paragraphs<'_> {
         let inner = Ctx {
             inline,
             block: block.inherited(),
-            link: self.link_of(id, ctx.link),
+            link,
             path: ctx.path,
         };
         let body = self.enclose(ctx.path, block.inherited(), |p| p.children(id, inner));

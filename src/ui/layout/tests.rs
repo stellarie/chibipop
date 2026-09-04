@@ -5837,6 +5837,51 @@ fn a_div_that_a_stylesheet_displays_as_inline_joins_its_line() {
     assert_eq!(vec!["see also here"], text);
 }
 
+/// A cross-reference must look like one. HTML colors an `a` before any dictionary
+/// rule, so the walk seeds a followable link with the theme accent. A dictionary
+/// rule on a descendant still wins, as it does in a browser.
+///
+/// 字通 removes the underline with `a { text-decoration: none }`. The color is the
+/// only cue that survives, so the test uses that rule.
+#[test]
+fn a_followable_link_takes_the_accent_color() {
+    let theme = Theme::dark();
+    let s = laid_out(
+        &card_with(vec![css_tree(
+            "字通",
+            &sc(concat!(
+                r#"["「",{"tag":"a","href":"?query=相&wildcards=off","content":"相"},"#,
+                r#""」の",{"tag":"a","href":"?query=相&wildcards=off","content":"#,
+                r##"[{"tag":"span","style":{"color":"#a75a23"},"content":"項目"},"を見る"]},"##,
+                r#""。",{"tag":"a","href":"javascript:x","content":"dead"}]"#,
+            )),
+            "a { text-decoration: none }",
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s)[0];
+    let colors: Vec<(&str, Rgb)> = gloss
+        .spans
+        .iter()
+        .map(|sp| (&gloss.text[sp.at as usize..(sp.at + sp.len) as usize], sp.color))
+        .collect();
+    assert_eq!(
+        vec![
+            ("「", theme.body_text),
+            ("相", theme.accent),
+            ("」の", theme.body_text),
+            ("項目", (0xa7, 0x5a, 0x23)),
+            ("を見る", theme.accent),
+            ("。dead", theme.body_text),
+        ],
+        colors,
+        "a link is accent, a styled descendant keeps its color, a dead link is body text"
+    );
+}
+
 /// Jitendex uses a CSS-only pill on 48 776 nodes. The rule is
 /// `span[data-sc-class="tag"]`, and the entry has no inline box property.
 ///
