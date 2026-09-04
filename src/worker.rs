@@ -28,10 +28,10 @@ pub struct Hover {
     pub mask: CaptureMask,
 }
 
-/// One add-time sentence read.
+/// One sentence probe for an Anki add.
 ///
-/// This is a separate trigger from [`Hover`] because it needs no hit scan or
-/// presentation. It must also survive newer hovers until the add can answer.
+/// This trigger is separate from [`Hover`]. It needs no hit scan or presentation.
+/// It must survive newer hovers until the add can answer.
 #[derive(Clone, Copy)]
 pub struct SentenceProbe {
     pub anchor: PhysRect,
@@ -236,8 +236,8 @@ impl ServeNudge {
 /// Work that a drained batch completes before its newest hover.
 /// The state includes settings and trigger-mode freeze state.
 ///
-/// Keep state changes and sentence probes in arrival order. A reload and a
-/// press change state, while a sentence probe must not be coalesced.
+/// Keep state changes and sentence probes in arrival order. A reload and a press change state.
+/// A sentence probe must not be coalesced.
 enum Pre {
     Reload(WorkerSettings),
     Freeze(PhysPoint),
@@ -445,7 +445,7 @@ fn resolve_trigger(
     let sentence = || match state.sentence_mode {
         SentenceMode::All => join_all_lines(&ocr_lines),
         // `Static` reaches this point only when no region exists.
-        // `Sentence` reads the full sentence on add. This line is its fallback.
+        // The `Sentence` mode reads the full sentence on add. This line is its fallback.
         SentenceMode::Line | SentenceMode::Static | SentenceMode::Sentence => {
             extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset).to_string()
         }
@@ -478,10 +478,9 @@ fn resolve_static(
     present_lookup(dict, engine, state, &resolved, || join_all_lines(&lines), Vec::new(), false)
 }
 
-/// Resolve one add-time sentence probe.
+/// Resolve one sentence probe for an Anki add.
 ///
-/// The Controller keeps the hover-time sentence when this read fails or finds
-/// no anchor word.
+/// The Controller keeps the hover-time sentence when this read fails or finds no anchor word.
 fn resolve_sentence(source: &mut TextSource, probe: SentenceProbe) -> LookupOutcome {
     match source.read_sentence(probe.anchor, probe.orientation, probe.mask) {
         Ok(text) => LookupOutcome::Sentence(text),

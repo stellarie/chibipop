@@ -1840,13 +1840,13 @@ impl App {
                 });
             }
             // A sentence probe reads the frame around the hovered word.
-            // When the frame is live, hide the popup before the grab.
-            // `hide_popup` commits a transparent buffer, so the commit is
+            // Hide the popup before the live grab.
+            // `hide_popup` commits a transparent buffer. The commit is
             // flushed before the trigger reaches the Worker.
-            // Do not mask this popup instead: it sits over the next lines
+            // Do not mask this popup. It covers the next lines
             // that the sentence probe must read.
-            // A request that no pipeline serves answers `None` at once.
-            // The add then files the hover-time sentence. It never waits.
+            // A request with no pipeline gets `None` at once.
+            // The add then uses the hover-time sentence. It does not wait.
             Command::RequestSentence { id, anchor, orientation, hide_popup } => {
                 if hide_popup {
                     self.hide_popup();
@@ -1968,7 +1968,7 @@ impl App {
     }
 
     /// Send one Trigger to the pipeline, or log that none exists.
-    /// Return whether the pipeline took the Trigger.
+    /// Return whether the pipeline accepted the Trigger.
     fn send_trigger(&mut self, kind: TriggerKind, id: RequestId) -> bool {
         let Some(worker) = self.worker.as_ref() else {
             self.log.diag("lookup: no pipeline - nothing to ask");
@@ -1993,11 +1993,11 @@ impl App {
         }
     }
 
-    /// Keep every sentence result and only the newest other result.
+    /// Keep every sentence result. Keep only the newest other result.
     ///
-    /// Replacing the old other result in place preserves arrival order among
-    /// the results that remain. A sentence result is a state change, so it
-    /// must not be coalesced with hover results.
+    /// Replace the old other result in place. This preserves the arrival order
+    /// of the results that remain. A sentence result changes state.
+    /// Do not coalesce it with hover results.
     fn route_results(
         results: Vec<chibipop::worker::WorkerResult>,
     ) -> Vec<chibipop::worker::WorkerResult> {
@@ -2019,9 +2019,9 @@ impl App {
 
     /// Drain the Worker and Japanese analysis results.
     ///
-    /// Every sentence result reaches the Controller. Other Worker results
-    /// keep the existing newest-only rule. A sentence result restores the
-    /// popup before the Controller sees it.
+    /// Every sentence result reaches the Controller. Other Worker results keep
+    /// the existing newest-only rule. A sentence result restores the popup
+    /// before the Controller sees it.
     fn drain_results(&mut self) {
         let mut queued = Vec::new();
         if let Some(worker) = self.worker.as_ref() {
@@ -4828,8 +4828,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Keep each sentence result, but coalesce other results to the newest.
-    /// The retained values stay in their arrival order.
+    /// Keep each sentence result. Coalesce other results to the newest.
+    /// Retained values stay in arrival order.
     #[test]
     fn sentence_results_are_routed_in_order_with_the_newest_other_result() {
         let routed = App::route_results(vec![

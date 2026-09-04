@@ -1,9 +1,9 @@
 //! Read a larger OCR strip when the user adds a word to Anki.
 //!
-//! The hover box is small for speed, so hover-time sentence text is only a fragment.
-//! The probe runs only on add, so it can afford several OCR passes.
-//! The design hides the popup instead of masking the screen because the popup covers the next lines.
-//! The design uses a fixed reach instead of paragraph detection because OCR gives no paragraph labels.
+//! The hover box is small for speed. Hover-time sentence text is only a fragment.
+//! The probe runs only on add. It can use several OCR passes.
+//! The design hides the popup instead of masking the screen. The popup covers the next lines.
+//! The design uses a fixed reach instead of paragraph detection. OCR gives no paragraph labels.
 
 use crate::geom::PhysRect;
 use crate::text::layout::{self, OcrLine, OcrWord, Orientation};
@@ -16,14 +16,14 @@ const SENTENCE_CLOSERS: [char; 4] = ['」', '』', '）', ')'];
 
 /// Return the tiles that a sentence probe reads.
 ///
-/// The function returns no tiles when the anchor has no thickness or lies outside `bounds`.
-/// It makes a thirteen-thickness perpendicular band around the anchor center.
-/// It reads the full bounds on the reading axis.
+/// The function returns no tiles when the anchor has no thickness or lies outside the `bounds`.
+/// It makes a perpendicular band of thirteen thicknesses around the anchor center.
+/// It reads the full `bounds` on the reading axis.
 /// It splits that axis into tiles no longer than `2 * layout::TILE_LEN`.
 /// It overlaps consecutive tiles by one anchor thickness.
-/// It clamps every tile to `bounds`.
-/// It uses a fixed reach instead of a setting because a sentence probe has a bounded cost.
-/// It does not use one large tile because OCR accuracy falls on a larger capture.
+/// It clamps every tile to the `bounds`.
+/// The sentence probe uses a fixed reach. This limits its cost.
+/// It does not use one large tile. OCR accuracy falls when the capture is larger.
 ///
 /// The function uses physical pixels for every coordinate.
 pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRect) -> Vec<PhysRect> {
@@ -91,11 +91,11 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
 /// It splits a row when the reading-axis gap exceeds two thicknesses.
 /// It finds the anchor word when its overlap covers at least half of the anchor area.
 /// It keeps rows with matching thickness and a half-extent overlap in the same column.
-/// It orders rows top to bottom for horizontal text and right to left for vertical text.
+/// It orders rows from top to bottom for horizontal text and from right to left for vertical text.
 /// It stops at paragraph gaps wider than `layout::WRAP_GAP_HALVES / 2` thicknesses.
 /// It joins words without separators because Japanese does not need inserted spaces.
 /// It cuts at sentence terminators and keeps the listed closing brackets.
-/// It normalises the cut before returning it.
+/// It normalizes the cut before it returns it.
 /// It returns `None` when no word covers the anchor or the cut is empty.
 /// It does not use paragraph labels because OCR does not provide them.
 /// It does not use a fixed character count because sentence lengths vary.

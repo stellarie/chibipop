@@ -1843,7 +1843,7 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
 /// One ordered table supplies both directions of the UI map. The labels go
 /// to the picker and the mode comes back. iced returns a label, while the
 /// Windows combo returns an index. Both windows use one table instead of a
-/// string match at the call site. The first item is the default.
+/// string match at the call site. The first item supplies the default.
 const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
     (SentenceMode::Sentence, "Full sentence"),
     (SentenceMode::Line, "Current line"),
@@ -2856,7 +2856,7 @@ mod tests {
     }
 
     /// The sentence picker uses one ordered table. Each `SentenceMode` must appear
-    /// in the table, or the window cannot offer it and falls back to `Sentence`.
+    /// in the table. Otherwise, the window cannot offer it and uses `Sentence`.
     #[test]
     fn every_sentence_mode_round_trips_through_its_own_label() {
         for mode in [

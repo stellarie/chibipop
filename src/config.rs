@@ -950,7 +950,8 @@ fn default_notify_on_add() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SentenceMode {
-    /// The sentence that contains the hovered word. An add reads a strip around the word and cuts at 。！？ (`text::sentence`).
+    /// The sentence that contains the hovered word. An add reads a strip around
+    /// the word and cuts it at 。！？ (`text::sentence`).
     Sentence,
     /// The OCR line that contains the cursor.
     Line,

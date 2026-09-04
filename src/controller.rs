@@ -39,8 +39,8 @@ const SCROLL_STEP_PX: i32 = 48;
 const ARM_WARN_TICKS: u32 = 250;
 
 /// A non-sentence result becomes stale when a newer non-sentence
-/// `RequestId` exists. Sentence probes use unique IDs without superseding
-/// hover results that are already in flight.
+/// `RequestId` exists. Sentence probes use unique IDs without replacing
+/// hover results that are already active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
@@ -486,12 +486,12 @@ pub struct Controller {
     /// The count of consecutive ticks while the scroll action is armed.
     armed_ticks: u32,
     next_id: u64,
-    /// The latest request ID, including add-time sentence reads.
+    /// The latest request ID includes add-time sentence reads.
     ///
     /// Hover-result staleness uses `latest_lookup` because a sentence read
-    /// must not supersede a hover result that was already in flight.
+    /// must not replace a hover result that was already active.
     latest: RequestId,
-    /// The newest request that supersedes non-sentence lookup outcomes.
+    /// The newest request that replaces non-sentence lookup outcomes.
     ///
     /// A sentence read uses `next_request` for a unique ID but leaves this
     /// marker unchanged.
@@ -612,7 +612,7 @@ impl Controller {
         self.latest
     }
 
-    /// Create a request that supersedes older non-sentence outcomes.
+    /// Create a request that replaces older non-sentence outcomes.
     fn next_lookup_request(&mut self) -> RequestId {
         let id = self.next_request();
         self.latest_lookup = id;
@@ -915,7 +915,7 @@ impl Controller {
         let scroll = s.scroll;
         let show_back = !s.history.is_empty();
 
-        // Build the payload now so an already-added Card cannot start a probe.
+        // Build the payload now. An added Card must not start a probe.
         let Some(note_commands) = self.add_note_commands() else { return Vec::new() };
 
         if self.cfg.sentence_probe {

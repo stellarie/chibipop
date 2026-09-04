@@ -291,8 +291,8 @@ impl TextSource {
 
     /// Read the sentence around `anchor` from bounded OCR tiles.
     ///
-    /// This read lives here because `TextSource` owns capture, the OCR cache,
-    /// the frozen frame, and the capture mask. Callers must not duplicate those
+    /// This read belongs here because `TextSource` owns capture, the OCR cache,
+    /// the frozen frame, and the capture mask. Callers must not duplicate these
     /// rules. The first failed grab is an error because a missing tile can hold
     /// the sentence start. A partial sentence on an Anki card is worse than the
     /// hovered line.
@@ -1287,7 +1287,7 @@ mod tests {
         }
     }
 
-    /// `FailingOutputCapture` refuses one tile after returning earlier tiles.
+    /// `FailingOutputCapture` refuses one tile after it returns earlier tiles.
     struct FailingOutputCapture {
         grabs: std::cell::Cell<u32>,
         fail_on: u32,
@@ -1315,8 +1315,8 @@ mod tests {
         }
     }
 
-    /// `SentenceScripted` returns rows in the first tile's local pixels.
-    /// The source maps those boxes back to the desktop before sentence cutting.
+    /// `SentenceScripted` returns rows in local pixels of the first tile.
+    /// The source maps those boxes back to the desktop before it cuts the sentence.
     struct SentenceScripted {
         calls: Rc<std::cell::Cell<u32>>,
         empty: bool,

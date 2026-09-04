@@ -242,7 +242,7 @@ impl PendingFieldMap {
 /// The sentence capture combo box in fill order.
 ///
 /// A Win32 combo box returns a selection index. The table defines the labels
-/// and output modes. The first item is the default.
+/// and output modes. The first item supplies the default.
 const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
     (SentenceMode::Sentence, "Full sentence"),
     (SentenceMode::Line, "Current line"),

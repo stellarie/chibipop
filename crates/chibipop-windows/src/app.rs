@@ -95,10 +95,10 @@ const REBUILD_TICK_MS: u32 = 100;
 
 /// The maximum delay before Apply visibly stalls.
 const APPLY_BUDGET_MS: u128 = 50;
-/// Keep every add-time sentence result and only the newest other result.
+/// Keep every add-time sentence result. Keep only the newest other result.
 ///
-/// The retained results stay in their arrival order. This lets a sentence
-/// complete an add even when a newer hover result is in the same queue.
+/// Retained results stay in arrival order. This lets a sentence complete an add
+/// even when a newer hover result is in the same queue.
 fn route_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
     let mut routed = Vec::with_capacity(results.len());
     let mut freshest_other = None;
@@ -2074,8 +2074,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
 
         } else if msg.message == WM_APP_RESULT {
-            // Keep every add-time sentence result, but only the newest other
-            // Worker result, while preserving the retained arrival order.
+            // Keep every add-time sentence result. Keep only the newest other
+            // Worker result. Preserve the arrival order of retained results.
             let mut results = Vec::new();
             while let Ok(r) = worker.results().try_recv() {
                 results.push(r);
@@ -2635,8 +2635,8 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             });
             None
         }
-        // Windows excludes its popup at the OS level, so the hide flag is
-        // ignored. WDA_EXCLUDEFROMCAPTURE or the capture guard handles it.
+        // Windows excludes its popup at the OS level. The hide flag has no effect.
+        // WDA_EXCLUDEFROMCAPTURE or the capture guard handles it.
         Command::RequestSentence {
             id,
             anchor,
