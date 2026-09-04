@@ -81,6 +81,15 @@ pub enum TriggerMode {
     Live,
     /// Shows the popup while the user holds a key.
     HoldKey,
+    /// Shows the popup after one key press and hides it after the next press.
+    /// The trigger key latches the hold, so the user can move onto the popup
+    /// without a held key. The lookup reads live grabs with the popup masked while latched.
+    Toggle,
+    /// Runs one lookup at the cursor for each key press, like Yomitan. The
+    /// popup stays until the next press finds no text or the user clicks
+    /// outside it. The lookup reads a live grab with the popup masked, so a
+    /// press over the popup is a miss and hides it. Hover never follows.
+    Press,
     /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]
     HoldShift,
@@ -1399,6 +1408,20 @@ mod tests {
         c.save(&p).unwrap();
         let back = load_or_create(&p).unwrap();
         assert_eq!(TriggerMode::HoldKey, back.trigger.mode);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn toggle_mode_is_spelled_toggle_in_the_file_and_survives_a_round_trip() {
+        let p = tmp("roundtrip-toggle");
+        let _ = std::fs::remove_file(&p);
+        let mut c = Config::default();
+        c.trigger.mode = TriggerMode::Toggle;
+        c.save(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("mode = \"toggle\""), "{text}");
+        let back = load_or_create(&p).unwrap();
+        assert_eq!(TriggerMode::Toggle, back.trigger.mode);
         let _ = std::fs::remove_file(&p);
     }
 

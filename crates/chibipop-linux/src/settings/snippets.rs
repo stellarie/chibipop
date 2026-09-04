@@ -11,6 +11,7 @@
 
 use crate::control::Verb;
 use crate::paths;
+use chibipop::config::TriggerMode;
 use std::path::Path;
 
 /// Identify the compositor family that the snippets target.
@@ -71,6 +72,20 @@ pub enum Bind {
     Hold,
     /// A one-shot global action. One press sends one verb and no release line.
     Press(Verb),
+}
+
+/// Select the native bind verb for a trigger mode.
+///
+/// The mode picks which verb the native bind sends.
+/// Toggle mode gets a one-line press bind with no release line, so the Hyprland
+/// modifier-first release defect already documented on [`Bind::Hold`] cannot wedge it.
+/// Press mode also gets one press bind, and it sends `lookup` for one lookup per key press.
+pub fn trigger_bind(mode: TriggerMode) -> Bind {
+    match mode {
+        TriggerMode::Toggle => Bind::Press(Verb::Toggle),
+        TriggerMode::Press => Bind::Press(Verb::Lookup),
+        _ => Bind::Hold,
+    }
 }
 
 /// Build the native-bind snippet for one chord.
@@ -225,6 +240,28 @@ mod tests {
             snippet,
             "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl anki-add"
         );
+    }
+
+    #[test]
+    fn trigger_modes_select_toggle_or_hold_bind_shape() {
+        for compositor in [Compositor::Hyprland, Compositor::Sway] {
+            let toggle =
+                bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(TriggerMode::Toggle));
+            assert!(toggle.ends_with("ctl toggle"), "{toggle}");
+            assert!(!toggle.contains("trigger-up"), "{toggle}");
+
+            let press =
+                bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(TriggerMode::Press));
+            assert!(press.ends_with("ctl lookup"), "{press}");
+            assert!(!press.contains("trigger-up"), "{press}");
+
+            for mode in [TriggerMode::Live, TriggerMode::HoldKey, TriggerMode::HoldShift] {
+                let hold =
+                    bind_snippet(compositor, "ALT+F", Path::new(DEV_EXE), trigger_bind(mode));
+                assert!(hold.contains("trigger-down"), "{hold}");
+                assert!(hold.contains("trigger-up"), "{hold}");
+            }
+        }
     }
 
     #[test]

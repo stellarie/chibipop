@@ -138,6 +138,14 @@ pub enum Event {
     TriggerDown,
     /// The trigger key changed to the up state.
     TriggerUp,
+    /// One trigger press in `Press` mode. It asks for one lookup at `pos`.
+    /// The press bypasses the movement gate and the sticky region, so a press
+    /// over the popup runs a lookup that the mask turns into a miss.
+    TriggerPressed { pos: PhysPoint },
+    /// A button press outside the popup while it is shown. The platform bin
+    /// sends this only in `Press` mode. It carries no point because the
+    /// Controller needs none. A hit inside the popup is `PointerDown`.
+    PointerDownOutside,
     /// A cursor position that passed the movement gate.
     CursorMoved { pos: PhysPoint },
     /// The dwell deadline passed while the cursor stayed still
@@ -446,7 +454,9 @@ pub struct Controller {
     last_accepted: Option<PhysPoint>,
     /// The point of the newest lookup. The dwell re-check uses this point.
     last_dispatch: Option<PhysPoint>,
-    /// Whether the trigger key is down.
+    /// Whether the trigger is active. In `HoldKey` mode, this is the key state.
+    /// In `Toggle` mode, the bin sends `TriggerDown` at toggle-on and `TriggerUp`
+    /// at toggle-off, so this is the latch. `Live` mode ignores it.
     trigger_held: bool,
     /// The Anki button height from the latest tick.
     button_h: i32,
@@ -537,6 +547,8 @@ impl Controller {
                 Vec::new()
             }
             Event::TriggerUp => self.trigger_up(),
+            Event::TriggerPressed { pos } => self.trigger_pressed(pos),
+            Event::PointerDownOutside => self.pointer_down_outside(),
             Event::CursorMoved { pos } => self.cursor_moved(pos),
             Event::DwellElapsed => self.dwell(),
             Event::LookupResult { id, outcome } => self.lookup_result(id, outcome),
@@ -909,8 +921,8 @@ impl Controller {
 
     fn trigger_up(&mut self) -> Vec<Command> {
         self.trigger_held = false;
-        // Live mode ignores this key event.
-        if matches!(self.cfg.trigger_mode, TriggerMode::Live) {
+        // Live mode ignores this key event. Press mode has no hold to end.
+        if matches!(self.cfg.trigger_mode, TriggerMode::Live | TriggerMode::Press) {
             return Vec::new();
         }
         self.last_accepted = None;
@@ -925,10 +937,35 @@ impl Controller {
         vec![Command::HidePopup, Command::SetBackArmed(false)]
     }
 
+    /// One press asks for one lookup at `pos`. The popup then stays until a
+    /// later lookup misses or the user clicks outside it. The press passes
+    /// the movement gate and the sticky region because the user asked.
+    fn trigger_pressed(&mut self, pos: PhysPoint) -> Vec<Command> {
+        self.last_accepted = Some(pos);
+        // Wait for the popup rectangle before deciding, as a hover does.
+        if self.surface.as_ref().is_some_and(|s| s.placed.is_none()) {
+            self.pending_cursor = Some(pos);
+            return Vec::new();
+        }
+        self.dispatch_lookup(pos)
+    }
+
+    /// A click outside the popup dismisses it. A lookup still in flight
+    /// must not show it again, so the request id moves on first.
+    fn pointer_down_outside(&mut self) -> Vec<Command> {
+        if self.surface.is_none() {
+            return Vec::new();
+        }
+        self.next_request();
+        self.hide()
+    }
+
     /// Whether the current mode accepts a cursor move.
+    /// Press mode never follows the cursor. Each press asks once.
     fn mode_eligible(&self) -> bool {
         match self.cfg.trigger_mode {
             TriggerMode::Live => true,
+            TriggerMode::Press => false,
             _ => self.trigger_held,
         }
     }
@@ -961,6 +998,11 @@ impl Controller {
         if self.frozen(pos) {
             return Vec::new();
         }
+        self.dispatch_lookup(pos)
+    }
+
+    /// Ask the lookup question at `pos` with the shown popup as the mask.
+    fn dispatch_lookup(&mut self, pos: PhysPoint) -> Vec<Command> {
         let popup = self.shown_popup();
         let id = self.next_request();
         self.last_dispatch = Some(pos);
@@ -988,15 +1030,21 @@ impl Controller {
     /// uses this value to arm its dwell watch. No popup means no watch and no
     /// idle wakeups.
     ///
-    /// Trigger mode has no re-check because its frozen grab cannot change.
+    /// Hold mode has no re-check because its frozen grab cannot change. Toggle
+    /// mode reads live grabs, so the screen under a still cursor can change
+    /// while the latch is on. Press mode asks only on a press.
     /// A drill-down is not screen content. A dialogue behind it must not change
     /// the history stack that the user opened.
     pub fn dwell_armed(&self) -> bool {
-        matches!(self.cfg.trigger_mode, TriggerMode::Live)
-            && self
-                .surface
-                .as_ref()
-                .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
+        let live = match self.cfg.trigger_mode {
+            TriggerMode::Live => true,
+            TriggerMode::Toggle => self.trigger_held,
+            _ => false,
+        };
+        live && self
+            .surface
+            .as_ref()
+            .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
     }
 
     /// The core popup rectangle when it is on screen.
@@ -1007,7 +1055,12 @@ impl Controller {
         Some(self.surface.as_ref()?.placed?.popup)
     }
 
+    /// Press mode has no sticky region. A press over the popup is a deliberate
+    /// lookup that the mask turns into a miss, which hides the popup.
     fn frozen(&self, p: PhysPoint) -> bool {
+        if matches!(self.cfg.trigger_mode, TriggerMode::Press) {
+            return false;
+        }
         let Some(s) = self.surface.as_ref() else { return false };
         let Some(placed) = s.placed else { return false };
         let sticky = PhysRect { h: placed.popup.h + self.button_h, ..placed.popup };
@@ -1575,6 +1628,93 @@ mod tests {
         ControllerConfig { trigger_mode: TriggerMode::HoldKey, ..cfg() }
     }
 
+    fn press_cfg() -> ControllerConfig {
+        ControllerConfig { trigger_mode: TriggerMode::Press, ..cfg() }
+    }
+
+    /// Show a placed popup from one press in Press mode.
+    fn pressed_and_shown(c: &mut Controller, pos: PhysPoint) {
+        c.handle(Event::TriggerPressed { pos });
+        let id = c.latest;
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+    }
+
+    #[test]
+    fn press_mode_looks_up_once_per_press_and_never_follows_the_cursor() {
+        let mut c = Controller::new(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        assert!(c.handle(Event::CursorMoved { pos }).is_empty(), "no hover before a press");
+        assert_eq!(
+            vec![Command::RequestLookup { id: RequestId(1), point: pos, popup: None }],
+            c.handle(Event::TriggerPressed { pos })
+        );
+        c.handle(ready_id(RequestId(1), "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        assert!(c.is_shown());
+        let away = PhysPoint { x: 900, y: 900 };
+        assert!(c.handle(Event::CursorMoved { pos: away }).is_empty(), "no hover after a press");
+        assert!(c.handle(Event::DwellElapsed).is_empty(), "no dwell re-check");
+        assert!(c.is_shown());
+    }
+
+    /// The press over the popup runs a lookup with the popup as the mask.
+    /// The sticky region must not swallow it, and the same point must pass
+    /// the movement gate.
+    #[test]
+    fn press_mode_asks_again_at_the_same_point_even_over_the_popup() {
+        let mut c = Controller::new(press_cfg());
+        let over_popup = PhysPoint { x: POPUP.x + 10, y: POPUP.y + 10 };
+        pressed_and_shown(&mut c, over_popup);
+        assert_eq!(
+            vec![Command::RequestLookup { id: RequestId(2), point: over_popup, popup: Some(POPUP) }],
+            c.handle(Event::TriggerPressed { pos: over_popup })
+        );
+        let out = c.handle(Event::LookupResult { id: RequestId(2), outcome: LookupOutcome::Hide });
+        assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn press_mode_ignores_the_key_release() {
+        let mut c = Controller::new(press_cfg());
+        pressed_and_shown(&mut c, PhysPoint { x: 110, y: 110 });
+        c.handle(Event::TriggerDown);
+        assert!(c.handle(Event::TriggerUp).is_empty());
+        assert!(c.is_shown());
+    }
+
+    #[test]
+    fn a_click_outside_hides_the_popup_and_kills_the_answer_in_flight() {
+        let mut c = Controller::new(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        pressed_and_shown(&mut c, pos);
+        c.handle(Event::TriggerPressed { pos: PhysPoint { x: 500, y: 500 } });
+        let stale = c.latest;
+        let out = c.handle(Event::PointerDownOutside);
+        assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
+        assert!(!c.is_shown());
+        assert!(c.handle(ready_id(stale, "\u{72AC}", ANCHOR)).is_empty());
+        assert!(!c.is_shown());
+        assert!(c.handle(Event::PointerDownOutside).is_empty(), "nothing to hide twice");
+    }
+
+    /// A press while the popup is still placing waits for the rectangle, so
+    /// the lookup carries the mask.
+    #[test]
+    fn a_press_during_placement_waits_for_the_rectangle() {
+        let mut c = Controller::new(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        c.handle(Event::TriggerPressed { pos });
+        c.handle(ready_id(RequestId(1), "\u{732B}", ANCHOR));
+        assert!(c.handle(Event::TriggerPressed { pos }).is_empty());
+        let out = c.handle(placed(POPUP, 200, 200));
+        assert!(
+            out.contains(&Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP) }),
+            "{out:?}"
+        );
+    }
+
     #[test]
     fn hold_mode_ignores_moves_until_the_key_is_down() {
         let mut c = Controller::new(hold_cfg());
@@ -1790,6 +1930,28 @@ mod tests {
         assert!(c.popup().is_some(), "the hold's popup is on screen");
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
+    }
+
+    /// Toggle mode reads live grabs, so a still cursor over a changed screen
+    /// gets the same re-check as Live mode while the latch is on. The latch
+    /// off ends the watch with the popup.
+    #[test]
+    fn a_latched_toggle_keeps_the_dwell_re_check() {
+        let mut c = Controller::new(ControllerConfig {
+            trigger_mode: TriggerMode::Toggle,
+            ..cfg()
+        });
+        assert!(!c.dwell_armed());
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        assert!(c.dwell_armed(), "a latched toggle watches the screen");
+        let pos = PhysPoint { x: 110, y: 110 };
+        assert_eq!(
+            vec![Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP) }],
+            c.handle(Event::DwellElapsed)
+        );
+        c.handle(Event::TriggerUp);
+        assert!(!c.dwell_armed(), "toggle-off ends the watch");
     }
 
     /// A drill-down is not screen content. A dialogue behind it must not change

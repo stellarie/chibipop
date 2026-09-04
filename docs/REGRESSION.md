@@ -919,11 +919,21 @@ In `chibipop run`, with the PID recorded:
 
 1. Switch **Trigger** from `Live` to `Hold key`, Apply. Hovering alone must now do nothing; holding
    the trigger key while moving must raise the popup.
-2. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one
+2. Switch **Trigger** to `Toggle`, Apply.
+3. Press the trigger key once. Release it. The popup must show and stay fixed while you move
+   onto it. Press the trigger key again. The popup must hide.
+4. Switch **Trigger** to `Press`, Apply.
+5. Press the trigger key over fixture text. Release it. The popup must show and stay at its first
+   position while you move the cursor. Move the cursor from outside the popup onto a gloss line
+   and click it. The click must select or drill down, as in Live mode. The log must show
+   `pointer: entered surface`. Press a button outside the popup. The popup must hide. Press
+   over fixture text again. Press the trigger key with the cursor over the popup. The popup must
+   hide. Press the trigger key over no text. The popup must remain hidden.
+6. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one
    does not.
-3. Change the Anki group's **Shortcut key**, Apply, and add a card with the new key.
+7. Change the Anki group's **Shortcut key**, Apply, and add a card with the new key.
 
-The observable in all three is the same: the new binding works **and the PID has not changed**.
+The observable in each case is that the new setting works **and the PID has not changed**.
 Before this branch Apply restarted the process, so these appeared to work while the thing making
 them work was the restart. Remove the restart and they silently stop — which is why a pass here is
 meaningless without the PID beside it.

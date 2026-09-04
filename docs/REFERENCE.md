@@ -61,13 +61,13 @@ The two binaries do not share a command line. Windows first, then Linux.
 ### Linux
 
 The daemon holds every capability, so the Linux commands are a daemon, a
-settings process, one control verb, and three diagnostics.
+settings process, control-socket verbs, and three diagnostics.
 
 | Command | What it does |
 |---|---|
 | `chibipop run` | The daemon. The default when no subcommand is given. |
 | `chibipop settings` | The settings window, in its own process ([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)). A settings crash cannot take live hover down. |
-| `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. Bind these in your compositor. |
+| `chibipop ctl VERB` | Sends one verb to the running daemon over its control socket. `lookup` runs one Press-mode lookup at the cursor. Bind these in your compositor. |
 | `chibipop probe` | Connects to the Wayland display, prints the capability report, exits. |
 | `chibipop capture-dump` | Grabs screen regions with the selected capture backend and writes PNGs. |
 | `chibipop clipboard-check` | Takes the clipboard selection with a known string and holds it. |
@@ -76,7 +76,7 @@ settings process, one control verb, and three diagnostics.
 
 **The `ctl` verb set is fixed**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
-`trigger-down`, `trigger-up`, `toggle`, `anki-add`, `screenshot`,
+`trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
 `ocr-clipboard`, `static-region`. One verb per global action, never a
 scripting API. The settings window prints a ready-to-paste compositor bind for
 each one, naming the running binary's real path.
@@ -308,8 +308,8 @@ them.
 
 ```toml
 [trigger]
-mode = "live"               # "live" | "hold-key" | "hold-shift" (legacy)
-trigger_key = "shift"       # Windows: the key held in hold-key mode
+mode = "live"               # "live" | "hold-key" | "toggle" | "press" | "hold-shift" (legacy)
+trigger_key = "shift"       # Windows: the key for hold-key, toggle, and press mode
 trigger_key_linux = "ALT+F" # Linux: the chord, in portal syntax
 per_character_lookup = false
 

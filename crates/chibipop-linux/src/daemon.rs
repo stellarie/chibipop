@@ -21,6 +21,8 @@ use crate::paths::Paths;
 use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
 use crate::tray::{self, TrayHandle, TrayRequest};
 use crate::overlay::{self, Outline};
+use crate::catcher::Catcher;
+
 use crate::popup::{self, Demo, Popup, ShowRequest};
 use crate::select::{self, Pick, Selector};
 use crate::shortcuts;
@@ -158,6 +160,11 @@ pub(crate) struct App {
     /// [`static_overlay_region`] decides when to show or hide it.
     /// One predicate gives every call site the same border rule.
     static_outline: Option<Outline>,
+    /// Full-output transparent layers for Press-mode outside-click dismissal.
+    /// The catcher shares the popup layer and leaves a hole over the popup.
+    /// This field is `None` when the compositor lacks layer shell or a shm pool.
+    catcher: Option<Catcher>,
+
     /// `CHIBIPOP_POPUP_DEMO=1` makes trigger verbs show and hide the canned
     /// popup without a lookup.
     /// A developer can inspect the surface without a Dictionary.
@@ -216,8 +223,9 @@ pub(crate) struct App {
     clipboard: Option<clipboard::Clipboard>,
     /// Dictionary identities last reported by the pipeline.
     dicts: Vec<DictInfo>,
-    /// Trigger-mode hold while the user holds one
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// Trigger-mode hold.
+    /// A key hold ends on `trigger-up`; a latch survives it until `toggle` ends
+    /// the hold (ARCHITECTURE.md#hover-cadence).
     hold: Option<Hold>,
     /// Last lookup failure that the daemon logged.
     /// This record limits each repeated line to one log entry as the cursor
@@ -471,11 +479,12 @@ impl App {
             Verb::Reload => self.reload_config(),
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
-            Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
+            Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
             Verb::TriggerUp if self.demo.armed => self.demo_hide(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
+            Verb::Lookup => self.lookup_at_cursor(),
             // The in-panel Anki slot raises the same Event, so every card path
             // uses one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
@@ -487,6 +496,18 @@ impl App {
             // socket provides the complete global channel.
             Verb::StaticRegion => self.pick_static_region(),
         }
+    }
+
+    /// Ask the Controller for one lookup at the latest cursor sample.
+    ///
+    /// This verb takes no frozen grab because a press can land while the popup
+    /// is shown, and the frozen-grab rule requires a grab before any popup exists.
+    fn lookup_at_cursor(&mut self) {
+        let Some(at) = self.cursor_now() else {
+            self.log.diag("lookup: no cursor sample yet - nothing to look up");
+            return;
+        };
+        self.feed(Event::TriggerPressed { pos: at });
     }
 
     /// One Event from the GlobalShortcuts session thread.
@@ -505,7 +526,7 @@ impl App {
                     if activated { "activated" } else { "deactivated" },
                     id.as_str()
                 ));
-                match shortcuts::action(id, activated) {
+                match shortcuts::action(id, activated, self.config.trigger.mode) {
                     shortcuts::Action::Verb(verb) => self.apply_verb(verb),
                     shortcuts::Action::Nothing => {}
                 }
@@ -553,28 +574,46 @@ impl App {
     /// One trigger Verb effect (ARCHITECTURE.md#hover-cadence).
     ///
     /// A press freezes the output under the cursor and looks up text there.
-    /// A release drops the frame and retracts the popup.
-    /// Code sends the grab to the Worker before the lookup.
-    /// The Worker serves its queue in order, so the grab predates the popup by
+    /// A toggle latch keeps live grabs with the popup masked.
+    /// A latch can last minutes while the screen changes under it.
+    /// A release drops a frozen frame or releases a live latch, then retracts
+    /// the popup.
+    /// The frozen press sends its grab to the Worker before the lookup.
+    /// The Worker serves its queue in order, so that grab predates the popup by
     /// rule, not by assumption.
     fn trigger(&mut self, step: trigger::Step) {
         match step {
-            trigger::Step::Freeze { latched } => {
+            trigger::Step::Freeze => {
                 let Some(at) = self.cursor_now() else {
                     self.log.diag("trigger: no cursor sample yet - nothing to look up");
                     return;
                 };
                 let output = self.output_containing(at);
                 self.freeze_at(at, output);
-                self.hold = Some(Hold { output, latched });
+                self.hold = Some(Hold { output, latched: false });
                 self.feed(Event::TriggerDown);
                 // The press supplies the first cursor sample. The first lookup
                 // needs no cursor motion.
                 self.feed(Event::CursorMoved { pos: at });
             }
+            trigger::Step::Latch => {
+                let Some(at) = self.cursor_now() else {
+                    self.log.diag("trigger: no cursor sample yet - nothing to look up");
+                    return;
+                };
+                let output = self.output_containing(at);
+                self.hold = Some(Hold { output, latched: true });
+                self.log.diag("trigger: latched - live grabs until toggle-off");
+                self.feed(Event::TriggerDown);
+                self.feed(Event::CursorMoved { pos: at });
+            }
             trigger::Step::Release => {
+                if self.hold.is_some_and(|hold| hold.latched) {
+                    self.log.diag("trigger: latch released");
+                } else {
+                    self.thaw();
+                }
                 self.hold = None;
-                self.thaw();
                 self.feed(Event::TriggerUp);
             }
             trigger::Step::Nothing(why) => self.log.diag(&format!("trigger: {why}")),
@@ -715,7 +754,7 @@ impl App {
         }
     }
 
-    /// Move selector, pick, and outline diagnostics into the log.
+    /// Move selector, pick, outline, and catcher diagnostics into the log.
     /// This matches `flush_popup_notes`. None of these objects owns the log.
     pub(crate) fn flush_surface_notes(&mut self) {
         let mut lines = Vec::new();
@@ -731,8 +770,33 @@ impl App {
         if let Some(outline) = self.static_outline.as_mut() {
             lines.extend(outline.drain_notes());
         }
+        if let Some(catcher) = self.catcher.as_mut() {
+            lines.extend(catcher.drain_notes());
+        }
         for line in lines {
             self.log.diag(&line);
+        }
+    }
+
+    /// Drop the catcher pane before the popup removes this output's screen.
+    pub(crate) fn catcher_output_destroyed(&mut self, output: &WlOutput) {
+        let id = self
+            .screens()
+            .into_iter()
+            .find(|screen| screen.output == output.clone())
+            .map(|screen| screen.id);
+        if let (Some(catcher), Some(id)) = (self.catcher.as_mut(), id) {
+            catcher.drop_output(id);
+        }
+    }
+    /// Refresh the catcher geometry after an output update.
+    pub(crate) fn catcher_output_updated(&mut self, output: &WlOutput) {
+        let screen = self
+            .screens()
+            .into_iter()
+            .find(|screen| screen.output == output.clone());
+        if let (Some(catcher), Some(screen)) = (self.catcher.as_mut(), screen) {
+            catcher.update_output(&screen);
         }
     }
 
@@ -1373,8 +1437,8 @@ impl App {
     // ---- routes ----
 
     /// A layer surface was configured. Surface identity selects the owner.
-    /// The pick paints the dim, an outline paints strips, and the popup paints
-    /// the panel.
+    /// The pick paints the dim, an outline paints strips, the catcher paints
+    /// its transparent mask, and the popup paints the panel.
     pub(crate) fn layer_configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1400,6 +1464,13 @@ impl App {
             self.flush_surface_notes();
             return;
         }
+        if self.catcher.as_ref().is_some_and(|catcher| catcher.owns_layer(layer)) {
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.configured(layer, size);
+            }
+            self.flush_surface_notes();
+            return;
+        }
         if self.popup.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             self.popup_mut().configured(layer, size);
             self.flush_popup_notes();
@@ -1411,8 +1482,8 @@ impl App {
     }
 
     /// The compositor closed a layer surface.
-    /// The popup recreates it, the pick cancels, and the outline loses one
-    /// surface until the next show.
+    /// The popup recreates it, the pick cancels, and the outline and catcher
+    /// lose one surface until the next show.
     pub(crate) fn layer_closed(&mut self, layer: &LayerSurface) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1431,6 +1502,13 @@ impl App {
         if self.static_outline.as_ref().is_some_and(|o| o.owns_layer(layer)) {
             if let Some(outline) = self.static_outline.as_mut() {
                 outline.drop_layer(layer);
+            }
+            self.flush_surface_notes();
+            return;
+        }
+        if self.catcher.as_ref().is_some_and(|catcher| catcher.owns_layer(layer)) {
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.drop_layer(layer);
             }
             self.flush_surface_notes();
             return;
@@ -1454,8 +1532,11 @@ impl App {
     }
 
     /// One `wl_pointer` frame. The pick owns the pointer while active because
-    /// its surfaces cover the output.
-    /// The popup receives frames that do not belong to the pick.
+    /// its surfaces cover the output. The Press-mode catcher owns the full
+    /// output except for the popup hole.
+    /// The catcher and the popup each take their own events of one frame.
+    /// One frame can carry a leave from the catcher and an enter onto the
+    /// popup, so a per-frame owner would starve the popup of its enter.
     pub(crate) fn pointer_frame(&mut self, events: &[PointerEvent]) {
         if let Some(pick) = self.pick.as_mut() {
             if select::pointer_frame(pick, events) {
@@ -1463,10 +1544,22 @@ impl App {
                 return;
             }
         }
-        if self.popup.is_none() {
-            return;
+        let pressed_outside = self.catcher.as_mut().is_some_and(|catcher| {
+            if let Some(popup) = self.popup.as_ref() {
+                catcher.sync_pointer(popup);
+            }
+            catcher.pointer_frame(events)
+        });
+        self.flush_surface_notes();
+        if pressed_outside {
+            self.feed(Event::PointerDownOutside);
         }
-        let interactions = popup::pointer_frame(self.popup_mut(), events);
+        let Some(popup) = self.popup.as_mut() else { return };
+        let catcher = self.catcher.as_ref();
+        let interactions = popup::pointer_frame(
+            popup,
+            events.iter().filter(|event| !catcher.is_some_and(|c| c.owns_surface(&event.surface))),
+        );
         self.flush_popup_notes();
         self.pointer_interactions(interactions);
     }
@@ -1864,11 +1957,13 @@ impl App {
     }
 
     /// Relate lookup pixels to the popup in time.
-    /// A hold reads the press-time frame. Other modes read the current screen.
+    /// An unlatched hold reads its press-time frame.
+    /// A latched hold reads live pixels with the popup masked.
+    /// Other modes also read the current screen.
     fn capture_mode(&self) -> CaptureMode {
         match self.hold {
-            Some(_) => CaptureMode::Frozen,
-            None => CaptureMode::Live,
+            Some(h) if !h.latched => CaptureMode::Frozen,
+            _ => CaptureMode::Live,
         }
     }
 
@@ -2049,6 +2144,13 @@ impl App {
             content_h: placed.content_h,
             view_h: placed.view_h,
         });
+        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+            let screens = self.screens();
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.show(&screens, placed.rect);
+            }
+            self.flush_surface_notes();
+        }
     }
 
     /// Hide with a transparent buffer, not an unmap.
@@ -2068,6 +2170,9 @@ impl App {
         }
         if let Some(outline) = self.scan_outline.as_mut() {
             outline.hide();
+        }
+        if let Some(catcher) = self.catcher.as_mut() {
+            catcher.hide();
         }
         self.flush_popup_notes();
         self.flush_surface_notes();
@@ -2106,6 +2211,8 @@ impl App {
     /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the same Controller
     /// path as a real lookup, but answers its lookup with canned data.
     /// It does not need capture, OCR, or a Dictionary.
+    /// Press mode ignores a cursor move, so the demo feeds the same press
+    /// Event that `lookup` feeds.
     fn demo_show(&mut self) {
         let anchor = self.demo_anchor();
         self.log.diag(&format!(
@@ -2113,6 +2220,10 @@ impl App {
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
         let point = PhysPoint { x: anchor.x, y: anchor.y };
+        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+            self.feed(Event::TriggerPressed { pos: point });
+            return;
+        }
         self.feed(Event::TriggerDown);
         self.feed(Event::CursorMoved { pos: point });
     }
@@ -2276,6 +2387,22 @@ impl App {
                 self.config = config;
                 let cfg = controller_config(&self.config);
                 self.feed(Event::ConfigReloaded(Box::new(cfg)));
+                let layer = self.popup.as_ref().map(Popup::layer);
+                let shown = self.popup.as_ref().and_then(Popup::shown).map(|shown| shown.placement.rect);
+                let screens = self.screens();
+                if let Some(catcher) = self.catcher.as_mut() {
+                    if let Some(layer) = layer {
+                        catcher.set_layer(layer);
+                    }
+                    if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+                        if let Some(rect) = shown {
+                            catcher.show(&screens, rect);
+                        }
+                    } else {
+                        catcher.hide();
+                    }
+                }
+                self.flush_surface_notes();
                 // The mode, checkbox, and region are editable in the settings
                 // window.
                 // Reload is the second of the predicate's three call sites.
@@ -2441,11 +2568,10 @@ impl CursorHandler for App {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
         self.last_cursor = Some(pos);
-        // When a hold crosses outputs, it needs a fresh full grab on the entered
-        // output (ARCHITECTURE.md#hover-cadence).
-        // Take it before the lookup that sees the output change.
-        // Do it here, not behind the Controller.
-        if let Some(hold) = self.hold {
+        // An unlatched hold crosses outputs with a fresh full frozen grab
+        // (ARCHITECTURE.md#hover-cadence).
+        // A latched hold reads live pixels and needs no cross-output regrab.
+        if let Some(hold) = self.hold.filter(|hold| !hold.latched) {
             if let Some(output) = trigger::regrab(hold, &self.cursor.geometries(), pos) {
                 self.log.diag("trigger: the cursor crossed onto another output");
                 self.freeze_at(pos, output);
@@ -2520,10 +2646,10 @@ fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> 
 /// `armed` belongs to the Controller: live mode, a popup rect, and no
 /// drill-down.
 /// `hold` belongs to the daemon because only it knows the frozen grab.
-/// Hold pixels predate the popup and cannot change, so trigger mode needs no
-/// re-check.
+/// A frozen hold has immutable pixels and blocks the watch.
+/// A latched hold has live pixels and allows the watch.
 fn dwell_wanted(hold: Option<Hold>, armed: bool) -> bool {
-    hold.is_none() && armed
+    !hold.is_some_and(|h| !h.latched) && armed
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -2923,20 +3049,22 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     }
 
-    // Three surfaces sit beside the popup.
+    // Four surfaces sit beside the popup.
     // Each borrows the popup's process handles: one `wl_compositor`, one
-    // `wl_shm`, one `wl_viewporter`, and one `OutputState`.
+    // `wl_shm`, one `wp_viewporter`, and one `OutputState`.
     // Each returns `None` when the same global is absent, so a
     // layer-shell-less session reports it once and keeps other channels.
     // Two outlines have separate lifetimes for scan rects and the static
-    // border.
+    // border. The catcher maps its panes lazily on the first Press lookup.
     let selector = Selector::bind(&conn, &globals_list, &queue.handle(), &popup);
     let scan_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
     let static_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
+    let catcher = Catcher::bind(&globals_list, &queue.handle(), &popup);
     for (what, present) in [
         ("selector", selector.is_some()),
         ("outline", scan_outline.is_some()),
         ("static outline", static_outline.is_some()),
+        ("catcher", catcher.is_some()),
     ] {
         if !present {
             log.diag(&format!(
@@ -3058,6 +3186,7 @@ pub fn run(paths: Paths) -> Result<()> {
         pick: None,
         scan_outline,
         static_outline,
+        catcher,
         demo,
         scripting: false,
         config,
@@ -3455,6 +3584,7 @@ mod tests {
             pick: None,
             scan_outline: None,
             static_outline: None,
+            catcher: None,
             demo: Demo::default(),
             scripting: false,
         }
@@ -3822,26 +3952,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `toggle` lasts beyond key release.
+    /// `toggle` starts a live latch that lasts beyond key release.
+    /// The first lookup uses a live grab and does not freeze the Worker.
     /// Release while latched changes nothing. A second toggle ends the hold
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// without thawing a frozen frame (ARCHITECTURE.md#hover-cadence).
     #[test]
-    fn a_toggle_holds_the_freeze_until_it_is_toggled_off() {
+    fn a_toggle_latches_live_until_it_is_toggled_off() {
         let dir = scratch("toggle");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
 
         app.handle_request("toggle", Some(Verb::Toggle));
         assert!(app.hold.is_some_and(|h| h.latched), "toggle-on latches");
+        assert_eq!(CaptureMode::Live, app.capture_mode(), "a latch reads live grabs");
+        answer(&app);
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "toggle-on sends a live lookup, not a freeze"
+        );
+        assert!(!done(&log).iter().any(|line| line == "freeze"));
+
         app.handle_request("trigger-up", Some(Verb::TriggerUp));
         assert!(app.hold.is_some(), "a stray release must not end a toggle");
         app.handle_request("toggle", Some(Verb::Toggle));
         assert_eq!(None, app.hold, "toggle-off ends it");
 
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
-        assert!(written.contains("a toggle holds the freeze"), "log was: {written}");
+        assert!(written.contains("a toggle holds the live grab"), "log was: {written}");
+        assert!(written.contains("trigger: latch released"), "log was: {written}");
+        assert!(!written.contains("frozen grab dropped"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3859,6 +4003,50 @@ mod tests {
         assert_eq!(None, app.hold, "nothing to freeze on");
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("no cursor sample yet"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lookup verb feeds one press event without creating a hold.
+    /// The live capture mask still applies when no popup rectangle exists.
+    #[test]
+    fn a_lookup_verb_requests_one_live_lookup_without_a_hold() {
+        let dir = scratch("lookup_verb");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(AT);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.handle_request("lookup", Some(Verb::Lookup));
+
+        assert_eq!(None, app.hold, "a lookup press never starts a hold");
+        assert_eq!(CaptureMode::Live, app.capture_mode(), "the lookup uses a live capture");
+        answer(&app);
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "one lookup reaches the live pipeline"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lookup verb reports a missing cursor sample and sends no request.
+    #[test]
+    fn a_lookup_verb_without_a_cursor_sample_sends_nothing() {
+        let dir = scratch("lookup_no_cursor");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.handle_request("lookup", Some(Verb::Lookup));
+
+        assert!(app.worker.as_ref().expect("the pipeline").results().try_recv().is_err());
+        assert!(done(&log).is_empty(), "no cursor sample means no pipeline request");
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("no cursor sample"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4544,7 +4732,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A live grab must mask the popup. A frozen hold reads through it
+    /// A live grab must mask the popup. A frozen key hold reads through it
     /// (ARCHITECTURE.md#capture-and-masking).
     /// The fake recognizer reports whether input has a mask, so both cases are
     /// observed.
@@ -4621,15 +4809,14 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
     /// Test the daemon half of the arm rule.
-    /// A hold reads immutable pixels, so trigger mode never uses a dwell watch.
+    /// A frozen hold has immutable pixels, but a latched hold reads live pixels.
     #[test]
-    fn a_frozen_hold_is_never_dwell_watched() {
+    fn a_frozen_hold_blocks_dwell_but_a_latched_hold_allows_it() {
         let output = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
         assert!(dwell_wanted(None, true), "a shown popup in live mode is watched");
         assert!(!dwell_wanted(Some(Hold { output, latched: false }), true));
-        assert!(!dwell_wanted(Some(Hold { output, latched: true }), true));
+        assert!(dwell_wanted(Some(Hold { output, latched: true }), true));
         assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
     }
 

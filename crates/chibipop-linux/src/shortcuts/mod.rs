@@ -47,6 +47,7 @@ pub mod portal;
 pub mod state;
 
 use crate::control::Verb;
+use chibipop::config::TriggerMode;
 use std::path::Path;
 
 /// The fixed set of shortcuts that chibipop registers. It keeps the consent
@@ -315,15 +316,28 @@ pub enum Action {
     Nothing,
 }
 
-/// Map one `Activated`/`Deactivated` signal to the daemon's action.
-pub fn action(id: ShortcutId, activated: bool) -> Action {
-    match (id, activated) {
-        // A hold needs both events. Both rungs send the press and release.
-        (ShortcutId::Trigger, true) => Action::Verb(Verb::TriggerDown),
-        (ShortcutId::Trigger, false) => Action::Verb(Verb::TriggerUp),
-        (ShortcutId::AnkiAdd, true) => Action::Verb(Verb::AnkiAdd),
+/// Select the verb for one portal signal.
+///
+/// The mode selects the verb that the trigger key sends. This keeps a portal
+/// press and a native bind on one `App::apply_verb` path
+/// (ARCHITECTURE.md#input-ladders). Toggle mode uses the existing `toggle`
+/// verb, so the daemon's latch logic in `trigger.rs` remains the single owner
+/// of the hold. Press mode sends one `lookup` verb per press and ignores the
+/// release.
+pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
+    match (id, activated, mode) {
+        (ShortcutId::Trigger, true, TriggerMode::Toggle) => Action::Verb(Verb::Toggle),
+        // A release cannot reverse a toggle latch.
+        (ShortcutId::Trigger, false, TriggerMode::Toggle) => Action::Nothing,
+        (ShortcutId::Trigger, true, TriggerMode::Press) => Action::Verb(Verb::Lookup),
+        // Press mode performs one lookup and ignores the release.
+        (ShortcutId::Trigger, false, TriggerMode::Press) => Action::Nothing,
+        // Every other trigger mode needs both events.
+        (ShortcutId::Trigger, true, _) => Action::Verb(Verb::TriggerDown),
+        (ShortcutId::Trigger, false, _) => Action::Verb(Verb::TriggerUp),
+        (ShortcutId::AnkiAdd, true, _) => Action::Verb(Verb::AnkiAdd),
         // A release cannot reverse an Anki add action.
-        (ShortcutId::AnkiAdd, false) => Action::Nothing,
+        (ShortcutId::AnkiAdd, false, _) => Action::Nothing,
     }
 }
 
@@ -473,8 +487,53 @@ mod tests {
     /// remains active.
     #[test]
     fn the_trigger_id_maps_to_both_halves_of_the_hold() {
-        assert_eq!(Action::Verb(Verb::TriggerDown), action(ShortcutId::Trigger, true));
-        assert_eq!(Action::Verb(Verb::TriggerUp), action(ShortcutId::Trigger, false));
+        assert_eq!(
+            Action::Verb(Verb::TriggerDown),
+            action(ShortcutId::Trigger, true, TriggerMode::HoldKey)
+        );
+        assert_eq!(
+            Action::Verb(Verb::TriggerUp),
+            action(ShortcutId::Trigger, false, TriggerMode::HoldKey)
+        );
+    }
+
+    /// Toggle mode sends one verb on each press. The release does not change
+    /// the latch.
+    #[test]
+    fn toggle_mode_sends_the_toggle_verb_on_press_and_nothing_on_release() {
+        assert_eq!(
+            Action::Verb(Verb::Toggle),
+            action(ShortcutId::Trigger, true, TriggerMode::Toggle)
+        );
+        assert_eq!(
+            Action::Nothing,
+            action(ShortcutId::Trigger, false, TriggerMode::Toggle)
+        );
+
+        for mode in [TriggerMode::Live, TriggerMode::HoldShift] {
+            assert_eq!(
+                Action::Verb(Verb::TriggerDown),
+                action(ShortcutId::Trigger, true, mode)
+            );
+            assert_eq!(
+                Action::Verb(Verb::TriggerUp),
+                action(ShortcutId::Trigger, false, mode)
+            );
+        }
+    }
+
+    /// Press mode sends one lookup verb for each press. The release does not
+    /// create a second lookup.
+    #[test]
+    fn press_mode_sends_the_lookup_verb_on_press_and_nothing_on_release() {
+        assert_eq!(
+            Action::Verb(Verb::Lookup),
+            action(ShortcutId::Trigger, true, TriggerMode::Press)
+        );
+        assert_eq!(
+            Action::Nothing,
+            action(ShortcutId::Trigger, false, TriggerMode::Press)
+        );
     }
 
     /// Anki adds only on a press. The release does not create a second
@@ -482,8 +541,14 @@ mod tests {
     /// `chibipop ctl anki-add` therefore use the same code path.
     #[test]
     fn the_add_id_adds_once_per_press() {
-        assert_eq!(Action::Verb(Verb::AnkiAdd), action(ShortcutId::AnkiAdd, true));
-        assert_eq!(Action::Nothing, action(ShortcutId::AnkiAdd, false));
+        assert_eq!(
+            Action::Verb(Verb::AnkiAdd),
+            action(ShortcutId::AnkiAdd, true, TriggerMode::HoldKey)
+        );
+        assert_eq!(
+            Action::Nothing,
+            action(ShortcutId::AnkiAdd, false, TriggerMode::HoldKey)
+        );
     }
 
     /// A status row names the channel that owns the binding. A portal row can

@@ -110,13 +110,42 @@ bindsym --no-repeat Mod1+f exec chibipop ctl trigger-down
 bindsym --release   Mod1+f exec chibipop ctl trigger-up
 ```
 
-`trigger-down` freezes one full grab of the monitor under the cursor *before*
-the popup appears, and every lookup while you hold the chord reads that frozen
-screen: the popup can cover the very word it is defining and the next lookup
-still reads through it. Moving onto another monitor mid-hold grabs that one.
-`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the
-hands-free version — it freezes at toggle-on and stays frozen until you toggle
-off.
+In hold-key mode, `trigger-down` freezes one full grab of the monitor under the cursor *before*
+the popup appears, and every lookup while you hold the chord reads that frozen screen. The popup
+can cover the very word it defines, and the next lookup still reads through it. Moving onto another
+monitor mid-hold grabs that one.
+`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the hands-free version:
+it latches the trigger and reads live grabs with the popup masked until toggle-off. Lookups see
+screen changes while the latch is on.
+Toggle mode in the settings window selects this path for the portal channel and prints the
+one-line press bind for the native channel.
+
+**Press mode** runs one lookup at the cursor for each trigger-key press. The lookup reads a live
+grab with the popup masked, so Press mode does not use a Frozen grab. If it finds text, the popup
+shows and stays. Hover never follows the cursor, and no Dwell re-check runs. A press with no text
+hides the popup. A press over the popup also hides it because the mask gives no text. A button press
+outside the popup also hides it.
+The key release does nothing. Per-character lookup is inert in Press mode.
+
+On Hyprland, bind Press mode with one line:
+
+```
+bind = ALT, F, exec, chibipop ctl lookup
+```
+
+On sway, use:
+
+```
+bindsym --no-repeat ALT+F exec chibipop ctl lookup
+```
+The settings window prints these lines for the selected Press mode.
+
+The click catcher exists only in Press mode while a popup is placed. The daemon gives every
+output a transparent full-output layer surface at the popup layer. Its input region covers the
+output except a hole over the popup rectangle. The catcher is never unmapped. When the daemon hides
+the popup, it clears the input region. The catcher swallows the outside click, so it does not reach
+the window under it. Wayland gives a client no other way to observe the click because there is no
+evdev path and the popup takes no focus.
 
 **One Hyprland defect to know about** (present through at least 0.55.4,
 verified in source and live): if you release the modifier before the key —
@@ -132,6 +161,8 @@ wedge:
 ```
 bind = ALT, F, exec, chibipop ctl toggle
 ```
+Toggle mode cannot wedge on Hyprland because it has no release bind.
+Press mode has no release bind, so this defect does not apply to its `lookup` bind.
 
 sway is not affected — it arms the release binding at press time and fires it
 on whichever key of the chord comes up first.
@@ -165,8 +196,12 @@ inherit another app ID. For example, a launch from VS Code can register
 `code:trigger`. Bind the exact name that `hyprctl` reports.
 
 Hyprland delivers the portal release keyed to the pressed shortcut itself,
-independent of the modifier state, so either release order retracts the popup.
-The socket keeps serving as a namespace-free fallback.
+independent of the modifier state. Hold-key mode uses this release, so either release order
+retracts the popup. Toggle and Press modes ignore the release.
+The socket keeps serving as a namespace-free fallback. The settings window
+does not guess the namespace. When XDPH owns the trigger, the Trigger row
+shows the control-socket bind for the selected mode instead, as the add-card
+row does.
 
 **The add-card chord is a one-shot action.** The popup never takes focus, so
 the key must be global. On Hyprland, use the control socket even when XDPH is
@@ -355,7 +390,7 @@ nothing is bound until you paste the snippet).
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `anki-add` (add the word in the popup to Anki), `screenshot` (drag a region and file it as the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup` (run one Press-mode lookup), `anki-add` (add the word in the popup to Anki), `screenshot` (drag a region and file it as the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |

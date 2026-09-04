@@ -78,6 +78,8 @@ pub enum ApplyMode {
 const ID_APPLY: i32 = 100;
 const ID_MODE_LIVE: i32 = 102;
 const ID_MODE_HOLD: i32 = 103;
+const ID_MODE_TOGGLE: i32 = 153;
+const ID_MODE_PRESS: i32 = 154;
 const ID_THEME: i32 = 104;
 const ID_FONT: i32 = 105;
 const ID_MAX_HEIGHT: i32 = 106;
@@ -1053,9 +1055,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_CSS_EDITOR => record_click(hwnd, SettingsClick::CssEditor),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
-                ID_MODE_LIVE | ID_MODE_HOLD => unsafe {
+                ID_MODE_LIVE | ID_MODE_HOLD | ID_MODE_TOGGLE | ID_MODE_PRESS => unsafe {
                     if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
-                        let _ = EnableWindow(c, id == ID_MODE_HOLD);
+                        let _ = EnableWindow(c, id != ID_MODE_LIVE);
                     }
                     if let Ok(c) = dlg_item(hwnd, ID_PER_CHAR) {
                         let _ = EnableWindow(c, id == ID_MODE_LIVE);
@@ -3644,6 +3646,10 @@ impl SettingsWindow {
             // ---- Trigger ----
             gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
             y += 20;
+            // Live, Hold key, Toggle, and Press key share one radio group.
+            // Press key shares the trigger key and runs one lookup per press.
+            // Four 120-pixel radios at PAD, PAD + 130, PAD + 260, and PAD + 390
+            // end at x=524 inside the 532-pixel group box.
             let live = child(
                 page,
                 w!("BUTTON"),
@@ -3670,7 +3676,36 @@ impl SettingsWindow {
                 f,
             )?;
             gen.push(hold);
+            let toggle = child(
+                page,
+                w!("BUTTON"),
+                "Toggle",
+                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
+                PAD + 260,
+                y,
+                120,
+                ROW_H,
+                ID_MODE_TOGGLE,
+                f,
+            )?;
+            gen.push(toggle);
+            let press = child(
+                page,
+                w!("BUTTON"),
+                "Press key",
+                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
+                PAD + 390,
+                y,
+                120,
+                ROW_H,
+                ID_MODE_PRESS,
+                f,
+            )?;
+            gen.push(press);
             let is_live = matches!(form.mode, crate::config::TriggerMode::Live);
+            let is_toggle = matches!(form.mode, crate::config::TriggerMode::Toggle);
+            let is_press = matches!(form.mode, crate::config::TriggerMode::Press);
+            let is_hold = !is_live && !is_toggle && !is_press;
             SendMessageW(
                 live,
                 BM_SETCHECK,
@@ -3680,7 +3715,19 @@ impl SettingsWindow {
             SendMessageW(
                 hold,
                 BM_SETCHECK,
-                Some(WPARAM(if is_live { 0 } else { 1 })),
+                Some(WPARAM(if is_hold { 1 } else { 0 })),
+                None,
+            );
+            SendMessageW(
+                toggle,
+                BM_SETCHECK,
+                Some(WPARAM(if is_toggle { 1 } else { 0 })),
+                None,
+            );
+            SendMessageW(
+                press,
+                BM_SETCHECK,
+                Some(WPARAM(if is_press { 1 } else { 0 })),
                 None,
             );
             y += ROW_H + ROW_GAP;
@@ -3705,9 +3752,9 @@ impl SettingsWindow {
             y += ROW_H + 18;
 
             // ---- Popup ----
-            // WS_GROUP ends the radio group above. Without it, the group runs
-            // to the end of the window. The arrow keys then walk out of the
-            // Live and Hold Shift buttons into the combos.
+            // WS_GROUP ends the four-mode radio group above. Without it, the group runs
+            // to the end of the window. Arrow keys then walk out of the Live, Hold key,
+            // Toggle, and Press key buttons into the combos.
             gen.push(group_start(
                 "Popup",
                 y,
@@ -5031,7 +5078,11 @@ impl SettingsWindow {
             let field_map = Some(merged_field_map(saved, &readings));
 
             SettingsForm {
-                mode: if checked(ID_MODE_HOLD) {
+                mode: if checked(ID_MODE_PRESS) {
+                    crate::config::TriggerMode::Press
+                } else if checked(ID_MODE_TOGGLE) {
+                    crate::config::TriggerMode::Toggle
+                } else if checked(ID_MODE_HOLD) {
                     crate::config::TriggerMode::HoldKey
                 } else {
                     crate::config::TriggerMode::Live

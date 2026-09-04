@@ -70,13 +70,14 @@ _Avoid_: capture lock
 
 **Dwell re-check**:
 The damage-gated watch kept while the cursor rests on a shown popup. The popup refreshes
-when the screen changes beneath it. The watch runs in live mode only.
+when the screen changes beneath it. The watch runs in live mode and in a latched Toggle mode.
 _Avoid_: polling loop, refresh timer
 
 **Frozen grab**:
-The press-time full-output capture in trigger mode. All lookups while the user holds the
-key read this capture. The capture happens before the popup exists, so it needs no mask
-and reads through the popup.
+The press-time full-output capture for hold-key mode. While hold-key mode holds the grab, every
+lookup reads this capture. The capture happens before the popup exists, so it needs no mask and
+reads through the popup. Toggle mode reads live grabs with the popup masked while latched. Press
+mode reads one live masked grab for each press.
 _Avoid_: snapshot, screenshot buffer
 
 **TextMeasure**:
@@ -286,6 +287,31 @@ _Avoid_: mouse hook, pointer tracker
 **Trigger channel**:
 The source of trigger-key press and trigger-key release events on Linux.
 _Avoid_: keyboard hook, hotkey listener
+
+**Toggle mode**:
+One trigger-key press shows the popup and latches the trigger. While the latch is on, each lookup
+reads a live grab with the popup masked, so lookups see screen changes. The next press hides the
+popup and turns off the latch. Per-character lookup is inert in this mode, as in hold-key mode.
+_Avoid_: latch mode, sticky mode
+
+**Press mode**:
+One trigger-key press runs one lookup at the cursor. The lookup reads a live grab with the popup masked.
+If it finds text, the popup shows and stays. Hover never follows the cursor, and no Dwell re-check runs.
+If a press finds no text, the popup hides. A press over the popup also hides it because the mask gives
+no text. A button press outside the popup also hides it. The key release does nothing. Per-character
+lookup is inert in this mode.
+On Windows, the low-level mouse hook observes an outside button press without swallowing it, so the
+press reaches the window under the popup.
+_Avoid_: one-shot mode, sticky popup
+
+**Click catcher**:
+The transparent full-output layer surface that the daemon gives every output while a Press-mode popup is placed.
+Its input region covers the output except a hole over the popup rectangle. It is never unmapped. When
+the daemon hides the popup, it clears the input region. It swallows the outside button press, so that
+press does not reach the window under it.
+Wayland gives a client no other way to observe the click because there is no evdev path and the popup
+takes no focus.
+_Avoid_: dismiss layer, shield
 
 **Control socket**:
 The UNIX socket where verbs arrive from outside the daemon. Keybinds from the compositor
