@@ -401,7 +401,14 @@ the sentence at `。！？`; a closing `」` stays. A line with a different size
 such as ruby or a heading, ends the sentence. A paragraph gap also ends the
 sentence. The probe costs two or three OCR passes on add and none on hover.
 When the probe fails, the sentence falls back to the hovered line. Older
-configs without this key change to `sentence` when you upgrade.
+configs without this key change to `sentence` when you upgrade. A saved config
+writes every key, so a file that says `sentence_mode = "line"` keeps `line`
+until you change it.
+
+`line` uses the hovered OCR line with the same `。！？` cut at the cursor. A
+wide page holds several sentences on one line, and the card gets only the
+sentence of the hovered word. `line` never reads outside the hover capture, so
+a sentence that starts on the line above is cut short.
 
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`

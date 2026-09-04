@@ -177,8 +177,7 @@ pub fn sentence_at(
         }
     }
     let anchor_offset = anchor_offset?;
-    let (start, end) = sentence_bounds(&text, anchor_offset);
-    let result = layout::normalise(&text[start..end]);
+    let result = layout::normalise(cut_sentence(&text, anchor_offset));
     (!result.trim().is_empty()).then_some(result)
 }
 
@@ -299,6 +298,18 @@ fn row_forward_gap(
         Orientation::Horizontal => row_perp_centre(next, orientation) - row_perp_centre(previous, orientation),
         Orientation::Vertical => row_perp_centre(previous, orientation) - row_perp_centre(next, orientation),
     }
+}
+
+/// Return the sentence that holds the character at `anchor_offset`.
+///
+/// The cut starts after the last terminator before the anchor. It keeps an opening
+/// bracket directly before that start. It ends after the first terminator at or
+/// after the anchor and any closing brackets behind it. The hover-time line and
+/// the add-time probe both use this cut. One line that holds three sentences
+/// gives one sentence on both paths.
+pub fn cut_sentence(text: &str, anchor_offset: usize) -> &str {
+    let (start, end) = sentence_bounds(text, anchor_offset);
+    &text[start..end]
 }
 
 fn sentence_bounds(text: &str, anchor_offset: usize) -> (usize, usize) {

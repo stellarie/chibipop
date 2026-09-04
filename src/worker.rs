@@ -12,6 +12,7 @@ use crate::lookup::model::Dictionary;
 use crate::present::{self, DictInfo, PresentConfig};
 use crate::text::layout::{CaptureSize, OcrLine, Orientation, Resolved};
 use crate::text::mask::CaptureMask;
+use crate::text::sentence;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
@@ -534,13 +535,17 @@ fn present_lookup(
     }
 }
 
-/// Return the OCR line that contains the cursor offset.
+/// Return the sentence that contains the cursor offset.
+///
+/// The function takes the OCR line at the cursor, then cuts that line to one
+/// sentence with [`sentence::cut_sentence`]. A wide page holds several sentences
+/// on one line. A card wants only the sentence of the hovered word.
 fn extract_sentence_line(text: &str, cursor_offset: usize) -> &str {
     let mut pos = 0;
     for line in text.split('\n') {
         let end = pos + line.len();
         if cursor_offset >= pos && cursor_offset <= end {
-            return line;
+            return sentence::cut_sentence(line, cursor_offset - pos);
         }
         pos = end + 1;
     }
@@ -622,6 +627,24 @@ mod tests {
     fn extract_sentence_line_past_the_end_falls_back_to_all() {
         let text = "abc\ndef";
         assert_eq!(text, extract_sentence_line(text, 999));
+    }
+
+    /// The reported case: one wide line held three sentences, and the card got all three.
+    #[test]
+    fn extract_sentence_line_cuts_a_wide_line_to_the_sentence_at_the_cursor() {
+        let text = "日本のいろいろな場所で、雨がたくさん降りそうだと言っています。山が崩れたり、低い所に水が入ったりするかもしれません。気をつけてください。";
+        let offset = text.find('山').unwrap();
+        assert_eq!(
+            "山が崩れたり、低い所に水が入ったりするかもしれません。",
+            extract_sentence_line(text, offset)
+        );
+    }
+
+    #[test]
+    fn extract_sentence_line_cuts_only_the_line_that_holds_the_cursor() {
+        let text = "前の行。\n一つ目。二つ目の文。\n次の行。";
+        let offset = text.find('二').unwrap();
+        assert_eq!("二つ目の文。", extract_sentence_line(text, offset));
     }
 
     fn ocr_word(text: &str) -> crate::text::layout::OcrWord {
