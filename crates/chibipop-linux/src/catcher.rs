@@ -20,6 +20,7 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_pointer::WlPointer;
+use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::QueueHandle;
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     Shape, WpCursorShapeDeviceV1,
@@ -99,16 +100,6 @@ pub fn input_region_rects(
         });
     }
     regions
-}
-
-/// A catcher button press that the daemon must dismiss.
-///
-/// `pressed` distinguishes a dismissing button from Enter and motion events.
-/// Both kinds of event belong to the catcher, so the daemon does not send them
-/// to the popup pointer state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Outside {
-    pub pressed: bool,
 }
 
 /// One full-output catcher surface.
@@ -256,39 +247,39 @@ impl Catcher {
         self.shape_pointer = Some(pointer.clone());
     }
 
-    /// Handle pointer events for the catcher.
+    /// Test whether one pointer event landed on a catcher pane.
+    ///
+    /// The daemon routes each event of a frame by surface. Hyprland sends
+    /// one frame for a leave from the catcher and an enter onto the popup,
+    /// because both surfaces belong to one client. A rule that claims the
+    /// whole frame for the catcher would hide that enter from the popup.
+    /// Then the popup holds no focus and ignores every later press.
+    pub fn owns_surface(&self, surface: &WlSurface) -> bool {
+        self.panes.iter().any(|pane| pane.layer.wl_surface() == surface)
+    }
+
+    /// Handle the catcher's events of one pointer frame.
     ///
     /// Enter sets the default shape. Any button press asks the daemon to
-    /// dismiss the popup. Other events stay consumed so popup state does not
-    /// observe a frame that landed on the catcher.
-    pub fn pointer_frame(&mut self, events: &[PointerEvent]) -> Option<Outside> {
-        let mut belongs = false;
+    /// dismiss the popup, so this function returns `true` for it. Other events
+    /// on the catcher need no answer.
+    pub fn pointer_frame(&mut self, events: &[PointerEvent]) -> bool {
         let mut pressed = false;
-        for event in events {
-            if !self
-                .panes
-                .iter()
-                .any(|pane| pane.active && pane.layer.wl_surface() == &event.surface)
-            {
-                continue;
-            }
-            belongs = true;
+        for event in events.iter().filter(|event| self.owns_surface(&event.surface)) {
             match &event.kind {
                 PointerEventKind::Enter { serial } => {
                     if let Some(device) = self.shape.as_ref() {
                         device.set_shape(*serial, Shape::Default);
                     }
                 }
-                PointerEventKind::Press { .. } => {
-                    pressed = true;
-                }
+                PointerEventKind::Press { .. } => pressed = true,
                 PointerEventKind::Motion { .. }
                 | PointerEventKind::Release { .. }
                 | PointerEventKind::Axis { .. }
                 | PointerEventKind::Leave { .. } => {}
             }
         }
-        belongs.then_some(Outside { pressed })
+        pressed
     }
 
     /// Update one pane after its output geometry changes.

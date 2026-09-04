@@ -1534,7 +1534,9 @@ impl App {
     /// One `wl_pointer` frame. The pick owns the pointer while active because
     /// its surfaces cover the output. The Press-mode catcher owns the full
     /// output except for the popup hole.
-    /// The popup receives frames that do not belong to either surface.
+    /// The catcher and the popup each take their own events of one frame.
+    /// One frame can carry a leave from the catcher and an enter onto the
+    /// popup, so a per-frame owner would starve the popup of its enter.
     pub(crate) fn pointer_frame(&mut self, events: &[PointerEvent]) {
         if let Some(pick) = self.pick.as_mut() {
             if select::pointer_frame(pick, events) {
@@ -1542,23 +1544,22 @@ impl App {
                 return;
             }
         }
-        let caught = self.catcher.as_mut().and_then(|catcher| {
+        let pressed_outside = self.catcher.as_mut().is_some_and(|catcher| {
             if let Some(popup) = self.popup.as_ref() {
                 catcher.sync_pointer(popup);
             }
             catcher.pointer_frame(events)
         });
-        if let Some(outside) = caught {
-            self.flush_surface_notes();
-            if outside.pressed {
-                self.feed(Event::PointerDownOutside);
-            }
-            return;
+        self.flush_surface_notes();
+        if pressed_outside {
+            self.feed(Event::PointerDownOutside);
         }
-        if self.popup.is_none() {
-            return;
-        }
-        let interactions = popup::pointer_frame(self.popup_mut(), events);
+        let Some(popup) = self.popup.as_mut() else { return };
+        let catcher = self.catcher.as_ref();
+        let interactions = popup::pointer_frame(
+            popup,
+            events.iter().filter(|event| !catcher.is_some_and(|c| c.owns_surface(&event.surface))),
+        );
         self.flush_popup_notes();
         self.pointer_interactions(interactions);
     }
@@ -2210,6 +2211,8 @@ impl App {
     /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the same Controller
     /// path as a real lookup, but answers its lookup with canned data.
     /// It does not need capture, OCR, or a Dictionary.
+    /// Press mode ignores a cursor move, so the demo feeds the same press
+    /// Event that `lookup` feeds.
     fn demo_show(&mut self) {
         let anchor = self.demo_anchor();
         self.log.diag(&format!(
@@ -2217,6 +2220,10 @@ impl App {
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
         let point = PhysPoint { x: anchor.x, y: anchor.y };
+        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+            self.feed(Event::TriggerPressed { pos: point });
+            return;
+        }
         self.feed(Event::TriggerDown);
         self.feed(Event::CursorMoved { pos: point });
     }

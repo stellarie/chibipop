@@ -641,9 +641,11 @@ pub fn script_from_env() -> (Vec<Vec<Step>>, Vec<String>) {
 /// A frame batches related events. For example, SCTK merges the axis
 /// pieces into one event. A frame may also carry a leave and an
 /// enter together, when the pointer crosses between two of the
-/// popup's surfaces. Therefore, this function keeps the order inside
-/// the frame.
-pub fn frame(popup: &mut Popup, events: &[PointerEvent]) -> Vec<Interaction> {
+/// popup's surfaces, or from the Press-mode catcher onto a panel.
+/// Therefore, this function keeps the order inside the frame. The
+/// daemon filters the catcher's own events out before this call, so
+/// a non-panel event here means the implicit grab after a press.
+pub fn frame<'a>(popup: &mut Popup, events: impl Iterator<Item = &'a PointerEvent>) -> Vec<Interaction> {
     let mut out = Vec::new();
     for event in events {
         let panel = popup.panel_of(&event.surface);

@@ -924,7 +924,9 @@ In `chibipop run`, with the PID recorded:
    onto it. Press the trigger key again. The popup must hide.
 4. Switch **Trigger** to `Press`, Apply.
 5. Press the trigger key over fixture text. Release it. The popup must show and stay at its first
-   position while you move the cursor. Press a button outside the popup. The popup must hide. Press
+   position while you move the cursor. Move the cursor from outside the popup onto a gloss line
+   and click it. The click must select or drill down, as in Live mode. The log must show
+   `pointer: entered surface`. Press a button outside the popup. The popup must hide. Press
    over fixture text again. Press the trigger key with the cursor over the popup. The popup must
    hide. Press the trigger key over no text. The popup must remain hidden.
 6. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one

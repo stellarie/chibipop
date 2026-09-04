@@ -121,6 +121,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   the output except the popup rectangle. The catcher is never unmapped. Hide clears its input
   region, and a button press on the catcher hides the popup. The catcher swallows that click
   because there is no evdev path and the popup takes no focus.
+- The daemon routes each event of one `wl_pointer` frame by surface. The catcher and the
+  popup are one client, so a compositor can put a leave from the catcher and an enter onto
+  the popup in one frame. A per-frame owner would hide that enter from the popup, and the
+  popup would then ignore every click inside it.
 
 ## Selection
 
