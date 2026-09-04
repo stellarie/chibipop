@@ -79,15 +79,20 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   the next lines of the sentence, and a mask would drop those words. The screenshot-on-add
   path already hides and restores the popup, and the sentence probe reuses that path. In
   frozen mode the Worker reads the held frame, so no hide is needed.
+- On the portal rung, a live sentence hide records the parked-frame content counter
+  before its commit. After the `wl_display.sync` callback, the daemon waits on a short
+  calloop poll for a newer counter, or for a 150 ms deadline, and then it sends the
+  probe. The `RegionCapture` seam itself never waits for damage.
 - The mask boundary is a capture edge. The engine drops words that touch it. It never
   partially recognizes them.
-- A wrap joins the nearest body line below. The center gap from the hovered line to that
-  candidate is from 0.5 through 4.5 times the larger line thickness. The candidate line
-  thickness is from two thirds through one and a half times the hovered line thickness.
-  The candidate start can be up to half a thickness after the hovered line start. The
-  rules use geometry, not ruby or heading labels. The reach is fixed. A pitch measured
-  from neighbors fails on a two-line paragraph because the pair under test has no pitch
-  beside it.
+- A wrap joins the nearest body line on the cross axis. For horizontal text, that
+  line is below the hovered line. For vertical text, it is the next column to the left.
+  The center gap from the hovered line to that candidate is from 0.5 through 4.5
+  times the larger line thickness. The candidate line thickness is from two thirds
+  through one and a half times the hovered line thickness. The candidate start can
+  be up to half a thickness after the hovered line start. The rules use geometry,
+  not ruby or heading labels. The reach is fixed. A pitch measured from neighbors
+  fails on a two-line paragraph because the pair under test has no pitch beside it.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders

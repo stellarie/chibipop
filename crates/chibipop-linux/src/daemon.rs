@@ -47,6 +47,7 @@ use chibipop::worker::{Hover, SentenceProbe, Trigger, TriggerKind, Worker};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use smithay_client_toolkit::seat::pointer::PointerEvent;
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
@@ -80,6 +81,10 @@ const GESTURE_TIMER_TICKS: u64 =
 /// See [`App::probe_surfaces`].
 const SURFACE_PROBE_ENV: &str = "CHIBIPOP_SURFACE_PROBE";
 const SURFACE_PROBE_DEADLINE: Duration = Duration::from_millis(400);
+
+/// Poll interval and deadline for a portal frame after a live sentence hide.
+const PORTAL_SENTENCE_POLL: Duration = Duration::from_millis(8);
+const PORTAL_SENTENCE_DEADLINE: Duration = Duration::from_millis(150);
 
 /// The demo anchor box before the first cursor sample.
 /// The canned popup needs a position before that sample.
@@ -184,6 +189,8 @@ pub(crate) struct App {
     deferred_popup: Option<DeferredPopup>,
     /// A sentence request waiting for the display ordering step.
     pending_sentence: Option<PendingSentence>,
+    /// Deadline for the portal frame wait after the display ordering step.
+    sentence_deadline: Option<Instant>,
     /// Sentence probes already accepted by the Worker.
     sentence_requests: HashSet<u64>,
 
@@ -256,6 +263,18 @@ pub(crate) struct App {
     /// The backend lives on the Worker thread, so retry reads this flag and
     /// does not access the backend.
     portal_serving: bool,
+    /// The parked-frame store for a granted portal session.
+    /// Wlr and refused portal sessions leave this as `None`.
+    portal_frames: Option<Arc<portal::frame::FrameStore>>,
+    /// Dwell re-check timer while it is armed
+    /// (ARCHITECTURE.md#hover-cadence).
+    dwell: Option<RegistrationToken>,
+    /// Poll timer for a portal sentence frame after the hide sync.
+    sentence_timer: Option<RegistrationToken>,
+    /// The temporary clock keeps core gesture deadlines active.
+    gesture_tick: Option<RegistrationToken>,
+    /// This value counts ticks until the temporary gesture clock stops.
+    gesture_ticks_left: u64,
     /// Rung that the ladder chose. `reload` reads it to decide if retry has
     /// purpose.
     capture_selection: capture_backend::Selection,
@@ -274,13 +293,6 @@ pub(crate) struct App {
     /// The dwell watch and temporary gesture clock are the only sources that
     /// this daemon adds or removes at runtime.
     pump: LoopHandle<'static, App>,
-    /// Dwell re-check timer while it is armed
-    /// (ARCHITECTURE.md#hover-cadence).
-    dwell: Option<RegistrationToken>,
-    /// The temporary clock keeps core gesture deadlines active.
-    gesture_tick: Option<RegistrationToken>,
-    /// This value counts ticks until the temporary gesture clock stops.
-    gesture_ticks_left: u64,
 }
 
 /// One popup job. It blocks the thread that runs it.
@@ -458,6 +470,8 @@ struct PendingSentence {
     orientation: Orientation,
     mask: CaptureMask,
     generation: u64,
+    /// Portal content counter recorded before the hide commit.
+    portal_seq: Option<u64>,
     owns_hide: bool,
 }
 
@@ -2088,7 +2102,76 @@ impl App {
         TimeoutAction::Drop
     }
 
+    fn cancel_sentence_timer(&mut self) {
+        self.sentence_deadline = None;
+        if let Some(token) = self.sentence_timer.take() {
+            self.pump.remove(token);
+        }
+    }
+
+    /// Poll the portal counter after the hide's display ordering callback.
+    ///
+    /// The timer keeps the pump responsive. A failed timer setup falls back to
+    /// the hover sentence instead of blocking or dropping the add.
+    fn arm_sentence_timer(&mut self, id: RequestId, generation: u64) {
+        let waiting = self.pending_sentence.as_ref().is_some_and(|pending| {
+            pending.id == id && pending.generation == generation && pending.portal_seq.is_some()
+        });
+        if !waiting || self.sentence_timer.is_some() {
+            return;
+        }
+        self.sentence_deadline = Some(Instant::now() + PORTAL_SENTENCE_DEADLINE);
+        let timer = Timer::from_duration(PORTAL_SENTENCE_POLL);
+        match self.pump.insert_source(timer, move |_, _, app: &mut App| {
+            app.sentence_timer_tick(id, generation)
+        }) {
+            Ok(token) => self.sentence_timer = Some(token),
+            Err(e) => {
+                self.sentence_deadline = None;
+                self.log.diag(&format!(
+                    "sentence: no portal frame timer could be armed - {e}; using the hover sentence"
+                ));
+                if let Some(pending) = self.pending_sentence.take() {
+                    self.sentence_without_probe(pending);
+                }
+            }
+        }
+    }
+
+    fn sentence_timer_tick(&mut self, id: RequestId, generation: u64) -> TimeoutAction {
+        let Some(pending) = self.pending_sentence.as_ref() else {
+            return TimeoutAction::Drop;
+        };
+        if pending.id != id || pending.generation != generation {
+            return TimeoutAction::Drop;
+        }
+        let Some(before) = pending.portal_seq else {
+            return TimeoutAction::Drop;
+        };
+        if self
+            .portal_frames
+            .as_ref()
+            .is_some_and(|store| store.content_seq() != before)
+        {
+            self.dispatch_pending_sentence();
+            return TimeoutAction::Drop;
+        }
+        let Some(deadline) = self.sentence_deadline else {
+            return TimeoutAction::Drop;
+        };
+        if Instant::now() >= deadline {
+            self.log.diag(&format!(
+                "sentence: portal frame wait timeout after {PORTAL_SENTENCE_DEADLINE:?}; \
+                 dispatching with the current frame"
+            ));
+            self.dispatch_pending_sentence();
+            return TimeoutAction::Drop;
+        }
+        TimeoutAction::ToDuration(PORTAL_SENTENCE_POLL)
+    }
+
     fn cancel_pending_sentence(&mut self) {
+        self.cancel_sentence_timer();
         let Some(pending) = self.pending_sentence.take() else { return };
         if pending.owns_hide {
             self.hide_owners.release(HideOwner::Sentence);
@@ -2128,6 +2211,7 @@ impl App {
     /// callback can still reach the queue after cancellation, so validate the
     /// current popup before sending the trigger.
     fn dispatch_pending_sentence(&mut self) {
+        self.cancel_sentence_timer();
         let Some(pending) = self.pending_sentence.take() else { return };
         if self.controller_hidden
             || self.popup_generation != pending.generation
@@ -2173,6 +2257,17 @@ impl App {
         orientation: Orientation,
         hide_popup: bool,
     ) {
+        // A second add supersedes the first one. Clear its timer and hide owner
+        // before recording the new frame baseline.
+        self.cancel_pending_sentence();
+        let live_sentence_hide = hide_popup
+            && self.display.is_some()
+            && self.wayland_qh.is_some()
+            && self.worker.is_some()
+            && !self.demo.armed;
+        let portal_seq = live_sentence_hide
+            .then(|| self.portal_frames.as_ref().map(|store| store.content_seq()))
+            .flatten();
         if hide_popup {
             self.begin_capture_hide(HideOwner::Sentence);
         }
@@ -2182,9 +2277,10 @@ impl App {
             orientation,
             mask: CaptureMask::for_mode(self.capture_mode(), None),
             generation: self.popup_generation,
+            portal_seq,
             owns_hide: hide_popup,
         };
-        if hide_popup && self.display.is_some() && self.wayland_qh.is_some() && self.worker.is_some() && !self.demo.armed {
+        if live_sentence_hide {
             self.pending_sentence = Some(pending);
             if let Err(e) = self.queue_sentence_sync(id, self.popup_generation) {
                 self.log.diag(&format!("sentence: the popup hide did not settle - {e:#}"));
@@ -2869,6 +2965,11 @@ impl App {
     /// The cursor, tray, settings, and popup remain available.
     fn spawn_worker(&mut self, portal: Option<PortalCapture>) {
         self.worker = None;
+        self.portal_frames = None;
+        let portal_frames = match self.worker_setup.backend {
+            Some(Backend::Portal) => portal.as_ref().map(PortalCapture::frame_store),
+            _ => None,
+        };
         // Until spawn succeeds, the queue has no pipeline.
         // An `ocr-clipboard` press while the pipeline is absent fails with a reason,
         // rather than wait on a dead thread.
@@ -2894,6 +2995,7 @@ impl App {
                 self.dicts = dicts;
                 self.ocr_jobs = worker::OcrJobs::new(jobs_tx, worker.serve_nudge());
                 self.worker = Some(worker);
+                self.portal_frames = portal_frames;
                 self.rescope_lookups(&sent_scope);
                 self.look_where_the_cursor_is();
             }
@@ -3123,9 +3225,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
 }
 /// Completes the asynchronous barrier for a live sentence capture.
 ///
-/// The hide was committed before the sync request. Dispatching here means the
-/// Worker never starts its live grab until the compositor has processed that
-/// commit. A callback for a cancelled request is ignored.
+/// The hide was committed before the sync request. Wlr dispatches at this
+/// callback; portal dispatch waits for its parked-frame counter timer.
+/// A callback for a cancelled request is ignored.
 impl Dispatch<WlCallback, SentenceSync> for App {
     fn event(
         app: &mut App,
@@ -3140,7 +3242,15 @@ impl Dispatch<WlCallback, SentenceSync> for App {
             .as_ref()
             .is_some_and(|pending| pending.id == sync.id && pending.generation == sync.generation);
         if current {
-            app.dispatch_pending_sentence();
+            let waits_for_portal_frame = app
+                .pending_sentence
+                .as_ref()
+                .is_some_and(|pending| pending.portal_seq.is_some());
+            if waits_for_portal_frame {
+                app.arm_sentence_timer(sync.id, sync.generation);
+            } else {
+                app.dispatch_pending_sentence();
+            }
         }
     }
 }
@@ -3622,6 +3732,7 @@ pub fn run(paths: Paths) -> Result<()> {
         controller_hidden: true,
         pump: event_loop.handle(),
         dwell: None,
+        sentence_timer: None,
         gesture_tick: None,
         gesture_ticks_left: 0,
         cursor: CursorState::default(),
@@ -3655,6 +3766,7 @@ pub fn run(paths: Paths) -> Result<()> {
         hold: None,
         last_warning: None,
         portal_serving: capture.is_some(),
+        portal_frames: None,
         capture_selection,
         pointer_defect,
         portal_retry,
@@ -3668,6 +3780,7 @@ pub fn run(paths: Paths) -> Result<()> {
         hidden_popup: None,
         deferred_popup: None,
         pending_sentence: None,
+        sentence_deadline: None,
         sentence_requests: HashSet::new(),
         demo,
         scripting: false,
@@ -4021,6 +4134,7 @@ mod tests {
             controller_hidden: true,
             pump: event_loop.handle(),
             dwell: None,
+            sentence_timer: None,
             gesture_tick: None,
             gesture_ticks_left: 0,
             settings: SettingsChild::new(),
@@ -4060,6 +4174,7 @@ mod tests {
             hold: None,
             last_warning: None,
             portal_serving: false,
+            portal_frames: None,
             capture_selection: capture,
             // The software-cursor probe is a startup fact.
             // The harness tests the combination, not the compositor option.
@@ -4075,6 +4190,7 @@ mod tests {
             hidden_popup: None,
             deferred_popup: None,
             pending_sentence: None,
+            sentence_deadline: None,
             sentence_requests: HashSet::new(),
             demo: Demo::default(),
             scripting: false,
@@ -5323,6 +5439,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn prepare_portal_sentence(
+        app: &mut App,
+        store: &Arc<portal::frame::FrameStore>,
+        id: RequestId,
+        generation: u64,
+    ) {
+        let presentation = popup::canned();
+        let anchor = PhysRect { x: 580, y: 280, w: 40, h: 40 };
+        let _ = app.controller.handle(Event::LookupResult {
+            id: RequestId(1),
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(presentation),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        let _ = app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 500, y: 400, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        app.popup_generation = generation;
+        app.controller_hidden = false;
+        app.portal_frames = Some(Arc::clone(store));
+        app.hide_owners.acquire(HideOwner::Sentence);
+        app.pending_sentence = Some(PendingSentence {
+            id,
+            anchor,
+            orientation: Orientation::Horizontal,
+            mask: CaptureMask::NONE,
+            generation,
+            portal_seq: Some(store.content_seq()),
+            owns_hide: true,
+        });
+    }
+
+    /// Drain Worker results until the sentence hide owner is released.
+    /// Empty queues are normal while the Worker is still running.
+    fn drain_until_hide_released(app: &mut App) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !app.hide_owners.is_empty() && Instant::now() < deadline {
+            app.drain_results();
+            if !app.hide_owners.is_empty() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// A portal sentence waits for a newer parked frame after the hide sync.
+    #[test]
+    fn a_portal_sentence_dispatches_after_the_frame_counter_advances() {
+        let dir = scratch("portal_sentence_advance");
+
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, _log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        let store = Arc::new(portal::frame::FrameStore::new());
+        let id = RequestId(80);
+        let generation = 4;
+        prepare_portal_sentence(&mut app, &store, id, generation);
+
+        app.arm_sentence_timer(id, generation);
+        store.clear();
+        assert!(matches!(
+            app.sentence_timer_tick(id, generation),
+            TimeoutAction::Drop
+        ));
+        assert!(app.pending_sentence.is_none());
+        assert!(app.sentence_requests.contains(&id.0));
+        drain_until_hide_released(&mut app);
+        assert!(app.hide_owners.is_empty(), "the Worker completion releases the hide");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A portal sentence uses the stale frame only when the bounded wait expires.
+    #[test]
+    fn a_portal_sentence_dispatches_at_the_frame_wait_deadline() {
+        let dir = scratch("portal_sentence_timeout");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, _log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        let store = Arc::new(portal::frame::FrameStore::new());
+        let id = RequestId(81);
+        let generation = 5;
+        prepare_portal_sentence(&mut app, &store, id, generation);
+
+        app.arm_sentence_timer(id, generation);
+        app.sentence_deadline =
+            Some(Instant::now().checked_sub(Duration::from_millis(1)).unwrap());
+        assert!(matches!(
+            app.sentence_timer_tick(id, generation),
+            TimeoutAction::Drop
+        ));
+        assert!(app.pending_sentence.is_none());
+        assert!(app.sentence_requests.contains(&id.0));
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("frame wait timeout"), "log was: {written}");
+        drain_until_hide_released(&mut app);
+        assert!(app.hide_owners.is_empty(), "the Worker completion releases the hide");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cancelled portal sentence cannot be revived by its late timer tick.
+    #[test]
+    fn a_cancelled_portal_sentence_ignores_a_late_timer_tick() {
+        let dir = scratch("portal_sentence_cancel");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, _log) = fake_worker(None, None);
+        app.worker = Some(worker);
+        let store = Arc::new(portal::frame::FrameStore::new());
+        let id = RequestId(82);
+        let generation = 6;
+        prepare_portal_sentence(&mut app, &store, id, generation);
+
+        app.arm_sentence_timer(id, generation);
+        assert!(app.sentence_timer.is_some());
+        app.cancel_pending_sentence();
+        assert!(app.pending_sentence.is_none());
+        assert!(app.sentence_timer.is_none());
+        assert!(app.hide_owners.is_empty(), "cancellation releases the hide");
+        assert!(matches!(
+            app.sentence_timer_tick(id, generation),
+            TimeoutAction::Drop
+        ));
+        assert!(app.sentence_requests.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Backpressure paces input.
     /// Samples while an active read run coalesce to the newest.
     /// The daemon queues no extra sample
@@ -5434,6 +5683,7 @@ mod tests {
             orientation: Orientation::Horizontal,
             mask: CaptureMask::NONE,
             generation,
+            portal_seq: None,
             owns_hide: true,
         });
         app.hidden_popup = Some(HiddenPopup {

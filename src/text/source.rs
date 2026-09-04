@@ -476,42 +476,43 @@ impl TextSource {
     ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
         let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
-        let Some(mut first) = resolved else { return Ok((None, scan, lines)) };
+        let Some(pass_one) = resolved else { return Ok((None, scan, lines)) };
         let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         if collect {
             scan.push(ScanRect { rect: region, kind: ScanKind::Pass1 });
         }
-        if let Some((probes, wrapped)) =
-            self.probe_wrap(&lines, cursor, region, first.orientation, mask)
+        let wrapped = if let Some((probes, wrapped)) =
+            self.probe_wrap(&lines, cursor, region, pass_one.orientation, mask)
         {
             if collect {
                 for probe in probes {
                     scan.push(ScanRect { rect: probe, kind: ScanKind::Tile });
                 }
             }
-            if let Some(wrapped) = wrapped {
-                first = wrapped;
-            }
-        }
+            wrapped
+        } else {
+            None
+        };
+        let wrapped_anchor =
+            wrapped.as_ref().map_or(pass_one.span.anchor, |r| r.span.anchor);
         if self.settings.max_passes <= 1 {
             if collect {
-                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+                scan.push(ScanRect { rect: wrapped_anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan, lines));
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         }
-
         // Reuse pass 1's kept tail. Do not read it again.
         let alnum = self.settings.scan_alphanumeric;
         let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, alnum)
         else {
             if collect {
-                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+                scan.push(ScanRect { rect: wrapped_anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan, lines));
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         };
         let head_chars = head.chars().count();
 
-        let anchor = first.span.anchor;
+        let anchor = pass_one.span.anchor;
         let band = band_of(anchor, orientation, self.settings.capture.short());
         let perpendicular_centre = match orientation {
             Orientation::Horizontal => anchor.center().y,
@@ -551,6 +552,7 @@ impl TextSource {
         );
 
         if collect {
+            let anchor = if tail.is_empty() { wrapped_anchor } else { pass_one.span.anchor };
             scan.push(ScanRect { rect: anchor, kind: ScanKind::Anchor });
         }
 
@@ -558,7 +560,7 @@ impl TextSource {
         // When tiles add text, use the stitched head and tail and drop a joined continuation.
         // A word past the box on the same row shows that the line continues.
         if tail.is_empty() {
-            return Ok((Some(first), scan, lines));
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         }
         let text = normalise(&format!("{head}{tail}"));
         Ok((
@@ -1174,6 +1176,10 @@ mod tests {
     const WIDE_TAIL: PhysRect = PhysRect { x: 1000, y: 470, w: 940, h: 270 };
     /// `region_around` returns the capture size at the wide output cursor.
     const WIDE_REGION: PhysRect = PhysRect { x: 1650, y: 450, w: 500, h: 100 };
+    /// The wide wrap fixture reports a larger box for the hovered glyph.
+    const WIDE_WRAP_HIT: PhysRect = PhysRect { x: 970, y: 480, w: 60, h: 40 };
+    /// The precedence fixture returns one same-row word from the first forward tile.
+    const FORWARD_TILE: PhysRect = PhysRect { x: 1250, y: 440, w: 500, h: 120 };
 
 
     /// Select the bounded probe that fails in the fixture.
@@ -1198,6 +1204,10 @@ mod tests {
         glued_seam: bool,
         /// Fail one bounded probe after pass 1.
         fail: Option<ProbeFailure>,
+        /// Give the hovered glyph a wider box in a wrap probe.
+        wrap_wide_hit: bool,
+        /// Return same-row text from the first forward tile.
+        forward_tail: bool,
     }
     /// `ScriptedCapture` records each requested region for role-based OCR replies.
     struct ScriptedCapture {
@@ -1295,7 +1305,26 @@ mod tests {
                 ]);
             }
             if (w, h) == (WRAP_TAIL.w, WRAP_TAIL.h) && capture_x == WRAP_TAIL.x {
-                return Ok(vec![chars("にも疎", 900 - WRAP_TAIL.x, 480 - WRAP_TAIL.y)]);
+                let mut line = chars("にも疎", 900 - WRAP_TAIL.x, 480 - WRAP_TAIL.y);
+                if self.wrap_wide_hit {
+                    line.words[2].rect = PhysRect {
+                        x: WIDE_WRAP_HIT.x - WRAP_TAIL.x,
+                        y: WIDE_WRAP_HIT.y - WRAP_TAIL.y,
+                        w: WIDE_WRAP_HIT.w,
+                        h: WIDE_WRAP_HIT.h,
+                    };
+                }
+                return Ok(vec![line]);
+            }
+            if self.forward_tail
+                && (w, h) == (FORWARD_TILE.w, FORWARD_TILE.h)
+                && capture_x == FORWARD_TILE.x
+            {
+                return Ok(vec![chars(
+                    "先",
+                    0,
+                    480 - FORWARD_TILE.y,
+                )]);
             }
             Ok(Vec::new())
         }
@@ -1503,9 +1532,36 @@ mod tests {
                 wide,
                 glued_seam,
                 fail,
+                wrap_wide_hit: false,
+                forward_tail: false,
             }),
             SettingsSnapshot {
                 max_passes,
+                upscale: 1,
+                prefer_vertical: false,
+                capture: CaptureSize::default(),
+                scan_alphanumeric: true,
+            },
+        );
+        (source, runs)
+    }
+    fn wide_wrap_with_forward_tail_scripted() -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        let runs = Rc::new(std::cell::Cell::new(0));
+        let region_x = Rc::new(std::cell::Cell::new(0));
+        let source = TextSource::new(
+            Box::new(ScriptedCapture { region_x: Rc::clone(&region_x), wide: false }),
+            Box::new(Scripted {
+                runs: runs.clone(),
+                region_x,
+                wrap_in_box: false,
+                wide: false,
+                glued_seam: false,
+                fail: None,
+                wrap_wide_hit: true,
+                forward_tail: true,
+            }),
+            SettingsSnapshot {
+                max_passes: 2,
                 upscale: 1,
                 prefer_vertical: false,
                 capture: CaptureSize::default(),
@@ -1641,6 +1697,17 @@ mod tests {
             assert_eq!("にも疎かった", resolved.span.text);
         }
         assert_eq!(runs.get(), 3, "a static dwell must never recognise again");
+    }
+    /// A wider wrap hit must not replace pass 1's anchor when a forward tile adds text.
+    #[test]
+    fn a_forward_tile_keeps_the_pass_one_anchor_after_a_wider_wrap_probe() {
+        let (mut source, runs) = wide_wrap_with_forward_tail_scripted();
+        let resolved =
+            source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("read").expect("a hit");
+
+        assert_eq!("疎先", resolved.span.text);
+        assert_eq!(PhysRect { x: 980, y: 480, w: 40, h: 40 }, resolved.span.anchor);
+        assert_eq!(4, runs.get(), "pass 1, two wrap probes, and one forward tile must run");
     }
 
     /// Forward tiles find nothing after a line's last character. Pass 1's answer,

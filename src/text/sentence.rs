@@ -96,14 +96,15 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
 
 /// Return the sentence that contains the word at `anchor`.
 /// The function groups words by thickness and perpendicular center.
-/// It removes high-overlap duplicates, preferring a representative that covers half the
-/// anchor and then the larger box.
-/// It finds the anchor word when its overlap covers at least half of the anchor area.
+/// It removes high-overlap duplicates, preferring a representative with meaningful
+/// anchor overlap and then the larger box.
+/// It finds the candidate with the largest intersection with the anchor.
+/// It accepts an overlap covering at least half the smaller of the anchor and candidate boxes.
 /// It keeps rows with matching thickness and a half-extent overlap in the same column.
 /// It orders rows from top to bottom for horizontal text and from right to left for vertical text.
 /// It stops at paragraph gaps wider than 4.5 times the larger adjacent row thickness.
 /// It joins words without separators because Japanese does not need inserted spaces.
-/// It cuts at sentence terminators and keeps the listed closing brackets.
+/// It cuts after a complete terminator run and keeps the listed closing brackets.
 /// It normalizes the cut before it returns it.
 /// It returns `None` when no word covers the anchor or the cut is empty.
 /// It does not use paragraph labels because OCR does not provide them.
@@ -121,15 +122,16 @@ pub fn sentence_at(
     dedupe_rows(&mut rows, orientation, anchor, anchor_area);
 
     let mut anchor_word = None;
+    let mut largest_overlap_area = 0;
     for row in &rows {
         for word in row {
-            if covers_anchor(word, anchor, anchor_area) {
+            let Some(overlap_area) = intersection_area(word.rect, anchor) else {
+                continue;
+            };
+            if covers_anchor(word, anchor, anchor_area) && overlap_area > largest_overlap_area {
                 anchor_word = Some(*word);
-                break;
+                largest_overlap_area = overlap_area;
             }
-        }
-        if anchor_word.is_some() {
-            break;
         }
     }
     let anchor_word = anchor_word?;
@@ -183,8 +185,9 @@ pub fn sentence_at(
     let mut anchor_offset = None;
     for row in &rows[first..=last] {
         for word in row {
-            if anchor_offset.is_none() && std::ptr::eq(*word, anchor_word) {
-                anchor_offset = Some(text.len());
+            let word_offset = text.len();
+            if std::ptr::eq(*word, anchor_word) {
+                anchor_offset = Some(word_offset + anchor_character_offset(word, anchor, orientation));
             }
             text.push_str(&word.text);
         }
@@ -275,11 +278,17 @@ fn dedupe_rows(
 }
 
 fn covers_anchor(word: &OcrWord, anchor: PhysRect, anchor_area: i64) -> bool {
-    let Some(overlap) = word.rect.intersection(anchor) else {
+    let Some(overlap_area) = intersection_area(word.rect, anchor) else {
         return false;
     };
-    let overlap_area = i64::from(overlap.w) * i64::from(overlap.h);
-    overlap_area * 2 >= anchor_area
+    let candidate_area = word_area(word);
+    let smaller_area = anchor_area.min(candidate_area);
+    candidate_area > 0 && smaller_area > 0 && overlap_area * 2 >= smaller_area
+}
+
+fn intersection_area(a: PhysRect, b: PhysRect) -> Option<i64> {
+    let overlap = a.intersection(b)?;
+    Some(i64::from(overlap.w) * i64::from(overlap.h))
 }
 
 fn same_physical_word(a: &OcrWord, b: &OcrWord) -> bool {
@@ -292,6 +301,29 @@ fn same_physical_word(a: &OcrWord, b: &OcrWord) -> bool {
 
 fn word_area(word: &OcrWord) -> i64 {
     i64::from(word.rect.w) * i64::from(word.rect.h)
+}
+
+fn anchor_character_offset(word: &OcrWord, anchor: PhysRect, orientation: Orientation) -> usize {
+    let character_count = word.text.chars().count();
+    if character_count <= 1 {
+        return 0;
+    }
+
+    let (axis_start, axis_extent) = match orientation {
+        Orientation::Horizontal => (i64::from(word.rect.x), i64::from(word.rect.w)),
+        Orientation::Vertical => (i64::from(word.rect.y), i64::from(word.rect.h)),
+    };
+    if axis_extent <= 0 {
+        return 0;
+    }
+    let axis_center = match orientation {
+        Orientation::Horizontal => i64::from(anchor.x) + i64::from(anchor.w) / 2,
+        Orientation::Vertical => i64::from(anchor.y) + i64::from(anchor.h) / 2,
+    };
+    let position = (axis_center - axis_start).clamp(0, axis_extent);
+    let character_index =
+        (position * character_count as i64 / axis_extent).min(character_count as i64 - 1) as usize;
+    word.text.char_indices().nth(character_index).map_or(0, |(offset, _)| offset)
 }
 
 fn word_perp_centre(word: &OcrWord, orientation: Orientation) -> i32 {
@@ -366,10 +398,10 @@ fn row_forward_gap(
 
 /// Return the sentence that holds the character at `anchor_offset`.
 ///
-/// The cut starts after the last terminator before the anchor. It keeps an opening
-/// bracket directly before that start. It ends after the first terminator at or
-/// after the anchor and any closing brackets behind it. The hover-time line and
-/// the add-time probe both use this cut. One line that holds three sentences
+/// The cut starts after the last terminator run before the anchor. It keeps an opening
+/// bracket directly before that start. It ends after the complete terminator run at or
+/// after the anchor and any closing brackets behind it. The hover-time line and the
+/// add-time probe both use this cut. One line that holds three sentences
 /// gives one sentence on both paths.
 pub fn cut_sentence(text: &str, anchor_offset: usize) -> &str {
     let (start, end) = sentence_bounds(text, anchor_offset);
@@ -378,18 +410,19 @@ pub fn cut_sentence(text: &str, anchor_offset: usize) -> &str {
 
 fn sentence_bounds(text: &str, anchor_offset: usize) -> (usize, usize) {
     let mut start = 0;
+    let anchor_terminator_start = terminator_run_start(text, anchor_offset);
+    let before_anchor = anchor_terminator_start.unwrap_or(anchor_offset);
     let mut previous_end = None;
     for (index, character) in text.char_indices() {
-        if index >= anchor_offset {
+        if index >= before_anchor {
             break;
         }
         if SENTENCE_ENDS.contains(&character) {
             previous_end = Some(index + character.len_utf8());
         }
     }
-    if let Some(mut end) = previous_end {
-        end = skip_closers(text, end);
-        start = end;
+    if let Some(end) = previous_end {
+        start = skip_closers(text, end);
     }
 
     if start > 0 {
@@ -413,11 +446,38 @@ fn sentence_bounds(text: &str, anchor_offset: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// Return the end after any closing brackets that follow a terminator.
+fn terminator_run_start(text: &str, anchor_offset: usize) -> Option<usize> {
+    let character = text.get(anchor_offset..)?.chars().next()?;
+    if !SENTENCE_ENDS.contains(&character) {
+        return None;
+    }
+
+    let mut start = anchor_offset;
+    while let Some((index, character)) = text[..start].char_indices().next_back() {
+        if !SENTENCE_ENDS.contains(&character) {
+            break;
+        }
+        start = index;
+    }
+    Some(start)
+}
+
+/// Return the end after consecutive terminators and closing brackets.
 fn skip_closers(text: &str, end: usize) -> usize {
-    let tail = &text[end..];
-    let kept = tail.chars().take_while(|c| SENTENCE_CLOSERS.contains(c)).map(char::len_utf8).sum::<usize>();
-    end + kept
+    let mut end = end;
+    while let Some(character) = text[end..].chars().next() {
+        if !SENTENCE_ENDS.contains(&character) {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    while let Some(character) = text[end..].chars().next() {
+        if !SENTENCE_CLOSERS.contains(&character) {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    end
 }
 
 #[cfg(test)]
@@ -560,6 +620,45 @@ mod tests {
         let lines = vec![row("カ-。", 100, 100, 40, 40)];
         let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
         assert_eq!(Some("カー。".to_string()), sentence_at(&lines, anchor, Orientation::Horizontal));
+    }
+
+    #[test]
+    fn sentence_at_matches_finer_add_time_segmentation() {
+        let lines = vec![OcrLine {
+            words: vec![
+                w("日", 100, 100, 40, 40),
+                w("本", 140, 100, 40, 40),
+                w("語。", 180, 100, 40, 40),
+            ],
+        }];
+        let anchor = PhysRect { x: 100, y: 100, w: 120, h: 40 };
+
+        assert_eq!(
+            Some("日本語。".to_string()),
+            sentence_at(&lines, anchor, Orientation::Horizontal)
+        );
+    }
+
+    #[test]
+    fn sentence_at_maps_an_anchor_into_a_merged_word() {
+        let lines = vec![OcrLine {
+            words: vec![w("前。対象。", 100, 100, 200, 40)],
+        }];
+        let anchor = PhysRect { x: 180, y: 100, w: 40, h: 40 };
+
+        assert_eq!(
+            Some("対象。".to_string()),
+            sentence_at(&lines, anchor, Orientation::Horizontal)
+        );
+    }
+
+    #[test]
+    fn cut_sentence_consumes_a_terminator_run_in_both_directions() {
+        let text = "前。本当！？次。";
+
+        assert_eq!("本当！？", cut_sentence(text, text.find("本当").unwrap()));
+        assert_eq!("本当！？", cut_sentence(text, text.find("？").unwrap()));
+        assert_eq!("次。", cut_sentence(text, text.find("次").unwrap()));
     }
 
     #[test]

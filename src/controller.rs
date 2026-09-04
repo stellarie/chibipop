@@ -1044,9 +1044,10 @@ impl Controller {
             return Vec::new();
         }
         let Some(entry) = s.history.pop() else { return Vec::new() };
+        let pending_sentence = s.pending_sentence.take().or(entry.pending_sentence);
         s.presentation = entry.presentation;
         s.anki = entry.anki;
-        s.pending_sentence = entry.pending_sentence;
+        s.pending_sentence = pending_sentence;
         s.selection = Selections::default();
         s.gesture.reset();
         s.analysis = None;
@@ -2743,6 +2744,66 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn a_sentence_probe_survives_back_from_the_drill_down_card() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown_card(&mut c, presentation_of("card A"));
+
+        let drill_down_id = match click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("card B".into())),
+        )
+        .as_slice()
+        {
+            [Command::RequestDrillDown { id, .. }] => *id,
+            commands => panic!("expected the drill-down request, got {commands:?}"),
+        };
+        c.handle(Event::LookupResult {
+            id: drill_down_id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("card B"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+
+        let sentence_id = c
+            .handle(Event::AddRequested)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestSentence { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the sentence request");
+        assert!(c.add_in_flight());
+
+        let back = c.handle(Event::BackRequested);
+        assert!(
+            back.iter().any(|command| matches!(
+                command,
+                Command::ShowPopup { presentation, .. }
+                    if presentation.top.as_ref().and_then(|card| card.written.as_deref())
+                        == Some("card A")
+            )),
+            "Back must restore card A: {back:?}"
+        );
+        assert!(c.add_in_flight(), "Back must keep the probe in flight");
+
+        let out = c.handle(Event::LookupResult {
+            id: sentence_id,
+            outcome: LookupOutcome::Sentence(Some("B sentence".into())),
+        });
+        let (expr, fields) = match out.as_slice() {
+            [Command::AddNote { expr, fields }, Command::SyncAnkiButton] => (expr, fields),
+            commands => panic!("expected card B's add command, got {commands:?}"),
+        };
+        assert_eq!("card B", expr);
+        assert_eq!(Some("B sentence"), fields.get("sentence").map(String::as_str));
+    }
 
     #[test]
     fn a_failed_probe_keeps_the_hover_sentence() {
