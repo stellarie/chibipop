@@ -77,6 +77,13 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   a flat white fill with a hard edge.
 - The mask boundary is a capture edge. The engine drops words that touch it. It never
   partially recognizes them.
+- A wrap joins the nearest body line below. The center gap from the hovered line to that
+  candidate is from 0.5 through 4.5 times the larger line thickness. The candidate line
+  thickness is from two thirds through one and a half times the hovered line thickness.
+  The candidate start can be up to half a thickness after the hovered line start. The
+  rules use geometry, not ruby or heading labels. The reach is fixed. A pitch measured
+  from neighbors fails on a two-line paragraph because the pair under test has no pitch
+  beside it.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders
@@ -171,6 +178,19 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
   also hides it because the mask gives no text. Cursor movement and key release do nothing, and
   per-character lookup is inert.
+- A wrap probe follows pass 1 when the lookup would run past the line end and the box did
+  not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
+  edge can be clipped and does not suppress a probe. The probe uses one bounded
+  region when the span is at most `2 * TILE_LEN`. Otherwise, it uses two bounded regions
+  at the output margin and the hovered line end. Each reading-axis length is at most
+  `2 * TILE_LEN` (1000 physical pixels). The probe geometry uses the line mean center and
+  thickness. A probe costs one or two grabs and OCR passes, independent of
+  `max_ocr_passes`. A probe stops at its first capture failure and keeps pass 1. The probe
+  drops words within `EDGE_MARGIN` of its interior edge before the merge. The tile path
+  applies the same rule. `resolve_wrap` merges probe fragments and replaces pass 1 only
+  when a continuation joins. When forward tiles add text past the box, the stitched
+  head and tail win, and the merge drops the joined wrap. When tiles add no text, pass 1's
+  answer with its geometry and any joined wrap stands.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine

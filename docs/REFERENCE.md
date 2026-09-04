@@ -454,6 +454,24 @@ wrong word is worse than a short reading of the right one. Over nine hovers
 on one line, **single-pass got the character right 9 times out of 9; three
 passes managed 4.**
 
+A hidden wrap costs one or two extra captures and OCR passes, independent of
+`max_ocr_passes`. The probe runs only when pass 1 contains the line end, leaves
+lookup capacity, and has no complete visible continuation. A continuation near pass 1's
+leading edge can be clipped and does not suppress a probe.
+
+For a short span, the probe reads one bounded region from the output margin to the
+hovered line end. For a long span, it reads two bounded regions: one at the output margin
+and one at the hovered line end. Each region is at most 1000 physical pixels along the
+reading direction. Each region starts one quarter of a line above the hovered line and
+reaches six line heights below it. A line joins as the continuation only when its center
+sits from half a line through 4.5 lines below the hovered line. Its glyphs must also be
+about the same size.
+
+A probe stops at its first failed capture and keeps pass 1. With `max_ocr_passes` above 1,
+tile text found past the box replaces the joined wrap, so a hidden wrap is most reliable
+at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
+`show_scan_region` overlay draws each region as a tile.
+
 ### `highlight_match`
 
 Draws **one** faint box around the characters the popup is currently

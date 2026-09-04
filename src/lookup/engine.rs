@@ -21,6 +21,16 @@ pub fn clean_input(text: &str) -> String {
     cut.chars().take(MAX_LOOKUP_CHARS).collect()
 }
 
+/// Return true when `clean_input` keeps the text and the character cap has room.
+///
+/// Text without a separator and shorter than `MAX_LOOKUP_CHARS` passes.
+/// The tail of such a line can hold part of a word that continues below.
+/// The wrap probe asks this question (`text::layout::wrap_probe`).
+pub fn runs_out(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.contains(SEPARATORS) && trimmed.chars().count() < MAX_LOOKUP_CHARS
+}
+
 fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }
@@ -272,6 +282,18 @@ mod tests {
     fn input_truncated_by_character_not_byte_count() {
         let long = "あ".repeat(40);
         assert_eq!(MAX_LOOKUP_CHARS, clean_input(&long).chars().count());
+    }
+
+    #[test]
+    fn runs_out_boundary_for_separator_free_tail() {
+        assert!(runs_out(&"あ".repeat(24)));
+        assert!(!runs_out(&"あ".repeat(25)));
+        assert!(!runs_out(&"あ".repeat(26)));
+    }
+
+    #[test]
+    fn runs_out_rejects_text_with_separator() {
+        assert!(!runs_out("あああ。"));
     }
 
     #[test]
