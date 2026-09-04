@@ -260,11 +260,44 @@ struct Group<'a> {
     hits: Vec<&'a Hit>,
 }
 
+/// Returns whether a character is a CJK ideograph.
+pub fn is_kanji(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{F900}'..='\u{FAFF}'
+    )
+}
+
+/// Returns the written form and the reading that one hit claims.
+///
+/// A term bank can leave the reading empty. Babylon does so on 9 990 of its 10 000
+/// rows, and 大辞泉 does so on alias rows. The build then stores the term as its own
+/// reading with no written form, the shape of a kana-only headword
+/// (`dict::build::PreparedRow::same`). A reading is kana, so a "reading" with a kanji
+/// in it is the term echoed back. This function reads that shape as a written form
+/// with no reading. The Card can then borrow the reading from a Dictionary that has
+/// one, and a mined note does not put the kanji string in its reading field.
+///
+/// This rule lives here and not in the build. A build change needs a schema bump and
+/// a rebuild of every library. This rule reads the stored shape as it is.
+fn claim(hit: &Hit) -> (Option<&str>, Option<&str>) {
+    match (hit.written.as_deref(), hit.reading.as_deref()) {
+        (None, Some(reading)) if reading.chars().any(is_kanji) => (Some(reading), None),
+        (written, reading) => (written, reading),
+    }
+}
+
 /// Builds the Presentation from Dictionary hits that already have rank order.
 ///
 /// The `hits` slice must use rank order. The function reads `dict` once for
 /// each Card reading. A Pitch pattern belongs to a reading, not to a term
 /// path or a `Hit`.
+///
+/// A hit joins the group with its written form and reading. A hit with no reading
+/// ([`claim`]) joins the first group with its written form, and a group with no
+/// reading takes the reading of the first hit that supplies one. 銀 has three
+/// readings, so a reading-less 銀 joins the reading that ranks highest.
 pub fn build(
     hits: &[Hit],
     dicts: &[DictInfo],
@@ -276,14 +309,22 @@ pub fn build(
         if !enabled_for(hit.entry.dict_id, dicts, &cfg.terms) {
             continue;
         }
-        match groups
-            .iter_mut()
-            .find(|g| g.written == hit.written && g.reading == hit.reading)
-        {
-            Some(g) => g.hits.push(hit),
+        let (written, reading) = claim(hit);
+        match groups.iter_mut().find(|g| {
+            g.written.as_deref() == written
+                && (g.reading.as_deref() == reading
+                    || g.reading.is_none()
+                    || reading.is_none())
+        }) {
+            Some(g) => {
+                if g.reading.is_none() {
+                    g.reading = reading.map(str::to_string);
+                }
+                g.hits.push(hit);
+            }
             None => groups.push(Group {
-                written: hit.written.clone(),
-                reading: hit.reading.clone(),
+                written: written.map(str::to_string),
+                reading: reading.map(str::to_string),
                 hits: vec![hit],
             }),
         }
@@ -669,6 +710,53 @@ mod tests {
         assert_eq!(2, blocks[0].entries.len());
         assert!(blocks[1].dict_name.contains("Jitendex"));
         assert_eq!(1, blocks[1].entries.len());
+    }
+
+    /// A term bank can leave the reading empty. Babylon does so on 9 990 of its 10 000
+    /// rows, and 大辞泉 does so on alias rows. The build then stores the term as its own
+    /// reading with no written form, the shape of a kana-only headword.
+    ///
+    /// Such a row must not open a Card of its own above the real one. It joins the Card
+    /// with the same written form, and that Card keeps the reading and pitch that the
+    /// other Dictionary supplies. Here the reading-less row ranks first, as it did for
+    /// 銀の匙 in the library.
+    #[test]
+    fn a_row_with_no_reading_joins_the_card_that_has_one() {
+        let mut orphan = hit("銀の匙", "銀の匙", 1, "n. silver spoon");
+        orphan.written = None;
+        let hits = vec![orphan, hit("銀の匙", "ぎんのさじ", 2, "銀で作ったさじ。")];
+        let p = build(&hits, &dicts(), &cfg(), &with_pitch(&[(2, "銀の匙", "ぎんのさじ", downstep(0))]));
+        assert_eq!(1, p.all_cards.len(), "one word, one card: {:?}", p.all_cards);
+        let card = p.top.expect("a top card");
+        assert_eq!(Some("銀の匙"), card.written.as_deref());
+        assert_eq!(Some("ぎんのさじ"), card.reading.as_deref(), "borrowed from 大辞林");
+        assert_eq!(1, card.pitch.len(), "and the pitch of that reading");
+        assert_eq!(2, card.blocks.len(), "both Dictionaries gloss the one card");
+    }
+
+    /// A reading-less row with no Dictionary to borrow from keeps its own Card. The Card
+    /// has the written form and no reading. The old shape claimed the kanji string as a
+    /// reading, so a mined note put 銀の in its reading field.
+    #[test]
+    fn a_row_with_no_reading_and_no_sibling_has_a_written_form_and_no_reading() {
+        let mut orphan = hit("銀の", "銀の", 1, "adj. silver");
+        orphan.written = None;
+        let p = build(&[orphan], &dicts(), &cfg(), &no_pitch());
+        let card = p.top.expect("a top card");
+        assert_eq!(Some("銀の"), card.written.as_deref());
+        assert_eq!(None, card.reading.as_deref());
+    }
+
+    /// A kana-only headword keeps its shape. Its reading is the headword, and the popup
+    /// shows it once.
+    #[test]
+    fn a_kana_only_headword_keeps_its_reading_as_its_headword() {
+        let mut cat = hit("ねこ", "ねこ", 1, "cat");
+        cat.written = None;
+        let p = build(&[cat], &dicts(), &cfg(), &no_pitch());
+        let card = p.top.expect("a top card");
+        assert_eq!(None, card.written.as_deref());
+        assert_eq!(Some("ねこ"), card.reading.as_deref());
     }
 
     /// Verifies that consecutive entries suppress duplicate tag displays.
