@@ -943,6 +943,11 @@ impl Paragraphs<'_> {
     /// same record, not a second record. A new source added here therefore
     /// uses the gate, and downstream code does not need the setting.
     ///
+    /// One declaration bypasses this gate: `display`. It changes where a line
+    /// breaks, and [`GlossDoc::is_block`] reads it for every renderer. The
+    /// plain-text and HTML renderers have no setting, so the popup must agree
+    /// with them at either value of the setting.
+    ///
     /// An empty record leaves every property unset. Only two sources remain
     /// visible: HTML's own stylesheet ([`tag_style`]) and the theme's font
     /// and colors. A `b` stays bold when style support is off because markup
@@ -970,6 +975,13 @@ impl Paragraphs<'_> {
     /// Both inline `style` and `styles.css` arrive through
     /// [`Paragraphs::declarations`]. Therefore, the setting disables both
     /// sources at once.
+    ///
+    /// The size stops at [`Paragraphs::cap`], the panel headword size. A
+    /// dictionary heading at `1.5em` would outgrow the headword above it and
+    /// read as a second headword. The cap applies to the resolved value, so a
+    /// `big` inside a `big` and a stylesheet `em` meet the same limit. A
+    /// child resolves its own lengths against the capped size, because that
+    /// size is the em that the child sees.
     pub(super) fn styled(&self, id: NodeId, parent: Inline) -> Inline {
         let doc = self.doc;
         let mut style = tag_style(doc.node(id).tag, parent);
@@ -982,6 +994,7 @@ impl Paragraphs<'_> {
             }
             apply_style(doc, *key, *value, self.ems(parent.size), &mut style);
         }
+        style.size = style.size.min(self.cap);
         style
     }
 

@@ -470,8 +470,7 @@ impl Paragraphs<'_> {
     /// A `<ruby>` that reached no base still opens at band zero.
     pub(super) fn ruby(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
-        let style = self.styled(id, ctx.inline);
-        let link = self.link_of(id, ctx.link);
+        let (style, link) = self.enter(id, ctx);
         let slot = self.open_slot(style);
         let outer = std::mem::replace(&mut self.open_ruby, slot);
         let outer_path = std::mem::replace(&mut self.ruby_path, ctx.path);

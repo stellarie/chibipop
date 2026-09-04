@@ -76,8 +76,9 @@ use crate::controller::HitAction;
 use crate::present::{AnkiPopupState, Presentation};
 use crate::select::{Coverage, Selections};
 use crate::ui::theme::{Theme, SCROLLBAR_MIN_THUMB};
+use crate::present::is_kanji;
 use chrome::{
-    build_elements, is_kanji, measure_line, one_span, pitch_elem, side_panel, span, text_elem,
+    build_elements, measure_line, one_span, pitch_elem, side_panel, span, text_elem,
     Elem, CORNER_GAP, SEPARATOR_THICKNESS, SIDE_GAP, SIDE_PANEL_W,
 };
 use measure::measure_text;

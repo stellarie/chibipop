@@ -350,13 +350,13 @@ fn selected_node(
     if !has_selected_child(doc, id, path, plan) {
         return PlainRendered::empty();
     }
-    let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
+    let own_container = top_level || doc.is_block(id) || matches!(node.tag, Tag::Td | Tag::Th);
     let children = selected_children(walk, id, path, own_container, item_path);
     if children.text.is_empty() {
         return PlainRendered::empty();
     }
     let mut text = String::new();
-    if node.tag.is_block() || (doc.has_marker(id) && !prose) {
+    if doc.is_block(id) || (doc.has_marker(id) && !prose) {
         text.push_str(BLOCK_MARK);
     }
     if let Some(number) = number {
@@ -612,10 +612,10 @@ fn full_node_into(
         out.push_str(doc.text(id));
         return;
     }
-    if node.tag.is_block() || (doc.has_marker(id) && !prose) {
+    if doc.is_block(id) || (doc.has_marker(id) && !prose) {
         out.push_str(BLOCK_MARK);
     }
-    full_children_into(doc, id, !node.tag.is_inline(), roles, out);
+    full_children_into(doc, id, !doc.is_inline(id), roles, out);
 }
 
 fn full_children_into(
@@ -762,10 +762,10 @@ fn node_into(doc: &GlossDoc, id: NodeId, prose: bool, out: &mut String) {
         out.push_str(doc.text(id));
         return;
     }
-    if n.tag.is_block() || (doc.has_marker(id) && !prose) {
+    if doc.is_block(id) || (doc.has_marker(id) && !prose) {
         out.push_str(BLOCK_MARK);
     }
-    children_into(doc, id, !n.tag.is_inline(), out);
+    children_into(doc, id, !doc.is_inline(id), out);
 }
 
 /// Renders the children of one node.

@@ -176,8 +176,8 @@ pub struct SheetCounts {
     /// `@media (max-width: 500px)`.
     pub dropped_at_rule: usize,
     /// Rules whose selectors compile but whose declarations contain no property
-    /// that this build maps. A rule with only `display` and `grid-column` is one
-    /// such rule.
+    /// that this build maps. A rule with only `line-height` and `grid-column` is
+    /// one such rule.
     pub no_decls: usize,
     /// Compiled selectors after the compile step expands selector lists and `&`
     /// nesting.
@@ -426,15 +426,17 @@ impl Pool {
 /// The CSS spelling of each property that this build maps.
 ///
 /// This table provides the kebab-case half of the camelCase table in
-/// `gloss::parse::style_key_for`. It stays narrow by design.
+/// `gloss::parse::style_key_for`, plus `display`. The schema has no `display`, so
+/// only a stylesheet supplies it. It stays narrow by design.
 /// The build keeps declarations that the renderer understands and drops the rest.
-/// Therefore the build drops and counts `display`, `grid-column`, `line-height`,
-/// and `font-family`. It also drops 15 logical properties, such as
+/// Therefore the build drops and counts `grid-column`, `line-height`, and
+/// `font-family`. It also drops 15 logical properties, such as
 /// `margin-inline-start`. That group contains more than 700 declarations.
 /// The table does not map per-edge color or writing mode. The renderer drops
 /// those properties instead of assigning incomplete semantics.
 fn css_key(prop: &str) -> Option<StyleKey> {
     Some(match prop {
+        "display" => StyleKey::Display,
         "font-style" => StyleKey::FontStyle,
         "font-weight" => StyleKey::FontWeight,
         "font-size" => StyleKey::FontSize,

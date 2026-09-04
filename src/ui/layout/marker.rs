@@ -389,8 +389,7 @@ impl Paragraphs<'_> {
                 // The `li` starts no new line and draws no block box.
                 // Its content is inline, so CSS draws no block box around it.
                 self.pending_sep = true;
-                let inline = self.styled(child, ctx.inline);
-                let link = self.link_of(child, ctx.link);
+                let (inline, link) = self.enter(child, ctx);
                 self.children(child, Ctx { inline, link, ..at });
             }
             // Clear pending markers for an empty item.

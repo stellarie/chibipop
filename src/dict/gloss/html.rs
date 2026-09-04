@@ -159,6 +159,7 @@ fn html_tag(tag: Tag) -> Option<&'static str> {
 /// A subset leaves those Dictionaries as unstyled text while the popup draws their pills.
 fn css_name(key: StyleKey) -> &'static str {
     match key {
+        StyleKey::Display => "display",
         StyleKey::FontStyle => "font-style",
         StyleKey::FontWeight => "font-weight",
         StyleKey::FontSize => "font-size",
@@ -447,7 +448,7 @@ fn render_range_node(
     if node.kind == Kind::Image || node.tag == Tag::Br {
         return Rendered::empty();
     }
-    let own_container = top_level || node.tag.is_block() || matches!(node.tag, Tag::Td | Tag::Th);
+    let own_container = top_level || doc.is_block(id) || matches!(node.tag, Tag::Td | Tag::Th);
     let child_container = if own_container { path } else { active_container };
     let content = render_range_children(walk, id, child_container, own_container);
     if content.html.is_empty() {

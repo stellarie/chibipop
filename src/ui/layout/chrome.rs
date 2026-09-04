@@ -427,15 +427,6 @@ pub(super) fn side_panel(
 /// The side column's heading.
 pub(super) const SIDE_HEADING: &str = "See also";
 
-/// Returns whether a character is a CJK ideograph.
-pub(super) fn is_kanji(c: char) -> bool {
-    matches!(c,
-        '\u{4E00}'..='\u{9FFF}'
-        | '\u{3400}'..='\u{4DBF}'
-        | '\u{F900}'..='\u{FAFF}'
-    )
-}
-
 /// One text line that the code can measure or draw.
 ///
 /// The code creates a new `Line` each time.

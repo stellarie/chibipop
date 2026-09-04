@@ -96,13 +96,14 @@ fn only_the_properties_the_renderer_maps_survive() {
         ("list-style-type", StyleKey::ListStyleType),
         ("margin-right", StyleKey::MarginRight),
         ("padding-left", StyleKey::PaddingLeft),
+        ("display", StyleKey::Display),
     ];
     for (prop, want) in mapped {
         assert_eq!(Some(want), css_key(prop), "{prop}");
     }
     let unmapped = [
-        "display",
         "grid-column",
+        "grid-template-columns",
         "line-height",
         "font-family",
         "margin-inline-start",
@@ -635,7 +636,7 @@ fn a_var_value_drops_its_declaration_and_leaves_the_rule() {
 /// A grammar gap and a property gap mean different things to the census.
 #[test]
 fn a_rule_of_unmapped_properties_only_is_counted_apart() {
-    let sheet = Sheet::compile("span { display: grid; grid-column: 1; line-height: 1.4 }");
+    let sheet = Sheet::compile("span { grid-column: 1; line-height: 1.4; font-family: x }");
     let counts = sheet.counts();
     assert_eq!(1, counts.rules);
     assert_eq!(1, counts.no_decls);
@@ -649,7 +650,7 @@ fn every_scanned_rule_lands_in_exactly_one_count() {
     let sheet = Sheet::compile(
         "span { color: red }
          .chrome { border: 1px }
-         div { display: grid }
+         div { grid-column: 1 }
          @media print { td { margin: 0 } }
          li:first-child { margin-top: 1px }",
     );
