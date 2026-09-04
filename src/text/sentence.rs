@@ -182,7 +182,7 @@ pub fn sentence_at(
     (!result.trim().is_empty()).then_some(result)
 }
 
-fn group_rows<'a>(lines: &'a [OcrLine], orientation: Orientation) -> Vec<Vec<&'a OcrWord>> {
+fn group_rows(lines: &[OcrLine], orientation: Orientation) -> Vec<Vec<&OcrWord>> {
     let mut rows: Vec<Vec<&OcrWord>> = Vec::new();
     for line in lines {
         for word in &line.words {
@@ -338,17 +338,11 @@ fn sentence_bounds(text: &str, anchor_offset: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn skip_closers(text: &str, mut end: usize) -> usize {
-    loop {
-        let Some((offset, character)) = text[end..].char_indices().next() else {
-            break;
-        };
-        if !SENTENCE_CLOSERS.contains(&character) {
-            break;
-        }
-        end += offset + character.len_utf8();
-    }
-    end
+/// Return the end after any closing brackets that follow a terminator.
+fn skip_closers(text: &str, end: usize) -> usize {
+    let tail = &text[end..];
+    let kept = tail.chars().take_while(|c| SENTENCE_CLOSERS.contains(c)).map(char::len_utf8).sum::<usize>();
+    end + kept
 }
 
 #[cfg(test)]

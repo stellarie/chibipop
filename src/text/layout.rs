@@ -451,7 +451,7 @@ pub fn resolve_wrap(
 /// The tile path already applies this rule in [`split_at_clipped`] and [`drop_leading`].
 /// An output edge is a real screen edge. It cannot cut a glyph, so this code does not
 /// trim it.
-fn trim_probe_edges(
+pub(crate) fn trim_probe_edges(
     lines: &mut [OcrLine],
     probe: PhysRect,
     bounds: PhysRect,

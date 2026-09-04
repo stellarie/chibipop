@@ -5,7 +5,8 @@ use crate::config::{
     resolve_engine, Config, EngineChoice, SelectionButtons, SelectionSeparator, TripleClick,
 };
 use crate::controller::{
-    Button, Command, Controller, ControllerConfig, Event, PopupView, RequestId, TrayAction,
+    Button, Command, Controller, ControllerConfig, Event, LookupOutcome, PopupView, RequestId,
+    TrayAction,
 };
 use chibipop::select::TextAddr;
 use crate::geom::{place_popup, PhysPoint, PhysRect, ScanDisplay};
@@ -37,7 +38,7 @@ use crate::ui::tray::{Tray, TrayCommand};
 use crate::ui::window::{AnkiButton, CaptureExclusion, Popup};
 use crate::update;
 use crate::worker::{
-    Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings,
+    Hover, SentenceProbe, Trigger, TriggerKind, Worker, WorkerParts, WorkerResult, WorkerSettings,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -94,6 +95,27 @@ const REBUILD_TICK_MS: u32 = 100;
 
 /// The maximum delay before Apply visibly stalls.
 const APPLY_BUDGET_MS: u128 = 50;
+/// Keep every add-time sentence result and only the newest other result.
+///
+/// The retained results stay in their arrival order. This lets a sentence
+/// complete an add even when a newer hover result is in the same queue.
+fn route_results(results: Vec<WorkerResult>) -> Vec<WorkerResult> {
+    let mut routed = Vec::with_capacity(results.len());
+    let mut freshest_other = None;
+    for result in results {
+        if matches!(&result.outcome, LookupOutcome::Sentence(_)) {
+            routed.push(Some(result));
+        } else {
+            if let Some(index) = freshest_other {
+                routed[index] = None;
+            }
+            freshest_other = Some(routed.len());
+            routed.push(Some(result));
+        }
+    }
+    routed.into_iter().flatten().collect()
+}
+
 
 /// The result of one duplicate check.
 struct AnkiDupeResult {
@@ -2051,34 +2073,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
             }
 
-            if Hooks::take_press() {
-                drive!(Event::TriggerPressed { pos: cursor_pos });
-            }
-
-            let cursor = Hooks::take_pending().unwrap_or_else(|| {
-                // Fallback: poll GetCursorPos when the low-level hook is blocked,
-                // for example, by anti-cheat software.
-                let pos = cursor_pos;
-                let dominated = Hooks::poll_gate(pos);
-                if dominated {
-                    pos
-                } else {
-                    PhysPoint {
-                        x: i32::MIN,
-                        y: i32::MIN,
-                    }
-                }
-            });
-            if cursor.x != i32::MIN {
-                drive!(Event::CursorMoved { pos: cursor });
-            }
         } else if msg.message == WM_APP_RESULT {
-            // Use only the newest queued Worker result.
-            let mut freshest: Option<WorkerResult> = None;
+            // Keep every add-time sentence result, but only the newest other
+            // Worker result, while preserving the retained arrival order.
+            let mut results = Vec::new();
             while let Ok(r) = worker.results().try_recv() {
-                freshest = Some(r);
+                results.push(r);
             }
-            if let Some(result) = freshest {
+            for result in route_results(results) {
                 drive!(Event::LookupResult {
                     id: result.id,
                     outcome: result.outcome
@@ -2548,8 +2550,10 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
         primary_additive: live.selection_buttons == SelectionButtons::PrimaryAdditive,
         separator: live.selection_separator.into(),
         triple_click: live.triple_click,
+        sentence_probe: live.sentence_mode == crate::config::SentenceMode::Sentence,
     }
 }
+
 
 /// Stores one add while the OS does the screenshot-on-add steps.
 ///
@@ -2625,6 +2629,24 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let _ = x.trigger_tx.send(Trigger {
                 kind: TriggerKind::Hover(Hover {
                     at: point,
+                    mask: CaptureMask::NONE,
+                }),
+                id,
+            });
+            None
+        }
+        // Windows excludes its popup at the OS level, so the hide flag is
+        // ignored. WDA_EXCLUDEFROMCAPTURE or the capture guard handles it.
+        Command::RequestSentence {
+            id,
+            anchor,
+            orientation,
+            hide_popup: _,
+        } => {
+            let _ = x.trigger_tx.send(Trigger {
+                kind: TriggerKind::Sentence(SentenceProbe {
+                    anchor,
+                    orientation,
                     mask: CaptureMask::NONE,
                 }),
                 id,
@@ -4059,6 +4081,39 @@ mod tests {
             "json.dumps spacing: {raw}"
         );
         assert_eq!(None, drifted(&library, &db).unwrap(), "the two agree");
+    }
+
+    #[test]
+    fn result_routing_keeps_sentences_and_freshest_other_in_arrival_order() {
+        let routed = route_results(vec![
+            WorkerResult {
+                id: RequestId(1),
+                outcome: LookupOutcome::Hide,
+            },
+            WorkerResult {
+                id: RequestId(2),
+                outcome: LookupOutcome::Sentence(Some("first sentence".into())),
+            },
+            WorkerResult {
+                id: RequestId(3),
+                outcome: LookupOutcome::Hide,
+            },
+            WorkerResult {
+                id: RequestId(4),
+                outcome: LookupOutcome::Sentence(None),
+            },
+        ]);
+
+        assert_eq!(
+            vec![RequestId(2), RequestId(3), RequestId(4)],
+            routed.iter().map(|result| result.id).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            &routed[0].outcome,
+            LookupOutcome::Sentence(Some(text)) if text == "first sentence"
+        ));
+        assert!(matches!(&routed[1].outcome, LookupOutcome::Hide));
+        assert!(matches!(&routed[2].outcome, LookupOutcome::Sentence(None)));
     }
 
     /// Check that a new archive produces a drift notice.

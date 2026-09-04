@@ -8,8 +8,10 @@ use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
-    resolve_wrap, tile_forward, wrap_probe, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
+    resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
+    Orientation, Resolved,
 };
+use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
@@ -285,6 +287,50 @@ impl TextSource {
             fallback: frame.fallback,
             unchanged: frame.unchanged,
         })
+    }
+
+    /// Read the sentence around `anchor` from bounded OCR tiles.
+    ///
+    /// This read lives here because `TextSource` owns capture, the OCR cache,
+    /// the frozen frame, and the capture mask. Callers must not duplicate those
+    /// rules. The first failed grab is an error because a missing tile can hold
+    /// the sentence start. A partial sentence on an Anki card is worse than the
+    /// hovered line.
+    ///
+    /// Frozen mode needs no separate path. [`Self::recognise_at_capture`] already
+    /// reads the held frame.
+    pub fn read_sentence(
+        &mut self,
+        anchor: PhysRect,
+        orientation: Orientation,
+        mask: CaptureMask,
+    ) -> Result<Option<String>> {
+        let bounds = self.capture.bounds_containing(anchor.center());
+        let regions = sentence::probe_regions(anchor, orientation, bounds);
+        if regions.is_empty() {
+            return Ok(None);
+        }
+
+        let live = self.frozen.is_none();
+        if live {
+            self.capture.begin_read();
+        }
+        // Keep one cache generation for this logical read, like the tiled hover path.
+        self.previous = std::mem::take(&mut self.recognised);
+        let result: Result<Option<String>> = (|| {
+            let mut all_lines = Vec::new();
+            for tile in regions {
+                let (mut lines, _) =
+                    self.recognise_at_capture(tile, self.settings.upscale, mask)?;
+                trim_probe_edges(&mut lines, tile, bounds, orientation);
+                all_lines.extend(lines);
+            }
+            Ok(sentence::sentence_at(&all_lines, anchor, orientation))
+        })();
+        if live {
+            self.capture.end_read();
+        }
+        result
     }
 
     /// Capture and recognize at `factor`, then map the words to physical pixels.
@@ -1237,8 +1283,136 @@ mod tests {
         }
 
         fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
-            PhysRect { x: 0, y: 0, w: 2400, h: 1500 }
+            PhysRect { x: 0, y: 0, w: 2560, h: 1500 }
         }
+    }
+
+    /// `FailingOutputCapture` refuses one tile after returning earlier tiles.
+    struct FailingOutputCapture {
+        grabs: std::cell::Cell<u32>,
+        fail_on: u32,
+    }
+
+    impl RegionCapture for FailingOutputCapture {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            let grab = self.grabs.get() + 1;
+            self.grabs.set(grab);
+            if grab == self.fail_on {
+                return Err(anyhow::anyhow!("scripted sentence grab failure"));
+            }
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "output",
+                fallback: None,
+                unchanged: true,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 2560, h: 1440 }
+        }
+    }
+
+    /// `SentenceScripted` returns rows in the first tile's local pixels.
+    /// The source maps those boxes back to the desktop before sentence cutting.
+    struct SentenceScripted {
+        calls: Rc<std::cell::Cell<u32>>,
+        empty: bool,
+    }
+
+    impl OcrEngine for SentenceScripted {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if self.empty || call != 1 {
+                return Ok(Vec::new());
+            }
+            let row = |text: &str, y: i32| OcrLine {
+                words: text
+                    .chars()
+                    .enumerate()
+                    .map(|(i, character)| OcrWord {
+                        text: character.to_string(),
+                        rect: PhysRect { x: 100 + 40 * i as i32, y, w: 40, h: 40 },
+                    })
+                    .collect(),
+            };
+            Ok(vec![
+                row("前の文。今日は", 180),
+                row("いい天気で", 240),
+                row("すね。次", 300),
+            ])
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "sentence-scripted"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
+
+    fn sentence_scripted(
+        fail_on: Option<u32>,
+        empty: bool,
+    ) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let capture: Box<dyn RegionCapture> = match fail_on {
+            Some(fail_on) => Box::new(FailingOutputCapture {
+                grabs: std::cell::Cell::new(0),
+                fail_on,
+            }),
+            None => Box::new(OutputCapture),
+        };
+        let source = TextSource::new(
+            capture,
+            Box::new(SentenceScripted { calls: calls.clone(), empty }),
+            SettingsSnapshot { upscale: 1, ..snap() },
+        );
+        (source, calls)
+    }
+
+    const SENTENCE_ANCHOR: PhysRect = PhysRect { x: 180, y: 500, w: 40, h: 40 };
+
+    #[test]
+    fn sentence_probe_reads_three_tiles_and_cuts_at_sentence_ends() {
+        let (mut source, calls) = sentence_scripted(None, false);
+
+        let sentence = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect("sentence probe");
+
+        assert_eq!(Some("今日はいい天気ですね。".to_string()), sentence);
+        assert_eq!(3, calls.get(), "the 2560px output needs three tiles");
+    }
+
+    #[test]
+    fn a_sentence_probe_grab_failure_is_returned() {
+        let (mut source, calls) = sentence_scripted(Some(2), false);
+
+        let error = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect_err("the second tile must fail the read");
+
+        assert!(format!("{error:#}").contains("scripted sentence grab failure"));
+        assert_eq!(1, calls.get(), "the second grab fails before OCR");
+    }
+
+    #[test]
+    fn a_sentence_probe_without_an_anchor_word_returns_none() {
+        let (mut source, calls) = sentence_scripted(None, true);
+
+        let sentence = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect("sentence probe");
+
+        assert_eq!(None, sentence);
+        assert_eq!(3, calls.get(), "all tiles are read before the anchor scan");
     }
 
     fn scripted(wrap_in_box: bool, max_passes: u8) -> (TextSource, Rc<std::cell::Cell<u32>>) {

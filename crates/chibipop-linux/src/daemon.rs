@@ -43,7 +43,7 @@ use chibipop::present::DictInfo;
 use chibipop::text::layout::{OcrLine, Orientation};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::text::Frame;
-use chibipop::worker::{Hover, Trigger, TriggerKind, Worker};
+use chibipop::worker::{Hover, SentenceProbe, Trigger, TriggerKind, Worker};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
@@ -1839,6 +1839,29 @@ impl App {
                     },
                 });
             }
+            // A sentence probe reads the frame around the hovered word.
+            // When the frame is live, hide the popup before the grab.
+            // `hide_popup` commits a transparent buffer, so the commit is
+            // flushed before the trigger reaches the Worker.
+            // Do not mask this popup instead: it sits over the next lines
+            // that the sentence probe must read.
+            // A request that no pipeline serves answers `None` at once.
+            // The add then files the hover-time sentence. It never waits.
+            Command::RequestSentence { id, anchor, orientation, hide_popup } => {
+                if hide_popup {
+                    self.hide_popup();
+                }
+                let mask = CaptureMask::for_mode(self.capture_mode(), None);
+                let sent = !self.demo.armed
+                    && self.send_trigger(
+                        TriggerKind::Sentence(SentenceProbe { anchor, orientation, mask }),
+                        id,
+                    );
+                if !sent {
+                    self.restore_popup();
+                    self.feed(Event::LookupResult { id, outcome: LookupOutcome::Sentence(None) });
+                }
+            }
             Command::RequestLookup { id, point, popup } => {
                 let mask = CaptureMask::for_mode(self.capture_mode(), popup);
                 self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
@@ -1945,15 +1968,18 @@ impl App {
     }
 
     /// Send one Trigger to the pipeline, or log that none exists.
-    fn send_trigger(&mut self, kind: TriggerKind, id: RequestId) {
+    /// Return whether the pipeline took the Trigger.
+    fn send_trigger(&mut self, kind: TriggerKind, id: RequestId) -> bool {
         let Some(worker) = self.worker.as_ref() else {
             self.log.diag("lookup: no pipeline - nothing to ask");
-            return;
+            return false;
         };
         if worker.trigger().send(Trigger { kind, id }).is_err() {
             self.log.diag("lookup: the pipeline has gone away");
             self.worker = None;
+            return false;
         }
+        true
     }
 
     /// Relate lookup pixels to the popup in time.
@@ -1967,21 +1993,51 @@ impl App {
         }
     }
 
-    /// Drain the Worker and Japanese analysis results. Keep only the newest queued
-    /// result from each service. Newer requests replace older requests before they
-    /// reach the event loop.
+    /// Keep every sentence result and only the newest other result.
+    ///
+    /// Replacing the old other result in place preserves arrival order among
+    /// the results that remain. A sentence result is a state change, so it
+    /// must not be coalesced with hover results.
+    fn route_results(
+        results: Vec<chibipop::worker::WorkerResult>,
+    ) -> Vec<chibipop::worker::WorkerResult> {
+        let mut routed = Vec::with_capacity(results.len());
+        let mut freshest_other = None;
+        for result in results {
+            if matches!(&result.outcome, LookupOutcome::Sentence(_)) {
+                routed.push(result);
+                continue;
+            }
+            if let Some(index) = freshest_other {
+                routed.remove(index);
+            }
+            freshest_other = Some(routed.len());
+            routed.push(result);
+        }
+        routed
+    }
+
+    /// Drain the Worker and Japanese analysis results.
+    ///
+    /// Every sentence result reaches the Controller. Other Worker results
+    /// keep the existing newest-only rule. A sentence result restores the
+    /// popup before the Controller sees it.
     fn drain_results(&mut self) {
-        let mut freshest = None;
+        let mut queued = Vec::new();
         if let Some(worker) = self.worker.as_ref() {
             while let Ok(result) = worker.results().try_recv() {
-                freshest = Some(result);
+                queued.push(result);
             }
         }
         let mut freshest_analysis = None;
         while let Ok(result) = self.analysis.results().try_recv() {
             freshest_analysis = Some(result);
         }
-        if let Some(result) = freshest {
+        for result in Self::route_results(queued) {
+            let sentence = matches!(&result.outcome, LookupOutcome::Sentence(_));
+            if sentence {
+                self.restore_popup();
+            }
             self.feed(Event::LookupResult { id: result.id, outcome: result.outcome });
         }
         if let Some((generation, words)) = freshest_analysis {
@@ -2607,6 +2663,7 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
         anki_enabled: config.anki.enabled,
+        sentence_probe: config.anki.sentence_mode == chibipop::config::SentenceMode::Sentence,
         include_dictionary_name: config.anki.include_dictionary_name,
         first_dict_only: config.anki.first_dict_only,
         summary_chars: config.popup.summary_chars,
@@ -4767,6 +4824,67 @@ mod tests {
             ["begin_read", "grab", "end_read", "ocr masked=false"],
             "the hold reads through the popup: {:?}",
             done(&log)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Keep each sentence result, but coalesce other results to the newest.
+    /// The retained values stay in their arrival order.
+    #[test]
+    fn sentence_results_are_routed_in_order_with_the_newest_other_result() {
+        let routed = App::route_results(vec![
+            chibipop::worker::WorkerResult { id: RequestId(1), outcome: LookupOutcome::Hide },
+            chibipop::worker::WorkerResult {
+                id: RequestId(2),
+                outcome: LookupOutcome::Sentence(Some("first".to_string())),
+            },
+            chibipop::worker::WorkerResult { id: RequestId(3), outcome: LookupOutcome::Hide },
+            chibipop::worker::WorkerResult {
+                id: RequestId(4),
+                outcome: LookupOutcome::Sentence(Some("second".to_string())),
+            },
+        ]);
+
+        assert_eq!(
+            vec![RequestId(2), RequestId(3), RequestId(4)],
+            routed.iter().map(|result| result.id).collect::<Vec<_>>(),
+            "sentences stay in order and the newest other result keeps its arrival slot"
+        );
+        assert!(matches!(
+            &routed[0].outcome,
+            LookupOutcome::Sentence(Some(text)) if text == "first"
+        ));
+        assert!(matches!(&routed[1].outcome, LookupOutcome::Hide));
+        assert!(matches!(
+            &routed[2].outcome,
+            LookupOutcome::Sentence(Some(text)) if text == "second"
+        ));
+    }
+
+    /// A sentence request reaches the Worker as a sentence trigger.
+    /// The fake pipeline records the same grab seam as a real pipeline.
+    #[test]
+    fn a_sentence_request_hides_the_popup_and_asks_the_worker() {
+        let dir = scratch("sentence_request");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.execute(Command::RequestSentence {
+            id: RequestId(1),
+            anchor: PhysRect { x: 580, y: 280, w: 40, h: 40 },
+            orientation: Orientation::Horizontal,
+            hide_popup: true,
+        });
+        let result = answer(&app);
+
+        assert!(matches!(result.outcome, LookupOutcome::Sentence(_)));
+        assert_eq!(RequestId(1), result.id, "the sentence trigger keeps its request id");
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "the request uses the sentence trigger and no popup mask"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

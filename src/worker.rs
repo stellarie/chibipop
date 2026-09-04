@@ -10,7 +10,7 @@ use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
 use crate::present::{self, DictInfo, PresentConfig};
-use crate::text::layout::{CaptureSize, OcrLine, Resolved};
+use crate::text::layout::{CaptureSize, OcrLine, Orientation, Resolved};
 use crate::text::mask::CaptureMask;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
@@ -28,10 +28,22 @@ pub struct Hover {
     pub mask: CaptureMask,
 }
 
-/// The Worker accepts `Hover` and `DrillDown` lookups, `Reload`, `Freeze`, and `Thaw`
-/// state changes, and `Serve` wake requests.
+/// One add-time sentence read.
+///
+/// This is a separate trigger from [`Hover`] because it needs no hit scan or
+/// presentation. It must also survive newer hovers until the add can answer.
+#[derive(Clone, Copy)]
+pub struct SentenceProbe {
+    pub anchor: PhysRect,
+    pub orientation: Orientation,
+    pub mask: CaptureMask,
+}
+
+/// The Worker accepts `Hover`, `Sentence`, and `DrillDown` lookups, `Reload`,
+/// `Freeze`, and `Thaw` state changes, and `Serve` wake requests.
 pub enum TriggerKind {
     Hover(Hover),
+    Sentence(SentenceProbe),
     DrillDown(String),
     Reload(Box<WorkerSettings>),
     /// A trigger press takes one full grab of the output that contains this
@@ -221,15 +233,39 @@ impl ServeNudge {
     }
 }
 
-/// State that a drained batch applies before its newest hover.
+/// Work that a drained batch completes before its newest hover.
 /// The state includes settings and trigger-mode freeze state.
 ///
-/// Keep these values in arrival order. A reload and a press change state, so
-/// they cannot coalesce.
+/// Keep state changes and sentence probes in arrival order. A reload and a
+/// press change state, while a sentence probe must not be coalesced.
 enum Pre {
     Reload(WorkerSettings),
     Freeze(PhysPoint),
     Thaw,
+    Sentence(RequestId, SentenceProbe),
+}
+
+/// Keep the newest hover, every state change, and every sentence probe.
+///
+/// State changes and sentence probes remain in arrival order. Hovers coalesce
+/// because only the newest hover is useful.
+fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
+    let mut pre = Vec::new();
+    let mut hover = None;
+    let mut take = |t: Trigger| match t.kind {
+        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
+        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
+        TriggerKind::Thaw => pre.push(Pre::Thaw),
+        TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
+        // The wake already arrived.
+        TriggerKind::Serve => {}
+        _ => hover = Some(t),
+    };
+    take(first);
+    while let Ok(next) = rx.try_recv() {
+        take(next);
+    }
+    (hover, pre)
 }
 
 /// State that a lookup uses after a reload.
@@ -274,25 +310,6 @@ fn take_reload(
         // Keep the current handle. It still answers. A dropped handle answers nothing.
         Err(e) => eprintln!("chibipop: reopening the dictionary failed: {e:#}"),
     }
-}
-
-/// Keep the newest hover and each state change in arrival order.
-fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
-    let mut pre = Vec::new();
-    let mut hover = None;
-    let mut take = |t: Trigger| match t.kind {
-        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
-        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
-        TriggerKind::Thaw => pre.push(Pre::Thaw),
-        // The wake already arrived.
-        TriggerKind::Serve => {}
-        _ => hover = Some(t),
-    };
-    take(first);
-    while let Ok(next) = rx.try_recv() {
-        take(next);
-    }
-    (hover, pre)
 }
 
 /// The Worker serves triggers and owns OCR.
@@ -360,6 +377,13 @@ fn worker_main(
                     }
                 }
                 Pre::Thaw => source.thaw(),
+                Pre::Sentence(id, probe) => {
+                    let outcome = resolve_sentence(&mut source, probe);
+                    if result_tx.send(WorkerResult { id, outcome }).is_err() {
+                        return;
+                    }
+                    wake();
+                }
             }
         }
         let Some(trigger) = hover else {
@@ -382,6 +406,7 @@ fn worker_main(
                 TriggerKind::Reload(_)
                 | TriggerKind::Freeze(_)
                 | TriggerKind::Thaw
+                | TriggerKind::Sentence(_)
                 | TriggerKind::Serve => {
                     LookupOutcome::Failed("a state change reached the hover path".to_string())
                 }
@@ -451,6 +476,20 @@ fn resolve_static(
     let lines = read.lines;
     // This path draws no capture boxes. It also draws no match outline.
     present_lookup(dict, engine, state, &resolved, || join_all_lines(&lines), Vec::new(), false)
+}
+
+/// Resolve one add-time sentence probe.
+///
+/// The Controller keeps the hover-time sentence when this read fails or finds
+/// no anchor word.
+fn resolve_sentence(source: &mut TextSource, probe: SentenceProbe) -> LookupOutcome {
+    match source.read_sentence(probe.anchor, probe.orientation, probe.mask) {
+        Ok(text) => LookupOutcome::Sentence(text),
+        Err(e) => {
+            eprintln!("chibipop: sentence probe failed, using the hovered line: {e:#}");
+            LookupOutcome::Sentence(None)
+        }
+    }
 }
 
 /// Resolve the text under the cursor, build the presentation, and attach the
@@ -639,6 +678,43 @@ mod tests {
             })
             .collect();
         assert_eq!(vec![2, 4], passes, "neither reload may be swallowed, and order holds");
+    }
+
+    #[test]
+    fn drain_keeps_a_sentence_between_hovers_and_the_newest_hover() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let first_at = PhysPoint { x: 1, y: 1 };
+        let second_at = PhysPoint { x: 9, y: 9 };
+        tx.send(Trigger {
+            kind: TriggerKind::Sentence(SentenceProbe {
+                anchor: PhysRect { x: 20, y: 30, w: 40, h: 40 },
+                orientation: Orientation::Horizontal,
+                mask: CaptureMask::NONE,
+            }),
+            id: RequestId(2),
+        })
+        .unwrap();
+        tx.send(Trigger {
+            kind: TriggerKind::Hover(Hover { at: second_at, mask: CaptureMask::NONE }),
+            id: RequestId(3),
+        })
+        .unwrap();
+        let first = Trigger {
+            kind: TriggerKind::Hover(Hover { at: first_at, mask: CaptureMask::NONE }),
+            id: RequestId(1),
+        };
+
+        let (hover, pre) = drain(first, &rx);
+
+        assert!(matches!(hover.map(|t| t.kind), Some(TriggerKind::Hover(h)) if h.at == second_at));
+        assert!(matches!(
+            pre.as_slice(),
+            [Pre::Sentence(id, probe)]
+                if *id == RequestId(2)
+                    && probe.anchor == (PhysRect { x: 20, y: 30, w: 40, h: 40 })
+                    && probe.orientation == Orientation::Horizontal
+                    && probe.mask == CaptureMask::NONE
+        ));
     }
 
     /// Treat `Freeze` and `Thaw` as state changes, not as lookups.

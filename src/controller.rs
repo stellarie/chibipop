@@ -38,8 +38,9 @@ const SCROLL_STEP_PX: i32 = 48;
 /// The number of armed ticks before the Controller warns the user.
 const ARM_WARN_TICKS: u32 = 250;
 
-/// A request becomes stale when a newer `RequestId` exists. The Controller
-/// uses request IDs instead of a sentinel.
+/// A non-sentence result becomes stale when a newer non-sentence
+/// `RequestId` exists. Sentence probes use unique IDs without superseding
+/// hover results that are already in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
@@ -93,6 +94,10 @@ pub enum LookupOutcome {
     },
     /// A Dictionary-only result for a kanji drill-down.
     DrillDown(Box<Presentation>),
+    /// The sentence that an add-time probe read.
+    ///
+    /// `None` keeps the sentence from the hover-time presentation.
+    Sentence(Option<String>),
 }
 
 /// The action that the tray menu selected.
@@ -180,6 +185,18 @@ pub enum Command {
     /// (ARCHITECTURE.md#capture-and-masking).
     /// A platform bin that already excludes the popup ignores this field.
     RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
+    /// Read the full sentence around the hovered word for an Anki add.
+    ///
+    /// The bin hides the popup when `hide_popup` is true, sends
+    /// `TriggerKind::Sentence` to the Worker, and restores the popup when the
+    /// result arrives. Windows excludes its popup at the OS level and ignores
+    /// the flag.
+    RequestSentence {
+        id: RequestId,
+        anchor: PhysRect,
+        orientation: Orientation,
+        hide_popup: bool,
+    },
     /// Request a lookup from the Dictionary data only.
     RequestDrillDown { id: RequestId, text: String },
     /// Send the current settings to the Worker.
@@ -238,6 +255,8 @@ pub struct ControllerConfig {
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
+    /// Read the full sentence on add (`SentenceMode::Sentence`).
+    pub sentence_probe: bool,
     /// Include each Dictionary name in both Anki glossary fields.
     pub include_dictionary_name: bool,
     /// Send only the first Dictionary's glossary block to Anki.
@@ -392,6 +411,8 @@ enum PlaceKind {
 struct Surface {
     /// The rectangle of the hovered glyph.
     anchor: PhysRect,
+    /// The axis along which the hold can grow.
+    orientation: Orientation,
     /// The rectangle where the cursor can move without a new lookup.
     hold: PhysRect,
     /// The hold rectangle for one character.
@@ -423,6 +444,8 @@ struct Surface {
     last_drag_point: Option<PhysPoint>,
     /// The placement result stays `None` until the platform sends `PopupPlaced`.
     placed: Option<Placed>,
+    /// The add-time sentence read that is waiting for a Worker result.
+    pending_sentence: Option<RequestId>,
 }
 
 /// State that the platform bin can read.
@@ -463,7 +486,16 @@ pub struct Controller {
     /// The count of consecutive ticks while the scroll action is armed.
     armed_ticks: u32,
     next_id: u64,
+    /// The latest request ID, including add-time sentence reads.
+    ///
+    /// Hover-result staleness uses `latest_lookup` because a sentence read
+    /// must not supersede a hover result that was already in flight.
     latest: RequestId,
+    /// The newest request that supersedes non-sentence lookup outcomes.
+    ///
+    /// A sentence read uses `next_request` for a unique ID but leaves this
+    /// marker unchanged.
+    latest_lookup: RequestId,
     generation: u64,
     /// The monotonic dispatch tick that times pointer gestures.
     clock: u64,
@@ -484,6 +516,7 @@ impl Controller {
             armed_ticks: 0,
             next_id: 0,
             latest: RequestId(0),
+            latest_lookup: RequestId(0),
             generation: 0,
             clock: 0,
         }
@@ -561,7 +594,7 @@ impl Controller {
             Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
             Event::ConfigReloaded(cfg) => {
                 self.cfg = *cfg;
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestReload { id }]
             }
             Event::TrayAction(TrayAction::OpenSettings) => vec![Command::OpenSettings],
@@ -569,11 +602,21 @@ impl Controller {
         }
     }
 
-    /// Create a new `RequestId`. Older results become stale.
+    /// Create a unique request ID.
+    ///
+    /// `next_lookup_request` also advances the non-sentence staleness marker.
+    /// Add-time sentence reads use this method directly for a unique ID.
     fn next_request(&mut self) -> RequestId {
         self.next_id += 1;
         self.latest = RequestId(self.next_id);
         self.latest
+    }
+
+    /// Create a request that supersedes older non-sentence outcomes.
+    fn next_lookup_request(&mut self) -> RequestId {
+        let id = self.next_request();
+        self.latest_lookup = id;
+        id
     }
 
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
@@ -663,7 +706,7 @@ impl Controller {
             Some(HitAction::Back) => self.pop_history(),
             Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
             Some(HitAction::DrillDown(query)) if text.is_none() => {
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestDrillDown { id, text: query }]
             }
             None if text.is_none() && local.y >= p.popup.h => self.start_add(),
@@ -724,7 +767,7 @@ impl Controller {
         match hit {
             Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
             Some(HitAction::DrillDown(text)) => {
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestDrillDown { id, text }]
             }
             Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
@@ -812,7 +855,7 @@ impl Controller {
                     match action {
                         Some(HitAction::OpenUrl(url)) => out.push(Command::OpenUrl(url)),
                         Some(HitAction::DrillDown(text)) => {
-                            let id = self.next_request();
+                            let id = self.next_lookup_request();
                             out.push(Command::RequestDrillDown { id, text });
                         }
                         _ => {}
@@ -865,16 +908,56 @@ impl Controller {
 
     /// Apply the same guard as the pointer path.
     fn start_add(&mut self) -> Vec<Command> {
+        let Some(s) = self.surface.as_ref() else { return Vec::new() };
+        if s.placed.is_none() || s.presentation.top.is_none() || s.anki.adding {
+            return Vec::new();
+        }
+        let scroll = s.scroll;
+        let show_back = !s.history.is_empty();
+
+        // Build the payload now so an already-added Card cannot start a probe.
+        let Some(note_commands) = self.add_note_commands() else { return Vec::new() };
+
+        if self.cfg.sentence_probe {
+            let id = self.next_request();
+            let hide_popup = !(self.trigger_held
+                && matches!(self.cfg.trigger_mode, TriggerMode::HoldKey | TriggerMode::Toggle));
+            let s = self.surface.as_mut().expect("surface checked above");
+            s.anki.adding = true;
+            s.anki.failed = false;
+            s.pending_sentence = Some(id);
+            return vec![
+                Command::RepaintPopup { scroll, show_back },
+                Command::RequestSentence {
+                    id,
+                    anchor: s.anchor,
+                    orientation: s.orientation,
+                    hide_popup,
+                },
+                Command::SyncAnkiButton,
+            ];
+        }
+
+        {
+            let s = self.surface.as_mut().expect("surface checked above");
+            s.anki.adding = true;
+            s.anki.failed = false;
+        }
+        let mut out = vec![Command::RepaintPopup { scroll, show_back }];
+        out.extend(note_commands);
+        out
+    }
+
+    /// Build the common Anki command tail for a direct add or a probe result.
+    ///
+    /// The caller sets `anki.adding` because a sentence probe sets it before
+    /// the Worker reply arrives.
+    fn add_note_commands(&self) -> Option<Vec<Command>> {
         let first_dict_only = self.cfg.first_dict_only;
         let include_dictionary_name = self.cfg.include_dictionary_name;
         let separator = self.cfg.separator;
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() {
-            return Vec::new();
-        }
-        if s.presentation.top.is_none() {
-            return Vec::new();
-        }
+        let s = self.surface.as_ref()?;
+        s.presentation.top.as_ref()?;
         let selection = s.selection.card(0).cloned().unwrap_or_default();
         let (expr, fields) = note_payload(
             &s.presentation,
@@ -883,19 +966,10 @@ impl Controller {
             &selection,
             separator,
         );
-        if s.anki.adding || s.anki.added.contains(&expr) {
-            return Vec::new();
+        if s.anki.added.contains(&expr) {
+            return None;
         }
-        s.anki.adding = true;
-        s.anki.failed = false;
-        vec![
-            Command::RepaintPopup {
-                scroll: s.scroll,
-                show_back: !s.history.is_empty(),
-            },
-            Command::AddNote { expr, fields },
-            Command::SyncAnkiButton,
-        ]
+        Some(vec![Command::AddNote { expr, fields }, Command::SyncAnkiButton])
     }
 
     fn pop_history(&mut self) -> Vec<Command> {
@@ -928,7 +1002,7 @@ impl Controller {
         self.last_accepted = None;
         self.pending_cursor = None;
         // Invalidate any lookup that has not returned.
-        self.next_request();
+        self.next_lookup_request();
         if self.surface.take().is_none() {
             return Vec::new();
         }
@@ -956,7 +1030,7 @@ impl Controller {
         if self.surface.is_none() {
             return Vec::new();
         }
-        self.next_request();
+        self.next_lookup_request();
         self.hide()
     }
 
@@ -1004,7 +1078,7 @@ impl Controller {
     /// Ask the lookup question at `pos` with the shown popup as the mask.
     fn dispatch_lookup(&mut self, pos: PhysPoint) -> Vec<Command> {
         let popup = self.shown_popup();
-        let id = self.next_request();
+        let id = self.next_lookup_request();
         self.last_dispatch = Some(pos);
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
@@ -1022,7 +1096,7 @@ impl Controller {
         }
         let Some(pos) = self.last_dispatch else { return Vec::new() };
         let popup = self.shown_popup();
-        let id = self.next_request();
+        let id = self.next_lookup_request();
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
 
@@ -1073,7 +1147,10 @@ impl Controller {
     }
 
     fn lookup_result(&mut self, id: RequestId, outcome: LookupOutcome) -> Vec<Command> {
-        if id < self.latest {
+        if let LookupOutcome::Sentence(text) = outcome {
+            return self.sentence_result(id, text);
+        }
+        if id < self.latest_lookup {
             // This result is superseded, not an error.
             return Vec::new();
         }
@@ -1088,7 +1165,20 @@ impl Controller {
             LookupOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
                 self.ready(*presentation, anchor, orientation, matched, scan)
             }
+            LookupOutcome::Sentence(_) => unreachable!("sentence outcomes return above"),
         }
+    }
+
+    fn sentence_result(&mut self, id: RequestId, text: Option<String>) -> Vec<Command> {
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        if s.pending_sentence != Some(id) {
+            return Vec::new();
+        }
+        s.pending_sentence = None;
+        if let Some(sentence) = text {
+            s.presentation.sentence = Some(sentence);
+        }
+        self.add_note_commands().unwrap_or_default()
     }
 
     fn hide(&mut self) -> Vec<Command> {
@@ -1130,6 +1220,7 @@ impl Controller {
         let HoldRects { hold, hold_char } = hold_regions(anchor, matched, orientation);
         self.surface = Some(Surface {
             anchor,
+            orientation,
             hold,
             hold_char,
             presentation,
@@ -1144,6 +1235,7 @@ impl Controller {
             analysis_generation: 0,
             pressed_link: None,
             last_drag_point: None,
+            pending_sentence: None,
             placed: None,
         });
 
@@ -1374,6 +1466,7 @@ mod tests {
 
     fn cfg() -> ControllerConfig {
         ControllerConfig {
+            sentence_probe: false,
             trigger_mode: TriggerMode::Live,
             per_character_lookup: false,
             scroll_popup: true,
@@ -2312,6 +2405,127 @@ mod tests {
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
     }
 
+    #[test]
+    fn an_add_with_the_probe_asks_for_the_sentence_first() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        assert_eq!(
+            out,
+            vec![
+                Command::RepaintPopup { scroll: 0, show_back: false },
+                Command::RequestSentence {
+                    id: RequestId(2),
+                    anchor: ANCHOR,
+                    orientation: Orientation::Horizontal,
+                    hide_popup: true,
+                },
+                Command::SyncAnkiButton,
+            ]
+        );
+        assert!(c.anki().expect("shown").adding);
+    }
+
+    #[test]
+    fn a_sentence_result_completes_the_add_with_the_new_sentence() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let request_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+        let sentence = "今日はいい天気ですね。".to_string();
+        let out = c.handle(Event::LookupResult {
+            id: request_id,
+            outcome: LookupOutcome::Sentence(Some(sentence.clone())),
+        });
+        let fields = match out.as_slice() {
+            [Command::AddNote { fields, .. }, Command::SyncAnkiButton] => fields,
+            commands => panic!("expected the add tail, got {commands:?}"),
+        };
+        assert_eq!(fields.get("sentence"), Some(&sentence));
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_the_hover_sentence() {
+        let mut presentation = presentation_of("\u{732B}");
+        presentation.sentence = Some("hover sentence".into());
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown_card(&mut c, presentation);
+        let request_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+        let out = c.handle(Event::LookupResult {
+            id: request_id,
+            outcome: LookupOutcome::Sentence(None),
+        });
+        let fields = match out.as_slice() {
+            [Command::AddNote { fields, .. }, Command::SyncAnkiButton] => fields,
+            commands => panic!("expected the add tail, got {commands:?}"),
+        };
+        assert_eq!(fields.get("sentence").map(String::as_str), Some("hover sentence"));
+    }
+
+    #[test]
+    fn a_stale_sentence_result_is_dropped() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let sentence_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        let hover_id = c.latest;
+        let new_anchor = PhysRect { x: 900, y: 900, w: 20, h: 20 };
+        let out = c.handle(ready_id(hover_id, "\u{72AC}", new_anchor));
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+        assert!(!c.anki().expect("new surface").adding);
+
+        assert!(c
+            .handle(Event::LookupResult {
+                id: sentence_id,
+                outcome: LookupOutcome::Sentence(Some("stale".into())),
+            })
+            .is_empty());
+        assert!(!c.anki().expect("new surface").adding);
+    }
+
+    #[test]
+    fn a_hover_result_after_a_sentence_request_is_not_stale() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        let hover_id = c.latest;
+        assert!(!c.handle(Event::AddRequested).is_empty());
+        assert!(hover_id < c.latest);
+
+        let new_anchor = PhysRect { x: 900, y: 900, w: 20, h: 20 };
+        let out = c.handle(ready_id(hover_id, "\u{72AC}", new_anchor));
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+    }
+
     /// A platform bin that paints the Anki control inside the popup needs its
     /// state before the first frame. This state exists before the platform knows
     /// the rectangle, so `popup()` returns `None`.
@@ -2649,6 +2863,38 @@ mod tests {
         assert!(c.handle(Event::AddRequested).is_empty());
         c.handle(placed(POPUP, 200, 200));
         assert!(!c.handle(Event::AddRequested).is_empty());
+    }
+
+    #[test]
+    fn a_held_trigger_reads_the_frozen_frame_without_a_hide() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..hold_cfg()
+        });
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        let request = out.iter().find_map(|command| match command {
+            Command::RequestSentence { anchor, orientation, hide_popup, .. } => {
+                Some((*anchor, *orientation, *hide_popup))
+            }
+            _ => None,
+        });
+        assert_eq!(request, Some((ANCHOR, Orientation::Horizontal, false)));
+    }
+
+    #[test]
+    fn an_add_without_the_probe_is_unchanged() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: false,
+            ..cfg()
+        });
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        assert!(out.iter().any(|command| matches!(command, Command::AddNote { .. })));
+        assert!(!out.iter().any(|command| matches!(command, Command::RequestSentence { .. })));
     }
 
     // -- selection and Controller behavior --
