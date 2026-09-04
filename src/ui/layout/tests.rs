@@ -5779,6 +5779,64 @@ fn a_descendant_rule_draws_a_box_only_where_its_ancestor_holds() {
     );
 }
 
+/// 字通 wraps every entry in `span` nodes and makes its section a block only in its
+/// stylesheet: `[data-sc-section] { display: block }`. This test uses the 相与
+/// entry verbatim, minus its link markup.
+///
+/// In a browser, the block section starts under the inline heading. Before this
+/// test, the walk read only the schema tag, so the section's first text joined the
+/// heading's line: `【相与】そうよ 親しみあう。`.
+#[test]
+fn a_span_that_a_stylesheet_displays_as_block_opens_its_own_line() {
+    let s = laid_out(
+        &card_with(vec![css_tree(
+            "字通",
+            &sc(concat!(
+                r#"[{"tag":"span","content":[{"tag":"span","content":[{"tag":"span","#,
+                r#""content":"【相与】そうよ","data":{"main_title":""}}],"data":{"h3":""}},"#,
+                r#"{"tag":"span","content":[{"tag":"span","content":"親しみあう。"},"#,
+                r#"{"tag":"div","content":"「相」の項目を見る。","data":{"p":""}}],"#,
+                r#""data":{"section":"","description":""}}]}]"#,
+            )),
+            "[data-sc-section] { display: block; margin: 0em 1.5em }",
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = bodies(&s);
+    let text: Vec<&str> = gloss.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        vec!["【相与】そうよ", "親しみあう。", "「相」の項目を見る。"],
+        text,
+        "the block section starts its own paragraph under the heading"
+    );
+    let indent = 1.5 * Theme::dark().body_size;
+    assert_eq!(s.origin, gloss[0].pen.0, "the inline heading keeps the margin");
+    assert_eq!(s.origin + indent, gloss[1].pen.0, "the block pays its margin-left");
+    assert_eq!(s.origin + indent, gloss[2].pen.0, "and so does the paragraph inside it");
+}
+
+/// A stylesheet can turn a schema block back into an inline: `div { display: inline }`.
+/// The text of that `div` then joins the line around it, as it does in a browser.
+#[test]
+fn a_div_that_a_stylesheet_displays_as_inline_joins_its_line() {
+    let s = laid_out(
+        &card_with(vec![css_tree(
+            "x",
+            &sc(r#"["see ",{"tag":"div","data":{"ref":""},"content":"also"}," here"]"#),
+            "div[data-sc-ref] { display: inline }",
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    let text: Vec<&str> = bodies(&s).iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(vec!["see also here"], text);
+}
+
 /// Jitendex uses a CSS-only pill on 48 776 nodes. The rule is
 /// `span[data-sc-class="tag"]`, and the entry has no inline box property.
 ///

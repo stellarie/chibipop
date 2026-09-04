@@ -290,6 +290,7 @@ fn kind_name(kind: Kind) -> &'static str {
 /// signature names the property that the cascade resolved. The two names can differ.
 fn style_key_name(key: StyleKey) -> &'static str {
     match key {
+        StyleKey::Display => "display",
         StyleKey::FontStyle => "font-style",
         StyleKey::FontWeight => "font-weight",
         StyleKey::FontSize => "font-size",
@@ -601,7 +602,7 @@ fn walk_fragments(
 /// rule.
 fn inline_only(doc: &GlossDoc, id: NodeId) -> bool {
     let node = doc.node(id);
-    !node.tag.is_block()
+    !doc.is_block(id)
         && !matches!(
             node.kind,
             Kind::List | Kind::ListItem | Kind::Table | Kind::Row | Kind::Cell | Kind::Image

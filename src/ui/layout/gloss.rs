@@ -361,10 +361,10 @@ impl Paragraphs<'_> {
         // once to `block_box` and once to `inline_boxes`.
         // A renderer over `SceneElem::boxes()` then painted Jitendex's
         // `span[data-sc-class="tag"]` twice.
-        if node.tag.is_block() && block.style.exists() {
+        if doc.is_block(id) && block.style.exists() {
             return self.wrap(id, ctx, block, inline);
         }
-        if node.tag.is_block() {
+        if doc.is_block(id) {
             self.open(ctx.path, block);
         } else if doc.has_marker(id) && !prose {
             // The marker separates senses only when the senses are adjacent.
@@ -392,7 +392,7 @@ impl Paragraphs<'_> {
         // This pass draws no box around those labels.
         //
         // [`measure_pills`]: super::pill::measure_pills
-        if !node.tag.is_block() && (block.style.paints() || reserves(block.style)) {
+        if !doc.is_block(id) && (block.style.paints() || reserves(block.style)) {
             return self.pill(id, next, block.style);
         }
         // A list marks and indents its own children. The list therefore handles them
@@ -594,7 +594,7 @@ impl Paragraphs<'_> {
     /// no box. A bare string declares no box, so each paragraph carries no box.
     pub(super) fn children(&mut self, id: NodeId, ctx: Ctx) {
         let doc = self.doc;
-        if !doc.node(id).tag.is_inline() && doc.is_string_list(id) {
+        if !doc.is_inline(id) && doc.is_string_list(id) {
             for (i, child) in doc.children(id).enumerate() {
                 let child_ctx = ctx.at(i);
                 self.open(child_ctx.path, ctx.block);

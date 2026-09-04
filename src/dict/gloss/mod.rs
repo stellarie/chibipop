@@ -229,11 +229,10 @@ impl Tag {
     /// Returns true when this tag breaks a line.
     ///
     /// This split defines the block and inline groups in the schema.
-    /// Every renderer over this tree shares the split.
-    /// The plain-text walk turns a block into a line break.
-    /// The popup inline pass ends a paragraph at a block.
-    /// Structured content has no `display` property, so the mapping is fixed.
-    /// The mapping needs no cascade.
+    /// Structured content has no `display` property, so the schema mapping is fixed.
+    /// A Dictionary stylesheet can still declare `display` on a node.
+    /// [`GlossDoc::is_block`] reads that declaration first and falls back to this split.
+    /// Every renderer over this tree calls that method, not this one.
     ///
     /// `td`, `th`, `thead`, and `tbody` belong to neither group.
     /// A cell is a grid element, not a line-break element.
@@ -251,8 +250,7 @@ impl Tag {
     /// This method is not the complement of [`is_block`](Self::is_block).
     /// A cell tag belongs to neither group.
     /// An emphasis tag such as `b` is inline because it says nothing about lines.
-    /// This method decides when bare strings under a node become separate lines.
-    /// Otherwise they stay in one flow.
+    /// [`GlossDoc::is_inline`] applies a `display` declaration before this split.
     pub fn is_inline(self) -> bool {
         matches!(self, Tag::Span | Tag::A | Tag::Ruby | Tag::Rt | Tag::Rp | Tag::Img)
     }
@@ -287,6 +285,13 @@ pub enum ItemType {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum StyleKey {
+    /// The stylesheet-only `display` property.
+    ///
+    /// The schema has no `display`, so the parser never writes this key.
+    /// `dict::sheet` folds it from a Dictionary's `styles.css`.
+    /// [`GlossDoc::is_block`] reads it, so the declaration changes the line structure of
+    /// an Entry, not only its paint.
+    Display,
     FontStyle,
     FontWeight,
     FontSize,
@@ -624,7 +629,7 @@ impl GlossDoc {
             .any(|c| self.is_plain_string(c) && !self.text(c).trim().is_empty())
     }
 
-    /// Returns true when this node contains visible text without a block tag or marker.
+    /// Returns true when this node contains visible text without a block or marker.
     ///
     /// This method provides the other half of marker exemption.
     /// [`prose`](Self::prose) detects only bare text siblings.
@@ -636,9 +641,54 @@ impl GlossDoc {
     /// In sense headers, marked labels precede prose fragments.
     /// The parser checks only earlier text to prevent false matches on sense headers.
     pub fn inline_prose(&self, id: NodeId) -> bool {
-        !self.nodes[id as usize].tag.is_block()
-            && !self.has_marker(id)
-            && self.has_visible_text(id)
+        !self.is_block(id) && !self.has_marker(id) && self.has_visible_text(id)
+    }
+
+    /// Returns true when this node breaks a line.
+    ///
+    /// A `display` declaration from the Dictionary stylesheet decides first.
+    /// 字通 writes every node as a `span` and makes its section a block only in
+    /// `styles.css`. 旺文社漢字典 declares `display: block` 46 times, and
+    /// 小学館例解学習国語 17 times. Seven of 14 stylesheets in the library declare it.
+    /// A browser starts such a block under the inline text before it.
+    /// Without this rule, the first text of the block joined the heading's line.
+    /// The schema split ([`Tag::is_block`]) decides when the node declares no `display`.
+    ///
+    /// The popup, the plain-text renderer, and the HTML renderer all call this method.
+    /// A line break is part of what an Entry says, so the "dictionary styling" setting
+    /// does not gate it. The three renderers then agree on line positions at either
+    /// setting.
+    pub fn is_block(&self, id: NodeId) -> bool {
+        self.display_block(id).unwrap_or_else(|| self.nodes[id as usize].tag.is_block())
+    }
+
+    /// Returns true when this node never breaks a line.
+    ///
+    /// A `display` declaration decides first, as in [`is_block`](Self::is_block).
+    /// The schema split ([`Tag::is_inline`]) decides otherwise.
+    pub fn is_inline(&self, id: NodeId) -> bool {
+        match self.display_block(id) {
+            Some(block) => !block,
+            None => self.nodes[id as usize].tag.is_inline(),
+        }
+    }
+
+    /// Reads the `display` declaration as a line-break decision.
+    ///
+    /// A block-level outer display type breaks a line: `block`, `flex`, `grid`,
+    /// `list-item`, `flow-root`, and `table`. An inline-level type does not: `inline`
+    /// and every `inline-*` value.
+    /// The method returns `None` for every other value.
+    /// `none` hides a node, and no renderer here hides a node.
+    /// `contents` and the table-internal types describe a box that the schema tag
+    /// already places, so the tag decides.
+    fn display_block(&self, id: NodeId) -> Option<bool> {
+        let value = self.style_of(id, StyleKey::Display)?;
+        match self.scalar_str(value)?.trim() {
+            "block" | "flex" | "grid" | "list-item" | "flow-root" | "table" => Some(true),
+            v if v == "inline" || v.starts_with("inline-") => Some(false),
+            _ => None,
+        }
     }
 
     /// Returns true when this node or any descendant contains non-whitespace text.

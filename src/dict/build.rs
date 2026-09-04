@@ -2620,12 +2620,12 @@ mod tests {
     /// kept and dropped *rules* can hide a difference between the two counts.
     ///
     /// The test asserts expanded counts. `padding` is one authored declaration but
-    /// four compiled longhands. `display` and `line-height` are outside
+    /// four compiled longhands. `grid-column` and `line-height` are outside
     /// `sheet::css_key`, and the `var()` border width names a custom property from
     /// Yomitan's popup chrome.
     #[test]
     fn a_build_reports_the_declarations_it_could_not_map() {
-        let css = "span[data-sc-fbox] { padding: 0.1em; display: grid; line-height: 1.4;\n\
+        let css = "span[data-sc-fbox] { padding: 0.1em; grid-column: 1; line-height: 1.4;\n\
                    border-width: var(--gap) }\n";
         let archive = styled_archive("declaration_gap", css);
         let out = out_path("declaration_gap");
@@ -2639,7 +2639,7 @@ mod tests {
         assert_eq!(1, counts.styles.kept, "the selector compiles, so the rule stays");
         assert_eq!(0, counts.styles.dropped, "no grammar gap here");
         assert_eq!(4, counts.styles.declarations, "one padding, four longhands");
-        assert_eq!(3, counts.styles.unmapped, "display, line-height, and the var()");
+        assert_eq!(3, counts.styles.unmapped, "grid-column, line-height, and the var()");
         let emitted = lines.into_inner();
         assert!(
             emitted.iter().any(|l| {

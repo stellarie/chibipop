@@ -943,6 +943,11 @@ impl Paragraphs<'_> {
     /// same record, not a second record. A new source added here therefore
     /// uses the gate, and downstream code does not need the setting.
     ///
+    /// One declaration bypasses this gate: `display`. It changes where a line
+    /// breaks, and [`GlossDoc::is_block`] reads it for every renderer. The
+    /// plain-text and HTML renderers have no setting, so the popup must agree
+    /// with them at either value of the setting.
+    ///
     /// An empty record leaves every property unset. Only two sources remain
     /// visible: HTML's own stylesheet ([`tag_style`]) and the theme's font
     /// and colors. A `b` stays bold when style support is off because markup
