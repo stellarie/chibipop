@@ -331,7 +331,7 @@ pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize
 }
 
 /// Return the mean center across a line: `y` for a row and `x` for a column.
-fn perp_centre(line: &OcrLine, orientation: Orientation) -> i32 {
+pub(crate) fn perp_centre(line: &OcrLine, orientation: Orientation) -> i32 {
     let axis = |p: PhysPoint| match orientation {
         Orientation::Horizontal => p.y,
         Orientation::Vertical => p.x,
@@ -341,7 +341,7 @@ fn perp_centre(line: &OcrLine, orientation: Orientation) -> i32 {
 }
 
 /// Return the mean thickness of a line's words: `h` for a row and `w` for a column.
-fn thickness(line: &OcrLine, orientation: Orientation) -> i32 {
+pub(crate) fn thickness(line: &OcrLine, orientation: Orientation) -> i32 {
     let cross: AxisEdge = match orientation {
         Orientation::Horizontal => |r| r.h,
         Orientation::Vertical => |r| r.w,
@@ -351,7 +351,7 @@ fn thickness(line: &OcrLine, orientation: Orientation) -> i32 {
 }
 
 /// Return the first edge of a line on the reading axis.
-fn reading_start(line: &OcrLine, orientation: Orientation) -> Option<i32> {
+pub(crate) fn reading_start(line: &OcrLine, orientation: Orientation) -> Option<i32> {
     let edge: AxisEdge = match orientation {
         Orientation::Horizontal => |r| r.x,
         Orientation::Vertical => |r| r.y,
@@ -361,7 +361,7 @@ fn reading_start(line: &OcrLine, orientation: Orientation) -> Option<i32> {
 
 /// Return the gap from `a` to `b` on the reading axis.
 /// A row's next line lies below it. A column's next line lies to its left.
-fn forward_gap(a: &OcrLine, b: &OcrLine, orientation: Orientation) -> i32 {
+pub(crate) fn forward_gap(a: &OcrLine, b: &OcrLine, orientation: Orientation) -> i32 {
     match orientation {
         Orientation::Horizontal => perp_centre(b, orientation) - perp_centre(a, orientation),
         Orientation::Vertical => perp_centre(a, orientation) - perp_centre(b, orientation),
@@ -372,7 +372,7 @@ fn forward_gap(a: &OcrLine, b: &OcrLine, orientation: Orientation) -> i32 {
 ///
 /// Ruby above a base line is half its height. A heading is larger. Neither one forms
 /// a continuation.
-fn same_size(reference: i32, thick: i32) -> bool {
+pub(crate) fn same_size(reference: i32, thick: i32) -> bool {
     thick * 3 >= reference * 2 && thick * 2 <= reference * 3
 }
 
@@ -385,7 +385,7 @@ fn same_size(reference: i32, thick: i32) -> bool {
 /// The fixed reach can join across a paragraph gap when the last line has no 。 or 」.
 /// [`wrap_probe`] rejects that case before it reads anything. Only a line without
 /// punctuation pays this cost. [`wrap_probe`] sizes its probes from this value.
-const WRAP_GAP_HALVES: i32 = 9;
+pub(crate) const WRAP_GAP_HALVES: i32 = 9;
 
 /// Return the center gap when `next` forms a continuation of `current`.
 ///

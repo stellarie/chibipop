@@ -420,7 +420,8 @@ fn resolve_trigger(
     let sentence = || match state.sentence_mode {
         SentenceMode::All => join_all_lines(&ocr_lines),
         // `Static` reaches this point only when no region exists.
-        SentenceMode::Line | SentenceMode::Static => {
+        // `Sentence` reads the full sentence on add. This line is its fallback.
+        SentenceMode::Line | SentenceMode::Static | SentenceMode::Sentence => {
             extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset).to_string()
         }
     };

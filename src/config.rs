@@ -943,12 +943,15 @@ fn default_notify_on_add() -> bool {
 
 /// Defines the text that the Anki sentence field receives.
 ///
-/// The TOML file uses `lowercase` names.
+/// The TOML file uses `lowercase` names: `"sentence"`, `"line"`, `"all"`, and
+/// `"static"`.
 /// Files from earlier versions use `"line"`, `"all"`, and `"static"`.
 /// The parser still reads them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SentenceMode {
+    /// The sentence that contains the hovered word. An add reads a strip around the word and cuts at 。！？ (`text::sentence`).
+    Sentence,
     /// The OCR line that contains the cursor.
     Line,
     /// Every line that the hover capture reads.
@@ -960,7 +963,7 @@ pub enum SentenceMode {
 
 /// The default sentence mode.
 fn default_sentence_mode() -> SentenceMode {
-    SentenceMode::Line
+    SentenceMode::Sentence
 }
 
 /// The default key for the static region.
@@ -1785,8 +1788,8 @@ mod tests {
     }
 
     #[test]
-    fn sentence_mode_defaults_to_line() {
-        assert_eq!(SentenceMode::Line, Config::default().anki.sentence_mode);
+    fn sentence_mode_defaults_to_sentence() {
+        assert_eq!(SentenceMode::Sentence, Config::default().anki.sentence_mode);
     }
 
     #[test]
@@ -1980,6 +1983,7 @@ mod tests {
     #[test]
     fn a_config_written_before_the_enum_still_names_every_mode() {
         for (written, expected) in [
+            ("sentence", SentenceMode::Sentence),
             ("line", SentenceMode::Line),
             ("all", SentenceMode::All),
             ("static", SentenceMode::Static),

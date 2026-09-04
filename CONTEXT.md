@@ -251,6 +251,10 @@ once, and the software saves it in the configuration. It is independent of the m
 mode change cannot cause data loss.
 _Avoid_: sentence box, capture region
 
+**Sentence probe**:
+A Sentence probe is an add-time read that captures the full sentence for the Anki sentence
+field.
+
 **Clipboard rung**:
 The Wayland protocol that chibipop uses to take the selection. It tries
 `ext-data-control-v1`, and then it tries `wlr-data-control-unstable-v1`. If the compositor

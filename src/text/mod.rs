@@ -6,6 +6,7 @@
 //! This module contains no platform code.
 
 pub mod layout;
+pub mod sentence;
 pub mod mask;
 mod frozen;
 pub mod source;

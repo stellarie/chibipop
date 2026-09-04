@@ -365,7 +365,7 @@ model = "Lapis"
 add_key = "a"               # Windows
 add_key_linux = "ALT+A"     # Linux, portal syntax
 notify_on_add = true
-sentence_mode = "line"      # "line" | "all" | "static"
+sentence_mode = "sentence"  # "sentence" | "line" | "all" | "static"
 static_region_key = ""      # Windows; empty leaves it unbound
 static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
 show_static_overlay = true
@@ -392,6 +392,16 @@ include_on_add = false
 # hotkey = "ctrl+shift+c"       # Windows
 # hotkey_linux = "ALT+C"        # Linux
 ```
+
+### `sentence_mode`
+
+`sentence` is the default. On add, chibipop hides the popup. It reads a strip
+six line heights above and below the hovered word across the output. It cuts
+the sentence at `。！？`; a closing `」` stays. A line with a different size,
+such as ruby or a heading, ends the sentence. A paragraph gap also ends the
+sentence. The probe costs two or three OCR passes on add and none on hover.
+When the probe fails, the sentence falls back to the hovered line. Older
+configs without this key change to `sentence` when you upgrade.
 
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`

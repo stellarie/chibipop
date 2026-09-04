@@ -75,6 +75,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   path shows one actionable error with a retry action.
 - The Worker masks chibipop's own on-screen rectangles in core before OCR. It applies
   a flat white fill with a hard edge.
+- An add-time read hides the popup instead of masking it. The popup sits below the anchor, on
+  the next lines of the sentence, and a mask would drop those words. The screenshot-on-add
+  path already hides and restores the popup, and the sentence probe reuses that path. In
+  frozen mode the Worker reads the held frame, so no hide is needed.
 - The mask boundary is a capture edge. The engine drops words that touch it. It never
   partially recognizes them.
 - A wrap joins the nearest body line below. The center gap from the hovered line to that
@@ -191,6 +195,14 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   when a continuation joins. When forward tiles add text past the box, the stitched
   head and tail win, and the merge drops the joined wrap. When tiles add no text, pass 1's
   answer with its geometry and any joined wrap stands.
+- A sentence probe runs on an Anki add and never on hover. The Controller answers
+  `AddRequested` with `Command::RequestSentence`. The bin hides the popup and sends
+  `TriggerKind::Sentence` to the Worker. The Worker reads the tiles that
+  `text::sentence::probe_regions` names, trims interior tile edges, and cuts the sentence
+  with `text::sentence::sentence_at`. The result returns as `LookupOutcome::Sentence`. The
+  Controller then builds the note. A failed probe or a probe with no anchor word keeps the
+  hover-time sentence. `drain` never drops a `Sentence` trigger, because the user pressed a
+  key. The reach is `SENTENCE_REACH_LINES` (6) above and below. Every number is a constant.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine
