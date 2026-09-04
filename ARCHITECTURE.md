@@ -75,8 +75,24 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   path shows one actionable error with a retry action.
 - The Worker masks chibipop's own on-screen rectangles in core before OCR. It applies
   a flat white fill with a hard edge.
+- An add-time read hides the popup instead of masking it. The popup sits below the anchor, on
+  the next lines of the sentence, and a mask would drop those words. The screenshot-on-add
+  path already hides and restores the popup, and the sentence probe reuses that path. In
+  frozen mode the Worker reads the held frame, so no hide is needed.
+- On the portal rung, a live sentence hide records the parked-frame content counter
+  before its commit. After the `wl_display.sync` callback, the daemon waits on a short
+  calloop poll for a newer counter, or for a 150 ms deadline, and then it sends the
+  probe. The `RegionCapture` seam itself never waits for damage.
 - The mask boundary is a capture edge. The engine drops words that touch it. It never
   partially recognizes them.
+- A wrap joins the nearest body line on the cross axis. For horizontal text, that
+  line is below the hovered line. For vertical text, it is the next column to the left.
+  The center gap from the hovered line to that candidate is from 0.5 through 4.5
+  times the larger line thickness. The candidate line thickness is from two thirds
+  through one and a half times the hovered line thickness. The candidate start can
+  be up to half a thickness after the hovered line start. The rules use geometry,
+  not ruby or heading labels. The reach is fixed. A pitch measured from neighbors
+  fails on a two-line paragraph because the pair under test has no pitch beside it.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders
@@ -171,6 +187,31 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
   also hides it because the mask gives no text. Cursor movement and key release do nothing, and
   per-character lookup is inert.
+- A wrap probe follows pass 1 when the lookup would run past the line end and the box did
+  not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
+  edge can be clipped and does not suppress a probe. The probe uses one bounded
+  region when the reading-axis span is at most `2 * TILE_LEN` (1000 physical pixels).
+  Otherwise it uses the deterministic sequence of half-overlapping regions needed to
+  cover the span from the output margin to the hovered line end. Each reading-axis
+  length is at most `2 * TILE_LEN`, and each step is `TILE_LEN` (500 physical pixels);
+  the last region can be shorter. For a positive span, the no-failure capture count is
+  one when `span <= 2 * TILE_LEN`; otherwise it is
+  `1 + ceil((span - 2 * TILE_LEN) / TILE_LEN)`. Each region costs one grab and OCR pass,
+  independent of `max_ocr_passes`. A probe stops at its first capture failure and keeps
+  pass 1. The probe drops words within `EDGE_MARGIN` of both interior edges before the
+  merge; half-tile overlap leaves a full copy of a wide word away from both seams.
+  The tile path applies the same rule. `resolve_wrap` merges probe fragments and replaces
+  pass 1 only when a continuation joins. When forward tiles add text past the box, the
+  stitched head and tail win, and the merge drops the joined wrap. When tiles add no text,
+  pass 1's answer with its geometry and any joined wrap stands.
+- A sentence probe runs on an Anki add and never on hover. The Controller answers
+  `AddRequested` with `Command::RequestSentence`. The bin hides the popup and sends
+  `TriggerKind::Sentence` to the Worker. The Worker reads the tiles that
+  `text::sentence::probe_regions` names, trims interior tile edges, and cuts the sentence
+  with `text::sentence::sentence_at`. The result returns as `LookupOutcome::Sentence`. The
+  Controller then builds the note. A failed probe or a probe with no anchor word keeps the
+  hover-time sentence. `drain` never drops a `Sentence` trigger, because the user pressed a
+  key. The reach is `SENTENCE_REACH_LINES` (6) above and below. Every number is a constant.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine

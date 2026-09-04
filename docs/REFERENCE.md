@@ -365,7 +365,7 @@ model = "Lapis"
 add_key = "a"               # Windows
 add_key_linux = "ALT+A"     # Linux, portal syntax
 notify_on_add = true
-sentence_mode = "line"      # "line" | "all" | "static"
+sentence_mode = "sentence"  # "sentence" | "line" | "all" | "static"
 static_region_key = ""      # Windows; empty leaves it unbound
 static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
 show_static_overlay = true
@@ -392,6 +392,33 @@ include_on_add = false
 # hotkey = "ctrl+shift+c"       # Windows
 # hotkey_linux = "ALT+C"        # Linux
 ```
+
+### `sentence_mode`
+
+`sentence` is the default. On add, chibipop hides the popup before a live
+capture that cannot exclude it. It reads a strip six line heights above and
+below the hovered word across the output. It cuts the sentence at `。！？`; a
+`」` after a terminator stays. A line with a different size, such as ruby or a
+heading, ends the sentence. A paragraph gap also ends the sentence. The probe
+uses one or more tiles along the output's reading axis. It uses one OCR pass
+for each tile. The tile count follows the output span, and each tile's band
+follows the text thickness. The sentence probe runs no OCR pass on hover. A
+held `hold-key` trigger reads the frozen grab without hiding the popup. Windows
+ignores the hide flag because it excludes the popup from its own captures at the
+OS level. When the probe fails, the sentence falls back to the hover-time
+sentence.
+Older configs without this key change to `sentence` when you upgrade. A saved
+config writes every key, so a file that says `sentence_mode = "line"` keeps
+`line` until you change it.
+
+`line` uses the hovered OCR line with the same `。！？` cut at the cursor. A
+wide page holds several sentences on one line, and the card gets only the
+sentence of the hovered word. `line` never reads outside the hover capture, so
+a sentence that starts on the line above is cut short.
+
+In every mode, the sentence field bolds the word as it appears on screen:
+`山が<b>崩れたり</b>、…`. The bold is the surface form, not the headword. A
+sentence that does not contain the surface form stays plain.
 
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`
@@ -453,6 +480,28 @@ character than the one you are pointing at*, and a longer reading of the
 wrong word is worse than a short reading of the right one. Over nine hovers
 on one line, **single-pass got the character right 9 times out of 9; three
 passes managed 4.**
+
+A hidden wrap costs one or more extra captures and OCR passes, independent of
+`max_ocr_passes`. The probe runs only when pass 1 contains the line end, leaves
+lookup capacity, and has no complete visible continuation. A continuation near pass 1's
+leading edge can be clipped and does not suppress a probe.
+
+For a short span, the probe reads one bounded region from the output margin to the
+hovered line end. For a long span, it reads a deterministic sequence of regions
+with half-tile overlap that covers the full span from the output margin to the
+hovered line end. Each region is at most 1000 physical pixels along the
+reading direction. Each region starts one quarter of a line before the hovered
+line on the cross axis, and it reaches six line heights after it. A candidate
+line joins as the continuation only when its center lies from half a line
+through 4.5 lines on the cross axis.
+For horizontal text, the candidate lies below the hovered line. For vertical
+text, the candidate lies in the next column to the left. Its glyphs must also
+be about the same size.
+
+A probe stops at its first failed capture and keeps pass 1. With `max_ocr_passes` above 1,
+tile text found past the box replaces the joined wrap, so a hidden wrap is most reliable
+at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
+`show_scan_region` overlay draws each region as a tile.
 
 ### `highlight_match`
 

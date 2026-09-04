@@ -9,9 +9,10 @@ use crate::controller::{LookupOutcome, RequestId};
 use crate::geom::{PhysPoint, PhysRect, ScanDisplay, ScanKind, ScanRect};
 use crate::lookup::engine::LookupEngine;
 use crate::lookup::model::Dictionary;
-use crate::present::{self, DictInfo, PresentConfig};
-use crate::text::layout::{CaptureSize, OcrLine, Resolved};
+use crate::present::{self, DictInfo, OcrSurface, PresentConfig};
+use crate::text::layout::{CaptureSize, OcrLine, Orientation, Resolved};
 use crate::text::mask::CaptureMask;
+use crate::text::sentence;
 use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
@@ -28,10 +29,22 @@ pub struct Hover {
     pub mask: CaptureMask,
 }
 
-/// The Worker accepts `Hover` and `DrillDown` lookups, `Reload`, `Freeze`, and `Thaw`
-/// state changes, and `Serve` wake requests.
+/// One sentence probe for an Anki add.
+///
+/// This trigger is separate from [`Hover`]. It needs no hit scan or presentation.
+/// It must survive newer hovers until the add can answer.
+#[derive(Clone, Copy)]
+pub struct SentenceProbe {
+    pub anchor: PhysRect,
+    pub orientation: Orientation,
+    pub mask: CaptureMask,
+}
+
+/// The Worker accepts `Hover`, `Sentence`, and `DrillDown` lookups, `Reload`,
+/// `Freeze`, and `Thaw` state changes, and `Serve` wake requests.
 pub enum TriggerKind {
     Hover(Hover),
+    Sentence(SentenceProbe),
     DrillDown(String),
     Reload(Box<WorkerSettings>),
     /// A trigger press takes one full grab of the output that contains this
@@ -221,15 +234,39 @@ impl ServeNudge {
     }
 }
 
-/// State that a drained batch applies before its newest hover.
+/// Work that a drained batch completes before its newest hover.
 /// The state includes settings and trigger-mode freeze state.
 ///
-/// Keep these values in arrival order. A reload and a press change state, so
-/// they cannot coalesce.
+/// Keep state changes and sentence probes in arrival order. A reload and a press change state.
+/// A sentence probe must not be coalesced.
 enum Pre {
     Reload(WorkerSettings),
     Freeze(PhysPoint),
     Thaw,
+    Sentence(RequestId, SentenceProbe),
+}
+
+/// Keep the newest hover, every state change, and every sentence probe.
+///
+/// State changes and sentence probes remain in arrival order. Hovers coalesce
+/// because only the newest hover is useful.
+fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
+    let mut pre = Vec::new();
+    let mut hover = None;
+    let mut take = |t: Trigger| match t.kind {
+        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
+        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
+        TriggerKind::Thaw => pre.push(Pre::Thaw),
+        TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
+        // The wake already arrived.
+        TriggerKind::Serve => {}
+        _ => hover = Some(t),
+    };
+    take(first);
+    while let Ok(next) = rx.try_recv() {
+        take(next);
+    }
+    (hover, pre)
 }
 
 /// State that a lookup uses after a reload.
@@ -274,25 +311,6 @@ fn take_reload(
         // Keep the current handle. It still answers. A dropped handle answers nothing.
         Err(e) => eprintln!("chibipop: reopening the dictionary failed: {e:#}"),
     }
-}
-
-/// Keep the newest hover and each state change in arrival order.
-fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
-    let mut pre = Vec::new();
-    let mut hover = None;
-    let mut take = |t: Trigger| match t.kind {
-        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
-        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
-        TriggerKind::Thaw => pre.push(Pre::Thaw),
-        // The wake already arrived.
-        TriggerKind::Serve => {}
-        _ => hover = Some(t),
-    };
-    take(first);
-    while let Ok(next) = rx.try_recv() {
-        take(next);
-    }
-    (hover, pre)
 }
 
 /// The Worker serves triggers and owns OCR.
@@ -360,6 +378,13 @@ fn worker_main(
                     }
                 }
                 Pre::Thaw => source.thaw(),
+                Pre::Sentence(id, probe) => {
+                    let outcome = resolve_sentence_safe(&mut source, probe);
+                    if result_tx.send(WorkerResult { id, outcome }).is_err() {
+                        return;
+                    }
+                    wake();
+                }
             }
         }
         let Some(trigger) = hover else {
@@ -382,6 +407,7 @@ fn worker_main(
                 TriggerKind::Reload(_)
                 | TriggerKind::Freeze(_)
                 | TriggerKind::Thaw
+                | TriggerKind::Sentence(_)
                 | TriggerKind::Serve => {
                     LookupOutcome::Failed("a state change reached the hover path".to_string())
                 }
@@ -420,7 +446,8 @@ fn resolve_trigger(
     let sentence = || match state.sentence_mode {
         SentenceMode::All => join_all_lines(&ocr_lines),
         // `Static` reaches this point only when no region exists.
-        SentenceMode::Line | SentenceMode::Static => {
+        // The `Sentence` mode reads the full sentence on add. This line is its fallback.
+        SentenceMode::Line | SentenceMode::Static | SentenceMode::Sentence => {
             extract_sentence_line(&resolved.span.text, resolved.span.cursor_byte_offset).to_string()
         }
     };
@@ -452,6 +479,28 @@ fn resolve_static(
     present_lookup(dict, engine, state, &resolved, || join_all_lines(&lines), Vec::new(), false)
 }
 
+/// Resolve one sentence probe for an Anki add.
+///
+/// The Controller keeps the hover-time sentence when this read fails or finds no anchor word.
+fn resolve_sentence(source: &mut TextSource, probe: SentenceProbe) -> LookupOutcome {
+    match source.read_sentence(probe.anchor, probe.orientation, probe.mask) {
+        Ok(text) => LookupOutcome::Sentence(text),
+        Err(e) => {
+            eprintln!("chibipop: sentence probe failed, using the hovered line: {e:#}");
+            LookupOutcome::Sentence(None)
+        }
+    }
+}
+
+/// Keep a panic in a platform OCR engine from stopping later Worker requests.
+fn resolve_sentence_safe(source: &mut TextSource, probe: SentenceProbe) -> LookupOutcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve_sentence(source, probe)))
+        .unwrap_or_else(|_| {
+            eprintln!("chibipop: sentence probe panicked, using the hovered line");
+            LookupOutcome::Sentence(None)
+        })
+}
+
 /// Resolve the text under the cursor, build the presentation, and attach the
 /// Anki sentence.
 ///
@@ -480,6 +529,12 @@ fn present_lookup(
 
     let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
     presentation.sentence = Some(sentence());
+    // `match_len` counts characters of the trimmed input, as `match_highlight` does.
+    // Keep the complete trimmed source so a promoted Card can use its own length.
+    presentation.surface = presentation
+        .top
+        .as_ref()
+        .and_then(|top| OcrSurface::new(text, top.match_len));
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if outline_match {
         if let Some(rect) = matched {
@@ -495,13 +550,17 @@ fn present_lookup(
     }
 }
 
-/// Return the OCR line that contains the cursor offset.
+/// Return the sentence that contains the cursor offset.
+///
+/// The function takes the OCR line at the cursor, then cuts that line to one
+/// sentence with [`sentence::cut_sentence`]. A wide page holds several sentences
+/// on one line. A card wants only the sentence of the hovered word.
 fn extract_sentence_line(text: &str, cursor_offset: usize) -> &str {
     let mut pos = 0;
     for line in text.split('\n') {
         let end = pos + line.len();
         if cursor_offset >= pos && cursor_offset <= end {
-            return line;
+            return sentence::cut_sentence(line, cursor_offset - pos);
         }
         pos = end + 1;
     }
@@ -544,6 +603,84 @@ mod tests {
     use crate::lookup::model::FakeDictionary;
     use crate::text::layout::{Orientation, TextGeom};
     use crate::text::TextSpan;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct ReadLog {
+        begins: AtomicUsize,
+        ends: AtomicUsize,
+        active: AtomicUsize,
+        later_begin_saw_closed: AtomicBool,
+    }
+
+    impl ReadLog {
+        fn new() -> Self {
+            Self {
+                begins: AtomicUsize::new(0),
+                ends: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                later_begin_saw_closed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    struct SentenceCapture {
+        reads: Arc<ReadLog>,
+    }
+
+    impl RegionCapture for SentenceCapture {
+        fn grab(&mut self, region: PhysRect) -> anyhow::Result<crate::text::Frame> {
+            Ok(crate::text::Frame {
+                buf: vec![0; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "sentence-test",
+                fallback: None,
+                unchanged: false,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 1000, h: 1000 }
+        }
+
+        fn begin_read(&mut self) {
+            let begin = self.reads.begins.fetch_add(1, Ordering::SeqCst);
+            if begin > 0 && self.reads.active.load(Ordering::SeqCst) == 0 {
+                self.reads.later_begin_saw_closed.store(true, Ordering::SeqCst);
+            }
+            self.reads.active.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn end_read(&mut self) {
+            self.reads.ends.fetch_add(1, Ordering::SeqCst);
+            self.reads.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PanickingOcr {
+        calls: AtomicUsize,
+    }
+
+    impl OcrEngine for PanickingOcr {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> anyhow::Result<Vec<OcrLine>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("sentence probe OCR panic");
+            }
+            Ok(Vec::new())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "panicking-ocr"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
 
     fn ws(passes: u8) -> WorkerSettings {
         WorkerSettings {
@@ -583,6 +720,24 @@ mod tests {
     fn extract_sentence_line_past_the_end_falls_back_to_all() {
         let text = "abc\ndef";
         assert_eq!(text, extract_sentence_line(text, 999));
+    }
+
+    /// The reported case: one wide line held three sentences, and the card got all three.
+    #[test]
+    fn extract_sentence_line_cuts_a_wide_line_to_the_sentence_at_the_cursor() {
+        let text = "日本のいろいろな場所で、雨がたくさん降りそうだと言っています。山が崩れたり、低い所に水が入ったりするかもしれません。気をつけてください。";
+        let offset = text.find('山').unwrap();
+        assert_eq!(
+            "山が崩れたり、低い所に水が入ったりするかもしれません。",
+            extract_sentence_line(text, offset)
+        );
+    }
+
+    #[test]
+    fn extract_sentence_line_cuts_only_the_line_that_holds_the_cursor() {
+        let text = "前の行。\n一つ目。二つ目の文。\n次の行。";
+        let offset = text.find('二').unwrap();
+        assert_eq!("二つ目の文。", extract_sentence_line(text, offset));
     }
 
     fn ocr_word(text: &str) -> crate::text::layout::OcrWord {
@@ -640,6 +795,43 @@ mod tests {
         assert_eq!(vec![2, 4], passes, "neither reload may be swallowed, and order holds");
     }
 
+    #[test]
+    fn drain_keeps_a_sentence_between_hovers_and_the_newest_hover() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let first_at = PhysPoint { x: 1, y: 1 };
+        let second_at = PhysPoint { x: 9, y: 9 };
+        tx.send(Trigger {
+            kind: TriggerKind::Sentence(SentenceProbe {
+                anchor: PhysRect { x: 20, y: 30, w: 40, h: 40 },
+                orientation: Orientation::Horizontal,
+                mask: CaptureMask::NONE,
+            }),
+            id: RequestId(2),
+        })
+        .unwrap();
+        tx.send(Trigger {
+            kind: TriggerKind::Hover(Hover { at: second_at, mask: CaptureMask::NONE }),
+            id: RequestId(3),
+        })
+        .unwrap();
+        let first = Trigger {
+            kind: TriggerKind::Hover(Hover { at: first_at, mask: CaptureMask::NONE }),
+            id: RequestId(1),
+        };
+
+        let (hover, pre) = drain(first, &rx);
+
+        assert!(matches!(hover.map(|t| t.kind), Some(TriggerKind::Hover(h)) if h.at == second_at));
+        assert!(matches!(
+            pre.as_slice(),
+            [Pre::Sentence(id, probe)]
+                if *id == RequestId(2)
+                    && probe.anchor == (PhysRect { x: 20, y: 30, w: 40, h: 40 })
+                    && probe.orientation == Orientation::Horizontal
+                    && probe.mask == CaptureMask::NONE
+        ));
+    }
+
     /// Treat `Freeze` and `Thaw` as state changes, not as lookups.
     /// Keep `Freeze` and `Thaw` in arrival order.
     /// Select the newest hover separately.
@@ -669,6 +861,73 @@ mod tests {
         let (hover, pre) = drain(first, &rx);
         assert!(hover.is_none());
         assert!(matches!(pre.as_slice(), [Pre::Reload(s)] if s.max_passes == 3));
+    }
+
+    #[test]
+    fn a_panicking_sentence_probe_returns_none_and_closes_live_read_before_later_hover() {
+        let mut settings = ws(1);
+        settings.present_cfg = Config::default().present_config(&[di(1, "FakeDict")]);
+        let reads = Arc::new(ReadLog::new());
+        let capture_reads = Arc::clone(&reads);
+        let (worker, _) = Worker::spawn(
+            settings,
+            move || -> anyhow::Result<WorkerParts> {
+                Ok(WorkerParts {
+                    capture: Box::new(SentenceCapture { reads: capture_reads }),
+                    ocr: Box::new(PanickingOcr { calls: AtomicUsize::new(0) }),
+                    dict: Box::new(eating_dict()),
+                    reopen_dict: None,
+                    engine: engine(),
+                    serve: None,
+                })
+            },
+            || {},
+        )
+        .expect("the Worker starts before it reads a sentence");
+
+        worker
+            .trigger()
+            .send(Trigger {
+                kind: TriggerKind::Sentence(SentenceProbe {
+                    anchor: PhysRect { x: 480, y: 480, w: 40, h: 40 },
+                    orientation: Orientation::Horizontal,
+                    mask: CaptureMask::NONE,
+                }),
+                id: RequestId(1),
+            })
+            .unwrap();
+
+        let sentence = worker
+            .results()
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a panicking sentence probe must still answer");
+        assert_eq!(RequestId(1), sentence.id);
+        assert!(matches!(sentence.outcome, LookupOutcome::Sentence(None)));
+
+        worker
+            .trigger()
+            .send(Trigger {
+                kind: TriggerKind::Hover(Hover {
+                    at: PhysPoint { x: 480, y: 480 },
+                    mask: CaptureMask::NONE,
+                }),
+                id: RequestId(2),
+            })
+            .unwrap();
+
+        let later = worker
+            .results()
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the Worker must handle a later capture request");
+        assert_eq!(RequestId(2), later.id);
+        assert!(matches!(later.outcome, LookupOutcome::Hide));
+        assert!(
+            reads.later_begin_saw_closed.load(Ordering::SeqCst),
+            "the later capture must begin after the sentence read closes",
+        );
+        assert_eq!(2, reads.begins.load(Ordering::SeqCst), "sentence and hover each open a read");
+        assert_eq!(2, reads.ends.load(Ordering::SeqCst), "every live read must end");
+        assert_eq!(0, reads.active.load(Ordering::SeqCst), "no live read may remain open");
     }
 
     fn di(id: i64, name: &str) -> DictInfo {
@@ -791,6 +1050,11 @@ mod tests {
             panic!("a hit must present something")
         };
         assert_eq!(Some("食べた。".to_string()), presentation.sentence);
+        assert_eq!(
+            Some("食"),
+            presentation.surface.as_ref().and_then(OcrSurface::as_str),
+            "the on-screen form the card matched",
+        );
         assert!(matched.is_some(), "a hit with geometry has a rect to outline");
         assert_eq!(
             vec![ScanKind::Pass1, ScanKind::Match],

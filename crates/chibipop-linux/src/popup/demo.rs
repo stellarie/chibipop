@@ -94,6 +94,7 @@ pub fn canned() -> Presentation {
         ],
         all_cards: Vec::new(),
         sentence: None,
+        surface: None,
     }
 }
 

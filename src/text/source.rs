@@ -8,8 +8,10 @@ use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
     band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
-    tile_forward, CaptureSize, OcrLine, OcrWord, Orientation, Resolved,
+    resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
+    Orientation, Resolved,
 };
+use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
@@ -287,6 +289,55 @@ impl TextSource {
         })
     }
 
+    /// Read the sentence around `anchor` from bounded OCR tiles.
+    ///
+    /// This read belongs here because `TextSource` owns capture, the OCR cache,
+    /// the frozen frame, and the capture mask. Callers must not duplicate these
+    /// rules. The first failed grab is an error because a missing tile can hold
+    /// the sentence start. A partial sentence on an Anki card is worse than the
+    /// hovered line.
+    ///
+    /// Frozen mode needs no separate path. [`Self::recognise_at_capture`] already
+    /// reads the held frame.
+    pub fn read_sentence(
+        &mut self,
+        anchor: PhysRect,
+        orientation: Orientation,
+        mask: CaptureMask,
+    ) -> Result<Option<String>> {
+        let bounds = self.capture.bounds_containing(anchor.center());
+        let regions = sentence::probe_regions(anchor, orientation, bounds);
+        if regions.is_empty() {
+            return Ok(None);
+        }
+
+        let live = self.frozen.is_none();
+        let read = |source: &mut Self| -> Result<Option<String>> {
+            // Keep one cache generation for this logical read, like the tiled hover path.
+            source.previous = std::mem::take(&mut source.recognised);
+            let mut all_lines = Vec::new();
+            for tile in regions {
+                let (mut lines, _) =
+                    source.recognise_at_capture(tile, source.settings.upscale, mask)?;
+                trim_probe_edges(&mut lines, tile, bounds, orientation);
+                all_lines.extend(lines);
+            }
+            Ok(sentence::sentence_at(&all_lines, anchor, orientation))
+        };
+
+        if !live {
+            return read(self);
+        }
+
+        self.capture.begin_read();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(self)));
+        self.capture.end_read();
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     /// Capture and recognize at `factor`, then map the words to physical pixels.
     ///
     /// The code fills `mask` with white in the grabbed pixels before OCR sees them.
@@ -425,33 +476,43 @@ impl TextSource {
     ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
         let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
-        let Some(first) = resolved else { return Ok((None, scan, lines)) };
+        let Some(pass_one) = resolved else { return Ok((None, scan, lines)) };
+        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         if collect {
-            scan.push(ScanRect {
-                rect: region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
-                kind: ScanKind::Pass1,
-            });
+            scan.push(ScanRect { rect: region, kind: ScanKind::Pass1 });
         }
+        let wrapped = if let Some((probes, wrapped)) =
+            self.probe_wrap(&lines, cursor, region, pass_one.orientation, mask)
+        {
+            if collect {
+                for probe in probes {
+                    scan.push(ScanRect { rect: probe, kind: ScanKind::Tile });
+                }
+            }
+            wrapped
+        } else {
+            None
+        };
+        let wrapped_anchor =
+            wrapped.as_ref().map_or(pass_one.span.anchor, |r| r.span.anchor);
         if self.settings.max_passes <= 1 {
             if collect {
-                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+                scan.push(ScanRect { rect: wrapped_anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan, lines));
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         }
-
         // Reuse pass 1's kept tail. Do not read it again.
-        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         let alnum = self.settings.scan_alphanumeric;
         let Some((head, tail_start, orientation)) = head_and_tail(&lines, cursor, region, alnum)
         else {
             if collect {
-                scan.push(ScanRect { rect: first.span.anchor, kind: ScanKind::Anchor });
+                scan.push(ScanRect { rect: wrapped_anchor, kind: ScanKind::Anchor });
             }
-            return Ok((Some(first), scan, lines));
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         };
         let head_chars = head.chars().count();
 
-        let anchor = first.span.anchor;
+        let anchor = pass_one.span.anchor;
         let band = band_of(anchor, orientation, self.settings.capture.short());
         let perpendicular_centre = match orientation {
             Orientation::Horizontal => anchor.center().y,
@@ -491,13 +552,17 @@ impl TextSource {
         );
 
         if collect {
+            let anchor = if tail.is_empty() { wrapped_anchor } else { pass_one.span.anchor };
             scan.push(ScanRect { rect: anchor, kind: ScanKind::Anchor });
         }
 
-        let text = normalise(&format!("{head}{tail}"));
-        if text.is_empty() {
-            return Ok((Some(first), scan, lines));
+        // Keep pass 1's answer when tiles add no text. Preserve its geometry and any joined continuation.
+        // When tiles add text, use the stitched head and tail and drop a joined continuation.
+        // A word past the box on the same row shows that the line continues.
+        if tail.is_empty() {
+            return Ok((Some(wrapped.unwrap_or(pass_one)), scan, lines));
         }
+        let text = normalise(&format!("{head}{tail}"));
         Ok((
             Some(Resolved {
                 // The stitched text has no geometry.
@@ -512,6 +577,38 @@ impl TextSource {
             scan,
             lines,
         ))
+    }
+
+    /// Read bounded wrap probes when pass 1's box can hide a wrap.
+    /// See [`wrap_probe`].
+    /// `orientation` comes from pass 1 because a clipped probe can contain one word.
+    ///
+    /// The result lists every probe that this operation attempted.
+    /// A failure stops the probe sequence at that probe. Later probes cannot join without it.
+    /// Pass 1's answer then stands.
+    fn probe_wrap(
+        &mut self,
+        lines: &[OcrLine],
+        cursor: PhysPoint,
+        region: PhysRect,
+        orientation: Orientation,
+        mask: CaptureMask,
+    ) -> Option<(Vec<PhysRect>, Option<Resolved>)> {
+        let alnum = self.settings.scan_alphanumeric;
+        let bounds = self.capture.bounds_containing(cursor);
+        let probes = wrap_probe(lines, cursor, region, alnum, bounds)?;
+        let mut probe_lines: Vec<(PhysRect, Vec<OcrLine>)> = Vec::new();
+        for (i, &probe) in probes.iter().enumerate() {
+            match self.recognise_at_capture(probe, self.settings.upscale, mask) {
+                Ok((lines, _)) => probe_lines.push((probe, lines)),
+                Err(e) => {
+                    eprintln!("chibipop: wrap probe failed, using pass 1: {e:#}");
+                    return Some((probes[..=i].to_vec(), None));
+                }
+            }
+        }
+        let wrapped = resolve_wrap(&probe_lines, cursor, alnum, orientation, bounds);
+        Some((probes, wrapped))
     }
 
     /// Read one capture and return the hovered line.
@@ -734,6 +831,7 @@ mod tests {
         }
     }
 
+
     /// This capture lets the test control `unchanged`.
     /// It exercises reuse without a compositor.
     struct Paced {
@@ -746,6 +844,7 @@ mod tests {
             self.grabs.set(self.grabs.get() + 1);
             Ok(Frame {
                 buf: vec![0u8; (region.w * region.h * 4) as usize],
+
                 w: region.w,
                 h: region.h,
                 source: "paced",
@@ -1061,6 +1160,565 @@ mod tests {
         source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("pass 1 again");
         source.resolve_in_region(AT, OTHER, CaptureMask::NONE).expect("tile again");
         assert_eq!(runs.get(), 2, "neither region may evict the other");
+    }
+
+    // -- the wrap probe --
+
+    /// The hover sits on the last character of the hovered line.
+    /// The line's margin lies far left of pass 1's 500x100 box. The wrap `かった` starts at that margin.
+    const WRAP_AT: PhysPoint = PhysPoint { x: 1000, y: 500 };
+    /// `region_around(WRAP_AT)` returns the default capture size.
+    const WRAP_REGION: PhysRect = PhysRect { x: 750, y: 450, w: 500, h: 100 };
+    /// These are the two bounded probes in the short fixture.
+    const WRAP_MARGIN: PhysRect = PhysRect { x: 0, y: 470, w: 1000, h: 270 };
+    const WRAP_TAIL: PhysRect = PhysRect { x: 500, y: 470, w: 540, h: 270 };
+    /// The wide output fixture moves the line-end probe farther right.
+    const WIDE_TAIL: PhysRect = PhysRect { x: 1000, y: 470, w: 940, h: 270 };
+    /// `region_around` returns the capture size at the wide output cursor.
+    const WIDE_REGION: PhysRect = PhysRect { x: 1650, y: 450, w: 500, h: 100 };
+    /// The wide wrap fixture reports a larger box for the hovered glyph.
+    const WIDE_WRAP_HIT: PhysRect = PhysRect { x: 970, y: 480, w: 60, h: 40 };
+    /// The precedence fixture returns one same-row word from the first forward tile.
+    const FORWARD_TILE: PhysRect = PhysRect { x: 1250, y: 440, w: 500, h: 120 };
+
+
+    /// Select the bounded probe that fails in the fixture.
+    enum ProbeFailure {
+        Margin,
+        Tail,
+    }
+
+    /// The `Scripted` fixture answers each grab by its shape in that grab's image pixels.
+    /// The whole screen holds `にも疎` with its end at x=1020.
+    /// It holds `かった` at x=100 on the line below.
+    /// Pass 1's box sees only the line end. The two probes see both fragments.
+    /// The source combines their mapped lines.
+    struct Scripted {
+        runs: Rc<std::cell::Cell<u32>>,
+        region_x: Rc<std::cell::Cell<i32>>,
+        /// Show a clear continuation inside pass 1's box.
+        wrap_in_box: bool,
+        /// Place the line end near x=1900 for the wide output test.
+        wide: bool,
+        /// Place one OCR word across the probe seam.
+        glued_seam: bool,
+        /// Fail one bounded probe after pass 1.
+        fail: Option<ProbeFailure>,
+        /// Give the hovered glyph a wider box in a wrap probe.
+        wrap_wide_hit: bool,
+        /// Return same-row text from the first forward tile.
+        forward_tail: bool,
+    }
+    /// `ScriptedCapture` records each requested region for role-based OCR replies.
+    struct ScriptedCapture {
+        region_x: Rc<std::cell::Cell<i32>>,
+        wide: bool,
+    }
+
+    impl RegionCapture for ScriptedCapture {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            self.region_x.set(region.x);
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "scripted",
+                fallback: None,
+                unchanged: true,
+            })
+        }
+
+        fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
+            if self.wide {
+                PhysRect { x: 0, y: 0, w: 2560, h: 1500 }
+            } else {
+                PhysRect { x: p.x - 1000, y: p.y - 1000, w: 2000, h: 2000 }
+            }
+        }
+    }
+
+    impl OcrEngine for Scripted {
+        fn recognise(&self, _bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+            self.runs.set(self.runs.get() + 1);
+            let chars = |text: &str, x0: i32, y: i32| OcrLine {
+                words: text
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| OcrWord {
+                        text: c.to_string(),
+                        rect: PhysRect { x: x0 + 40 * i as i32, y, w: 40, h: 40 },
+                    })
+                    .collect(),
+            };
+            let capture_x = self.region_x.get();
+            if (w, h) == (WRAP_MARGIN.w, WRAP_MARGIN.h)
+                && capture_x == WRAP_MARGIN.x
+                && matches!(self.fail, Some(ProbeFailure::Margin))
+            {
+                return Err(anyhow::anyhow!("scripted margin probe failure"));
+            }
+            if (w, h) == (WRAP_TAIL.w, WRAP_TAIL.h)
+                && capture_x == WRAP_TAIL.x
+                && matches!(self.fail, Some(ProbeFailure::Tail))
+            {
+                return Err(anyhow::anyhow!("scripted tail probe failure"));
+            }
+
+            if (w, h) == (WRAP_REGION.w, WRAP_REGION.h) {
+                let (x, origin) =
+                    if self.wide { (1800, WIDE_REGION) } else { (900, WRAP_REGION) };
+                let mut lines = vec![chars("にも疎", x - origin.x, 480 - origin.y)];
+                if self.wrap_in_box {
+                    lines.push(chars("かった", 850 - origin.x, 510 - origin.y));
+                }
+                return Ok(lines);
+            }
+            if self.wide {
+                if (w, h) == (WRAP_MARGIN.w, WRAP_MARGIN.h) && capture_x == WRAP_MARGIN.x {
+                    return Ok(vec![chars("かった", 100 - WRAP_MARGIN.x, 540 - WRAP_MARGIN.y)]);
+                }
+                if (w, h) == (WIDE_TAIL.w, WIDE_TAIL.h) && capture_x == WIDE_TAIL.x {
+                    return Ok(vec![chars("にも疎", 1800 - WIDE_TAIL.x, 480 - WIDE_TAIL.y)]);
+                }
+                return Ok(Vec::new());
+            }
+            if (w, h) == (WRAP_MARGIN.w, WRAP_MARGIN.h) && capture_x == WRAP_MARGIN.x {
+                if self.glued_seam {
+                    let mut line = chars("に", 900 - WRAP_MARGIN.x, 480 - WRAP_MARGIN.y);
+                    line.words.push(OcrWord {
+                        text: "も疎".into(),
+                        rect: PhysRect {
+                            x: 940 - WRAP_MARGIN.x,
+                            y: 480 - WRAP_MARGIN.y,
+                            w: 60,
+                            h: 40,
+                        },
+                    });
+                    return Ok(vec![
+                        line,
+                        chars("かった", 100 - WRAP_MARGIN.x, 540 - WRAP_MARGIN.y),
+                    ]);
+                }
+                return Ok(vec![
+                    chars("にも", 900 - WRAP_MARGIN.x, 480 - WRAP_MARGIN.y),
+                    chars("かった", 100 - WRAP_MARGIN.x, 540 - WRAP_MARGIN.y),
+                ]);
+            }
+            if (w, h) == (WRAP_TAIL.w, WRAP_TAIL.h) && capture_x == WRAP_TAIL.x {
+                let mut line = chars("にも疎", 900 - WRAP_TAIL.x, 480 - WRAP_TAIL.y);
+                if self.wrap_wide_hit {
+                    line.words[2].rect = PhysRect {
+                        x: WIDE_WRAP_HIT.x - WRAP_TAIL.x,
+                        y: WIDE_WRAP_HIT.y - WRAP_TAIL.y,
+                        w: WIDE_WRAP_HIT.w,
+                        h: WIDE_WRAP_HIT.h,
+                    };
+                }
+                return Ok(vec![line]);
+            }
+            if self.forward_tail
+                && (w, h) == (FORWARD_TILE.w, FORWARD_TILE.h)
+                && capture_x == FORWARD_TILE.x
+            {
+                return Ok(vec![chars(
+                    "先",
+                    0,
+                    480 - FORWARD_TILE.y,
+                )]);
+            }
+            Ok(Vec::new())
+        }
+
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
+
+    struct OutputCapture;
+
+    impl RegionCapture for OutputCapture {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+
+                w: region.w,
+                h: region.h,
+                source: "output",
+                fallback: None,
+                unchanged: true,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 2560, h: 1500 }
+        }
+    }
+
+    /// `FailingOutputCapture` refuses one tile after it returns earlier tiles.
+    struct FailingOutputCapture {
+        grabs: std::cell::Cell<u32>,
+        fail_on: u32,
+    }
+
+    impl RegionCapture for FailingOutputCapture {
+        fn grab(&mut self, region: PhysRect) -> Result<Frame> {
+            let grab = self.grabs.get() + 1;
+            self.grabs.set(grab);
+            if grab == self.fail_on {
+                return Err(anyhow::anyhow!("scripted sentence grab failure"));
+            }
+            Ok(Frame {
+                buf: vec![0u8; (region.w * region.h * 4) as usize],
+
+                w: region.w,
+                h: region.h,
+                source: "output",
+                fallback: None,
+                unchanged: true,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 2560, h: 1440 }
+        }
+    }
+
+    /// `SentenceScripted` returns rows in local pixels of the first tile.
+    /// The source maps those boxes back to the desktop before it cuts the sentence.
+    struct SentenceScripted {
+        calls: Rc<std::cell::Cell<u32>>,
+        empty: bool,
+    }
+
+    impl OcrEngine for SentenceScripted {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if self.empty || call != 1 {
+                return Ok(Vec::new());
+            }
+            let row = |text: &str, y: i32| OcrLine {
+                words: text
+                    .chars()
+                    .enumerate()
+                    .map(|(i, character)| OcrWord {
+                        text: character.to_string(),
+                        rect: PhysRect { x: 100 + 40 * i as i32, y, w: 40, h: 40 },
+                    })
+                    .collect(),
+            };
+            Ok(vec![
+                row("前の文。今日は", 180),
+                row("いい天気で", 240),
+                row("すね。次", 300),
+            ])
+        }
+
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "sentence-scripted"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
+
+    fn sentence_scripted(
+        fail_on: Option<u32>,
+        empty: bool,
+    ) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let capture: Box<dyn RegionCapture> = match fail_on {
+            Some(fail_on) => Box::new(FailingOutputCapture {
+                grabs: std::cell::Cell::new(0),
+                fail_on,
+            }),
+            None => Box::new(OutputCapture),
+        };
+        let source = TextSource::new(
+            capture,
+            Box::new(SentenceScripted { calls: calls.clone(), empty }),
+            SettingsSnapshot { upscale: 1, ..snap() },
+        );
+        (source, calls)
+    }
+
+    const SENTENCE_ANCHOR: PhysRect = PhysRect { x: 180, y: 500, w: 40, h: 40 };
+
+    #[test]
+    fn sentence_probe_reads_five_tiles_and_cuts_at_sentence_ends() {
+
+        let (mut source, calls) = sentence_scripted(None, false);
+
+        let sentence = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect("sentence probe");
+
+        assert_eq!(Some("今日はいい天気ですね。".to_string()), sentence);
+        assert_eq!(5, calls.get(), "the 2560px output needs five bounded tiles");
+
+    }
+
+    #[test]
+    fn a_sentence_probe_grab_failure_is_returned() {
+        let (mut source, calls) = sentence_scripted(Some(2), false);
+
+        let error = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect_err("the second tile must fail the read");
+
+        assert!(format!("{error:#}").contains("scripted sentence grab failure"));
+        assert_eq!(1, calls.get(), "the second grab fails before OCR");
+    }
+
+    #[test]
+    fn a_sentence_probe_without_an_anchor_word_returns_none() {
+        let (mut source, calls) = sentence_scripted(None, true);
+
+        let sentence = source
+            .read_sentence(SENTENCE_ANCHOR, Orientation::Horizontal, CaptureMask::NONE)
+            .expect("sentence probe");
+
+        assert_eq!(None, sentence);
+        assert_eq!(5, calls.get(), "all five tiles are read before the anchor scan");
+
+    }
+
+    fn scripted(wrap_in_box: bool, max_passes: u8) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        scripted_fixture(wrap_in_box, max_passes, false, false, None)
+    }
+
+    fn glued_seam_scripted() -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        scripted_fixture(false, 1, false, true, None)
+    }
+
+    fn wide_scripted(max_passes: u8) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        scripted_fixture(false, max_passes, true, false, None)
+    }
+
+    fn failing_scripted(failure: ProbeFailure) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        scripted_fixture(false, 1, false, false, Some(failure))
+    }
+
+    fn scripted_fixture(
+        wrap_in_box: bool,
+        max_passes: u8,
+        wide: bool,
+        glued_seam: bool,
+        fail: Option<ProbeFailure>,
+    ) -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        let runs = Rc::new(std::cell::Cell::new(0));
+        let region_x = Rc::new(std::cell::Cell::new(0));
+        let capture: Box<dyn RegionCapture> = Box::new(ScriptedCapture {
+            region_x: Rc::clone(&region_x),
+            wide,
+        });
+        let source = TextSource::new(
+            capture,
+            Box::new(Scripted {
+                runs: runs.clone(),
+                region_x,
+                wrap_in_box,
+                wide,
+                glued_seam,
+                fail,
+                wrap_wide_hit: false,
+                forward_tail: false,
+            }),
+            SettingsSnapshot {
+                max_passes,
+                upscale: 1,
+                prefer_vertical: false,
+                capture: CaptureSize::default(),
+                scan_alphanumeric: true,
+            },
+        );
+        (source, runs)
+    }
+    fn wide_wrap_with_forward_tail_scripted() -> (TextSource, Rc<std::cell::Cell<u32>>) {
+        let runs = Rc::new(std::cell::Cell::new(0));
+        let region_x = Rc::new(std::cell::Cell::new(0));
+        let source = TextSource::new(
+            Box::new(ScriptedCapture { region_x: Rc::clone(&region_x), wide: false }),
+            Box::new(Scripted {
+                runs: runs.clone(),
+                region_x,
+                wrap_in_box: false,
+                wide: false,
+                glued_seam: false,
+                fail: None,
+                wrap_wide_hit: true,
+                forward_tail: true,
+            }),
+            SettingsSnapshot {
+                max_passes: 2,
+                upscale: 1,
+                prefer_vertical: false,
+                capture: CaptureSize::default(),
+                scan_alphanumeric: true,
+            },
+        );
+        (source, runs)
+    }
+
+    fn assert_probe_failure_keeps_pass_one(
+        failure: ProbeFailure,
+        expected_runs: u32,
+        expected_scan: &[(ScanKind, PhysRect)],
+    ) {
+        let (mut source, runs) = failing_scripted(failure);
+        let (resolved, scan, _) = source
+            .resolve_at_tiled_scanned(WRAP_AT, true, CaptureMask::NONE)
+            .expect("read");
+        let resolved = resolved.expect("pass 1 hit");
+
+        assert_eq!(expected_runs, runs.get(), "the probe must stop at the first failure");
+        assert_eq!("にも疎", resolved.span.text);
+        assert_eq!(6, resolved.span.cursor_byte_offset);
+        let geom: Vec<(usize, PhysRect)> =
+            resolved.span.geom.iter().map(|g| (g.char_count, g.rect)).collect();
+        assert_eq!(
+            vec![
+                (1, PhysRect { x: 900, y: 480, w: 40, h: 40 }),
+                (1, PhysRect { x: 940, y: 480, w: 40, h: 40 }),
+                (1, PhysRect { x: 980, y: 480, w: 40, h: 40 }),
+            ],
+            geom,
+        );
+        assert_eq!(PhysRect { x: 980, y: 480, w: 40, h: 40 }, resolved.span.anchor);
+
+        let scan: Vec<(ScanKind, PhysRect)> = scan.iter().map(|s| (s.kind, s.rect)).collect();
+        assert_eq!(expected_scan, scan.as_slice());
+    }
+
+    #[test]
+    fn a_margin_probe_failure_keeps_pass_one() {
+        assert_probe_failure_keeps_pass_one(
+            ProbeFailure::Margin,
+            2,
+            &[
+                (ScanKind::Pass1, WRAP_REGION),
+                (ScanKind::Tile, WRAP_MARGIN),
+                (ScanKind::Anchor, PhysRect { x: 980, y: 480, w: 40, h: 40 }),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_tail_probe_failure_keeps_pass_one() {
+        assert_probe_failure_keeps_pass_one(
+            ProbeFailure::Tail,
+            3,
+            &[
+                (ScanKind::Pass1, WRAP_REGION),
+                (ScanKind::Tile, WRAP_MARGIN),
+                (ScanKind::Tile, WRAP_TAIL),
+                (ScanKind::Anchor, PhysRect { x: 980, y: 480, w: 40, h: 40 }),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_wrap_outside_the_box_is_read_by_two_bounded_probes() {
+        let (mut source, runs) = scripted(false, 1);
+        let (resolved, scan, _) = source
+            .resolve_at_tiled_scanned(WRAP_AT, true, CaptureMask::NONE)
+            .expect("read");
+        let resolved = resolved.expect("a hit");
+        assert_eq!(runs.get(), 3, "pass 1 and the two probes");
+        assert_eq!("にも疎かった", resolved.span.text);
+        assert_eq!("にも".len(), resolved.span.cursor_byte_offset);
+        assert_eq!(6, resolved.span.geom.len(), "the combined answer keeps geometry");
+        let kinds: Vec<(ScanKind, PhysRect)> = scan.iter().map(|s| (s.kind, s.rect)).collect();
+        assert_eq!(
+            vec![
+                (ScanKind::Pass1, WRAP_REGION),
+                (ScanKind::Tile, WRAP_MARGIN),
+                (ScanKind::Tile, WRAP_TAIL),
+                (ScanKind::Anchor, PhysRect { x: 980, y: 480, w: 40, h: 40 }),
+            ],
+            kinds,
+        );
+    }
+
+    #[test]
+    fn a_glued_box_at_the_probe_seam_does_not_hide_the_hovered_word() {
+        let (mut source, runs) = glued_seam_scripted();
+        let resolved =
+            source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("read").expect("a hit");
+        assert_eq!("にも疎かった", resolved.span.text);
+        assert_eq!(6, resolved.span.cursor_byte_offset);
+        assert_eq!(PhysRect { x: 980, y: 480, w: 40, h: 40 }, resolved.span.anchor);
+        assert_eq!(3, runs.get());
+    }
+
+    #[test]
+    fn a_wide_output_keeps_the_hit_tail_and_margin_continuation() {
+        let (mut source, runs) = wide_scripted(1);
+        let resolved = source
+            .resolve_at_tiled(PhysPoint { x: 1900, y: 500 }, CaptureMask::NONE)
+            .expect("read")
+            .expect("a hit");
+        assert_eq!(runs.get(), 4, "pass 1 and the three bounded probes");
+        assert_eq!("にも疎かった", resolved.span.text);
+        assert_eq!(6, resolved.span.geom.len());
+        assert_eq!(PhysRect { x: 1880, y: 480, w: 40, h: 40 }, resolved.span.anchor);
+        assert_eq!(6, resolved.span.cursor_byte_offset);
+    }
+
+    #[test]
+    fn a_wrap_inside_the_box_costs_no_probe() {
+        let (mut source, runs) = scripted(true, 1);
+        let resolved =
+            source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("read").expect("a hit");
+        assert_eq!(runs.get(), 1);
+        assert_eq!("にも疎かった", resolved.span.text);
+    }
+
+    /// The probe joins the reuse set. A static dwell then costs no OCR for the probe.
+    #[test]
+    fn a_dwell_reuses_the_probe() {
+        let (mut source, runs) = scripted(false, 1);
+        source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("first read");
+        assert_eq!(runs.get(), 3);
+        for _ in 0..3 {
+            let resolved =
+                source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("dwell").expect("a hit");
+            assert_eq!("にも疎かった", resolved.span.text);
+        }
+        assert_eq!(runs.get(), 3, "a static dwell must never recognise again");
+    }
+    /// A wider wrap hit must not replace pass 1's anchor when a forward tile adds text.
+    #[test]
+    fn a_forward_tile_keeps_the_pass_one_anchor_after_a_wider_wrap_probe() {
+        let (mut source, runs) = wide_wrap_with_forward_tail_scripted();
+        let resolved =
+            source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("read").expect("a hit");
+
+        assert_eq!("疎先", resolved.span.text);
+        assert_eq!(PhysRect { x: 980, y: 480, w: 40, h: 40 }, resolved.span.anchor);
+        assert_eq!(4, runs.get(), "pass 1, two wrap probes, and one forward tile must run");
+    }
+
+    /// Forward tiles find nothing after a line's last character. Pass 1's answer,
+    /// with the continuation and its geometry, must survive the tiled path.
+    #[test]
+    fn tiles_that_add_nothing_keep_the_wrapped_answer() {
+        let (mut source, _) = scripted(false, 3);
+        let resolved =
+            source.resolve_at_tiled(WRAP_AT, CaptureMask::NONE).expect("read").expect("a hit");
+        assert_eq!("にも疎かった", resolved.span.text);
+        assert_eq!(6, resolved.span.geom.len());
     }
 
     /// New settings produce new answers, so the source must drop all stored results.

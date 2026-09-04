@@ -1267,10 +1267,10 @@ mod tests {
     }
 
     #[test]
-    fn sentence_mode_defaults_to_line_in_the_form() {
+    fn sentence_mode_defaults_to_sentence_in_the_form() {
         let cfg = Config::default();
         let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Line, form.sentence_mode);
+        assert_eq!(SentenceMode::Sentence, form.sentence_mode);
     }
 
     #[test]
@@ -1291,6 +1291,16 @@ mod tests {
         assert_eq!(SentenceMode::Static, form.sentence_mode);
         let out = apply_to(&form, &cfg);
         assert_eq!(SentenceMode::Static, out.anki.sentence_mode);
+    }
+
+    #[test]
+    fn sentence_mode_sentence_round_trips() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.sentence_mode = SentenceMode::Sentence;
+        let form = from_config(&cfg, &dicts());
+        assert_eq!(SentenceMode::Sentence, form.sentence_mode);
+        let out = apply_to(&form, &cfg);
+        assert_eq!(SentenceMode::Sentence, out.anki.sentence_mode);
     }
 
     #[test]

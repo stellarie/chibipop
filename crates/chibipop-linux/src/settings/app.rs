@@ -1843,8 +1843,9 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
 /// One ordered table supplies both directions of the UI map. The labels go
 /// to the picker and the mode comes back. iced returns a label, while the
 /// Windows combo returns an index. Both windows use one table instead of a
-/// string match at the call site.
-const SENTENCE_MODES: [(SentenceMode, &str); 3] = [
+/// string match at the call site. The first item supplies the default.
+const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
+    (SentenceMode::Sentence, "Full sentence"),
     (SentenceMode::Line, "Current line"),
     (SentenceMode::All, "All lines"),
     (SentenceMode::Static, "Static region"),
@@ -1865,7 +1866,7 @@ fn sentence_mode_label(mode: SentenceMode) -> &'static str {
 /// The sentence mode for a picked label. Only labels from this table return
 /// from the UI, so the fallback cannot occur there.
 fn sentence_mode_of(label: &str) -> SentenceMode {
-    SENTENCE_MODES.iter().find(|&&(_, l)| l == label).map_or(SentenceMode::Line, |&(m, _)| m)
+    SENTENCE_MODES.iter().find(|&&(_, l)| l == label).map_or(SentenceMode::Sentence, |&(m, _)| m)
 }
 
 /// The static-region row's copyable bind, or the reason that no bind exists.
@@ -2855,15 +2856,20 @@ mod tests {
     }
 
     /// The sentence picker uses one ordered table. Each `SentenceMode` must appear
-    /// in the table, or the window cannot offer it and falls back to `Line`.
+    /// in the table. Otherwise, the window cannot offer it and uses `Sentence`.
     #[test]
     fn every_sentence_mode_round_trips_through_its_own_label() {
-        for mode in [SentenceMode::Line, SentenceMode::All, SentenceMode::Static] {
+        for mode in [
+            SentenceMode::Sentence,
+            SentenceMode::Line,
+            SentenceMode::All,
+            SentenceMode::Static,
+        ] {
             let label = sentence_mode_label(mode);
             assert_eq!(mode, sentence_mode_of(label), "{label}");
             assert!(sentence_labels().iter().any(|l| l == label), "{label} must be offered");
         }
-        assert_eq!(3, sentence_labels().len(), "the table is the whole list");
+        assert_eq!(4, sentence_labels().len(), "the table is the whole list");
     }
 
     /// A *Static region* choice stores the mode on the shared form. Apply writes it,
@@ -2872,7 +2878,7 @@ mod tests {
     fn picking_the_static_region_mode_stages_it_on_the_form() {
         let dir = scratch("srmode");
         let mut app = app(&dir);
-        assert_eq!(SentenceMode::Line, app.form.sentence_mode, "the shipped default");
+        assert_eq!(SentenceMode::Sentence, app.form.sentence_mode, "the shipped default");
 
         let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
         assert_eq!(SentenceMode::Static, app.form.sentence_mode);

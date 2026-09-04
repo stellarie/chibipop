@@ -414,6 +414,12 @@ impl PortalCapture {
     pub fn new(session: PortalSession) -> PortalCapture {
         PortalCapture { session, held: Vec::new(), previous: Vec::new() }
     }
+    /// Shares only the parked-frame store with the daemon's post-hide sentence wait.
+    ///
+    /// Exposing the session or making `grab` wait for damage was rejected.
+    pub(crate) fn frame_store(&self) -> Arc<frame::FrameStore> {
+        Arc::clone(self.session.stream.store())
+    }
 
     /// Returns pixels that the code holds for `region` and promotes them into
     /// this read.

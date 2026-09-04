@@ -16,7 +16,42 @@ use crate::lookup::model::{Dictionary, Hit};
 use crate::text::layout::union_chars;
 use crate::text::TextSpan;
 
+/// The OCR source and match length for the current top Card.
+///
+/// The source keeps enough text to derive a new surface when `swap_top`
+/// promotes a Card with a different match length.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrSurface {
+    source: String,
+    match_len: usize,
+}
+
+impl OcrSurface {
+    /// Keep the trimmed OCR source and the match length of the current Card.
+    pub fn new(source: &str, match_len: usize) -> Option<Self> {
+        let source = source.trim_start();
+        (!source.is_empty()).then(|| Self { source: source.to_string(), match_len })
+    }
+
+    /// Return the surface for the current Card without allocating.
+    pub fn as_str(&self) -> Option<&str> {
+        let end = self
+            .source
+            .char_indices()
+            .nth(self.match_len)
+            .map_or(self.source.len(), |(at, _)| at);
+        (!self.source[..end].is_empty()).then_some(&self.source[..end])
+    }
+
+    fn set_match_len(&mut self, match_len: usize) {
+        self.match_len = match_len;
+    }
+}
+
 /// The popup view model for one hover.
+///
+/// `surface` keeps the OCR source in a small value so all Presentation
+/// literals can keep using `surface: None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Presentation {
     pub top: Option<Card>,
@@ -25,6 +60,8 @@ pub struct Presentation {
     pub all_cards: Vec<Card>,
     /// The OCR sentence line that `worker.rs` sets for note payloads.
     pub sentence: Option<String>,
+    /// The OCR source and current top-Card surface for note payloads.
+    pub surface: Option<OcrSurface>,
 }
 
 /// The complete top [`Card`].
@@ -341,7 +378,7 @@ pub fn build(
         .map(|c| collapsed_from_card(c, cfg.summary_chars))
         .collect();
 
-    Presentation { top, collapsed, all_cards, sentence: None }
+    Presentation { top, collapsed, all_cards, sentence: None, surface: None }
 }
 
 /// The physical-pixel space between the text and its outline.
@@ -462,6 +499,9 @@ pub fn swap_top(p: &mut Presentation, collapsed_index: usize, summary_chars: usi
     }
     p.all_cards.swap(0, card_index);
     p.top = Some(p.all_cards[0].clone());
+    if let Some(surface) = p.surface.as_mut() {
+        surface.set_match_len(p.all_cards[0].match_len);
+    }
     p.collapsed = p
         .all_cards
         .iter()
@@ -1091,6 +1131,30 @@ mod tests {
         let row = collapsed_from_card(&card, 40);
         assert!(!row.summary.contains('\n'));
         assert_eq!(41, row.summary.chars().count());
+    }
+
+    #[test]
+    fn swap_top_updates_the_ocr_surface_for_a_promoted_card_with_a_different_match_len() {
+        let mut short = hit("食", "しょく", 1, "eat");
+        short.match_len = 1;
+        let mut long = hit("食べ", "たべ", 1, "to eat");
+        long.match_len = 2;
+        let mut p = build(&[short, long], &dicts(), &cfg(), &no_pitch());
+        // The Worker matched the first card against the OCR input "食べ".
+        p.surface = OcrSurface::new("食べ", 1);
+        assert_eq!(
+            Some("食"),
+            p.surface.as_ref().and_then(OcrSurface::as_str),
+        );
+        assert_eq!(1, p.top.as_ref().expect("a top card").match_len);
+
+        swap_top(&mut p, 0, 40);
+
+        assert_eq!(2, p.top.as_ref().expect("the promoted card").match_len);
+        assert_eq!(
+            Some("食べ"),
+            p.surface.as_ref().and_then(OcrSurface::as_str),
+        );
     }
 
     #[test]

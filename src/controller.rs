@@ -12,7 +12,7 @@ use crate::dict::gloss::{
     extent, leaf_text, leaves, RoleFilter, Separator,
 };
 use crate::geom::{in_sticky, PhysPoint, PhysRect, ScanRect};
-use crate::present::{self, AnkiPopupState, Presentation};
+use crate::present::{self, AnkiPopupState, OcrSurface, Presentation};
 use crate::select::gesture::PressInput;
 use crate::select::{
     entries, CardSelection, Coverage, Gesture, GestureEffect, GestureEnv, GestureInput, ItemSource,
@@ -38,8 +38,9 @@ const SCROLL_STEP_PX: i32 = 48;
 /// The number of armed ticks before the Controller warns the user.
 const ARM_WARN_TICKS: u32 = 250;
 
-/// A request becomes stale when a newer `RequestId` exists. The Controller
-/// uses request IDs instead of a sentinel.
+/// A non-sentence result becomes stale when a newer non-sentence
+/// `RequestId` exists. Sentence probes use unique IDs without replacing
+/// hover results that are already active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
@@ -93,6 +94,10 @@ pub enum LookupOutcome {
     },
     /// A Dictionary-only result for a kanji drill-down.
     DrillDown(Box<Presentation>),
+    /// The sentence that an add-time probe read.
+    ///
+    /// `None` keeps the sentence from the hover-time presentation.
+    Sentence(Option<String>),
 }
 
 /// The action that the tray menu selected.
@@ -180,6 +185,18 @@ pub enum Command {
     /// (ARCHITECTURE.md#capture-and-masking).
     /// A platform bin that already excludes the popup ignores this field.
     RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
+    /// Read the full sentence around the hovered word for an Anki add.
+    ///
+    /// The bin hides the popup when `hide_popup` is true, sends
+    /// `TriggerKind::Sentence` to the Worker, and restores the popup when the
+    /// result arrives. Windows excludes its popup at the OS level and ignores
+    /// the flag.
+    RequestSentence {
+        id: RequestId,
+        anchor: PhysRect,
+        orientation: Orientation,
+        hide_popup: bool,
+    },
     /// Request a lookup from the Dictionary data only.
     RequestDrillDown { id: RequestId, text: String },
     /// Send the current settings to the Worker.
@@ -238,6 +255,8 @@ pub struct ControllerConfig {
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
+    /// Read the full sentence on add (`SentenceMode::Sentence`).
+    pub sentence_probe: bool,
     /// Include each Dictionary name in both Anki glossary fields.
     pub include_dictionary_name: bool,
     /// Send only the first Dictionary's glossary block to Anki.
@@ -354,9 +373,32 @@ pub fn note_payload(
         )
     };
     if let Some(sentence) = &p.sentence {
-        fields.insert("sentence".to_string(), sentence.clone());
+        let surface = p.surface.as_ref().and_then(OcrSurface::as_str);
+        fields.insert("sentence".to_string(), bold_surface(sentence, surface));
     }
     (expr, fields)
+}
+
+/// Wrap the first `surface` inside `sentence` in `<b>`.
+///
+/// An Anki field holds HTML, so `<b>` renders bold and stays searchable as the
+/// plain characters. The match is the first occurrence because the probe gives
+/// no offset. A sentence without the surface, for example after an OCR
+/// difference between the hover read and the probe read, stays plain.
+fn bold_surface(sentence: &str, surface: Option<&str>) -> String {
+    let Some(surface) = surface.filter(|s| !s.is_empty()) else {
+        return sentence.to_string();
+    };
+    let Some(at) = sentence.find(surface) else {
+        return sentence.to_string();
+    };
+    let mut out = String::with_capacity(sentence.len() + 7);
+    out.push_str(&sentence[..at]);
+    out.push_str("<b>");
+    out.push_str(surface);
+    out.push_str("</b>");
+    out.push_str(&sentence[at + surface.len()..]);
+    out
 }
 
 /// State saved before a drill-down so Back can restore it.
@@ -364,6 +406,8 @@ pub fn note_payload(
 struct HistoryEntry {
     presentation: Presentation,
     anki: AnkiPopupState,
+    /// An add-time sentence read that belongs to this popup.
+    pending_sentence: Option<PendingSentence>,
 }
 
 /// The measured geometry of the popup.
@@ -374,6 +418,18 @@ struct Placed {
     content_h: i32,
     /// The popup view height.
     view_h: i32,
+}
+
+/// The note payload authorized when an add-time sentence probe starts.
+///
+/// Popup state can change while the Worker reads the sentence. Keep this
+/// payload independent so the result cannot retarget a newer Card.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingSentence {
+    id: RequestId,
+    expr: String,
+    fields: HashMap<String, String>,
+    surface: Option<String>,
 }
 
 /// The reason that a `ShowPopup` request is active.
@@ -392,6 +448,8 @@ enum PlaceKind {
 struct Surface {
     /// The rectangle of the hovered glyph.
     anchor: PhysRect,
+    /// The axis along which the hold can grow.
+    orientation: Orientation,
     /// The rectangle where the cursor can move without a new lookup.
     hold: PhysRect,
     /// The hold rectangle for one character.
@@ -421,7 +479,8 @@ struct Surface {
     pressed_link: Option<HitAction>,
     /// The last popup-local pointer point during a drag.
     last_drag_point: Option<PhysPoint>,
-    /// The placement result stays `None` until the platform sends `PopupPlaced`.
+    /// The add-time sentence read and its authorized note payload.
+    pending_sentence: Option<PendingSentence>,
     placed: Option<Placed>,
 }
 
@@ -463,7 +522,16 @@ pub struct Controller {
     /// The count of consecutive ticks while the scroll action is armed.
     armed_ticks: u32,
     next_id: u64,
+    /// The latest request ID includes add-time sentence reads.
+    ///
+    /// Hover-result staleness uses `latest_lookup` because a sentence read
+    /// must not replace a hover result that was already active.
     latest: RequestId,
+    /// The newest request that replaces non-sentence lookup outcomes.
+    ///
+    /// A sentence read uses `next_request` for a unique ID but leaves this
+    /// marker unchanged.
+    latest_lookup: RequestId,
     generation: u64,
     /// The monotonic dispatch tick that times pointer gestures.
     clock: u64,
@@ -484,6 +552,7 @@ impl Controller {
             armed_ticks: 0,
             next_id: 0,
             latest: RequestId(0),
+            latest_lookup: RequestId(0),
             generation: 0,
             clock: 0,
         }
@@ -561,7 +630,7 @@ impl Controller {
             Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
             Event::ConfigReloaded(cfg) => {
                 self.cfg = *cfg;
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestReload { id }]
             }
             Event::TrayAction(TrayAction::OpenSettings) => vec![Command::OpenSettings],
@@ -569,11 +638,21 @@ impl Controller {
         }
     }
 
-    /// Create a new `RequestId`. Older results become stale.
+    /// Create a unique request ID.
+    ///
+    /// `next_lookup_request` also advances the non-sentence staleness marker.
+    /// Add-time sentence reads use this method directly for a unique ID.
     fn next_request(&mut self) -> RequestId {
         self.next_id += 1;
         self.latest = RequestId(self.next_id);
         self.latest
+    }
+
+    /// Create a request that replaces older non-sentence outcomes.
+    fn next_lookup_request(&mut self) -> RequestId {
+        let id = self.next_request();
+        self.latest_lookup = id;
+        id
     }
 
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
@@ -663,7 +742,7 @@ impl Controller {
             Some(HitAction::Back) => self.pop_history(),
             Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
             Some(HitAction::DrillDown(query)) if text.is_none() => {
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestDrillDown { id, text: query }]
             }
             None if text.is_none() && local.y >= p.popup.h => self.start_add(),
@@ -724,7 +803,7 @@ impl Controller {
         match hit {
             Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
             Some(HitAction::DrillDown(text)) => {
-                let id = self.next_request();
+                let id = self.next_lookup_request();
                 vec![Command::RequestDrillDown { id, text }]
             }
             Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
@@ -812,7 +891,7 @@ impl Controller {
                     match action {
                         Some(HitAction::OpenUrl(url)) => out.push(Command::OpenUrl(url)),
                         Some(HitAction::DrillDown(text)) => {
-                            let id = self.next_request();
+                            let id = self.next_lookup_request();
                             out.push(Command::RequestDrillDown { id, text });
                         }
                         _ => {}
@@ -863,18 +942,88 @@ impl Controller {
         self.start_add()
     }
 
+    fn add_in_flight(&self) -> bool {
+        let Some(s) = self.surface.as_ref() else { return false };
+        s.anki.adding
+            || s.pending_sentence.is_some()
+            || s.history.iter().any(|entry| {
+                entry.anki.adding || entry.pending_sentence.is_some()
+            })
+    }
+
     /// Apply the same guard as the pointer path.
     fn start_add(&mut self) -> Vec<Command> {
+        if self.add_in_flight() {
+            return Vec::new();
+        }
+        let (scroll, show_back, anchor, orientation, matched_surface) = {
+            let Some(s) = self.surface.as_ref() else { return Vec::new() };
+            if s.placed.is_none() || s.presentation.top.is_none() {
+                return Vec::new();
+            }
+            let matched_surface = if self.cfg.sentence_probe {
+                s.presentation
+                    .surface
+                    .as_ref()
+                    .and_then(OcrSurface::as_str)
+                    .map(str::to_owned)
+            } else {
+                None
+            };
+            (s.scroll, !s.history.is_empty(), s.anchor, s.orientation, matched_surface)
+        };
+
+        // Authorize the payload before the asynchronous sentence probe starts.
+        let Some((expr, fields)) = self.add_note_payload() else { return Vec::new() };
+
+        if self.cfg.sentence_probe {
+            let id = self.next_request();
+            // Only a frozen HoldKey grab predates the popup. Toggle reads a
+            // live masked grab and must hide the popup before the probe.
+            let hide_popup =
+                !(self.trigger_held && matches!(self.cfg.trigger_mode, TriggerMode::HoldKey));
+            let s = self.surface.as_mut().expect("surface checked above");
+            s.anki.adding = true;
+            s.anki.failed = false;
+            s.pending_sentence = Some(PendingSentence {
+                id,
+                expr,
+                fields,
+                surface: matched_surface,
+            });
+            return vec![
+                Command::RepaintPopup { scroll, show_back },
+                Command::RequestSentence {
+                    id,
+                    anchor,
+                    orientation,
+                    hide_popup,
+                },
+                Command::SyncAnkiButton,
+            ];
+        }
+
+        {
+            let s = self.surface.as_mut().expect("surface checked above");
+            s.anki.adding = true;
+            s.anki.failed = false;
+        }
+        vec![
+            Command::RepaintPopup { scroll, show_back },
+            Command::AddNote { expr, fields },
+            Command::SyncAnkiButton,
+        ]
+    }
+
+    /// Build one add payload from the current popup state.
+    ///
+    /// A sentence probe caller stores this result before any popup mutation.
+    fn add_note_payload(&self) -> Option<(String, HashMap<String, String>)> {
         let first_dict_only = self.cfg.first_dict_only;
         let include_dictionary_name = self.cfg.include_dictionary_name;
         let separator = self.cfg.separator;
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() {
-            return Vec::new();
-        }
-        if s.presentation.top.is_none() {
-            return Vec::new();
-        }
+        let s = self.surface.as_ref()?;
+        s.presentation.top.as_ref()?;
         let selection = s.selection.card(0).cloned().unwrap_or_default();
         let (expr, fields) = note_payload(
             &s.presentation,
@@ -883,19 +1032,10 @@ impl Controller {
             &selection,
             separator,
         );
-        if s.anki.adding || s.anki.added.contains(&expr) {
-            return Vec::new();
+        if s.anki.added.contains(&expr) {
+            return None;
         }
-        s.anki.adding = true;
-        s.anki.failed = false;
-        vec![
-            Command::RepaintPopup {
-                scroll: s.scroll,
-                show_back: !s.history.is_empty(),
-            },
-            Command::AddNote { expr, fields },
-            Command::SyncAnkiButton,
-        ]
+        Some((expr, fields))
     }
 
     fn pop_history(&mut self) -> Vec<Command> {
@@ -904,8 +1044,10 @@ impl Controller {
             return Vec::new();
         }
         let Some(entry) = s.history.pop() else { return Vec::new() };
+        let pending_sentence = s.pending_sentence.take().or(entry.pending_sentence);
         s.presentation = entry.presentation;
         s.anki = entry.anki;
+        s.pending_sentence = pending_sentence;
         s.selection = Selections::default();
         s.gesture.reset();
         s.analysis = None;
@@ -928,7 +1070,7 @@ impl Controller {
         self.last_accepted = None;
         self.pending_cursor = None;
         // Invalidate any lookup that has not returned.
-        self.next_request();
+        self.next_lookup_request();
         if self.surface.take().is_none() {
             return Vec::new();
         }
@@ -956,7 +1098,7 @@ impl Controller {
         if self.surface.is_none() {
             return Vec::new();
         }
-        self.next_request();
+        self.next_lookup_request();
         self.hide()
     }
 
@@ -1004,7 +1146,7 @@ impl Controller {
     /// Ask the lookup question at `pos` with the shown popup as the mask.
     fn dispatch_lookup(&mut self, pos: PhysPoint) -> Vec<Command> {
         let popup = self.shown_popup();
-        let id = self.next_request();
+        let id = self.next_lookup_request();
         self.last_dispatch = Some(pos);
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
@@ -1022,7 +1164,7 @@ impl Controller {
         }
         let Some(pos) = self.last_dispatch else { return Vec::new() };
         let popup = self.shown_popup();
-        let id = self.next_request();
+        let id = self.next_lookup_request();
         vec![Command::RequestLookup { id, point: pos, popup }]
     }
 
@@ -1073,7 +1215,10 @@ impl Controller {
     }
 
     fn lookup_result(&mut self, id: RequestId, outcome: LookupOutcome) -> Vec<Command> {
-        if id < self.latest {
+        if let LookupOutcome::Sentence(text) = outcome {
+            return self.sentence_result(id, text);
+        }
+        if id < self.latest_lookup {
             // This result is superseded, not an error.
             return Vec::new();
         }
@@ -1088,7 +1233,40 @@ impl Controller {
             LookupOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
                 self.ready(*presentation, anchor, orientation, matched, scan)
             }
+            LookupOutcome::Sentence(_) => unreachable!("sentence outcomes return above"),
         }
+    }
+
+    fn sentence_result(&mut self, id: RequestId, text: Option<String>) -> Vec<Command> {
+        let Some(s) = self.surface.as_mut() else { return Vec::new() };
+        let pending = if s
+            .pending_sentence
+            .as_ref()
+            .is_some_and(|pending| pending.id == id)
+        {
+            s.pending_sentence.take()
+        } else {
+            s.history.iter_mut().find_map(|entry| {
+                if entry
+                    .pending_sentence
+                    .as_ref()
+                    .is_some_and(|pending| pending.id == id)
+                {
+                    entry.pending_sentence.take()
+                } else {
+                    None
+                }
+            })
+        };
+        let Some(mut pending) = pending else { return Vec::new() };
+        if let Some(sentence) = text {
+            let sentence_field = bold_surface(&sentence, pending.surface.as_deref());
+            pending.fields.insert("sentence".to_string(), sentence_field);
+        }
+        vec![
+            Command::AddNote { expr: pending.expr, fields: pending.fields },
+            Command::SyncAnkiButton,
+        ]
     }
 
     fn hide(&mut self) -> Vec<Command> {
@@ -1130,6 +1308,7 @@ impl Controller {
         let HoldRects { hold, hold_char } = hold_regions(anchor, matched, orientation);
         self.surface = Some(Surface {
             anchor,
+            orientation,
             hold,
             hold_char,
             presentation,
@@ -1144,9 +1323,9 @@ impl Controller {
             analysis_generation: 0,
             pressed_link: None,
             last_drag_point: None,
+            pending_sentence: None,
             placed: None,
         });
-
         self.pending_scan = scan;
         out.extend(self.begin_place(PlaceKind::Fresh));
         out
@@ -1159,9 +1338,11 @@ impl Controller {
         if s.placed.is_none() {
             return Vec::new();
         }
+        let pending_sentence = s.pending_sentence.take();
         s.history.push(HistoryEntry {
             presentation: std::mem::replace(&mut s.presentation, presentation),
             anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled)),
+            pending_sentence,
         });
         s.selection = Selections::default();
         s.gesture.reset();
@@ -1344,11 +1525,39 @@ impl Controller {
         if s.placed.is_none() {
             return Vec::new();
         }
-        s.anki.adding = false;
-        if failed {
-            s.anki.failed = true;
+        let current_in_flight = s.anki.adding || s.pending_sentence.is_some();
+        let history_target = if current_in_flight {
+            None
         } else {
-            s.anki.added.insert(expr);
+            s.history.iter().position(|entry| {
+                entry.anki.adding || entry.pending_sentence.is_some()
+            })
+        };
+        let fallback_current = s
+                .presentation
+                .top
+                .as_ref()
+                .and_then(|card| card.written.as_deref().or(card.reading.as_deref()))
+                .is_some_and(|current| current == expr.as_str());
+        match history_target {
+            Some(index) => {
+                let anki = &mut s.history[index].anki;
+                anki.adding = false;
+                if failed {
+                    anki.failed = true;
+                } else {
+                    anki.added.insert(expr);
+                }
+            }
+            None if current_in_flight || fallback_current => {
+                s.anki.adding = false;
+                if failed {
+                    s.anki.failed = true;
+                } else {
+                    s.anki.added.insert(expr);
+                }
+            }
+            None => return Vec::new(),
         }
         self.begin_place(PlaceKind::Reshow)
     }
@@ -1374,6 +1583,7 @@ mod tests {
 
     fn cfg() -> ControllerConfig {
         ControllerConfig {
+            sentence_probe: false,
             trigger_mode: TriggerMode::Live,
             per_character_lookup: false,
             scroll_popup: true,
@@ -1409,6 +1619,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         }
     }
 
@@ -1476,6 +1687,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards,
             sentence: None,
+            surface: None,
         }
     }
 
@@ -2245,6 +2457,21 @@ mod tests {
         );
         c.handle(placed(POPUP, 200, 200));
         assert!(c.popup().expect("placed").show_back);
+        c.surface
+            .as_mut()
+            .expect("card B surface")
+            .selection
+            .card_mut(0)
+            .replace(SelRange {
+                start: TextAddr {
+                    entry: 0,
+                    addr: crate::select::DocAddr::START,
+                },
+                end: TextAddr {
+                    entry: 0,
+                    addr: crate::select::DocAddr::END,
+                },
+            });
 
         let out = c.handle(Event::BackRequested);
         assert_eq!(
@@ -2261,6 +2488,10 @@ mod tests {
         );
         c.handle(placed(POPUP, 200, 200));
         assert!(!c.popup().expect("placed").show_back);
+        assert!(
+            c.selection().expect("card A selection").card(0).is_none_or(CardSelection::is_empty),
+            "Back must not apply card B's selection to card A"
+        );
         // No history entry remains to remove.
         assert!(c.handle(Event::BackRequested).is_empty());
     }
@@ -2312,6 +2543,340 @@ mod tests {
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
     }
 
+    #[test]
+    fn an_add_with_the_probe_asks_for_the_sentence_first() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        assert_eq!(
+            out,
+            vec![
+                Command::RepaintPopup { scroll: 0, show_back: false },
+                Command::RequestSentence {
+                    id: RequestId(2),
+                    anchor: ANCHOR,
+                    orientation: Orientation::Horizontal,
+                    hide_popup: true,
+                },
+                Command::SyncAnkiButton,
+            ]
+        );
+        assert!(c.anki().expect("shown").adding);
+    }
+
+    #[test]
+    fn a_sentence_result_completes_the_add_with_the_new_sentence() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let request_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+        let sentence = "今日はいい天気ですね。".to_string();
+        let out = c.handle(Event::LookupResult {
+            id: request_id,
+            outcome: LookupOutcome::Sentence(Some(sentence.clone())),
+        });
+        let fields = match out.as_slice() {
+            [Command::AddNote { fields, .. }, Command::SyncAnkiButton] => fields,
+            commands => panic!("expected the add tail, got {commands:?}"),
+        };
+        assert_eq!(fields.get("sentence"), Some(&sentence));
+    }
+    #[test]
+    fn a_pending_sentence_add_keeps_the_original_card_after_popup_changes() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        config.sentence_probe = true;
+        config.include_dictionary_name = false;
+        let card_for_note = |written: &str, gloss: &str| Card {
+            written: Some(written.to_string()),
+            blocks: vec![GlossBlock::parse(
+                "Test",
+                &serde_json::json!([gloss]).to_string(),
+            )],
+            ..card(written)
+        };
+        let card_a = card_for_note("card A", "A-only gloss");
+        let card_b = card_for_note("card B", "B-only gloss");
+        let mut c = Controller::new(config);
+        shown_card(
+            &mut c,
+            presentation_with_card(card_a.clone(), vec![card_a, card_b]),
+        );
+
+        // Select card A before beginning the asynchronous sentence probe.
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::ToggleEntry(0)),
+        );
+        assert!(
+            !c.selection().unwrap().card(0).expect("card A selection").is_empty(),
+            "the original note has a selected Entry",
+        );
+        let request_id = c
+            .handle(Event::AddRequested)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestSentence { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the sentence request");
+
+        // Expanding card B changes both popup content and the active selection
+        // while the sentence result is still pending.
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::ExpandEntry(0)),
+        );
+        let popup = c.popup().expect("expanded popup");
+        assert_eq!(
+            popup.presentation.top.as_ref().and_then(|card| card.written.as_deref()),
+            Some("card B"),
+        );
+        assert!(popup.selection.card(0).is_none_or(CardSelection::is_empty));
+
+        let out = c.handle(Event::LookupResult {
+            id: request_id,
+            outcome: LookupOutcome::Sentence(Some("A sentence".into())),
+        });
+        let (expr, fields) = match out.as_slice() {
+            [Command::AddNote { expr, fields }, Command::SyncAnkiButton] => (expr, fields),
+            commands => panic!("expected the original add payload, got {commands:?}"),
+        };
+        assert_eq!("card A", expr);
+        assert_eq!(Some("card A"), fields.get("expression").map(String::as_str));
+        assert_eq!(Some("1. A-only gloss"), fields.get("glossary").map(String::as_str));
+        assert_eq!(
+            Some("<ol style=\"margin:2px 0 2px 20px;padding:0\"><li>A-only gloss</li></ol>"),
+            fields.get("glossary_html").map(String::as_str),
+        );
+        assert_eq!(Some("A sentence"), fields.get("sentence").map(String::as_str));
+    }
+    #[test]
+    fn a_drill_down_during_a_sentence_probe_keeps_the_add_with_card_a() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown_card(&mut c, presentation_of("card A"));
+
+        let sentence_id = c
+            .handle(Event::AddRequested)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestSentence { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the sentence request");
+        assert!(c.anki().expect("card A popup").adding);
+
+        let drill_down_id = match click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("card B".into())),
+        )
+        .as_slice()
+        {
+            [Command::RequestDrillDown { id, .. }] => *id,
+            commands => panic!("expected the drill-down request, got {commands:?}"),
+        };
+        let out = c.handle(Event::LookupResult {
+            id: drill_down_id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("card B"))),
+        });
+        assert!(
+            out.iter().any(|command| matches!(command, Command::ShowPopup { .. })),
+            "the drill-down replaces the visible popup: {out:?}"
+        );
+        c.handle(placed(POPUP, 200, 200));
+
+        let popup = c.popup().expect("card B popup");
+        assert_eq!(
+            popup.presentation.top.as_ref().and_then(|card| card.written.as_deref()),
+            Some("card B")
+        );
+        assert!(!popup.anki.adding, "card B must not display card A's pending add");
+
+        let out = c.handle(Event::LookupResult {
+            id: sentence_id,
+            outcome: LookupOutcome::Sentence(Some("A sentence".into())),
+        });
+        match out.as_slice() {
+            [Command::AddNote { expr, .. }, Command::SyncAnkiButton] => {
+                assert_eq!("card A", expr.as_str(), "the sentence probe belongs to card A");
+            }
+            commands => panic!("expected card A's add command, got {commands:?}"),
+        }
+
+        c.handle(Event::NoteAdded { expr: "card A".into(), failed: false });
+        c.handle(placed(POPUP, 200, 200));
+        let popup = c.popup().expect("card B popup after the add");
+        assert!(!popup.anki.adding);
+        assert!(
+            !popup.anki.added.contains("card A"),
+            "NoteAdded for card A must not mark card B as added"
+        );
+
+        c.handle(Event::BackRequested);
+        c.handle(placed(POPUP, 200, 200));
+        let popup = c.popup().expect("card A popup after Back");
+        assert_eq!(
+            popup.presentation.top.as_ref().and_then(|card| card.written.as_deref()),
+            Some("card A")
+        );
+        assert!(!popup.anki.adding);
+        assert!(popup.anki.added.contains("card A"));
+    }
+
+
+
+    #[test]
+    fn a_sentence_probe_survives_back_from_the_drill_down_card() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown_card(&mut c, presentation_of("card A"));
+
+        let drill_down_id = match click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("card B".into())),
+        )
+        .as_slice()
+        {
+            [Command::RequestDrillDown { id, .. }] => *id,
+            commands => panic!("expected the drill-down request, got {commands:?}"),
+        };
+        c.handle(Event::LookupResult {
+            id: drill_down_id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("card B"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+
+        let sentence_id = c
+            .handle(Event::AddRequested)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestSentence { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the sentence request");
+        assert!(c.add_in_flight());
+
+        let back = c.handle(Event::BackRequested);
+        assert!(
+            back.iter().any(|command| matches!(
+                command,
+                Command::ShowPopup { presentation, .. }
+                    if presentation.top.as_ref().and_then(|card| card.written.as_deref())
+                        == Some("card A")
+            )),
+            "Back must restore card A: {back:?}"
+        );
+        assert!(c.add_in_flight(), "Back must keep the probe in flight");
+
+        let out = c.handle(Event::LookupResult {
+            id: sentence_id,
+            outcome: LookupOutcome::Sentence(Some("B sentence".into())),
+        });
+        let (expr, fields) = match out.as_slice() {
+            [Command::AddNote { expr, fields }, Command::SyncAnkiButton] => (expr, fields),
+            commands => panic!("expected card B's add command, got {commands:?}"),
+        };
+        assert_eq!("card B", expr);
+        assert_eq!(Some("B sentence"), fields.get("sentence").map(String::as_str));
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_the_hover_sentence() {
+        let mut presentation = presentation_of("\u{732B}");
+        presentation.sentence = Some("hover sentence".into());
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown_card(&mut c, presentation);
+        let request_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+        let out = c.handle(Event::LookupResult {
+            id: request_id,
+            outcome: LookupOutcome::Sentence(None),
+        });
+        let fields = match out.as_slice() {
+            [Command::AddNote { fields, .. }, Command::SyncAnkiButton] => fields,
+            commands => panic!("expected the add tail, got {commands:?}"),
+        };
+        assert_eq!(fields.get("sentence").map(String::as_str), Some("hover sentence"));
+    }
+
+    #[test]
+    fn a_stale_sentence_result_is_dropped() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        let sentence_id = match &c.handle(Event::AddRequested)[1] {
+            Command::RequestSentence { id, .. } => *id,
+            command => panic!("expected a sentence request, got {command:?}"),
+        };
+
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        let hover_id = c.latest;
+        let new_anchor = PhysRect { x: 900, y: 900, w: 20, h: 20 };
+        let out = c.handle(ready_id(hover_id, "\u{72AC}", new_anchor));
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+        assert!(!c.anki().expect("new surface").adding);
+
+        assert!(c
+            .handle(Event::LookupResult {
+                id: sentence_id,
+                outcome: LookupOutcome::Sentence(Some("stale".into())),
+            })
+            .is_empty());
+        assert!(!c.anki().expect("new surface").adding);
+    }
+
+    #[test]
+    fn a_hover_result_after_a_sentence_request_is_not_stale() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        let hover_id = c.latest;
+        assert!(!c.handle(Event::AddRequested).is_empty());
+        assert!(hover_id < c.latest);
+
+        let new_anchor = PhysRect { x: 900, y: 900, w: 20, h: 20 };
+        let out = c.handle(ready_id(hover_id, "\u{72AC}", new_anchor));
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+    }
+
     /// A platform bin that paints the Anki control inside the popup needs its
     /// state before the first frame. This state exists before the platform knows
     /// the rectangle, so `popup()` returns `None`.
@@ -2334,6 +2899,30 @@ mod tests {
         assert!(
             c.anki().expect("still shown").added.contains("\u{732B}"),
             "and it follows the add lifecycle, rect or no rect"
+        );
+    }
+
+    #[test]
+    fn an_external_note_add_marks_the_current_drill_down_card() {
+        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        shown(&mut c);
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("card B".into())),
+        );
+        c.handle(Event::LookupResult {
+            id: c.latest,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("card B"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+
+        c.handle(Event::NoteAdded { expr: "card B".into(), failed: false });
+
+        assert!(
+            c.anki().expect("card B Anki state").added.contains("card B"),
+            "a screenshot-filed note has no local in-flight add"
         );
     }
 
@@ -2651,6 +3240,58 @@ mod tests {
         assert!(!c.handle(Event::AddRequested).is_empty());
     }
 
+    #[test]
+    fn a_held_trigger_reads_the_frozen_frame_without_a_hide() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..hold_cfg()
+        });
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        let request = out.iter().find_map(|command| match command {
+            Command::RequestSentence { anchor, orientation, hide_popup, .. } => {
+                Some((*anchor, *orientation, *hide_popup))
+            }
+            _ => None,
+        });
+        assert_eq!(request, Some((ANCHOR, Orientation::Horizontal, false)));
+    }
+    #[test]
+    fn a_latched_toggle_probe_hides_the_popup_for_live_capture() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            trigger_mode: TriggerMode::Toggle,
+            ..cfg()
+        });
+        c.handle(Event::TriggerDown);
+        shown(&mut c);
+        let hide_popup = c
+            .handle(Event::AddRequested)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestSentence { hide_popup, .. } => Some(hide_popup),
+                _ => None,
+            });
+        assert_eq!(Some(true), hide_popup);
+    }
+
+
+    #[test]
+    fn an_add_without_the_probe_is_unchanged() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: false,
+            ..cfg()
+        });
+        shown(&mut c);
+        let out = c.handle(Event::AddRequested);
+        assert!(out.iter().any(|command| matches!(command, Command::AddNote { .. })));
+        assert!(!out.iter().any(|command| matches!(command, Command::RequestSentence { .. })));
+    }
+
     // -- selection and Controller behavior --
     #[test]
     fn a_drag_over_two_glosses_updates_the_public_selection() {
@@ -2787,6 +3428,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         };
         let mut selection = CardSelection::default();
         selection.replace(SelRange {
@@ -2821,6 +3463,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
+            surface: None,
         };
 
         // The `reading` value replaces the missing `written` value.
@@ -2841,6 +3484,36 @@ mod tests {
         assert_eq!(
             (String::new(), HashMap::new()),
             note_payload(&p, false, true, &empty, Separator::Ellipsis),
+        );
+    }
+
+    /// The card bolds the on-screen form, not the headword. A conjugated
+    /// verb stays conjugated, and a sentence without the form stays plain.
+    #[test]
+    fn the_sentence_field_bolds_the_matched_surface() {
+        let sentence = "山が崩れたり、低い所に水が入ったりするかもしれません。";
+        assert_eq!(
+            "山が<b>崩れたり</b>、低い所に水が入ったりするかもしれません。",
+            bold_surface(sentence, Some("崩れたり"))
+        );
+        assert_eq!(sentence, bold_surface(sentence, Some("崩れる")));
+        assert_eq!(sentence, bold_surface(sentence, Some("")));
+        assert_eq!(sentence, bold_surface(sentence, None));
+        // Only the first occurrence is bold.
+        assert_eq!("<b>山</b>と山", bold_surface("山と山", Some("山")));
+
+        let p = Presentation {
+            top: Some(card("\u{732B}")),
+            collapsed: Vec::new(),
+            all_cards: Vec::new(),
+            sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
+            surface: OcrSurface::new("\u{732B}", 1),
+        };
+        let (_, fields) =
+            note_payload(&p, false, true, &CardSelection::default(), Separator::Ellipsis);
+        assert_eq!(
+            Some(&"<b>\u{732B}</b>\u{304C}\u{3044}\u{308B}".to_string()),
+            fields.get("sentence")
         );
     }
 }

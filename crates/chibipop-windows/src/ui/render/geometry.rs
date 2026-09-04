@@ -634,7 +634,7 @@ fn row(written: Option<&str>, reading: Option<&str>, summary: &str) -> Collapsed
 
 fn present(top: Option<Card>, collapsed: Vec<CollapsedRow>) -> Presentation {
     let all_cards = top.iter().cloned().collect();
-    Presentation { top, collapsed, all_cards, sentence: None }
+    Presentation { top, collapsed, all_cards, sentence: None, surface: None }
 }
 
 /// Create 30-pixel character boxes from x=100, like the fixtures in

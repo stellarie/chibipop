@@ -29,8 +29,7 @@ pub struct ShotPlan {
 /// Builds a screenshot add plan without guards.
 ///
 /// This is the Mining screenshot plan. It saves a picture regardless of the
-/// popup add state. It does not apply [`plan_add`]'s guards or read
-/// `include_on_add`.
+/// popup add state. It does not apply [`plan_add`]'s config gate.
 pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> ShotPlan {
     // The Mining screenshot plan uses the same note as the Anki button.
     // It applies the same Card selection.
@@ -43,6 +42,39 @@ pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> S
         selection,
         cfg.anki.selection_separator.into(),
     );
+    make_plan(expr, fields, cfg, save_root, now)
+}
+
+/// Plans the screenshot that accompanies an already-authorized add, or returns
+/// `None` when the screenshot-on-add setting is off.
+///
+/// `Command::AddNote` has already passed the Controller's add guards. Its
+/// `expr` and `fields` are therefore the complete note payload for this plan.
+/// In particular, this function must not read a popup or rebuild a payload:
+/// the popup may have changed by the time the platform performs the screenshot.
+///
+/// This seam owns only screenshot choices: whether the feature is enabled, the
+/// filename derived from the authorized expression, and the picture field.
+pub fn plan_add(
+    expr: &str,
+    fields: &HashMap<String, String>,
+    cfg: &Config,
+    save_root: &Path,
+    now: u64,
+) -> Option<ShotPlan> {
+    if !cfg.actions.screenshot.include_on_add {
+        return None;
+    }
+    Some(make_plan(expr.to_string(), fields.clone(), cfg, save_root, now))
+}
+
+fn make_plan(
+    expr: String,
+    fields: HashMap<String, String>,
+    cfg: &Config,
+    save_root: &Path,
+    now: u64,
+) -> ShotPlan {
     let path = save_root.join(format!("{}_{now}.png", sanitize_filename(&expr)));
     let picture_field = cfg
         .anki
@@ -51,44 +83,6 @@ pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> S
         .find(|m| m.source == "screenshot")
         .map(|m| m.anki_field.clone());
     ShotPlan { expr, fields, path, picture_field }
-}
-
-/// Plans the screenshot that accompanies an add, or returns `None`.
-///
-/// The function returns `None` when `actions.screenshot.include_on_add` is off,
-/// the payload has no expression for the file name, or the word is already in
-/// the collection.
-///
-/// **`Controller::start_add`'s in-flight guard is deliberately not here.**
-/// Both bins call this function after the state machine emits `Command::AddNote`.
-/// `start_add` marks the popup with the add state before it emits that command.
-/// A guard here would reject the authorized add, so no screenshot would accompany it.
-/// `start_add` already rejects a second add at the same time. This function keeps
-/// the other two guards because they describe the Card: a blank expression would
-/// write `_<epoch>.png` and an empty note, and a word in the collection must not
-/// be filed twice.
-///
-/// The function derives the payload through [`crate::controller::note_payload`]
-/// instead of taking it from the command. `expr` is `written || reading` from
-/// the same `Presentation` that built the command. `expr` does not depend on
-/// `first_dict_only`, so the guard, file name, and `NoteAdded` key agree.
-/// `fields` can differ only when a bin gives this function a `Config` that
-/// differs from the `ControllerConfig` that built the state machine. Both bins
-/// clone one value.
-pub fn plan_add(
-    view: &PopupView<'_>,
-    cfg: &Config,
-    save_root: &Path,
-    now: u64,
-) -> Option<ShotPlan> {
-    if !cfg.actions.screenshot.include_on_add {
-        return None;
-    }
-    let plan = plan(view, cfg, save_root, now);
-    if plan.expr.is_empty() || view.anki.added.contains(&plan.expr) {
-        return None;
-    }
-    Some(plan)
 }
 
 /// Writes the PNG and creates the save folder when needed.
@@ -128,8 +122,8 @@ pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i6
 
 /// Returns seconds since the epoch for a screenshot file name.
 ///
-/// [`plan`] names files `<word>_<epoch>.png`. Both bins pass this value as
-/// `now`, so a screenshots folder keeps one name pattern on both platforms.
+/// [`plan`] names files `<word>_<epoch seconds>.png`. Both bins pass this value
+/// as `now`, so a screenshots folder keeps one name pattern on both platforms.
 pub fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -205,6 +199,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         }
     }
 
@@ -236,87 +231,69 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_names_the_file_after_the_word_and_the_epoch_second() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let a = anki_state();
-        let plan = plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1_700_000_000).unwrap();
+    fn an_authorized_payload_names_the_file_after_its_expression_and_epoch_second() {
+        let fields = HashMap::new();
+        let plan =
+            plan_add("\u{5bbf}\u{820e}", &fields, &cfg_on(), Path::new(ROOT), 1_700_000_000)
+                .unwrap();
         assert_eq!(
             Path::new(ROOT).join("\u{5bbf}\u{820e}_1700000000.png"),
             plan.path
         );
         assert_eq!("\u{5bbf}\u{820e}", plan.expr);
+        assert_eq!(fields, plan.fields);
+    }
+
+    #[test]
+    fn an_authorized_payload_wins_over_the_current_popup_card() {
+        let popup_presentation = presentation(Some("card B"), None);
+        let popup_anki = anki_state();
+        let popup = view(&popup_presentation, &popup_anki);
+        assert_eq!("card B", popup.presentation.top.as_ref().unwrap().written.as_deref().unwrap());
+
+        let fields = HashMap::from([("Expression".to_string(), "card A".to_string())]);
+        let plan = plan_add("card A", &fields, &cfg_on(), Path::new(ROOT), 11).unwrap();
+
+        assert_eq!("card A", plan.expr);
+        assert_eq!(fields, plan.fields);
+        assert_eq!(Path::new(ROOT).join("card A_11.png"), plan.path);
     }
 
     #[test]
     fn the_picture_field_is_the_field_map_row_sourced_from_the_screenshot() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let a = anki_state();
         let mut cfg = cfg_on();
         cfg.anki.field_map.push(FieldMapping {
             anki_field: "Picture".into(),
             source: "screenshot".into(),
         });
-        let plan = plan_add(&view(&p, &a), &cfg, Path::new(ROOT), 1).unwrap();
+        let plan = plan_add("", &HashMap::new(), &cfg, Path::new(ROOT), 1).unwrap();
         assert_eq!(Some("Picture".to_string()), plan.picture_field);
     }
 
     #[test]
     fn a_field_map_that_routes_no_screenshot_plans_a_pictureless_add() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let a = anki_state();
-        let plan = plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1).unwrap();
+        let plan = plan_add("宿舎", &HashMap::new(), &cfg_on(), Path::new(ROOT), 1).unwrap();
         assert_eq!(None, plan.picture_field);
     }
 
     #[test]
     fn include_on_add_off_plans_nothing() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let a = anki_state();
         let cfg = Config::default();
         assert!(!cfg.actions.screenshot.include_on_add, "the shipped default");
-        assert_eq!(None, plan_add(&view(&p, &a), &cfg, Path::new(ROOT), 1));
+        assert_eq!(None, plan_add("宿舎", &HashMap::new(), &cfg, Path::new(ROOT), 1));
     }
 
     #[test]
-    fn a_card_with_no_expression_plans_nothing_rather_than_an_epoch_only_name() {
-        let p = presentation(None, None);
-        let a = anki_state();
-        assert_eq!(None, plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1));
+    fn an_authorized_empty_expression_still_has_a_payload_plan() {
+        let fields = HashMap::new();
+        let plan = plan_add("", &fields, &cfg_on(), Path::new(ROOT), 1).unwrap();
+        assert_eq!("", plan.expr);
+        assert_eq!(fields, plan.fields);
+        assert_eq!(Path::new(ROOT).join("screenshot_1.png"), plan.path);
     }
 
     #[test]
-    fn a_popup_with_no_card_plans_nothing() {
-        let p = Presentation {
-            top: None,
-            collapsed: Vec::new(),
-            all_cards: Vec::new(),
-            sentence: None,
-        };
-        let a = anki_state();
-        assert_eq!(None, plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1));
-    }
-
-    #[test]
-    fn a_word_already_in_the_collection_plans_nothing() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let mut a = anki_state();
-        a.added.insert("\u{5bbf}\u{820e}".to_string());
-        assert_eq!(None, plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1));
-    }
-
-    /// This test sets `adding` before it calls `plan_add`. The state machine already
-    /// passed the `start_add` guard before it emitted `AddNote`, so `plan_add` must
-    /// still create this screenshot plan.
-    #[test]
-    fn an_add_already_marked_in_flight_still_plans_because_start_add_owns_that_guard() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let mut a = anki_state();
-        a.adding = true;
-        assert!(plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1).is_some());
-    }
-
-    #[test]
-    fn the_ungated_plan_ignores_include_on_add_and_the_add_guards() {
+    fn the_ungated_plan_ignores_include_on_add() {
         let p = presentation(Some("\u{5bbf}\u{820e}"), None);
         let mut a = anki_state();
         a.adding = true;
@@ -327,10 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn the_expression_falls_back_to_the_reading_the_way_the_note_payload_does() {
+    fn the_ungated_plan_expression_falls_back_to_the_reading() {
         let p = presentation(None, Some("\u{306D}\u{3053}"));
         let a = anki_state();
-        let plan = plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 3).unwrap();
+        let plan = plan(&view(&p, &a), &cfg_on(), Path::new(ROOT), 3);
         assert_eq!("\u{306D}\u{3053}", plan.expr);
         assert_eq!(Path::new(ROOT).join("\u{306D}\u{3053}_3.png"), plan.path);
     }
