@@ -197,6 +197,16 @@ pub(super) struct Paragraphs<'a> {
     /// clickable things in the panel: the selection highlight and the Entry check. One
     /// color for every click keeps the panel legible. See [`Paragraphs::enter`].
     pub(super) link: Rgb,
+    /// Stores the largest size that gloss text can take.
+    ///
+    /// This is the theme headword size, or the body size when a theme makes its
+    /// headword smaller than its body. 字通 sets its own heading to `1.5em` bold. At
+    /// a 15px body, that heading outgrew the 20px headword above it and read as a
+    /// second, larger headword. The headword is the largest text in the panel, so a
+    /// gloss size stops at it. See [`Paragraphs::styled`].
+    ///
+    /// [`Paragraphs::styled`]: super::style
+    pub(super) cap: f32,
     /// Stores the popup's root font size. A `rem` in dictionary declarations uses a fraction
     /// of this size ([`Ems`]).
     ///
@@ -246,6 +256,7 @@ pub(super) fn paragraphs(
         rule: theme.collapsed_text,
         tint: theme.separator,
         link: theme.accent,
+        cap: theme.headword_size.max(theme.body_size),
         root_em: theme.body_size,
     };
     let root = Ctx {

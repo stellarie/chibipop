@@ -975,6 +975,13 @@ impl Paragraphs<'_> {
     /// Both inline `style` and `styles.css` arrive through
     /// [`Paragraphs::declarations`]. Therefore, the setting disables both
     /// sources at once.
+    ///
+    /// The size stops at [`Paragraphs::cap`], the panel headword size. A
+    /// dictionary heading at `1.5em` would outgrow the headword above it and
+    /// read as a second headword. The cap applies to the resolved value, so a
+    /// `big` inside a `big` and a stylesheet `em` meet the same limit. A
+    /// child resolves its own lengths against the capped size, because that
+    /// size is the em that the child sees.
     pub(super) fn styled(&self, id: NodeId, parent: Inline) -> Inline {
         let doc = self.doc;
         let mut style = tag_style(doc.node(id).tag, parent);
@@ -987,6 +994,7 @@ impl Paragraphs<'_> {
             }
             apply_style(doc, *key, *value, self.ems(parent.size), &mut style);
         }
+        style.size = style.size.min(self.cap);
         style
     }
 

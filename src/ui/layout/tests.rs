@@ -5539,7 +5539,7 @@ fn styling_off_renders_in_the_themes_own_colours_and_draws_no_box() {
     let styled = gloss_of(&styled_scene, "chatting");
     let ink = span_of(styled, "chatting");
     assert_eq!((255, 0, 0), ink.color, "the dictionary's colour, honoured");
-    assert_eq!(2.0 * theme.body_size, ink.size, "its size too");
+    assert_eq!(theme.headword_size, ink.size, "its size too, capped at the headword");
     assert!(!styled.inline_boxes.is_empty(), "and its pill, drawn");
 
     let plain_scene = shown(&p, without(|r| r.styling = false));
@@ -5879,6 +5879,52 @@ fn a_followable_link_takes_the_accent_color() {
         ],
         colors,
         "a link is accent, a styled descendant keeps its color, a dead link is body text"
+    );
+}
+
+/// A dictionary can ask for gloss text larger than the panel headword. 字通 sets
+/// its own heading to `1.5em` bold, so at a 15px body it outgrew the 20px
+/// headword above it and read as a second, larger headword.
+///
+/// The panel caps a resolved gloss size at the headword size. A size under the
+/// cap keeps its value. A length inside a capped node resolves against the capped
+/// size, because that is the node's own em.
+#[test]
+fn a_gloss_font_size_never_exceeds_the_headword_size() {
+    let theme = Theme::dark();
+    let s = laid_out(
+        &card_with(vec![css_tree(
+            "字通",
+            &sc(concat!(
+                r#"[{"tag":"span","data":{"main_title":""},"content":["#,
+                r#""【相与】",{"tag":"span","style":{"fontSize":"0.5em"},"content":"そうよ"}]},"#,
+                r#"{"tag":"span","style":{"fontSize":"1.2em"},"content":"親"}]"#,
+            )),
+            "span[data-sc-main_title] { font-size: 1.5em }",
+        )]),
+        400.0,
+        4000.0,
+        false,
+        false,
+    );
+    let gloss = s
+        .elems
+        .iter()
+        .find(|e| e.text.starts_with("【相与】"))
+        .unwrap_or_else(|| panic!("the heading run: {:?}", texts(&s)));
+    let sizes: Vec<(&str, f32)> = gloss
+        .spans
+        .iter()
+        .map(|sp| (&gloss.text[sp.at as usize..(sp.at + sp.len) as usize], sp.size))
+        .collect();
+    assert_eq!(
+        vec![
+            ("【相与】", theme.headword_size),
+            ("そうよ", theme.headword_size / 2.0),
+            ("親", 1.2 * theme.body_size),
+        ],
+        sizes,
+        "1.5em caps at the headword, 0.5em of the capped em, 1.2em untouched"
     );
 }
 
@@ -6349,9 +6395,10 @@ fn a_right_aligned_lines_ink_box_counts_its_alignment_slack_once() {
 /// The table children are `span[data-sc-IndexSubG]`, one per stroke-count group.
 /// No `tr` or `td` exists. The stylesheet maps these spans to table rows with
 /// `display: table-row`. CSS 2.1 section 17.2 defines this map.
-/// chibipop does not map `display`, because `display: grid` is the most common
-/// corpus declaration. The table walk therefore receives content outside cells
-/// and applies the anonymous-box rule from CSS 2.1 section 17.2.1.
+/// chibipop reads `display` only as a line-break decision
+/// (`GlossDoc::is_block`), and a table-internal type keeps the tag rule. The
+/// table walk therefore receives content outside cells and applies the
+/// anonymous-box rule from CSS 2.1 section 17.2.1.
 fn radical_index() -> Presentation {
     card_with(vec![css_tree(
         "旺文社漢字典 第四版",
@@ -6395,9 +6442,10 @@ fn radical_index() -> Presentation {
 /// Their reading order would turn 90 degrees, and right strips would leave the
 /// panel. Adjacent strips would also overlap.
 ///
-/// The stylesheet `font-size: 1.4em` makes a kanji 21px at [`BOX_EM`]. It
-/// advances 10.5px, and a stroke-count number advances 7.5px. Two numbers and
-/// three kanji measure 46.5px on one line with the 1.4em height.
+/// The stylesheet `font-size: 1.4em` asks for 21px at [`BOX_EM`]. The panel caps
+/// gloss text at the 20px headword size, so a kanji advances 10px, and a
+/// stroke-count number advances 7.5px. Two numbers and three kanji measure 45px
+/// on one line with the capped height.
 #[test]
 fn a_table_whose_children_are_not_rows_becomes_one_cell_and_not_one_column_each() {
     let s = laid_out(&radical_index(), 424.0, 4000.0, false, false);
@@ -6408,8 +6456,8 @@ fn a_table_whose_children_are_not_rows_becomes_one_cell_and_not_one_column_each(
         .iter()
         .find(|e| e.kind == ElemKind::Text && e.text == "⓪火②灰灯")
         .unwrap_or_else(|| panic!("the index reads in document order: {:?}", texts(&s)));
-    assert_eq!(2.0 * BOX_EM * ADVANCE + 3.0 * 1.4 * BOX_EM * ADVANCE, index.rect.w);
-    assert_eq!(1.4 * BOX_EM * LINE_H, index.rect.h, "one line, as tall as its kanji");
+    assert_eq!(2.0 * BOX_EM * ADVANCE + 3.0 * 20.0 * ADVANCE, index.rect.w);
+    assert_eq!(20.0 * LINE_H, index.rect.h, "one line, as tall as its capped kanji");
 
     // The grid has one column and no other. A table without declared width shrinks
     // to fit. Nineteen groups therefore no longer request nineteen tracks that need
