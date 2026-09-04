@@ -520,6 +520,12 @@ fn present_lookup(
 
     let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
     presentation.sentence = Some(sentence());
+    // `match_len` counts characters of the trimmed input, as `match_highlight` does.
+    presentation.surface = presentation
+        .top
+        .as_ref()
+        .map(|top| text.trim_start().chars().take(top.match_len).collect::<String>())
+        .filter(|surface| !surface.is_empty());
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
     if outline_match {
         if let Some(rect) = matched {
@@ -890,6 +896,7 @@ mod tests {
             panic!("a hit must present something")
         };
         assert_eq!(Some("食べた。".to_string()), presentation.sentence);
+        assert_eq!(Some("食".to_string()), presentation.surface, "the on-screen form the card matched");
         assert!(matched.is_some(), "a hit with geometry has a rect to outline");
         assert_eq!(
             vec![ScanKind::Pass1, ScanKind::Match],

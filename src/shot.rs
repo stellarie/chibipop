@@ -205,6 +205,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         }
     }
 
@@ -291,6 +292,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         };
         let a = anki_state();
         assert_eq!(None, plan_add(&view(&p, &a), &cfg_on(), Path::new(ROOT), 1));

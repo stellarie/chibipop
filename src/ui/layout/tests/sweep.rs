@@ -1788,6 +1788,7 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
         collapsed: Vec::new(),
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 

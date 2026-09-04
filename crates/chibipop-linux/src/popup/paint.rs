@@ -1030,6 +1030,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         };
         let mut text = Fake::default();
         let scene = chibipop::ui::layout::scene(

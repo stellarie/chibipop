@@ -421,6 +421,7 @@ fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 
@@ -450,6 +451,7 @@ fn with_collapsed() -> Presentation {
         ],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 
@@ -504,6 +506,7 @@ fn card_with(blocks: Vec<GlossBlock>) -> Presentation {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 
@@ -593,6 +596,7 @@ fn a_run_too_wide_for_the_column_wraps_onto_more_lines() {
         collapsed: vec![],
         all_cards: vec![],
         sentence: None,
+        surface: None,
     };
     // The 100px column fits 13 units at 7.5px each. The 120-unit run needs 10 lines.
     let s = laid_out(&p, 124.0, 4000.0, false, false);
@@ -620,6 +624,7 @@ fn a_run_that_exactly_fills_the_column_stays_on_one_line() {
         collapsed: vec![],
         all_cards: vec![],
         sentence: None,
+        surface: None,
     };
     let s = laid_out(&p, 124.0, 4000.0, false, false);
     let gloss = s.elems.iter().find(|e| e.text == exact).unwrap();
@@ -936,6 +941,7 @@ fn a_kana_only_headword_drills_nowhere() {
         collapsed: vec![],
         all_cards: vec![],
         sentence: None,
+        surface: None,
     };
     let s = laid_out(&p, 424.0, 4000.0, false, false);
     assert!(!s.hits.iter().any(|h| matches!(h.action, HitAction::DrillDown(_))));
@@ -1212,6 +1218,7 @@ fn rich(glossary: &str) -> Presentation {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 
@@ -3720,6 +3727,7 @@ fn a_table_wider_than_the_panel_never_widens_the_panel() {
             }],
             all_cards: vec![card],
             sentence: None,
+            surface: None,
         }
     };
     let plain = grid_scene(&wide(table(&[tr(&["a", "b"])])), 300.0, true);
@@ -6801,6 +6809,7 @@ fn card_with_pitch(reading: &str, pitch: Vec<crate::present::PitchRow>) -> Prese
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     }
 }
 
@@ -6960,6 +6969,7 @@ fn the_pitch_row_replaces_the_reading_line_and_sits_above_the_part_of_speech() {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     };
     let s = laid_out(&p, 480.0, 800.0, false, false);
 
@@ -6996,6 +7006,7 @@ fn a_kana_only_headword_draws_its_accent_under_the_headword() {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     };
     let s = laid_out(&p, 480.0, 800.0, false, false);
 
@@ -7052,6 +7063,7 @@ fn a_pitch_row_after_the_frequency_corner_takes_the_narrowed_width() {
         collapsed: vec![],
         all_cards: vec![card],
         sentence: None,
+        surface: None,
     };
     let s = laid_out(&p, 480.0, 800.0, false, false);
 

@@ -5349,6 +5349,7 @@ mod tests {
                     collapsed: Vec::new(),
                     all_cards: Vec::new(),
                     sentence: None,
+                    surface: None,
                 }),
                 anchor,
                 orientation: Orientation::Horizontal,

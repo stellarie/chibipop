@@ -373,9 +373,31 @@ pub fn note_payload(
         )
     };
     if let Some(sentence) = &p.sentence {
-        fields.insert("sentence".to_string(), sentence.clone());
+        fields.insert("sentence".to_string(), bold_surface(sentence, p.surface.as_deref()));
     }
     (expr, fields)
+}
+
+/// Wrap the first `surface` inside `sentence` in `<b>`.
+///
+/// An Anki field holds HTML, so `<b>` renders bold and stays searchable as the
+/// plain characters. The match is the first occurrence because the probe gives
+/// no offset. A sentence without the surface, for example after an OCR
+/// difference between the hover read and the probe read, stays plain.
+fn bold_surface(sentence: &str, surface: Option<&str>) -> String {
+    let Some(surface) = surface.filter(|s| !s.is_empty()) else {
+        return sentence.to_string();
+    };
+    let Some(at) = sentence.find(surface) else {
+        return sentence.to_string();
+    };
+    let mut out = String::with_capacity(sentence.len() + 7);
+    out.push_str(&sentence[..at]);
+    out.push_str("<b>");
+    out.push_str(surface);
+    out.push_str("</b>");
+    out.push_str(&sentence[at + surface.len()..]);
+    out
 }
 
 /// State saved before a drill-down so Back can restore it.
@@ -1502,6 +1524,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         }
     }
 
@@ -1569,6 +1592,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards,
             sentence: None,
+            surface: None,
         }
     }
 
@@ -3033,6 +3057,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: None,
+            surface: None,
         };
         let mut selection = CardSelection::default();
         selection.replace(SelRange {
@@ -3067,6 +3092,7 @@ mod tests {
             collapsed: Vec::new(),
             all_cards: Vec::new(),
             sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
+            surface: None,
         };
 
         // The `reading` value replaces the missing `written` value.
@@ -3087,6 +3113,36 @@ mod tests {
         assert_eq!(
             (String::new(), HashMap::new()),
             note_payload(&p, false, true, &empty, Separator::Ellipsis),
+        );
+    }
+
+    /// The card bolds the on-screen form, not the headword. A conjugated
+    /// verb stays conjugated, and a sentence without the form stays plain.
+    #[test]
+    fn the_sentence_field_bolds_the_matched_surface() {
+        let sentence = "山が崩れたり、低い所に水が入ったりするかもしれません。";
+        assert_eq!(
+            "山が<b>崩れたり</b>、低い所に水が入ったりするかもしれません。",
+            bold_surface(sentence, Some("崩れたり"))
+        );
+        assert_eq!(sentence, bold_surface(sentence, Some("崩れる")));
+        assert_eq!(sentence, bold_surface(sentence, Some("")));
+        assert_eq!(sentence, bold_surface(sentence, None));
+        // Only the first occurrence is bold.
+        assert_eq!("<b>山</b>と山", bold_surface("山と山", Some("山")));
+
+        let p = Presentation {
+            top: Some(card("\u{732B}")),
+            collapsed: Vec::new(),
+            all_cards: Vec::new(),
+            sentence: Some("\u{732B}\u{304C}\u{3044}\u{308B}".into()),
+            surface: Some("\u{732B}".into()),
+        };
+        let (_, fields) =
+            note_payload(&p, false, true, &CardSelection::default(), Separator::Ellipsis);
+        assert_eq!(
+            Some(&"<b>\u{732B}</b>\u{304C}\u{3044}\u{308B}".to_string()),
+            fields.get("sentence")
         );
     }
 }

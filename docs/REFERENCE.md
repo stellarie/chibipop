@@ -410,6 +410,10 @@ wide page holds several sentences on one line, and the card gets only the
 sentence of the hovered word. `line` never reads outside the hover capture, so
 a sentence that starts on the line above is cut short.
 
+In every mode, the sentence field bolds the word as it appears on screen:
+`山が<b>崩れたり</b>、…`. The bold is the surface form, not the headword. A
+sentence that does not contain the surface form stays plain.
+
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`
 and `FreqSort`/`frequency`.

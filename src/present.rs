@@ -25,6 +25,12 @@ pub struct Presentation {
     pub all_cards: Vec<Card>,
     /// The OCR sentence line that `worker.rs` sets for note payloads.
     pub sentence: Option<String>,
+    /// The on-screen text that the top Card matched, as OCR read it.
+    ///
+    /// The note bolds this text inside `sentence`. It is the surface form, not
+    /// the headword: a card for 崩れる bolds 崩れたり. `worker.rs` sets it
+    /// from the hovered span and `match_len`.
+    pub surface: Option<String>,
 }
 
 /// The complete top [`Card`].
@@ -341,7 +347,7 @@ pub fn build(
         .map(|c| collapsed_from_card(c, cfg.summary_chars))
         .collect();
 
-    Presentation { top, collapsed, all_cards, sentence: None }
+    Presentation { top, collapsed, all_cards, sentence: None, surface: None }
 }
 
 /// The physical-pixel space between the text and its outline.
