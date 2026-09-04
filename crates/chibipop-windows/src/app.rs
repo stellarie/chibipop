@@ -1614,6 +1614,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 button_h
             });
 
+            Hooks::set_outside_watch(
+                matches!(live.trigger_mode, crate::config::TriggerMode::Press)
+                    && controller.popup().is_some(),
+            );
+            if let Some(point) = Hooks::take_outside_click() {
+                if let Some(view) = controller.popup() {
+                    let popup = PhysRect { h: view.popup.h + button_h, ..view.popup };
+                    if !popup.contains(point) {
+                        drive!(Event::PointerDownOutside);
+                    }
+                }
+            }
+
             let notches = Hooks::take_whole_notches();
             if notches != 0 {
                 drive!(Event::Scrolled { notches });
@@ -2036,6 +2049,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                     drive!(Event::TriggerUp);
                 }
+            }
+
+            if Hooks::take_press() {
+                drive!(Event::TriggerPressed { pos: cursor_pos });
             }
 
             let cursor = Hooks::take_pending().unwrap_or_else(|| {

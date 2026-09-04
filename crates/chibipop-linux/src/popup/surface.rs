@@ -461,6 +461,15 @@ impl Popup {
         &self.compositor
     }
 
+    /// The layer that carries every popup panel.
+    ///
+    /// The Press-mode catcher must share this layer. A lower layer cannot
+    /// receive a click that the popup owns, so the catcher reads this value
+    /// instead of keeping a second config mapping.
+    pub fn layer(&self) -> Layer {
+        self.layer
+    }
+
     /// The one `wp_viewporter`. This function returns no
     /// fractional-scale object beside it. The popup already has a
     /// surface on every output, so its `preferred_scale` is this
@@ -469,6 +478,14 @@ impl Popup {
     /// latches the scale there either.
     pub fn viewporter(&self) -> Option<&WpViewporter> {
         self.viewporter.as_ref()
+    }
+
+    /// Return the popup pointer's shape source.
+    ///
+    /// The Press-mode catcher reuses this pointer and shape manager. A second
+    /// `wl_pointer` would split enter serials from the pointer events it shapes.
+    pub fn pointer_shape_source(&self) -> Option<(&CursorShapeManager, &WlPointer)> {
+        self.pointer.shape_source()
     }
 
     /// The logical theme that this popup resolved from the config.
@@ -1479,19 +1496,25 @@ impl OutputHandler for App {
     }
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<App>, output: WlOutput) {
-        let popup = self.popup_mut();
-        if let Some(info) = popup.outputs.info(&output) {
-            let geo = place::geometry_of(&info);
-            if let Some(panel) = popup.panels.iter_mut().find(|p| p.output == output) {
-                panel.geo = geo;
+        {
+            let popup = self.popup_mut();
+            if let Some(info) = popup.outputs.info(&output) {
+                let geo = place::geometry_of(&info);
+                if let Some(panel) = popup.panels.iter_mut().find(|p| p.output == output) {
+                    panel.geo = geo;
+                }
             }
         }
+        self.catcher_output_updated(&output);
     }
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<App>, output: WlOutput) {
+        self.catcher_output_destroyed(&output);
         self.popup_mut().drop_output(&output);
         self.flush_popup_notes();
+        self.flush_surface_notes();
     }
+
 }
 
 impl ShmHandler for App {

@@ -23,6 +23,8 @@ mod cursor;
 #[cfg(target_os = "linux")]
 mod daemon;
 #[cfg(target_os = "linux")]
+mod catcher;
+#[cfg(target_os = "linux")]
 mod entry;
 #[cfg(target_os = "linux")]
 mod lock;

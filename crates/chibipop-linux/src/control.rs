@@ -27,6 +27,11 @@ pub enum Verb {
     TriggerDown,
     TriggerUp,
     Toggle,
+    /// Run one lookup at the cursor with a live grab, as
+    /// [`chibipop::config::TriggerMode::Press`] does. The popup stays until a
+    /// later lookup finds no text or the user clicks outside it. The verb
+    /// takes no hold and no frozen grab, so a press over the popup is a miss.
+    Lookup,
     /// Add a card for the lookup on screen. This is the same action that the
     /// portal `anki-add` shortcut performs. Both channels use this wire name.
     AnkiAdd,
@@ -45,11 +50,12 @@ pub enum Verb {
     StaticRegion,
 }
 
-pub const VERBS: [Verb; 8] = [
+pub const VERBS: [Verb; 9] = [
     Verb::Reload,
     Verb::TriggerDown,
     Verb::TriggerUp,
     Verb::Toggle,
+    Verb::Lookup,
     Verb::AnkiAdd,
     Verb::Screenshot,
     Verb::OcrClipboard,
@@ -63,6 +69,7 @@ impl Verb {
             Verb::TriggerDown => "trigger-down",
             Verb::TriggerUp => "trigger-up",
             Verb::Toggle => "toggle",
+            Verb::Lookup => "lookup",
             Verb::AnkiAdd => "anki-add",
             Verb::Screenshot => "screenshot",
             Verb::OcrClipboard => "ocr-clipboard",
@@ -111,6 +118,9 @@ impl StubState {
                 self.toggled_on = !self.toggled_on;
                 format!("toggled {}", if self.toggled_on { "on" } else { "off" })
             }
+            // Do not count this action. The lookup can miss, and the Controller
+            // decides what stays on screen. This line reports the request.
+            Verb::Lookup => "lookup requested at the cursor".to_string(),
             // Do not count this action. The daemon's `Controller` decides whether an
             // add occurs at all. It considers cases with no card, an empty expression, and
             // an already added card. A counter here would provide a second, less accurate
@@ -255,12 +265,12 @@ mod tests {
 
     /// These literal names form the contract. A bind line that a user pasted
     /// years ago must remain valid. A rename is a breaking change, so this
-    /// assertion records the rule.
+    /// assertion records the rule. An addition at the end keeps every old name.
     #[test]
     fn the_wire_names_are_the_forever_contract() {
         assert_eq!(
-            "reload, trigger-down, trigger-up, toggle, anki-add, screenshot, ocr-clipboard, \
-             static-region",
+            "reload, trigger-down, trigger-up, toggle, lookup, anki-add, screenshot, \
+             ocr-clipboard, static-region",
             verb_list()
         );
     }

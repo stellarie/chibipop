@@ -21,6 +21,8 @@ use crate::paths::Paths;
 use crate::tray::status::{ChannelId, ChannelState, ChannelStatuses};
 use crate::tray::{self, TrayHandle, TrayRequest};
 use crate::overlay::{self, Outline};
+use crate::catcher::Catcher;
+
 use crate::popup::{self, Demo, Popup, ShowRequest};
 use crate::select::{self, Pick, Selector};
 use crate::shortcuts;
@@ -158,6 +160,11 @@ pub(crate) struct App {
     /// [`static_overlay_region`] decides when to show or hide it.
     /// One predicate gives every call site the same border rule.
     static_outline: Option<Outline>,
+    /// Full-output transparent layers for Press-mode outside-click dismissal.
+    /// The catcher shares the popup layer and leaves a hole over the popup.
+    /// This field is `None` when the compositor lacks layer shell or a shm pool.
+    catcher: Option<Catcher>,
+
     /// `CHIBIPOP_POPUP_DEMO=1` makes trigger verbs show and hide the canned
     /// popup without a lookup.
     /// A developer can inspect the surface without a Dictionary.
@@ -471,11 +478,12 @@ impl App {
             Verb::Reload => self.reload_config(),
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
-            Verb::TriggerDown | Verb::Toggle if self.demo.armed => self.demo_show(),
+            Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
             Verb::TriggerUp if self.demo.armed => self.demo_hide(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
+            Verb::Lookup => self.lookup_at_cursor(),
             // The in-panel Anki slot raises the same Event, so every card path
             // uses one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
@@ -487,6 +495,18 @@ impl App {
             // socket provides the complete global channel.
             Verb::StaticRegion => self.pick_static_region(),
         }
+    }
+
+    /// Ask the Controller for one lookup at the latest cursor sample.
+    ///
+    /// This verb takes no frozen grab because a press can land while the popup
+    /// is shown, and the frozen-grab rule requires a grab before any popup exists.
+    fn lookup_at_cursor(&mut self) {
+        let Some(at) = self.cursor_now() else {
+            self.log.diag("lookup: no cursor sample yet - nothing to look up");
+            return;
+        };
+        self.feed(Event::TriggerPressed { pos: at });
     }
 
     /// One Event from the GlobalShortcuts session thread.
@@ -715,7 +735,7 @@ impl App {
         }
     }
 
-    /// Move selector, pick, and outline diagnostics into the log.
+    /// Move selector, pick, outline, and catcher diagnostics into the log.
     /// This matches `flush_popup_notes`. None of these objects owns the log.
     pub(crate) fn flush_surface_notes(&mut self) {
         let mut lines = Vec::new();
@@ -731,8 +751,33 @@ impl App {
         if let Some(outline) = self.static_outline.as_mut() {
             lines.extend(outline.drain_notes());
         }
+        if let Some(catcher) = self.catcher.as_mut() {
+            lines.extend(catcher.drain_notes());
+        }
         for line in lines {
             self.log.diag(&line);
+        }
+    }
+
+    /// Drop the catcher pane before the popup removes this output's screen.
+    pub(crate) fn catcher_output_destroyed(&mut self, output: &WlOutput) {
+        let id = self
+            .screens()
+            .into_iter()
+            .find(|screen| screen.output == output.clone())
+            .map(|screen| screen.id);
+        if let (Some(catcher), Some(id)) = (self.catcher.as_mut(), id) {
+            catcher.drop_output(id);
+        }
+    }
+    /// Refresh the catcher geometry after an output update.
+    pub(crate) fn catcher_output_updated(&mut self, output: &WlOutput) {
+        let screen = self
+            .screens()
+            .into_iter()
+            .find(|screen| screen.output == output.clone());
+        if let (Some(catcher), Some(screen)) = (self.catcher.as_mut(), screen) {
+            catcher.update_output(&screen);
         }
     }
 
@@ -1373,8 +1418,8 @@ impl App {
     // ---- routes ----
 
     /// A layer surface was configured. Surface identity selects the owner.
-    /// The pick paints the dim, an outline paints strips, and the popup paints
-    /// the panel.
+    /// The pick paints the dim, an outline paints strips, the catcher paints
+    /// its transparent mask, and the popup paints the panel.
     pub(crate) fn layer_configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1400,6 +1445,13 @@ impl App {
             self.flush_surface_notes();
             return;
         }
+        if self.catcher.as_ref().is_some_and(|catcher| catcher.owns_layer(layer)) {
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.configured(layer, size);
+            }
+            self.flush_surface_notes();
+            return;
+        }
         if self.popup.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             self.popup_mut().configured(layer, size);
             self.flush_popup_notes();
@@ -1411,8 +1463,8 @@ impl App {
     }
 
     /// The compositor closed a layer surface.
-    /// The popup recreates it, the pick cancels, and the outline loses one
-    /// surface until the next show.
+    /// The popup recreates it, the pick cancels, and the outline and catcher
+    /// lose one surface until the next show.
     pub(crate) fn layer_closed(&mut self, layer: &LayerSurface) {
         if self.pick.as_ref().is_some_and(|p| p.owns_layer(layer)) {
             if let Some(pick) = self.pick.as_mut() {
@@ -1431,6 +1483,13 @@ impl App {
         if self.static_outline.as_ref().is_some_and(|o| o.owns_layer(layer)) {
             if let Some(outline) = self.static_outline.as_mut() {
                 outline.drop_layer(layer);
+            }
+            self.flush_surface_notes();
+            return;
+        }
+        if self.catcher.as_ref().is_some_and(|catcher| catcher.owns_layer(layer)) {
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.drop_layer(layer);
             }
             self.flush_surface_notes();
             return;
@@ -1454,14 +1513,28 @@ impl App {
     }
 
     /// One `wl_pointer` frame. The pick owns the pointer while active because
-    /// its surfaces cover the output.
-    /// The popup receives frames that do not belong to the pick.
+    /// its surfaces cover the output. The Press-mode catcher owns the full
+    /// output except for the popup hole.
+    /// The popup receives frames that do not belong to either surface.
     pub(crate) fn pointer_frame(&mut self, events: &[PointerEvent]) {
         if let Some(pick) = self.pick.as_mut() {
             if select::pointer_frame(pick, events) {
                 self.flush_surface_notes();
                 return;
             }
+        }
+        let caught = self.catcher.as_mut().and_then(|catcher| {
+            if let Some(popup) = self.popup.as_ref() {
+                catcher.sync_pointer(popup);
+            }
+            catcher.pointer_frame(events)
+        });
+        if let Some(outside) = caught {
+            self.flush_surface_notes();
+            if outside.pressed {
+                self.feed(Event::PointerDownOutside);
+            }
+            return;
         }
         if self.popup.is_none() {
             return;
@@ -2049,6 +2122,13 @@ impl App {
             content_h: placed.content_h,
             view_h: placed.view_h,
         });
+        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+            let screens = self.screens();
+            if let Some(catcher) = self.catcher.as_mut() {
+                catcher.show(&screens, placed.rect);
+            }
+            self.flush_surface_notes();
+        }
     }
 
     /// Hide with a transparent buffer, not an unmap.
@@ -2068,6 +2148,9 @@ impl App {
         }
         if let Some(outline) = self.scan_outline.as_mut() {
             outline.hide();
+        }
+        if let Some(catcher) = self.catcher.as_mut() {
+            catcher.hide();
         }
         self.flush_popup_notes();
         self.flush_surface_notes();
@@ -2276,6 +2359,22 @@ impl App {
                 self.config = config;
                 let cfg = controller_config(&self.config);
                 self.feed(Event::ConfigReloaded(Box::new(cfg)));
+                let layer = self.popup.as_ref().map(Popup::layer);
+                let shown = self.popup.as_ref().and_then(Popup::shown).map(|shown| shown.placement.rect);
+                let screens = self.screens();
+                if let Some(catcher) = self.catcher.as_mut() {
+                    if let Some(layer) = layer {
+                        catcher.set_layer(layer);
+                    }
+                    if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+                        if let Some(rect) = shown {
+                            catcher.show(&screens, rect);
+                        }
+                    } else {
+                        catcher.hide();
+                    }
+                }
+                self.flush_surface_notes();
                 // The mode, checkbox, and region are editable in the settings
                 // window.
                 // Reload is the second of the predicate's three call sites.
@@ -2923,20 +3022,22 @@ pub fn run(paths: Paths) -> Result<()> {
         }
     }
 
-    // Three surfaces sit beside the popup.
+    // Four surfaces sit beside the popup.
     // Each borrows the popup's process handles: one `wl_compositor`, one
-    // `wl_shm`, one `wl_viewporter`, and one `OutputState`.
+    // `wl_shm`, one `wp_viewporter`, and one `OutputState`.
     // Each returns `None` when the same global is absent, so a
     // layer-shell-less session reports it once and keeps other channels.
     // Two outlines have separate lifetimes for scan rects and the static
-    // border.
+    // border. The catcher maps its panes lazily on the first Press lookup.
     let selector = Selector::bind(&conn, &globals_list, &queue.handle(), &popup);
     let scan_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
     let static_outline = Outline::bind(&globals_list, &queue.handle(), &popup);
+    let catcher = Catcher::bind(&globals_list, &queue.handle(), &popup);
     for (what, present) in [
         ("selector", selector.is_some()),
         ("outline", scan_outline.is_some()),
         ("static outline", static_outline.is_some()),
+        ("catcher", catcher.is_some()),
     ] {
         if !present {
             log.diag(&format!(
@@ -3058,6 +3159,7 @@ pub fn run(paths: Paths) -> Result<()> {
         pick: None,
         scan_outline,
         static_outline,
+        catcher,
         demo,
         scripting: false,
         config,
@@ -3455,6 +3557,7 @@ mod tests {
             pick: None,
             scan_outline: None,
             static_outline: None,
+            catcher: None,
             demo: Demo::default(),
             scripting: false,
         }
@@ -3859,6 +3962,50 @@ mod tests {
         assert_eq!(None, app.hold, "nothing to freeze on");
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("no cursor sample yet"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lookup verb feeds one press event without creating a hold.
+    /// The live capture mask still applies when no popup rectangle exists.
+    #[test]
+    fn a_lookup_verb_requests_one_live_lookup_without_a_hold() {
+        let dir = scratch("lookup_verb");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(AT);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.handle_request("lookup", Some(Verb::Lookup));
+
+        assert_eq!(None, app.hold, "a lookup press never starts a hold");
+        assert_eq!(CaptureMode::Live, app.capture_mode(), "the lookup uses a live capture");
+        answer(&app);
+        assert_eq!(
+            done(&log),
+            ["begin_read", "grab", "ocr masked=false", "end_read"],
+            "one lookup reaches the live pipeline"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The lookup verb reports a missing cursor sample and sends no request.
+    #[test]
+    fn a_lookup_verb_without_a_cursor_sample_sends_nothing() {
+        let dir = scratch("lookup_no_cursor");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        let (worker, log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.handle_request("lookup", Some(Verb::Lookup));
+
+        assert!(app.worker.as_ref().expect("the pipeline").results().try_recv().is_err());
+        assert!(done(&log).is_empty(), "no cursor sample means no pipeline request");
+        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        assert!(written.contains("no cursor sample"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -322,12 +322,16 @@ pub enum Action {
 /// press and a native bind on one `App::apply_verb` path
 /// (ARCHITECTURE.md#input-ladders). Toggle mode uses the existing `toggle`
 /// verb, so the daemon's latch logic in `trigger.rs` remains the single owner
-/// of the hold.
+/// of the hold. Press mode sends one `lookup` verb per press and ignores the
+/// release.
 pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
     match (id, activated, mode) {
         (ShortcutId::Trigger, true, TriggerMode::Toggle) => Action::Verb(Verb::Toggle),
         // A release cannot reverse a toggle latch.
         (ShortcutId::Trigger, false, TriggerMode::Toggle) => Action::Nothing,
+        (ShortcutId::Trigger, true, TriggerMode::Press) => Action::Verb(Verb::Lookup),
+        // Press mode performs one lookup and ignores the release.
+        (ShortcutId::Trigger, false, TriggerMode::Press) => Action::Nothing,
         // Every other trigger mode needs both events.
         (ShortcutId::Trigger, true, _) => Action::Verb(Verb::TriggerDown),
         (ShortcutId::Trigger, false, _) => Action::Verb(Verb::TriggerUp),
@@ -516,6 +520,20 @@ mod tests {
                 action(ShortcutId::Trigger, false, mode)
             );
         }
+    }
+
+    /// Press mode sends one lookup verb for each press. The release does not
+    /// create a second lookup.
+    #[test]
+    fn press_mode_sends_the_lookup_verb_on_press_and_nothing_on_release() {
+        assert_eq!(
+            Action::Verb(Verb::Lookup),
+            action(ShortcutId::Trigger, true, TriggerMode::Press)
+        );
+        assert_eq!(
+            Action::Nothing,
+            action(ShortcutId::Trigger, false, TriggerMode::Press)
+        );
     }
 
     /// Anki adds only on a press. The release does not create a second

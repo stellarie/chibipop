@@ -1175,6 +1175,8 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         TriggerMode::Live
     } else if app.form.mode == TriggerMode::Toggle {
         TriggerMode::Toggle
+    } else if app.form.mode == TriggerMode::Press {
+        TriggerMode::Press
     } else {
         // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
         TriggerMode::HoldKey
@@ -1183,6 +1185,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         radio("Live", TriggerMode::Live, Some(selected), Message::Mode),
         radio("Hold key", TriggerMode::HoldKey, Some(selected), Message::Mode),
         radio("Toggle", TriggerMode::Toggle, Some(selected), Message::Mode),
+        radio("Press key", TriggerMode::Press, Some(selected), Message::Mode),
     ]
     .spacing(20);
 
@@ -2500,6 +2503,11 @@ mod tests {
             Some("bind = ALT, F, exec, /usr/bin/chibipop ctl toggle".to_string()),
             app.portal_trigger_snippet(&None)
         );
+        let _ = update(&mut app, Message::Mode(TriggerMode::Press));
+        assert_eq!(
+            Some("bind = ALT, F, exec, /usr/bin/chibipop ctl lookup".to_string()),
+            app.portal_trigger_snippet(&None)
+        );
         let _ = view(&app);
 
         assert_eq!(None, app.portal_trigger_snippet(&Some("Meta+F".into())));
@@ -2516,6 +2524,11 @@ mod tests {
 
         let snippet = app.bind_snippet();
         assert!(snippet.contains("ctl toggle"), "{snippet}");
+        assert!(!snippet.contains("trigger-down"), "{snippet}");
+        assert!(!snippet.contains("trigger-up"), "{snippet}");
+        let _ = update(&mut app, Message::Mode(TriggerMode::Press));
+        let snippet = app.bind_snippet();
+        assert!(snippet.contains("ctl lookup"), "{snippet}");
         assert!(!snippet.contains("trigger-down"), "{snippet}");
         assert!(!snippet.contains("trigger-up"), "{snippet}");
         let _ = std::fs::remove_dir_all(&dir);

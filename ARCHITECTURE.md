@@ -91,12 +91,14 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The portal shortcut identifier set has exactly two members: `trigger` and `anki-add`.
 - The system rejects evdev completely, even as a setting.
 - `keyboard_interactivity: none` is a strict rule. The popup never takes focus.
-- One control-socket verb exists for each global action. A verb exists only if a user
-  can bind a key to it. No verb reads state, takes an argument, or composes.
+- The control-socket verb set has one verb for each global action. It has `lookup` for Press
+  mode. A verb exists only if a user can bind a key to it. No verb reads state, takes an
+  argument, or composes.
 - A portal press event and its native-bind verb use one code path.
   `shortcuts::action` maps the identifier and trigger mode to a `Verb`. In Toggle mode,
-  it maps the trigger identifier to the `toggle` verb. `App::apply_verb` is the only target
-  function.
+  it maps the trigger identifier to the `toggle` verb. In Press mode, it maps an activated
+  trigger identifier to the `lookup` verb and a release to `Action::Nothing`.
+  `App::apply_verb` is the only target function.
 
 ## Popup and measurement
 
@@ -114,6 +116,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
+- A click catcher exists only in Press mode while a popup is placed. The daemon gives every
+  output a transparent full-output layer surface at the popup layer. Its input region covers
+  the output except the popup rectangle. The catcher is never unmapped. Hide clears its input
+  region, and a button press on the catcher hides the popup. The catcher swallows that click
+  because there is no evdev path and the popup takes no focus.
 
 ## Selection
 
@@ -150,11 +157,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   drives dispatch.
 - It has no settle delay and no velocity gate.
 - The damage-gated dwell re-check runs only while a popup is visible.
-- At key press, trigger mode freezes one full grab of the output under the cursor
+- At key press in hold-key mode, the system freezes one full grab of the output under the cursor
   before any popup exists. No capture and no mask run while the user holds the key.
-- Release drops the frozen buffer, and each press captures again. The `toggle` command
+- Release drops the frozen buffer, and each hold-key press captures again. The `toggle` command
   captures at toggle-on and holds the buffer until toggle-off. Toggle mode uses this path on
   both platforms: Linux sends the `toggle` verb, and Windows flips the hook latch.
+- Press mode has no Frozen grab or Dwell re-check. Each trigger press performs one live masked
+  grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
+  also hides it because the mask gives no text. Cursor movement and key release do nothing, and
+  per-character lookup is inert.
 - Every cadence number is a hardcoded constant. No cadence number is a setting.
 
 ## OCR engine

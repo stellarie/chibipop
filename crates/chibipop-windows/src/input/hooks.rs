@@ -44,6 +44,9 @@ static KEY_DOWN: AtomicBool = AtomicBool::new(false);
 /// Tracks physical trigger edges so Windows autorepeat does not toggle the latch.
 static TRIGGER_PHYSICAL: AtomicBool = AtomicBool::new(false);
 
+/// Stores one physical Press-mode trigger edge.
+static PENDING_PRESS: AtomicBool = AtomicBool::new(false);
+
 /// The main thread resets this flag on each tick.
 /// A stuck `true` value blocks every wheel event.
 static SCROLL_ARMED: AtomicBool = AtomicBool::new(false);
@@ -53,6 +56,15 @@ static PENDING_SCROLL: AtomicI32 = AtomicI32::new(0);
 
 /// Arms click capture on the popup area.
 static CLICK_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Watches an outside button press while a Press-mode popup is visible.
+/// The observer never swallows the click because an outside click in Press mode
+/// is the user's click on another window. Chibipop only adds a hide action.
+static OUTSIDE_WATCH: AtomicBool = AtomicBool::new(false);
+
+/// Stores one outside button press in screen coordinates.
+static PENDING_OUTSIDE: AtomicI64 = AtomicI64::new(NO_POINT);
+
 /// This state stores button bits while the pointer is held.
 static POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
@@ -183,6 +195,7 @@ fn mode_to_u8(m: TriggerMode) -> u8 {
         TriggerMode::Live => 0,
         TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
         TriggerMode::Toggle => 2,
+        TriggerMode::Press => 3,
     }
 }
 
@@ -190,6 +203,7 @@ fn u8_to_mode(v: u8) -> TriggerMode {
     match v {
         1 => TriggerMode::HoldKey,
         2 => TriggerMode::Toggle,
+        3 => TriggerMode::Press,
         _ => TriggerMode::Live,
     }
 }
@@ -198,6 +212,7 @@ fn u8_to_mode(v: u8) -> TriggerMode {
 fn mode_currently_eligible() -> bool {
     match u8_to_mode(MODE.load(Ordering::SeqCst)) {
         TriggerMode::Live => true,
+        TriggerMode::Press => false,
         _ => KEY_DOWN.load(Ordering::SeqCst),
     }
 }
@@ -205,11 +220,15 @@ fn mode_currently_eligible() -> bool {
 /// Updates trigger state without calling Win32 APIs.
 ///
 /// Windows sends autorepeat key-down events, so the physical edge state filters
-/// repeats. Toggle mode keeps its latch across release, and toggle-off resets
-/// the movement gate before the next capture.
+/// repeats. Toggle mode keeps its latch across release, and toggle-off resets the
+/// movement gate before the next capture.
 fn transition_trigger_state(down: bool, still_held: bool, mode: TriggerMode) {
     if down {
         if TRIGGER_PHYSICAL.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if mode == TriggerMode::Press {
+            PENDING_PRESS.store(true, Ordering::SeqCst);
             return;
         }
         if mode == TriggerMode::Toggle {
@@ -222,6 +241,9 @@ fn transition_trigger_state(down: bool, still_held: bool, mode: TriggerMode) {
         }
     } else if !still_held {
         TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+        if mode == TriggerMode::Press {
+            return;
+        }
         if mode == TriggerMode::Toggle {
             return;
         }
@@ -403,6 +425,22 @@ unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM
     queue_pointer_event(PointerEvent { button, down, point });
 }
 
+/// Records one unarmed button press in screen coordinates.
+fn record_outside_click(point: PhysPoint) {
+    if !CLICK_ARMED.load(Ordering::SeqCst) && OUTSIDE_WATCH.load(Ordering::SeqCst) {
+        PENDING_OUTSIDE.store(pack(point), Ordering::SeqCst);
+    }
+}
+
+/// Reads and records one unarmed button press from a low-level hook event.
+unsafe fn record_outside_click_from_lparam(lparam: LPARAM) {
+    // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
+    // the message is a button-down edge. The `WH_MOUSE_LL` contract
+    // guarantees a valid, aligned `MSLLHOOKSTRUCT` for this call.
+    let data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    record_outside_click(PhysPoint { x: data.pt.x, y: data.pt.y });
+}
+
 /// Stores one wheel event's delta.
 unsafe fn record_wheel(lparam: LPARAM) {
     // SAFETY: `mouse_hook_proc` calls this only when `code >= 0` and
@@ -422,6 +460,8 @@ fn accumulate_wheel(delta: i32) {
 /// Handles `WH_MOUSE_LL` events.
 ///
 /// An armed wheel event returns before the next hook receives it.
+/// An outside Press-mode click reaches the next hook because it belongs to
+/// another window. Chibipop only adds a hide action.
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         match wparam.0 as u32 {
@@ -434,6 +474,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 });
                 return LRESULT(1);
             }
+            WM_LBUTTONDOWN
+                if !CLICK_ARMED.load(Ordering::SeqCst)
+                    && OUTSIDE_WATCH.load(Ordering::SeqCst) =>
+            {
+                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
+            }
             WM_LBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe {
                     record_pointer_event(PointerButton::Left, false, lparam)
@@ -445,6 +491,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     record_pointer_event(PointerButton::Right, true, lparam)
                 });
                 return LRESULT(1);
+            }
+            WM_RBUTTONDOWN
+                if !CLICK_ARMED.load(Ordering::SeqCst)
+                    && OUTSIDE_WATCH.load(Ordering::SeqCst) =>
+            {
+                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
             }
             WM_RBUTTONUP if CLICK_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe {
@@ -610,6 +662,14 @@ impl Hooks {
         KEY_DOWN.load(Ordering::SeqCst)
     }
 
+    /// Delivers one Press-mode edge to the pump.
+    ///
+    /// Press mode uses a pulse instead of `KEY_DOWN`, so it never emits hold
+    /// edges.
+    pub fn take_press() -> bool {
+        PENDING_PRESS.swap(false, Ordering::SeqCst)
+    }
+
     /// Sets the virtual-key code for the trigger key.
     pub fn set_trigger_key(vk: u16) {
         TRIGGER_VK.store(vk, Ordering::SeqCst);
@@ -664,6 +724,23 @@ impl Hooks {
         }
     }
 
+    /// Watches outside button presses while a Press-mode popup is visible.
+    ///
+    /// The observer never swallows the click because an outside click in Press
+    /// mode is the user's click on another window. Chibipop only adds a hide.
+    pub fn set_outside_watch(watch: bool) {
+        OUTSIDE_WATCH.store(watch, Ordering::SeqCst);
+        if !watch {
+            PENDING_OUTSIDE.store(NO_POINT, Ordering::SeqCst);
+        }
+    }
+
+    /// Takes one observed outside button press.
+    pub fn take_outside_click() -> Option<PhysPoint> {
+        let v = PENDING_OUTSIDE.swap(NO_POINT, Ordering::SeqCst);
+        (v != NO_POINT).then(|| unpack(v))
+    }
+
     /// This function takes all queued popup button edges in callback order.
     pub fn take_pointer_events() -> Vec<PointerEvent> {
         pointer_events()
@@ -681,13 +758,14 @@ impl Hooks {
 
     /// Sets the mode that controls the trigger gate.
     ///
-    /// A mode change clears the physical edge and latch state so a Toggle
-    /// latch cannot survive a settings change into another mode.
+    /// A mode change clears the physical edge, latch, and pending Press state.
+    /// This prevents a previous mode from delivering an edge after the change.
     pub fn set_mode(m: TriggerMode) {
         let mode = mode_to_u8(m);
         if MODE.swap(mode, Ordering::SeqCst) != mode {
             KEY_DOWN.store(false, Ordering::SeqCst);
             TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+            PENDING_PRESS.store(false, Ordering::SeqCst);
         }
     }
 
@@ -882,6 +960,26 @@ mod tests {
     }
 
     #[test]
+    fn press_transitions_queue_one_edge_without_latching() {
+        let _g = trigger_guard();
+        KEY_DOWN.store(false, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+        PENDING_PRESS.store(false, Ordering::SeqCst);
+
+        transition_trigger_state(true, false, TriggerMode::Press);
+        assert!(Hooks::take_press());
+        assert!(!Hooks::take_press());
+        assert!(!Hooks::trigger_held());
+
+        transition_trigger_state(true, false, TriggerMode::Press);
+        assert!(!Hooks::take_press(), "autorepeat must not queue another press");
+
+        transition_trigger_state(false, false, TriggerMode::Press);
+        assert!(!Hooks::take_press(), "release must not queue a press");
+        assert!(!TRIGGER_PHYSICAL.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn armed_pointer_edges_are_swallowed_and_queued() {
         let _g = pointer_guard();
         Hooks::set_click_armed(false);
@@ -913,6 +1011,29 @@ mod tests {
     }
 
     #[test]
+    fn outside_watch_records_one_unarmed_button_press() {
+        let _g = pointer_guard();
+        Hooks::set_click_armed(false);
+        Hooks::set_outside_watch(false);
+        assert_eq!(None, Hooks::take_outside_click());
+
+        Hooks::set_outside_watch(true);
+        let point = PhysPoint { x: 10, y: 20 };
+        record_outside_click(point);
+        assert_eq!(Some(point), Hooks::take_outside_click());
+        assert_eq!(None, Hooks::take_outside_click());
+
+        Hooks::set_outside_watch(false);
+        record_outside_click(point);
+        assert_eq!(None, Hooks::take_outside_click());
+
+        Hooks::set_outside_watch(true);
+        record_outside_click(point);
+        Hooks::set_outside_watch(false);
+        assert_eq!(None, Hooks::take_outside_click());
+    }
+
+    #[test]
     fn wheel_notches_bank_their_sub_notch_remainder() {
         let _g = wheel_guard();
         Hooks::discard_scroll();
@@ -927,6 +1048,7 @@ mod tests {
         );
 
         // High-resolution deltas must combine before they form a notch.
+
         accumulate_wheel(40);
         assert_eq!(0, Hooks::take_whole_notches(), "40 is not yet a notch");
         accumulate_wheel(40);

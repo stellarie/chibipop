@@ -85,6 +85,11 @@ pub enum TriggerMode {
     /// The trigger key latches the hold, so the user can move onto the popup
     /// without a held key. The frozen grab lasts until the next press.
     Toggle,
+    /// Runs one lookup at the cursor for each key press, like Yomitan. The
+    /// popup stays until the next press finds no text or the user clicks
+    /// outside it. The lookup reads a live grab with the popup masked, so a
+    /// press over the popup is a miss and hides it. Hover never follows.
+    Press,
     /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]
     HoldShift,
