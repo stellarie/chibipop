@@ -169,7 +169,10 @@ inherit another app ID. For example, a launch from VS Code can register
 
 Hyprland delivers the portal release keyed to the pressed shortcut itself,
 independent of the modifier state, so either release order retracts the popup.
-The socket keeps serving as a namespace-free fallback.
+The socket keeps serving as a namespace-free fallback. The settings window
+does not guess the namespace. When XDPH owns the trigger, the Trigger row
+shows the control-socket bind for the selected mode instead, as the add-card
+row does.
 
 **The add-card chord is a one-shot action.** The popup never takes focus, so
 the key must be global. On Hyprland, use the control socket even when XDPH is

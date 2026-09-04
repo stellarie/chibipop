@@ -265,6 +265,17 @@ impl App {
         )
     }
 
+    /// Return the trigger row's socket bind when the portal owns the trigger
+    /// but reports no key on Hyprland. XDPH stores the key in hyprland.conf
+    /// under a `global` namespace that depends on the process that starts the
+    /// daemon. The control socket has one stable path and reaches the same
+    /// `App::apply_verb` target. Return `None` when the desktop reports the
+    /// key, because its shortcut editor then owns the change.
+    fn portal_trigger_snippet(&self, current: &Option<String>) -> Option<String> {
+        (current.is_none() && self.compositor == Compositor::Hyprland)
+            .then(|| self.bind_snippet())
+    }
+
     /// Return the add-card row's copyable bind.
     /// Return `None` when desktop settings own the key.
     /// Hyprland always gets a control socket bind. A portal namespace depends on
@@ -1192,19 +1203,45 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         // the portal owns the bind. The portal dialog and the desktop shortcut editor
         // change the key. The chord above is the value this window gives the portal at
         // the next start.
-        HotkeyControl::Rebind { current } => column![
-            text("Portal channel: the GlobalShortcuts portal owns this binding."),
-            text(match &current {
-                Some(key) => format!("Current key: {key}"),
-                None => "Current key: your desktop does not report one - open its global-shortcuts settings to see or change it".to_string(),
-            }),
-            text(
-                "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
-            )
-            .size(13),
-        ]
-        .spacing(6)
-        .into(),
+        // XDPH reports no key and Hyprland has no shortcut editor. Its `global`
+        // namespace depends on the process that starts the daemon. Give Hyprland
+        // the stable control-socket bind, as the add-card row does.
+        HotkeyControl::Rebind { current } => {
+            let rebind: Element<'_, Message> = match app.portal_trigger_snippet(&current) {
+                Some(snippet) => column![
+                    text(
+                        "Hyprland has no global-shortcut editor. Use this control-socket bind \
+                         in hyprland.conf:"
+                    ),
+                    container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+                    button("Copy bind snippet").on_press(Message::CopyBind),
+                    text(
+                        "This route reaches the same trigger action and does not depend on \
+                         the portal app ID."
+                    )
+                    .size(13),
+                ]
+                .spacing(6)
+                .into(),
+                None => {
+                    text(
+                        "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
+                    )
+                    .size(13)
+                    .into()
+                }
+            };
+            column![
+                text("Portal channel: the GlobalShortcuts portal owns this binding."),
+                text(match &current {
+                    Some(key) => format!("Current key: {key}"),
+                    None => "Current key: the portal does not report one.".to_string(),
+                }),
+                rebind,
+            ]
+            .spacing(6)
+            .into()
+        }
         HotkeyControl::NoChord => {
             text("Type a chord above to get a bind you can paste or a key to ask the portal for.")
                 .size(13)
@@ -2435,6 +2472,39 @@ mod tests {
         // The full window still builds both portal rows. The status block is a widget
         // tree, not only a control value.
         let _ = view(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// XDPH reports no key for the trigger and Hyprland has no shortcut editor.
+    /// The trigger row must give the same control-socket way out as the add row,
+    /// and the bind must follow the selected mode. A desktop that reports the
+    /// key keeps its own editor.
+    #[test]
+    fn the_hyprland_portal_trigger_row_offers_its_native_bind() {
+        let dir = scratch("triggerportalrow");
+        let mut app = app(&dir);
+        app.channel = HotkeyChannel::Portal { current_binding: None };
+
+        assert_eq!(
+            Some(
+                "bind = ALT, F, exec, /usr/bin/chibipop ctl trigger-down\n\
+                 bindr = ALT, F, exec, /usr/bin/chibipop ctl trigger-up\n\
+                 # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
+                 # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead."
+                    .to_string()
+            ),
+            app.portal_trigger_snippet(&None)
+        );
+        let _ = update(&mut app, Message::Mode(TriggerMode::Toggle));
+        assert_eq!(
+            Some("bind = ALT, F, exec, /usr/bin/chibipop ctl toggle".to_string()),
+            app.portal_trigger_snippet(&None)
+        );
+        let _ = view(&app);
+
+        assert_eq!(None, app.portal_trigger_snippet(&Some("Meta+F".into())));
+        app.compositor = Compositor::Kde;
+        assert_eq!(None, app.portal_trigger_snippet(&None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
