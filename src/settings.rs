@@ -65,6 +65,7 @@ pub struct SettingsForm {
     pub capture_width: i32,
     pub capture_height: i32,
     pub scan_alphanumeric: bool,
+    pub discard_furigana: bool,
     pub per_character_lookup: bool,
     pub ocr_language: String,
     /// "builtin" or the name of a plugin.
@@ -435,6 +436,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         capture_width: cfg.ocr.capture_width,
         capture_height: cfg.ocr.capture_height,
         scan_alphanumeric: cfg.ocr.scan_alphanumeric,
+        discard_furigana: cfg.ocr.discard_furigana,
         per_character_lookup: cfg.trigger.per_character_lookup,
         ocr_language: cfg.ocr.language.clone(),
         engine: cfg.ocr.engine.clone(),
@@ -519,6 +521,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.ocr.capture_width = form.capture_width.clamp(CAPTURE_W_RANGE.0, CAPTURE_W_RANGE.1);
     out.ocr.capture_height = form.capture_height.clamp(CAPTURE_H_RANGE.0, CAPTURE_H_RANGE.1);
     out.ocr.scan_alphanumeric = form.scan_alphanumeric;
+    out.ocr.discard_furigana = form.discard_furigana;
     out.trigger.per_character_lookup = form.per_character_lookup;
     out.ocr.language = form.ocr_language.clone();
     out.ocr.engine = form.engine.clone();
@@ -1400,6 +1403,15 @@ mod tests {
         let mut form = from_config(&cfg, &dicts());
         form.scan_alphanumeric = false;
         assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
+    }
+
+    #[test]
+    fn discard_furigana_round_trips_through_the_form() {
+        let mut config = Config::default();
+        config.ocr.discard_furigana = false;
+        let form = from_config(&config, &dicts());
+        assert!(!form.discard_furigana);
+        assert!(!apply_to(&form, &config).ocr.discard_furigana);
     }
 
     #[test]

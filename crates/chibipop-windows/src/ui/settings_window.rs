@@ -202,6 +202,8 @@ const ID_SELECTION_SEPARATOR: i32 = 179;
 const ID_TRIPLE_CLICK: i32 = 180;
 /// This identifier names the checkbox for `include_dictionary_name`.
 const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
+/// Furigana filter checkbox.
+const ID_DISCARD_FURIGANA: i32 = 186;
 
 
 /// The first field-map combo identifier.
@@ -4251,7 +4253,7 @@ impl SettingsWindow {
 
             // ---- OCR / Debug ----
             y = 0;
-            ocr.push(group("OCR / Debug", y, 15 * ROW_H + 38)?);
+            ocr.push(group("OCR / Debug", y, 16 * ROW_H + 38)?);
             y += 20;
             let plugins_root = crate::paths::beside_exe("plugins");
             let found = crate::plugin::discover::discover(&plugins_root);
@@ -4453,6 +4455,13 @@ impl SettingsWindow {
                 "Scan alphanumeric text",
                 ID_SCAN_ALNUM,
                 form.scan_alphanumeric,
+                y,
+            )?);
+            y += ROW_H;
+            ocr.push(check(
+                "Discard furigana from OCR text",
+                ID_DISCARD_FURIGANA,
+                form.discard_furigana,
                 y,
             )?);
             y += ROW_H;
@@ -5325,6 +5334,7 @@ impl SettingsWindow {
                 capture_width: px(ID_CAPTURE_W, template.capture_width),
                 capture_height: px(ID_CAPTURE_H, template.capture_height),
                 scan_alphanumeric: checked(ID_SCAN_ALNUM),
+                discard_furigana: checked(ID_DISCARD_FURIGANA),
                 per_character_lookup: checked(ID_PER_CHAR),
                 ocr_language,
                 engine,

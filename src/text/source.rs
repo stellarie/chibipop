@@ -7,9 +7,9 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
-    band_of, head_and_tail, map_from_upscaled, nearest_line, normalise, region_around, resolve,
-    resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
-    Orientation, Resolved,
+    band_of, discard_furigana, head_and_tail, map_from_upscaled, nearest_line, normalise,
+    region_around, resolve, resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize,
+    OcrLine, OcrWord, Orientation, Resolved,
 };
 use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
@@ -131,6 +131,7 @@ pub struct SettingsSnapshot {
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
+    pub discard_furigana: bool,
 }
 
 /// `Frozen` records the result of trigger mode's press-time grab.
@@ -173,7 +174,12 @@ impl TextSource {
     /// The job cannot create a second engine elsewhere.
     /// This method gives one-off OCR calls the same seam as lookups.
     pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
-        self.ocr.recognise(bgra, w, h)
+        let lines = self.ocr.recognise(bgra, w, h)?;
+        Ok(if self.settings.discard_furigana {
+            discard_furigana(lines)
+        } else {
+            lines
+        })
     }
 
     /// Return the name of the engine that reads this source's pixels.
@@ -371,6 +377,11 @@ impl TextSource {
         let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
         let origin = PhysPoint { x: region.x, y: region.y };
         let lines = to_desktop(raw, origin, factor, mask);
+        let lines = if self.settings.discard_furigana {
+            discard_furigana(lines)
+        } else {
+            lines
+        };
         self.remember(region, factor, mask, &lines);
         Ok((lines, frame))
     }
@@ -868,6 +879,53 @@ mod tests {
         words: Vec<PhysRect>,
     }
 
+    struct RubyOcr;
+
+    impl OcrEngine for RubyOcr {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> Result<Vec<OcrLine>> {
+            Ok(vec![
+                OcrLine {
+                    words: vec![OcrWord {
+                        text: "かんじ".to_string(),
+                        rect: PhysRect { x: 5, y: 0, w: 45, h: 12 },
+                    }],
+                },
+                OcrLine {
+                    words: vec![OcrWord {
+                        text: "漢字".to_string(),
+                        rect: PhysRect { x: 0, y: 15, w: 60, h: 30 },
+                    }],
+                },
+            ])
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "ruby"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn recognise_keeps_ruby_when_discard_is_off() {
+        let mut settings = snap();
+        settings.discard_furigana = false;
+        let source = TextSource::new(Box::new(SolidCapture), Box::new(RubyOcr), settings);
+        assert_eq!(2, source.recognise(&[], 0, 0).unwrap().len());
+    }
+
+    #[test]
+    fn recognise_discards_ruby_when_enabled() {
+        let source = TextSource::new(Box::new(SolidCapture), Box::new(RubyOcr), snap());
+        let lines = source.recognise(&[], 0, 0).unwrap();
+        assert_eq!(1, lines.len());
+        assert_eq!("漢字", lines[0].words[0].text);
+    }
+
     impl OcrEngine for RecordingOcr {
         fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
             *self.seen.borrow_mut() = Some((bgra.to_vec(), w, h));
@@ -927,6 +985,7 @@ mod tests {
             prefer_vertical: false,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
+            discard_furigana: true,
         }
     }
 
@@ -1092,6 +1151,7 @@ mod tests {
                 prefer_vertical: false,
                 capture: CaptureSize::default(),
                 scan_alphanumeric: false,
+                discard_furigana: true,
             },
         );
         (source, runs)
@@ -1541,6 +1601,7 @@ mod tests {
                 prefer_vertical: false,
                 capture: CaptureSize::default(),
                 scan_alphanumeric: true,
+                discard_furigana: true,
             },
         );
         (source, runs)
@@ -1566,6 +1627,7 @@ mod tests {
                 prefer_vertical: false,
                 capture: CaptureSize::default(),
                 scan_alphanumeric: true,
+                discard_furigana: true,
             },
         );
         (source, runs)
@@ -1733,6 +1795,7 @@ mod tests {
             prefer_vertical: true,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
+            discard_furigana: true,
         };
         source.apply_settings(settings, "ja");
         source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("read after reload");

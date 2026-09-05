@@ -76,6 +76,7 @@ pub struct WorkerSettings {
     pub prefer_vertical: bool,
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
+    pub discard_furigana: bool,
     pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
@@ -99,6 +100,7 @@ impl WorkerSettings {
             prefer_vertical: self.prefer_vertical,
             capture: self.capture,
             scan_alphanumeric: self.scan_alphanumeric,
+            discard_furigana: self.discard_furigana,
         }
     }
 }
@@ -689,6 +691,7 @@ mod tests {
             prefer_vertical: false,
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
+            discard_furigana: true,
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(&[]),
             scan_display: ScanDisplay { captures: false, highlight: false },

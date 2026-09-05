@@ -734,6 +734,9 @@ pub struct OcrConfig {
     /// Resolves words that contain only Latin characters.
     #[serde(default = "default_scan_alphanumeric")]
     pub scan_alphanumeric: bool,
+    /// Removes geometric ruby lines.
+    #[serde(default = "default_discard_furigana")]
+    pub discard_furigana: bool,
     /// The language tag for the OCR recognizer.
     #[serde(default = "default_ocr_language")]
     pub language: String,
@@ -759,6 +762,10 @@ fn default_scan_alphanumeric() -> bool {
     true
 }
 
+fn default_discard_furigana() -> bool {
+    true
+}
+
 fn default_ocr_engine() -> String {
     "builtin".to_string()
 }
@@ -771,6 +778,7 @@ impl Default for OcrConfig {
             capture_width: default_capture_width(),
             capture_height: default_capture_height(),
             scan_alphanumeric: default_scan_alphanumeric(),
+            discard_furigana: default_discard_furigana(),
             language: default_ocr_language(),
             engine: default_ocr_engine(),
         }
@@ -1494,6 +1502,34 @@ mod tests {
     #[test]
     fn prefer_vertical_defaults_to_false() {
         assert!(!Config::default().ocr.prefer_vertical);
+    }
+
+    #[test]
+    fn discard_furigana_defaults_to_true() {
+        assert!(Config::default().ocr.discard_furigana);
+    }
+
+    #[test]
+    fn an_old_ocr_section_enables_furigana_discard() {
+        let p = tmp("ocr_no_furigana_setting");
+        let _ = std::fs::remove_file(&p);
+        Config::default().save(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        let old = saved.replace("discard_furigana = true\n", "");
+        std::fs::write(&p, old).unwrap();
+        assert!(load_or_create(&p).unwrap().ocr.discard_furigana);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn discard_furigana_false_round_trips() {
+        let p = tmp("keep_furigana");
+        let _ = std::fs::remove_file(&p);
+        let mut config = Config::default();
+        config.ocr.discard_furigana = false;
+        config.save(&p).unwrap();
+        assert!(!load_or_create(&p).unwrap().ocr.discard_furigana);
+        let _ = std::fs::remove_file(&p);
     }
 
     /// One TOML value can enable multiple OCR passes.
