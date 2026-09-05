@@ -70,6 +70,13 @@ pub struct Card {
     pub written: Option<String>,
     pub reading: Option<String>,
     pub pos: Vec<String>,
+    /// The Inflection chain: the conjugation and auxiliary steps between the headword
+    /// and the hovered text, in build order from the headword outward.
+    ///
+    /// `inflection_chain` has already filtered this list for display.
+    /// The chain lives on the Card, not on a GlossBlock or GlossEntry.
+    /// It belongs to the match, the same Hit that supplies `match_len`, not to one Dictionary.
+    pub inflections: Vec<String>,
     /// The Reported frequency for this Card's headword.
     ///
     /// The highest-priority enabled frequency Dictionary supplies this value when it reports the headword.
@@ -411,6 +418,7 @@ fn card_from_group(
         written: group.written,
         reading: group.reading,
         pos,
+        inflections: inflection_chain(&best.process),
         freq: best.entry.reported_freq,
         blocks,
         match_len: best.match_len,
@@ -549,6 +557,29 @@ fn ordered_blocks(hits: &[&Hit], dicts: &[DictInfo], cfg: &PresentConfig) -> Vec
 /// identify Sense numbers, not grammatical parts of speech.
 fn definition_tags(pos: &[String]) -> Vec<String> {
     pos.iter().filter(|t| !is_number(t)).cloned().collect()
+}
+
+/// Builds the Inflection chain in build order from the headword outward.
+///
+/// `Hit::process` stores the steps outermost first, so this function reverses them.
+/// It drops empty steps. It drops a parenthesized stem such as `(unstressed infinitive)`
+/// unless the stem is `process[0]`, the outermost step. That step stays because a bare
+/// te-form such as 風邪をひいて still explains its match with `(te form)`. Nazeka uses
+/// this filter.
+///
+/// The design rejects a relabel table in code. The labels are the `detail` strings of
+/// `data/deconjugator.json`, so a relabel is a change to the rule file.
+pub fn inflection_chain(process: &[String]) -> Vec<String> {
+    process
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|&(i, step)| {
+            !step.is_empty()
+                && !(i != 0 && step.starts_with('(') && step.ends_with(')'))
+        })
+        .map(|(_, step)| step.clone())
+        .collect()
 }
 
 /// Returns true if the trimmed tag contains only numeric digits.
@@ -974,11 +1005,30 @@ mod tests {
         assert_eq!(1, p.top.as_ref().unwrap().blocks.len());
     }
 
+    /// The Card must read from the headword outward, the reverse of `Hit::process`.
+    #[test]
+    fn the_card_lists_inflections_from_the_headword_outward() {
+        let process = ["past", "(unstressed infinitive)", "passive/potential", "causative"]
+            .map(String::from);
+        assert_eq!(inflection_chain(&process), ["causative", "passive/potential", "past"]);
+    }
+
+    /// The outermost parenthesized step stays, and an inner stem or an empty step does not.
+    #[test]
+    fn a_bare_stem_keeps_its_outermost_parenthesized_step() {
+        let bare = ["(te form)", "", "(unstressed infinitive)"].map(String::from);
+        assert_eq!(inflection_chain(&bare), ["(te form)"]);
+
+        let stacked = ["polite", "teiru", "(te form)"].map(String::from);
+        assert_eq!(inflection_chain(&stacked), ["teiru", "polite"]);
+    }
+
     fn bare_card(match_len: usize) -> Card {
         Card {
             written: None,
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![],
             match_len,
@@ -1065,6 +1115,7 @@ mod tests {
             written: Some("猫".into()),
             reading: Some("ねこ".into()),
             pos: vec!["noun".into()],
+            inflections: vec![],
             freq: Some(100),
             blocks: vec![strings("Test", &["cat", "feline"])],
             match_len: 1,
@@ -1083,6 +1134,7 @@ mod tests {
             written: None,
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![strings("D", &[&long])],
             match_len: 1,
@@ -1107,6 +1159,7 @@ mod tests {
             written: Some("走る".into()),
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![strings("D", &["to run\nto flow"])],
             match_len: 1,
@@ -1123,6 +1176,7 @@ mod tests {
             written: None,
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![strings("D", &[&format!("{}\n{}", "あ".repeat(30), "い".repeat(30))])],
             match_len: 1,

@@ -288,6 +288,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   substitutes `DEFAULT_FREQ` for this silence.
 - The displayed frequency is always the number reported by the highest-ranked enabled
   Dictionary. It is never the computed rank.
+- `Hit::process` is outermost first. The step nearest the hovered text comes first.
+  `present::inflection_chain` reverses it into build order from the headword outward.
+  It drops empty steps and inner parenthesized stems. It keeps the outermost step, so a
+  bare te-form still explains its match.
+- The Card shows the Inflection chain in one dimmed row after the pitch rows and before
+  the part-of-speech row. The separator is ` « ` (U+00AB). An empty chain draws no row,
+  so no geometry golden changes.
+- The design rejects an outermost-first display (weikipop's order), a relabel table in
+  code (the labels come from `data/deconjugator.json`), and a setting that hides the row.
 
 ## Verification
 

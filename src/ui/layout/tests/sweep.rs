@@ -1766,6 +1766,7 @@ fn sweep_card(r: &Row, doc: &Arc<GlossDoc>) -> Presentation {
         written: Some(r.term.clone()),
         reading: (!r.reading.is_empty() && r.reading != r.term).then(|| r.reading.clone()),
         pos: Vec::new(),
+        inflections: Vec::new(),
         freq: None,
         blocks: vec![GlossBlock {
             dict_name: r.dict.clone(),

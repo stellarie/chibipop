@@ -411,6 +411,7 @@ fn one_card(pos: &[&str], freq: Option<i64>) -> Presentation {
         written: Some("雑談".into()),
         reading: Some("ざつだん".into()),
         pos: pos.iter().map(|s| s.to_string()).collect(),
+        inflections: vec![],
         freq,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
@@ -430,6 +431,7 @@ fn with_collapsed() -> Presentation {
         written: Some("雑談".into()),
         reading: Some("ざつだん".into()),
         pos: vec![],
+        inflections: vec![],
         freq: None,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
@@ -496,6 +498,7 @@ fn card_with(blocks: Vec<GlossBlock>) -> Presentation {
         written: Some("雑談".into()),
         reading: None,
         pos: vec![],
+        inflections: vec![],
         freq: None,
         blocks,
         match_len: 2,
@@ -588,6 +591,7 @@ fn a_run_too_wide_for_the_column_wraps_onto_more_lines() {
             written: Some("猫".into()),
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![block("Jitendex", &[&long])],
             match_len: 1,
@@ -616,6 +620,7 @@ fn a_run_that_exactly_fills_the_column_stays_on_one_line() {
             written: Some("猫".into()),
             reading: None,
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![block("Jitendex", &[&exact])],
             match_len: 1,
@@ -933,6 +938,7 @@ fn a_kana_only_headword_drills_nowhere() {
             written: None,
             reading: Some("ざつだん".into()),
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![],
             match_len: 2,
@@ -1208,6 +1214,7 @@ fn rich(glossary: &str) -> Presentation {
         written: None,
         reading: Some("\u{3055}\u{3064}\u{3060}\u{3093}".into()),
         pos: vec![],
+        inflections: vec![],
         freq: None,
         blocks: vec![tree("Jitendex", glossary)],
         match_len: 4,
@@ -3713,6 +3720,7 @@ fn a_table_wider_than_the_panel_never_widens_the_panel() {
             written: None,
             reading: Some("\u{3055}\u{3064}\u{3060}\u{3093}".into()),
             pos: vec![],
+            inflections: vec![],
             freq: None,
             blocks: vec![tree("Jitendex", &sc(&glossary))],
             match_len: 4,
@@ -6799,6 +6807,7 @@ fn card_with_pitch(reading: &str, pitch: Vec<crate::present::PitchRow>) -> Prese
         written: Some("雑談".into()),
         reading: Some(reading.into()),
         pos: vec![],
+        inflections: vec![],
         freq: None,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
@@ -6959,6 +6968,7 @@ fn the_pitch_row_replaces_the_reading_line_and_sits_above_the_part_of_speech() {
         written: Some("雑談".into()),
         reading: Some("ざつだん".into()),
         pos: vec!["noun".into()],
+        inflections: vec![],
         freq: None,
         blocks: vec![block("Jitendex", &["chatting"])],
         match_len: 2,
@@ -6988,6 +6998,66 @@ fn the_pitch_row_replaces_the_reading_line_and_sits_above_the_part_of_speech() {
     assert_eq!("noun", s.elems[2].text, "the part of speech, after the accent");
 }
 
+/// The Inflection chain explains the match before the reader sees the part of speech
+/// and the entry.
+#[test]
+fn the_inflection_chain_sits_between_the_reading_and_the_part_of_speech() {
+    let card = Card {
+        written: Some("食べる".into()),
+        reading: Some("たべる".into()),
+        pos: vec!["v1".into()],
+        inflections: vec!["causative".into(), "passive/potential".into(), "past".into()],
+        freq: None,
+        blocks: vec![block("Jitendex", &["to eat"])],
+        match_len: 7,
+        pitch: vec![],
+    };
+    let p = Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+        surface: None,
+    };
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    let order: Vec<&str> = s.elems.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(["Headword", "Text", "Text", "Text"], order[..4], "{:?}", texts(&s));
+    assert_eq!(
+        ["たべる", "causative \u{ab} passive/potential \u{ab} past", "v1"],
+        texts(&s)[1..4],
+        "reading, then the chain, then the part of speech"
+    );
+}
+
+/// An empty Inflection chain adds no element. This rule keeps every geometry
+/// golden unchanged, because no golden fixture carries a chain.
+#[test]
+fn an_unconjugated_card_draws_no_inflection_row() {
+    let card = Card {
+        written: Some("食べる".into()),
+        reading: Some("たべる".into()),
+        pos: vec!["v1".into()],
+        inflections: vec![],
+        freq: None,
+        blocks: vec![block("Jitendex", &["to eat"])],
+        match_len: 7,
+        pitch: vec![],
+    };
+    let p = Presentation {
+        top: Some(card.clone()),
+        collapsed: vec![],
+        all_cards: vec![card],
+        sentence: None,
+        surface: None,
+    };
+    let s = laid_out(&p, 480.0, 800.0, false, false);
+
+    assert!(texts(&s).iter().all(|text| !text.contains('\u{ab}')), "{:?}", texts(&s));
+    assert_eq!(["Headword", "Text", "Text"], s.elems.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()[..3]);
+    assert_eq!("v1", s.elems[2].text, "the part of speech follows the reading directly");
+}
+
 /// A kana-only headword has no separate reading line. Marked kana sit directly
 /// below the headword.
 #[test]
@@ -6996,6 +7066,7 @@ fn a_kana_only_headword_draws_its_accent_under_the_headword() {
         written: None,
         reading: Some("ざつだん".into()),
         pos: vec![],
+        inflections: vec![],
         freq: None,
         blocks: vec![],
         match_len: 4,
@@ -7053,6 +7124,7 @@ fn a_pitch_row_after_the_frequency_corner_takes_the_narrowed_width() {
         written: None,
         reading: Some("ざつだん".into()),
         pos: vec![],
+        inflections: vec![],
         freq: Some(42),
         blocks: vec![],
         match_len: 4,

@@ -264,6 +264,12 @@ mod tests {
         let hits = engine().run(&taberu_dict(), "食べさせられた").unwrap();
         assert_eq!(1, hits.len());
         assert_eq!(Some("食べる".to_string()), hits[0].written);
+        // The group keeps the shortest derivation, outermost step first. The Card's
+        // Inflection chain reverses this order, so the order is a contract.
+        assert_eq!(
+            hits[0].process,
+            ["past", "(unstressed infinitive)", "passive/potential", "causative"]
+        );
     }
 
     #[test]

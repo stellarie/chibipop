@@ -802,6 +802,8 @@ is the failure this catches.
 Hovering 風邪 must box **all six** characters of 風邪をひいて for the entry 風邪をひく — the
 highlight follows the *match*, not the headword.
 
+The Card shows `(te form)` under 風邪をひく.
+
 ### 1.4 Draw it and look
 
 ```bash

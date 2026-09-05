@@ -63,6 +63,7 @@ pub fn canned() -> Presentation {
             written: Some("\u{6f22}\u{5b57}".to_string()),
             reading: Some("\u{304b}\u{3093}\u{3058}".to_string()),
             pos: vec!["n".to_string()],
+            inflections: vec![],
             freq: Some(1042),
             blocks: vec![
                 GlossBlock::parse(

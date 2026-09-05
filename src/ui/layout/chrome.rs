@@ -61,6 +61,10 @@ pub(super) const PITCH_MARK: f32 = 1.0;
 /// The collapsed row uses an em dash between its headword and summary because they are separate.
 /// A reading and its Dictionary sources form one statement, so one space separates them.
 pub(super) const PITCH_SOURCE_GAP: &str = "\u{2003}";
+/// Yomitan draws its Inflection chain with `«`, the `--inflection-separator` value.
+/// This separator differs from the part-of-speech row's ` · ` so readers can tell
+/// the two dimmed rows apart.
+pub(super) const INFLECTION_SEPARATOR: &str = " \u{ab} ";
 
 /// Fixed "See also" column width.
 pub(super) const SIDE_PANEL_W: f32 = 110.0;
@@ -629,6 +633,21 @@ pub(super) fn build_elements(
             for row in &card.pitch {
                 out.push(Elem::Pitch(pitch_line(reading, row, theme)));
             }
+        }
+
+        // The Inflection chain sits below the reading and above the part of speech.
+        // It explains the match before the reader sees the entry.
+        // An empty chain draws no row because an unconjugated headword has nothing
+        // to explain. Every geometry golden carries no chain, so this row moves none.
+        if !card.inflections.is_empty() {
+            out.push(Elem::Text(Line {
+                text: card.inflections.join(INFLECTION_SEPARATOR),
+                color: theme.dimmed_text,
+                size: theme.dimmed_size,
+                top_gap: LINE_GAP,
+                weight: theme.dimmed_weight,
+                italic: theme.dimmed_italic,
+            }));
         }
 
         if !card.pos.is_empty() {

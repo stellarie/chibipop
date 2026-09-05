@@ -571,6 +571,18 @@ text is stitched from several captures that do not carry their character
 boxes with them. An absent box is the designed behaviour there; a misplaced
 one would not be.
 
+### Inflection chain
+
+The Card shows the conjugation and auxiliary steps between the headword and the
+hovered text in one dimmed row under the reading. 食べさせられた shows
+`causative « passive/potential « past`. The row lists the steps from the headword
+outward, so the reader rebuilds the hovered form from left to right.
+
+A bare te-form such as 風邪をひいて shows `(te form)`. The row hides inner stems such
+as `(unstressed infinitive)`, because they are plumbing between two visible steps.
+The labels are the `detail` strings of `data/deconjugator.json`, verbatim. An
+unconjugated headword shows no row. No setting controls the row.
+
 ### Sticky hover
 
 The popup stays put while you read it. Move the cursor from the word into the

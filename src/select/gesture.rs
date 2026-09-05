@@ -550,6 +550,7 @@ mod tests {
             written: Some("食べる".to_string()),
             reading: Some("たべる".to_string()),
             pos: Vec::new(),
+            inflections: Vec::new(),
             freq: None,
             blocks: vec![crate::present::GlossBlock::parse("Test", glossary)],
             match_len: 3,

@@ -344,6 +344,7 @@ mod tests {
             written: None,
             reading: None,
             pos: Vec::new(),
+            inflections: Vec::new(),
             freq: None,
             blocks: vec![
                 GlossBlock {

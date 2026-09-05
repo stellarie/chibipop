@@ -527,6 +527,7 @@ fn card(
         written: written.map(str::to_string),
         reading: reading.map(str::to_string),
         pos: pos.iter().map(|s| s.to_string()).collect(),
+        inflections: Vec::new(),
         freq,
         blocks,
         match_len,

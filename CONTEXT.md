@@ -225,6 +225,13 @@ after which the pitch drops, plus the nasal and devoiced moras recorded with it.
 can carry several patterns. A Dictionary can report several patterns for one reading.
 _Avoid_: accent (overloaded), pitch accent data, downstep (that's one field of it)
 
+**Inflection chain**:
+The conjugation and auxiliary steps between a headword and the hovered text, in build
+order from the headword outward. The Card shows the chain in one dimmed row under the
+reading and above the part-of-speech row. The labels are the `detail` strings of
+`data/deconjugator.json`, verbatim.
+_Avoid_: process (code only), deconjugation steps, reasons
+
 ### Actions
 
 **Mining screenshot**:
