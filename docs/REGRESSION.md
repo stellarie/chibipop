@@ -2026,14 +2026,15 @@ folder when you check files.
 
 #### 1.30a Region and window selection
 
-1. **Drag a region.** Set **Screenshot capture mode** to **Region**. Start the
-   screenshot action and drag a region. Release the mouse button. The selector
-   must show the chosen region and save a PNG.
+1. **Drag a region.** Set **Screenshot capture mode** to **Region** and press
+   **Apply**. Start the screenshot action and drag a region. Release the mouse
+   button. The selector must show the chosen region and save a PNG.
 2. **Use the Region window choice.** On Windows, hold `Alt` before the gesture
    and click a visible window. On Linux, click a visible window when Hyprland
    or Sway metadata is available. Without that metadata, drag a region instead.
-3. **Click a window in Window mode.** Set the mode to **Window**. Click a
-   visible window. Windows uses the native selector. Linux uses `slurp -r`.
+3. **Click a window in Window mode.** Set the mode to **Window** and press
+   **Apply**. Click a visible window. Windows uses the native selector. Linux
+   uses `slurp -r`.
 4. **Check visible pixels.** Open the PNG and compare it with the visible
    screen rectangle. A window capture must not contain hidden or occluded
    window content. If Anki is connected, check the configured screenshot field.
@@ -2042,13 +2043,13 @@ folder when you check files.
 
 #### 1.30b Fixed target persistence
 
-1. **Save a fixed region.** Reset the saved targets and press **Apply**. Set
-   **Fixed region**. Drag a region on first use. Check the saved summary and
+1. **Save a fixed region.** Reset the saved targets. Set **Fixed region**.
+   Press **Apply**. Drag a region on first use. Check the saved summary and
    the global physical-pixel rectangle.
 2. **Reuse the fixed region.** Restart chibipop and take another picture. The
    action must bypass selection and use the saved rectangle.
-3. **Save a fixed window.** Reset the saved targets and press **Apply**. Set
-   **Fixed window**. Click one visible window on first use. Check its exact
+3. **Save a fixed window.** Reset the saved targets. Set **Fixed window**.
+   Press **Apply**. Click one visible window on first use. Check its exact
    `app_id` and title in the saved summary. On Windows, `app_id` is the window
    class. On Linux, it is the compositor class or `app_id`.
 4. **Reuse moved geometry.** Restart chibipop, move or resize the saved window,

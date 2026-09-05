@@ -280,7 +280,18 @@ fn screenshot_mode_at(selection: isize) -> ScreenshotMode {
 
 /// Formats the saved fixed targets for the Anki settings page.
 fn screenshot_target_summary(form: &SettingsForm) -> String {
-    match (form.screenshot_fixed_region, &form.screenshot_fixed_window) {
+    screenshot_target_summary_values(
+        form.screenshot_fixed_region,
+        form.screenshot_fixed_window.as_ref(),
+    )
+}
+
+/// Formats saved fixed targets from their current configuration values.
+fn screenshot_target_summary_values(
+    region: Option<[i32; 4]>,
+    window: Option<&crate::config::ScreenshotWindow>,
+) -> String {
+    match (region, window) {
         (None, None) => "No saved screenshot targets.".into(),
         (Some([x, y, w, h]), None) => format!("Saved region: ({x}, {y}, {w}x{h})"),
         (None, Some(window)) => {
@@ -2615,6 +2626,8 @@ pub struct SettingsWindow {
     current_tab: Cell<u32>,
     /// Operation mode for the Apply button.
     apply_mode: ApplyMode,
+    /// True while the settings controls are disabled.
+    busy: Cell<bool>,
 }
 
 impl SettingsWindow {
@@ -2683,6 +2696,7 @@ impl SettingsWindow {
                 bottom_y0: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
+                busy: Cell::new(false),
             };
             // `build` reports final layout height. The window sizes to
             // match content dimensions. Window frame borders and title bar
@@ -2883,7 +2897,38 @@ impl SettingsWindow {
     pub fn clear_screenshot_reset_targets(&self) {
         self.staged.borrow_mut().screenshot_reset_targets = false;
     }
-
+    /// Refreshes saved-target controls from the current screenshot configuration.
+    ///
+    /// An unapplied reset stays visible until the user applies it.
+    pub fn refresh_screenshot_targets(
+        &self,
+        screenshot: &crate::config::ScreenshotConfig,
+    ) {
+        let (region, window) = {
+            let mut staged = self.staged.borrow_mut();
+            if staged.screenshot_reset_targets {
+                return;
+            }
+            staged.screenshot_fixed_region = screenshot.fixed_region;
+            staged.screenshot_fixed_window = screenshot.fixed_window.clone();
+            (
+                staged.screenshot_fixed_region,
+                staged.screenshot_fixed_window.clone(),
+            )
+        };
+        let summary = wide(&screenshot_target_summary_values(region, window.as_ref()));
+        let has_target = !self.busy.get() && (region.is_some() || window.is_some());
+        // SAFETY: These controls are created by `build` and remain live until
+        // this window drops. `SetWindowTextW` copies the string during the call.
+        unsafe {
+            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_SUMMARY) {
+                let _ = SetWindowTextW(c, PCWSTR(summary.as_ptr()));
+            }
+            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_RESET) {
+                let _ = EnableWindow(c, has_target);
+            }
+        }
+    }
 
     /// Updates controls to show applied dimensions.
     pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
@@ -2925,13 +2970,22 @@ impl SettingsWindow {
         // SAFETY: Each identifier in `WHILE_BUSY` names a valid descendant of
         // `self.hwnd` created in `build`. Focus moves off the controls first
         // so keyboard input is not trapped on disabled controls.
+        self.busy.set(busy);
         unsafe {
             if busy {
                 let _ = SetFocus(Some(self.hwnd));
             }
             for id in WHILE_BUSY {
                 if let Ok(c) = dlg_item(self.hwnd, id) {
-                    let _ = EnableWindow(c, !busy);
+                    let enabled = if id == ID_SCREENSHOT_RESET && !busy {
+                        let staged = self.staged.borrow();
+                        !staged.screenshot_reset_targets
+                            && (staged.screenshot_fixed_region.is_some()
+                                || staged.screenshot_fixed_window.is_some())
+                    } else {
+                        !busy
+                    };
+                    let _ = EnableWindow(c, enabled);
                 }
             }
             if !busy {

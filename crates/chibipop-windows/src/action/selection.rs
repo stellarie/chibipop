@@ -11,7 +11,9 @@ use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -76,9 +78,9 @@ fn normalized_rect(a: PhysPoint, b: PhysPoint) -> PhysRect {
     }
 }
 
-/// Return true when either drag dimension reaches `MIN_DRAG_PX`.
+/// Return true when both dimensions are nonzero and one reaches `MIN_DRAG_PX`.
 fn meets_drag_threshold(r: PhysRect) -> bool {
-    r.w >= MIN_DRAG_PX || r.h >= MIN_DRAG_PX
+    r.w > 0 && r.h > 0 && (r.w >= MIN_DRAG_PX || r.h >= MIN_DRAG_PX)
 }
 
 /// Return the virtual desktop as `(x, y, w, h)` coordinates and dimensions.
@@ -360,7 +362,18 @@ fn window_rect(hwnd: HWND) -> Option<PhysRect> {
     // SAFETY: `rect` is local writable storage and `hwnd` comes from EnumWindows.
     unsafe {
         let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect).ok()?;
+        // DWM bounds omit invisible resize borders. Some windows do not expose
+        // them, so use the normal bounds when DWM cannot provide the frame.
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut c_void,
+            size_of::<RECT>() as u32,
+        )
+        .is_err()
+        {
+            GetWindowRect(hwnd, &mut rect).ok()?;
+        }
         let w = rect.right - rect.left;
         let h = rect.bottom - rect.top;
         (w > 0 && h > 0).then_some(PhysRect {
@@ -413,6 +426,7 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
             || !IsWindowVisible(hwnd).as_bool()
             || IsIconic(hwnd).as_bool()
             || window_is_cloaked(hwnd)
+            || (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0) != 0
         {
             return BOOL(1);
         }
@@ -530,7 +544,7 @@ fn on_lbuttondown(hwnd: HWND) {
             SetCapture(hwnd);
         }
         TARGET.with(|cell| *cell.borrow_mut() = find_window_at(cursor_point()));
-        DONE.set(true);
+        // Keep the selector captured until button-up commits the target.
         return;
     }
     ANCHOR.set(Some(cursor_point()));
@@ -546,10 +560,8 @@ fn on_mousemove(hwnd: HWND) {
     paint_overlay(hwnd, Some((anchor, cursor_point())));
 }
 
-/// Commit the drag when one dimension reaches the threshold.
+/// Commit the drag when both dimensions are nonzero and one reaches the threshold.
 fn on_lbuttonup() {
-    // SAFETY: `ReleaseCapture` has no preconditions.
-    let _ = unsafe { ReleaseCapture() };
     if let Some(anchor) = ANCHOR.get() {
         let r = normalized_rect(anchor, cursor_point());
         if meets_drag_threshold(r) {
@@ -557,7 +569,10 @@ fn on_lbuttonup() {
         }
     }
     ANCHOR.set(None);
+    // Finish while the selector still owns the button-up message.
     DONE.set(true);
+    // SAFETY: `ReleaseCapture` has no preconditions.
+    let _ = unsafe { ReleaseCapture() };
 }
 
 fn on_cancel() {
@@ -805,23 +820,35 @@ mod tests {
     }
 
     #[test]
-    fn meets_drag_threshold_requires_one_axis_over_the_floor() {
+    fn meets_drag_threshold_rejects_zero_dimension_drags() {
         assert!(!meets_drag_threshold(PhysRect {
             x: 0,
             y: 0,
             w: 4,
             h: 4
         }));
-        assert!(meets_drag_threshold(PhysRect {
+        assert!(!meets_drag_threshold(PhysRect {
             x: 0,
             y: 0,
             w: 5,
             h: 0
         }));
-        assert!(meets_drag_threshold(PhysRect {
+        assert!(!meets_drag_threshold(PhysRect {
             x: 0,
             y: 0,
             w: 0,
+            h: 5
+        }));
+        assert!(meets_drag_threshold(PhysRect {
+            x: 0,
+            y: 0,
+            w: 5,
+            h: 1
+        }));
+        assert!(meets_drag_threshold(PhysRect {
+            x: 0,
+            y: 0,
+            w: 1,
             h: 5
         }));
     }

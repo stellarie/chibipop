@@ -442,9 +442,10 @@ Apply to commit a reset. The reset clears both saved target fields.
 Window capture copies the visible screen rectangle. It does not copy hidden or occluded
 window contents. Existing OCR and static-region selectors remain region-only.
 
-Interactive selection has a 20-second timeout. Press Esc to cancel. On Windows,
-you can also right-click. If screenshot-on-add selection or capture fails, chibipop
-files the card without an image. A standalone Mining screenshot saves nothing in that case.
+On Linux, interactive selection has a 20-second timeout. On Windows, the selector
+waits until you select or cancel. Press Esc to cancel. On Windows, you can also
+right-click. If screenshot-on-add selection or capture fails, chibipop files the card
+without an image. A standalone Mining screenshot saves nothing in that case.
 
 ### `sentence_mode`
 

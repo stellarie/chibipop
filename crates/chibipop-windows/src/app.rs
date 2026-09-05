@@ -1464,7 +1464,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     // Store the active in-place edit here.
     let mut edit: Option<EditFlight> = None;
-    let mut edit_cfg: Option<Config> = None;
+    let mut edit_cfg: Option<(Config, bool)> = None;
 
     // I4: keep all capture-guard code in one place.
     let drain_capture_guard = || {
@@ -1838,6 +1838,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             ) {
                                 eprintln!("chibipop: saving screenshot target failed: {e:#}");
                             }
+                            if let Some(w) = &settings {
+                                w.refresh_screenshot_targets(&cfg.actions.screenshot);
+                            }
                             let cmd = crate::action::ScreenshotCommand {
                                 bgra_buf,
                                 width,
@@ -1930,13 +1933,23 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             Ok(report) => {
                                 let report = *report;
                                 let status = edit_status(&report);
-                                let mut updated = edit_cfg.take().unwrap_or_else(|| cfg.clone());
+                                let (mut updated, reset_screenshot_targets) = edit_cfg
+                                    .take()
+                                    .unwrap_or_else(|| (cfg.clone(), false));
                                 // Apply removals first because Dictionary names can collide.
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
                                 }
                                 for (name, roles) in &report.added {
                                     settings::dictionary_added(&mut updated, name, *roles);
+                                }
+                                // A Dictionary Apply can outlive a target capture. Preserve that
+                                // target unless this Apply explicitly reset both target fields.
+                                if !reset_screenshot_targets {
+                                    updated.actions.screenshot.fixed_region =
+                                        cfg.actions.screenshot.fixed_region;
+                                    updated.actions.screenshot.fixed_window =
+                                        cfg.actions.screenshot.fixed_window.clone();
                                 }
                                 // Replace the stale Dictionary identity cache.
                                 dicts = report.dicts;
@@ -1987,7 +2000,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
                                         begin_apply(w);
-                                        edit_cfg = Some(updated);
+                                        edit_cfg = Some((updated, edited.screenshot_reset_targets));
                                         let (etx, erx) = mpsc::channel::<EditMsg>();
                                         edit = Some(EditFlight {
                                             rx: erx,
@@ -2276,20 +2289,26 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 &cfg.actions.screenshot,
             ) {
                 Ok(Some(target)) => {
-                    if let Err(e) = persist_screenshot_target(
-                        &mut cfg,
-                        &target,
-                        config_path,
-                        &mut save_job,
-                    ) {
-                        eprintln!("chibipop: saving screenshot target failed: {e:#}");
+                    match crate::text::capture::capture_upscaled_by(target.rect(), 1) {
+                        Ok(cap) => {
+                            if let Err(e) = persist_screenshot_target(
+                                &mut cfg,
+                                &target,
+                                config_path,
+                                &mut save_job,
+                            ) {
+                                eprintln!("chibipop: saving screenshot target failed: {e:#}");
+                            }
+                            if let Some(w) = &settings {
+                                w.refresh_screenshot_targets(&cfg.actions.screenshot);
+                            }
+                            Some((target, cap))
+                        }
+                        Err(e) => {
+                            eprintln!("chibipop: grabbing the screenshot failed: {e:#}");
+                            None
+                        }
                     }
-                    crate::text::capture::capture_upscaled_by(target.rect(), 1)
-                        .inspect_err(|e| {
-                            eprintln!("chibipop: grabbing the screenshot failed: {e:#}")
-                        })
-                        .ok()
-                        .map(|cap| (target, cap))
                 }
                 Ok(None) => None,
                 Err(e) => {

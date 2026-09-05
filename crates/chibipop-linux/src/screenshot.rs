@@ -198,15 +198,14 @@ fn run_slurp(
     })?;
 
     if let Some(mut input) = child.stdin.take() {
-        for (index, window) in windows.iter().enumerate() {
-            writeln!(
-                input,
-                "{},{:.0} {:.0}x{:.0} w{index}",
-                window.rect.x,
-                window.rect.y,
-                window.rect.w,
-                window.rect.h
-            )?;
+        // slurp can exit before it reads stdin, for example when a second
+        // selector is active. A write error must still reap the child, or
+        // each retry leaves a zombie for the daemon's lifetime.
+        if let Err(error) = write_windows(&mut input, windows) {
+            drop(input);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("writing window rectangles to slurp");
         }
     }
 
@@ -247,6 +246,11 @@ fn run_slurp(
     if restrict_to_windows && window.is_none() {
         bail!("slurp did not return a window target")
     }
+    // A click without a drag returns a one-pixel rectangle. The old selector
+    // discarded such a pick, and a fixed region must not save it.
+    if window.is_none() && !crate::select::meets_threshold(rect) {
+        return Ok(Outcome::Cancelled);
+    }
     Ok(Outcome::Selected(Selection { rect, window }))
 }
 
@@ -264,6 +268,20 @@ fn reap_slurp(mut child: Child) -> Result<std::process::Output> {
         thread::sleep(Duration::from_millis(10));
     }
     child.wait_with_output().context("reaping slurp")
+}
+
+fn write_windows(input: &mut impl Write, windows: &[Window]) -> std::io::Result<()> {
+    for (index, window) in windows.iter().enumerate() {
+        writeln!(
+            input,
+            "{},{:.0} {:.0}x{:.0} w{index}",
+            window.rect.x,
+            window.rect.y,
+            window.rect.w,
+            window.rect.h
+        )?;
+    }
+    Ok(())
 }
 
 fn label_index(value: &str) -> Result<usize> {
@@ -344,8 +362,12 @@ fn query_hyprland() -> Result<Vec<Window>> {
 }
 
 fn hypr_on_visible_workspace(value: &Value, active_workspaces: &HashMap<i64, (i64, i64)>) -> bool {
+    // A fullscreen window suppresses its siblings. Hyprland reports them as
+    // mapped and not hidden, but `visible` is false. slurp prefers the
+    // smallest rectangle, so such a window would intercept the click.
     if !value.get("mapped").and_then(Value::as_bool).unwrap_or(false)
         || value.get("hidden").and_then(Value::as_bool).unwrap_or(true)
+        || !value.get("visible").and_then(Value::as_bool).unwrap_or(true)
     {
         return false;
     }
@@ -381,7 +403,9 @@ fn query_sway() -> Result<Vec<Window>> {
 
 fn collect_sway_windows(value: &Value, windows: &mut Vec<Window>, parent_visible: bool) {
     let visible = parent_visible && value.get("visible").and_then(Value::as_bool).unwrap_or(true);
-    if value.get("type").and_then(Value::as_str) == Some("con") && visible {
+    // Sway types a floating window `floating_con`, not `con`.
+    let is_window = matches!(value.get("type").and_then(Value::as_str), Some("con" | "floating_con"));
+    if is_window && visible {
         if let (Some(identity), Some(rect)) = (sway_identity(value), sway_rect(value)) {
             windows.push(Window { identity, rect });
         }
@@ -537,6 +561,22 @@ mod tests {
     }
 
     #[test]
+    fn sway_floating_windows_are_targets() {
+        let tree = serde_json::json!({
+            "type": "root", "nodes": [],
+            "floating_nodes": [{
+                "type": "floating_con", "pid": 7, "visible": true,
+                "app_id": "mpv", "name": "video",
+                "rect": {"x": 40, "y": 50, "width": 640, "height": 360}
+            }]
+        });
+        let mut windows = Vec::new();
+        collect_sway_windows(&tree, &mut windows, true);
+        assert_eq!(1, windows.len());
+        assert_eq!("mpv", windows[0].identity.app_id);
+    }
+
+    #[test]
     fn hyprland_windows_must_be_on_the_active_workspace() {
         let active = HashMap::from([(1_i64, (2_i64, -42_i64))]);
         let visible = serde_json::json!({
@@ -554,5 +594,10 @@ mod tests {
         assert!(hypr_on_visible_workspace(&visible, &active));
         assert!(hypr_on_visible_workspace(&special, &active));
         assert!(!hypr_on_visible_workspace(&hidden_workspace, &active));
+        let under_fullscreen = serde_json::json!({
+            "mapped": true, "hidden": false, "visible": false, "monitor": 1,
+            "workspace": {"id": 2}
+        });
+        assert!(!hypr_on_visible_workspace(&under_fullscreen, &active));
     }
 }

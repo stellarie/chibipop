@@ -249,7 +249,9 @@ On Windows, the native selector uses a drag for a region and a click for a
 window. Hold `Alt` before you start the gesture to switch between these two
 choices. On Linux, `slurp` provides the selector. Region mode supports a
 window click or a region drag. Window mode uses a window click. Linux does
-not use the Windows `Alt` switch.
+not use the Windows `Alt` switch. A Linux window click needs the window list
+from Hyprland or Sway. On another compositor, only a region drag works, and
+the window modes fail.
 
 A fixed window stores its exact `app_id` and title. Windows uses the window
 class as `app_id`. Linux uses the compositor class or `app_id`. Both values
