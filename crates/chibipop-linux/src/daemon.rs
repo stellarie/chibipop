@@ -2458,6 +2458,7 @@ impl App {
     }
 
     fn execute(&mut self, cmd: Command) {
+        self.log.diag(&Self::command_diagnostic(&cmd));
         match cmd {
             // OCR must not read our popup while a live grab runs.
             // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).
@@ -2623,6 +2624,90 @@ impl App {
             // This daemon has no such tick or seat hook, so no row is armed per
             // tick.
             other => self.log.diag(&format!("controller: {other:?} (no-op)")),
+        }
+    }
+
+    fn command_diagnostic(cmd: &Command) -> String {
+        match cmd {
+            Command::RequestLookup { id, point, popup } => format!(
+                "action=request_lookup id={} point=({}, {}) popup={}",
+                id.0,
+                point.x,
+                point.y,
+                popup.is_some()
+            ),
+            Command::RequestSentence { id, anchor, orientation, hide_popup } => format!(
+                "action=request_sentence id={} anchor=({}, {}, {}x{}) orientation={orientation:?} hide_popup={hide_popup}",
+                id.0,
+                anchor.x,
+                anchor.y,
+                anchor.w,
+                anchor.h
+            ),
+            Command::RequestDrillDown { id, text } => format!(
+                "action=request_drill_down id={} text_len={}",
+                id.0,
+                text.chars().count()
+            ),
+            Command::RequestReload { id } => format!("action=request_reload id={}", id.0),
+            Command::ShowPopup { presentation, anchor, scroll, show_back } => format!(
+                "action=show_popup anchor=({}, {}, {}x{}) scroll={} show_back={} top={} cards={} collapsed={} sentence={} surface={}",
+                anchor.x,
+                anchor.y,
+                anchor.w,
+                anchor.h,
+                scroll,
+                show_back,
+                presentation.top.is_some(),
+                presentation.all_cards.len(),
+                presentation.collapsed.len(),
+                presentation.sentence.is_some(),
+                presentation.surface.is_some()
+            ),
+            Command::RepaintPopup { scroll, show_back } => {
+                format!("action=repaint_popup scroll={scroll} show_back={show_back}")
+            }
+            Command::HidePopup => "action=hide_popup".to_string(),
+            Command::ShowScanOverlay { rects } => {
+                format!("action=show_scan_overlay rects={}", rects.len())
+            }
+            Command::SyncAnkiButton => "action=sync_anki_button".to_string(),
+            Command::SetScrollArmed(armed) => format!("action=set_scroll_armed armed={armed}"),
+            Command::SetClickArmed(armed) => format!("action=set_click_armed armed={armed}"),
+            Command::SetAddArmed(armed) => format!("action=set_add_armed armed={armed}"),
+            Command::SetBackArmed(armed) => format!("action=set_back_armed armed={armed}"),
+            Command::DiscardScroll => "action=discard_scroll".to_string(),
+            Command::SetCursorShape { local, scroll } => format!(
+                "action=set_cursor_shape local=({}, {}) scroll={scroll}",
+                local.x,
+                local.y
+            ),
+            Command::CheckDupes { generation, exprs } => format!(
+                "action=check_dupes generation={generation} expressions={}",
+                exprs.len()
+            ),
+            Command::AddNote { expr, fields } => format!(
+                "action=add_note expr_len={} fields={}",
+                expr.chars().count(),
+                fields.len()
+            ),
+            Command::LogLookup { match_len, .. } => {
+                format!("action=log_lookup match_len={match_len}")
+            }
+            Command::WarnLookupFailed(msg) => {
+                format!("action=warn_lookup_failed message_len={}", msg.chars().count())
+            }
+            Command::WarnScrollCaptured { seconds } => {
+                format!("action=warn_scroll_captured seconds={seconds}")
+            }
+            Command::OpenUrl(url) => format!("action=open_url url_len={}", url.chars().count()),
+            Command::RequestAnalysis { generation, texts } => format!(
+                "action=request_analysis generation={generation} texts={}",
+                texts.len()
+            ),
+            Command::SetDragging(dragging) => format!("action=set_dragging dragging={dragging}"),
+            Command::OpenSettings => "action=open_settings".to_string(),
+            Command::Exit => "action=exit".to_string(),
         }
     }
 

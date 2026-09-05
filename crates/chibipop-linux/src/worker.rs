@@ -208,6 +208,7 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
         scan_alphanumeric: config.ocr.scan_alphanumeric,
         discard_furigana: config.ocr.discard_furigana,
+        show_lookup_log: config.debug.show_lookup_log,
         language: config.ocr.language.clone(),
         // The settings window supplies active terms and pitch lists.
         // The names stay exact and retain priority order.
@@ -368,9 +369,12 @@ mod tests {
     /// at the seam.
     #[test]
     fn the_linux_worker_never_upscales() {
-        let s = settings(&Config::default(), &[]);
+        let mut config = Config::default();
+        config.debug.show_lookup_log = true;
+        let s = settings(&config, &[]);
         assert_eq!(1, s.upscale);
         assert_eq!(1, s.snapshot().upscale, "and the snapshot carries it to TextSource");
+        assert!(s.show_lookup_log);
     }
 
     /// Earlier code hardcoded `static_region: None`.

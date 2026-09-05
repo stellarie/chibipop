@@ -45,7 +45,7 @@ use chibipop::text::{Frame, RegionCapture};
 use metadata::StreamPlacement;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What `Frame::source` says: the rung, for logs and `probe`.
 pub const SOURCE: &str = "portal-screencast";
@@ -447,59 +447,155 @@ impl PortalCapture {
 
 impl RegionCapture for PortalCapture {
     fn grab(&mut self, region: PhysRect) -> anyhow::Result<Frame> {
-        anyhow::ensure!(
-            region.w > 0 && region.h > 0,
-            "a {}x{} region has no pixels",
-            region.w,
-            region.h
-        );
-        let swapped = self.session.ensure_monitor_for(region)?;
-        let store = Arc::clone(self.session.stream.store());
-        if swapped || store.shape().is_none() {
+        let started = Instant::now();
+        let result: anyhow::Result<Frame> = (|| {
             anyhow::ensure!(
-                store.wait_for_first(FIRST_FRAME_DEADLINE),
-                "the portal stream delivered no frame within {FIRST_FRAME_DEADLINE:?}"
+                region.w > 0 && region.h > 0,
+                "a {}x{} region has no pixels",
+                region.w,
+                region.h
             );
-        }
-
-        let seq = store.content_seq();
-        if let Some(held) = self.take_held(region) {
-            if held.seq == seq {
-                // No damage reached this monitor after the code served these pixels. They
-                // still match the screen, so the pipeline can skip one OCR pass
-                // (core's `Frame::unchanged`).
-                return Ok(Frame {
-                    buf: held.buf.clone(),
-                    w: region.w,
-                    h: region.h,
-                    source: SOURCE,
-                    fallback: None,
-                    unchanged: true,
-                });
+            let old_node = self.session.node_id();
+            let stream_started = Instant::now();
+            let swapped = self.session.ensure_monitor_for(region)?;
+            eprintln!(
+                "chibipop: capture backend=portal-screencast stage=stream region=({},{} {}x{}) node={} changed={} elapsed_ms={:.3}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                self.session.node_id(),
+                swapped,
+                stream_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            if swapped {
+                eprintln!(
+                    "chibipop: capture backend=portal-screencast stage=stream_switch from_node={} to_node={}",
+                    old_node,
+                    self.session.node_id(),
+                );
             }
-        }
+            let store = Arc::clone(self.session.stream.store());
+            if swapped || store.shape().is_none() {
+                let wait_started = Instant::now();
+                let ready = store.wait_for_first(FIRST_FRAME_DEADLINE);
+                eprintln!(
+                    "chibipop: capture backend=portal-screencast stage=first_frame_wait outcome={} wait_limit_ms={} elapsed_ms={:.3}",
+                    if ready { "ready" } else { "timeout" },
+                    FIRST_FRAME_DEADLINE.as_secs_f64() * 1000.0,
+                    wait_started.elapsed().as_secs_f64() * 1000.0,
+                );
+                anyhow::ensure!(
+                    ready,
+                    "the portal stream delivered no frame within {FIRST_FRAME_DEADLINE:?}"
+                );
+            }
 
-        let anchor = self
-            .session
-            .anchor()
-            .context_or("the connected portal stream is anchored to no known output")?;
-        let shape = store
-            .shape()
-            .context_or("the portal stream has not negotiated a format yet")?;
-        let len = usize::try_from(i64::from(region.w) * i64::from(region.h) * 4)
-            .map_err(|_| anyhow::anyhow!("a {}x{} region is too large", region.w, region.h))?;
-        // The buffer stays black where the stream has no pixels. An off-monitor area
-        // has no content. This blank area affects one hover, but a failure would
-        // affect every hover near an edge.
-        let mut buf = vec![0u8; len];
-        let served = match cut(region, anchor, shape.w, shape.h) {
-            Some((src, dest)) => store.crop_into(src, dest, &mut buf, region.w, region.h),
-            None => Some(seq),
-        };
-        let seq = served
-            .context_or("the portal stream has no frame parked")?;
-        self.hold(region, seq, &buf);
-        Ok(Frame { buf, w: region.w, h: region.h, source: SOURCE, fallback: None, unchanged: false })
+            let seq = store.content_seq();
+            if let Some(held) = self.take_held(region) {
+                if held.seq == seq {
+                    // No damage reached this monitor after the code served these pixels. They
+                    // still match the screen, so the pipeline can skip one OCR pass
+                    // (core's `Frame::unchanged`).
+                    return Ok(Frame {
+                        buf: held.buf.clone(),
+                        w: region.w,
+                        h: region.h,
+                        source: SOURCE,
+                        fallback: None,
+                        unchanged: true,
+                    });
+                }
+            }
+
+            let anchor = self
+                .session
+                .anchor()
+                .context_or("the connected portal stream is anchored to no known output")?;
+            let shape = store
+                .shape()
+                .context_or("the portal stream has not negotiated a format yet")?;
+            let len = usize::try_from(i64::from(region.w) * i64::from(region.h) * 4)
+                .map_err(|_| anyhow::anyhow!("a {}x{} region is too large", region.w, region.h))?;
+            // The buffer stays black where the stream has no pixels. An off-monitor area
+            // has no content. This blank area affects one hover, but a failure would
+            // affect every hover near an edge.
+            let mut buf = vec![0u8; len];
+            let piece = cut(region, anchor, shape.w, shape.h);
+            match piece {
+                Some((src, dest)) => eprintln!(
+                    "chibipop: capture backend=portal-screencast stage=piece node={} region=({},{} {}x{}) anchor=({}, {}) stream={}x{} src=({},{} {}x{}) dest=({}, {})",
+                    self.session.node_id(),
+                    region.x,
+                    region.y,
+                    region.w,
+                    region.h,
+                    anchor.x,
+                    anchor.y,
+                    shape.w,
+                    shape.h,
+                    src.x,
+                    src.y,
+                    src.w,
+                    src.h,
+                    dest.x,
+                    dest.y,
+                ),
+                None => eprintln!(
+                    "chibipop: capture backend=portal-screencast stage=piece node={} region=({},{} {}x{}) anchor=({}, {}) stream={}x{} outcome=outside",
+                    self.session.node_id(),
+                    region.x,
+                    region.y,
+                    region.w,
+                    region.h,
+                    anchor.x,
+                    anchor.y,
+                    shape.w,
+                    shape.h,
+                ),
+            }
+            let crop_started = Instant::now();
+            let served = match piece {
+                Some((src, dest)) => store.crop_into(src, dest, &mut buf, region.w, region.h),
+                None => Some(seq),
+            };
+            eprintln!(
+                "chibipop: capture backend=portal-screencast stage=crop node={} region=({},{} {}x{}) bytes={} outcome={} elapsed_ms={:.3}",
+                self.session.node_id(),
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                buf.len(),
+                if served.is_some() { "ready" } else { "failed" },
+                crop_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let seq = served.context_or("the portal stream has no frame parked")?;
+            self.hold(region, seq, &buf);
+            Ok(Frame { buf, w: region.w, h: region.h, source: SOURCE, fallback: None, unchanged: false })
+        })();
+        match &result {
+            Ok(frame) => eprintln!(
+                "chibipop: capture backend=portal-screencast stage=grab region=({},{} {}x{}) bytes={} freshness={} seq={} elapsed_ms={:.3}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                frame.buf.len(),
+                if frame.unchanged { "unchanged" } else { "fresh" },
+                self.session.stream.store().content_seq(),
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+            Err(e) => eprintln!(
+                "chibipop: capture backend=portal-screencast stage=grab region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+        }
+        result
     }
 
     fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
