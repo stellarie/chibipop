@@ -17,6 +17,7 @@ use crate::text::{OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 /// One hover contains the cursor position and the mask for its grab.
 #[derive(Clone, Copy)]
@@ -242,10 +243,72 @@ impl ServeNudge {
 /// Keep state changes and sentence probes in arrival order. A reload and a press change state.
 /// A sentence probe must not be coalesced.
 enum Pre {
-    Reload(WorkerSettings),
-    Freeze(PhysPoint),
-    Thaw,
+    Reload(RequestId, WorkerSettings),
+    Freeze(RequestId, PhysPoint),
+    Thaw(RequestId),
     Sentence(RequestId, SentenceProbe),
+}
+
+fn trigger_name(kind: &TriggerKind) -> &'static str {
+    match kind {
+        TriggerKind::Hover(_) => "hover",
+        TriggerKind::Sentence(_) => "sentence",
+        TriggerKind::DrillDown(_) => "drill_down",
+        TriggerKind::Reload(_) => "reload",
+        TriggerKind::Freeze(_) => "freeze",
+        TriggerKind::Thaw => "thaw",
+        TriggerKind::Serve => "serve",
+    }
+}
+
+fn outcome_name(outcome: &LookupOutcome) -> &'static str {
+    match outcome {
+        LookupOutcome::Hide => "hide",
+        LookupOutcome::Failed(_) => "failed",
+        LookupOutcome::Ready { .. } => "ready",
+        LookupOutcome::DrillDown(_) => "drill_down",
+        LookupOutcome::Sentence(_) => "sentence",
+    }
+}
+
+fn log_request_start(id: RequestId, kind: &str) {
+    eprintln!("chibipop: worker request=start id={} kind={kind}", id.0);
+}
+
+fn log_request_complete(id: RequestId, kind: &str, outcome: &LookupOutcome, started: Instant) {
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match outcome {
+        LookupOutcome::Ready { presentation, scan, matched, .. } => eprintln!(
+            "chibipop: worker request=complete id={} kind={kind} outcome=ready scan_rects={} cards={} matched={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            scan.len(),
+            presentation.all_cards.len(),
+            matched.is_some(),
+        ),
+        LookupOutcome::DrillDown(presentation) => eprintln!(
+            "chibipop: worker request=complete id={} kind={kind} outcome=drill_down cards={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            presentation.all_cards.len(),
+        ),
+        LookupOutcome::Sentence(text) => eprintln!(
+            "chibipop: worker request=complete id={} kind={kind} outcome=sentence present={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            text.is_some(),
+        ),
+        _ => eprintln!(
+            "chibipop: worker request=complete id={} kind={kind} outcome={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            outcome_name(outcome),
+        ),
+    }
+}
+
+fn log_state_complete(id: RequestId, kind: &str, outcome: &str, started: Instant) {
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "chibipop: worker request=complete id={} kind={kind} outcome={outcome} elapsed_ms={elapsed_ms:.3}",
+        id.0,
+    );
 }
 
 /// Keep the newest hover, every state change, and every sentence probe.
@@ -256,9 +319,9 @@ fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<
     let mut pre = Vec::new();
     let mut hover = None;
     let mut take = |t: Trigger| match t.kind {
-        TriggerKind::Reload(s) => pre.push(Pre::Reload(*s)),
-        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(at)),
-        TriggerKind::Thaw => pre.push(Pre::Thaw),
+        TriggerKind::Reload(s) => pre.push(Pre::Reload(t.id, *s)),
+        TriggerKind::Freeze(at) => pre.push(Pre::Freeze(t.id, at)),
+        TriggerKind::Thaw => pre.push(Pre::Thaw(t.id)),
         TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
         // The wake already arrived.
         TriggerKind::Serve => {}
@@ -324,9 +387,13 @@ fn worker_main(
     result_tx: mpsc::Sender<WorkerResult>,
     startup_tx: mpsc::Sender<Result<Vec<DictInfo>>>,
 ) {
+    let startup_started = Instant::now();
+    eprintln!("chibipop: worker startup=start");
     let WorkerParts { capture, ocr, mut dict, reopen_dict, engine, mut serve } = match open() {
         Ok(p) => p,
         Err(e) => {
+            let elapsed_ms = startup_started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("chibipop: worker startup=complete outcome=open_failed elapsed_ms={elapsed_ms:.3}");
             let _ = startup_tx.send(Err(e));
             return;
         }
@@ -335,6 +402,8 @@ fn worker_main(
     let dicts: Vec<DictInfo> = match dict.dicts().context("reading dictionary identities") {
         Ok(d) => d,
         Err(e) => {
+            let elapsed_ms = startup_started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("chibipop: worker startup=complete outcome=dict_failed elapsed_ms={elapsed_ms:.3}");
             let _ = startup_tx.send(Err(e));
             return;
         }
@@ -353,6 +422,11 @@ fn worker_main(
     if startup_tx.send(Ok(state.dicts.clone())).is_err() {
         return; // The main thread no longer waits. Nothing remains to do.
     }
+    let elapsed_ms = startup_started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "chibipop: worker startup=complete outcome=ready dicts={} elapsed_ms={elapsed_ms:.3}",
+        state.dicts.len(),
+    );
 
     // The sender dropped, so stop the Worker.
     loop {
@@ -367,21 +441,45 @@ fn worker_main(
         let (hover, pre) = drain(first, &trigger_rx);
         for change in pre {
             match change {
-                Pre::Reload(s) => {
+                Pre::Reload(id, s) => {
+                    let started = Instant::now();
+                    log_request_start(id, "reload");
                     source.apply_settings(s.snapshot(), &s.language);
                     take_reload(s, reopen_dict.as_ref(), &mut dict, &mut state);
+                    log_state_complete(id, "reload", "applied", started);
                 }
                 // Take the press-time grab: one full output before any popup exists
                 // (ARCHITECTURE.md#hover-cadence). The source stores a failure,
                 // so later lookups in the hold report it.
-                Pre::Freeze(at) => {
-                    if let Err(e) = source.freeze(at) {
-                        eprintln!("chibipop: the trigger-press grab failed: {e:#}");
-                    }
+                Pre::Freeze(id, at) => {
+                    let started = Instant::now();
+                    log_request_start(id, "freeze");
+                    let outcome = match source.freeze(at) {
+                        Ok(_) => "frozen",
+                        Err(e) => {
+                            eprintln!("chibipop: the trigger-press grab failed: {e:#}");
+                            "failed"
+                        }
+                    };
+                    log_state_complete(id, "freeze", outcome, started);
                 }
-                Pre::Thaw => source.thaw(),
+                Pre::Thaw(id) => {
+                    let started = Instant::now();
+                    log_request_start(id, "thaw");
+                    source.thaw();
+                    log_state_complete(id, "thaw", "released", started);
+                }
                 Pre::Sentence(id, probe) => {
+                    let started = Instant::now();
+                    log_request_start(id, "sentence");
                     let outcome = resolve_sentence_safe(&mut source, probe);
+                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    eprintln!(
+                        "chibipop: worker stage=sentence id={} outcome={} elapsed_ms={elapsed_ms:.3}",
+                        id.0,
+                        outcome_name(&outcome),
+                    );
+                    log_request_complete(id, "sentence", &outcome, started);
                     if result_tx.send(WorkerResult { id, outcome }).is_err() {
                         return;
                     }
@@ -394,12 +492,17 @@ fn worker_main(
         };
 
         // One bad frame does not stop the Worker.
+        let id = trigger.id;
+        let kind = trigger_name(&trigger.kind);
+        let started = Instant::now();
+        log_request_start(id, kind);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match &trigger.kind {
                 TriggerKind::Hover(h) => {
-                    resolve_trigger(&mut source, dict.as_ref(), &engine, &state, *h)
+                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, *h)
                 }
                 TriggerKind::DrillDown(text) => resolve_drilldown(
+                    id,
                     dict.as_ref(),
                     &engine,
                     &state.dicts,
@@ -416,8 +519,9 @@ fn worker_main(
             }
         }))
         .unwrap_or_else(|_| LookupOutcome::Failed("a hover lookup panicked".to_string()));
+        log_request_complete(id, kind, &outcome, started);
 
-        if result_tx.send(WorkerResult { id: trigger.id, outcome }).is_err() {
+        if result_tx.send(WorkerResult { id, outcome }).is_err() {
             break; // The result receiver closed, so stop the Worker.
         }
         wake();
@@ -426,6 +530,7 @@ fn worker_main(
 
 /// Resolve one hover from OCR to the presentation.
 fn resolve_trigger(
+    id: RequestId,
     source: &mut TextSource,
     dict: &dyn Dictionary,
     engine: &LookupEngine,
@@ -434,16 +539,42 @@ fn resolve_trigger(
 ) -> LookupOutcome {
     if state.sentence_mode == SentenceMode::Static {
         if let Some(region) = state.static_region {
-            return resolve_static(source, dict, engine, state, hover, region);
+            return resolve_static(id, source, dict, engine, state, hover, region);
         }
         // No region exists. Continue with line mode.
         eprintln!("chibipop: static mode but no region set; using line mode");
     }
+    let started = Instant::now();
     let raw = source.resolve_at_tiled_scanned(hover.at, state.scan_display.captures, hover.mask);
     let (resolved, scan, ocr_lines) = match raw {
-        Ok((Some(r), scan, lines)) => (r, scan, lines),
-        Ok((None, _, _)) => return LookupOutcome::Hide,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
+        Ok((Some(r), scan, lines)) => {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "chibipop: worker stage=ocr id={} mode=tiled outcome=resolved lines={} scan_rects={} elapsed_ms={elapsed_ms:.3}",
+                id.0,
+                lines.len(),
+                scan.len(),
+            );
+            (r, scan, lines)
+        }
+        Ok((None, scan, lines)) => {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "chibipop: worker stage=ocr id={} mode=tiled outcome=empty lines={} scan_rects={} elapsed_ms={elapsed_ms:.3}",
+                id.0,
+                lines.len(),
+                scan.len(),
+            );
+            return LookupOutcome::Hide;
+        }
+        Err(e) => {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "chibipop: worker stage=ocr id={} mode=tiled outcome=failed elapsed_ms={elapsed_ms:.3}",
+                id.0,
+            );
+            return LookupOutcome::Failed(format!("{e:#}"));
+        }
     };
     let sentence = || match state.sentence_mode {
         SentenceMode::All => join_all_lines(&ocr_lines),
@@ -455,13 +586,22 @@ fn resolve_trigger(
     };
     // The tiled path is the only path that draws an overlay.
     let outline = state.scan_display.highlight;
-    present_lookup(dict, engine, state, &resolved, sentence, scan, outline)
+    present_lookup(
+        dict,
+        engine,
+        state,
+        &resolved,
+        sentence,
+        scan,
+        PresentLog { request_id: Some(id), outline_match: outline },
+    )
 }
 
 /// Resolve one static region with one capture.
 /// [`SentenceMode::Static`] makes the sentence contain all text in the
 /// user-drawn box.
 fn resolve_static(
+    id: RequestId,
     source: &mut TextSource,
     dict: &dyn Dictionary,
     engine: &LookupEngine,
@@ -469,16 +609,44 @@ fn resolve_static(
     hover: Hover,
     region: PhysRect,
 ) -> LookupOutcome {
+    let started = Instant::now();
     let read = match source.resolve_in_region(hover.at, region, hover.mask) {
         Ok(r) => r,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
-    };
-    let Some(resolved) = read.resolved else {
-        return LookupOutcome::Hide;
+        Err(e) => {
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "chibipop: worker stage=ocr id={} mode=static outcome=failed elapsed_ms={elapsed_ms:.3}",
+                id.0,
+            );
+            return LookupOutcome::Failed(format!("{e:#}"));
+        }
     };
     let lines = read.lines;
+    let Some(resolved) = read.resolved else {
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "chibipop: worker stage=ocr id={} mode=static outcome=empty lines={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            lines.len(),
+        );
+        return LookupOutcome::Hide;
+    };
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "chibipop: worker stage=ocr id={} mode=static outcome=resolved lines={} elapsed_ms={elapsed_ms:.3}",
+        id.0,
+        lines.len(),
+    );
     // This path draws no capture boxes. It also draws no match outline.
-    present_lookup(dict, engine, state, &resolved, || join_all_lines(&lines), Vec::new(), false)
+    present_lookup(
+        dict,
+        engine,
+        state,
+        &resolved,
+        || join_all_lines(&lines),
+        Vec::new(),
+        PresentLog { request_id: Some(id), outline_match: false },
+    )
 }
 
 /// Resolve one sentence probe for an Anki add.
@@ -511,6 +679,12 @@ fn resolve_sentence_safe(source: &mut TextSource, probe: SentenceProbe) -> Looku
 /// `scan` contains the rects that the path already collected.
 /// When `outline_match` is true, add the match rect last.
 /// This order draws the match over the capture boxes.
+#[derive(Clone, Copy)]
+struct PresentLog {
+    request_id: Option<RequestId>,
+    outline_match: bool,
+}
+
 fn present_lookup(
     dict: &dyn Dictionary,
     engine: &LookupEngine,
@@ -518,17 +692,39 @@ fn present_lookup(
     resolved: &Resolved,
     sentence: impl FnOnce() -> String,
     mut scan: Vec<ScanRect>,
-    outline_match: bool,
+    log: PresentLog,
 ) -> LookupOutcome {
     let text = &resolved.span.text[resolved.span.cursor_byte_offset..];
+    let lookup_started = Instant::now();
     let hits = match engine.run(dict, text) {
-        Ok(h) => h,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
+        Ok(hits) => {
+            if let Some(id) = log.request_id {
+                let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
+                let outcome = if hits.is_empty() { "empty" } else { "complete" };
+                eprintln!(
+                    "chibipop: worker stage=lookup id={} outcome={outcome} hits={} elapsed_ms={elapsed_ms:.3}",
+                    id.0,
+                    hits.len(),
+                );
+            }
+            hits
+        }
+        Err(e) => {
+            if let Some(id) = log.request_id {
+                let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
+                eprintln!(
+                    "chibipop: worker stage=lookup id={} outcome=failed elapsed_ms={elapsed_ms:.3}",
+                    id.0,
+                );
+            }
+            return LookupOutcome::Failed(format!("{e:#}"));
+        }
     };
     if hits.is_empty() {
         return LookupOutcome::Hide;
     }
 
+    let presentation_started = Instant::now();
     let mut presentation = present::build(&hits, &state.dicts, &state.present_cfg, dict);
     presentation.sentence = Some(sentence());
     // `match_len` counts characters of the trimmed input, as `match_highlight` does.
@@ -538,10 +734,20 @@ fn present_lookup(
         .as_ref()
         .and_then(|top| OcrSurface::new(text, top.match_len));
     let matched = present::match_highlight(&resolved.span, presentation.top.as_ref());
-    if outline_match {
+    if log.outline_match {
         if let Some(rect) = matched {
             scan.push(ScanRect { rect, kind: ScanKind::Match });
         }
+    }
+    if let Some(id) = log.request_id {
+        let elapsed_ms = presentation_started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "chibipop: worker stage=presentation id={} outcome=ready cards={} collapsed={} scan_rects={} elapsed_ms={elapsed_ms:.3}",
+            id.0,
+            presentation.all_cards.len(),
+            presentation.collapsed.len(),
+            scan.len(),
+        );
     }
     LookupOutcome::Ready {
         presentation: Box::new(presentation),
@@ -580,20 +786,45 @@ fn join_all_lines(lines: &[OcrLine]) -> String {
 
 /// Run a Dictionary lookup without OCR.
 fn resolve_drilldown(
+    id: RequestId,
     dict: &dyn Dictionary,
     engine: &LookupEngine,
     dicts: &[DictInfo],
     present_cfg: &PresentConfig,
     text: &str,
 ) -> LookupOutcome {
+    let lookup_started = Instant::now();
     let hits = match engine.run(dict, text) {
-        Ok(h) => h,
-        Err(e) => return LookupOutcome::Failed(format!("{e:#}")),
+        Ok(hits) => {
+            let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
+            let outcome = if hits.is_empty() { "empty" } else { "complete" };
+            eprintln!(
+                "chibipop: worker stage=lookup id={} mode=drill_down outcome={outcome} hits={} elapsed_ms={elapsed_ms:.3}",
+                id.0,
+                hits.len(),
+            );
+            hits
+        }
+        Err(e) => {
+            let elapsed_ms = lookup_started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "chibipop: worker stage=lookup id={} mode=drill_down outcome=failed elapsed_ms={elapsed_ms:.3}",
+                id.0,
+            );
+            return LookupOutcome::Failed(format!("{e:#}"));
+        }
     };
     if hits.is_empty() {
         return LookupOutcome::Hide;
     }
+    let presentation_started = Instant::now();
     let p = present::build(&hits, dicts, present_cfg, dict);
+    let elapsed_ms = presentation_started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "chibipop: worker stage=presentation id={} mode=drill_down outcome=ready cards={} collapsed=0 elapsed_ms={elapsed_ms:.3}",
+        id.0,
+        p.all_cards.len(),
+    );
     LookupOutcome::DrillDown(Box::new(p))
 }
 
@@ -791,7 +1022,7 @@ mod tests {
         let passes: Vec<u8> = pre
             .iter()
             .filter_map(|p| match p {
-                Pre::Reload(s) => Some(s.max_passes),
+                Pre::Reload(_, s) => Some(s.max_passes),
                 _ => None,
             })
             .collect();
@@ -850,7 +1081,7 @@ mod tests {
         let (hover, pre) = drain(first, &rx);
         assert!(hover.is_some(), "the hover between them still runs");
         assert!(
-            matches!(pre.as_slice(), [Pre::Freeze(p), Pre::Thaw] if *p == at),
+            matches!(pre.as_slice(), [Pre::Freeze(_, p), Pre::Thaw(_)] if *p == at),
             "a freeze and a thaw must not coalesce"
         );
     }
@@ -863,7 +1094,7 @@ mod tests {
         let first = Trigger { kind: TriggerKind::Reload(Box::new(ws(3))), id: RequestId(1) };
         let (hover, pre) = drain(first, &rx);
         assert!(hover.is_none());
-        assert!(matches!(pre.as_slice(), [Pre::Reload(s)] if s.max_passes == 3));
+        assert!(matches!(pre.as_slice(), [Pre::Reload(_, s)] if s.max_passes == 3));
     }
 
     #[test]
@@ -1046,7 +1277,7 @@ mod tests {
             &hit,
             || "食べた。".to_string(),
             pass1,
-            true,
+            PresentLog { request_id: None, outline_match: true },
         );
 
         let LookupOutcome::Ready { presentation, matched, scan, .. } = outcome else {
@@ -1080,7 +1311,7 @@ mod tests {
             &hit,
             || "食".to_string(),
             Vec::new(),
-            false,
+            PresentLog { request_id: None, outline_match: false },
         );
 
         let LookupOutcome::Ready { matched, scan, .. } = outcome else {
@@ -1104,7 +1335,7 @@ mod tests {
             &miss,
             || panic!("a miss must not assemble a sentence"),
             Vec::new(),
-            true,
+            PresentLog { request_id: None, outline_match: true },
         );
 
         assert!(matches!(outcome, LookupOutcome::Hide));
