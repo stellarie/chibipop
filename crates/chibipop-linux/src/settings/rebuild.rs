@@ -86,10 +86,12 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("chibipop-rebuild".to_string())
         .spawn(move || {
-            // The thread holds the lock for the whole build and drops
-            // it at exit.
-            let _lock: InstanceLock = lock;
-            sink(run(&form, &plan, &sink));
+            let result = {
+                // Held until terminal result.
+                let _lock: InstanceLock = lock;
+                run(&form, &plan, &sink)
+            };
+            sink(result);
         })
         .map_err(LockError::Io)?;
     Ok(())
@@ -211,6 +213,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// A directory that the test removes at drop.
     struct Scratch(PathBuf);
@@ -595,6 +598,29 @@ mod tests {
             }
         };
         done(&last);
+    }
+
+    #[test]
+    fn terminal_progress_arrives_after_the_library_flock_is_free() {
+        let (dir, _guard) = scratch("terminal_unlocked");
+        let p = plan(&dir);
+        let runtime_dir = p.runtime_dir.clone();
+        let lock_name = lock::library_file_name(&p.library_dir);
+        let form = staging(&[fixture("terms.zip")]);
+        let (tx, rx) = mpsc::channel();
+
+        spawn(&form, p, move |progress| {
+            if matches!(progress, Progress::Done { .. } | Progress::Failed(_)) {
+                let reacquired = lock::acquire_at(&runtime_dir, &lock_name).is_ok();
+                let _ = tx.send(reacquired);
+            }
+        })
+        .expect("the library lock");
+
+        assert!(
+            rx.recv_timeout(Duration::from_secs(30)).unwrap(),
+            "terminal progress must wait until the library flock is free"
+        );
     }
 
     #[test]
