@@ -474,6 +474,42 @@ cargo test --workspace --exclude chibipop-windows   # Linux
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#workspace-and-seams).
 
+### Running the Linux regression suite
+
+Install Python 3 and start Docker or Podman. Then run the suite from the
+repository root:
+
+```bash
+python scripts/linux_container_regression.py
+```
+
+Use Podman explicitly, or repeat the complete schedule to expose intermittent
+failures:
+
+```bash
+python scripts/linux_container_regression.py --runtime podman
+python scripts/linux_container_regression.py --loops 3
+```
+
+The runner mounts the repository read-only. Each loop copies the current Git
+workspace into a fresh Ubuntu 24.04 container, including local non-ignored
+changes. It removes only its token-labelled container after the loop.
+
+Results go to `linux-regression-artifacts/`. The directory contains JSON and
+JUnit reports, command logs, package output, and compositor evidence. Use
+`--artifacts-dir <directory>` to choose another location.
+
+List the schedule or inspect the generated commands without starting a
+container:
+
+```bash
+python scripts/linux_container_regression.py --list
+python scripts/linux_container_regression.py --dry-run
+```
+
+This tests Linux inside containers, not virtual machines. See
+[`docs/REGRESSION.md`](docs/REGRESSION.md) for the Windows and manual checks.
+
 ### The rest of the documentation
 
 | Document | What is in it |
