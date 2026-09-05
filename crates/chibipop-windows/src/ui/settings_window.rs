@@ -4,7 +4,8 @@
 //! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{
-    LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, TripleClick, FIELD_SOURCES,
+    LayoutMode, ScreenshotMode, SelectionButtons, SelectionSeparator, SentenceMode, TripleClick,
+    FIELD_SOURCES,
 };
 use crate::dict::frequency::RankingStrategy;
 use crate::library::Role;
@@ -137,6 +138,14 @@ const ID_ENGINE_LOG: i32 = 148;
 const ID_ADAPTER_LOG: i32 = 149;
 /// The Include screenshot checkbox.
 const ID_INCLUDE_SCREENSHOT: i32 = 150;
+/// The screenshot capture mode combo box.
+const ID_SCREENSHOT_MODE: i32 = 182;
+/// The saved screenshot target summary.
+const ID_SCREENSHOT_SUMMARY: i32 = 183;
+/// The first-use and Alt modifier hint.
+const ID_SCREENSHOT_HINT: i32 = 184;
+/// The button that clears both saved screenshot targets.
+const ID_SCREENSHOT_RESET: i32 = 185;
 /// The Notify on add checkbox.
 const ID_NOTIFY_ON_ADD: i32 = 151;
 /// The Customize CSS button.
@@ -259,6 +268,29 @@ fn sentence_mode_at(selection: isize) -> SentenceMode {
         .ok()
         .and_then(|i| SENTENCE_MODES.get(i))
         .map_or(SentenceMode::Sentence, |&(mode, _)| mode)
+}
+
+/// Returns the screenshot mode for a combo-box selection.
+fn screenshot_mode_at(selection: isize) -> ScreenshotMode {
+    usize::try_from(selection)
+        .ok()
+        .and_then(|i| ScreenshotMode::ALL.get(i).copied())
+        .unwrap_or_default()
+}
+
+/// Formats the saved fixed targets for the Anki settings page.
+fn screenshot_target_summary(form: &SettingsForm) -> String {
+    match (form.screenshot_fixed_region, &form.screenshot_fixed_window) {
+        (None, None) => "No saved screenshot targets.".into(),
+        (Some([x, y, w, h]), None) => format!("Saved region: ({x}, {y}, {w}x{h})"),
+        (None, Some(window)) => {
+            format!("Saved window: class {:?}, title {:?}", window.app_id, window.title)
+        }
+        (Some([x, y, w, h]), Some(window)) => format!(
+            "Saved region: ({x}, {y}, {w}x{h}) | window: class {:?}, title {:?}",
+            window.app_id, window.title
+        ),
+    }
 }
 
 /// The layout mode combo box in fill order.
@@ -387,7 +419,7 @@ struct TcItemW {
 }
 
 /// The list contains controls that the Apply action disables.
-const WHILE_BUSY: [i32; 23] = [
+const WHILE_BUSY: [i32; 25] = [
     ID_APPLY,
     ID_QUIT,
     ID_OCR_LANG,
@@ -411,6 +443,8 @@ const WHILE_BUSY: [i32; 23] = [
     ID_PITCH_REMOVE,
     ID_ANKI_TEST,
     ID_CHECK_UPDATE,
+    ID_SCREENSHOT_MODE,
+    ID_SCREENSHOT_RESET,
 ];
 
 // ---- Layout dimensions in 96-DPI pixels ----
@@ -588,6 +622,7 @@ enum Action {
     /// The handler removes the item from all lists, regardless of its section.
     Remove(Role),
     ConfigureEngine,
+    ResetScreenshotTargets,
 }
 
 fn class_name() -> PCWSTR {
@@ -1055,6 +1090,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_CSS_EDITOR => record_click(hwnd, SettingsClick::CssEditor),
+                ID_SCREENSHOT_RESET => record_action(hwnd, Action::ResetScreenshotTargets),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD | ID_MODE_TOGGLE | ID_MODE_PRESS => unsafe {
                     if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
@@ -2786,10 +2822,11 @@ impl SettingsWindow {
                     self.add_picked();
                 }
                 Action::ConfigureEngine => {
-                    // Decision D9: The file picker runs an internal message pump.
+                    // Decision D9: The folder picker runs an internal message pump.
                     before_blocking();
                     self.configure_engine();
                 }
+                Action::ResetScreenshotTargets => self.reset_screenshot_targets(),
             }
         }
     }
@@ -2814,6 +2851,39 @@ impl SettingsWindow {
             }
         }
     }
+
+    /// Clear both saved screenshot targets in the form and in the controls.
+    unsafe fn reset_screenshot_targets(&self) {
+        {
+            let mut staged = self.staged.borrow_mut();
+            staged.screenshot_fixed_region = None;
+            staged.screenshot_fixed_window = None;
+            staged.screenshot_reset_targets = true;
+        }
+        let summary = wide("No saved screenshot targets.");
+        // SAFETY: These controls are created by `build` and remain live until
+        // this window drops.
+        unsafe {
+            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_SUMMARY) {
+                let _ = SetWindowTextW(c, PCWSTR(summary.as_ptr()));
+            }
+            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_RESET) {
+                let _ = EnableWindow(c, false);
+            }
+            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
+                let _ = SetWindowTextW(
+                    c,
+                    PCWSTR(wide("Saved screenshot targets cleared. Apply to save.").as_ptr()),
+                );
+            }
+        }
+    }
+
+    /// Clear the in-memory reset marker after a successful Apply.
+    pub fn clear_screenshot_reset_targets(&self) {
+        self.staged.borrow_mut().screenshot_reset_targets = false;
+    }
+
 
     /// Updates controls to show applied dimensions.
     pub fn set_capture_fields(&self, ocr: &crate::config::OcrConfig) {
@@ -4393,7 +4463,7 @@ impl SettingsWindow {
 
             // ---- Anki (own tab) ----
             y = 0;
-            ank.push(group("Anki", y, 12 * ROW_H + 34)?);
+            ank.push(group("Anki", y, 16 * ROW_H + 34)?);
             y += 20;
             let anki_chk = child(
                 page,
@@ -4501,6 +4571,80 @@ impl SettingsWindow {
                 form.include_screenshot,
                 y,
             )?);
+            y += ROW_H;
+            ank.push(label("Screenshot capture mode", y)?);
+            let screenshot_mode = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                FIELD_X,
+                y,
+                FIELD_W,
+                180,
+                ID_SCREENSHOT_MODE,
+                f,
+            )?;
+            ank.push(screenshot_mode);
+            for (i, mode) in ScreenshotMode::ALL.iter().enumerate() {
+                let text = mode.to_string();
+                SendMessageW(
+                    screenshot_mode,
+                    CB_ADDSTRING,
+                    None,
+                    Some(LPARAM(wide(&text).as_ptr() as isize)),
+                );
+                if *mode == form.screenshot_capture_mode {
+                    SendMessageW(screenshot_mode, CB_SETCURSEL, Some(WPARAM(i)), None);
+                }
+            }
+            if SendMessageW(screenshot_mode, CB_GETCURSEL, None, None).0 < 0 {
+                SendMessageW(screenshot_mode, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            y += ROW_H;
+            ank.push(child(
+                page,
+                w!("STATIC"),
+                "Fixed modes save the first target. Hold Alt to switch region and window.",
+                WINDOW_STYLE(0),
+                PAD,
+                y + 4,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                ID_SCREENSHOT_HINT,
+                f,
+            )?);
+            y += ROW_H;
+            let target_summary = screenshot_target_summary(form);
+            ank.push(child(
+                page,
+                w!("STATIC"),
+                &target_summary,
+                WINDOW_STYLE(0),
+                PAD,
+                y + 4,
+                WIN_W - 2 * PAD - 20,
+                ROW_H,
+                ID_SCREENSHOT_SUMMARY,
+                f,
+            )?);
+            y += ROW_H;
+            let reset = child(
+                page,
+                w!("BUTTON"),
+                "Clear saved screenshot targets",
+                WS_TABSTOP,
+                FIELD_X,
+                y,
+                FIELD_W,
+                ROW_H,
+                ID_SCREENSHOT_RESET,
+                f,
+            )?;
+            ank.push(reset);
+            let has_target =
+                form.screenshot_fixed_region.is_some() || form.screenshot_fixed_window.is_some();
+            let _ = EnableWindow(reset, has_target);
             y += ROW_H;
             ank.push(check(
                 "Include dictionary name",
@@ -5008,6 +5152,7 @@ impl SettingsWindow {
             let frequency = role_rows(ID_FREQS, &template.frequency);
             let pitch = role_rows(ID_PITCH, &template.pitch);
             let staged = self.staged.borrow();
+            let screenshot_reset_targets = staged.screenshot_reset_targets;
 
             let theme = if combo_index(ID_THEME) == 1 {
                 "light"
@@ -5016,6 +5161,7 @@ impl SettingsWindow {
             };
             let sentence_mode = sentence_mode_at(combo_index(ID_SENTENCE_MODE));
             let selection_buttons = selection_buttons_at(combo_index(ID_SELECTION_BUTTONS));
+            let screenshot_capture_mode = screenshot_mode_at(combo_index(ID_SCREENSHOT_MODE));
             let selection_separator = selection_separator_at(combo_index(ID_SELECTION_SEPARATOR));
             let triple_click = triple_click_at(combo_index(ID_TRIPLE_CLICK));
             let font = {
@@ -5145,9 +5291,17 @@ impl SettingsWindow {
                 notify_on_add: checked(ID_NOTIFY_ON_ADD),
                 sentence_mode,
                 static_region_key: resolved_sr_key(h, &template.static_region_key),
-                show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
-                ocr_clipboard_key,
                 include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
+                screenshot_capture_mode,
+                screenshot_fixed_region: (!screenshot_reset_targets)
+                    .then_some(template.screenshot_fixed_region)
+                    .flatten(),
+                screenshot_fixed_window: (!screenshot_reset_targets)
+                    .then(|| template.screenshot_fixed_window.clone())
+                    .flatten(),
+                screenshot_reset_targets,
+                ocr_clipboard_key,
+                show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
                 include_dictionary_name: checked(ID_INCLUDE_DICTIONARY_NAME),
                 first_dict_only: checked(ID_FIRST_DICT_ONLY),
                 selection_buttons,

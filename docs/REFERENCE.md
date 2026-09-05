@@ -387,11 +387,64 @@ hotkey = "ctrl+shift+s"     # Windows
 # hotkey_linux = "ALT+S"    # Linux; absent leaves it unbound
 save_dir = "screenshots"
 include_on_add = false
+capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-window"
+# fixed_region = [100, 200, 800, 600]  # optional; x, y, width, height in physical pixels
+# [actions.screenshot.fixed_window]   # optional saved window target
+# app_id = "org.example.Reader"
+# title = "Japanese text"
 
 # [actions.ocr_clipboard]   # absent by default; both keys optional
 # hotkey = "ctrl+shift+c"       # Windows
 # hotkey_linux = "ALT+C"        # Linux
 ```
+
+### `capture_mode`
+
+`capture_mode` selects the target that the screenshot action captures. The default is
+`"region"`. The mode applies to screenshot-on-add and the standalone Mining screenshot.
+
+| Value | Selection |
+|---|---|
+| `"region"` | Select a region on every screenshot. |
+| `"window"` | Select a visible window on every screenshot. |
+| `"fixed-region"` | Select a region once, then reuse its saved physical rectangle. |
+| `"fixed-window"` | Select a window once, then resolve its saved identity before each capture. |
+
+On Linux, `slurp` provides the interactive selector. Region mode supports a click on a
+supplied window or a drag for an arbitrary region. A window metadata query supplies the
+window rectangles for the click. If that query fails, region drag still works wherever
+`slurp` and the layer-shell selector work. Window mode uses `slurp -r` and requires a
+Hyprland `hyprctl` or Sway `swaymsg` window query.
+
+On Windows, the native selector starts a region drag in region mode and a window click in
+window mode. Hold Alt before you start the selection gesture to switch between these two
+target types. The selector uses the window class as `app_id`.
+
+The first fixed-region use asks for a region. On Linux, it always uses a drag without
+window rectangles. The first fixed-window use asks for a window. A Windows Alt switch can
+select the other target type for one capture, but it does not save that target in the
+wrong fixed-target field.
+After a first fixed-mode selection, chibipop saves the target in the config. Later
+captures bypass interactive selection until you reset the target.
+
+`fixed_region` stores `[x, y, width, height]` in global physical pixels. The width and
+height must be positive. The saved rectangle remains unchanged until you reset it.
+
+`fixed_window` stores the exact `app_id` and `title` pair. Both values must match one
+visible window. A missing or ambiguous match fails instead of selecting another window.
+The capture resolves fresh window geometry before each use, so a move or resize changes
+the captured rectangle. A title change makes the saved identity absent. Reset the target
+and select the window again.
+
+Both settings windows show the mode, a saved-target summary, and a reset control. Press
+Apply to commit a reset. The reset clears both saved target fields.
+
+Window capture copies the visible screen rectangle. It does not copy hidden or occluded
+window contents. Existing OCR and static-region selectors remain region-only.
+
+Interactive selection has a 20-second timeout. Press Esc to cancel. On Windows,
+you can also right-click. If screenshot-on-add selection or capture fails, chibipop
+files the card without an image. A standalone Mining screenshot saves nothing in that case.
 
 ### `sentence_mode`
 

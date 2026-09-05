@@ -23,9 +23,9 @@ use crate::lock::{self, LockError};
 use crate::popup;
 use anyhow::Context;
 use chibipop::config::{
-    FieldMapping, LayoutMode, PopupLayer, SelectionButtons, SelectionSeparator, SentenceMode,
-    TriggerMode, TripleClick, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE,
-    SUMMARY_RANGE,
+    FieldMapping, LayoutMode, PopupLayer, ScreenshotMode, SelectionButtons, SelectionSeparator,
+    SentenceMode, TriggerMode, TripleClick, FIELD_SOURCES, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE,
+    PASSES_RANGE, SUMMARY_RANGE,
 };
 use chibipop::dict::frequency::RankingStrategy;
 use chibipop::library::Role;
@@ -413,7 +413,12 @@ impl App {
                     self.form.capture_height = cfg.ocr.capture_height;
                     self.capture_w = cfg.ocr.capture_width.to_string();
                     self.capture_h = cfg.ocr.capture_height.to_string();
+                    self.form.screenshot_fixed_region =
+                        cfg.actions.screenshot.fixed_region;
+                    self.form.screenshot_fixed_window =
+                        cfg.actions.screenshot.fixed_window.clone();
                 }
+                self.form.screenshot_reset_targets = false;
                 self.status = apply::describe(&applied);
             }
             Err(e) => self.status = format!("Apply failed: {e:#}"),
@@ -728,6 +733,10 @@ enum Message {
     /// Whether an add carries a mining picture. The core gate is
     /// `chibipop::shot::plan_add`.
     IncludeScreenshot(bool),
+    /// The screenshot capture mode from the shared form.
+    ScreenshotModePicked(String),
+    /// Clear both saved fixed screenshot targets.
+    ResetScreenshotTargets,
     /// The mining screenshot chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
     ScreenshotKey(String),
@@ -841,9 +850,17 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.triple_click = triple_click_of(&label);
         }
         Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
+        Message::ScreenshotModePicked(label) => {
+            app.form.screenshot_capture_mode = screenshot_mode_of(&label);
+        }
+        Message::ResetScreenshotTargets => {
+            app.form.screenshot_fixed_region = None;
+            app.form.screenshot_fixed_window = None;
+            app.form.screenshot_reset_targets = true;
+        }
         // This is the only place where empty text becomes `None`. The config field
-        // uses `Option`, so absence has a distinct value. An empty chord would be a
-        // sentinel that the daemon would need to interpret.
+        // uses `Option`, so absence has a distinct value. An empty chord would be
+        // a sentinel that the daemon would need to interpret.
         Message::ScreenshotKey(v) => {
             app.linux.screenshot_key_linux = (!v.trim().is_empty()).then_some(v);
         }
@@ -1974,25 +1991,73 @@ fn screenshot_bind(app: &App) -> Element<'_, Message> {
     }
 }
 
+/// Return the screenshot capture mode labels in the order shared by core.
+fn screenshot_mode_labels() -> Vec<String> {
+    ScreenshotMode::ALL.iter().map(ToString::to_string).collect()
+}
+
+/// Return the capture mode that matches a picker label.
+///
+/// The picker emits only labels from [`screenshot_mode_labels`]. The default
+/// still protects the form if a stale message arrives after a core change.
+fn screenshot_mode_of(label: &str) -> ScreenshotMode {
+    ScreenshotMode::ALL
+        .iter()
+        .copied()
+        .find(|mode| mode.to_string() == label)
+        .unwrap_or_default()
+}
+
 /// The mining screenshot rows. They control inclusion on add, the save folder,
-/// and the standalone screenshot chord.
+/// the capture mode, saved fixed targets, and the standalone screenshot chord.
 ///
 /// Show every row in every state. The folder and chord also affect the
 /// standalone screenshot action, so `include_on_add` does not control them.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let region_summary = match app.form.screenshot_fixed_region {
+        Some([x, y, width, height]) => format!(
+            "Saved fixed region: x={x}, y={y}, width={width}, height={height} physical pixels."
+        ),
+        None => "No fixed region is saved.".to_string(),
+    };
+    let window_summary = match app.form.screenshot_fixed_window.as_ref() {
+        Some(window) => format!(
+            "Saved fixed window: app_id={:?}, title={:?}.",
+            window.app_id, window.title
+        ),
+        None => "No fixed window is saved.".to_string(),
+    };
     vec![
         checkbox(app.form.include_screenshot)
             .label("Include screenshot when adding")
             .on_toggle(Message::IncludeScreenshot)
             .into(),
         text(
-            "Asking for a card dims the screen: drag the area to capture, release to \
-             confirm. Esc or a right-click skips the picture and files the card without \
-             one. Add a field mapping below with source \"screenshot\" to say which Anki \
-             field the picture lands in."
+            "On add, the screenshot uses the selected mode. Region modes use a drag, and \
+             window modes use a click. Esc skips the picture and files the card without one."
         )
         .size(13)
         .into(),
+        labeled(
+            "Screenshot capture mode",
+            pick_list(
+                screenshot_mode_labels(),
+                Some(app.form.screenshot_capture_mode.to_string()),
+                Message::ScreenshotModePicked,
+            ),
+        ),
+        text(
+            "Fixed modes select and save a target on first use, then reuse it for later \
+             screenshots. Reset the saved targets to select them again. Linux window capture \
+             needs slurp and Hyprland or Sway window queries."
+        )
+        .size(13)
+        .into(),
+        text(region_summary).size(13).into(),
+        text(window_summary).size(13).into(),
+        button("Reset saved screenshot targets")
+            .on_press(Message::ResetScreenshotTargets)
+            .into(),
         labeled(
             "Screenshots folder",
             text_input("screenshots", &app.linux.screenshot_save_dir)

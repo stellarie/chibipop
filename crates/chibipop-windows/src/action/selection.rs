@@ -1,17 +1,23 @@
-//! The Region selector lets the user draw a rectangle on the virtual desktop.
+//! The target selector lets the user choose a region or window on the virtual desktop.
 
+use crate::config::{ScreenshotMode, ScreenshotWindow};
 use crate::geom::{PhysPoint, PhysRect};
 use crate::input::hooks::Hooks;
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::mem::size_of;
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetCapture,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Minimum width or height for a valid drag, in physical pixels.
@@ -22,16 +28,42 @@ const DIM_ALPHA: u8 = 102;
 const BORDER_PX: i32 = 2;
 /// Virtual-key code for `VK_ESCAPE`.
 const VK_ESCAPE: usize = 0x1B;
+/// Virtual-key code for `VK_MENU` (either Alt key).
+const VK_MENU: i32 = 0x12;
 
 fn class_name() -> PCWSTR {
     w!("ChibipopRegionSelect")
 }
 
+/// The result of one screenshot selection.
+///
+/// A window target keeps its identity and its current bounds. Fixed-window
+/// captures resolve the identity again before every capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionTarget {
+    Region(PhysRect),
+    Window {
+        rect: PhysRect,
+        target: ScreenshotWindow,
+    },
+}
+
+impl SelectionTarget {
+    /// Return the physical rectangle to capture.
+    pub fn rect(&self) -> PhysRect {
+        match self {
+            SelectionTarget::Region(rect) | SelectionTarget::Window { rect, .. } => *rect,
+        }
+    }
+}
+
 thread_local! {
     static ANCHOR: Cell<Option<PhysPoint>> = const { Cell::new(None) };
-    static RESULT: Cell<Option<PhysRect>> = const { Cell::new(None) };
     static DONE: Cell<bool> = const { Cell::new(false) };
     static PAINT_CTX: RefCell<Option<PaintCtx>> = const { RefCell::new(None) };
+    static TARGET: RefCell<Option<SelectionTarget>> = const { RefCell::new(None) };
+    static MODE: Cell<ScreenshotMode> = const { Cell::new(ScreenshotMode::Region) };
+    static ALLOW_TARGET_SWITCH: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Return the smallest `PhysRect` that contains both drag points.
@@ -300,7 +332,207 @@ fn cursor_point() -> PhysPoint {
     PhysPoint { x: pt.x, y: pt.y }
 }
 
+fn window_text(hwnd: HWND) -> String {
+    // SAFETY: `GetWindowTextLengthW` and `GetWindowTextW` use the same live
+    // top-level handle. The vector has one extra slot for the terminating NUL.
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let got = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..got.max(0) as usize])
+    }
+}
+
+fn window_class(hwnd: HWND) -> String {
+    // SAFETY: The fixed buffer prevents `GetClassNameW` from writing past its
+    // end. The function returns the character count without the NUL.
+    unsafe {
+        let mut buf = [0u16; 256];
+        let got = GetClassNameW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..got.max(0) as usize])
+    }
+}
+
+fn window_rect(hwnd: HWND) -> Option<PhysRect> {
+    // SAFETY: `rect` is local writable storage and `hwnd` comes from EnumWindows.
+    unsafe {
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).ok()?;
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        (w > 0 && h > 0).then_some(PhysRect {
+            x: rect.left,
+            y: rect.top,
+            w,
+            h,
+        })
+    }
+}
+
+fn window_is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: `cloaked` is writable storage of the size requested by DWM.
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut c_void,
+            size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+    }
+}
+
+enum WindowSearchKind {
+    At(PhysPoint),
+    Exact(ScreenshotWindow),
+}
+
+struct WindowSearch {
+    kind: WindowSearchKind,
+    process_id: u32,
+    result: Option<SelectionTarget>,
+    matches: usize,
+}
+
+/// Search visible top-level windows in z-order.
+///
+/// `EnumWindows` starts with the topmost window, so an at-point search can stop
+/// at its first match. An exact fixed-target search stops after two matches.
+unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: `lparam` points to the `WindowSearch` supplied for this call.
+    let search = unsafe { &mut *(lparam.0 as *mut WindowSearch) };
+    unsafe {
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id as *mut u32));
+        if process_id == search.process_id
+            || !IsWindowVisible(hwnd).as_bool()
+            || IsIconic(hwnd).as_bool()
+            || window_is_cloaked(hwnd)
+        {
+            return BOOL(1);
+        }
+    }
+    let Some(rect) = window_rect(hwnd) else {
+        return BOOL(1);
+    };
+    let class = window_class(hwnd);
+    let title = window_text(hwnd);
+    match &search.kind {
+        WindowSearchKind::At(point) if rect.contains(*point) => {
+            search.result = Some(SelectionTarget::Window {
+                rect,
+                target: ScreenshotWindow { app_id: class, title },
+            });
+            BOOL(0)
+        }
+        WindowSearchKind::Exact(target) if target.app_id == class && target.title == title => {
+            search.matches += 1;
+            if search.matches == 1 {
+                search.result = Some(SelectionTarget::Window {
+                    rect,
+                    target: target.clone(),
+                });
+            }
+            (search.matches < 2).then_some(BOOL(1)).unwrap_or(BOOL(0))
+        }
+        _ => BOOL(1),
+    }
+}
+
+fn find_window_at(point: PhysPoint) -> Option<SelectionTarget> {
+    let mut search = WindowSearch {
+        kind: WindowSearchKind::At(point),
+        // Exclude every chibipop surface, not only the selector itself.
+        process_id: unsafe { GetCurrentProcessId() },
+        result: None,
+        matches: 0,
+    };
+    // SAFETY: The callback only runs during this call, and `search` stays live
+    // until `EnumWindows` returns.
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_window_proc),
+            LPARAM(&mut search as *mut WindowSearch as isize),
+        );
+    }
+    search.result
+}
+
+/// Resolve a saved window identity to its current physical bounds.
+///
+/// The class and title must identify one visible top-level window. Missing and
+/// ambiguous identities return errors instead of selecting a different window.
+pub fn resolve_window(target: &ScreenshotWindow) -> Result<PhysRect> {
+    let mut search = WindowSearch {
+        kind: WindowSearchKind::Exact(target.clone()),
+        process_id: unsafe { GetCurrentProcessId() },
+        result: None,
+        matches: 0,
+    };
+    // SAFETY: The callback only runs during this call, and `search` stays live
+    // until `EnumWindows` returns.
+    let enumerated = unsafe {
+        EnumWindows(
+            Some(enum_window_proc),
+            LPARAM(&mut search as *mut WindowSearch as isize),
+        )
+    };
+    if search.matches < 2 {
+        enumerated.context("enumerating screenshot windows")?;
+    }
+    match search.matches {
+        0 => anyhow::bail!(
+            "saved screenshot window is not visible: class {:?}, title {:?}",
+            target.app_id,
+            target.title
+        ),
+        1 => search
+            .result
+            .map(|selection| selection.rect())
+            .context("saved screenshot window has no bounds"),
+        _ => anyhow::bail!(
+            "saved screenshot window is ambiguous: class {:?}, title {:?}",
+            target.app_id,
+            target.title
+        ),
+    }
+}
+
+fn alt_down() -> bool {
+    // SAFETY: `GetAsyncKeyState` reads the current state of the virtual key.
+    unsafe { (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0 }
+}
+
+fn window_mode(mode: ScreenshotMode) -> bool {
+    matches!(mode, ScreenshotMode::Window | ScreenshotMode::FixedWindow)
+}
+fn use_window_for_selection() -> bool {
+    ALLOW_TARGET_SWITCH.with(|allow| {
+        if !allow.get() {
+            return false;
+        }
+        let mode = MODE.get();
+        window_mode(mode) ^ alt_down()
+    })
+}
+
 fn on_lbuttondown(hwnd: HWND) {
+    if use_window_for_selection() {
+        // Capture the button-up message too. This prevents the click that
+        // chooses a window from reaching the selected application.
+        // SAFETY: `hwnd` identifies the live selector window.
+        unsafe {
+            SetCapture(hwnd);
+        }
+        TARGET.with(|cell| *cell.borrow_mut() = find_window_at(cursor_point()));
+        DONE.set(true);
+        return;
+    }
     ANCHOR.set(Some(cursor_point()));
     // SAFETY: `wndproc` receives `hwnd` from the OS for each message and passes it here.
     // `hwnd` therefore identifies a live window.
@@ -321,7 +553,7 @@ fn on_lbuttonup() {
     if let Some(anchor) = ANCHOR.get() {
         let r = normalized_rect(anchor, cursor_point());
         if meets_drag_threshold(r) {
-            RESULT.set(Some(r));
+            TARGET.with(|cell| *cell.borrow_mut() = Some(SelectionTarget::Region(r)));
         }
     }
     ANCHOR.set(None);
@@ -330,6 +562,7 @@ fn on_lbuttonup() {
 
 fn on_cancel() {
     ANCHOR.set(None);
+    TARGET.with(|cell| *cell.borrow_mut() = None);
     DONE.set(true);
 }
 
@@ -433,15 +666,41 @@ impl RegionSelection {
     }
 
     /// Show the selector and block until the user selects or cancels a region.
+    ///
+    /// This legacy entry point remains region-only. OCR and static-region
+    /// selectors must not change behavior when Alt is held.
     pub fn run(&mut self) -> Option<PhysRect> {
+        self.run_target_inner(ScreenshotMode::Region, false)
+            .and_then(|target| match target {
+                SelectionTarget::Region(rect) => Some(rect),
+                SelectionTarget::Window { .. } => None,
+            })
+    }
+
+    /// Show the selector and return a region or a clicked top-level window.
+    ///
+    /// Region mode starts a drag. Window mode selects the top-level window
+    /// under the first click. Alt switches these two interactions.
+    pub fn run_target(&mut self, mode: ScreenshotMode) -> Option<SelectionTarget> {
+        self.run_target_inner(mode, true)
+    }
+
+    fn run_target_inner(
+        &mut self,
+        mode: ScreenshotMode,
+        allow_target_switch: bool,
+    ) -> Option<SelectionTarget> {
         ANCHOR.set(None);
-        RESULT.set(None);
+        TARGET.with(|cell| *cell.borrow_mut() = None);
+        MODE.set(mode);
+        ALLOW_TARGET_SWITCH.with(|cell| cell.set(allow_target_switch));
         DONE.set(false);
 
         let ctx = match build_paint_ctx() {
             Ok(ctx) => ctx,
             Err(e) => {
                 eprintln!("chibipop: region selection overlay failed: {e:#}");
+                ALLOW_TARGET_SWITCH.with(|cell| cell.set(false));
                 return None;
             }
         };
@@ -470,14 +729,18 @@ impl RegionSelection {
             }
         }
 
-        // SAFETY: `Drop` destroys `self.hwnd` after this method returns, so it remains valid here.
+        // SAFETY: `ReleaseCapture` has no preconditions. This also releases
+        // the capture used to swallow a window-selection button-up message.
         unsafe {
+            let _ = ReleaseCapture();
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         Hooks::set_selection_active(false);
         PAINT_CTX.with(|cell| *cell.borrow_mut() = None);
-        RESULT.get()
+        ALLOW_TARGET_SWITCH.with(|cell| cell.set(false));
+        TARGET.with(|cell| cell.borrow_mut().take())
     }
+
 }
 
 impl RegionSelection {
@@ -505,6 +768,17 @@ impl Drop for RegionSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NativeWindowGuard(HWND);
+
+    impl Drop for NativeWindowGuard {
+        fn drop(&mut self) {
+            // SAFETY: The guard owns the window created by the test.
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+
 
     fn p(x: i32, y: i32) -> PhysPoint {
         PhysPoint { x, y }
@@ -646,4 +920,48 @@ mod tests {
         assert_eq!(white, px[idx(4, 2, vw)], "bottom band, clipped left");
         assert_eq!(9, px[idx(2, 4, vw)], "past the clamped right edge");
     }
+    #[test]
+    fn resolve_window_rejects_a_window_owned_by_this_process() {
+        let title = format!(
+            "chibipop-pid-regression-{}",
+            // SAFETY: This call has no preconditions.
+            unsafe { GetCurrentProcessId() }
+        );
+        let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = unsafe {
+            // SAFETY: The built-in STATIC class accepts these window arguments.
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                PCWSTR(title_w.as_ptr()),
+                WS_POPUP | WS_VISIBLE,
+                0,
+                0,
+                16,
+                16,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create the native regression window");
+        let _guard = NativeWindowGuard(hwnd);
+        assert!(unsafe { IsWindowVisible(hwnd).as_bool() });
+        assert_ne!(
+            unsafe { GetWindowThreadProcessId(hwnd, None) },
+            unsafe { GetCurrentProcessId() },
+            "the test must distinguish the window thread ID from the process ID"
+        );
+
+        let target = ScreenshotWindow {
+            app_id: window_class(hwnd),
+            title,
+        };
+        assert!(
+            resolve_window(&target).is_err(),
+            "the selector must reject windows owned by this process"
+        );
+    }
+
 }

@@ -51,6 +51,8 @@ mod trigger;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
+mod screenshot;
+#[cfg(target_os = "linux")]
 mod worker;
 
 #[cfg(target_os = "linux")]

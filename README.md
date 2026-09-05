@@ -231,21 +231,54 @@ notification when a card is added**.
 
 ### Add a picture of what you were reading
 
-A screenshot gives the card context — the panel, the subtitle, the line of
-the game you found the word in.
+A screenshot gives the card context — the panel, the subtitle, or the line of
+the game where you found the word.
+
+#### Choose a screenshot mode
+
+Choose a mode in the *Anki* tab with **Screenshot capture mode**.
+
+- **Region** is the default. Select a region for each picture.
+- **Window** selects one visible window for each picture.
+- **Fixed region** asks for one region on first use, then reuses its saved
+  global physical-pixel rectangle.
+- **Fixed window** asks for one visible window on first use, then finds that
+  window for each picture.
+
+On Windows, the native selector uses a drag for a region and a click for a
+window. Hold `Alt` before you start the gesture to switch between these two
+choices. On Linux, `slurp` provides the selector. Region mode supports a
+window click or a region drag. Window mode uses a window click. Linux does
+not use the Windows `Alt` switch.
+
+A fixed window stores its exact `app_id` and title. Windows uses the window
+class as `app_id`. Linux uses the compositor class or `app_id`. Both values
+must match exactly one visible window. Window capture copies the visible
+screen rectangle. It does not copy hidden or occluded window contents.
+
+Fixed region keeps the same rectangle after a restart. Fixed window queries
+fresh geometry after a window moves or changes size. A title change breaks the
+match. Reset the saved target and select the window again.
 
 1. **Turn it on.** *Anki* tab > tick **Include screenshot when adding**.
-2. **Find a word.** Hover until the pop-up appears.
-3. **Ask for the card.** Press the Anki key, or click the Anki button
-   under the pop-up. The screen dims.
-4. **Choose the area.** Drag a rectangle around what you want to keep, and
-   release.
+2. **Choose a mode.** Select **Region**, **Window**, **Fixed region**, or
+   **Fixed window**. Press **Apply** after you change the mode.
+3. **Find a word.** Hover until the pop-up appears.
+4. **Ask for the card.** Press the Anki key, or click the Anki button under
+   the pop-up.
+5. **Select the target when the mode asks for one.** Complete the drag or
+   click. Fixed modes save a successful first selection for later pictures.
 
-chibipop saves the picture and, if Anki is running, makes the card.
+Settings shows the mode, each saved target summary, and a reset control. Use
+**Clear saved screenshot targets** on Windows or **Reset saved screenshot
+targets** on Linux. Press **Apply** to commit the reset. The next fixed-mode
+picture asks for a new target.
 
-**To skip the picture,** press **Esc** while the screen is dimmed — or
-right-click, on Linux. You still get the card, without an image. If you
-decide nothing for 20 seconds, chibipop cancels the picture by itself.
+chibipop saves the picture and, if Anki is open, makes the card.
+
+**To skip the picture,** press **Esc** while the screen is dimmed. On Windows,
+you can also right-click. You still get the card without an image. After
+20 seconds without a selection, chibipop cancels the picture.
 
 **Where the picture is saved.** In a folder called `screenshots`. Change
 it with the **Screenshots folder** box on the *Anki* tab. A full path is
@@ -261,18 +294,18 @@ point at the pictures.
 
 ### Take a picture without making a card
 
-A separate key takes a screenshot for the pop-up already on screen,
-whether or not you asked for a card. chibipop saves the picture. If Anki
-is running, it also files a card.
+A separate key takes a screenshot for the pop-up already on screen. It uses
+the selected screenshot mode. chibipop saves the picture. If Anki is open, it
+also files a card.
 
 - **Windows:** set the key as `actions.screenshot.hotkey`.
 - **Linux:** it is a key combination you set in your desktop, bound to
   `chibipop ctl screenshot`. The *Anki* tab writes the line for you to
   copy. See [`docs/LINUX.md`](docs/LINUX.md).
 
-Press it with no pop-up on screen and chibipop says so in its log rather
-than doing nothing quietly. There is nothing to take a picture *of* until
-you have looked a word up.
+Press it with no pop-up on screen and chibipop says so in its log rather than
+doing nothing quietly. There is nothing to take a picture *of* until you have
+looked a word up.
 
 ### Add the sentence
 
