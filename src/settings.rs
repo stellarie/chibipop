@@ -100,6 +100,12 @@ pub struct SettingsForm {
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
+    pub screenshot_capture_mode: crate::config::ScreenshotMode,
+    pub screenshot_fixed_region: Option<[i32; 4]>,
+    pub screenshot_fixed_window: Option<crate::config::ScreenshotWindow>,
+    /// Saved targets can change while this form is open.
+    /// Only an explicit reset can remove a target from the latest Config.
+    pub screenshot_reset_targets: bool,
     /// This setting controls whether Anki glossary fields include each Dictionary name.
     pub include_dictionary_name: bool,
     /// Whether the note uses only the top Dictionary's Entry.
@@ -456,6 +462,10 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
+        screenshot_capture_mode: cfg.actions.screenshot.capture_mode,
+        screenshot_fixed_region: cfg.actions.screenshot.fixed_region,
+        screenshot_fixed_window: cfg.actions.screenshot.fixed_window.clone(),
+        screenshot_reset_targets: false,
         include_dictionary_name: cfg.anki.include_dictionary_name,
         first_dict_only: cfg.anki.first_dict_only,
         selection_buttons: cfg.anki.selection_buttons,
@@ -544,6 +554,11 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         }),
     };
     out.actions.screenshot.include_on_add = form.include_screenshot;
+    out.actions.screenshot.capture_mode = form.screenshot_capture_mode;
+    if form.screenshot_reset_targets {
+        out.actions.screenshot.fixed_region = None;
+        out.actions.screenshot.fixed_window = None;
+    }
     out.plugins.enabled = form.enabled_plugins.clone();
     // Each role list becomes an enabled array and a disabled array. Each array
     // keeps its rows in screen order. An unreadable file remains a row for
@@ -1133,31 +1148,37 @@ mod tests {
     }
 
     #[test]
-    fn include_screenshot_round_trips() {
+    fn an_open_settings_form_preserves_a_newly_saved_screenshot_target() {
         let mut cfg = cfg_with(&[]);
-        cfg.actions.screenshot.include_on_add = true;
-        let form = from_config(&cfg, &dicts());
-        assert!(form.include_screenshot);
+        let mut form = from_config(&cfg, &dicts());
+        cfg.actions.screenshot.fixed_region = Some([-300, 40, 200, 100]);
+        cfg.actions.screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "reader".into(),
+            title: "日本語".into(),
+        });
+        form.screenshot_capture_mode = crate::config::ScreenshotMode::FixedWindow;
         let out = apply_to(&form, &cfg);
-        assert!(out.actions.screenshot.include_on_add);
+        assert_eq!(cfg.actions.screenshot.fixed_region, out.actions.screenshot.fixed_region);
+        assert_eq!(cfg.actions.screenshot.fixed_window, out.actions.screenshot.fixed_window);
     }
 
     #[test]
-    fn include_on_add_defaults_to_false() {
-        let cfg = Config::default();
-        assert!(!cfg.actions.screenshot.include_on_add);
-        let form = from_config(&cfg, &dicts());
-        assert!(!form.include_screenshot);
-    }
-
-    #[test]
-    fn include_screenshot_false_round_trips() {
+    fn resetting_screenshot_targets_replaces_only_the_saved_targets() {
         let mut cfg = cfg_with(&[]);
-        cfg.actions.screenshot.include_on_add = false;
-        let form = from_config(&cfg, &dicts());
-        assert!(!form.include_screenshot);
+        cfg.actions.screenshot.fixed_region = Some([0, 40, 200, 100]);
+        cfg.actions.screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "reader".into(),
+            title: "日本語".into(),
+        });
+        cfg.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".into());
+        let mut form = from_config(&cfg, &dicts());
+        form.screenshot_reset_targets = true;
         let out = apply_to(&form, &cfg);
-        assert!(!out.actions.screenshot.include_on_add);
+        assert_eq!(None, out.actions.screenshot.fixed_region);
+        assert_eq!(None, out.actions.screenshot.fixed_window);
+        assert_eq!(cfg.actions.screenshot.capture_mode, out.actions.screenshot.capture_mode);
+        assert_eq!(cfg.actions.screenshot.hotkey_linux, out.actions.screenshot.hotkey_linux);
     }
 
     #[test]

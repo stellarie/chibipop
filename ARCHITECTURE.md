@@ -68,8 +68,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 - Two Linux capture backends exist: wlr-screencopy v3 is primary, and portal ScreenCast
   with PipeWire is the fallback.
-- The selection reads the advertised capability. It never reads the compositor identity.
-  The `hyprctl cursorpos` cursor rung is the single permitted exception.
+- Capture backend selection reads the advertised capability. It never reads the compositor
+  identity. The `hyprctl cursorpos` cursor rung remains the only cursor-selection exception.
+- Screenshot target selection is separate from capture backend selection. On Linux, it can
+  query visible-window metadata with Hyprland `hyprctl` or Sway `swaymsg`. These queries
+  supply screenshot targets only. They never select a capture backend.
 - Buffers use shm with CPU cropping only. No backend contains GPU plumbing.
 - The app requests portal consent at startup. A denial never causes an exit. The hover
   path shows one actionable error with a retry action.

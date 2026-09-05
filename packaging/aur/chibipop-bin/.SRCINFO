@@ -13,6 +13,7 @@ pkgbase = chibipop-bin
 	optdepends = noto-fonts-cjk: Japanese glyphs in the popup - without a JP font kanji render as tofu
 	optdepends = xdg-desktop-portal: capture and global-shortcut channels on KDE and GNOME
 	optdepends = pipewire: the portal capture stream (dlopened, only on that rung)
+	optdepends = slurp: interactive screenshot region and window selection
 	provides = chibipop=0.8.2
 	conflicts = chibipop
 	options = !strip

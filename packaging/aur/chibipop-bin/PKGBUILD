@@ -39,6 +39,7 @@ optdepends=(
 	'noto-fonts-cjk: Japanese glyphs in the popup - without a JP font kanji render as tofu'
 	'xdg-desktop-portal: capture and global-shortcut channels on KDE and GNOME'
 	'pipewire: the portal capture stream (dlopened, only on that rung)'
+	'slurp: interactive screenshot region and window selection'
 )
 provides=("chibipop=$pkgver")
 conflicts=('chibipop')

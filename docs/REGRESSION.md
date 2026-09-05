@@ -2020,32 +2020,63 @@ clean on Windows OCR with the exact warning quoted above.
 
 ### 1.30 Screenshot action — added 2026-08-24, not run
 
-With `chibipop run` live and a popup visible (hover a Japanese word):
+Start `chibipop run` with a popup visible. Hover a Japanese word before each
+standalone or include-on-add screenshot check. Use the configured screenshots
+folder when you check files.
 
-1. Press the screenshot hotkey (`Ctrl+Shift+S` by default). The screen dims and a crosshair
-   cursor appears over the full virtual desktop.
-2. Click and drag to select a region. The selected area stays un-dimmed with a white border.
-   Release the mouse button.
-3. A PNG is saved to `screenshots/` beside the exe. The filename is
-   `{word}_{unix_seconds}.png` where `{word}` is the mined expression sanitized for the
-   filesystem. Verify the file exists and opens as a valid image showing the selected region.
-4. If Anki is connected: a card is created with the word, reading, and glossary, plus a context
-   image attached to the configured field (default `Context`). Verify the card in Anki — the
-   Context field should contain an `<img src="chibipop-screenshot-...">` tag, and the image
-   should be in the collection media folder.
-5. **Esc during selection** — the overlay closes, the popup returns unchanged, no file is saved.
-6. **Right-click during selection** — same as Esc.
-7. **Accidental click (drag < 5px)** — treated as cancel.
-8. **Without a popup visible**, the hotkey does nothing (silently ignored).
-9. **After the screenshot**, the popup shows the word as "added" (the Anki button state updates),
-   and pressing the regular Anki add key on the same word hits `allowDuplicate: false` — not a
-   bug, expected behavior.
-10. **Hot reload**: change `actions.screenshot.hotkey` in `chibipop.toml`, press Apply in
-    Settings. The new hotkey works, the old one does not. **PID unchanged.**
+#### 1.30a Region and window selection
 
-**Pass** when the PNG is saved, the Anki card carries the image, Esc/right-click/tiny-drag all
-cancel cleanly, the hotkey is inert without a popup, and Apply re-registers the binding without
-a restart.
+1. **Drag a region.** Set **Screenshot capture mode** to **Region** and press
+   **Apply**. Start the screenshot action and drag a region. Release the mouse
+   button. The selector must show the chosen region and save a PNG.
+2. **Use the Region window choice.** On Windows, hold `Alt` before the gesture
+   and click a visible window. On Linux, click a visible window when Hyprland
+   or Sway metadata is available. Without that metadata, drag a region instead.
+3. **Click a window in Window mode.** Set the mode to **Window** and press
+   **Apply**. Click a visible window. Windows uses the native selector. Linux
+   uses `slurp -r`.
+4. **Check visible pixels.** Open the PNG and compare it with the visible
+   screen rectangle. A window capture must not contain hidden or occluded
+   window content. If Anki is connected, check the configured screenshot field.
+5. **Cancel the selection.** Press **Esc**. On Windows, also check right-click.
+   The selector must close without a PNG. The popup must return.
+
+#### 1.30b Fixed target persistence
+
+1. **Save a fixed region.** Reset the saved targets. Set **Fixed region**.
+   Press **Apply**. Drag a region on first use. Check the saved summary and
+   the global physical-pixel rectangle.
+2. **Reuse the fixed region.** Restart chibipop and take another picture. The
+   action must bypass selection and use the saved rectangle.
+3. **Save a fixed window.** Reset the saved targets. Set **Fixed window**.
+   Press **Apply**. Click one visible window on first use. Check its exact
+   `app_id` and title in the saved summary. On Windows, `app_id` is the window
+   class. On Linux, it is the compositor class or `app_id`.
+4. **Reuse moved geometry.** Restart chibipop, move or resize the saved window,
+   and take a picture. The action must use its current visible screen rectangle.
+5. **Reject a bad identity.** Change the saved window title, or create a second
+   visible window with the same `app_id` and title. The action must report an
+   absent or ambiguous match and select no other window.
+
+#### 1.30c Reset and failure behavior
+
+1. **Check the settings controls.** Confirm that Settings shows the selected
+   mode, saved target summaries, and a reset control. Confirm that **Apply**
+   commits the reset.
+2. **Select after reset.** Use a fixed mode after reset. The next picture must
+   ask for a target and save the new target after a successful selection.
+3. **Keep the card after a failed picture.** Cancel an include-on-add
+   selection, or cause a selection or capture failure. The card must save
+   without an image. A standalone mining screenshot must save no file.
+4. **Check the popup state.** Take a successful picture. The popup must show
+   the word as added. A second regular Anki add must use `allowDuplicate: false`.
+5. **Reload the hotkey.** On Windows, change `actions.screenshot.hotkey`. On
+   Linux, change `actions.screenshot.hotkey_linux` and its compositor bind.
+   Press **Apply**. The new key must work, the old key must fail, and the
+   process ID must stay unchanged.
+
+**Pass** when every applicable subsection meets its checks. Do not treat a
+selector test as proof of the live screen, compositor, or Anki path.
 
 ---
 

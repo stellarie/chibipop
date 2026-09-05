@@ -25,6 +25,7 @@ use crate::catcher::Catcher;
 
 use crate::popup::{self, Demo, Popup, ShowRequest};
 use crate::select::{self, Pick, Selector};
+use crate::screenshot;
 use crate::shortcuts;
 use crate::signals;
 use crate::trigger::{self, Hold};
@@ -334,29 +335,35 @@ enum AnkiOutcome {
 /// Therefore `Option<Shot>` also enforces one pick at a time
 /// (see [`App::park_shot`]).
 enum Shot {
-    /// The user approved this shot. The shot waits for a region that the user
-    /// must drag.
+    /// The user must choose a target, either by clicking a window or dragging
+    /// a region.
     ///
     /// The `AddNote` arm of [`App::execute`] or `Verb::Screenshot` parks this
     /// state.
     /// The pump's top level drains it.
     /// The Windows bin uses the same rule at the bottom of its message loop
     /// (`crates/chibipop-windows/src/app.rs`).
-    /// A region pick uses a nested pump. A nested pump inside a command batch
-    /// re-enters Controller dispatch before the batch ends.
+    /// The screenshot selector runs as a blocking child process. A selector
+    /// callback inside a command batch would re-enter Controller dispatch.
     Parked(Pending),
     /// The region is picked. A separate thread grabs its pixels.
     /// The popup stays off screen until the pixels arrive because an earlier
     /// popup could appear in them.
     Grabbing(Pending),
 }
-
-/// Plan for one screenshot and the feature that requested it.
 struct Pending {
     /// Core owns every file and note rule (`chibipop::shot`).
     /// This bin picks a region and grabs pixels.
     plan: chibipop::shot::ShotPlan,
     kind: ShotKind,
+    /// Snapshot the mode when the add or mining request is authorized.
+    mode: chibipop::config::ScreenshotMode,
+}
+fn outcome_selection(outcome: screenshot::Outcome) -> Result<Option<screenshot::Selection>> {
+    match outcome {
+        screenshot::Outcome::Cancelled => Ok(None),
+        screenshot::Outcome::Selected(selection) => Ok(Some(selection)),
+    }
 }
 
 /// Screenshot feature that owns a plan. Two features exist.
@@ -485,6 +492,12 @@ struct SentenceSync {
     generation: u64,
 }
 
+/// The synchronous hide barrier for a screenshot's blocking selector.
+///
+/// This queue shares the daemon connection, so the compositor has processed
+/// the transparent popup commit before `slurp` starts or a fixed grab begins.
+#[derive(Debug, Default)]
+struct HideBarrier;
 impl AnkiCall {
     /// Network part of the call. It runs outside the pump.
     fn run(self, anki: &chibipop::config::AnkiConfig) -> AnkiOutcome {
@@ -1003,6 +1016,25 @@ impl App {
             self.restore_popup_if_ready();
         }
     }
+    /// Wait until the compositor processes the popup hide commit.
+    ///
+    /// The callback belongs to a temporary queue on the daemon connection.
+    /// This gives the blocking `slurp` process the same ordering guarantee as
+    /// the asynchronous sentence capture path.
+    fn settle_capture_hide(&self) -> Result<()> {
+        let display = self.display.as_ref().context("the screenshot has no Wayland connection")?;
+        let mut queue = display.new_event_queue::<HideBarrier>();
+        let callback = display.display().sync(&queue.handle(), ());
+        if !callback.is_alive() {
+            bail!("creating the screenshot hide barrier failed");
+        }
+        display.flush().context("flushing the screenshot hide barrier")?;
+        let mut barrier = HideBarrier;
+        queue
+            .roundtrip(&mut barrier)
+            .context("waiting for the screenshot hide barrier")?;
+        Ok(())
+    }
 
     /// Drag a region on the dimmed screen. This function blocks until the user
     /// decides.
@@ -1216,7 +1248,11 @@ impl App {
                         "will be saved with no card (AnkiConnect is not serving this popup)"
                     }
                 ));
-                self.park_shot(Pending { plan, kind: ShotKind::Mining { files_a_card } });
+                self.park_shot(Pending {
+                    plan,
+                    kind: ShotKind::Mining { files_a_card },
+                    mode: self.config.actions.screenshot.capture_mode,
+                });
             }
             _ => self.log.diag(
                 "screenshot: nothing to file - the mining screenshot captures the context of \
@@ -1246,32 +1282,160 @@ impl App {
         self.pump.insert_idle(|app: &mut App| app.drain_shot());
     }
 
-    /// OS part of a parked shot: hide, drag, and grab.
+    /// OS part of a parked shot: hide the popup, select a target, and grab.
     ///
-    /// [`App::pick_region`] hides the popup.
-    /// The popup stays down until pixels arrive, so it does not enter them.
+    /// `slurp` owns the interactive selector. Fixed targets skip that process
+    /// and a fixed window resolves fresh compositor geometry for every shot.
     fn drain_shot(&mut self) {
         let Some(Shot::Parked(shot)) = self.shot.take() else { return };
-        // `None` uses the product deadline (`select::PICK_TIMEOUT`), the same
-        // as `static-region`.
-        // A second constant would create a second pick duration.
-        let picked = self.pick_region(None, HideOwner::Screenshot);
-        self.took_shot_region(picked, shot);
+        self.begin_capture_hide(HideOwner::Screenshot);
+        let geometries = self.cursor.geometries();
+        let interactive = match shot.mode {
+            chibipop::config::ScreenshotMode::FixedRegion => {
+                self.config.actions.screenshot.fixed_region.is_none()
+            }
+            chibipop::config::ScreenshotMode::FixedWindow => {
+                self.config.actions.screenshot.fixed_window.is_none()
+            }
+            chibipop::config::ScreenshotMode::Region | chibipop::config::ScreenshotMode::Window => true,
+        };
+        let started = Instant::now();
+        let selected = match self.settle_capture_hide() {
+            Err(error) => Err(error),
+            Ok(()) => {
+                // `begin_capture_hide` commits all hidden surfaces. The
+                // barrier above flushes the same connection before selection.
+                self.flush_surface_notes();
+                match shot.mode {
+                    chibipop::config::ScreenshotMode::FixedRegion => {
+                        match self.config.actions.screenshot.fixed_region {
+                            Some(target) => screenshot::fixed_region(target)
+                                .map(|rect| Some(screenshot::Selection { rect, window: None })),
+                            None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
+                        }
+                    }
+                    chibipop::config::ScreenshotMode::FixedWindow => {
+                        match self.config.actions.screenshot.fixed_window.as_ref() {
+                            Some(target) => screenshot::resolve_window(target, &geometries).map(Some),
+                            None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
+                        }
+                    }
+                    chibipop::config::ScreenshotMode::Region
+                    | chibipop::config::ScreenshotMode::Window => {
+                        screenshot::select(shot.mode, &geometries).and_then(outcome_selection)
+                    }
+                }
+            }
+        };
+        if interactive {
+            self.log.diag(&format!(
+                "select: pick took {} ms and answered {}",
+                started.elapsed().as_millis(),
+                match &selected {
+                    Ok(Some(_)) => "a region",
+                    Ok(None) => "nothing",
+                    Err(_) => "an error",
+                }
+            ));
+        }
+        self.took_shot_selection(selected, shot);
     }
 
-    /// Interpret a completed pick.
-    /// Split from [`App::drain_shot`] for the same reason as
-    /// `took_static_region` and `pick_static_region`.
-    /// The pick uses a nested pump and needs a compositor.
-    /// This part holds pure state for daemon tests.
-    fn took_shot_region(&mut self, picked: Option<PhysRect>, shot: Pending) {
-        match picked {
-            Some(region) => self.spawn_shot(region, shot),
-            None => {
+    /// Interpret a completed target selection.
+    fn took_shot_selection(
+        &mut self,
+        selected: Result<Option<screenshot::Selection>>,
+        shot: Pending,
+    ) {
+        match selected {
+            Ok(Some(selection)) => {
+                if let Err(error) = self.save_fixed_target(shot.mode, &selection) {
+                    self.log.diag(&format!("screenshot: could not save the fixed target - {error:#}"));
+                }
+                self.spawn_shot(selection.rect, shot);
+            }
+            Ok(None) => {
                 self.release_capture_hide(HideOwner::Screenshot);
                 self.shot_without_picture(shot, "no region was picked");
             }
+            Err(error) => {
+                self.release_capture_hide(HideOwner::Screenshot);
+                self.log.diag(&format!("screenshot: selection failed - {error:#}"));
+                self.shot_without_picture(shot, "the target selection failed");
+            }
         }
+    }
+
+    /// Save only the target type that the fixed mode owns.
+    fn save_fixed_target(
+        &mut self,
+        mode: chibipop::config::ScreenshotMode,
+        selection: &screenshot::Selection,
+    ) -> Result<()> {
+        enum FixedTarget {
+            Region([i32; 4]),
+            Window(chibipop::config::ScreenshotWindow),
+        }
+
+        let fixed = match mode {
+            chibipop::config::ScreenshotMode::FixedRegion
+                if self.config.actions.screenshot.fixed_region.is_none() =>
+            {
+                Some(FixedTarget::Region([
+                    selection.rect.x,
+                    selection.rect.y,
+                    selection.rect.w,
+                    selection.rect.h,
+                ]))
+            }
+            chibipop::config::ScreenshotMode::FixedWindow
+                if self.config.actions.screenshot.fixed_window.is_none() =>
+            {
+                Some(FixedTarget::Window(
+                    selection.window.clone().context("the selected target has no window identity")?,
+                ))
+            }
+            _ => None,
+        };
+        let Some(fixed) = fixed else { return Ok(()) };
+
+        // Settings can save a newer config while this shot waits for `slurp`.
+        // Load that file, change only the target, and save it before changing
+        // the daemon snapshot. A failed save leaves the live target unchanged.
+        let mut latest = chibipop::config::load_or_create(&self.paths.config_file)
+            .with_context(|| format!("loading {}", self.paths.config_file.display()))?;
+        if latest.actions.screenshot.capture_mode != mode {
+            return Ok(());
+        }
+        let already_saved = match mode {
+            chibipop::config::ScreenshotMode::FixedRegion => {
+                latest.actions.screenshot.fixed_region.is_some()
+            }
+            chibipop::config::ScreenshotMode::FixedWindow => {
+                latest.actions.screenshot.fixed_window.is_some()
+            }
+            _ => false,
+        };
+        if !already_saved {
+            match fixed {
+                FixedTarget::Region(target) => latest.actions.screenshot.fixed_region = Some(target),
+                FixedTarget::Window(target) => latest.actions.screenshot.fixed_window = Some(target),
+            }
+            latest
+                .save(&self.paths.config_file)
+                .with_context(|| format!("saving screenshot target to {}", self.paths.config_file.display()))?;
+            self.log.diag("screenshot: fixed target selected and saved");
+        }
+        match mode {
+            chibipop::config::ScreenshotMode::FixedRegion => {
+                self.config.actions.screenshot.fixed_region = latest.actions.screenshot.fixed_region;
+            }
+            chibipop::config::ScreenshotMode::FixedWindow => {
+                self.config.actions.screenshot.fixed_window = latest.actions.screenshot.fixed_window;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Grab an arbitrary rect on its own thread.
@@ -2444,10 +2608,14 @@ impl App {
             }
             // Screenshot-on-add seam. A plan carries a picture, so do not
             // dispatch the plain add.
-            // The picture call files the authorized command payload. OS work
-            // stays in [`App::park_shot`].
+            // The picture call files the authorized command payload.
+            // OS work stays in [`App::park_shot`].
             Command::AddNote { expr, fields } => match self.plan_shot_for_add(&expr, &fields) {
-                Some(plan) => self.park_shot(Pending { plan, kind: ShotKind::Add }),
+                Some(plan) => self.park_shot(Pending {
+                    plan,
+                    kind: ShotKind::Add,
+                    mode: self.config.actions.screenshot.capture_mode,
+                }),
                 None => self.spawn_anki(AnkiCall::Add { expr, fields }),
             },
             // Rows that arm (`Set*Armed`, `SetCursorShape`) come from the Windows
@@ -3252,6 +3420,17 @@ impl Dispatch<WlCallback, SentenceSync> for App {
                 app.dispatch_pending_sentence();
             }
         }
+    }
+}
+impl Dispatch<WlCallback, ()> for HideBarrier {
+    fn event(
+        _: &mut HideBarrier,
+        _: &WlCallback,
+        _: <WlCallback as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<HideBarrier>,
+    ) {
     }
 }
 
@@ -6340,13 +6519,13 @@ mod tests {
     // **Stub for region pick.** These tests use no compositor.
     // Two seams represent the real flow:
     //
-    // - `App::took_shot_region(picked, shot)` receives the pick answer, as
-    //   `static-region` does. `None` means cancel.
+    // - `App::took_shot_selection(selected, shot)` receives the slurp answer.
+    //   `None` means cancel.
     // - `App::handle_shot(grabbed)` receives the `calloop::channel` message from
     //   the grab thread. A fabricated `Frame` matches real pixels at this seam.
     //
-    // Only the drag and `capture::oneshot` remain outside these tests.
-    // `tests/surfaces_live.rs` and `capture-dump` cover them with a compositor.
+    // Only slurp and `capture::oneshot` remain outside these tests.
+    // A live compositor smoke test covers them.
 
     /// Two by two solid blue pixels.
     /// This is the smallest input `encode_bgra_to_png` accepts: BGRA8,
@@ -6488,8 +6667,7 @@ mod tests {
 
     /// Test deferral and cancel.
     /// The plan parks inside the socket callback. The pump handles it later.
-    /// A pick that returns no region files the card once without a picture.
-    /// No layer shell makes the pick return no region.
+    /// The target callback returns no region, so the card has no picture.
     #[test]
     fn a_cancelled_screenshot_pick_files_the_card_once_without_a_picture() {
         let dir = scratch("shotcancel");
@@ -6502,22 +6680,16 @@ mod tests {
         place_a_popup(&mut app);
 
         app.handle_request("anki-add", Verb::parse("anki-add"));
-        assert!(
-            matches!(app.shot, Some(Shot::Parked(_))),
-            "the pick must not run inside the command batch"
-        );
-        assert!(
-            !std::fs::read_to_string(&log_file).unwrap_or_default().contains("select: pick"),
-            "and no pick has been attempted yet"
-        );
+        let shot = match app.shot.take() {
+            Some(Shot::Parked(shot)) => shot,
+            Some(Shot::Grabbing(_)) => panic!("the pick must not run inside the command batch"),
+            None => panic!("the add must park a shot"),
+        };
+        app.took_shot_selection(Ok(None), shot);
 
         let written =
             pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
 
-        assert!(
-            written.contains("select: pick took"),
-            "the pump's idle pass owns the pick: {written}"
-        );
         assert!(
             written.contains("screenshot: no region was picked - the card goes in without a picture"),
             "log was: {written}"

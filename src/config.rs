@@ -1043,6 +1043,41 @@ pub struct ActionsConfig {
     pub ocr_clipboard: Option<OcrClipboardConfig>,
 }
 
+/// Fixed modes keep a target instead of asking for one on every add.
+/// Window identity stays separate from geometry so a moved window remains the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenshotMode {
+    #[default]
+    Region,
+    Window,
+    FixedRegion,
+    FixedWindow,
+}
+
+impl ScreenshotMode {
+    pub const ALL: [Self; 4] = [Self::Region, Self::Window, Self::FixedRegion, Self::FixedWindow];
+}
+
+impl std::fmt::Display for ScreenshotMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Region => "Region",
+            Self::Window => "Window",
+            Self::FixedRegion => "Fixed region",
+            Self::FixedWindow => "Fixed window",
+        })
+    }
+}
+
+/// A title alone can identify windows from different applications.
+/// Both values must match one window before a fixed screenshot can use its current bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotWindow {
+    pub app_id: String,
+    pub title: String,
+}
+
 /// The `[actions.screenshot]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScreenshotConfig {
@@ -1061,6 +1096,15 @@ pub struct ScreenshotConfig {
     pub save_dir: String,
     #[serde(default)]
     pub include_on_add: bool,
+    #[serde(default)]
+    pub capture_mode: ScreenshotMode,
+    /// This rectangle uses global physical pixels, like `anki.static_region`.
+    /// An absent target makes the next fixed-region screenshot ask for one.
+    #[serde(default)]
+    pub fixed_region: Option<[i32; 4]>,
+    /// The bin resolves this identity for each capture instead of saving stale bounds.
+    #[serde(default)]
+    pub fixed_window: Option<ScreenshotWindow>,
 }
 
 /// The `[actions.ocr_clipboard]` section.
@@ -1107,6 +1151,9 @@ impl Default for ScreenshotConfig {
             hotkey_linux: None,
             save_dir: default_screenshot_save_dir(),
             include_on_add: false,
+            capture_mode: ScreenshotMode::default(),
+            fixed_region: None,
+            fixed_window: None,
         }
     }
 }
@@ -2853,6 +2900,22 @@ mod tests {
         assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
         assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
         assert_eq!(None, cfg.actions.ocr_clipboard);
+    }
+
+    #[test]
+    fn screenshot_targets_survive_config_save() {
+        let mut cfg = Config::default();
+        cfg.actions.screenshot = toml::from_str(r#"
+            capture_mode = "fixed-window"
+            fixed_region = [-1200, 80, 640, 480]
+            fixed_window = { app_id = "reader", title = "読書" }
+        "#).unwrap();
+        let path = tmp("screenshot_targets");
+        cfg.save(&path).unwrap();
+        let loaded = load_or_create(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(ScreenshotMode::FixedWindow, loaded.actions.screenshot.capture_mode);
+        assert_eq!(cfg.actions.screenshot, loaded.actions.screenshot);
     }
 
     /// Both platform chords use one nested section.

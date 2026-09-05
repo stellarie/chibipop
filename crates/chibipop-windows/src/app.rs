@@ -1464,7 +1464,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     };
     // Store the active in-place edit here.
     let mut edit: Option<EditFlight> = None;
-    let mut edit_cfg: Option<Config> = None;
+    let mut edit_cfg: Option<(Config, bool)> = None;
 
     // I4: keep all capture-guard code in one place.
     let drain_capture_guard = || {
@@ -1825,10 +1825,22 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         width,
                         height,
                         save_dir,
+                        target,
                     }) => {
                         // The mining screenshot uses its own card path.
                         // It ignores `include_on_add` and the add guards, so it uses the ungated plan.
                         if let Some(view) = controller.popup() {
+                            if let Err(e) = persist_screenshot_target(
+                                &mut cfg,
+                                &target,
+                                config_path,
+                                &mut save_job,
+                            ) {
+                                eprintln!("chibipop: saving screenshot target failed: {e:#}");
+                            }
+                            if let Some(w) = &settings {
+                                w.refresh_screenshot_targets(&cfg.actions.screenshot);
+                            }
                             let cmd = crate::action::ScreenshotCommand {
                                 bgra_buf,
                                 width,
@@ -1921,7 +1933,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             Ok(report) => {
                                 let report = *report;
                                 let status = edit_status(&report);
-                                let mut updated = edit_cfg.take().unwrap_or_else(|| cfg.clone());
+                                let (mut updated, reset_screenshot_targets) = edit_cfg
+                                    .take()
+                                    .unwrap_or_else(|| (cfg.clone(), false));
                                 // Apply removals first because Dictionary names can collide.
                                 for name in &report.removed {
                                     settings::dictionary_removed(&mut updated, name);
@@ -1929,9 +1943,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 for (name, roles) in &report.added {
                                     settings::dictionary_added(&mut updated, name, *roles);
                                 }
+                                // A Dictionary Apply can outlive a target capture. Preserve that
+                                // target unless this Apply explicitly reset both target fields.
+                                if !reset_screenshot_targets {
+                                    updated.actions.screenshot.fixed_region =
+                                        cfg.actions.screenshot.fixed_region;
+                                    updated.actions.screenshot.fixed_window =
+                                        cfg.actions.screenshot.fixed_window.clone();
+                                }
                                 // Replace the stale Dictionary identity cache.
                                 dicts = report.dicts;
                                 w.clear_staged();
+                                w.clear_screenshot_reset_targets();
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 cfg = updated.clone();
                                 live = derive(&cfg);
@@ -1977,7 +2000,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     Err(e) => refuse_apply(w, &e),
                                     Ok(lock) => {
                                         begin_apply(w);
-                                        edit_cfg = Some(updated);
+                                        edit_cfg = Some((updated, edited.screenshot_reset_targets));
                                         let (etx, erx) = mpsc::channel::<EditMsg>();
                                         edit = Some(EditFlight {
                                             rx: erx,
@@ -2022,6 +2045,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
                                 let clamped = settings::clamp_notice(&edited, &updated);
                                 w.reseed_per_language(&updated.dictionaries.per_language);
+                                w.clear_screenshot_reset_targets();
                                 cfg = updated.clone();
                                 save_in_background(
                                     &mut save_job,
@@ -2253,31 +2277,52 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 DispatchMessageW(&msg);
             }
         }
+
         // Handle the OS half of screenshot-on-add outside every Command batch.
-        // The state machine authorized the add and marked the popup for an add.
-        // This code only selects a region and grabs pixels. The selector owns a
-        // nested `GetMessageW` pump, so this code cannot run where the plan is made.
-        //
-        // Settings code can `continue` past this block for dialog messages.
-        // The dispatch tick is not a dialog message, so a parked plan waits at
-        // most one DISPATCH_TICK_MS.
         if let Some(pending) = pending_shot.take() {
             let _ = popup.hide();
             if let Some(b) = &anki_button {
                 b.hide();
             }
-            let grabbed = region_selection.run().and_then(|rect| {
-                crate::text::capture::capture_upscaled_by(rect, 1)
-                    .inspect_err(|e| eprintln!("chibipop: grabbing the screenshot failed: {e:#}"))
-                    .ok()
-            });
+            let selected = match crate::action::screenshot::select_target(
+                &mut region_selection,
+                &cfg.actions.screenshot,
+            ) {
+                Ok(Some(target)) => {
+                    match crate::text::capture::capture_upscaled_by(target.rect(), 1) {
+                        Ok(cap) => {
+                            if let Err(e) = persist_screenshot_target(
+                                &mut cfg,
+                                &target,
+                                config_path,
+                                &mut save_job,
+                            ) {
+                                eprintln!("chibipop: saving screenshot target failed: {e:#}");
+                            }
+                            if let Some(w) = &settings {
+                                w.refresh_screenshot_targets(&cfg.actions.screenshot);
+                            }
+                            Some((target, cap))
+                        }
+                        Err(e) => {
+                            eprintln!("chibipop: grabbing the screenshot failed: {e:#}");
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("chibipop: resolving the screenshot target failed: {e:#}");
+                    None
+                }
+            };
             let view = screenshot_restore_view(&controller);
             if view.is_some() {
                 let _ = popup.show_without_activating();
             }
             sync_anki_button(anki_button.as_ref(), view, &theme);
-            match grabbed {
-                Some(cap) => {
+            match selected {
+                Some((_target, cap)) => {
                     let _ = screenshot_tx.send(crate::action::ScreenshotCommand {
                         bgra_buf: cap.buf,
                         width: cap.w,
@@ -3276,6 +3321,51 @@ fn save_in_background(
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
         }
     }));
+}
+
+/// Save a newly selected fixed target without changing another screenshot target.
+///
+/// Load the latest file first so a settings window cannot erase fields that
+/// changed after it opened. Save the file before updating the live config.
+fn persist_screenshot_target(
+    cfg: &mut Config,
+    target: &crate::action::selection::SelectionTarget,
+    config_path: &Path,
+    save_job: &mut Option<thread::JoinHandle<()>>,
+) -> Result<()> {
+    let mode = cfg.actions.screenshot.capture_mode;
+    match (mode, target) {
+        (
+            crate::config::ScreenshotMode::FixedRegion,
+            crate::action::selection::SelectionTarget::Region(rect),
+        ) => {
+            join_save(save_job);
+            let mut latest = crate::config::load_or_create(config_path)?;
+            if latest.actions.screenshot.capture_mode == mode
+                && latest.actions.screenshot.fixed_region.is_none()
+            {
+                latest.actions.screenshot.fixed_region = Some([rect.x, rect.y, rect.w, rect.h]);
+                latest.save(config_path)?;
+                cfg.actions.screenshot.fixed_region = latest.actions.screenshot.fixed_region;
+            }
+        }
+        (
+            crate::config::ScreenshotMode::FixedWindow,
+            crate::action::selection::SelectionTarget::Window { target, .. },
+        ) => {
+            join_save(save_job);
+            let mut latest = crate::config::load_or_create(config_path)?;
+            if latest.actions.screenshot.capture_mode == mode
+                && latest.actions.screenshot.fixed_window.is_none()
+            {
+                latest.actions.screenshot.fixed_window = Some(target.clone());
+                latest.save(config_path)?;
+                cfg.actions.screenshot.fixed_window = latest.actions.screenshot.fixed_window.clone();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Joins the previous save before a new save starts.

@@ -93,12 +93,13 @@ impl ActionContext<'_> {
 #[derive(Debug)]
 pub enum ActionOutcome {
     Completed,
-    /// Captured pixels that the pump can send to the Worker.
     ScreenshotCaptured {
         bgra_buf: Vec<u8>,
         width: i32,
         height: i32,
         save_dir: PathBuf,
+        /// The selected target, including a fresh window identity and bounds.
+        target: selection::SelectionTarget,
     },
     TextCaptured {
         text: String,

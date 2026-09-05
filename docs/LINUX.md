@@ -224,11 +224,48 @@ bindsym --no-repeat Mod1+a exec chibipop ctl anki-add
 KDE and GNOME own the portal key through their desktop shortcut settings. The
 popup's Anki button uses the same add-card code path on every desktop.
 
+### Screenshot capture modes
+
+The *Anki* tab sets **Screenshot capture mode** for the mining screenshot and
+for **Include screenshot when adding**.
+
+- **Region** is the default. `slurp` lets you drag a region. On Hyprland or
+  Sway, a window query also lets you click a visible window.
+- **Window** uses `slurp -r` and a click on a visible window.
+- **Fixed region** asks for a region drag on first use. It saves the rectangle
+  as global physical pixels and reuses it on later pictures.
+- **Fixed window** asks for a visible window click on first use. It saves the
+  window `app_id` and title, then queries fresh geometry for every picture.
+
+Interactive selection needs the `slurp` command on `PATH` and a compositor that
+supports layer-shell. Install `slurp` with your distribution package manager.
+Region mode still supports a drag when no Hyprland or Sway window query exists.
+Window mode and first-use Fixed window selection need `hyprctl` on Hyprland or
+`swaymsg` on Sway. Fixed window reuse needs the same query for each picture.
+
+Linux stores the compositor class or `app_id` as `app_id`. Hyprland supplies
+the compositor class. Sway supplies `app_id`, or its X11 window class when
+`app_id` is empty. The saved `app_id` and title must match exactly one visible
+window. A missing or ambiguous match reports an error and selects no other
+window. Window capture copies the visible screen rectangle, not hidden or
+occluded window contents.
+
+Fixed region keeps its rectangle after a restart. Fixed window follows a
+window move or resize because it gets fresh geometry. A title change breaks
+the match. Reset the saved target and select the window again.
+
+The Linux settings window shows the selected mode, saved target summaries, and
+**Reset saved screenshot targets**. Press **Apply** after a reset. The next
+fixed-mode picture asks for a new target. Press **Esc** to cancel a selection.
+The selection times out after 20 seconds. Include-on-add
+still files the card without a picture.
+
 **The mining screenshot's key is the same story again.** `chibipop ctl
-screenshot` grabs a region for the popup on screen and files it as that card's
-context picture. Its chord (`actions.screenshot.hotkey_linux`, unset by
-default) is **native-channel only** — no portal id, so the consent dialog
-stays at two entries — and one press, one verb:
+screenshot` uses the selected mode for the popup on screen and files the
+picture as that card's context image. Its chord
+(`actions.screenshot.hotkey_linux`, unset by default) is **native-channel
+only** — no portal id, so the consent dialog stays at two entries — and one
+press, one verb:
 
 ```
 bind = SUPER, S, exec, chibipop ctl screenshot
@@ -240,12 +277,8 @@ bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
 
 Pressed with no popup up it writes one line to the log saying why nothing
 happened: the picture is filed against the word on screen, and there is no
-word without a lookup. The picture that rides an *add* needs no key of its
-own — see **Include screenshot when adding** below.
-
-Ready-to-copy snippets live in [`extras/hyprland.conf`](../extras/hyprland.conf),
-and the settings window shows (and copies) the right snippet for whatever chord
-you configure — one row shape for every global action, trigger chord included.
+word without a lookup. The picture that rides an *add* needs no key of its own.
+See **Include screenshot when adding** in the README.
 
 ---
 
@@ -390,7 +423,7 @@ nothing is bound until you paste the snippet).
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup` (run one Press-mode lookup), `anki-add` (add the word in the popup to Anki), `screenshot` (drag a region and file it as the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup` (run one Press-mode lookup), `anki-add` (add the word in the popup to Anki), `screenshot` (use the selected screenshot mode and file the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
@@ -451,18 +484,18 @@ your frequency lists there and Apply.
   `ALT+A`) registers on the GlobalShortcuts portal alongside the trigger; the
   popup's own Anki button works on every compositor.
 - **The mining screenshot works the same, with its own key on the native
-  channel.** *Include screenshot when adding* dims the screen when you ask for
-  a card, exactly as on Windows: drag the region, release to confirm, `Esc` or
-  right-click to skip it (the card still goes in, without a picture), and 20
-  seconds of no decision cancels the pick. The PNG lands in
-  `$XDG_DATA_HOME/chibipop/screenshots` by default — `~/.local/share/chibipop/screenshots`
-  where that is unset, or beside the executable in portable mode — and the
-  *Anki* tab's **Screenshots folder** box changes it (absolute paths taken as
-  typed). Both the drag and the grab need the same protocols the popup and
-  hovering already need (`zwlr_layer_shell_v1` for the selector, the Capture
-  channel for the pixels), so a session where hovering works can always take
-  one. Taking a screenshot *without* asking for a card is the `screenshot`
-  verb, a compositor bind — see [the trigger key](#the-trigger-key).
+  channel.** *Include screenshot when adding* uses the selected mode described
+  above. The PNG lands in
+  `$XDG_DATA_HOME/chibipop/screenshots` by default —
+  `~/.local/share/chibipop/screenshots` when that is unset, or beside the
+  executable in portable mode. The *Anki* tab's **Screenshots folder** box
+  changes this path. Absolute paths stay exactly as typed.
+
+  Interactive modes need `slurp` and layer-shell support. The Capture channel
+  supplies the pixels. A saved fixed region bypasses the selector. A saved
+  fixed window still needs fresh Hyprland or Sway window metadata. Taking a
+  screenshot without asking for a card uses the `screenshot` verb, a
+  compositor bind. See [the trigger key](#the-trigger-key).
 - **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard` verb
   dims the screen, reads the region you drag with the same engine and the same
   OCR settings hovering uses, and puts the text on the clipboard — one line per
