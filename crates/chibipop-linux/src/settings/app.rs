@@ -710,6 +710,7 @@ enum Message {
     Passes(u8),
     PreferVertical(bool),
     ScanAlnum(bool),
+    DiscardFurigana(bool),
     ShowScanRegion(bool),
     CaptureW(String),
     CaptureH(String),
@@ -829,6 +830,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Passes(v) => app.form.max_ocr_passes = v,
         Message::PreferVertical(on) => app.form.prefer_vertical = on,
         Message::ScanAlnum(on) => app.form.scan_alphanumeric = on,
+        Message::DiscardFurigana(on) => app.form.discard_furigana = on,
         Message::ShowScanRegion(on) => app.form.show_scan_region = on,
         Message::CaptureW(v) => app.capture_w = v,
         Message::CaptureH(v) => app.capture_h = v,
@@ -1790,6 +1792,9 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.scan_alphanumeric)
                 .label("Scan alphanumeric text")
                 .on_toggle(Message::ScanAlnum),
+            checkbox(app.form.discard_furigana)
+                .label("Discard furigana from OCR text")
+                .on_toggle(Message::DiscardFurigana),
             checkbox(app.form.per_character_lookup)
                 .label("Look up each character as you hover (Live mode only)")
                 .on_toggle(Message::PerChar),

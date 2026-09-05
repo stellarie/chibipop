@@ -166,6 +166,7 @@ would pin a permanent, unfixable notice), and a database whose `source_hashes`
 is absent or unparseable — a legacy or hand-built file.
 
 `probe` and `watch` both take `--tiles N`, mirroring `[ocr] max_ocr_passes`.
+They discard furigana by default. Pass `--keep-furigana` to preserve raw OCR lines.
 **Both default to 1, matching the shipped configuration** — a diagnostic that
 defaults to a setting production doesn't use measures the wrong thing. The
 memory figures in [`REGRESSION.md`](REGRESSION.md) were taken with `watch` at
@@ -348,6 +349,7 @@ prefer_vertical = false     # swap capture_width and capture_height
 capture_width = 500         # 100-1600 px, centred on the cursor
 capture_height = 100        # 80-600 px
 scan_alphanumeric = true
+discard_furigana = true     # remove geometric ruby from every OCR output
 language = "ja"             # Windows recogniser tag; Linux always reads ja
 engine = "builtin"          # Windows: "builtin", or a discovered plugin name
 
@@ -556,6 +558,12 @@ A probe stops at its first failed capture and keeps pass 1. With `max_ocr_passes
 tile text found past the box replaces the joined wrap, so a hidden wrap is most reliable
 at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
 `show_scan_region` overlay draws each region as a tile.
+
+### `discard_furigana`
+
+Removes small kana-only ruby lines beside larger overlapping kanji lines.
+It affects lookup text, Anki sentences, and OCR-to-clipboard on both platforms.
+The setting defaults to `true`. Set it to `false` to preserve every OCR line.
 
 ### `highlight_match`
 

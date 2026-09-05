@@ -130,9 +130,10 @@ If it still misses, the DirectWrite glyph/font cache is the first suspect, not O
   The single-pass `resolve_at` is deleted too — see item 34. `docs/REGRESSION.md` §1.24 is the
   human check that the swap changed nothing on screen, and it is **still owed**: it covers this
   re-cut as well as the one it was written for.
-- **Ruby hover on pass 1.** `nearest_line` keeps the tiled path from splicing furigana, but
-  `hit_scan` on pass 1 will happily resolve a ruby character if the cursor is nearer to it than
-  to the base text. Reproduced live at (3550,1450) → `ん` from `かんたん`.
+- **Ruby hover on pass 1 — fixed in code; manual check pending.**
+  `ocr.discard_furigana = true` removes small kana-only annotation lines before `hit_scan`.
+  Set it to `false` to preserve the prior behavior. The original reproduction was
+  (3550,1450) → `ん` from `かんたん`.
 - ~~**Text clipped by a window edge is unrecoverable**~~ at any capture shape. **DONE** — it is
   now a row in the README's troubleshooting table. It is a ceiling, not a defect.
 

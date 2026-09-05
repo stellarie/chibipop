@@ -67,6 +67,9 @@ enum Command {
         /// Time N reads in this one process.
         #[arg(long)]
         repeat: Option<u32>,
+        /// Keep furigana in OCR text.
+        #[arg(long)]
+        keep_furigana: bool,
     },
     /// Open the settings window.
     Settings {
@@ -87,6 +90,9 @@ enum Command {
         /// Set the total number of OCR passes.
         #[arg(long, default_value_t = 1)]
         tiles: u8,
+        /// Keep furigana in OCR text.
+        #[arg(long)]
+        keep_furigana: bool,
     },
     /// Run the popup process.
     Run {
@@ -171,7 +177,18 @@ pub fn run() -> Result<()> {
             print_hits(&hits);
             Ok(())
         }
-        Command::Probe { at, region, tiles, dict, rules, show_region, upscale, dump, repeat } => {
+        Command::Probe {
+            at,
+            region,
+            tiles,
+            dict,
+            rules,
+            show_region,
+            upscale,
+            dump,
+            repeat,
+            keep_furigana,
+        } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
             let (xs, ys) = at
@@ -190,6 +207,7 @@ pub fn run() -> Result<()> {
                     prefer_vertical: false,
                     capture,
                     scan_alphanumeric: true,
+                    discard_furigana: !keep_furigana,
                 },
                 "ja",
             )?;
@@ -361,7 +379,7 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Watch { dict, rules, tiles } => {
+        Command::Watch { dict, rules, tiles, keep_furigana } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
             let mut source = chibipop_windows::text::text_source(
@@ -371,6 +389,7 @@ pub fn run() -> Result<()> {
                     prefer_vertical: false,
                     capture: chibipop::text::layout::CaptureSize::default(),
                     scan_alphanumeric: true,
+                    discard_furigana: !keep_furigana,
                 },
                 "ja",
             )?;

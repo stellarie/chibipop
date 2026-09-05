@@ -207,6 +207,7 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         prefer_vertical: config.ocr.prefer_vertical,
         capture: CaptureSize { w: config.ocr.capture_width, h: config.ocr.capture_height },
         scan_alphanumeric: config.ocr.scan_alphanumeric,
+        discard_furigana: config.ocr.discard_furigana,
         language: config.ocr.language.clone(),
         // The settings window supplies active terms and pitch lists.
         // The names stay exact and retain priority order.

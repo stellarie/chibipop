@@ -16,6 +16,86 @@ pub struct OcrLine {
     pub words: Vec<OcrWord>,
 }
 
+fn line_rect(line: &OcrLine) -> Option<PhysRect> {
+    let mut words = line.words.iter();
+    let first = words.next()?.rect;
+    Some(words.fold(first, |all, word| {
+        let right = all.x.saturating_add(all.w).max(word.rect.x.saturating_add(word.rect.w));
+        let bottom = all.y.saturating_add(all.h).max(word.rect.y.saturating_add(word.rect.h));
+        let x = all.x.min(word.rect.x);
+        let y = all.y.min(word.rect.y);
+        PhysRect { x, y, w: right.saturating_sub(x), h: bottom.saturating_sub(y) }
+    }))
+}
+
+fn interval_overlap(a: i32, a_len: i32, b: i32, b_len: i32) -> i32 {
+    a.saturating_add(a_len)
+        .min(b.saturating_add(b_len))
+        .saturating_sub(a.max(b))
+}
+
+fn interval_gap(a: i32, a_len: i32, b: i32, b_len: i32) -> i32 {
+    a.max(b)
+        .saturating_sub(a.saturating_add(a_len).min(b.saturating_add(b_len)))
+        .max(0)
+}
+
+fn contains_kanji(line: &OcrLine) -> bool {
+    line.words.iter().any(|word| {
+        word.text.chars().any(|c| {
+            matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
+        })
+    })
+}
+
+fn contains_only_kana(line: &OcrLine) -> bool {
+    let mut saw_character = false;
+    let only_kana = line.words.iter().flat_map(|word| word.text.chars()).all(|c| {
+        saw_character = true;
+        is_kana(c)
+    });
+    saw_character && only_kana
+}
+
+fn is_ruby_pair(ruby: PhysRect, base: PhysRect) -> bool {
+    let horizontal_overlap = interval_overlap(ruby.x, ruby.w, base.x, base.w);
+    let vertical_overlap = interval_overlap(ruby.y, ruby.h, base.y, base.h);
+    let horizontal = ruby.w >= ruby.h
+        && base.w >= base.h
+        && i64::from(ruby.h) * 3 <= i64::from(base.h) * 2
+        && horizontal_overlap >= ruby.w.saturating_add(1) / 2
+        && interval_gap(ruby.y, ruby.h, base.y, base.h) <= base.h;
+    let vertical = ruby.h >= ruby.w
+        && base.h >= base.w
+        && i64::from(ruby.w) * 3 <= i64::from(base.w) * 2
+        && vertical_overlap >= ruby.h.saturating_add(1) / 2
+        && interval_gap(ruby.x, ruby.w, base.x, base.w) <= base.w;
+    horizontal || vertical
+}
+
+/// Removes geometric ruby lines.
+pub fn discard_furigana(lines: Vec<OcrLine>) -> Vec<OcrLine> {
+    let rects: Vec<Option<PhysRect>> = lines.iter().map(line_rect).collect();
+    let discard: Vec<bool> = lines
+        .iter()
+        .enumerate()
+        .map(|(ruby_index, line)| {
+            let Some(ruby) = rects[ruby_index] else { return false };
+            contains_only_kana(line)
+                && rects.iter().enumerate().any(|(base_index, base)| {
+                    base_index != ruby_index
+                        && contains_kanji(&lines[base_index])
+                        && base.is_some_and(|base| is_ruby_pair(ruby, base))
+                })
+        })
+        .collect();
+    lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!discard[index]).then_some(line))
+        .collect()
+}
+
 /// Join recognized lines into one plain-text block.
 ///
 /// The function joins words without spaces because Japanese OCR splits words for recognition, not because the source has spaces.
@@ -881,6 +961,64 @@ pub fn has_scannable_script(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizontal_ruby_is_removed() {
+        let lines = vec![
+            OcrLine { words: vec![w("かんじ", 105, 75, 45, 12)] },
+            OcrLine { words: vec![w("漢字", 100, 90, 60, 30)] },
+        ];
+        let filtered = discard_furigana(lines);
+        assert_eq!(1, filtered.len());
+        assert_eq!("漢字", filtered[0].words[0].text);
+    }
+
+    #[test]
+    fn vertical_ruby_is_removed() {
+        let lines = vec![
+            OcrLine { words: vec![w("かんじ", 133, 105, 12, 45)] },
+            OcrLine { words: vec![w("漢字", 100, 100, 30, 60)] },
+        ];
+        let filtered = discard_furigana(lines);
+        assert_eq!(1, filtered.len());
+        assert_eq!("漢字", filtered[0].words[0].text);
+    }
+
+    #[test]
+    fn unrelated_small_kana_is_preserved() {
+        let lines = vec![
+            OcrLine { words: vec![w("かな", 300, 10, 20, 10)] },
+            OcrLine { words: vec![w("漢字", 100, 90, 60, 30)] },
+        ];
+        assert_eq!(lines, discard_furigana(lines.clone()));
+    }
+
+    #[test]
+    fn small_non_kana_text_is_preserved() {
+        let lines = vec![
+            OcrLine { words: vec![w("注1", 105, 75, 30, 12)] },
+            OcrLine { words: vec![w("漢字", 100, 90, 60, 30)] },
+        ];
+        assert_eq!(lines, discard_furigana(lines.clone()));
+    }
+
+    #[test]
+    fn perpendicular_kana_text_is_preserved() {
+        let lines = vec![
+            OcrLine { words: vec![w("かな", 100, 75, 100, 10)] },
+            OcrLine { words: vec![w("漢", 145, 90, 10, 30)] },
+        ];
+        assert_eq!(lines, discard_furigana(lines.clone()));
+    }
+
+    #[test]
+    fn edge_crossing_kana_text_is_preserved() {
+        let lines = vec![
+            OcrLine { words: vec![w("かな", 100, 75, 100, 10)] },
+            OcrLine { words: vec![w("漢字", 195, 90, 60, 30)] },
+        ];
+        assert_eq!(lines, discard_furigana(lines.clone()));
+    }
 
     fn w(text: &str, x: i32, y: i32, ww: i32, h: i32) -> OcrWord {
         OcrWord { text: text.to_string(), rect: PhysRect { x, y, w: ww, h } }

@@ -219,6 +219,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 ## OCR engine
 
+- `ocr.discard_furigana` filters recognized lines at the shared `TextSource` seam.
+  Lookup, sentence probes, and both clipboard paths therefore use one rule.
 - meikiocr over `ort` is the only Linux `OcrEngine`. There is no runtime selection, no
   fallback, and no Python runtime.
 - The Linux adapter never upscales crops. Windows uses an `UPSCALE` value of 2, and Linux

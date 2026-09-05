@@ -143,6 +143,7 @@ fn settings() -> WorkerSettings {
         prefer_vertical: false,
         capture: CaptureSize::default(),
         scan_alphanumeric: true,
+        discard_furigana: true,
         language: "ja".to_string(),
         present_cfg: cfg.present_config(&[]),
         scan_display: ScanDisplay { captures: false, highlight: false },
