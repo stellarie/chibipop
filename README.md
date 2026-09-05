@@ -428,10 +428,74 @@ works. **GNOME** mostly works. The older **X11** is not supported.
 | Download | `tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz` | nothing else to install |
 | Arch Linux | install `chibipop-bin` from the AUR | the same build, through pacman |
 | Arch, from source | install `chibipop` from the AUR | uses your distribution's ONNX Runtime |
+| Nix | `nix run github:stellarie/chibipop` | builds with nixpkgs' ONNX Runtime |
 
 The download needs glibc 2.39, libstdc++ 3.4.31 and a Japanese font, and
 nothing else. The OCR engine is inside it, so it works with no internet
 connection and downloads nothing on first run.
+
+### Nix
+
+Run chibipop directly from the flake. It builds the Linux binary and includes
+its models, dictionaries, desktop entry, and systemd user unit:
+
+```bash
+nix run github:stellarie/chibipop -- run
+```
+
+The default package uses CPU ONNX Runtime. A CUDA-enabled package is also
+available:
+
+```bash
+nix run github:stellarie/chibipop#cuda -- run
+```
+
+To use chibipop from Home Manager, add the flake as an input:
+
+```nix
+inputs.chibipop = {
+  url = "github:stellarie/chibipop";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Then import its Home Manager module in and enable the program:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.chibipop.homeManagerModules.default ];
+
+  programs.chibipop = {
+    enable = true;
+  };
+}
+```
+
+To start chibipop automatically with the graphical session, use:
+
+```nix
+programs.chibipop = {
+  enable = true;
+  systemd.enable = true;
+};
+```
+
+The systemd option is not required. You can start it manually with
+`chibipop run`. See [For developers](#12-for-developers) for the development
+shell.
+
+### Using CUDA with Home Manager
+
+The Home Manager module uses the CPU package by default. To use the CUDA
+variant, set the `package` field in your existing `programs.chibipop` block:
+
+```nix
+programs.chibipop.package = inputs.chibipop.packages.${pkgs.system}.cuda;
+```
+
+The development shells are available as `nix develop` for CPU or `nix develop
+.#cuda` for CUDA.
 
 ### Setting up the trigger key
 
