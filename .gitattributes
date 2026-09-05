@@ -3,3 +3,10 @@
 # runners set core.autocrlf=true machine-wide, so without this a checkout
 # rewrites them to CRLF and every golden reds on line endings alone.
 crates/chibipop-windows/tests/goldens/geometry/*.json -text
+
+# Linux package artifacts are executed or sourced by POSIX tools.
+extras/*.conf text eol=lf
+extras/*.desktop text eol=lf
+extras/*.service text eol=lf
+packaging/aur/** text eol=lf
+scripts/*.sh text eol=lf
