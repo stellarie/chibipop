@@ -1606,6 +1606,7 @@ mod tests {
             written: Some(written.to_string()),
             reading: None,
             pos: Vec::new(),
+            inflections: Vec::new(),
             freq: None,
             blocks: Vec::new(),
             match_len: written.chars().count(),

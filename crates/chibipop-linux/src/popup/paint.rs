@@ -1022,6 +1022,7 @@ mod tests {
                 written: None,
                 reading: None,
                 pos: Vec::new(),
+                inflections: Vec::new(),
                 freq: None,
                 blocks: vec![chibipop::present::GlossBlock::parse("d", body)],
                 match_len: 1,

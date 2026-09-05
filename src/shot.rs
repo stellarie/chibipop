@@ -191,6 +191,7 @@ mod tests {
                 written: written.map(str::to_string),
                 reading: reading.map(str::to_string),
                 pos: Vec::new(),
+                inflections: Vec::new(),
                 freq: None,
                 blocks: Vec::new(),
                 match_len: 1,

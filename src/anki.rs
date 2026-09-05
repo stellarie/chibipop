@@ -522,6 +522,7 @@ mod tests {
             written: written.map(str::to_string),
             reading: reading.map(str::to_string),
             pos: vec![],
+            inflections: vec![],
             freq,
             blocks: vec![],
             match_len: 1,

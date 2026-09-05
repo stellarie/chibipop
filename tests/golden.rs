@@ -1,4 +1,5 @@
 //! The golden corpus checks `(input, expected headword)` against a real Dictionary.
+//! The corpus also pins the Inflection chain of the matched hit.
 //!
 //! CI does not build or commit a Dictionary here. The Linux job stays headless,
 //! and a 238 MB build is not a CI step. The test skips when it finds no Dictionary.
@@ -32,17 +33,21 @@ use chibipop::lookup::rules::load_rules;
 use chibipop::lookup::sqlite::SqliteDictionary;
 use std::path::PathBuf;
 
-const CASES: &[(&str, &str)] = &[
-    ("食べる", "食べる"),
-    ("食べさせられた", "食べる"),
-    ("行かなかった", "行く"),
-    ("面白くない", "面白い"),
-    ("見ている", "見る"),
-    ("日本語", "日本語"),
-    ("学校に行く", "学校"),
-    ("読みました", "読む"),
-    ("小さかった", "小さい"),
-    ("してしまった", "する"),
+const CASES: &[(&str, &str, &[&str])] = &[
+    ("食べる", "食べる", &[]),
+    (
+        "食べさせられた",
+        "食べる",
+        &["causative", "passive/potential", "past"],
+    ),
+    ("行かなかった", "行く", &["negative", "past"]),
+    ("面白くない", "面白い", &["negative"]),
+    ("見ている", "見る", &["teiru"]),
+    ("日本語", "日本語", &[]),
+    ("学校に行く", "学校", &[]),
+    ("読みました", "読む", &["past polite"]),
+    ("小さかった", "小さい", &["past"]),
+    ("してしまった", "する", &["finish/completely/end up", "past"]),
 ];
 
 /// Set the path to a Dictionary outside the default layout.
@@ -103,13 +108,12 @@ fn golden_corpus() {
     ));
 
     let mut failures = Vec::new();
-    for (input, expected) in CASES {
+    for (input, expected, chain) in CASES {
         let hits = engine.run(&dict, input).unwrap();
-        let found = hits.iter().take(3).any(|h| {
+        let Some(hit) = hits.iter().take(3).find(|h| {
             h.written.as_deref() == Some(*expected)
                 || h.reading.as_deref() == Some(*expected)
-        });
-        if !found {
+        }) else {
             let top: Vec<String> = hits
                 .iter()
                 .take(3)
@@ -119,6 +123,14 @@ fn golden_corpus() {
                 .collect();
             failures.push(format!(
                 "{input}: expected {expected} in top 3, got {top:?}"
+            ));
+            continue;
+        };
+        let got = chibipop::present::inflection_chain(&hit.process);
+        if got != *chain {
+            failures.push(format!(
+                "{input}: expected inflection chain {chain:?}, got {got:?} from raw process {:?}",
+                hit.process
             ));
         }
     }
