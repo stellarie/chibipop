@@ -71,10 +71,10 @@ const VERTICAL_CER_CEILING: f64 = 0.20;
 const VERTICAL_HIT_FLOOR: f64 = 0.75;
 /// Set a generous limit. This catches a severe regression, not a slow runner.
 /// Release measured 20.8 ms and debug measured 37 ms on developer hardware.
-/// Three debug runs on ubuntu-24.04 measured 88.0, 129.3, and 132.5 ms.
+/// Container runs measured 88.0, 129.3, 132.5, 252.2, and 282.3 ms.
 /// Runner class alone changes the result by about half. The product bar
 /// (warm p50 <= 100 ms on developer hardware) does not apply here.
-const LATENCY_P50_CEILING_MS: f64 = 250.0;
+const LATENCY_P50_CEILING_MS: f64 = 500.0;
 
 /// The non-vertical slices that the gate scores together.
 const HORIZONTAL_SLICES: [&str; 4] = ["smoke", "horizontal", "mixed", "small"];

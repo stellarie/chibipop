@@ -232,6 +232,19 @@ class LinuxContainerRegressionTests(unittest.TestCase):
         self.assertNotIn("--uid 1000", source)
         self.assertIn("USER regression", source)
 
+    def test_packaging_text_inputs_keep_lf_line_endings(self) -> None:
+        attributes = (Path(runner.__file__).parents[1] / ".gitattributes").read_text(
+            encoding="utf-8"
+        )
+        for rule in (
+            "data/ipadic/COPYING text eol=lf",
+            "data/ipadic/NOTICE text eol=lf",
+            "data/ipadic/SHA256SUMS.txt text eol=lf",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, attributes)
+        self.assertNotIn("data/ipadic/system.dic text", attributes)
+
     def test_evidence_copy_failure_is_infrastructure(self) -> None:
         evidence = runner.Step("evidence", ("bash",), "evidence", required=False)
         self.assertEqual(
