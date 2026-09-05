@@ -452,7 +452,7 @@ unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
                     target: target.clone(),
                 });
             }
-            (search.matches < 2).then_some(BOOL(1)).unwrap_or(BOOL(0))
+            if search.matches < 2 { BOOL(1) } else { BOOL(0) }
         }
         _ => BOOL(1),
     }
