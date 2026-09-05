@@ -3259,6 +3259,7 @@ fn worker_settings(live: &LiveSettings, dicts: &[DictInfo]) -> WorkerSettings {
         capture: live.capture,
         scan_alphanumeric: live.scan_alphanumeric,
         discard_furigana: live.discard_furigana,
+        show_lookup_log: live.show_lookup_log,
         language: live.language.clone(),
         present_cfg: live.present_cfg.clone(),
         scan_display: live.scan_display,
@@ -3601,10 +3602,12 @@ mod tests {
         cfg.ocr.capture_height = 480;
         cfg.ocr.scan_alphanumeric = false;
         cfg.ocr.max_ocr_passes = 3;
+        cfg.debug.show_lookup_log = true;
         let out = worker_settings(&derive(&cfg), &[]);
         assert_eq!(CaptureSize { w: 640, h: 480 }, out.capture);
         assert!(!out.scan_alphanumeric);
         assert_eq!(3, out.max_passes);
+        assert!(out.show_lookup_log);
     }
 
     #[test]

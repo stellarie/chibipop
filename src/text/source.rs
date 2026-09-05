@@ -118,6 +118,19 @@ struct Recognised {
     lines: Vec<OcrLine>,
 }
 
+struct CaptureLog<'a> {
+    frame: &'a Frame,
+    region: PhysRect,
+    factor: i32,
+    mask: CaptureMask,
+    reused: bool,
+    capture_ms: f64,
+    ocr_ms: f64,
+    lines: &'a [OcrLine],
+    outcome: &'static str,
+    error: Option<&'a anyhow::Error>,
+}
+
 /// `SettingsSnapshot` stores reloadable OCR settings.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct SettingsSnapshot {
@@ -152,6 +165,7 @@ pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: Box<dyn OcrEngine>,
     settings: SettingsSnapshot,
+    show_lookup_log: bool,
     /// This is the press-time grab for the active trigger hold.
     /// Every lookup reads from it, so the backend receives no more calls.
     /// (ARCHITECTURE.md#hover-cadence).
@@ -174,12 +188,52 @@ impl TextSource {
     /// The job cannot create a second engine elsewhere.
     /// This method gives one-off OCR calls the same seam as lookups.
     pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
-        let lines = self.ocr.recognise(bgra, w, h)?;
-        Ok(if self.settings.discard_furigana {
+        let started = std::time::Instant::now();
+        let lines = match self.ocr.recognise(bgra, w, h) {
+            Ok(lines) => lines,
+            Err(error) => {
+                eprintln!(
+                    "chibipop: ocr job=one_off size={}x{} bytes={} outcome=failed ocr_ms={:.3} error={error:#}",
+                    w,
+                    h,
+                    bgra.len(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+                return Err(error);
+            }
+        };
+        let lines = if self.settings.discard_furigana {
             discard_furigana(lines)
         } else {
             lines
-        })
+        };
+        let words = lines.iter().map(|line| line.words.len()).sum::<usize>();
+        eprintln!(
+            "chibipop: ocr job=one_off size={}x{} bytes={} outcome=ok ocr_ms={:.3} lines={} words={}",
+            w,
+            h,
+            bgra.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            lines.len(),
+            words,
+        );
+        if self.show_lookup_log {
+            for (line_index, line) in lines.iter().enumerate() {
+                for (word_index, word) in line.words.iter().enumerate() {
+                    eprintln!(
+                        "chibipop: ocr job=one_off line={} word={} text={:?} rect={},{} {}x{}",
+                        line_index,
+                        word_index,
+                        word.text,
+                        word.rect.x,
+                        word.rect.y,
+                        word.rect.w,
+                        word.rect.h,
+                    );
+                }
+            }
+        }
+        Ok(lines)
     }
 
     /// Return the name of the engine that reads this source's pixels.
@@ -199,10 +253,15 @@ impl TextSource {
             capture,
             ocr,
             settings,
+            show_lookup_log: false,
             frozen: None,
             recognised: Vec::new(),
             previous: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_show_lookup_log(&mut self, enabled: bool) {
+        self.show_lookup_log = enabled;
     }
 
     /// Replace the OCR settings.
@@ -368,13 +427,62 @@ impl TextSource {
             Some(_) => CaptureMask::NONE,
             None => mask.clipped_to(region),
         };
-        let frame = self.grab(region, factor, mask)?;
+        let capture_started = std::time::Instant::now();
+        let frame = match self.grab(region, factor, mask) {
+            Ok(frame) => frame,
+            Err(error) => {
+                let elapsed_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
+                eprintln!(
+                    "chibipop: capture region={},{} {}x{} factor={} mask={} source=unknown unchanged=false reused=false bytes=0 capture_ms={elapsed_ms:.3} ocr_ms=0.000 lines=0 words=0 outcome=failed error={error:#}",
+                    region.x,
+                    region.y,
+                    region.w,
+                    region.h,
+                    factor,
+                    mask_label(mask, region),
+                );
+                return Err(error);
+            }
+        };
+        let capture_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
         if frame.unchanged {
             if let Some(lines) = self.reuse(region, factor, mask) {
+                self.log_capture(CaptureLog {
+                    frame: &frame,
+                    region,
+                    factor,
+                    mask,
+                    reused: true,
+                    capture_ms,
+                    ocr_ms: 0.0,
+                    lines: &lines,
+                    outcome: "ok",
+                    error: None,
+                });
                 return Ok((lines, frame));
             }
         }
-        let raw = self.ocr.recognise(&frame.buf, frame.w, frame.h)?;
+        let ocr_started = std::time::Instant::now();
+        let raw = match self.ocr.recognise(&frame.buf, frame.w, frame.h) {
+            Ok(raw) => raw,
+            Err(error) => {
+                let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
+                self.log_capture(CaptureLog {
+                    frame: &frame,
+                    region,
+                    factor,
+                    mask,
+                    reused: false,
+                    capture_ms,
+                    ocr_ms,
+                    lines: &[],
+                    outcome: "failed",
+                    error: Some(&error),
+                });
+                return Err(error);
+            }
+        };
+        let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
         let origin = PhysPoint { x: region.x, y: region.y };
         let lines = to_desktop(raw, origin, factor, mask);
         let lines = if self.settings.discard_furigana {
@@ -382,8 +490,65 @@ impl TextSource {
         } else {
             lines
         };
+        self.log_capture(CaptureLog {
+            frame: &frame,
+            region,
+            factor,
+            mask,
+            reused: false,
+            capture_ms,
+            ocr_ms,
+            lines: &lines,
+            outcome: "ok",
+            error: None,
+        });
         self.remember(region, factor, mask, &lines);
         Ok((lines, frame))
+    }
+
+    fn log_capture(&self, log: CaptureLog<'_>) {
+        let words = log.lines.iter().map(|line| line.words.len()).sum::<usize>();
+        eprintln!(
+            "chibipop: capture region={},{} {}x{} factor={} mask={} source={} fallback={} unchanged={} reused={} bytes={} capture_ms={:.3} ocr_ms={:.3} lines={} words={} outcome={}",
+            log.region.x,
+            log.region.y,
+            log.region.w,
+            log.region.h,
+            log.factor,
+            mask_label(log.mask, log.region),
+            log.frame.source,
+            log.frame.fallback.as_deref().unwrap_or("none"),
+            log.frame.unchanged,
+            log.reused,
+            log.frame.buf.len(),
+            log.capture_ms,
+            log.ocr_ms,
+            log.lines.len(),
+            words,
+            log.outcome,
+        );
+        if let Some(error) = log.error {
+            eprintln!("chibipop: capture stage=ocr outcome=failed error={error:#}");
+        }
+        if !self.show_lookup_log {
+            return;
+        }
+        for (line_index, line) in log.lines.iter().enumerate() {
+            let text = line.words.iter().map(|word| word.text.as_str()).collect::<String>();
+            eprintln!("chibipop: capture line={} text={text:?}", line_index);
+            for (word_index, word) in line.words.iter().enumerate() {
+                eprintln!(
+                    "chibipop: capture word={} line={} text={:?} rect={},{} {}x{}",
+                    word_index,
+                    line_index,
+                    word.text,
+                    word.rect.x,
+                    word.rect.y,
+                    word.rect.w,
+                    word.rect.h,
+                );
+            }
+        }
     }
 
     /// Return this pass's pixels from the frozen frame or a live grab.
@@ -670,6 +835,13 @@ fn to_desktop(
         })
         .filter(|l: &OcrLine| !l.words.is_empty())
         .collect()
+}
+
+fn mask_label(mask: CaptureMask, region: PhysRect) -> String {
+    mask.overlap_in(region).map_or_else(
+        || "none".to_string(),
+        |rect| format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h),
+    )
 }
 
 /// Grab, mask, and upscale by `factor`. Return BGRA pixels.

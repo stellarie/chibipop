@@ -78,6 +78,7 @@ pub struct WorkerSettings {
     pub capture: CaptureSize,
     pub scan_alphanumeric: bool,
     pub discard_furigana: bool,
+    pub show_lookup_log: bool,
     pub language: String,
     pub present_cfg: PresentConfig,
     pub scan_display: ScanDisplay,
@@ -410,6 +411,7 @@ fn worker_main(
     };
 
     let mut source = TextSource::new(capture, ocr, settings.snapshot());
+    source.set_show_lookup_log(settings.show_lookup_log);
     let mut state = LookupState {
         present_cfg: settings.present_cfg,
         scan_display: settings.scan_display,
@@ -445,6 +447,7 @@ fn worker_main(
                     let started = Instant::now();
                     log_request_start(id, "reload");
                     source.apply_settings(s.snapshot(), &s.language);
+                    source.set_show_lookup_log(s.show_lookup_log);
                     take_reload(s, reopen_dict.as_ref(), &mut dict, &mut state);
                     log_state_complete(id, "reload", "applied", started);
                 }
@@ -923,6 +926,7 @@ mod tests {
             capture: CaptureSize::default(),
             scan_alphanumeric: true,
             discard_furigana: true,
+            show_lookup_log: false,
             language: "ja".to_string(),
             present_cfg: Config::default().present_config(&[]),
             scan_display: ScanDisplay { captures: false, highlight: false },
