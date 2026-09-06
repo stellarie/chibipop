@@ -51,9 +51,7 @@ use wayland_protocols::ext::data_control::v1::client::ext_data_control_device_v1
     self as ext_device, ExtDataControlDeviceV1,
 };
 use wayland_protocols::ext::data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1;
-use wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::{
-    self as ext_offer, ExtDataControlOfferV1,
-};
+use wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::ExtDataControlOfferV1;
 use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1::{
     self as ext_source, ExtDataControlSourceV1,
 };
@@ -61,9 +59,7 @@ use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_device_v1
     self as wlr_device, ZwlrDataControlDeviceV1,
 };
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
-use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::{
-    self as wlr_offer, ZwlrDataControlOfferV1,
-};
+use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1;
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_source_v1::{
     self as wlr_source, ZwlrDataControlSourceV1,
 };
@@ -196,8 +192,6 @@ impl Clipboard {
         // Use version 1 deliberately. `set_selection` is all this daemon needs.
         // Version 2 of the wlr rung adds the *primary* selection. It adds an
         // announcement stream whose offers this client would only destroy.
-        let manager = Manager::bind(rung, &registry, manager_global.name, &qh);
-
         // The selection belongs to a seat. This daemon takes the first seat that
         // the session advertises. This is the same seat that supplies the pointer
         // and keyboard for a pick (`App::seat`). A multi-seat session is outside
@@ -207,10 +201,10 @@ impl Clipboard {
             .find(|g| g.interface == "wl_seat")
             .context("this session advertises no wl_seat to own a selection on")?;
         let seat = registry.bind::<WlSeat, _, Owner>(seat_global.name, 1, &qh, ());
-        let device = manager.device(&seat, &qh);
+        let clip = Clip::bind(rung, &registry, manager_global.name, &seat, &qh);
 
         let mut owner =
-            Owner { conn: conn.clone(), manager, device, source: None, notes, finished: false };
+            Owner { conn: conn.clone(), clip, source: None, notes, finished: false };
         // Use one roundtrip before the thread starts. A refused bind returns
         // `Err` here instead of a silent thread. The roundtrip also
         // delivers the device's first `selection` event. Its offer handler
@@ -270,16 +264,15 @@ impl Clipboard {
     }
 }
 
-/// The clipboard thread's complete state: the manager, the device, and the
-/// source that currently owns the selection.
+/// The clipboard thread's complete state: the bound clip and the source that
+/// currently owns the selection.
 struct Owner {
     /// This thread's own connection supports the one operation that the event
     /// queue inside calloop's source cannot call from a callback. That operation is
     /// a roundtrip. [`Connection::roundtrip`] dispatches no events, so its
     /// events wait for calloop to pass them on as usual.
     conn: Connection,
-    manager: Manager,
-    device: Device,
+    clip: Clip,
     /// `None` before the first copy and after the compositor cancels ours.
     /// Another client owns the selection in that normal state.
     source: Option<Source>,
@@ -297,11 +290,7 @@ impl Owner {
         // Each copy therefore needs a new source.
         // Each source answers a `send` with its own bytes.
         // A replaced source can still have a `send` event in flight.
-        let source = self.manager.source(copy.payload, qh);
-        for mime in TEXT_MIMES {
-            source.offer(mime);
-        }
-        self.device.set_selection(&source);
+        let source = self.clip.publish(copy.payload, qh);
         // Call `destroy` only after `set_selection`. Requests keep wire order.
         // The compositor moves the selection to the new source before it reads
         // this destroy request.
@@ -372,17 +361,12 @@ impl Owner {
     }
 }
 
-/// The manager for each rung. The three protocol enums avoid a trait object.
-/// Both protocols provide the same operations, `bind` chooses one rung once,
-/// and each `Dispatch` implementation uses a concrete interface.
-enum Manager {
-    Ext(ExtDataControlManagerV1),
-    Wlr(ZwlrDataControlManagerV1),
-}
-
-enum Device {
-    Ext(ExtDataControlDeviceV1),
-    Wlr(ZwlrDataControlDeviceV1),
+/// The manager and device for each rung. The enum keeps both proxies in the
+/// same protocol family, so a source and a device cannot belong to different
+/// protocols.
+enum Clip {
+    Ext { manager: ExtDataControlManagerV1, device: ExtDataControlDeviceV1 },
+    Wlr { manager: ZwlrDataControlManagerV1, device: ZwlrDataControlDeviceV1 },
 }
 
 enum Source {
@@ -390,53 +374,54 @@ enum Source {
     Wlr(ZwlrDataControlSourceV1),
 }
 
-impl Manager {
-    fn bind(rung: Rung, registry: &WlRegistry, name: u32, qh: &QueueHandle<Owner>) -> Manager {
+impl Clip {
+    fn bind(
+        rung: Rung,
+        registry: &WlRegistry,
+        name: u32,
+        seat: &WlSeat,
+        qh: &QueueHandle<Owner>,
+    ) -> Clip {
         match rung {
             Rung::Ext => {
-                Manager::Ext(registry.bind::<ExtDataControlManagerV1, _, Owner>(name, 1, qh, ()))
+                let manager =
+                    registry.bind::<ExtDataControlManagerV1, _, Owner>(name, 1, qh, ());
+                let device = manager.get_data_device(seat, qh, ());
+                Clip::Ext { manager, device }
             }
             Rung::Wlr => {
-                Manager::Wlr(registry.bind::<ZwlrDataControlManagerV1, _, Owner>(name, 1, qh, ()))
+                let manager =
+                    registry.bind::<ZwlrDataControlManagerV1, _, Owner>(name, 1, qh, ());
+                let device = manager.get_data_device(seat, qh, ());
+                Clip::Wlr { manager, device }
             }
         }
     }
 
-    fn device(&self, seat: &WlSeat, qh: &QueueHandle<Owner>) -> Device {
+    /// Create a source for `payload`, offer every text MIME, and take the selection with it.
+    fn publish(&self, payload: Arc<[u8]>, qh: &QueueHandle<Owner>) -> Source {
         match self {
-            Manager::Ext(m) => Device::Ext(m.get_data_device(seat, qh, ())),
-            Manager::Wlr(m) => Device::Wlr(m.get_data_device(seat, qh, ())),
-        }
-    }
-
-    fn source(&self, payload: Arc<[u8]>, qh: &QueueHandle<Owner>) -> Source {
-        match self {
-            Manager::Ext(m) => Source::Ext(m.create_data_source(qh, payload)),
-            Manager::Wlr(m) => Source::Wlr(m.create_data_source(qh, payload)),
-        }
-    }
-}
-
-impl Device {
-    fn set_selection(&self, source: &Source) {
-        match (self, source) {
-            (Device::Ext(d), Source::Ext(s)) => d.set_selection(Some(s)),
-            (Device::Wlr(d), Source::Wlr(s)) => d.set_selection(Some(s)),
-            // One rung always pairs with one protocol. This arm cannot occur.
-            // Do nothing instead of a panic in the daemon's clipboard path.
-            _ => {}
+            Clip::Ext { manager, device } => {
+                let source = manager.create_data_source(qh, payload);
+                for mime in TEXT_MIMES {
+                    source.offer(mime.to_string());
+                }
+                device.set_selection(Some(&source));
+                Source::Ext(source)
+            }
+            Clip::Wlr { manager, device } => {
+                let source = manager.create_data_source(qh, payload);
+                for mime in TEXT_MIMES {
+                    source.offer(mime.to_string());
+                }
+                device.set_selection(Some(&source));
+                Source::Wlr(source)
+            }
         }
     }
 }
 
 impl Source {
-    fn offer(&self, mime: &str) {
-        match self {
-            Source::Ext(s) => s.offer(mime.to_string()),
-            Source::Wlr(s) => s.offer(mime.to_string()),
-        }
-    }
-
     fn destroy(self) {
         match self {
             Source::Ext(s) => s.destroy(),
@@ -519,43 +504,15 @@ impl Dispatch<WlRegistry, ()> for Owner {
     }
 }
 
-/// The seat. This client uses it only to request `get_data_device`. It ignores
-/// the seat capabilities and other seat events.
-impl Dispatch<WlSeat, ()> for Owner {
-    fn event(
-        _: &mut Owner,
-        _: &WlSeat,
-        _: wayland_client::protocol::wl_seat::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Owner>,
-    ) {
-    }
-}
-
-impl Dispatch<ExtDataControlManagerV1, ()> for Owner {
-    fn event(
-        _: &mut Owner,
-        _: &ExtDataControlManagerV1,
-        _: <ExtDataControlManagerV1 as Proxy>::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Owner>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrDataControlManagerV1, ()> for Owner {
-    fn event(
-        _: &mut Owner,
-        _: &ZwlrDataControlManagerV1,
-        _: <ZwlrDataControlManagerV1 as Proxy>::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Owner>,
-    ) {
-    }
-}
+// Every proxy below takes `ignore`. A bare `delegate_noop!` panics on the
+// first event, and the daemon must not die on a protocol event it does not
+// use.
+// The seat. This client uses it only to request `get_data_device`. It ignores
+// the seat capabilities and other seat events.
+wayland_client::delegate_noop!(Owner: ignore WlSeat);
+// The managers. Neither protocol defines a manager event.
+wayland_client::delegate_noop!(Owner: ignore ExtDataControlManagerV1);
+wayland_client::delegate_noop!(Owner: ignore ZwlrDataControlManagerV1);
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for Owner {
     // Opcode 0 is `data_offer`. It is the only event that creates a child.
@@ -608,31 +565,11 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for Owner {
     }
 }
 
-/// An announced offer. The device destroys it on arrival, so this handler
-/// receives no event.
-impl Dispatch<ExtDataControlOfferV1, ()> for Owner {
-    fn event(
-        _: &mut Owner,
-        _: &ExtDataControlOfferV1,
-        _: ext_offer::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Owner>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrDataControlOfferV1, ()> for Owner {
-    fn event(
-        _: &mut Owner,
-        _: &ZwlrDataControlOfferV1,
-        _: wlr_offer::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Owner>,
-    ) {
-    }
-}
+// An announced offer. Its `offer` MIME events arrive before the device's
+// `selection` event, and the device destroys the offer on arrival. This
+// client reads no offer, so it ignores them.
+wayland_client::delegate_noop!(Owner: ignore ExtDataControlOfferV1);
+wayland_client::delegate_noop!(Owner: ignore ZwlrDataControlOfferV1);
 
 /// The source that owns the selection. Its user data is the payload, so a
 /// `send` event answers with the bytes that created the source.

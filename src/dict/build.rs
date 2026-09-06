@@ -1,7 +1,7 @@
 //! Dictionary build schema and writer.
 
 use crate::dict::archive::{
-    for_each_media, for_each_meta_row, for_each_row, read_index, read_styles_css, TermBanks,
+    fold_meta_rows, for_each_media, for_each_row, read_index, read_styles_css, TermBanks,
 };
 use crate::dict::frequency::{
     self, lookup_freq, merge_freq_row, FreqSource, FreqTable, RankingStrategy,
@@ -11,7 +11,7 @@ use crate::dict::media::{self, Intrinsic};
 use crate::dict::pitch;
 use crate::dict::reindex;
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Statement};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -760,11 +760,7 @@ fn to_json_list<T: Serialize>(list: &[T]) -> Result<String> {
 pub fn load_freqs(freqs: &[PathBuf]) -> Result<Vec<FreqSource>> {
     let mut sources = Vec::with_capacity(freqs.len());
     for fa in freqs {
-        let mut table = FreqTable::new();
-        for_each_meta_row(fa, |row| {
-            merge_freq_row(&mut table, &row);
-            Ok(())
-        })?;
+        let table = fold_meta_rows(fa, FreqTable::new(), |table, row| merge_freq_row(table, &row))?;
         sources.push(FreqSource { name: dict_title(fa)?, table });
     }
     Ok(sources)
@@ -1335,62 +1331,74 @@ fn insert_sql(head: &str, cols: usize, rows: usize) -> String {
     sql
 }
 
-/// Flushes buffered entry rows.
-fn flush_entries(tx: &rusqlite::Transaction, text: &str, batches: &mut Batches) -> Result<()> {
-    let batch = &batches.entries;
-    if batch.is_empty() {
+/// Flushes rows with one prepared multi-row insert.
+fn flush_batch<R>(
+    tx: &rusqlite::Transaction,
+    rows: &mut Vec<R>,
+    full_sql: &str,
+    head: &str,
+    columns: usize,
+    bind: impl Fn(&mut Statement<'_>, &R, &mut usize) -> rusqlite::Result<()>,
+) -> Result<()> {
+    if rows.is_empty() {
         return Ok(());
     }
     let owned;
-    let sql = if batch.len() == BATCH_ROWS {
-        &batches.entry_sql
+    let sql = if rows.len() == BATCH_ROWS {
+        full_sql
     } else {
-        owned = insert_sql(ENTRY_INSERT, 3, batch.len());
+        owned = insert_sql(head, columns, rows.len());
         &owned
     };
     let mut stmt = tx.prepare_cached(sql)?;
     let mut idx = 1;
-    for row in batch.iter() {
-        stmt.raw_bind_parameter(idx, row.0)?;
-        stmt.raw_bind_parameter(idx + 1, row.1)?;
-        stmt.raw_bind_parameter(idx + 2, slice(text, row.2))?;
-        idx += 3;
+    for row in rows.iter() {
+        bind(&mut stmt, row, &mut idx)?;
     }
     stmt.raw_execute()?;
     drop(stmt);
-    batches.entries.clear();
+    rows.clear();
     Ok(())
+}
+
+/// Flushes buffered entry rows.
+fn flush_entries(tx: &rusqlite::Transaction, text: &str, batches: &mut Batches) -> Result<()> {
+    flush_batch(
+        tx,
+        &mut batches.entries,
+        &batches.entry_sql,
+        ENTRY_INSERT,
+        3,
+        |stmt, row, idx| {
+            stmt.raw_bind_parameter(*idx, row.0)?;
+            stmt.raw_bind_parameter(*idx + 1, row.1)?;
+            stmt.raw_bind_parameter(*idx + 2, slice(text, row.2))?;
+            *idx += 3;
+            Ok(())
+        },
+    )
 }
 
 /// Flushes buffered term rows.
 fn flush_terms(tx: &rusqlite::Transaction, text: &str, batches: &mut Batches) -> Result<()> {
-    let batch = &batches.terms;
-    if batch.is_empty() {
-        return Ok(());
-    }
-    let owned;
-    let sql = if batch.len() == BATCH_ROWS {
-        &batches.term_sql
-    } else {
-        owned = insert_sql(TERM_INSERT, 7, batch.len());
-        &owned
-    };
-    let mut stmt = tx.prepare_cached(sql)?;
-    let mut idx = 1;
-    for row in batch.iter() {
-        stmt.raw_bind_parameter(idx, slice(text, row.0))?;
-        stmt.raw_bind_parameter(idx + 1, row.1.map(|s| slice(text, s)))?;
-        stmt.raw_bind_parameter(idx + 2, slice(text, row.2))?;
-        stmt.raw_bind_parameter(idx + 3, slice(text, row.3))?;
-        stmt.raw_bind_parameter(idx + 4, row.4)?;
-        stmt.raw_bind_parameter(idx + 5, row.5)?;
-        stmt.raw_bind_parameter(idx + 6, row.6)?;
-        idx += 7;
-    }
-    stmt.raw_execute()?;
-    drop(stmt);
-    batches.terms.clear();
-    Ok(())
+    flush_batch(
+        tx,
+        &mut batches.terms,
+        &batches.term_sql,
+        TERM_INSERT,
+        7,
+        |stmt, row, idx| {
+            stmt.raw_bind_parameter(*idx, slice(text, row.0))?;
+            stmt.raw_bind_parameter(*idx + 1, row.1.map(|s| slice(text, s)))?;
+            stmt.raw_bind_parameter(*idx + 2, slice(text, row.2))?;
+            stmt.raw_bind_parameter(*idx + 3, slice(text, row.3))?;
+            stmt.raw_bind_parameter(*idx + 4, row.4)?;
+            stmt.raw_bind_parameter(*idx + 5, row.5)?;
+            stmt.raw_bind_parameter(*idx + 6, row.6)?;
+            *idx += 7;
+            Ok(())
+        },
+    )
 }
 
 /// Creates the table schema.

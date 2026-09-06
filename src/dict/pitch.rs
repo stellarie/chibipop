@@ -135,12 +135,7 @@ pub fn supplies_pitch(archive: &Path) -> bool {
 /// differ. A `"freq"` row is skipped here, and a `"pitch"` row is skipped by
 /// the frequency loader. An archive with both rows supplies both roles.
 pub fn load_pitch(archive: &Path) -> Result<PitchTable> {
-    let mut table = PitchTable::new();
-    archive::for_each_meta_row(archive, |row| {
-        merge_pitch_row(&mut table, &row);
-        Ok(())
-    })?;
-    Ok(table)
+    archive::fold_meta_rows(archive, PitchTable::new(), |table, row| merge_pitch_row(table, &row))
 }
 
 /// Merges one row into a `PitchTable`.

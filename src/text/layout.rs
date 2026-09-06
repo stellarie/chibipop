@@ -154,6 +154,55 @@ pub enum Orientation {
     Horizontal,
     Vertical,
 }
+impl Orientation {
+    /// The reading-axis start edge: `x` for a row, `y` for a column.
+    pub(crate) fn lead(self, r: PhysRect) -> i32 {
+        match self {
+            Self::Horizontal => r.x,
+            Self::Vertical => r.y,
+        }
+    }
+
+    /// The reading-axis end edge, saturating.
+    pub(crate) fn trail(self, r: PhysRect) -> i32 {
+        match self {
+            Self::Horizontal => r.x.saturating_add(r.w),
+            Self::Vertical => r.y.saturating_add(r.h),
+        }
+    }
+
+    /// The reading-axis extent: `w` for a row, `h` for a column.
+    pub(crate) fn len(self, r: PhysRect) -> i32 {
+        match self {
+            Self::Horizontal => r.w,
+            Self::Vertical => r.h,
+        }
+    }
+
+    /// The cross-axis extent: `h` for a row, `w` for a column.
+    pub(crate) fn thick(self, r: PhysRect) -> i32 {
+        match self {
+            Self::Horizontal => r.h,
+            Self::Vertical => r.w,
+        }
+    }
+
+    /// The cross-axis coordinate of a point: `y` for a row, `x` for a column.
+    pub(crate) fn cross(self, p: PhysPoint) -> i32 {
+        match self {
+            Self::Horizontal => p.y,
+            Self::Vertical => p.x,
+        }
+    }
+
+    /// A rectangle from reading-axis (`lead`, `len`) and cross-axis (`cross_start`, `thick`) parts.
+    pub(crate) fn rect(self, lead: i32, len: i32, cross_start: i32, thick: i32) -> PhysRect {
+        match self {
+            Self::Horizontal => PhysRect { x: lead, y: cross_start, w: len, h: thick },
+            Self::Vertical => PhysRect { x: cross_start, y: lead, w: thick, h: len },
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Resolved {
@@ -167,13 +216,14 @@ pub fn orientation_of(line: &OcrLine) -> Orientation {
         return Orientation::Horizontal;
     }
     let centres: Vec<PhysPoint> = line.words.iter().map(|w| w.rect.center()).collect();
-    let spread = |vals: Vec<i32>| -> i32 {
-        let max = vals.iter().copied().max().unwrap_or(0);
-        let min = vals.iter().copied().min().unwrap_or(0);
-        max - min
-    };
-    let x_spread = spread(centres.iter().map(|c| c.x).collect());
-    let y_spread = spread(centres.iter().map(|c| c.y).collect());
+    let (x_min, x_max) = centres.iter().fold((i32::MAX, i32::MIN), |(min, max), c| {
+        (min.min(c.x), max.max(c.x))
+    });
+    let (y_min, y_max) = centres.iter().fold((i32::MAX, i32::MIN), |(min, max), c| {
+        (min.min(c.y), max.max(c.y))
+    });
+    let x_spread = x_max - x_min;
+    let y_spread = y_max - y_min;
     if y_spread > x_spread { Orientation::Vertical } else { Orientation::Horizontal }
 }
 
@@ -214,24 +264,23 @@ pub const BAND_FACTOR: f32 = 3.0;
 /// Build a band around a word and floor its short axis.
 pub fn band_of(word: PhysRect, orientation: Orientation, short_floor: i32) -> PhysRect {
     let c = word.center();
-    match orientation {
-        Orientation::Horizontal => {
-            let h = (((word.h as f32) * BAND_FACTOR).round() as i32).max(short_floor);
-            PhysRect { x: word.x, y: c.y - h / 2, w: word.w, h }
-        }
-        Orientation::Vertical => {
-            let w = (((word.w as f32) * BAND_FACTOR).round() as i32).max(short_floor);
-            PhysRect { x: c.x - w / 2, y: word.y, w, h: word.h }
-        }
-    }
+    let t = (((orientation.thick(word) as f32) * BAND_FACTOR).round() as i32).max(short_floor);
+    orientation.rect(
+        orientation.lead(word),
+        orientation.len(word),
+        orientation.cross(c) - t / 2,
+        t,
+    )
 }
 
 /// Build one tile with length `len`.
 pub fn tile_after(band: PhysRect, start: i32, orientation: Orientation, len: i32) -> PhysRect {
-    match orientation {
-        Orientation::Horizontal => PhysRect { x: start, y: band.y, w: len, h: band.h },
-        Orientation::Vertical => PhysRect { x: band.x, y: start, w: band.w, h: len },
-    }
+    orientation.rect(
+        start,
+        len,
+        orientation.cross(PhysPoint { x: band.x, y: band.y }),
+        orientation.thick(band),
+    )
 }
 
 /// Return `None` when the tile has zero extent.
@@ -251,17 +300,12 @@ pub fn nearest_line(
     orientation: Orientation,
     tolerance: i32,
 ) -> Option<&OcrLine> {
-    let axis = |p: PhysPoint| match orientation {
-        Orientation::Horizontal => p.y,
-        Orientation::Vertical => p.x,
-    };
-
     let mut best: Option<(&OcrLine, i32)> = None;
     for line in lines {
         if line.words.is_empty() {
             continue;
         }
-        let sum: i32 = line.words.iter().map(|w| axis(w.rect.center())).sum();
+        let sum: i32 = line.words.iter().map(|w| orientation.cross(w.rect.center())).sum();
         let centre = sum / line.words.len() as i32;
         let d = (centre - perpendicular_centre).abs();
         if d > tolerance {
@@ -278,8 +322,6 @@ pub fn nearest_line(
 /// This margin protects words near a tile edge.
 pub const EDGE_MARGIN: i32 = 4;
 
-/// This function returns an edge on the scan axis.
-type AxisEdge = fn(&PhysRect) -> i32;
 
 /// Keep complete words and return the next tile start.
 pub fn split_at_clipped(
@@ -287,18 +329,14 @@ pub fn split_at_clipped(
     tile: PhysRect,
     orientation: Orientation,
 ) -> (Vec<&OcrWord>, i32) {
-    let (end, lead, trail): (i32, AxisEdge, AxisEdge) = match orientation {
-        Orientation::Horizontal => (tile.x + tile.w, |r| r.x, |r| r.x + r.w),
-        Orientation::Vertical => (tile.y + tile.h, |r| r.y, |r| r.y + r.h),
-    };
-
+    let end = orientation.trail(tile);
     let mut ordered: Vec<&OcrWord> = words.iter().collect();
-    ordered.sort_by_key(|word| lead(&word.rect));
+    ordered.sort_by_key(|word| orientation.lead(word.rect));
 
     let mut kept = Vec::new();
     for word in ordered {
-        if trail(&word.rect) > end - EDGE_MARGIN {
-            return (kept, lead(&word.rect));
+        if orientation.trail(word.rect) > end - EDGE_MARGIN {
+            return (kept, orientation.lead(word.rect));
         }
         kept.push(word);
     }
@@ -307,13 +345,9 @@ pub fn split_at_clipped(
 
 /// Return words whose start edge is near or after `start`.
 pub fn drop_leading(words: &[OcrWord], start: i32, orientation: Orientation) -> Vec<OcrWord> {
-    let lead: AxisEdge = match orientation {
-        Orientation::Horizontal => |r| r.x,
-        Orientation::Vertical => |r| r.y,
-    };
     words
         .iter()
-        .filter(|w| lead(&w.rect) >= start - EDGE_MARGIN)
+        .filter(|w| orientation.lead(w.rect) >= start - EDGE_MARGIN)
         .cloned()
         .collect()
 }
@@ -412,31 +446,19 @@ pub fn region_around(cursor: PhysPoint, prefer_vertical: bool, size: CaptureSize
 
 /// Return the mean center across a line: `y` for a row and `x` for a column.
 pub(crate) fn perp_centre(line: &OcrLine, orientation: Orientation) -> i32 {
-    let axis = |p: PhysPoint| match orientation {
-        Orientation::Horizontal => p.y,
-        Orientation::Vertical => p.x,
-    };
-    let sum: i32 = line.words.iter().map(|w| axis(w.rect.center())).sum();
+    let sum: i32 = line.words.iter().map(|w| orientation.cross(w.rect.center())).sum();
     sum / line.words.len() as i32
 }
 
 /// Return the mean thickness of a line's words: `h` for a row and `w` for a column.
 pub(crate) fn thickness(line: &OcrLine, orientation: Orientation) -> i32 {
-    let cross: AxisEdge = match orientation {
-        Orientation::Horizontal => |r| r.h,
-        Orientation::Vertical => |r| r.w,
-    };
-    let sum: i32 = line.words.iter().map(|w| cross(&w.rect)).sum();
+    let sum: i32 = line.words.iter().map(|w| orientation.thick(w.rect)).sum();
     sum / line.words.len() as i32
 }
 
 /// Return the first edge of a line on the reading axis.
 pub(crate) fn reading_start(line: &OcrLine, orientation: Orientation) -> Option<i32> {
-    let edge: AxisEdge = match orientation {
-        Orientation::Horizontal => |r| r.x,
-        Orientation::Vertical => |r| r.y,
-    };
-    line.words.iter().map(|w| edge(&w.rect)).min()
+    line.words.iter().map(|w| orientation.lead(w.rect)).min()
 }
 
 /// Return the gap from `a` to `b` on the reading axis.
@@ -539,37 +561,16 @@ pub(crate) fn trim_probe_edges(
     bounds: PhysRect,
     orientation: Orientation,
 ) {
-    let (probe_lead, probe_end, bounds_lead, bounds_end, lead, trail): (
-        i32,
-        i32,
-        i32,
-        i32,
-        AxisEdge,
-        AxisEdge,
-    ) = match orientation {
-        Orientation::Horizontal => (
-            probe.x,
-            probe.x + probe.w,
-            bounds.x,
-            bounds.x + bounds.w,
-            |r| r.x,
-            |r| r.x + r.w,
-        ),
-        Orientation::Vertical => (
-            probe.y,
-            probe.y + probe.h,
-            bounds.y,
-            bounds.y + bounds.h,
-            |r| r.y,
-            |r| r.y + r.h,
-        ),
-    };
+    let probe_lead = orientation.lead(probe);
+    let probe_end = orientation.trail(probe);
+    let bounds_lead = orientation.lead(bounds);
+    let bounds_end = orientation.trail(bounds);
     let trim_lead = probe_lead > bounds_lead;
     let trim_trail = probe_end < bounds_end;
     for line in lines {
         line.words.retain(|word| {
-            (!trim_lead || lead(&word.rect) >= probe_lead + EDGE_MARGIN)
-                && (!trim_trail || trail(&word.rect) <= probe_end - EDGE_MARGIN)
+            (!trim_lead || orientation.lead(word.rect) >= probe_lead + EDGE_MARGIN)
+                && (!trim_trail || orientation.trail(word.rect) <= probe_end - EDGE_MARGIN)
         });
     }
 }
@@ -662,10 +663,7 @@ pub fn head_and_tail(
     let orientation = orientation_of(line);
 
     let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
-    match orientation {
-        Orientation::Horizontal => ordered.sort_by_key(|w| w.rect.x),
-        Orientation::Vertical => ordered.sort_by_key(|w| w.rect.y),
-    }
+    ordered.sort_by_key(|w| orientation.lead(w.rect));
 
     let hit = &line.words[wi];
     let hit_pos = ordered.iter().position(|w| std::ptr::eq(*w, hit))?;
@@ -713,10 +711,7 @@ fn resolve_wrapped(
 
     // OCR does not promise an order.
     let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
-    match orientation {
-        Orientation::Horizontal => ordered.sort_by_key(|w| w.rect.x),
-        Orientation::Vertical => ordered.sort_by_key(|w| w.rect.y),
-    }
+    ordered.sort_by_key(|w| orientation.lead(w.rect));
 
     let hit = &line.words[wi];
     let mut text = String::new();
@@ -732,10 +727,7 @@ fn resolve_wrapped(
     let continuation = find_continuation(lines, li, orientation);
     if let Some(next_line) = continuation {
         let mut tail: Vec<&OcrWord> = next_line.words.iter().collect();
-        match orientation {
-            Orientation::Horizontal => tail.sort_by_key(|w| w.rect.x),
-            Orientation::Vertical => tail.sort_by_key(|w| w.rect.y),
-        }
+        tail.sort_by_key(|w| orientation.lead(w.rect));
         for w in &tail {
             text.push_str(&w.text);
         }
@@ -801,36 +793,24 @@ pub fn wrap_probe(
     let line = &lines[li];
     let orientation = orientation_of(line);
     let hit = line.words[wi].rect;
-    let (lead, trail, region_lead, region_end): (AxisEdge, AxisEdge, i32, i32) = match orientation {
-        Orientation::Horizontal => (
-            |r| r.x,
-            |r| r.x.saturating_add(r.w),
-            region.x,
-            region.x.saturating_add(region.w),
-        ),
-        Orientation::Vertical => (
-            |r| r.y,
-            |r| r.y.saturating_add(r.h),
-            region.y,
-            region.y.saturating_add(region.h),
-        ),
-    };
-    let bounds_end = match orientation {
-        Orientation::Horizontal => bounds.x.saturating_add(bounds.w),
-        Orientation::Vertical => bounds.y.saturating_add(bounds.h),
-    };
-    let hit_lead = lead(&hit);
-    let mut tail_words: Vec<&OcrWord> =
-        line.words.iter().filter(|word| lead(&word.rect) >= hit_lead).collect();
-    tail_words.sort_by_key(|word| lead(&word.rect));
+    let region_lead = orientation.lead(region);
+    let region_end = orientation.trail(region);
+    let bounds_end = orientation.trail(bounds);
+    let hit_lead = orientation.lead(hit);
+    let mut tail_words: Vec<&OcrWord> = line
+        .words
+        .iter()
+        .filter(|word| orientation.lead(word.rect) >= hit_lead)
+        .collect();
+    tail_words.sort_by_key(|word| orientation.lead(word.rect));
     if tail_words.is_empty() {
         return None;
     }
     let mut tail = String::new();
-    let mut line_end = trail(&hit);
+    let mut line_end = orientation.trail(hit);
     for word in tail_words {
         tail.push_str(&word.text);
-        line_end = line_end.max(trail(&word.rect));
+        line_end = line_end.max(orientation.trail(word.rect));
     }
     if !runs_out(&tail) {
         return None;
@@ -860,28 +840,16 @@ pub fn wrap_probe(
     // this reach. We accept that case to keep the probe short.
     let above = thick * 3 / 4;
     let below = thick * (WRAP_GAP_HALVES + 3) / 2;
-    let probe_start = match orientation {
-        Orientation::Horizontal => bounds.x,
-        Orientation::Vertical => bounds.y,
-    };
+    let probe_start = orientation.lead(bounds);
     let probe_end = line_end.saturating_add(thick / 2).min(bounds_end);
     if probe_end <= probe_start {
         return None;
     }
-    let band = match orientation {
-        Orientation::Horizontal => PhysRect {
-            x: probe_start,
-            y: perp_centre(line, orientation).saturating_sub(above),
-            w: probe_end - probe_start,
-            h: above + below,
-        },
-        Orientation::Vertical => PhysRect {
-            x: perp_centre(line, orientation).saturating_sub(below),
-            y: probe_start,
-            w: above + below,
-            h: probe_end - probe_start,
-        },
+    let cross_start = match orientation {
+        Orientation::Horizontal => perp_centre(line, orientation).saturating_sub(above),
+        Orientation::Vertical => perp_centre(line, orientation).saturating_sub(below),
     };
+    let band = orientation.rect(probe_start, probe_end - probe_start, cross_start, above + below);
     const MAX_PROBE_LEN: i32 = 2 * TILE_LEN;
     // Overlap adjacent windows by half of the maximum length. This gives a
     // multi-character OCR word a full copy away from both trim seams.
@@ -889,14 +857,12 @@ pub fn wrap_probe(
     let step = MAX_PROBE_LEN - overlap;
     let mut probes = Vec::new();
     let mut add = |start: i32, len: i32| {
-        let probe = match orientation {
-            Orientation::Horizontal => PhysRect { x: start, ..band },
-            Orientation::Vertical => PhysRect { y: start, ..band },
-        };
-        let probe = match orientation {
-            Orientation::Horizontal => PhysRect { w: len, ..probe },
-            Orientation::Vertical => PhysRect { h: len, ..probe },
-        };
+        let probe = orientation.rect(
+            start,
+            len,
+            orientation.cross(PhysPoint { x: band.x, y: band.y }),
+            orientation.thick(band),
+        );
         if let Some(probe) = clamp_tile(probe, bounds) {
             if !probes.contains(&probe) {
                 probes.push(probe);

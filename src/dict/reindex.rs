@@ -257,17 +257,24 @@ fn stored_tables(conn: &Connection, order: &[i64]) -> Result<Vec<FreqTable>> {
 /// name, and an absent Dictionary reports nothing. If two Dictionaries share
 /// a name, include both in `dict_id` order. `dict.name` is a title, so two
 /// editions can share it.
-fn ids_for(conn: &Connection, names: &[String]) -> Result<Vec<i64>> {
+fn dict_ids_by_name(conn: &Connection, name: &str) -> Result<Vec<i64>> {
     let mut stmt = conn
         .prepare("SELECT dict_id FROM dict WHERE name = ?1 ORDER BY dict_id")
         .context("preparing the dictionary name query")?;
+    let found = stmt
+        .query_map([name], |r| r.get::<_, i64>(0))
+        .with_context(|| format!("resolving the dictionary named {name}"))?;
+    let mut ids = Vec::new();
+    for id in found {
+        ids.push(id.with_context(|| format!("reading the dictionary named {name}"))?);
+    }
+    Ok(ids)
+}
+
+fn ids_for(conn: &Connection, names: &[String]) -> Result<Vec<i64>> {
     let mut order: Vec<i64> = Vec::with_capacity(names.len());
     for name in names {
-        let found = stmt
-            .query_map([name], |r| r.get::<_, i64>(0))
-            .with_context(|| format!("resolving the dictionary named {name}"))?;
-        for id in found {
-            let id = id.with_context(|| format!("reading the dictionary named {name}"))?;
+        for id in dict_ids_by_name(conn, name)? {
             if !order.contains(&id) {
                 order.push(id);
             }
@@ -316,14 +323,7 @@ fn frequency_dictionaries(conn: &Connection) -> Result<Vec<(i64, String)>> {
 /// frequency data once. Its claims use that row. `taken` lists ids already
 /// chosen for earlier sources, so two editions with one title get separate rows.
 fn unclaimed_dict_row(tx: &Transaction, name: &str, taken: &[i64]) -> Result<Option<i64>> {
-    let mut stmt = tx
-        .prepare("SELECT dict_id FROM dict WHERE name = ?1 ORDER BY dict_id")
-        .context("preparing the dictionary name query")?;
-    let found = stmt
-        .query_map([name], |r| r.get::<_, i64>(0))
-        .with_context(|| format!("resolving the dictionary named {name}"))?;
-    for id in found {
-        let id = id.with_context(|| format!("reading the dictionary named {name}"))?;
+    for id in dict_ids_by_name(tx, name)? {
         if !taken.contains(&id) {
             return Ok(Some(id));
         }

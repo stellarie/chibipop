@@ -32,10 +32,9 @@
 //! It does not pass a scratch buffer through the recursion.
 
 use super::{
-    leaves, DocAddr, DocRange, GlossDoc, ItemType, Kind, Leaf, NodeId, NodePath, Role,
-    Scalar, Selection, StyleKey, Tag,
+    DocRange, GlossDoc, ItemType, Kind, NodeId, NodePath, Role, Scalar, Selection, StyleKey, Tag,
 };
-use std::collections::HashMap;
+use super::select::SelectionPlan;
 
 /// The editorial roles that reach the output.
 ///
@@ -247,11 +246,6 @@ struct Rendered {
     boundary: bool,
 }
 
-struct RangePlan {
-    leaves: Vec<Leaf>,
-    intervals: HashMap<NodePath, Vec<(u32, u32)>>,
-    indexes: HashMap<NodePath, usize>,
-}
 
 /// Shared inputs for one selected HTML tree walk.
 ///
@@ -259,24 +253,10 @@ struct RangePlan {
 #[derive(Clone, Copy)]
 struct RangeWalk<'a> {
     doc: &'a GlossDoc,
-    plan: &'a RangePlan,
+    plan: &'a SelectionPlan,
     roles: RoleFilter,
     separator: super::Separator,
 }
-
-
-fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
-    let mut prefix = NodePath::ROOT;
-    for &step in addr.path.steps() {
-        let Some(next) = prefix.child(step as usize) else { break };
-        prefix = next;
-        if prefix.resolve(doc).is_some_and(|id| doc.node(id).tag == Tag::Ruby) {
-            return DocAddr { path: prefix, byte: end as u32 };
-        }
-    }
-    addr
-}
-
 fn render_ranges(
     doc: &GlossDoc,
     ranges: &[DocRange],
@@ -284,85 +264,13 @@ fn render_ranges(
     roles: RoleFilter,
     out: &mut Vec<String>,
 ) {
-    let mut union: Vec<DocRange> = ranges
-        .iter()
-        .copied()
-        .map(|range| DocRange {
-            start: atomic_endpoint(doc, range.start, false),
-            end: atomic_endpoint(doc, range.end, true),
-        })
-        .collect();
-    union.retain(|range| range.start < range.end);
-    union.sort_by_key(|range| (range.start, range.end));
-    let mut merged: Vec<DocRange> = Vec::with_capacity(union.len());
-    for range in union {
-        if let Some(last) = merged.last_mut() {
-            if range.start <= last.end {
-                if range.end > last.end {
-                    last.end = range.end;
-                }
-                continue;
-            }
-        }
-        merged.push(range);
-    }
-    if merged.is_empty() {
-        return;
-    }
-
-    let visible = leaves(doc, roles);
-    if visible.is_empty() {
-        return;
-    }
-    let mut intervals = HashMap::new();
-    let mut indexes = HashMap::new();
-    for (index, leaf) in visible.iter().copied().enumerate() {
-        indexes.insert(leaf.path, index);
-        let leaf_start = DocAddr { path: leaf.path, byte: 0 };
-        let leaf_end = DocAddr { path: leaf.path, byte: leaf.len };
-        let mut covered: Vec<(u32, u32)> = Vec::new();
-        for range in &merged {
-            if range.end <= leaf_start || range.start >= leaf_end {
-                continue;
-            }
-            let start = if range.start.path < leaf.path {
-                0
-            } else {
-                range.start.byte.min(leaf.len)
-            };
-            let end = if range.end.path > leaf.path {
-                leaf.len
-            } else {
-                range.end.byte.min(leaf.len)
-            };
-            if start < end {
-                if let Some(previous) = covered.last_mut() {
-                    if start <= previous.1 {
-                        previous.1 = previous.1.max(end);
-                        continue;
-                    }
-                }
-                covered.push((start, end));
-            }
-        }
-        if !covered.is_empty() {
-            intervals.insert(leaf.path, covered);
-        }
-    }
-    if intervals.is_empty() {
-        return;
-    }
-    if visible.iter().all(|leaf| {
-        intervals
-            .get(&leaf.path)
-            .is_some_and(|covered| covered.len() == 1 && covered[0] == (0, leaf.len))
-    }) {
+    let Some(plan) = SelectionPlan::new(doc, ranges, roles) else { return };
+    if plan.covers_all() {
         for id in doc.items() {
             push(item_html(doc, id, roles), out);
         }
         return;
     }
-    let plan = RangePlan { leaves: visible, intervals, indexes };
     let walk = RangeWalk { doc, plan: &plan, roles, separator };
     for (index, id) in doc.items().enumerate() {
         let Some(path) = NodePath::ROOT.child(index) else { continue };
@@ -392,7 +300,7 @@ fn render_range_node(
     if matches!(node.tag, Tag::Rt | Tag::Rp)
         || (node.kind != Kind::Text
             && node.tag != Tag::Ruby
-            && !has_selected_child(doc, id, path, plan))
+            && !plan.has_selected_child(doc, id, path))
     {
         return Rendered::empty();
     }
@@ -583,15 +491,6 @@ fn list_html(parts: &[Part]) -> String {
     )
 }
 
-fn has_selected_child(doc: &GlossDoc, id: NodeId, path: NodePath, plan: &RangePlan) -> bool {
-    if plan.intervals.contains_key(&path) {
-        return true;
-    }
-    doc.children(id).enumerate().any(|(index, child)| {
-        path.child(index)
-            .is_some_and(|child_path| has_selected_child(doc, child, child_path, plan))
-    })
-}
 
 fn separator_text(separator: super::Separator) -> &'static str {
     match separator {
@@ -602,7 +501,7 @@ fn separator_text(separator: super::Separator) -> &'static str {
     }
 }
 
-fn join_parts(parts: &[Part], separator: super::Separator, plan: &RangePlan) -> String {
+fn join_parts(parts: &[Part], separator: super::Separator, plan: &SelectionPlan) -> String {
     let mut out = String::new();
     for (index, part) in parts.iter().enumerate() {
         if index != 0 && has_gap(Some(parts[index - 1].end), Some(part.start), plan) {
@@ -613,7 +512,7 @@ fn join_parts(parts: &[Part], separator: super::Separator, plan: &RangePlan) -> 
     out
 }
 
-fn has_gap(previous: Option<Position>, current: Option<Position>, plan: &RangePlan) -> bool {
+fn has_gap(previous: Option<Position>, current: Option<Position>, plan: &SelectionPlan) -> bool {
     let (Some(previous), Some(current)) = (previous, current) else { return false };
     if current.leaf == previous.leaf {
         return previous.byte < current.byte;
@@ -860,6 +759,7 @@ fn escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::DocAddr;
     use super::super::plain_items;
     use super::super::tests::doc;
     use super::super::{extent, Separator};

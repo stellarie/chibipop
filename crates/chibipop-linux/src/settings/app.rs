@@ -85,7 +85,7 @@ pub fn run(init: Init) -> anyhow::Result<()> {
     iced::application(move || App::new(init.clone()), update, view)
         .title("chibipop settings")
         .theme(|app: &App| {
-            if app.form.theme == "light" {
+            if app.form.cfg.popup.theme == "light" {
                 Theme::Light
             } else {
                 Theme::Dark
@@ -222,10 +222,10 @@ struct App {
 
 impl App {
     fn new(init: Init) -> App {
-        let fonts = font_items(&init.form.font);
+        let fonts = font_items(&init.form.cfg.popup.font);
         App {
-            capture_w: init.form.capture_width.to_string(),
-            capture_h: init.form.capture_height.to_string(),
+            capture_w: init.form.cfg.ocr.capture_width.to_string(),
+            capture_h: init.form.cfg.ocr.capture_height.to_string(),
             form: init.form,
             linux: init.linux,
             config_path: init.config_path,
@@ -261,7 +261,7 @@ impl App {
             self.compositor,
             &self.linux.trigger_key_linux,
             &self.exe,
-            snippets::trigger_bind(self.form.mode),
+            snippets::trigger_bind(self.form.cfg.trigger.mode),
         )
     }
 
@@ -269,8 +269,8 @@ impl App {
     /// but reports no key on Hyprland. XDPH stores the key in hyprland.conf
     /// under a `global` namespace that depends on the process that starts the
     /// daemon. The control socket has one stable path and reaches the same
-    /// `App::apply_verb` target. Return `None` when the desktop reports the
-    /// key, because its shortcut editor then owns the change.
+    /// `App::apply_verb` target. Return `None` when the desktop reports
+    /// the key, because its shortcut editor then owns the change.
     fn portal_trigger_snippet(&self, current: &Option<String>) -> Option<String> {
         (current.is_none() && self.compositor == Compositor::Hyprland)
             .then(|| self.bind_snippet())
@@ -307,76 +307,43 @@ impl App {
         )
     }
 
-    /// The static-region chord row's control.
+    /// Build the copyable bind for an action that always uses the native
+    /// channel, or `None` for a blank chord. The button exists only for
+    /// `Some`, so a cleared chord cannot copy an old bind.
     ///
-    /// This method always uses [`HotkeyChannel::Native`]. Decision D1 keeps
-    /// this action out of the two GlobalShortcuts ids, so the compositor bind
-    /// is its only global channel. If this method read `self.channel`, it
-    /// would show the trigger's portal key under this chord. That row would
-    /// claim a key that no one assigned to it.
-    fn static_region_control(&self) -> HotkeyControl {
-        HotkeyChannel::Native.control(
+    /// Decision D1 keeps these actions out of the two GlobalShortcuts ids, so
+    /// the compositor bind is their only global channel. A method that read
+    /// `self.channel` would show the trigger's portal key under a chord that
+    /// no one assigned to it.
+    fn native_snippet(&self, chord: &str, verb: Verb) -> Option<String> {
+        match HotkeyChannel::Native.control(
             self.compositor,
-            &self.linux.static_region_key_linux,
+            chord,
             &self.exe,
-            snippets::Bind::Press(Verb::StaticRegion),
-        )
+            snippets::Bind::Press(verb),
+        ) {
+            HotkeyControl::Snippet { text } => Some(text),
+            HotkeyControl::NoChord => None,
+            HotkeyControl::Rebind { .. } => unreachable!("Native never rebinds"),
+        }
     }
 
-    /// The static-region row's copyable bind, or `None` for a blank chord.
-    /// The button exists only for `Some`, so a cleared chord cannot copy an old bind.
     fn static_region_bind_snippet(&self) -> Option<String> {
-        match self.static_region_control() {
-            HotkeyControl::Snippet { text } => Some(text),
-            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
-        }
+        self.native_snippet(&self.linux.static_region_key_linux, Verb::StaticRegion)
     }
 
-    /// The mining screenshot chord row's control.
-    ///
-    /// This method always uses [`HotkeyChannel::Native`] for the reason above.
-    /// No portal action registers this chord, so the compositor bind is its
-    /// only global channel.
-    fn screenshot_control(&self) -> HotkeyControl {
-        HotkeyChannel::Native.control(
-            self.compositor,
-            self.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
-            &self.exe,
-            snippets::Bind::Press(Verb::Screenshot),
-        )
-    }
-
-    /// `screenshot_bind_snippet` returns the row's copyable bind, or `None`
-    /// when no chord exists.
     fn screenshot_bind_snippet(&self) -> Option<String> {
-        match self.screenshot_control() {
-            HotkeyControl::Snippet { text } => Some(text),
-            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
-        }
+        let chord = self.linux.screenshot_key_linux.as_deref().unwrap_or_default();
+        self.native_snippet(chord, Verb::Screenshot)
     }
 
-    /// The OCR-to-clipboard chord row's control. This action uses the native
-    /// channel for the same reason as the methods above.
-    fn ocr_clipboard_control(&self) -> HotkeyControl {
-        HotkeyChannel::Native.control(
-            self.compositor,
-            self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
-            &self.exe,
-            snippets::Bind::Press(Verb::OcrClipboard),
-        )
-    }
-
-    /// The OCR-to-clipboard row's copyable bind.
-    /// `None` means that no chord exists or that this compositor has no
-    /// clipboard protocol. A bind that only logs a refusal is invalid, so
-    /// this window never gives the user that bind.
+    /// `None` also means that this compositor has no clipboard protocol. A
+    /// bind that only logs a refusal is invalid, so this window never gives
+    /// the user that bind. The `?` enforces that guard.
     fn ocr_clipboard_bind_snippet(&self) -> Option<String> {
-        // `None` means no rung and no bind. The `?` enforces that guard.
         self.clipboard_rung?;
-        match self.ocr_clipboard_control() {
-            HotkeyControl::Snippet { text } => Some(text),
-            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
-        }
+        let chord = self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default();
+        self.native_snippet(chord, Verb::OcrClipboard)
     }
 
     fn apply(&mut self) {
@@ -385,8 +352,8 @@ impl App {
             self.status = "Capture width and height must be numbers.".to_string();
             return;
         };
-        self.form.capture_width = w;
-        self.form.capture_height = h;
+        self.form.cfg.ocr.capture_width = w;
+        self.form.cfg.ocr.capture_height = h;
         // Apply removes a field-map row without an Anki field.
         // Anki has no field named "", so core would search for that name on
         // every add and store nothing.
@@ -409,13 +376,13 @@ impl App {
             Ok(applied) => {
                 // The file now holds clamped values. The window shows them.
                 if let Ok(cfg) = chibipop::config::load_or_create(&self.config_path) {
-                    self.form.capture_width = cfg.ocr.capture_width;
-                    self.form.capture_height = cfg.ocr.capture_height;
+                    self.form.cfg.ocr.capture_width = cfg.ocr.capture_width;
+                    self.form.cfg.ocr.capture_height = cfg.ocr.capture_height;
                     self.capture_w = cfg.ocr.capture_width.to_string();
                     self.capture_h = cfg.ocr.capture_height.to_string();
-                    self.form.screenshot_fixed_region =
+                    self.form.cfg.actions.screenshot.fixed_region =
                         cfg.actions.screenshot.fixed_region;
-                    self.form.screenshot_fixed_window =
+                    self.form.cfg.actions.screenshot.fixed_window =
                         cfg.actions.screenshot.fixed_window.clone();
                 }
                 self.form.screenshot_reset_targets = false;
@@ -783,27 +750,29 @@ enum Message {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::Mode(mode) => app.form.mode = mode,
+        Message::Mode(mode) => app.form.cfg.trigger.mode = mode,
         Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
-        Message::PerChar(on) => app.form.per_character_lookup = on,
-        Message::ThemePicked(theme) => app.form.theme = theme,
-        Message::FontPicked(font) => app.form.font = font.into_owned(),
-        Message::MaxWidth(v) => app.form.max_width_percent = v,
-        Message::MaxHeight(v) => app.form.max_height_percent = v,
-        Message::Summary(v) => app.form.summary_chars = v as usize,
-        Message::Highlight(on) => app.form.highlight_match = on,
-        Message::Scroll(on) => app.form.scroll_popup = on,
-        Message::EdgeAutoscroll(on) => app.form.edge_autoscroll = on,
-        Message::SidePanel(on) => app.form.side_panel = on,
+        Message::PerChar(on) => app.form.cfg.trigger.per_character_lookup = on,
+        Message::ThemePicked(theme) => app.form.cfg.popup.theme = theme,
+        Message::FontPicked(font) => app.form.cfg.popup.font = font.into_owned(),
+        Message::MaxWidth(v) => app.form.cfg.popup.max_width_percent = v,
+        Message::MaxHeight(v) => app.form.cfg.popup.max_height_percent = v,
+        Message::Summary(v) => app.form.cfg.popup.summary_chars = v as usize,
+        Message::Highlight(on) => app.form.cfg.popup.highlight_match = on,
+        Message::Scroll(on) => app.form.cfg.popup.scroll_popup = on,
+        Message::EdgeAutoscroll(on) => app.form.cfg.popup.edge_autoscroll = on,
+        Message::SidePanel(on) => app.form.cfg.popup.side_panel = on,
         Message::LayerPicked(layer) => {
             app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
         }
-        Message::LayoutModePicked(label) => app.form.layout_mode = layout_mode_of(&label),
-        Message::DictStyling(on) => app.form.dictionary_styling = on,
-        Message::ShowExamples(on) => app.form.show_examples = on,
-        Message::ShowAttributions(on) => app.form.show_attributions = on,
-        Message::ShowImages(on) => app.form.show_images = on,
-        Message::ShowPartOfSpeech(on) => app.form.show_part_of_speech = on,
+        Message::LayoutModePicked(label) => {
+            app.form.cfg.popup.layout_mode = value_of(&LAYOUT_MODES, &label, LayoutMode::Roomy);
+        }
+        Message::DictStyling(on) => app.form.cfg.popup.dictionary_styling = on,
+        Message::ShowExamples(on) => app.form.cfg.popup.show_examples = on,
+        Message::ShowAttributions(on) => app.form.cfg.popup.show_attributions = on,
+        Message::ShowImages(on) => app.form.cfg.popup.show_images = on,
+        Message::ShowPartOfSpeech(on) => app.form.cfg.popup.show_part_of_speech = on,
         Message::DictSelected(role, name) => press_row(app, role, name),
         Message::DictHover(role, at, point) => {
             app.hover = Some(Hover { role, y: list_y(at, point.y) });
@@ -819,7 +788,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // state from the saved config. This arm stores the picked strategy. Apply
         // compares the current file with the next file and runs a reindex when one
         // value changes (`super::apply`).
-        Message::RankingPicked(label) => app.form.ranking_strategy = ranking_strategy_of(&label),
+        Message::RankingPicked(label) => {
+            app.form.cfg.dictionaries.ranking_strategy =
+                value_of(&RANKING_STRATEGIES, &label, RankingStrategy::BestRank);
+        }
         Message::AddPath(v) => app.add_path = v,
         Message::DictAdd => app.add_dictionary(),
         Message::DictRemove => app.remove_dictionary(),
@@ -827,37 +799,41 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DictPicked(picked) => app.took_picked(picked),
         Message::Rebuild => return app.start_rebuild(),
         Message::RebuildProgress(p) => app.took_progress(p),
-        Message::Passes(v) => app.form.max_ocr_passes = v,
-        Message::PreferVertical(on) => app.form.prefer_vertical = on,
-        Message::ScanAlnum(on) => app.form.scan_alphanumeric = on,
-        Message::DiscardFurigana(on) => app.form.discard_furigana = on,
-        Message::ShowScanRegion(on) => app.form.show_scan_region = on,
+        Message::Passes(v) => app.form.cfg.ocr.max_ocr_passes = v,
+        Message::PreferVertical(on) => app.form.cfg.ocr.prefer_vertical = on,
+        Message::ScanAlnum(on) => app.form.cfg.ocr.scan_alphanumeric = on,
+        Message::DiscardFurigana(on) => app.form.cfg.ocr.discard_furigana = on,
+        Message::ShowScanRegion(on) => app.form.cfg.debug.show_scan_region = on,
         Message::CaptureW(v) => app.capture_w = v,
         Message::CaptureH(v) => app.capture_h = v,
         Message::ShowLookupLog(on) => app.linux.show_lookup_log = on,
-        Message::AnkiEnabled(on) => app.form.anki_enabled = on,
-        Message::AnkiUrl(v) => app.form.anki_url = v,
-        Message::AnkiDeck(v) => app.form.anki_deck = v,
-        Message::AnkiModel(v) => app.form.anki_model = v,
+        Message::AnkiEnabled(on) => app.form.cfg.anki.enabled = on,
+        Message::AnkiUrl(v) => app.form.cfg.anki.url = v,
+        Message::AnkiDeck(v) => app.form.cfg.anki.deck = v,
+        Message::AnkiModel(v) => app.form.cfg.anki.model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
-        Message::IncludeDictionaryName(on) => app.form.include_dictionary_name = on,
-        Message::FirstDictOnly(v) => app.form.first_dict_only = v,
+        Message::IncludeDictionaryName(on) => app.form.cfg.anki.include_dictionary_name = on,
+        Message::FirstDictOnly(v) => app.form.cfg.anki.first_dict_only = v,
         Message::SelectionButtonsPicked(label) => {
-            app.form.selection_buttons = selection_buttons_of(&label);
+            app.form.cfg.anki.selection_buttons =
+                value_of(&SELECTION_BUTTONS, &label, SelectionButtons::PrimaryAdditive);
         }
         Message::SelectionSeparatorPicked(label) => {
-            app.form.selection_separator = selection_separator_of(&label);
+            app.form.cfg.anki.selection_separator =
+                value_of(&SELECTION_SEPARATORS, &label, SelectionSeparator::Ellipsis);
         }
         Message::TripleClickPicked(label) => {
-            app.form.triple_click = triple_click_of(&label);
+            app.form.cfg.anki.triple_click =
+                value_of(&TRIPLE_CLICKS, &label, TripleClick::SenseWithExamples);
         }
-        Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
+        Message::IncludeScreenshot(on) => app.form.cfg.actions.screenshot.include_on_add = on,
         Message::ScreenshotModePicked(label) => {
-            app.form.screenshot_capture_mode = screenshot_mode_of(&label);
+            app.form.cfg.actions.screenshot.capture_mode =
+                value_of(&SCREENSHOT_MODES, &label, ScreenshotMode::default());
         }
         Message::ResetScreenshotTargets => {
-            app.form.screenshot_fixed_region = None;
-            app.form.screenshot_fixed_window = None;
+            app.form.cfg.actions.screenshot.fixed_region = None;
+            app.form.cfg.actions.screenshot.fixed_window = None;
             app.form.screenshot_reset_targets = true;
         }
         // This is the only place where empty text becomes `None`. The config field
@@ -872,8 +848,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
         }
-        Message::SentenceModePicked(label) => app.form.sentence_mode = sentence_mode_of(&label),
-        Message::ShowStaticOverlay(on) => app.form.show_static_overlay = on,
+        Message::SentenceModePicked(label) => {
+            app.form.cfg.anki.sentence_mode = value_of(&SENTENCE_MODES, &label, SentenceMode::Sentence);
+        }
+        Message::ShowStaticOverlay(on) => app.form.cfg.anki.show_static_overlay = on,
         Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
         Message::FieldMapAnki(i, v) => {
             if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
@@ -920,7 +898,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::CopyStaticRegionBind => {
-            if let Some(snippet) = app.static_region_bind_snippet() {
+            if let Some(snippet) =
+                app.static_region_bind_snippet()
+            {
                 return iced::clipboard::write(snippet);
             }
         }
@@ -1190,11 +1170,11 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 fn trigger_section(app: &App) -> Element<'_, Message> {
-    let selected = if app.form.mode == TriggerMode::Live {
+    let selected = if app.form.cfg.trigger.mode == TriggerMode::Live {
         TriggerMode::Live
-    } else if app.form.mode == TriggerMode::Toggle {
+    } else if app.form.cfg.trigger.mode == TriggerMode::Toggle {
         TriggerMode::Toggle
-    } else if app.form.mode == TriggerMode::Press {
+    } else if app.form.cfg.trigger.mode == TriggerMode::Press {
         TriggerMode::Press
     } else {
         // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
@@ -1212,7 +1192,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         app.compositor,
         &app.linux.trigger_key_linux,
         &app.exe,
-        snippets::trigger_bind(app.form.mode),
+        snippets::trigger_bind(app.form.cfg.trigger.mode),
     ) {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns the binding. Paste this into its config:"),
@@ -1314,7 +1294,7 @@ fn popup_section(app: &App) -> Element<'_, Message> {
         column![
             labeled(
                 "Theme",
-                pick_list(themes, Some(app.form.theme.clone()), Message::ThemePicked),
+                pick_list(themes, Some(app.form.cfg.popup.theme.clone()), Message::ThemePicked),
             ),
             labeled(
                 "Font",
@@ -1326,37 +1306,37 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             labeled(
                 "Max width (% of screen)",
                 row![
-                    slider(MAX_WIDTH_RANGE.0..=MAX_WIDTH_RANGE.1, app.form.max_width_percent, Message::MaxWidth).width(220),
-                    text(format!("{}%", app.form.max_width_percent)),
+                    slider(MAX_WIDTH_RANGE.0..=MAX_WIDTH_RANGE.1, app.form.cfg.popup.max_width_percent, Message::MaxWidth).width(220),
+                    text(format!("{}%", app.form.cfg.popup.max_width_percent)),
                 ]
                 .spacing(10),
             ),
             labeled(
                 "Max height (% of screen)",
                 row![
-                    slider(MAX_HEIGHT_RANGE.0..=MAX_HEIGHT_RANGE.1, app.form.max_height_percent, Message::MaxHeight).width(220),
-                    text(format!("{}%", app.form.max_height_percent)),
+                    slider(MAX_HEIGHT_RANGE.0..=MAX_HEIGHT_RANGE.1, app.form.cfg.popup.max_height_percent, Message::MaxHeight).width(220),
+                    text(format!("{}%", app.form.cfg.popup.max_height_percent)),
                 ]
                 .spacing(10),
             ),
             labeled(
                 "Summary length (characters)",
                 row![
-                    slider(SUMMARY_RANGE.0 as u16..=SUMMARY_RANGE.1 as u16, app.form.summary_chars as u16, Message::Summary).width(220),
-                    text(app.form.summary_chars.to_string()),
+                    slider(SUMMARY_RANGE.0 as u16..=SUMMARY_RANGE.1 as u16, app.form.cfg.popup.summary_chars as u16, Message::Summary).width(220),
+                    text(app.form.cfg.popup.summary_chars.to_string()),
                 ]
                 .spacing(10),
             ),
-            checkbox(app.form.highlight_match)
+            checkbox(app.form.cfg.popup.highlight_match)
                 .label("Box the word being defined")
                 .on_toggle(Message::Highlight),
-            checkbox(app.form.scroll_popup)
+            checkbox(app.form.cfg.popup.scroll_popup)
                 .label("Scroll long entries with the wheel")
                 .on_toggle(Message::Scroll),
-            checkbox(app.form.edge_autoscroll)
+            checkbox(app.form.cfg.popup.edge_autoscroll)
                 .label("Auto-scroll while dragging at the popup edge")
                 .on_toggle(Message::EdgeAutoscroll),
-            checkbox(app.form.side_panel)
+            checkbox(app.form.cfg.popup.side_panel)
                 .label("Show related words beside the popup")
                 .on_toggle(Message::SidePanel),
             labeled(
@@ -1367,6 +1347,21 @@ fn popup_section(app: &App) -> Element<'_, Message> {
         ]
         .spacing(10),
     )
+}
+
+/// Return the labels in a choice table.
+fn labels<T>(table: &[(T, &'static str)]) -> Vec<String> {
+    table.iter().map(|entry| entry.1.to_string()).collect()
+}
+
+/// Return the label for a value, or the first table label when absent.
+fn label_of<T: PartialEq + Copy>(table: &[(T, &'static str)], value: T) -> &'static str {
+    table.iter().find(|entry| entry.0 == value).map_or(table[0].1, |entry| entry.1)
+}
+
+/// Return the value for a label, or the supplied default when absent.
+fn value_of<T: Copy>(table: &[(T, &'static str)], label: &str, default: T) -> T {
+    table.iter().find(|entry| entry.1 == label).map_or(default, |entry| entry.0)
 }
 
 /// The layout-mode picker items, in display order.
@@ -1385,24 +1380,6 @@ const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
     (SelectionButtons::PrimaryReplacing, "Primary replacing"),
 ];
 
-fn selection_button_labels() -> Vec<String> {
-    SELECTION_BUTTONS.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-fn selection_button_label(buttons: SelectionButtons) -> &'static str {
-    SELECTION_BUTTONS
-        .iter()
-        .find(|&&(value, _)| value == buttons)
-        .map_or(SELECTION_BUTTONS[0].1, |&(_, label)| label)
-}
-
-fn selection_buttons_of(label: &str) -> SelectionButtons {
-    SELECTION_BUTTONS
-        .iter()
-        .find(|&&(_, value)| value == label)
-        .map_or(SelectionButtons::PrimaryAdditive, |&(buttons, _)| buttons)
-}
-
 /// This table lists selection separators in display order.
 const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
@@ -1411,65 +1388,12 @@ const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::ListItems, "List items"),
 ];
 
-fn selection_separator_labels() -> Vec<String> {
-    SELECTION_SEPARATORS.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-fn selection_separator_label(separator: SelectionSeparator) -> &'static str {
-    SELECTION_SEPARATORS
-        .iter()
-        .find(|&&(value, _)| value == separator)
-        .map_or(SELECTION_SEPARATORS[0].1, |&(_, label)| label)
-}
-
-fn selection_separator_of(label: &str) -> SelectionSeparator {
-    SELECTION_SEPARATORS
-        .iter()
-        .find(|&&(_, value)| value == label)
-        .map_or(SelectionSeparator::Ellipsis, |&(separator, _)| separator)
-}
-
 /// This table lists triple-click modes in display order.
 const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
     (TripleClick::Sense, "Sense"),
     (TripleClick::SenseWithExamples, "Sense with examples"),
     (TripleClick::Line, "Line"),
 ];
-
-fn triple_click_labels() -> Vec<String> {
-    TRIPLE_CLICKS.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-fn triple_click_label(value: TripleClick) -> &'static str {
-    TRIPLE_CLICKS
-        .iter()
-        .find(|&&(item, _)| item == value)
-        .map_or(TRIPLE_CLICKS[1].1, |&(_, label)| label)
-}
-
-fn triple_click_of(label: &str) -> TripleClick {
-    TRIPLE_CLICKS
-        .iter()
-        .find(|&&(_, value)| value == label)
-        .map_or(TripleClick::SenseWithExamples, |&(value, _)| value)
-}
-
-/// The picker's items, in table order.
-fn layout_labels() -> Vec<String> {
-    LAYOUT_MODES.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-/// The label for a layout mode. Every `LayoutMode` appears in the table, so the
-/// fallback cannot occur.
-fn layout_mode_label(mode: LayoutMode) -> &'static str {
-    LAYOUT_MODES.iter().find(|&&(m, _)| m == mode).map_or(LAYOUT_MODES[0].1, |&(_, l)| l)
-}
-
-/// The layout mode for a picked label. Only labels from this table return from
-/// the UI, so the fallback cannot occur there.
-fn layout_mode_of(label: &str) -> LayoutMode {
-    LAYOUT_MODES.iter().find(|&&(_, l)| l == label).map_or(LayoutMode::Roomy, |&(m, _)| m)
-}
 
 /// The controls that decide entry content.
 ///
@@ -1486,24 +1410,24 @@ fn content_section(app: &App) -> Element<'_, Message> {
             labeled(
                 "Layout",
                 pick_list(
-                    layout_labels(),
-                    Some(layout_mode_label(app.form.layout_mode).to_string()),
+                    labels(&LAYOUT_MODES),
+                    Some(label_of(&LAYOUT_MODES, app.form.cfg.popup.layout_mode).to_string()),
                     Message::LayoutModePicked,
                 ),
             ),
-            checkbox(app.form.dictionary_styling)
+            checkbox(app.form.cfg.popup.dictionary_styling)
                 .label("Use the dictionary's own fonts and colours")
                 .on_toggle(Message::DictStyling),
-            checkbox(app.form.show_examples)
+            checkbox(app.form.cfg.popup.show_examples)
                 .label("Show example sentences")
                 .on_toggle(Message::ShowExamples),
-            checkbox(app.form.show_attributions)
+            checkbox(app.form.cfg.popup.show_attributions)
                 .label("Show attributions and footnotes")
                 .on_toggle(Message::ShowAttributions),
-            checkbox(app.form.show_images)
+            checkbox(app.form.cfg.popup.show_images)
                 .label("Show images")
                 .on_toggle(Message::ShowImages),
-            checkbox(app.form.show_part_of_speech)
+            checkbox(app.form.cfg.popup.show_part_of_speech)
                 .label("Show part-of-speech labels inside the entry")
                 .on_toggle(Message::ShowPartOfSpeech),
         ]
@@ -1522,28 +1446,6 @@ const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
     (RankingStrategy::Median, "Median (rank by median freq)"),
 ];
 
-/// The picker's items, in table order.
-fn ranking_labels() -> Vec<String> {
-    RANKING_STRATEGIES.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-/// The label for a `RankingStrategy`. Every strategy appears in the table, so
-/// the fallback cannot occur.
-fn ranking_strategy_label(strategy: RankingStrategy) -> &'static str {
-    RANKING_STRATEGIES
-        .iter()
-        .find(|&&(s, _)| s == strategy)
-        .map_or(RANKING_STRATEGIES[0].1, |&(_, l)| l)
-}
-
-/// The strategy for a picked label. Only labels from this table return from the
-/// UI, so the fallback cannot occur there.
-fn ranking_strategy_of(label: &str) -> RankingStrategy {
-    RANKING_STRATEGIES
-        .iter()
-        .find(|&&(_, l)| l == label)
-        .map_or(RankingStrategy::BestRank, |&(s, _)| s)
-}
 
 /// The caption for one role's list.
 ///
@@ -1649,8 +1551,8 @@ fn ranking_row(app: &App) -> Element<'_, Message> {
     row![
         text("Ranking").size(14),
         pick_list(
-            ranking_labels(),
-            Some(ranking_strategy_label(app.form.ranking_strategy).to_string()),
+            labels(&RANKING_STRATEGIES),
+            Some(label_of(&RANKING_STRATEGIES, app.form.cfg.dictionaries.ranking_strategy).to_string()),
             Message::RankingPicked,
         ),
     ]
@@ -1773,7 +1675,7 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
         column![
             labeled(
                 "OCR passes per hover",
-                pick_list(passes, Some(app.form.max_ocr_passes), Message::Passes),
+                pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
             ),
             text("1 = no tiling. Higher reads further ahead but can resolve the wrong character.")
                 .size(13),
@@ -1786,19 +1688,19 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
                 text_input("100", &app.capture_h).on_input(Message::CaptureH).width(120),
             ),
             text("Vertical mode swaps these two values.").size(13),
-            checkbox(app.form.prefer_vertical)
+            checkbox(app.form.cfg.ocr.prefer_vertical)
                 .label("Prefer vertical text (manga, VN)")
                 .on_toggle(Message::PreferVertical),
-            checkbox(app.form.scan_alphanumeric)
+            checkbox(app.form.cfg.ocr.scan_alphanumeric)
                 .label("Scan alphanumeric text")
                 .on_toggle(Message::ScanAlnum),
-            checkbox(app.form.discard_furigana)
+            checkbox(app.form.cfg.ocr.discard_furigana)
                 .label("Discard furigana from OCR text")
                 .on_toggle(Message::DiscardFurigana),
-            checkbox(app.form.per_character_lookup)
+            checkbox(app.form.cfg.trigger.per_character_lookup)
                 .label("Look up each character as you hover (Live mode only)")
                 .on_toggle(Message::PerChar),
-            checkbox(app.form.show_scan_region)
+            checkbox(app.form.cfg.debug.show_scan_region)
                 .label("Outline what each hover captured")
                 .on_toggle(Message::ShowScanRegion),
             // OCR-to-clipboard stays here because it uses the same engine and settings
@@ -1818,6 +1720,28 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
     )
 }
 
+/// Render a native-only bind row or its no-chord message.
+fn native_bind_row<'a>(
+    snippet: Option<String>,
+    copy: Message,
+    copy_label: &'static str,
+    no_chord: &'static str,
+) -> Element<'a, Message> {
+    match snippet {
+        Some(snippet) => column![
+            text(
+                "Native channel only: this action has no portal shortcut, so a compositor \
+                 bind is the only way to reach it. Paste this into your compositor's config:"
+            ),
+            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            button(copy_label).on_press(copy),
+        ]
+        .spacing(6)
+        .into(),
+        None => text(no_chord).size(13).into(),
+    }
+}
+
 /// The OCR-to-clipboard bind, or the reason that no bind exists.
 ///
 /// No bind can mean that the user typed no chord or that the compositor has no
@@ -1834,30 +1758,12 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
         .size(13)
         .into();
     }
-    match app.ocr_clipboard_control() {
-        HotkeyControl::Snippet { text: snippet } => column![
-            text(
-                "Native channel only: this action has no portal shortcut, so a compositor \
-                 bind is the only way to reach it. Paste this into your compositor's config:"
-            ),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
-            button("Copy OCR-to-clipboard bind").on_press(Message::CopyOcrClipboardBind),
-        ]
-        .spacing(6)
-        .into(),
-        // This arm cannot occur because `ocr_clipboard_control` always uses
-        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
-        HotkeyControl::Rebind { .. } => {
-            text("OCR-to-clipboard has no portal shortcut; bind it in your compositor.")
-                .size(13)
-                .into()
-        }
-        HotkeyControl::NoChord => {
-            text("No OCR-to-clipboard chord is set, so there is no bind to copy - type one above.")
-                .size(13)
-                .into()
-        }
-    }
+    native_bind_row(
+        app.ocr_clipboard_bind_snippet(),
+        Message::CopyOcrClipboardBind,
+        "Copy OCR-to-clipboard bind",
+        "No OCR-to-clipboard chord is set, so there is no bind to copy - type one above.",
+    )
 }
 
 /// The sentence-capture picker items, in display order.
@@ -1873,23 +1779,6 @@ const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
     (SentenceMode::Static, "Static region"),
 ];
 
-/// The picker items in table order.
-fn sentence_labels() -> Vec<String> {
-    SENTENCE_MODES.iter().map(|&(_, label)| label.to_string()).collect()
-}
-
-/// The label for a `SentenceMode`. Every mode appears in the table, so the
-/// fallback cannot occur. The first item remains the default if a future mode
-/// lacks a table entry.
-fn sentence_mode_label(mode: SentenceMode) -> &'static str {
-    SENTENCE_MODES.iter().find(|&&(m, _)| m == mode).map_or(SENTENCE_MODES[0].1, |&(_, l)| l)
-}
-
-/// The sentence mode for a picked label. Only labels from this table return
-/// from the UI, so the fallback cannot occur there.
-fn sentence_mode_of(label: &str) -> SentenceMode {
-    SENTENCE_MODES.iter().find(|&&(_, l)| l == label).map_or(SentenceMode::Sentence, |&(m, _)| m)
-}
 
 /// The static-region row's copyable bind, or the reason that no bind exists.
 ///
@@ -1897,30 +1786,12 @@ fn sentence_mode_of(label: &str) -> SentenceMode {
 /// id. A compositor bind is the only path. The row must not suggest a portal
 /// consent dialog for this action.
 fn static_region_bind(app: &App) -> Element<'_, Message> {
-    match app.static_region_control() {
-        HotkeyControl::Snippet { text: snippet } => column![
-            text(
-                "Native channel only: this action has no portal shortcut, so a compositor \
-                 bind is the only way to reach it. Paste this into your compositor's config:"
-            ),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
-            button("Copy static-region bind").on_press(Message::CopyStaticRegionBind),
-        ]
-        .spacing(6)
-        .into(),
-        // This arm cannot occur because `static_region_control` always uses
-        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
-        HotkeyControl::Rebind { .. } => {
-            text("The static region has no portal shortcut; bind it in your compositor.")
-                .size(13)
-                .into()
-        }
-        HotkeyControl::NoChord => text(
-            "No static-region chord is set, so there is no bind to copy - type one above."
-        )
-        .size(13)
-        .into(),
-    }
+    native_bind_row(
+        app.static_region_bind_snippet(),
+        Message::CopyStaticRegionBind,
+        "Copy static-region bind",
+        "No static-region chord is set, so there is no bind to copy - type one above.",
+    )
 }
 
 /// The sentence-capture rows. They choose the Anki sentence field and, in
@@ -1933,14 +1804,14 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = vec![labeled(
         "Anki sentence field",
         pick_list(
-            sentence_labels(),
-            Some(sentence_mode_label(app.form.sentence_mode).to_string()),
+            labels(&SENTENCE_MODES),
+            Some(label_of(&SENTENCE_MODES, app.form.cfg.anki.sentence_mode).to_string()),
             Message::SentenceModePicked,
         ),
     )];
-    if app.form.sentence_mode == SentenceMode::Static {
+    if app.form.cfg.anki.sentence_mode == SentenceMode::Static {
         rows.push(
-            checkbox(app.form.show_static_overlay)
+            checkbox(app.form.cfg.anki.show_static_overlay)
                 .label("Show the static region outline")
                 .on_toggle(Message::ShowStaticOverlay)
                 .into(),
@@ -1969,49 +1840,22 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
 /// This action has no portal id, so the compositor bind is its only path. The
 /// row uses "Native channel" text for the same reason as `static_region_bind`.
 fn screenshot_bind(app: &App) -> Element<'_, Message> {
-    match app.screenshot_control() {
-        HotkeyControl::Snippet { text: snippet } => column![
-            text(
-                "Native channel only: this action has no portal shortcut, so a compositor \
-                 bind is the only way to reach it. Paste this into your compositor's config:"
-            ),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
-            button("Copy screenshot bind").on_press(Message::CopyScreenshotBind),
-        ]
-        .spacing(6)
-        .into(),
-        // This arm cannot occur because `screenshot_control` always uses
-        // `HotkeyChannel::Native`. Keep the fallback honest. Do not use an unwrap.
-        HotkeyControl::Rebind { .. } => {
-            text("The mining screenshot has no portal shortcut; bind it in your compositor.")
-                .size(13)
-                .into()
-        }
-        HotkeyControl::NoChord => text(
-            "No screenshot chord is set, so there is no bind to copy - type one above. \
-             Adding a card can still take a picture with the checkbox above."
-        )
-        .size(13)
-        .into(),
-    }
+    native_bind_row(
+        app.screenshot_bind_snippet(),
+        Message::CopyScreenshotBind,
+        "Copy screenshot bind",
+        "No screenshot chord is set, so there is no bind to copy - type one above. \
+         Adding a card can still take a picture with the checkbox above.",
+    )
 }
 
-/// Return the screenshot capture mode labels in the order shared by core.
-fn screenshot_mode_labels() -> Vec<String> {
-    ScreenshotMode::ALL.iter().map(ToString::to_string).collect()
-}
-
-/// Return the capture mode that matches a picker label.
-///
-/// The picker emits only labels from [`screenshot_mode_labels`]. The default
-/// still protects the form if a stale message arrives after a core change.
-fn screenshot_mode_of(label: &str) -> ScreenshotMode {
-    ScreenshotMode::ALL
-        .iter()
-        .copied()
-        .find(|mode| mode.to_string() == label)
-        .unwrap_or_default()
-}
+/// The screenshot capture mode picker items, in display order.
+const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
+    (ScreenshotMode::Region, "Region"),
+    (ScreenshotMode::Window, "Window"),
+    (ScreenshotMode::FixedRegion, "Fixed region"),
+    (ScreenshotMode::FixedWindow, "Fixed window"),
+];
 
 /// The mining screenshot rows. They control inclusion on add, the save folder,
 /// the capture mode, saved fixed targets, and the standalone screenshot chord.
@@ -2019,13 +1863,13 @@ fn screenshot_mode_of(label: &str) -> ScreenshotMode {
 /// Show every row in every state. The folder and chord also affect the
 /// standalone screenshot action, so `include_on_add` does not control them.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let region_summary = match app.form.screenshot_fixed_region {
+    let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
         Some([x, y, width, height]) => format!(
             "Saved fixed region: x={x}, y={y}, width={width}, height={height} physical pixels."
         ),
         None => "No fixed region is saved.".to_string(),
     };
-    let window_summary = match app.form.screenshot_fixed_window.as_ref() {
+    let window_summary = match app.form.cfg.actions.screenshot.fixed_window.as_ref() {
         Some(window) => format!(
             "Saved fixed window: app_id={:?}, title={:?}.",
             window.app_id, window.title
@@ -2033,7 +1877,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         None => "No fixed window is saved.".to_string(),
     };
     vec![
-        checkbox(app.form.include_screenshot)
+        checkbox(app.form.cfg.actions.screenshot.include_on_add)
             .label("Include screenshot when adding")
             .on_toggle(Message::IncludeScreenshot)
             .into(),
@@ -2046,8 +1890,8 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         labeled(
             "Screenshot capture mode",
             pick_list(
-                screenshot_mode_labels(),
-                Some(app.form.screenshot_capture_mode.to_string()),
+                labels(&SCREENSHOT_MODES),
+                Some(label_of(&SCREENSHOT_MODES, app.form.cfg.actions.screenshot.capture_mode).to_string()),
                 Message::ScreenshotModePicked,
             ),
         ),
@@ -2210,22 +2054,22 @@ fn anki_section(app: &App) -> Element<'_, Message> {
     };
 
     let body = column![
-        checkbox(app.form.anki_enabled)
+        checkbox(app.form.cfg.anki.enabled)
             .label("Enable Anki integration")
             .on_toggle(Message::AnkiEnabled),
         labeled(
             "AnkiConnect URL",
-            text_input("http://localhost:8765", &app.form.anki_url)
+            text_input("http://localhost:8765", &app.form.cfg.anki.url)
                 .on_input(Message::AnkiUrl)
                 .width(260),
         ),
         labeled(
             "Deck",
-            text_input("Default", &app.form.anki_deck).on_input(Message::AnkiDeck).width(260),
+            text_input("Default", &app.form.cfg.anki.deck).on_input(Message::AnkiDeck).width(260),
         ),
         labeled(
             "Note type",
-            text_input("Lapis", &app.form.anki_model).on_input(Message::AnkiModel).width(260),
+            text_input("Lapis", &app.form.cfg.anki.model).on_input(Message::AnkiModel).width(260),
         ),
         labeled(
             "Add-card chord (portal syntax)",
@@ -2234,36 +2078,36 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .width(200),
         ),
         add_bind,
-        checkbox(app.form.include_dictionary_name)
+        checkbox(app.form.cfg.anki.include_dictionary_name)
             .label("Include dictionary name")
             .on_toggle(Message::IncludeDictionaryName),
         // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
         // The daemon reads `anki.first_dict_only`, so this row lets the user change it
         // without a TOML edit.
-        checkbox(app.form.first_dict_only)
+        checkbox(app.form.cfg.anki.first_dict_only)
             .label("First dictionary only")
             .on_toggle(Message::FirstDictOnly),
         labeled(
             "Selection buttons",
             pick_list(
-                selection_button_labels(),
-                Some(selection_button_label(app.form.selection_buttons).to_string()),
+                labels(&SELECTION_BUTTONS),
+                Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
                 Message::SelectionButtonsPicked,
             ),
         ),
         labeled(
             "Selection separator",
             pick_list(
-                selection_separator_labels(),
-                Some(selection_separator_label(app.form.selection_separator).to_string()),
+                labels(&SELECTION_SEPARATORS),
+                Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
                 Message::SelectionSeparatorPicked,
             ),
         ),
         labeled(
             "Triple-click",
             pick_list(
-                triple_click_labels(),
-                Some(triple_click_label(app.form.triple_click).to_string()),
+                labels(&TRIPLE_CLICKS),
+                Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
                 Message::TripleClickPicked,
             ),
         ),
@@ -2404,10 +2248,10 @@ fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
 /// The combo item that matches the form font.
 ///
 /// [`font_items`] always includes the font used when the window opens. Later
-/// writes to `form.font` come from picked items, so `None` only means that no
+/// writes to `form.cfg.popup.font` come from picked items, so `None` only means that no
 /// preview family exists.
 fn selected_family(app: &App) -> Option<&Cow<'static, str>> {
-    app.fonts.iter().find(|f| f.as_ref() == app.form.font.as_str())
+    app.fonts.iter().find(|f| f.as_ref() == app.form.cfg.popup.font.as_str())
 }
 
 /// The preview uses the selected family when the combo offers it. Otherwise it
@@ -2540,7 +2384,7 @@ mod tests {
                 app.compositor,
                 &app.linux.trigger_key_linux,
                 &app.exe,
-                snippets::trigger_bind(app.form.mode),
+                snippets::trigger_bind(app.form.cfg.trigger.mode),
             )
         );
         // The full window still builds both portal rows. The status block is a widget
@@ -2624,7 +2468,7 @@ mod tests {
         let dir = scratch("dictionaryname");
         let mut app = app(&dir);
         let cfg = chibipop::config::Config::default();
-        assert!(app.form.include_dictionary_name, "the default keeps existing card output");
+        assert!(app.form.cfg.anki.include_dictionary_name, "the default keeps existing card output");
 
         let _ = update(&mut app, Message::IncludeDictionaryName(false));
         assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
@@ -2641,7 +2485,7 @@ mod tests {
         let dir = scratch("firstdict");
         let mut app = app(&dir);
         let cfg = chibipop::config::Config::default();
-        assert!(!app.form.first_dict_only, "the default is every dictionary");
+        assert!(!app.form.cfg.anki.first_dict_only, "the default is every dictionary");
 
         let _ = update(&mut app, Message::FirstDictOnly(true));
         assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
@@ -2701,7 +2545,8 @@ mod tests {
         app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
 
         let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        let snippet = app.ocr_clipboard_bind_snippet().expect("a typed chord has a bind");
+        let snippet = app.ocr_clipboard_bind_snippet()
+            .expect("a typed chord has a bind");
 
         assert_eq!("bind = ALT, C, exec, /usr/bin/chibipop ctl ocr-clipboard", snippet);
         assert!(
@@ -2723,10 +2568,16 @@ mod tests {
 
         let _ = update(&mut app, Message::OcrClipboardKey("   ".to_string()));
         assert_eq!(None, app.linux.ocr_clipboard_key_linux, "whitespace is not a chord");
-        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        assert_eq!(
+            None,
+            app.ocr_clipboard_bind_snippet()
+        );
         // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyOcrClipboardBind);
-        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        assert_eq!(
+            None,
+            app.ocr_clipboard_bind_snippet()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2738,11 +2589,18 @@ mod tests {
         let dir = scratch("ocrclipnoproto");
         let mut app = app(&dir);
         let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        assert!(app.ocr_clipboard_bind_snippet().is_some(), "a session that can copy offers one");
+        assert!(
+            app.ocr_clipboard_bind_snippet()
+                .is_some(),
+            "a session that can copy offers one"
+        );
 
         app.clipboard_rung = None;
 
-        assert_eq!(None, app.ocr_clipboard_bind_snippet());
+        assert_eq!(
+            None,
+            app.ocr_clipboard_bind_snippet()
+        );
         // The chord remains in the form. A user who later moves to a compositor with
         // data control keeps the value they typed.
         assert_eq!(Some("ALT+C".to_string()), app.linux.ocr_clipboard_key_linux);
@@ -2805,7 +2663,8 @@ mod tests {
         let mut app = app(&dir);
 
         let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-        let snippet = app.static_region_bind_snippet().expect("a chord has a bind");
+        let snippet = app.static_region_bind_snippet()
+            .expect("a chord has a bind");
 
         assert_eq!("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region", snippet);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2825,10 +2684,8 @@ mod tests {
         let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
 
         assert_eq!(
-            HotkeyControl::Snippet {
-                text: "bind = ALT, R, exec, /usr/bin/chibipop ctl static-region".to_string()
-            },
-            app.static_region_control(),
+            Some("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region".to_string()),
+            app.static_region_bind_snippet(),
             "a portal session must not change what this row offers"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2842,11 +2699,16 @@ mod tests {
         let mut app = app(&dir);
 
         assert_eq!("", app.linux.static_region_key_linux, "the shipped default is unset");
-        assert_eq!(HotkeyControl::NoChord, app.static_region_control());
-        assert_eq!(None, app.static_region_bind_snippet());
-        // The copy action does nothing, so it cannot paste an old bind.
+        assert_eq!(
+            None,
+            app.static_region_bind_snippet()
+        );
+        // The copy action does nothing, so it cannot copy an old bind.
         let _ = update(&mut app, Message::CopyStaticRegionBind);
-        assert_eq!(None, app.static_region_bind_snippet());
+        assert_eq!(
+            None,
+            app.static_region_bind_snippet()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2859,21 +2721,31 @@ mod tests {
         let mut app = app(&dir);
 
         assert_eq!(None, app.linux.screenshot_key_linux, "the shipped default is unset");
-        assert_eq!(HotkeyControl::NoChord, app.screenshot_control());
+        assert_eq!(
+            None,
+            app.screenshot_bind_snippet()
+        );
 
         let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
         assert_eq!(Some("SUPER+S".to_string()), app.linux.screenshot_key_linux);
         assert_eq!(
             "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot",
-            app.screenshot_bind_snippet().expect("a chord has a bind")
+            app.screenshot_bind_snippet()
+            .expect("a chord has a bind")
         );
 
         let _ = update(&mut app, Message::ScreenshotKey("   ".to_string()));
         assert_eq!(None, app.linux.screenshot_key_linux, "blank is absence, not an empty chord");
-        assert_eq!(None, app.screenshot_bind_snippet());
+        assert_eq!(
+            None,
+            app.screenshot_bind_snippet()
+        );
         // The copy action does nothing, so it cannot paste an old bind.
         let _ = update(&mut app, Message::CopyScreenshotBind);
-        assert_eq!(None, app.screenshot_bind_snippet());
+        assert_eq!(
+            None,
+            app.screenshot_bind_snippet()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2889,10 +2761,8 @@ mod tests {
         let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
 
         assert_eq!(
-            HotkeyControl::Snippet {
-                text: "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot".to_string()
-            },
-            app.screenshot_control(),
+            Some("bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot".to_string()),
+            app.screenshot_bind_snippet(),
             "a portal session must not change what this row offers"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2935,11 +2805,15 @@ mod tests {
             SentenceMode::All,
             SentenceMode::Static,
         ] {
-            let label = sentence_mode_label(mode);
-            assert_eq!(mode, sentence_mode_of(label), "{label}");
-            assert!(sentence_labels().iter().any(|l| l == label), "{label} must be offered");
+            let label = label_of(&SENTENCE_MODES, mode);
+            assert_eq!(
+                mode,
+                value_of(&SENTENCE_MODES, label, SentenceMode::Sentence),
+                "{label}"
+            );
+            assert!(labels(&SENTENCE_MODES).iter().any(|l| l == label), "{label} must be offered");
         }
-        assert_eq!(4, sentence_labels().len(), "the table is the whole list");
+        assert_eq!(4, labels(&SENTENCE_MODES).len(), "the table is the whole list");
     }
 
     /// A *Static region* choice stores the mode on the shared form. Apply writes it,
@@ -2948,13 +2822,13 @@ mod tests {
     fn picking_the_static_region_mode_stages_it_on_the_form() {
         let dir = scratch("srmode");
         let mut app = app(&dir);
-        assert_eq!(SentenceMode::Sentence, app.form.sentence_mode, "the shipped default");
+        assert_eq!(SentenceMode::Sentence, app.form.cfg.anki.sentence_mode, "the shipped default");
 
         let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
-        assert_eq!(SentenceMode::Static, app.form.sentence_mode);
+        assert_eq!(SentenceMode::Static, app.form.cfg.anki.sentence_mode);
 
         let _ = update(&mut app, Message::ShowStaticOverlay(false));
-        assert!(!app.form.show_static_overlay);
+        assert!(!app.form.cfg.anki.show_static_overlay);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3181,7 +3055,7 @@ mod tests {
 
         let _ = update(&mut app, Message::FontPicked(picked.clone()));
 
-        assert_eq!(picked.as_ref(), app.form.font);
+        assert_eq!(picked.as_ref(), app.form.cfg.popup.font);
         assert_eq!(
             Font::with_name(match picked {
                 Cow::Borrowed(name) => name,
@@ -3199,10 +3073,10 @@ mod tests {
     fn an_uninstalled_configured_family_is_offered_and_previews_as_default() {
         let dir = scratch("font_absent");
         let mut app = app(&dir);
-        app.form.font = "No Such Family 12345".to_string();
-        app.fonts = font_items(&app.form.font);
+        app.form.cfg.popup.font = "No Such Family 12345".to_string();
+        app.fonts = font_items(&app.form.cfg.popup.font);
 
-        assert_eq!(Some(&Cow::Owned(app.form.font.clone())), selected_family(&app));
+        assert_eq!(Some(&Cow::Owned(app.form.cfg.popup.font.clone())), selected_family(&app));
         assert_eq!(Font::DEFAULT, preview_font(selected_family(&app)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3962,10 +3836,14 @@ mod tests {
         for strategy in
             [RankingStrategy::BestRank, RankingStrategy::Priority, RankingStrategy::Median]
         {
-            let label = ranking_strategy_label(strategy);
-            assert_eq!(strategy, ranking_strategy_of(label), "{label}");
+            let label = label_of(&RANKING_STRATEGIES, strategy);
+            assert_eq!(
+                strategy,
+                value_of(&RANKING_STRATEGIES, label, RankingStrategy::BestRank),
+                "{label}"
+            );
         }
-        assert_eq!(RANKING_STRATEGIES.len(), ranking_labels().len());
+        assert_eq!(RANKING_STRATEGIES.len(), labels(&RANKING_STRATEGIES).len());
     }
 
     /// The picker writes the form field that the Frequency reindex uses. This is
@@ -3974,14 +3852,16 @@ mod tests {
     fn picking_a_ranking_strategy_stages_it_on_the_form() {
         let dir = scratch("ranking");
         let mut app = app(&dir);
-        assert_eq!(RankingStrategy::BestRank, app.form.ranking_strategy, "the shipped default");
+        assert_eq!(RankingStrategy::BestRank, app.form.cfg.dictionaries.ranking_strategy, "the shipped default");
 
         let _ = update(
             &mut app,
-            Message::RankingPicked(ranking_strategy_label(RankingStrategy::Median).to_string()),
+            Message::RankingPicked(
+                label_of(&RANKING_STRATEGIES, RankingStrategy::Median).to_string(),
+            ),
         );
 
-        assert_eq!(RankingStrategy::Median, app.form.ranking_strategy);
+        assert_eq!(RankingStrategy::Median, app.form.cfg.dictionaries.ranking_strategy);
         assert_eq!(RankingStrategy::Median, saved(&app).dictionaries.ranking_strategy);
         let _ = view(&app);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4026,7 +3906,9 @@ mod tests {
 
         let _ = update(
             &mut app,
-            Message::RankingPicked(ranking_strategy_label(RankingStrategy::Priority).to_string()),
+            Message::RankingPicked(
+                label_of(&RANKING_STRATEGIES, RankingStrategy::Priority).to_string(),
+            ),
         );
 
         assert_eq!(DictionaryWork::Reindex, work(&opened, &app));

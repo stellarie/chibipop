@@ -28,15 +28,12 @@ fn post(url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
 }
 
 /// Returns `true` when AnkiConnect answers the version request.
-pub fn check_connection(url: &str) -> Result<bool> {
+pub fn check_connection(url: &str) -> bool {
     let body = serde_json::json!({
         "action": "version",
         "version": VERSION,
     });
-    match post(url, &body) {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    post(url, &body).is_ok()
 }
 
 fn string_list(resp: &serde_json::Value) -> Result<Vec<String>> {
@@ -189,35 +186,6 @@ fn require_expression_route(field_map: &[crate::config::FieldMapping]) -> Result
     )
 }
 
-/// Adds a note and returns its ID.
-pub fn add_note(
-    url: &str,
-    deck: &str,
-    model: &str,
-    fields: &HashMap<String, String>,
-    field_map: &[crate::config::FieldMapping],
-) -> Result<i64> {
-    require_expression_route(field_map)?;
-    let body = serde_json::json!({
-        "action": "addNote",
-        "version": VERSION,
-        "params": {
-            "note": {
-                "deckName": deck,
-                "modelName": model,
-                "fields": mapped_fields(fields, field_map),
-                "options": {
-                    "allowDuplicate": false,
-                },
-            },
-        },
-    });
-    let resp = post(url, &body)?;
-    resp.get("result")
-        .and_then(|r| r.as_i64())
-        .context("addNote did not return a note ID")
-}
-
 /// An image to attach to a note.
 pub struct NotePicture {
     pub data_base64: String,
@@ -254,8 +222,8 @@ fn build_add_note_body(
     })
 }
 
-/// Adds a note with a picture.
-pub fn add_note_with_picture(
+/// Adds a note with an optional picture.
+pub fn add_note(
     url: &str,
     deck: &str,
     model: &str,
@@ -284,6 +252,8 @@ fn escape_html(s: &str) -> String {
 /// visible blank line.
 const PLAIN_GROUP_SEPARATOR: &str = "<br><br>\n";
 
+const HTML_GROUP_SEPARATOR: &str = "<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">";
+
 /// Places a Dictionary name above its numbered plain-text definitions.
 ///
 /// Anki stores field values as HTML. Square brackets can become furigana under a
@@ -303,41 +273,64 @@ fn html_dictionary_group(name: &str, items: String, include_dictionary_name: boo
     format!("{heading}<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>")
 }
 
+/// Builds the glossary fields for the supplied Dictionary groups.
+fn glossary_fields<'a>(
+    card: &crate::present::Card,
+    groups: impl Iterator<Item = (&'a str, Vec<String>, Vec<String>)>,
+    include_dictionary_name: bool,
+) -> HashMap<String, String> {
+    let mut plain_groups = Vec::new();
+    let mut html_groups = Vec::new();
+    for (dict_name, plain, html) in groups {
+        if plain.is_empty() && html.is_empty() {
+            continue;
+        }
+        if !plain.is_empty() {
+            let numbered = plain
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| format!("{}. {value}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            plain_groups.push(plain_dictionary_group(
+                dict_name,
+                numbered,
+                include_dictionary_name,
+            ));
+        }
+        if !html.is_empty() {
+            // A newline has no effect in HTML, so use `<li>` tags.
+            let items = html
+                .into_iter()
+                .map(|value| format!("<li>{value}</li>"))
+                .collect();
+            html_groups.push(html_dictionary_group(dict_name, items, include_dictionary_name));
+        }
+    }
+    fields_with_glossary(
+        card,
+        plain_groups.join(PLAIN_GROUP_SEPARATOR),
+        html_groups.join(HTML_GROUP_SEPARATOR),
+    )
+}
+
 /// Builds field values from a card.
 pub fn fields_from_card(
     card: &crate::present::Card,
     blocks: &[crate::present::GlossBlock],
     include_dictionary_name: bool,
 ) -> HashMap<String, String> {
-    let glossary = blocks
-        .iter()
-        .map(|b| {
-            let numbered = b
-                .glosses()
-                .enumerate()
-                .map(|(i, g)| format!("{}. {g}", i + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
-            plain_dictionary_group(&b.dict_name, numbered, include_dictionary_name)
-        })
-        .collect::<Vec<_>>()
-        .join(PLAIN_GROUP_SEPARATOR);
-    // A newline has no effect in HTML, so use <li> tags.
     // Build this field here because card mining occurs once. This avoids work during each hover.
-    let glossary_html = blocks
-        .iter()
-        .map(|b| {
-            let items: String = b
-                .entries
-                .iter()
-                .flat_map(|e| render_html(&e.doc, Selection::Whole, RoleFilter::CARD))
-                .map(|g| format!("<li>{g}</li>"))
-                .collect();
-            html_dictionary_group(&b.dict_name, items, include_dictionary_name)
-        })
-        .collect::<Vec<_>>()
-        .join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">");
-    fields_with_glossary(card, glossary, glossary_html)
+    let groups = blocks.iter().map(|block| {
+        let plain = block.glosses().map(str::to_string).collect();
+        let html = block
+            .entries
+            .iter()
+            .flat_map(|entry| render_html(&entry.doc, Selection::Whole, RoleFilter::CARD))
+            .collect();
+        (block.dict_name.as_str(), plain, html)
+    });
+    glossary_fields(card, groups, include_dictionary_name)
 }
 
 /// Builds field values from the selected ranges of every Entry.
@@ -350,10 +343,8 @@ pub fn fields_from_selection(
     separator: Separator,
     include_dictionary_name: bool,
 ) -> HashMap<String, String> {
-    let mut plain_groups = Vec::new();
-    let mut html_groups = Vec::new();
     let mut ordinal = 0u32;
-    for block in &card.blocks {
+    let groups = card.blocks.iter().map(|block| {
         let mut plain = Vec::new();
         let mut html = Vec::new();
         for entry in &block.entries {
@@ -363,42 +354,15 @@ pub fn fields_from_selection(
                 continue;
             }
             plain.extend(plain_selected(&entry.doc, &ranges, RoleFilter::CARD, separator));
-            html.extend(
-                render_html(
-                    &entry.doc,
-                    Selection::Ranges { ranges: &ranges, separator },
-                    RoleFilter::CARD,
-                )
-                .into_iter()
-                .map(|value| format!("<li>{value}</li>")),
-            );
-        }
-        if !plain.is_empty() {
-            let numbered = plain
-                .into_iter()
-                .enumerate()
-                .map(|(index, value)| format!("{}. {value}", index + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
-            plain_groups.push(plain_dictionary_group(
-                &block.dict_name,
-                numbered,
-                include_dictionary_name,
+            html.extend(render_html(
+                &entry.doc,
+                Selection::Ranges { ranges: &ranges, separator },
+                RoleFilter::CARD,
             ));
         }
-        if !html.is_empty() {
-            html_groups.push(html_dictionary_group(
-                &block.dict_name,
-                html.concat(),
-                include_dictionary_name,
-            ));
-        }
-    }
-    fields_with_glossary(
-        card,
-        plain_groups.join(PLAIN_GROUP_SEPARATOR),
-        html_groups.join("<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">"),
-    )
+        (block.dict_name.as_str(), plain, html)
+    });
+    glossary_fields(card, groups, include_dictionary_name)
 }
 
 fn fields_with_glossary(
@@ -892,12 +856,12 @@ mod tests {
             crate::config::FieldMapping { anki_field: "Expression".into(), source: "frequency".into() },
             crate::config::FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
         ];
-        let err = add_note("not-a-url", "Default", "Lapis", &fields, &field_map).unwrap_err();
+        let err = add_note("not-a-url", "Default", "Lapis", &fields, &field_map, None).unwrap_err();
         assert!(format!("{err:#}").contains("expression"));
     }
 
     #[test]
-    fn add_note_with_picture_includes_picture_array() {
+    fn add_note_includes_picture_array() {
         let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
         let field_map = vec![crate::config::FieldMapping {
             anki_field: "Expression".into(),
@@ -918,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn add_note_with_picture_none_omits_picture() {
+    fn add_note_none_omits_picture() {
         let fields = HashMap::from([("expression".to_string(), "宿舎".to_string())]);
         let field_map = vec![crate::config::FieldMapping {
             anki_field: "Expression".into(),
