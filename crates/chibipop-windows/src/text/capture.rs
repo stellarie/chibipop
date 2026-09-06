@@ -80,16 +80,36 @@ impl CaptureGuard {
     /// Wait up to `ACK_TIMEOUT` for the acknowledgement. Continue without the
     /// acknowledgement if the main thread does not respond.
     fn hide_for_capture(&self) {
+        let started = Instant::now();
         let (ack_tx, ack_rx) = mpsc::channel();
         if self.request_tx.send(CaptureGuardMsg::Hide { ack: ack_tx }).is_err() {
+            eprintln!(
+                "chibipop: capture guard stage=hide outcome=disconnected elapsed_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
             return; // The main thread is gone, so capture cannot hide its windows.
         }
         self.wake_main_thread();
-        if ack_rx.recv_timeout(ACK_TIMEOUT).is_err() {
-            eprintln!(
-                "chibipop: capture guard: hide was not acknowledged within {ACK_TIMEOUT:?}; \
-                 capturing anyway - this capture may include the popup itself"
-            );
+        match ack_rx.recv_timeout(ACK_TIMEOUT) {
+            Ok(()) => eprintln!(
+                "chibipop: capture guard stage=hide outcome=ack elapsed_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "chibipop: capture guard stage=hide outcome=timeout limit_ms={} elapsed_ms={:.3}",
+                    ACK_TIMEOUT.as_secs_f64() * 1000.0,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                eprintln!(
+                    "chibipop: capture guard: hide was not acknowledged within {ACK_TIMEOUT:?}; \
+                     capturing anyway - this capture may include the popup itself"
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => eprintln!(
+                "chibipop: capture guard stage=hide outcome=disconnected elapsed_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
         }
     }
 
@@ -230,7 +250,8 @@ thread_local! {
 ///
 /// Use GDI `BitBlt` when DXGI fails or returns a flat frame.
 fn capture_region(region: PhysRect) -> Result<Frame> {
-    match capture_dxgi(region) {
+    let started = Instant::now();
+    let result = match capture_dxgi(region) {
         // A flat frame cannot provide text, so use the fallback.
         Ok(buf) if !is_uniform(&buf) => Ok(Frame {
             buf,
@@ -244,7 +265,29 @@ fn capture_region(region: PhysRect) -> Result<Frame> {
         }),
         Ok(_) => bitblt_after(region, "DXGI frame was one flat colour".to_string()),
         Err(e) => bitblt_after(region, format!("{e:#}")),
+    };
+    match &result {
+        Ok(frame) => eprintln!(
+            "chibipop: capture stage=region backend={} region=({},{} {}x{}) bytes={} fallback={} elapsed_ms={:.3}",
+            frame.source,
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            frame.buf.len(),
+            frame.fallback.as_deref().unwrap_or("none"),
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
+        Err(e) => eprintln!(
+            "chibipop: capture stage=region backend=none region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
     }
+    result
 }
 
 /// Capture the current pixels and scale them by `factor` with nearest-neighbor interpolation.
@@ -321,8 +364,41 @@ fn capture_dxgi(region: PhysRect) -> Result<Vec<u8>> {
 
 /// Wait for a usable desktop frame, then copy the requested region.
 fn refresh_and_copy(st: &mut DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
-    refresh_desktop(st)?;
-    copy_out(st, region)
+    let refresh_started = Instant::now();
+    if let Err(e) = refresh_desktop(st) {
+        eprintln!(
+            "chibipop: capture backend=dxgi stage=refresh outcome=failed elapsed_ms={:.3} error={e:#}",
+            refresh_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        return Err(e);
+    }
+    eprintln!(
+        "chibipop: capture backend=dxgi stage=refresh outcome=ready elapsed_ms={:.3}",
+        refresh_started.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    let copy_started = Instant::now();
+    let result = copy_out(st, region);
+    match &result {
+        Ok(buf) => eprintln!(
+            "chibipop: capture backend=dxgi stage=copy region=({},{} {}x{}) bytes={} elapsed_ms={:.3}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            buf.len(),
+            copy_started.elapsed().as_secs_f64() * 1000.0,
+        ),
+        Err(e) => eprintln!(
+            "chibipop: capture backend=dxgi stage=copy region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            copy_started.elapsed().as_secs_f64() * 1000.0,
+        ),
+    }
+    result
 }
 
 /// Refresh the retained desktop frame when a new frame exists.
@@ -335,54 +411,73 @@ fn refresh_and_copy(st: &mut DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
 fn refresh_desktop(st: &mut DxgiState) -> Result<()> {
     let warm = st.last.is_some();
     let deadline = Instant::now() + COLD_BUDGET;
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let wait = if warm {
-            WARM_ACQUIRE_MS
-        } else {
-            left.as_millis() as u32
-        };
-        let mut fi = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut res: Option<IDXGIResource> = None;
-        // SAFETY: `fi` and `res` are live locals. This code releases each acquired
-        // frame before the next acquire, as the API requires.
-        let got = unsafe { st.dup.AcquireNextFrame(wait, &mut fi, &mut res) };
-        match got {
-            Ok(()) => {
-                let mut fresh = false;
-                let mut failed = None;
-                if fi.LastPresentTime != 0 {
-                    match res.as_ref().context("null resource") {
-                        Ok(r) => match store_desktop(st, r) {
-                            Ok(()) => fresh = true,
+    let mut attempts = 0;
+    let mut timeouts = 0;
+    let mut fresh_frame = false;
+    let started = Instant::now();
+    let result: Result<()> = (|| {
+        loop {
+            attempts += 1;
+            let left = deadline.saturating_duration_since(Instant::now());
+            let wait = if warm { WARM_ACQUIRE_MS } else { left.as_millis() as u32 };
+            let mut fi = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut res: Option<IDXGIResource> = None;
+            // SAFETY: `fi` and `res` are live locals. This code releases each acquired
+            // frame before the next acquire, as the API requires.
+            let got = unsafe { st.dup.AcquireNextFrame(wait, &mut fi, &mut res) };
+            match got {
+                Ok(()) => {
+                    let mut fresh = false;
+                    let mut failed = None;
+                    if fi.LastPresentTime != 0 {
+                        match res.as_ref().context("null resource") {
+                            Ok(r) => match store_desktop(st, r) {
+                                Ok(()) => fresh = true,
+                                Err(e) => failed = Some(e),
+                            },
                             Err(e) => failed = Some(e),
-                        },
-                        Err(e) => failed = Some(e),
+                        }
+                    }
+                    // SAFETY: This call releases the frame acquired above.
+                    unsafe {
+                        let _ = st.dup.ReleaseFrame();
+                    }
+                    if let Some(e) = failed {
+                        return Err(e);
+                    }
+                    if fresh {
+                        fresh_frame = true;
+                        return Ok(());
                     }
                 }
-                // SAFETY: This call releases the frame acquired above.
-                unsafe {
-                    let _ = st.dup.ReleaseFrame();
-                }
-                if let Some(e) = failed {
-                    return Err(e);
-                }
-                if fresh {
-                    return Ok(());
-                }
+                Err(e) if e.code() == WAIT_TIMEOUT => timeouts += 1,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) if e.code() == WAIT_TIMEOUT => {}
-            Err(e) => return Err(e.into()),
+            if warm || Instant::now() >= deadline {
+                break;
+            }
         }
-        if warm || Instant::now() >= deadline {
-            break;
+        if st.last.is_some() {
+            Ok(())
+        } else {
+            anyhow::bail!("no live desktop frame within {COLD_BUDGET:?}")
         }
-    }
-    if st.last.is_some() {
-        Ok(())
-    } else {
-        anyhow::bail!("no live desktop frame within {COLD_BUDGET:?}")
-    }
+    })();
+    let freshness = match &result {
+        Ok(()) if fresh_frame => "fresh",
+        Ok(()) => "retained",
+        Err(_) => "unavailable",
+    };
+    eprintln!(
+        "chibipop: capture backend=dxgi stage=acquire warm={} wait_limit_ms={} attempts={} timeouts={} freshness={} elapsed_ms={:.3}",
+        warm,
+        if warm { f64::from(WARM_ACQUIRE_MS) } else { COLD_BUDGET.as_secs_f64() * 1000.0 },
+        attempts,
+        timeouts,
+        freshness,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+    result
 }
 
 /// Copy this desktop frame into the retained texture for later crops.
@@ -609,6 +704,7 @@ impl Drop for Selection {
 
 /// Capture a region with the GDI `BitBlt` path.
 fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
+    let started = Instant::now();
     let (w, h) = (region.w, region.h);
     if w <= 0 || h <= 0 {
         anyhow::bail!("capture region has a non-positive extent: {w}x{h}");
@@ -618,7 +714,7 @@ fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
         .and_then(|n| n.checked_mul(4))
         .context("capture region is too large to allocate")?;
 
-    unsafe {
+    let result: Result<Vec<u8>> = (|| unsafe {
         let screen = ScreenDc(GetDC(None));
         if screen.0.is_invalid() {
             anyhow::bail!("GetDC(None) returned a null device context");
@@ -656,7 +752,27 @@ fn capture_bitblt(region: PhysRect) -> Result<Vec<u8>> {
             anyhow::bail!("GetDIBits copied {scanlines} of {h} scanlines");
         }
         Ok(buf)
+    })();
+    match &result {
+        Ok(buf) => eprintln!(
+            "chibipop: capture backend=bitblt stage=capture region=({},{} {}x{}) bytes={} elapsed_ms={:.3}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            buf.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
+        Err(e) => eprintln!(
+            "chibipop: capture backend=bitblt stage=capture region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            started.elapsed().as_secs_f64() * 1000.0,
+        ),
     }
+    result
 }
 
 

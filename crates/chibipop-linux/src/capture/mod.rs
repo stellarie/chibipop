@@ -119,6 +119,12 @@ pub fn open(setup: &Setup, log: &mut dyn FnMut(&str)) -> Result<Opened> {
             let backend =
                 WlrScreencopy::open(&setup.globals).context("opening the screencopy backend")?;
             let outputs = backend.outputs();
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=open outputs={} damage_capable={} buffer_done={}",
+                outputs.len(),
+                backend.damage_capable,
+                backend.sends_buffer_done,
+            );
             Ok(Opened { backend: Box::new(backend), outputs })
         }
         Some(Backend::Portal) => {
@@ -225,6 +231,13 @@ pub struct WlrScreencopy {
     said_no_race: bool,
 }
 
+fn slot_name(slot: Slot) -> &'static str {
+    match slot {
+        Slot::Copy => "copy",
+        Slot::Watch => "watch",
+    }
+}
+
 impl WlrScreencopy {
     /// Bind the backend on the caller's thread.
     ///
@@ -317,17 +330,35 @@ impl WlrScreencopy {
     fn settle(&mut self) -> Result<Verdict> {
         let Some(frame) = self.watch_frame.clone() else {
             self.pacer.disarmed();
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=damage_wait outcome=no_race freshness=damaged elapsed_ms=0.000"
+            );
             return Ok(Verdict::Damaged);
         };
-        self.pump(Instant::now() + DWELL_DEADLINE, |st| st.watch.outcome.is_some())?;
+        let started = Instant::now();
+        if let Err(e) = self.pump(Instant::now() + DWELL_DEADLINE, |st| st.watch.outcome.is_some()) {
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=damage_wait outcome=failed elapsed_ms={:.3} error={e:#}",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Err(e);
+        }
         if self.st.watch.outcome.is_none() {
             // The deadline won. No damage reached the watched box, so the held pixels
             // still match the screen. Keep the race active. A static dwell then needs no copies.
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=damage_wait outcome=deadline freshness=unchanged elapsed_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
             return Ok(Verdict::Static);
         }
         frame.destroy();
         self.watch_frame = None;
         self.pacer.disarmed();
+        eprintln!(
+            "chibipop: capture backend=wlr-screencopy stage=damage_wait outcome=damaged freshness=fresh elapsed_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(Verdict::Damaged)
     }
 
@@ -379,23 +410,82 @@ impl WlrScreencopy {
     /// Wait for a frame's buffer enumeration for no more than `within`.
     fn enumerate(&mut self, slot: Slot, within: Duration) -> Result<session::Shape> {
         let buffer_done = self.sends_buffer_done;
-        self.pump(Instant::now() + within, move |st| {
+        let started = Instant::now();
+        if let Err(e) = self.pump(Instant::now() + within, move |st| {
             let s = st.slot(slot);
             s.outcome.is_some() || if buffer_done { s.enumerated } else { s.shape.is_some() }
-        })?;
+        }) {
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=enumerate slot={} outcome=failed wait_limit_ms={} elapsed_ms={:.3} error={e:#}",
+                slot_name(slot),
+                within.as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Err(e);
+        }
         let s = self.st.slot(slot);
         if s.outcome == Some(Outcome::Failed) {
-            anyhow::bail!("the compositor failed the frame before offering a buffer");
+            let error = anyhow::anyhow!("the compositor failed the frame before offering a buffer");
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=enumerate slot={} outcome=failed wait_limit_ms={} elapsed_ms={:.3} error={error:#}",
+                slot_name(slot),
+                within.as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Err(error);
         }
-        s.shape.with_context(|| {
+        let result = s.shape.with_context(|| {
             format!("the compositor offered no shm buffer within {within:?}")
-        })
+        });
+        match &result {
+            Ok(shape) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=enumerate slot={} outcome=ready wait_limit_ms={} shape={}x{} stride={} elapsed_ms={:.3}",
+                slot_name(slot),
+                within.as_secs_f64() * 1000.0,
+                shape.w,
+                shape.h,
+                shape.stride,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+            Err(e) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=enumerate slot={} outcome=timeout wait_limit_ms={} elapsed_ms={:.3} error={e:#}",
+                slot_name(slot),
+                within.as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+        }
+        result
     }
 
     /// Copy `region` from every output that it covers.
     fn copy_region(&mut self, region: PhysRect) -> Result<Vec<u8>> {
         self.st.geometries(&mut self.geoms);
         geometry::split(&self.geoms, region, &mut self.pieces);
+        eprintln!(
+            "chibipop: capture backend=wlr-screencopy stage=split region=({},{} {}x{}) pieces={}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            self.pieces.len(),
+        );
+        for (index, piece) in self.pieces.iter().enumerate() {
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=split piece={} output={} logical=({},{} {}x{}) want=({},{} {}x{}) dest=({}, {})",
+                index,
+                piece.output,
+                piece.logical.x,
+                piece.logical.y,
+                piece.logical.w,
+                piece.logical.h,
+                piece.want.x,
+                piece.want.y,
+                piece.want.w,
+                piece.want.h,
+                piece.dest.x,
+                piece.dest.y,
+            );
+        }
         anyhow::ensure!(
             !self.pieces.is_empty(),
             "{}x{} at ({},{}) is on no output",
@@ -418,12 +508,33 @@ impl WlrScreencopy {
 
     /// Copy one output's share of a region.
     fn copy_piece(&mut self, piece: Piece, region: PhysRect, out: &mut [u8]) -> Result<()> {
+        let started = Instant::now();
         let output = self.st.outputs[piece.output].output.clone();
         self.st.copy = session::FrameSlot::default();
         let frame = self.session.capture(&self.manager, &output, piece.logical, Slot::Copy);
         let copied = self.copy_into(&frame, piece, region, out);
         // The protocol allows one use. A ready or failed frame is spent.
         frame.destroy();
+        match &copied {
+            Ok(()) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=piece output={} region=({},{} {}x{}) outcome=ready elapsed_ms={:.3}",
+                piece.output,
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+            Err(e) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=piece output={} region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+                piece.output,
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+        }
         copied
     }
 
@@ -452,11 +563,43 @@ impl WlrScreencopy {
             shape.stride,
             shape.format,
         )?;
+        let wait_started = Instant::now();
         frame.copy(&buffer);
-        self.pump(Instant::now() + COPY_DEADLINE, |st| st.copy.outcome.is_some())?;
+        if let Err(e) = self.pump(Instant::now() + COPY_DEADLINE, |st| st.copy.outcome.is_some()) {
+            eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=copy_wait outcome=failed region=({},{} {}x{}) wait_limit_ms={} elapsed_ms={:.3} error={e:#}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                COPY_DEADLINE.as_secs_f64() * 1000.0,
+                wait_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Err(e);
+        }
         match self.st.copy.outcome {
-            Some(Outcome::Ready) => {}
-            Some(Outcome::Failed) => anyhow::bail!("the compositor failed the copy"),
+            Some(Outcome::Ready) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=copy_wait outcome=ready region=({},{} {}x{}) wait_limit_ms={} elapsed_ms={:.3}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                COPY_DEADLINE.as_secs_f64() * 1000.0,
+                wait_started.elapsed().as_secs_f64() * 1000.0,
+            ),
+            Some(Outcome::Failed) => {
+                let error = anyhow::anyhow!("the compositor failed the copy");
+                eprintln!(
+                    "chibipop: capture backend=wlr-screencopy stage=copy_wait outcome=failed region=({},{} {}x{}) wait_limit_ms={} elapsed_ms={:.3} error={error:#}",
+                    region.x,
+                    region.y,
+                    region.w,
+                    region.h,
+                    COPY_DEADLINE.as_secs_f64() * 1000.0,
+                    wait_started.elapsed().as_secs_f64() * 1000.0,
+                );
+                return Err(error);
+            }
             // The protocol has no third answer. `copy` is followed by `flags` and
             // `ready`, or by `failed` (`wlr-screencopy-unstable-v1`, the `copy`
             // request). Silence means neither answer. A compositor shows this
@@ -464,11 +607,23 @@ impl WlrScreencopy {
             // left a DPMS-off display unanswered, although the same awake
             // display answered in 2 ms. `COPY_DEADLINE` is 400 ms. Report that
             // condition, not the timer.
-            None => anyhow::bail!(
-                "the copy went unanswered for {COPY_DEADLINE:?}: the compositor owes ready \
-                 or failed and sent neither, which is what an output nothing is repainting \
-                 does - a display asleep or powered off"
-            ),
+            None => {
+                let error = anyhow::anyhow!(
+                    "the copy went unanswered for {COPY_DEADLINE:?}: the compositor owes ready \
+                     or failed and sent neither, which is what an output nothing is repainting \
+                     does - a display asleep or powered off"
+                );
+                eprintln!(
+                    "chibipop: capture backend=wlr-screencopy stage=copy_wait outcome=timeout region=({},{} {}x{}) wait_limit_ms={} elapsed_ms={:.3} error={error:#}",
+                    region.x,
+                    region.y,
+                    region.w,
+                    region.h,
+                    COPY_DEADLINE.as_secs_f64() * 1000.0,
+                    wait_started.elapsed().as_secs_f64() * 1000.0,
+                );
+                return Err(error);
+            }
         }
         let cut = geometry::cut(&piece, shape.w, shape.h)
             .context("the copied buffer holds none of the requested pixels")?;
@@ -481,41 +636,75 @@ impl WlrScreencopy {
             order,
             y_invert: self.st.copy.y_invert,
         };
+        let crop_started = Instant::now();
         crop::blit(&self.bytes, &buf, cut.src, cut.dest, out, region.w, region.h);
+        eprintln!(
+            "chibipop: capture backend=wlr-screencopy stage=crop region=({},{} {}x{}) bytes={} elapsed_ms={:.3}",
+            region.x,
+            region.y,
+            region.w,
+            region.h,
+            out.len(),
+            crop_started.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(())
     }
 }
 
 impl RegionCapture for WlrScreencopy {
     fn grab(&mut self, region: PhysRect) -> Result<Frame> {
-        anyhow::ensure!(
-            region.w > 0 && region.h > 0,
-            "a {}x{} region has no pixels",
-            region.w,
-            region.h
-        );
-        let cached = self.take_held(region).is_some();
-        let mut step = self.pacer.step(region, cached);
-        if step == Step::Settle {
-            let verdict = self.settle()?;
-            self.pacer.settled(verdict);
-            step = self.pacer.step(region, true);
-        }
-        if step == Step::Serve {
-            if let Some(buf) = self.take_held(region) {
-                return Ok(Frame {
-                    buf: buf.to_vec(),
-                    w: region.w,
-                    h: region.h,
-                    source: SOURCE,
-                    fallback: None,
-                    unchanged: true,
-                });
+        let started = Instant::now();
+        let result: Result<Frame> = (|| {
+            anyhow::ensure!(
+                region.w > 0 && region.h > 0,
+                "a {}x{} region has no pixels",
+                region.w,
+                region.h
+            );
+            let cached = self.take_held(region).is_some();
+            let mut step = self.pacer.step(region, cached);
+            if step == Step::Settle {
+                let verdict = self.settle()?;
+                self.pacer.settled(verdict);
+                step = self.pacer.step(region, true);
             }
+            if step == Step::Serve {
+                if let Some(buf) = self.take_held(region) {
+                    return Ok(Frame {
+                        buf: buf.to_vec(),
+                        w: region.w,
+                        h: region.h,
+                        source: SOURCE,
+                        fallback: None,
+                        unchanged: true,
+                    });
+                }
+            }
+            let buf = self.copy_region(region)?;
+            self.hold(region, &buf);
+            Ok(Frame { buf, w: region.w, h: region.h, source: SOURCE, fallback: None, unchanged: false })
+        })();
+        match &result {
+            Ok(frame) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=grab region=({},{} {}x{}) bytes={} freshness={} elapsed_ms={:.3}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                frame.buf.len(),
+                if frame.unchanged { "unchanged" } else { "fresh" },
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
+            Err(e) => eprintln!(
+                "chibipop: capture backend=wlr-screencopy stage=grab region=({},{} {}x{}) outcome=failed elapsed_ms={:.3} error={e:#}",
+                region.x,
+                region.y,
+                region.w,
+                region.h,
+                started.elapsed().as_secs_f64() * 1000.0,
+            ),
         }
-        let buf = self.copy_region(region)?;
-        self.hold(region, &buf);
-        Ok(Frame { buf, w: region.w, h: region.h, source: SOURCE, fallback: None, unchanged: false })
+        result
     }
 
     fn bounds_containing(&self, p: PhysPoint) -> PhysRect {
