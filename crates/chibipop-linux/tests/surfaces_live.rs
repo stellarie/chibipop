@@ -25,10 +25,11 @@
 //! The pick deadline ends without a decision, and the surfaces disappear.
 
 #![cfg(target_os = "linux")]
+mod common;
+use common::wayland;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
@@ -59,21 +60,10 @@ struct Session {
 
 impl Session {
     fn start() -> Session {
-        let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
-        let dir =
-            std::env::temp_dir().join(format!("chibipop-surfaces-live-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["run/chibipop", "config", "data", "state", "cache"] {
-            std::fs::create_dir_all(dir.join(sub)).expect("creating the scratch tree");
-        }
-        if !display.starts_with('/') {
-            let runtime = std::env::var("XDG_RUNTIME_DIR").expect("a session runtime dir");
-            std::os::unix::fs::symlink(
-                PathBuf::from(runtime).join(&display),
-                dir.join("run").join(&display),
-            )
-            .expect("linking the compositor socket into the scratch tree");
-        }
+        let dir = wayland::scratch(
+            "chibipop-surfaces-live",
+            &["run/chibipop", "config", "data", "state", "cache"],
+        );
 
         // These two surfaces can fail with protocol errors when they attach a buffer before
         // configure or ask a device-less seat for a keyboard.
@@ -82,7 +72,7 @@ impl Session {
         let sink = std::fs::File::create(&stderr).expect("creating the stderr capture");
 
         let mut cmd = Command::new(BIN);
-        xdg(&mut cmd, &dir);
+        wayland::xdg(&mut cmd, &dir);
         let daemon = cmd
             .env("CHIBIPOP_SURFACE_PROBE", "1")
             // The probe needs no pixels. The `none` override prevents a portal consent dialog.
@@ -104,72 +94,37 @@ impl Session {
 
     /// Wait for a log line that contains `needle`, then return it.
     fn wait_for(&self, needle: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if let Some(line) = self.log().lines().rev().find(|l| l.contains(needle)) {
-                return line.to_string();
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        panic!("waited 20s for {needle:?}; the log was:\n{}", self.log());
+        wayland::wait_for(&self.log, needle, 20)
     }
 
     fn terminate(&self) {
-        let _ = Command::new("kill").arg("-TERM").arg(self.daemon.id().to_string()).status();
+        wayland::terminate(&self.daemon);
     }
 
     fn wait_exit(&mut self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            match self.daemon.try_wait() {
-                Ok(Some(_)) => return true,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                Err(_) => return false,
-            }
-        }
-        false
+        wayland::wait_exit(&mut self.daemon)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.terminate();
-        let _ = self.daemon.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        wayland::teardown(&mut self.daemon, &self.dir);
     }
 }
 
-fn xdg(cmd: &mut Command, dir: &Path) {
-    let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
-    cmd.env("XDG_RUNTIME_DIR", dir.join("run"))
-        .env("XDG_CONFIG_HOME", dir.join("config"))
-        .env("XDG_DATA_HOME", dir.join("data"))
-        .env("XDG_STATE_HOME", dir.join("state"))
-        .env("XDG_CACHE_HOME", dir.join("cache"))
-        .env("WAYLAND_DISPLAY", display);
-}
 
 fn skip() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("skipping: WAYLAND_DISPLAY is unset (headless)");
         return true;
     }
-    let probe = Command::new(BIN).arg("probe").output().expect("spawning chibipop probe");
-    let report = String::from_utf8_lossy(&probe.stdout).to_string();
-    for global in NEEDED {
-        if !report.contains(&format!("{global} v")) {
-            eprintln!("skipping: this compositor advertises no {global}");
-            return true;
-        }
+    if let Some(global) = wayland::missing_global(BIN, &NEEDED) {
+        eprintln!("skipping: this compositor advertises no {global}");
+        return true;
     }
     false
 }
 
-/// Return one `hyprctl` subcommand's output, or `None` outside Hyprland.
-fn hyprctl(sub: &str) -> Option<String> {
-    let out = Command::new("hyprctl").args(["-i", "0", sub]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
-}
 
 /// Parse `probe: ... on NAME (WxH at S.SSSx)`.
 fn probe_screen(line: &str) -> (i32, i32, f64) {
@@ -212,7 +167,7 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
         let y1 = OUTLINED.iter().map(|r| r.1 + r.3).max().unwrap() + OUTSET;
         (x0, y0, x1 - x0, y1 - y0)
     };
-    if let Some(layers) = hyprctl("layers") {
+    if let Some(layers) = wayland::hyprctl("layers") {
         let pid = format!("pid: {}", session.daemon.id());
         let line = layers
             .lines()
@@ -286,7 +241,7 @@ fn the_outline_and_the_selector_map_paint_and_come_back_down_on_a_real_composito
     // Process exit must remove both surfaces.
     session.terminate();
     assert!(session.wait_exit(), "the daemon ignored SIGTERM");
-    if let Some(layers) = hyprctl("layers") {
+    if let Some(layers) = wayland::hyprctl("layers") {
         let pid = format!("pid: {}", session.daemon.id());
         assert!(
             !layers.contains(&pid),

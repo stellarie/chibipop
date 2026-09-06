@@ -13,10 +13,11 @@
 //! focus. That lack of focus is one of the properties under test.
 
 #![cfg(target_os = "linux")]
+mod common;
+use common::wayland;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::{Duration, Instant};
 
 /// The real chibipop binary.
 const BIN: &str = env!("CARGO_BIN_EXE_chibipop");
@@ -46,23 +47,12 @@ impl Session {
     /// socket can then never collide with a real daemon's. That is also why this code links
     /// the compositor socket into the tree.
     fn start() -> Session {
-        let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
-        let dir = std::env::temp_dir().join(format!("chibipop-popup-live-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["run/chibipop", "config", "data", "state", "cache"] {
-            std::fs::create_dir_all(dir.join(sub)).expect("creating the scratch tree");
-        }
-        if !display.starts_with('/') {
-            let runtime = std::env::var("XDG_RUNTIME_DIR").expect("a session runtime dir");
-            std::os::unix::fs::symlink(
-                PathBuf::from(runtime).join(&display),
-                dir.join("run").join(&display),
-            )
-            .expect("linking the compositor socket into the scratch tree");
-        }
-
+        let dir = wayland::scratch(
+            "chibipop-popup-live",
+            &["run/chibipop", "config", "data", "state", "cache"],
+        );
         let mut cmd = Command::new(BIN);
-        xdg(&mut cmd, &dir);
+        wayland::xdg(&mut cmd, &dir);
         cmd.env("CHIBIPOP_POPUP_DEMO", "1")
             .env("CHIBIPOP_POPUP_DEMO_ANCHOR", ANCHOR)
             .arg("run");
@@ -72,7 +62,7 @@ impl Session {
 
     fn ctl(&self, verb: &str) {
         let mut cmd = Command::new(BIN);
-        xdg(&mut cmd, &self.dir);
+        wayland::xdg(&mut cmd, &self.dir);
         let out = cmd.args(["ctl", verb]).output().expect("spawning chibipop ctl");
         assert!(
             out.status.success(),
@@ -88,33 +78,15 @@ impl Session {
 
     /// Wait for a line that contains `needle`, and answer it.
     fn wait_for(&self, needle: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if let Some(line) = self.log().lines().rev().find(|l| l.contains(needle)) {
-                return line.to_string();
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        panic!("waited 10s for {needle:?}; the log was:\n{}", self.log());
+        wayland::wait_for(&self.log, needle, 10)
     }
 
     fn terminate(&self) {
-        let _ = Command::new("kill").arg("-TERM").arg(self.daemon.id().to_string()).status();
+        wayland::terminate(&self.daemon);
     }
 
-    /// Reap the daemon for up to two seconds. This reap is the honest way to test whether
-    /// the daemon exited. An unwaited child stays a zombie, and `kill -0` cannot tell a
-    /// zombie from a process that runs.
     fn wait_exit(&mut self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            match self.daemon.try_wait() {
-                Ok(Some(_)) => return true,
-                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                Err(_) => return false,
-            }
-        }
-        false
+        wayland::wait_exit(&mut self.daemon)
     }
 }
 
@@ -122,43 +94,23 @@ impl Drop for Session {
     fn drop(&mut self) {
         // This is a SIGTERM, not a kill. The daemon's own handler unlinks the socket and
         // releases the lock, and the test asserts that it did.
-        self.terminate();
-        let _ = self.daemon.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        wayland::teardown(&mut self.daemon, &self.dir);
     }
 }
 
-fn xdg(cmd: &mut Command, dir: &Path) {
-    let display = std::env::var("WAYLAND_DISPLAY").expect("checked by skip()");
-    cmd.env("XDG_RUNTIME_DIR", dir.join("run"))
-        .env("XDG_CONFIG_HOME", dir.join("config"))
-        .env("XDG_DATA_HOME", dir.join("data"))
-        .env("XDG_STATE_HOME", dir.join("state"))
-        .env("XDG_CACHE_HOME", dir.join("cache"))
-        .env("WAYLAND_DISPLAY", display);
-}
 
 fn skip() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("skipping: WAYLAND_DISPLAY is unset (headless)");
         return true;
     }
-    let probe = Command::new(BIN).arg("probe").output().expect("spawning chibipop probe");
-    let report = String::from_utf8_lossy(&probe.stdout).to_string();
-    for global in NEEDED {
-        if !report.contains(&format!("{global} v")) {
-            eprintln!("skipping: this compositor advertises no {global}");
-            return true;
-        }
+    if let Some(global) = wayland::missing_global(BIN, &NEEDED) {
+        eprintln!("skipping: this compositor advertises no {global}");
+        return true;
     }
     false
 }
 
-/// One `hyprctl` subcommand's first line, or `None` off Hyprland.
-fn hyprctl(sub: &str) -> Option<String> {
-    let out = Command::new("hyprctl").args(["-i", "0", sub]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
-}
 
 /// `popup: shown on surface N at x,y WxH at S.SSSx (...)` unpacked.
 fn shown_rect(line: &str) -> (i32, i32, i32, i32, f64) {
@@ -204,7 +156,7 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
 
     // A show measures the popup, places it, commits the surface, and reports the rect back
     // to the Controller as `Event::PopupPlaced`.
-    let focus_before = hyprctl("activewindow");
+    let focus_before = wayland::hyprctl("activewindow");
     session.ctl("trigger-down");
     let shown = session.wait_for("popup: shown on surface");
     let (x, y, w, h, scale) = shown_rect(&shown);
@@ -215,7 +167,7 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
 
     // This is the compositor's own view of the surface, in logical units. That view checks
     // the placement arithmetic against the other side of the protocol, not against itself.
-    if let Some(layers) = hyprctl("layers") {
+    if let Some(layers) = wayland::hyprctl("layers") {
         // This code matches by pid, not by namespace alone. A developer who runs a real
         // chibipop in the same session has a `namespace: chibipop` layer of their own. A
         // comparison of this daemon's placement against that layer would fail for no
@@ -242,14 +194,14 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
 
     // Focus never moves. The setting `keyboard_interactivity: none` makes a focus change
     // impossible. This assertion would catch a change if the setting broke.
-    assert_eq!(focus_before, hyprctl("activewindow"), "showing the popup moved the focus");
+    assert_eq!(focus_before, wayland::hyprctl("activewindow"), "showing the popup moved the focus");
 
     // A hide attaches a transparent buffer. It never unmaps the surface. That choice keeps
     // the next show free of Hyprland's layer animation.
     session.ctl("trigger-up");
     session.wait_for("popup: hidden in");
     let pid = format!("pid: {}", session.daemon.id());
-    if let Some(layers) = hyprctl("layers") {
+    if let Some(layers) = wayland::hyprctl("layers") {
         assert!(
             layers.lines().any(|l| l.contains("namespace: chibipop") && l.contains(&pid)),
             "hiding must not unmap the surface:\n{layers}"
@@ -259,7 +211,7 @@ fn a_canned_popup_is_placed_painted_and_hidden_without_taking_focus() {
     // Nothing remains afterward. The surfaces end when the process ends.
     session.terminate();
     assert!(session.wait_exit(), "the daemon ignored SIGTERM");
-    if let Some(layers) = hyprctl("layers") {
+    if let Some(layers) = wayland::hyprctl("layers") {
         assert!(
             !layers.contains(&pid),
             "the daemon left layer surfaces behind:\n{layers}"

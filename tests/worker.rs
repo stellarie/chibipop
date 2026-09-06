@@ -7,12 +7,14 @@ use chibipop::controller::{LookupOutcome, RequestId};
 use chibipop::geom::{PhysPoint, PhysRect, ScanDisplay};
 use chibipop::lookup::deconj::Deconjugator;
 use chibipop::lookup::engine::LookupEngine;
-use chibipop::lookup::model::FakeDictionary;
+use chibipop::lookup::model::{Dictionary, FakeDictionary};
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{CaptureSize, OcrLine, OcrWord};
 use chibipop::text::mask::{CaptureMask, CaptureMode};
 use chibipop::text::{Frame, OcrEngine, RegionCapture, TextSource};
-use chibipop::worker::{Hover, Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings};
+use chibipop::worker::{
+    Hover, ReopenDict, ServeHook, Trigger, TriggerKind, Worker, WorkerParts, WorkerSettings,
+};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -154,6 +156,25 @@ fn settings() -> WorkerSettings {
     }
 }
 
+/// Build the parts that every Worker fixture shares: an empty Deconjugator
+/// and the lookup engine over it.
+fn parts(
+    capture: Box<dyn RegionCapture>,
+    ocr: Box<dyn OcrEngine>,
+    dict: Box<dyn Dictionary>,
+    reopen_dict: Option<ReopenDict>,
+    serve: Option<ServeHook>,
+) -> WorkerParts {
+    WorkerParts {
+        capture,
+        ocr,
+        dict,
+        reopen_dict,
+        serve,
+        engine: LookupEngine::new(Deconjugator::new(Vec::new())),
+    }
+}
+
 /// Build a Worker over the fake backends.
 /// OCR returns the supplied optional `text` for every capture.
 fn spawn(
@@ -168,14 +189,13 @@ fn spawn(
     let (worker, dicts) = Worker::spawn(
         settings(),
         move || {
-            Ok(WorkerParts {
-                capture: Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
-                ocr: Box::new(FakeOcr { log: log_tx, text, panics }),
-                dict: Box::new(dict()),
-                reopen_dict: None,
-                serve: None,
-                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-            })
+            Ok(parts(
+                Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
+                Box::new(FakeOcr { log: log_tx, text, panics }),
+                Box::new(dict()),
+                None,
+                None,
+            ))
         },
         || {},
     )
@@ -277,18 +297,17 @@ fn spawn_dwelling() -> (Worker, mpsc::Receiver<String>) {
     let (worker, _dicts) = Worker::spawn(
         settings(),
         move || {
-            Ok(WorkerParts {
-                capture: Box::new(DwellingCapture { log: capture_log, grabs: 0 }),
-                ocr: Box::new(FakeOcr {
+            Ok(parts(
+                Box::new(DwellingCapture { log: capture_log, grabs: 0 }),
+                Box::new(FakeOcr {
                     log: log_tx,
                     text: Some("\u{98DF}".to_string()),
                     panics: false,
                 }),
-                dict: Box::new(dict()),
-                reopen_dict: None,
-                serve: None,
-                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-            })
+                Box::new(dict()),
+                None,
+                None,
+            ))
         },
         || {},
     )
@@ -481,18 +500,17 @@ fn wake_fires_after_each_result() {
     let (worker, _dicts) = Worker::spawn(
         settings(),
         move || {
-            Ok(WorkerParts {
-                capture: Box::new(FakeCapture { log: capture_log, gate: None, entered_tx: None }),
-                ocr: Box::new(FakeOcr {
+            Ok(parts(
+                Box::new(FakeCapture { log: capture_log, gate: None, entered_tx: None }),
+                Box::new(FakeOcr {
                     log: log_tx,
                     text: Some("食".to_string()),
                     panics: false,
                 }),
-                dict: Box::new(dict()),
-                reopen_dict: None,
-                serve: None,
-                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-            })
+                Box::new(dict()),
+                None,
+                None,
+            ))
         },
         move || {
             let _ = wake_tx.send(());
@@ -620,23 +638,22 @@ fn a_reload_reopens_the_dictionary_the_worker_reads() {
     let (worker, dicts) = Worker::spawn(
         settings(),
         move || {
-            Ok(WorkerParts {
-                capture: Box::new(FakeCapture {
+            Ok(parts(
+                Box::new(FakeCapture {
                     log: capture_log,
                     gate: None,
                     entered_tx: None,
                 }),
-                ocr: Box::new(FakeOcr {
+                Box::new(FakeOcr {
                     log: log_tx,
                     text: Some("食".to_string()),
                     panics: false,
                 }),
-                dict: Box::new(dict_named("BeforeTheRebuild")),
+                Box::new(dict_named("BeforeTheRebuild")),
                 // This is the file state after the settings process renames the database.
-                reopen_dict: Some(Box::new(|| Ok(Box::new(dict_named("AfterTheRebuild"))))),
-                serve: None,
-                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-            })
+                Some(Box::new(|| Ok(Box::new(dict_named("AfterTheRebuild"))))),
+                None,
+            ))
         },
         || {},
     )
@@ -688,12 +705,12 @@ fn spawn_serving(
     let (worker, _dicts) = Worker::spawn(
         settings(),
         move || {
-            Ok(WorkerParts {
-                capture: Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
-                ocr: Box::new(FakeOcr { log: log_tx, text: Some("食".to_string()), panics: false }),
-                dict: Box::new(dict()),
-                reopen_dict: None,
-                serve: Some(Box::new(move |source: &TextSource| {
+            Ok(parts(
+                Box::new(FakeCapture { log: capture_log, gate, entered_tx }),
+                Box::new(FakeOcr { log: log_tx, text: Some("食".to_string()), panics: false }),
+                Box::new(dict()),
+                None,
+                Some(Box::new(move |source: &TextSource| {
                     let _ = hook_log.send("serve".to_string());
                     while let Ok(job) = job_rx.try_recv() {
                         let lines = source
@@ -702,8 +719,7 @@ fn spawn_serving(
                         let _ = job.done.send(lines);
                     }
                 })),
-                engine: LookupEngine::new(Deconjugator::new(Vec::new())),
-            })
+            ))
         },
         || {},
     )
