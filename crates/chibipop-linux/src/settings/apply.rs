@@ -450,7 +450,7 @@ mod tests {
         let config_path = dir.join("chibipop.toml");
         let cfg = chibipop::config::load_or_create(&config_path).unwrap();
         let mut f = form(&cfg);
-        f.capture_width = 5; // below the 100px floor
+        f.cfg.ocr.capture_width = 5; // below the 100px floor
 
         let applied = saving(&f, &LinuxFields::from_config(&cfg), &config_path, &dir.join("no"))
             .unwrap();
@@ -545,7 +545,7 @@ mod tests {
         let before = ranked(&db);
         let mut linux = LinuxFields::from_config(&cfg);
         linux.show_lookup_log = true;
-        form.summary_chars = 120;
+        form.cfg.popup.summary_chars = 120;
 
         let applied = apply(
             &form,
@@ -573,7 +573,8 @@ mod tests {
         let db = dir.join("chibipop.sqlite");
         let cfg = chibipop::config::load_or_create(&config_path).unwrap();
         let mut form = chibipop::settings::from_config(&cfg, &[]);
-        form.ranking_strategy = chibipop::dict::frequency::RankingStrategy::Priority;
+        form.cfg.dictionaries.ranking_strategy =
+            chibipop::dict::frequency::RankingStrategy::Priority;
 
         let applied = apply(
             &form,

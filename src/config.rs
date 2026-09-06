@@ -43,33 +43,35 @@ pub struct Config {
 
 /// The `[trigger]` section of the configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TriggerConfig {
     pub mode: TriggerMode,
     /// The key that controls popup display.
-    #[serde(default = "default_trigger_key")]
+    /// Uses `"shift"` for backward compatibility.
     pub trigger_key: String,
     /// The chord that controls popup display on Linux.
     ///
     /// The value uses the XDG GlobalShortcuts preferred-binding syntax.
     /// The wlr-native channel treats this value as advisory because the compositor
     /// bind controls behavior.
-    #[serde(default = "default_trigger_key_linux")]
+    /// Uses a chord instead of a bare key because a portal binding is system-wide.
     pub trigger_key_linux: String,
     /// Repeats a lookup for each character.
-    #[serde(default)]
     pub per_character_lookup: bool,
 }
 
-/// Uses `"shift"` for backward compatibility.
-fn default_trigger_key() -> String {
-    "shift".to_string()
+impl Default for TriggerConfig {
+    fn default() -> Self {
+        Self {
+            mode: TriggerMode::Live,
+            trigger_key: "shift".to_string(),
+            trigger_key_linux: "ALT+F".to_string(),
+            per_character_lookup: false,
+        }
+    }
 }
 
-/// Uses a chord instead of a bare key because a portal binding is system-wide.
-fn default_trigger_key_linux() -> String {
-    "ALT+F".to_string()
-}
-
+/// The default OCR language.
 pub fn default_ocr_language() -> String {
     "ja".to_string()
 }
@@ -160,6 +162,7 @@ pub fn trigger_key_name(vk: u16) -> String {
 
 /// The `[popup]` section of the configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PopupConfig {
     /// The theme name. Use `"dark"` or `"light"`.
     pub theme: String,
@@ -168,7 +171,6 @@ pub struct PopupConfig {
     /// The default is off so a recorder can capture the popup.
     pub exclude_from_capture: bool,
     /// The allowed popup width as a percent of the monitor.
-    #[serde(default = "default_max_width_percent")]
     pub max_width_percent: u8,
     /// The allowed popup height as a percent of the monitor.
     pub max_height_percent: u8,
@@ -176,47 +178,52 @@ pub struct PopupConfig {
     pub summary_chars: usize,
     pub font: String,
     /// Draws a box around the word that the popup defines.
-    #[serde(default = "default_highlight_match")]
+    /// Enables match highlights by default.
     pub highlight_match: bool,
     /// Lets the user scroll a long popup with the wheel.
-    #[serde(default = "default_scroll_popup")]
+    /// Enables popup scroll by default.
     pub scroll_popup: bool,
     /// This setting enables auto-scroll when a selection drag reaches the popup edge.
     ///
     /// If `scroll_popup = false`, edge auto-scroll stays disabled.
-    #[serde(default = "default_edge_autoscroll")]
+    /// The default enables edge auto-scroll.
     pub edge_autoscroll: bool,
     /// Places collapsed rows beside the entry instead of below it.
-    #[serde(default)]
     pub side_panel: bool,
     /// The layer that holds the popup on Linux.
-    #[serde(default)]
     pub layer: PopupLayer,
     /// Selects a compact or roomy layout.
-    #[serde(default)]
     pub layout_mode: LayoutMode,
     /// Applies each Dictionary's style.
     ///
     /// When this setting is off, the theme supplies the font and colors for every
     /// entry. The setting also ignores the inline `style` object and the
     /// Dictionary's `styles.css` file.
-    #[serde(default = "default_dictionary_styling")]
+    /// The default is on.
+    /// A Dictionary that styles its entry expects this setting.
     pub dictionary_styling: bool,
     /// Shows example sentences.
-    #[serde(default = "default_show_examples")]
+    /// The default is on.
+    /// A sentence that shows the word in use helps a learner understand
+    /// the word.
     pub show_examples: bool,
     /// Shows attributions and footnotes.
     ///
     /// This setting is independent of `show_examples`.
     /// A user can keep the sources without three sentences for each sense.
-    #[serde(default = "default_show_attributions")]
+    /// The default is on.
+    /// A license line makes an entry quotable.
     pub show_attributions: bool,
     /// Shows Dictionary images.
     ///
     /// When this setting is off, the code keeps an image's `alt` text because a
     /// gaiji represents a character.
     /// If the code drops the gaiji, a hole appears in the word.
-    #[serde(default = "default_show_images")]
+    /// The default is on.
+    /// An image node represents a *character* more often than an illustration.
+    /// The census found 427 786 nodes with a gaiji marker in
+    /// (`docs/research/dict-shapes.md`).
+    /// This count supports the default.
     pub show_images: bool,
     /// Shows part-of-speech labels inline.
     ///
@@ -224,57 +231,33 @@ pub struct PopupConfig {
     /// above the glosses.
     /// Inline labels repeat them.
     /// `gloss::RoleFilter::CARD` drops them for the same reason.
-    #[serde(default)]
     pub show_part_of_speech: bool,
 }
 
-/// Uses 25 percent of the monitor by default.
-fn default_max_width_percent() -> u8 {
-    25
+impl Default for PopupConfig {
+    fn default() -> Self {
+        Self {
+            theme: "dark".to_string(),
+            exclude_from_capture: false,
+            max_width_percent: 25,
+            max_height_percent: 45,
+            summary_chars: 40,
+            font: Platform::current().default_font().to_string(),
+            highlight_match: true,
+            scroll_popup: true,
+            edge_autoscroll: true,
+            side_panel: false,
+            layer: PopupLayer::default(),
+            layout_mode: LayoutMode::default(),
+            dictionary_styling: true,
+            show_examples: true,
+            show_attributions: true,
+            show_images: true,
+            show_part_of_speech: false,
+        }
+    }
 }
 
-/// Enables match highlights by default.
-fn default_highlight_match() -> bool {
-    true
-}
-
-/// Enables popup scroll by default.
-fn default_scroll_popup() -> bool {
-    true
-}
-
-/// This function enables edge auto-scroll by default.
-fn default_edge_autoscroll() -> bool {
-    true
-}
-
-/// The default is on.
-/// A Dictionary that styles its entry expects this setting.
-fn default_dictionary_styling() -> bool {
-    true
-}
-
-/// The default is on.
-/// A sentence that shows the word in use helps a learner understand
-/// the word.
-fn default_show_examples() -> bool {
-    true
-}
-
-/// The default is on.
-/// A license line makes an entry quotable.
-fn default_show_attributions() -> bool {
-    true
-}
-
-/// The default is on.
-/// An image node represents a *character* more often than an illustration.
-/// The census found 427 786 nodes with a gaiji marker in
-/// (`docs/research/dict-shapes.md`).
-/// This count supports the default.
-fn default_show_images() -> bool {
-    true
-}
 
 /// Selects the wlr layer that holds the Linux popup.
 ///
@@ -322,23 +305,6 @@ pub enum SelectionButtons {
     PrimaryReplacing,
 }
 
-impl SelectionButtons {
-    /// This method returns the kebab-case value stored in TOML.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            SelectionButtons::PrimaryAdditive => "primary-additive",
-            SelectionButtons::PrimaryReplacing => "primary-replacing",
-        }
-    }
-
-    /// This method returns the label that the settings windows show.
-    pub const fn label(self) -> &'static str {
-        match self {
-            SelectionButtons::PrimaryAdditive => "Primary additive",
-            SelectionButtons::PrimaryReplacing => "Primary replacing",
-        }
-    }
-}
 
 /// This enum selects the separator between selected glossary fragments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -355,27 +321,6 @@ pub enum SelectionSeparator {
     ListItems,
 }
 
-impl SelectionSeparator {
-    /// This method returns the kebab-case value stored in TOML.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            SelectionSeparator::Ellipsis => "ellipsis",
-            SelectionSeparator::Space => "space",
-            SelectionSeparator::LineBreak => "line-break",
-            SelectionSeparator::ListItems => "list-items",
-        }
-    }
-
-    /// This method returns the label that the settings windows show.
-    pub const fn label(self) -> &'static str {
-        match self {
-            SelectionSeparator::Ellipsis => "Ellipsis (…)",
-            SelectionSeparator::Space => "Space",
-            SelectionSeparator::LineBreak => "Line break",
-            SelectionSeparator::ListItems => "List items",
-        }
-    }
-}
 
 impl From<SelectionSeparator> for crate::dict::gloss::Separator {
     fn from(separator: SelectionSeparator) -> Self {
@@ -405,25 +350,6 @@ pub enum TripleClick {
     Line,
 }
 
-impl TripleClick {
-    /// This method returns the kebab-case value stored in TOML.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            TripleClick::Sense => "sense",
-            TripleClick::SenseWithExamples => "sense-with-examples",
-            TripleClick::Line => "line",
-        }
-    }
-
-    /// This method returns the label that the settings windows show.
-    pub const fn label(self) -> &'static str {
-        match self {
-            TripleClick::Sense => "Sense",
-            TripleClick::SenseWithExamples => "Sense with examples",
-            TripleClick::Line => "Line",
-        }
-    }
-}
 
 impl PopupConfig {
     /// Returns the popup render settings that the scene builder uses.
@@ -716,71 +642,39 @@ pub struct PluginsConfig {
 
 /// The `[ocr]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OcrConfig {
     /// The number of captures for each hover.
     ///
     /// The default is 1, so multiple captures stay disabled.
-    #[serde(default = "default_max_ocr_passes")]
     pub max_ocr_passes: u8,
     /// Prefers a tall capture for manga and visual novels.
-    #[serde(default)]
     pub prefer_vertical: bool,
     /// The capture box width in pixels.
-    #[serde(default = "default_capture_width")]
     pub capture_width: i32,
     /// The capture box height in pixels.
-    #[serde(default = "default_capture_height")]
     pub capture_height: i32,
     /// Resolves words that contain only Latin characters.
-    #[serde(default = "default_scan_alphanumeric")]
     pub scan_alphanumeric: bool,
     /// Removes geometric ruby lines.
-    #[serde(default = "default_discard_furigana")]
     pub discard_furigana: bool,
     /// The language tag for the OCR recognizer.
-    #[serde(default = "default_ocr_language")]
     pub language: String,
     /// The OCR engine name. Use `"builtin"` or a plugin name.
-    #[serde(default = "default_ocr_engine")]
     pub engine: String,
 }
 
-/// The default is 1, so multiple captures stay disabled.
-fn default_max_ocr_passes() -> u8 {
-    1
-}
-
-fn default_capture_width() -> i32 {
-    500
-}
-
-fn default_capture_height() -> i32 {
-    100
-}
-
-fn default_scan_alphanumeric() -> bool {
-    true
-}
-
-fn default_discard_furigana() -> bool {
-    true
-}
-
-fn default_ocr_engine() -> String {
-    "builtin".to_string()
-}
-
 impl Default for OcrConfig {
-    fn default() -> OcrConfig {
-        OcrConfig {
-            max_ocr_passes: default_max_ocr_passes(),
+    fn default() -> Self {
+        Self {
+            max_ocr_passes: 1,
             prefer_vertical: false,
-            capture_width: default_capture_width(),
-            capture_height: default_capture_height(),
-            scan_alphanumeric: default_scan_alphanumeric(),
-            discard_furigana: default_discard_furigana(),
+            capture_width: 500,
+            capture_height: 100,
+            scan_alphanumeric: true,
+            discard_furigana: true,
             language: default_ocr_language(),
-            engine: default_ocr_engine(),
+            engine: "builtin".to_string(),
         }
     }
 }
@@ -864,90 +758,87 @@ pub const FIELD_SOURCES: [&str; 8] = [
     "sentence",
 ];
 
-/// The `[anki]` section. It is optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AnkiConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_anki_url")]
+    /// The AnkiConnect URL. The default is the local AnkiConnect endpoint.
     pub url: String,
-    #[serde(default = "default_anki_deck")]
+    /// The deck name. The default is `"Default"`.
     pub deck: String,
-    #[serde(default = "default_anki_model")]
+    /// The model name. The default is `"Lapis"`.
     pub model: String,
-    /// The shortcut that adds the top card.
-    #[serde(default = "default_anki_add_key")]
+    /// The shortcut that adds the top card. The default is `"a"`.
     pub add_key: String,
     /// The same shortcut on Linux, in portal syntax.
-    #[serde(default = "default_anki_add_key_linux")]
+    ///
+    /// Uses the same modifier family as the trigger.
+    /// A portal binding is system-wide, so a bare letter is not enough.
     pub add_key_linux: String,
-    /// Shows a tray balloon after an add.
-    #[serde(default = "default_notify_on_add")]
+    /// Shows a tray balloon after an add. The default is on.
     pub notify_on_add: bool,
     /// The Anki field for each source value.
-    #[serde(default = "default_field_map")]
     pub field_map: Vec<FieldMapping>,
     /// Defines how the code builds the Anki sentence field.
-    #[serde(default = "default_sentence_mode")]
+    /// The default is sentence mode.
     pub sentence_mode: SentenceMode,
-    /// Sets the static region for sentence capture.
-    #[serde(default = "default_static_region_key")]
+    /// Sets the static region key for sentence capture. The default is empty.
     pub static_region_key: String,
     /// The same static-region key on Linux, in portal syntax.
-    #[serde(default = "default_static_region_key_linux")]
+    ///
+    /// Leaves the key unbound, like its Windows twin.
+    /// The portal shortcut list holds only the trigger and Anki add.
+    /// No action binds this chord.
     pub static_region_key_linux: String,
     /// The static region as [x, y, w, h], when the user sets one.
-    #[serde(default)]
     pub static_region: Option<[i32; 4]>,
-    /// Makes the teal border visible.
-    #[serde(default = "default_show_static_overlay")]
+    /// Makes the teal border visible. The overlay is on by default.
     pub show_static_overlay: bool,
     /// This setting includes each Dictionary name above its Anki glossary group.
-    #[serde(default = "default_include_dictionary_name")]
+    ///
+    /// The default keeps Dictionary headings because earlier versions always added them.
     pub include_dictionary_name: bool,
     /// Uses only the entry from the top Dictionary.
-    #[serde(default)]
     pub first_dict_only: bool,
     /// This setting selects whether the primary button adds to or replaces a selection.
-    #[serde(default)]
     pub selection_buttons: SelectionButtons,
     /// This setting selects the separator between selected glossary fragments.
-    #[serde(default)]
     pub selection_separator: SelectionSeparator,
     /// This setting selects the content for a triple-click.
-    #[serde(default)]
     pub triple_click: TripleClick,
 }
 
-
-/// The default Anki URL.
-fn default_anki_url() -> String {
-    "http://localhost:8765".to_string()
+impl Default for AnkiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "http://localhost:8765".to_string(),
+            deck: "Default".to_string(),
+            model: "Lapis".to_string(),
+            add_key: "a".to_string(),
+            add_key_linux: "ALT+A".to_string(),
+            notify_on_add: true,
+            field_map: vec![
+                FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
+                FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
+                FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
+                FieldMapping { anki_field: "Frequency".into(), source: "frequency".into() },
+                FieldMapping { anki_field: "FreqSort".into(), source: "frequency".into() },
+            ],
+            sentence_mode: SentenceMode::Sentence,
+            static_region_key: String::new(),
+            static_region_key_linux: String::new(),
+            static_region: None,
+            show_static_overlay: true,
+            include_dictionary_name: true,
+            first_dict_only: false,
+            selection_buttons: SelectionButtons::default(),
+            selection_separator: SelectionSeparator::default(),
+            triple_click: TripleClick::default(),
+        }
+    }
 }
 
-/// The default Anki deck name.
-fn default_anki_deck() -> String {
-    "Default".to_string()
-}
-/// The default Anki model name.
-fn default_anki_model() -> String {
-    "Lapis".to_string()
-}
-/// The default Anki add key.
-fn default_anki_add_key() -> String {
-    "a".to_string()
-}
-
-/// Uses the same modifier family as the trigger.
-/// A portal binding is system-wide, so a bare letter is not enough.
-fn default_anki_add_key_linux() -> String {
-    "ALT+A".to_string()
-}
-
-/// The default is on.
-fn default_notify_on_add() -> bool {
-    true
-}
 
 /// Defines the text that the Anki sentence field receives.
 ///
@@ -970,68 +861,7 @@ pub enum SentenceMode {
     Static,
 }
 
-/// The default sentence mode.
-fn default_sentence_mode() -> SentenceMode {
-    SentenceMode::Sentence
-}
 
-/// The default key for the static region.
-fn default_static_region_key() -> String {
-    String::new()
-}
-
-/// Leaves the key unbound, like its Windows twin.
-/// The portal shortcut list holds only the trigger and Anki add.
-/// No action binds this chord.
-fn default_static_region_key_linux() -> String {
-    String::new()
-}
-
-/// The overlay is on by default.
-fn default_show_static_overlay() -> bool {
-    true
-}
-
-/// This function keeps Dictionary headings because earlier versions always added them.
-fn default_include_dictionary_name() -> bool {
-    true
-}
-
-/// Returns the Lapis field mapping.
-fn default_field_map() -> Vec<FieldMapping> {
-    vec![
-        FieldMapping { anki_field: "Expression".into(), source: "expression".into() },
-        FieldMapping { anki_field: "ExpressionReading".into(), source: "reading".into() },
-        FieldMapping { anki_field: "Glossary".into(), source: "glossary".into() },
-        FieldMapping { anki_field: "Frequency".into(), source: "frequency".into() },
-        FieldMapping { anki_field: "FreqSort".into(), source: "frequency".into() },
-    ]
-}
-
-impl Default for AnkiConfig {
-    fn default() -> AnkiConfig {
-        AnkiConfig {
-            enabled: false,
-            url: default_anki_url(),
-            deck: default_anki_deck(),
-            model: default_anki_model(),
-            add_key: default_anki_add_key(),
-            add_key_linux: default_anki_add_key_linux(),
-            notify_on_add: default_notify_on_add(),
-            field_map: default_field_map(),
-            sentence_mode: default_sentence_mode(),
-            static_region_key: default_static_region_key(),
-            static_region_key_linux: default_static_region_key_linux(),
-            static_region: None,
-            show_static_overlay: default_show_static_overlay(),
-            include_dictionary_name: default_include_dictionary_name(),
-            first_dict_only: false,
-            selection_buttons: SelectionButtons::default(),
-            selection_separator: SelectionSeparator::default(),
-            triple_click: TripleClick::default(),
-        }
-    }
-}
 
 /// The Ctrl modifier bit.
 pub const MOD_CTRL: u8 = 0b001;
@@ -1042,12 +872,11 @@ pub const MOD_ALT: u8 = 0b100;
 
 /// The `[actions]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ActionsConfig {
-    #[serde(default = "default_actions_enabled")]
+    /// Enables action handling. The default is on.
     pub enabled: bool,
-    #[serde(default)]
     pub screenshot: ScreenshotConfig,
-    #[serde(default)]
     pub ocr_clipboard: Option<OcrClipboardConfig>,
 }
 
@@ -1088,8 +917,9 @@ pub struct ScreenshotWindow {
 
 /// The `[actions.screenshot]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScreenshotConfig {
-    #[serde(default = "default_screenshot_hotkey")]
+    /// The screenshot shortcut. The default is `ctrl+shift+s`.
     pub hotkey: String,
     /// The same action on Linux. No value leaves the action unbound.
     ///
@@ -1098,20 +928,15 @@ pub struct ScreenshotConfig {
     /// The Linux settings window gives this chord as a copyable compositor binding snippet.
     /// The field uses `Option`, like the OCR-clipboard twin.
     /// Absence stays distinct from an empty string.
-    #[serde(default)]
     pub hotkey_linux: Option<String>,
-    #[serde(default = "default_screenshot_save_dir")]
+    /// The screenshot folder. The default is `screenshots`.
     pub save_dir: String,
-    #[serde(default)]
     pub include_on_add: bool,
-    #[serde(default)]
     pub capture_mode: ScreenshotMode,
     /// This rectangle uses global physical pixels, like `anki.static_region`.
     /// An absent target makes the next fixed-region screenshot ask for one.
-    #[serde(default)]
     pub fixed_region: Option<[i32; 4]>,
     /// The bin resolves this identity for each capture instead of saving stale bounds.
-    #[serde(default)]
     pub fixed_window: Option<ScreenshotWindow>,
 }
 
@@ -1126,26 +951,12 @@ pub struct OcrClipboardConfig {
     pub hotkey_linux: Option<String>,
 }
 
-/// The default is on.
-fn default_actions_enabled() -> bool {
-    true
-}
-
-/// The default screenshot hotkey.
-fn default_screenshot_hotkey() -> String {
-    "ctrl+shift+s".to_string()
-}
-
-/// The default screenshot folder.
-fn default_screenshot_save_dir() -> String {
-    "screenshots".to_string()
-}
 
 
 impl Default for ActionsConfig {
-    fn default() -> ActionsConfig {
-        ActionsConfig {
-            enabled: default_actions_enabled(),
+    fn default() -> Self {
+        Self {
+            enabled: true,
             screenshot: ScreenshotConfig::default(),
             ocr_clipboard: None,
         }
@@ -1153,11 +964,11 @@ impl Default for ActionsConfig {
 }
 
 impl Default for ScreenshotConfig {
-    fn default() -> ScreenshotConfig {
-        ScreenshotConfig {
-            hotkey: default_screenshot_hotkey(),
+    fn default() -> Self {
+        Self {
+            hotkey: "ctrl+shift+s".to_string(),
             hotkey_linux: None,
-            save_dir: default_screenshot_save_dir(),
+            save_dir: "screenshots".to_string(),
             include_on_add: false,
             capture_mode: ScreenshotMode::default(),
             fixed_region: None,
@@ -1187,31 +998,8 @@ impl Default for Config {
     /// The values that chibipop uses by default.
     fn default() -> Config {
         Config {
-            trigger: TriggerConfig {
-                mode: TriggerMode::Live,
-                trigger_key: default_trigger_key(),
-                trigger_key_linux: default_trigger_key_linux(),
-                per_character_lookup: false,
-            },
-            popup: PopupConfig {
-                theme: "dark".to_string(),
-                exclude_from_capture: false,
-                max_width_percent: default_max_width_percent(),
-                max_height_percent: 45,
-                summary_chars: 40,
-                font: Platform::current().default_font().to_string(),
-                highlight_match: default_highlight_match(),
-                scroll_popup: default_scroll_popup(),
-                edge_autoscroll: default_edge_autoscroll(),
-                side_panel: false,
-                layer: PopupLayer::default(),
-                layout_mode: LayoutMode::default(),
-                dictionary_styling: default_dictionary_styling(),
-                show_examples: default_show_examples(),
-                show_attributions: default_show_attributions(),
-                show_images: default_show_images(),
-                show_part_of_speech: false,
-            },
+            trigger: TriggerConfig::default(),
+            popup: PopupConfig::default(),
             // The default has no Dictionary names.
             // A new installation enables every installed Dictionary in library order.
             // Earlier defaults stored two substrings.
@@ -1244,44 +1032,44 @@ impl Config {
     }
 
     /// Clamps every bounded config value.
-    fn clamp_ranges(&mut self, path: &Path) {
+    pub(crate) fn clamp_ranges(&mut self, report: Option<&Path>) {
         self.popup.max_width_percent = clamped(
-            path,
+            report,
             "max_width_percent",
             self.popup.max_width_percent,
             MAX_WIDTH_RANGE.0,
             MAX_WIDTH_RANGE.1,
         );
         self.popup.max_height_percent = clamped(
-            path,
+            report,
             "max_height_percent",
             self.popup.max_height_percent,
             MAX_HEIGHT_RANGE.0,
             MAX_HEIGHT_RANGE.1,
         );
         self.popup.summary_chars = clamped(
-            path,
+            report,
             "summary_chars",
             self.popup.summary_chars,
             SUMMARY_RANGE.0,
             SUMMARY_RANGE.1,
         );
         self.ocr.max_ocr_passes = clamped(
-            path,
+            report,
             "max_ocr_passes",
             self.ocr.max_ocr_passes,
             PASSES_RANGE.0,
             PASSES_RANGE.1,
         );
         self.ocr.capture_width = clamped(
-            path,
+            report,
             "ocr.capture_width",
             self.ocr.capture_width,
             CAPTURE_W_RANGE.0,
             CAPTURE_W_RANGE.1,
         );
         self.ocr.capture_height = clamped(
-            path,
+            report,
             "ocr.capture_height",
             self.ocr.capture_height,
             CAPTURE_H_RANGE.0,
@@ -1316,39 +1104,19 @@ impl Config {
         }
     }
 
-    /// Returns the layer that holds the Linux popup.
-    ///
-    /// Linux reads this field. Windows ignores it.
-    pub fn popup_layer(&self) -> PopupLayer {
-        self.popup.layer
-    }
-
-    /// Returns the trigger chord for a platform.
-    pub fn trigger_key_for(&self, platform: Platform) -> &str {
-        match platform {
-            Platform::Windows => &self.trigger.trigger_key,
-            Platform::Linux => &self.trigger.trigger_key_linux,
-        }
-    }
-
-    /// Returns the Anki-add chord for a platform.
-    pub fn add_key_for(&self, platform: Platform) -> &str {
-        match platform {
-            Platform::Windows => &self.anki.add_key,
-            Platform::Linux => &self.anki.add_key_linux,
-        }
-    }
 }
 
 /// Clamps a value and reports each change.
-fn clamped<T>(path: &Path, field: &str, value: T, lo: T, hi: T) -> T
+fn clamped<T>(report: Option<&Path>, field: &str, value: T, lo: T, hi: T) -> T
 where
     T: Ord + Copy + std::fmt::Display,
 {
     let out = value.clamp(lo, hi);
     if out != value {
-        let p = path.display();
-        eprintln!("chibipop: {p}: {field} {value} is outside {lo}-{hi}, using {out}");
+        if let Some(path) = report {
+            let p = path.display();
+            eprintln!("chibipop: {p}: {field} {value} is outside {lo}-{hi}, using {out}");
+        }
     }
     out
 }
@@ -1367,7 +1135,7 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
                 config.trigger.mode = TriggerMode::HoldKey;
                 config.trigger.trigger_key = "shift".to_string();
             }
-            config.clamp_ranges(path);
+            config.clamp_ranges(Some(path));
             Ok(config)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1405,7 +1173,7 @@ mod tests {
     /// Without that option, the settings window cannot reproduce the default.
     #[test]
     fn every_default_field_map_source_is_offered() {
-        for mapping in default_field_map() {
+        for mapping in &Config::default().anki.field_map {
             assert!(
                 FIELD_SOURCES.contains(&mapping.source.as_str()),
                 "default row {} maps source {:?}, which no picker offers",
@@ -1906,9 +1674,6 @@ mod tests {
 
     #[test]
     fn selection_enum_names_match_toml_values() {
-        assert_eq!("primary-replacing", SelectionButtons::PrimaryReplacing.as_str());
-        assert_eq!("line-break", SelectionSeparator::LineBreak.as_str());
-        assert_eq!("sense-with-examples", TripleClick::SenseWithExamples.as_str());
         // `toml` refuses a bare scalar at the top level, so wrap the enums.
         #[derive(serde::Serialize)]
         struct Wrap {
@@ -2405,7 +2170,7 @@ mod tests {
         let mut c = Config::default();
         c.ocr.capture_width = 1;
         c.ocr.capture_height = 1;
-        c.clamp_ranges(Path::new("test.toml"));
+        c.clamp_ranges(Some(Path::new("test.toml")));
         assert_eq!(CAPTURE_W_RANGE.0, c.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.0, c.ocr.capture_height);
     }
@@ -2415,7 +2180,7 @@ mod tests {
         let mut c = Config::default();
         c.ocr.capture_width = 99_999;
         c.ocr.capture_height = 99_999;
-        c.clamp_ranges(Path::new("test.toml"));
+        c.clamp_ranges(Some(Path::new("test.toml")));
         assert_eq!(CAPTURE_W_RANGE.1, c.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
     }
@@ -2426,7 +2191,7 @@ mod tests {
         let mut c = Config::default();
         c.ocr.capture_width = CAPTURE_W_RANGE.0;
         c.ocr.capture_height = CAPTURE_H_RANGE.1;
-        c.clamp_ranges(Path::new("test.toml"));
+        c.clamp_ranges(Some(Path::new("test.toml")));
         assert_eq!(CAPTURE_W_RANGE.0, c.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.1, c.ocr.capture_height);
     }
@@ -2649,15 +2414,6 @@ mod tests {
         assert!(parse("layer = \"bottom\"\n").is_err(), "garbage layers are a parse error");
     }
 
-    /// Confirms that the Linux popup accessor returns the configured layer.
-    #[test]
-    fn popup_layer_reaches_the_accessor() {
-        let mut c = Config::default();
-        assert_eq!(PopupLayer::Overlay, c.popup_layer());
-        c.popup.layer = PopupLayer::Top;
-        assert_eq!(PopupLayer::Top, c.popup_layer());
-    }
-
     /// `popup.layout_mode` accepts exactly `roomy` and `compact`.
     ///
     /// This test matches [`PopupLayer`] and rejects an unknown enum.
@@ -2753,18 +2509,6 @@ mod tests {
         for (what, edit, want) in cases {
             assert!(want(&resolve(edit)), "{what} did not reach the record");
         }
-    }
-
-    /// Confirms that each bin reads only its own platform fields.
-    #[test]
-    fn key_accessors_pick_the_platforms_field() {
-        let mut c = Config::default();
-        c.trigger.trigger_key = "f2".to_string();
-        c.anki.add_key = "d".to_string();
-        assert_eq!("f2", c.trigger_key_for(Platform::Windows));
-        assert_eq!("ALT+F", c.trigger_key_for(Platform::Linux));
-        assert_eq!("d", c.add_key_for(Platform::Windows));
-        assert_eq!("ALT+A", c.add_key_for(Platform::Linux));
     }
 
     /// Confirms that the code keeps a resolvable literal unchanged.

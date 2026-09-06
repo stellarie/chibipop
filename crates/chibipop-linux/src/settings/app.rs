@@ -85,7 +85,7 @@ pub fn run(init: Init) -> anyhow::Result<()> {
     iced::application(move || App::new(init.clone()), update, view)
         .title("chibipop settings")
         .theme(|app: &App| {
-            if app.form.theme == "light" {
+            if app.form.cfg.popup.theme == "light" {
                 Theme::Light
             } else {
                 Theme::Dark
@@ -222,10 +222,10 @@ struct App {
 
 impl App {
     fn new(init: Init) -> App {
-        let fonts = font_items(&init.form.font);
+        let fonts = font_items(&init.form.cfg.popup.font);
         App {
-            capture_w: init.form.capture_width.to_string(),
-            capture_h: init.form.capture_height.to_string(),
+            capture_w: init.form.cfg.ocr.capture_width.to_string(),
+            capture_h: init.form.cfg.ocr.capture_height.to_string(),
             form: init.form,
             linux: init.linux,
             config_path: init.config_path,
@@ -261,7 +261,7 @@ impl App {
             self.compositor,
             &self.linux.trigger_key_linux,
             &self.exe,
-            snippets::trigger_bind(self.form.mode),
+            snippets::trigger_bind(self.form.cfg.trigger.mode),
         )
     }
 
@@ -385,8 +385,8 @@ impl App {
             self.status = "Capture width and height must be numbers.".to_string();
             return;
         };
-        self.form.capture_width = w;
-        self.form.capture_height = h;
+        self.form.cfg.ocr.capture_width = w;
+        self.form.cfg.ocr.capture_height = h;
         // Apply removes a field-map row without an Anki field.
         // Anki has no field named "", so core would search for that name on
         // every add and store nothing.
@@ -409,13 +409,13 @@ impl App {
             Ok(applied) => {
                 // The file now holds clamped values. The window shows them.
                 if let Ok(cfg) = chibipop::config::load_or_create(&self.config_path) {
-                    self.form.capture_width = cfg.ocr.capture_width;
-                    self.form.capture_height = cfg.ocr.capture_height;
+                    self.form.cfg.ocr.capture_width = cfg.ocr.capture_width;
+                    self.form.cfg.ocr.capture_height = cfg.ocr.capture_height;
                     self.capture_w = cfg.ocr.capture_width.to_string();
                     self.capture_h = cfg.ocr.capture_height.to_string();
-                    self.form.screenshot_fixed_region =
+                    self.form.cfg.actions.screenshot.fixed_region =
                         cfg.actions.screenshot.fixed_region;
-                    self.form.screenshot_fixed_window =
+                    self.form.cfg.actions.screenshot.fixed_window =
                         cfg.actions.screenshot.fixed_window.clone();
                 }
                 self.form.screenshot_reset_targets = false;
@@ -783,27 +783,27 @@ enum Message {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::Mode(mode) => app.form.mode = mode,
+        Message::Mode(mode) => app.form.cfg.trigger.mode = mode,
         Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
-        Message::PerChar(on) => app.form.per_character_lookup = on,
-        Message::ThemePicked(theme) => app.form.theme = theme,
-        Message::FontPicked(font) => app.form.font = font.into_owned(),
-        Message::MaxWidth(v) => app.form.max_width_percent = v,
-        Message::MaxHeight(v) => app.form.max_height_percent = v,
-        Message::Summary(v) => app.form.summary_chars = v as usize,
-        Message::Highlight(on) => app.form.highlight_match = on,
-        Message::Scroll(on) => app.form.scroll_popup = on,
-        Message::EdgeAutoscroll(on) => app.form.edge_autoscroll = on,
-        Message::SidePanel(on) => app.form.side_panel = on,
+        Message::PerChar(on) => app.form.cfg.trigger.per_character_lookup = on,
+        Message::ThemePicked(theme) => app.form.cfg.popup.theme = theme,
+        Message::FontPicked(font) => app.form.cfg.popup.font = font.into_owned(),
+        Message::MaxWidth(v) => app.form.cfg.popup.max_width_percent = v,
+        Message::MaxHeight(v) => app.form.cfg.popup.max_height_percent = v,
+        Message::Summary(v) => app.form.cfg.popup.summary_chars = v as usize,
+        Message::Highlight(on) => app.form.cfg.popup.highlight_match = on,
+        Message::Scroll(on) => app.form.cfg.popup.scroll_popup = on,
+        Message::EdgeAutoscroll(on) => app.form.cfg.popup.edge_autoscroll = on,
+        Message::SidePanel(on) => app.form.cfg.popup.side_panel = on,
         Message::LayerPicked(layer) => {
             app.linux.layer = if layer == "top" { PopupLayer::Top } else { PopupLayer::Overlay };
         }
-        Message::LayoutModePicked(label) => app.form.layout_mode = layout_mode_of(&label),
-        Message::DictStyling(on) => app.form.dictionary_styling = on,
-        Message::ShowExamples(on) => app.form.show_examples = on,
-        Message::ShowAttributions(on) => app.form.show_attributions = on,
-        Message::ShowImages(on) => app.form.show_images = on,
-        Message::ShowPartOfSpeech(on) => app.form.show_part_of_speech = on,
+        Message::LayoutModePicked(label) => app.form.cfg.popup.layout_mode = layout_mode_of(&label),
+        Message::DictStyling(on) => app.form.cfg.popup.dictionary_styling = on,
+        Message::ShowExamples(on) => app.form.cfg.popup.show_examples = on,
+        Message::ShowAttributions(on) => app.form.cfg.popup.show_attributions = on,
+        Message::ShowImages(on) => app.form.cfg.popup.show_images = on,
+        Message::ShowPartOfSpeech(on) => app.form.cfg.popup.show_part_of_speech = on,
         Message::DictSelected(role, name) => press_row(app, role, name),
         Message::DictHover(role, at, point) => {
             app.hover = Some(Hover { role, y: list_y(at, point.y) });
@@ -819,7 +819,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // state from the saved config. This arm stores the picked strategy. Apply
         // compares the current file with the next file and runs a reindex when one
         // value changes (`super::apply`).
-        Message::RankingPicked(label) => app.form.ranking_strategy = ranking_strategy_of(&label),
+        Message::RankingPicked(label) => app.form.cfg.dictionaries.ranking_strategy = ranking_strategy_of(&label),
         Message::AddPath(v) => app.add_path = v,
         Message::DictAdd => app.add_dictionary(),
         Message::DictRemove => app.remove_dictionary(),
@@ -827,37 +827,37 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DictPicked(picked) => app.took_picked(picked),
         Message::Rebuild => return app.start_rebuild(),
         Message::RebuildProgress(p) => app.took_progress(p),
-        Message::Passes(v) => app.form.max_ocr_passes = v,
-        Message::PreferVertical(on) => app.form.prefer_vertical = on,
-        Message::ScanAlnum(on) => app.form.scan_alphanumeric = on,
-        Message::DiscardFurigana(on) => app.form.discard_furigana = on,
-        Message::ShowScanRegion(on) => app.form.show_scan_region = on,
+        Message::Passes(v) => app.form.cfg.ocr.max_ocr_passes = v,
+        Message::PreferVertical(on) => app.form.cfg.ocr.prefer_vertical = on,
+        Message::ScanAlnum(on) => app.form.cfg.ocr.scan_alphanumeric = on,
+        Message::DiscardFurigana(on) => app.form.cfg.ocr.discard_furigana = on,
+        Message::ShowScanRegion(on) => app.form.cfg.debug.show_scan_region = on,
         Message::CaptureW(v) => app.capture_w = v,
         Message::CaptureH(v) => app.capture_h = v,
         Message::ShowLookupLog(on) => app.linux.show_lookup_log = on,
-        Message::AnkiEnabled(on) => app.form.anki_enabled = on,
-        Message::AnkiUrl(v) => app.form.anki_url = v,
-        Message::AnkiDeck(v) => app.form.anki_deck = v,
-        Message::AnkiModel(v) => app.form.anki_model = v,
+        Message::AnkiEnabled(on) => app.form.cfg.anki.enabled = on,
+        Message::AnkiUrl(v) => app.form.cfg.anki.url = v,
+        Message::AnkiDeck(v) => app.form.cfg.anki.deck = v,
+        Message::AnkiModel(v) => app.form.cfg.anki.model = v,
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
-        Message::IncludeDictionaryName(on) => app.form.include_dictionary_name = on,
-        Message::FirstDictOnly(v) => app.form.first_dict_only = v,
+        Message::IncludeDictionaryName(on) => app.form.cfg.anki.include_dictionary_name = on,
+        Message::FirstDictOnly(v) => app.form.cfg.anki.first_dict_only = v,
         Message::SelectionButtonsPicked(label) => {
-            app.form.selection_buttons = selection_buttons_of(&label);
+            app.form.cfg.anki.selection_buttons = selection_buttons_of(&label);
         }
         Message::SelectionSeparatorPicked(label) => {
-            app.form.selection_separator = selection_separator_of(&label);
+            app.form.cfg.anki.selection_separator = selection_separator_of(&label);
         }
         Message::TripleClickPicked(label) => {
-            app.form.triple_click = triple_click_of(&label);
+            app.form.cfg.anki.triple_click = triple_click_of(&label);
         }
-        Message::IncludeScreenshot(on) => app.form.include_screenshot = on,
+        Message::IncludeScreenshot(on) => app.form.cfg.actions.screenshot.include_on_add = on,
         Message::ScreenshotModePicked(label) => {
-            app.form.screenshot_capture_mode = screenshot_mode_of(&label);
+            app.form.cfg.actions.screenshot.capture_mode = screenshot_mode_of(&label);
         }
         Message::ResetScreenshotTargets => {
-            app.form.screenshot_fixed_region = None;
-            app.form.screenshot_fixed_window = None;
+            app.form.cfg.actions.screenshot.fixed_region = None;
+            app.form.cfg.actions.screenshot.fixed_window = None;
             app.form.screenshot_reset_targets = true;
         }
         // This is the only place where empty text becomes `None`. The config field
@@ -872,8 +872,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
         }
-        Message::SentenceModePicked(label) => app.form.sentence_mode = sentence_mode_of(&label),
-        Message::ShowStaticOverlay(on) => app.form.show_static_overlay = on,
+        Message::SentenceModePicked(label) => app.form.cfg.anki.sentence_mode = sentence_mode_of(&label),
+        Message::ShowStaticOverlay(on) => app.form.cfg.anki.show_static_overlay = on,
         Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
         Message::FieldMapAnki(i, v) => {
             if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
@@ -1190,11 +1190,11 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 fn trigger_section(app: &App) -> Element<'_, Message> {
-    let selected = if app.form.mode == TriggerMode::Live {
+    let selected = if app.form.cfg.trigger.mode == TriggerMode::Live {
         TriggerMode::Live
-    } else if app.form.mode == TriggerMode::Toggle {
+    } else if app.form.cfg.trigger.mode == TriggerMode::Toggle {
         TriggerMode::Toggle
-    } else if app.form.mode == TriggerMode::Press {
+    } else if app.form.cfg.trigger.mode == TriggerMode::Press {
         TriggerMode::Press
     } else {
         // The legacy `hold-shift` alias means HoldKey, as in the Windows radio controls.
@@ -1212,7 +1212,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
         app.compositor,
         &app.linux.trigger_key_linux,
         &app.exe,
-        snippets::trigger_bind(app.form.mode),
+        snippets::trigger_bind(app.form.cfg.trigger.mode),
     ) {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns the binding. Paste this into its config:"),
@@ -1314,7 +1314,7 @@ fn popup_section(app: &App) -> Element<'_, Message> {
         column![
             labeled(
                 "Theme",
-                pick_list(themes, Some(app.form.theme.clone()), Message::ThemePicked),
+                pick_list(themes, Some(app.form.cfg.popup.theme.clone()), Message::ThemePicked),
             ),
             labeled(
                 "Font",
@@ -1326,37 +1326,37 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             labeled(
                 "Max width (% of screen)",
                 row![
-                    slider(MAX_WIDTH_RANGE.0..=MAX_WIDTH_RANGE.1, app.form.max_width_percent, Message::MaxWidth).width(220),
-                    text(format!("{}%", app.form.max_width_percent)),
+                    slider(MAX_WIDTH_RANGE.0..=MAX_WIDTH_RANGE.1, app.form.cfg.popup.max_width_percent, Message::MaxWidth).width(220),
+                    text(format!("{}%", app.form.cfg.popup.max_width_percent)),
                 ]
                 .spacing(10),
             ),
             labeled(
                 "Max height (% of screen)",
                 row![
-                    slider(MAX_HEIGHT_RANGE.0..=MAX_HEIGHT_RANGE.1, app.form.max_height_percent, Message::MaxHeight).width(220),
-                    text(format!("{}%", app.form.max_height_percent)),
+                    slider(MAX_HEIGHT_RANGE.0..=MAX_HEIGHT_RANGE.1, app.form.cfg.popup.max_height_percent, Message::MaxHeight).width(220),
+                    text(format!("{}%", app.form.cfg.popup.max_height_percent)),
                 ]
                 .spacing(10),
             ),
             labeled(
                 "Summary length (characters)",
                 row![
-                    slider(SUMMARY_RANGE.0 as u16..=SUMMARY_RANGE.1 as u16, app.form.summary_chars as u16, Message::Summary).width(220),
-                    text(app.form.summary_chars.to_string()),
+                    slider(SUMMARY_RANGE.0 as u16..=SUMMARY_RANGE.1 as u16, app.form.cfg.popup.summary_chars as u16, Message::Summary).width(220),
+                    text(app.form.cfg.popup.summary_chars.to_string()),
                 ]
                 .spacing(10),
             ),
-            checkbox(app.form.highlight_match)
+            checkbox(app.form.cfg.popup.highlight_match)
                 .label("Box the word being defined")
                 .on_toggle(Message::Highlight),
-            checkbox(app.form.scroll_popup)
+            checkbox(app.form.cfg.popup.scroll_popup)
                 .label("Scroll long entries with the wheel")
                 .on_toggle(Message::Scroll),
-            checkbox(app.form.edge_autoscroll)
+            checkbox(app.form.cfg.popup.edge_autoscroll)
                 .label("Auto-scroll while dragging at the popup edge")
                 .on_toggle(Message::EdgeAutoscroll),
-            checkbox(app.form.side_panel)
+            checkbox(app.form.cfg.popup.side_panel)
                 .label("Show related words beside the popup")
                 .on_toggle(Message::SidePanel),
             labeled(
@@ -1487,23 +1487,23 @@ fn content_section(app: &App) -> Element<'_, Message> {
                 "Layout",
                 pick_list(
                     layout_labels(),
-                    Some(layout_mode_label(app.form.layout_mode).to_string()),
+                    Some(layout_mode_label(app.form.cfg.popup.layout_mode).to_string()),
                     Message::LayoutModePicked,
                 ),
             ),
-            checkbox(app.form.dictionary_styling)
+            checkbox(app.form.cfg.popup.dictionary_styling)
                 .label("Use the dictionary's own fonts and colours")
                 .on_toggle(Message::DictStyling),
-            checkbox(app.form.show_examples)
+            checkbox(app.form.cfg.popup.show_examples)
                 .label("Show example sentences")
                 .on_toggle(Message::ShowExamples),
-            checkbox(app.form.show_attributions)
+            checkbox(app.form.cfg.popup.show_attributions)
                 .label("Show attributions and footnotes")
                 .on_toggle(Message::ShowAttributions),
-            checkbox(app.form.show_images)
+            checkbox(app.form.cfg.popup.show_images)
                 .label("Show images")
                 .on_toggle(Message::ShowImages),
-            checkbox(app.form.show_part_of_speech)
+            checkbox(app.form.cfg.popup.show_part_of_speech)
                 .label("Show part-of-speech labels inside the entry")
                 .on_toggle(Message::ShowPartOfSpeech),
         ]
@@ -1650,7 +1650,7 @@ fn ranking_row(app: &App) -> Element<'_, Message> {
         text("Ranking").size(14),
         pick_list(
             ranking_labels(),
-            Some(ranking_strategy_label(app.form.ranking_strategy).to_string()),
+            Some(ranking_strategy_label(app.form.cfg.dictionaries.ranking_strategy).to_string()),
             Message::RankingPicked,
         ),
     ]
@@ -1773,7 +1773,7 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
         column![
             labeled(
                 "OCR passes per hover",
-                pick_list(passes, Some(app.form.max_ocr_passes), Message::Passes),
+                pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
             ),
             text("1 = no tiling. Higher reads further ahead but can resolve the wrong character.")
                 .size(13),
@@ -1786,19 +1786,19 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
                 text_input("100", &app.capture_h).on_input(Message::CaptureH).width(120),
             ),
             text("Vertical mode swaps these two values.").size(13),
-            checkbox(app.form.prefer_vertical)
+            checkbox(app.form.cfg.ocr.prefer_vertical)
                 .label("Prefer vertical text (manga, VN)")
                 .on_toggle(Message::PreferVertical),
-            checkbox(app.form.scan_alphanumeric)
+            checkbox(app.form.cfg.ocr.scan_alphanumeric)
                 .label("Scan alphanumeric text")
                 .on_toggle(Message::ScanAlnum),
-            checkbox(app.form.discard_furigana)
+            checkbox(app.form.cfg.ocr.discard_furigana)
                 .label("Discard furigana from OCR text")
                 .on_toggle(Message::DiscardFurigana),
-            checkbox(app.form.per_character_lookup)
+            checkbox(app.form.cfg.trigger.per_character_lookup)
                 .label("Look up each character as you hover (Live mode only)")
                 .on_toggle(Message::PerChar),
-            checkbox(app.form.show_scan_region)
+            checkbox(app.form.cfg.debug.show_scan_region)
                 .label("Outline what each hover captured")
                 .on_toggle(Message::ShowScanRegion),
             // OCR-to-clipboard stays here because it uses the same engine and settings
@@ -1934,13 +1934,13 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
         "Anki sentence field",
         pick_list(
             sentence_labels(),
-            Some(sentence_mode_label(app.form.sentence_mode).to_string()),
+            Some(sentence_mode_label(app.form.cfg.anki.sentence_mode).to_string()),
             Message::SentenceModePicked,
         ),
     )];
-    if app.form.sentence_mode == SentenceMode::Static {
+    if app.form.cfg.anki.sentence_mode == SentenceMode::Static {
         rows.push(
-            checkbox(app.form.show_static_overlay)
+            checkbox(app.form.cfg.anki.show_static_overlay)
                 .label("Show the static region outline")
                 .on_toggle(Message::ShowStaticOverlay)
                 .into(),
@@ -2019,13 +2019,13 @@ fn screenshot_mode_of(label: &str) -> ScreenshotMode {
 /// Show every row in every state. The folder and chord also affect the
 /// standalone screenshot action, so `include_on_add` does not control them.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let region_summary = match app.form.screenshot_fixed_region {
+    let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
         Some([x, y, width, height]) => format!(
             "Saved fixed region: x={x}, y={y}, width={width}, height={height} physical pixels."
         ),
         None => "No fixed region is saved.".to_string(),
     };
-    let window_summary = match app.form.screenshot_fixed_window.as_ref() {
+    let window_summary = match app.form.cfg.actions.screenshot.fixed_window.as_ref() {
         Some(window) => format!(
             "Saved fixed window: app_id={:?}, title={:?}.",
             window.app_id, window.title
@@ -2033,7 +2033,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
         None => "No fixed window is saved.".to_string(),
     };
     vec![
-        checkbox(app.form.include_screenshot)
+        checkbox(app.form.cfg.actions.screenshot.include_on_add)
             .label("Include screenshot when adding")
             .on_toggle(Message::IncludeScreenshot)
             .into(),
@@ -2047,7 +2047,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             "Screenshot capture mode",
             pick_list(
                 screenshot_mode_labels(),
-                Some(app.form.screenshot_capture_mode.to_string()),
+                Some(app.form.cfg.actions.screenshot.capture_mode.to_string()),
                 Message::ScreenshotModePicked,
             ),
         ),
@@ -2210,22 +2210,22 @@ fn anki_section(app: &App) -> Element<'_, Message> {
     };
 
     let body = column![
-        checkbox(app.form.anki_enabled)
+        checkbox(app.form.cfg.anki.enabled)
             .label("Enable Anki integration")
             .on_toggle(Message::AnkiEnabled),
         labeled(
             "AnkiConnect URL",
-            text_input("http://localhost:8765", &app.form.anki_url)
+            text_input("http://localhost:8765", &app.form.cfg.anki.url)
                 .on_input(Message::AnkiUrl)
                 .width(260),
         ),
         labeled(
             "Deck",
-            text_input("Default", &app.form.anki_deck).on_input(Message::AnkiDeck).width(260),
+            text_input("Default", &app.form.cfg.anki.deck).on_input(Message::AnkiDeck).width(260),
         ),
         labeled(
             "Note type",
-            text_input("Lapis", &app.form.anki_model).on_input(Message::AnkiModel).width(260),
+            text_input("Lapis", &app.form.cfg.anki.model).on_input(Message::AnkiModel).width(260),
         ),
         labeled(
             "Add-card chord (portal syntax)",
@@ -2234,20 +2234,20 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                 .width(200),
         ),
         add_bind,
-        checkbox(app.form.include_dictionary_name)
+        checkbox(app.form.cfg.anki.include_dictionary_name)
             .label("Include dictionary name")
             .on_toggle(Message::IncludeDictionaryName),
         // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
         // The daemon reads `anki.first_dict_only`, so this row lets the user change it
         // without a TOML edit.
-        checkbox(app.form.first_dict_only)
+        checkbox(app.form.cfg.anki.first_dict_only)
             .label("First dictionary only")
             .on_toggle(Message::FirstDictOnly),
         labeled(
             "Selection buttons",
             pick_list(
                 selection_button_labels(),
-                Some(selection_button_label(app.form.selection_buttons).to_string()),
+                Some(selection_button_label(app.form.cfg.anki.selection_buttons).to_string()),
                 Message::SelectionButtonsPicked,
             ),
         ),
@@ -2255,7 +2255,7 @@ fn anki_section(app: &App) -> Element<'_, Message> {
             "Selection separator",
             pick_list(
                 selection_separator_labels(),
-                Some(selection_separator_label(app.form.selection_separator).to_string()),
+                Some(selection_separator_label(app.form.cfg.anki.selection_separator).to_string()),
                 Message::SelectionSeparatorPicked,
             ),
         ),
@@ -2263,7 +2263,7 @@ fn anki_section(app: &App) -> Element<'_, Message> {
             "Triple-click",
             pick_list(
                 triple_click_labels(),
-                Some(triple_click_label(app.form.triple_click).to_string()),
+                Some(triple_click_label(app.form.cfg.anki.triple_click).to_string()),
                 Message::TripleClickPicked,
             ),
         ),
@@ -2404,10 +2404,10 @@ fn font_items(configured: &str) -> Vec<Cow<'static, str>> {
 /// The combo item that matches the form font.
 ///
 /// [`font_items`] always includes the font used when the window opens. Later
-/// writes to `form.font` come from picked items, so `None` only means that no
+/// writes to `form.cfg.popup.font` come from picked items, so `None` only means that no
 /// preview family exists.
 fn selected_family(app: &App) -> Option<&Cow<'static, str>> {
-    app.fonts.iter().find(|f| f.as_ref() == app.form.font.as_str())
+    app.fonts.iter().find(|f| f.as_ref() == app.form.cfg.popup.font.as_str())
 }
 
 /// The preview uses the selected family when the combo offers it. Otherwise it
@@ -2540,7 +2540,7 @@ mod tests {
                 app.compositor,
                 &app.linux.trigger_key_linux,
                 &app.exe,
-                snippets::trigger_bind(app.form.mode),
+                snippets::trigger_bind(app.form.cfg.trigger.mode),
             )
         );
         // The full window still builds both portal rows. The status block is a widget
@@ -2624,7 +2624,7 @@ mod tests {
         let dir = scratch("dictionaryname");
         let mut app = app(&dir);
         let cfg = chibipop::config::Config::default();
-        assert!(app.form.include_dictionary_name, "the default keeps existing card output");
+        assert!(app.form.cfg.anki.include_dictionary_name, "the default keeps existing card output");
 
         let _ = update(&mut app, Message::IncludeDictionaryName(false));
         assert!(!chibipop::settings::apply_to(&app.form, &cfg).anki.include_dictionary_name);
@@ -2641,7 +2641,7 @@ mod tests {
         let dir = scratch("firstdict");
         let mut app = app(&dir);
         let cfg = chibipop::config::Config::default();
-        assert!(!app.form.first_dict_only, "the default is every dictionary");
+        assert!(!app.form.cfg.anki.first_dict_only, "the default is every dictionary");
 
         let _ = update(&mut app, Message::FirstDictOnly(true));
         assert!(chibipop::settings::apply_to(&app.form, &cfg).anki.first_dict_only);
@@ -2948,13 +2948,13 @@ mod tests {
     fn picking_the_static_region_mode_stages_it_on_the_form() {
         let dir = scratch("srmode");
         let mut app = app(&dir);
-        assert_eq!(SentenceMode::Sentence, app.form.sentence_mode, "the shipped default");
+        assert_eq!(SentenceMode::Sentence, app.form.cfg.anki.sentence_mode, "the shipped default");
 
         let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
-        assert_eq!(SentenceMode::Static, app.form.sentence_mode);
+        assert_eq!(SentenceMode::Static, app.form.cfg.anki.sentence_mode);
 
         let _ = update(&mut app, Message::ShowStaticOverlay(false));
-        assert!(!app.form.show_static_overlay);
+        assert!(!app.form.cfg.anki.show_static_overlay);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3181,7 +3181,7 @@ mod tests {
 
         let _ = update(&mut app, Message::FontPicked(picked.clone()));
 
-        assert_eq!(picked.as_ref(), app.form.font);
+        assert_eq!(picked.as_ref(), app.form.cfg.popup.font);
         assert_eq!(
             Font::with_name(match picked {
                 Cow::Borrowed(name) => name,
@@ -3199,10 +3199,10 @@ mod tests {
     fn an_uninstalled_configured_family_is_offered_and_previews_as_default() {
         let dir = scratch("font_absent");
         let mut app = app(&dir);
-        app.form.font = "No Such Family 12345".to_string();
-        app.fonts = font_items(&app.form.font);
+        app.form.cfg.popup.font = "No Such Family 12345".to_string();
+        app.fonts = font_items(&app.form.cfg.popup.font);
 
-        assert_eq!(Some(&Cow::Owned(app.form.font.clone())), selected_family(&app));
+        assert_eq!(Some(&Cow::Owned(app.form.cfg.popup.font.clone())), selected_family(&app));
         assert_eq!(Font::DEFAULT, preview_font(selected_family(&app)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3974,14 +3974,14 @@ mod tests {
     fn picking_a_ranking_strategy_stages_it_on_the_form() {
         let dir = scratch("ranking");
         let mut app = app(&dir);
-        assert_eq!(RankingStrategy::BestRank, app.form.ranking_strategy, "the shipped default");
+        assert_eq!(RankingStrategy::BestRank, app.form.cfg.dictionaries.ranking_strategy, "the shipped default");
 
         let _ = update(
             &mut app,
             Message::RankingPicked(ranking_strategy_label(RankingStrategy::Median).to_string()),
         );
 
-        assert_eq!(RankingStrategy::Median, app.form.ranking_strategy);
+        assert_eq!(RankingStrategy::Median, app.form.cfg.dictionaries.ranking_strategy);
         assert_eq!(RankingStrategy::Median, saved(&app).dictionaries.ranking_strategy);
         let _ = view(&app);
         let _ = std::fs::remove_dir_all(&dir);
