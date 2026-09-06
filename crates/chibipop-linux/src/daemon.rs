@@ -520,6 +520,7 @@ impl AnkiCall {
                     &anki.model,
                     &fields,
                     &anki.field_map,
+                    None,
                 );
                 AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
             }

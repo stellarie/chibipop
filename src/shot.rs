@@ -110,7 +110,7 @@ pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i6
         ),
         fields: vec![field.clone()],
     });
-    crate::anki::add_note_with_picture(
+    crate::anki::add_note(
         &anki.url,
         &anki.deck,
         &anki.model,

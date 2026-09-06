@@ -23,13 +23,13 @@ use anyhow::{Context, Result};
 // Linux supplies 1 because meikiocr measures worse on upscaled crops.
 // (ARCHITECTURE.md#ocr-engine).
 
-// MAINTAINER NOTE - adaptive upscale retry, disabled 2026-08-08.
+// MAINTAINER NOTE - adaptive upscale retry, disabled 2026-08-08, code removed 2026-09-06.
 // This note exceeds the 30-char comment rule because it records a method and its removal.
 // Stella asked that this note remain in this file.
 //
-// After the first pass at the configured upscale, the code checks the tallest recognized word.
-// If that word is shorter than SMALL_GLYPH_PX, the code captures and reads the same region again at RETRY_UPSCALE.
-// The code uses the new result only when it is not empty.
+// After the first pass at the configured upscale, the code checked the tallest recognized word.
+// If that word was shorter than 32 px, the code captured and read the same region again at 4x.
+// The code used the new result only when it was not empty.
 //
 // A developer added this method after text vanished at 2x and reappeared at 4x.
 // That evidence is invalid. DXGI Desktop Duplication silently returned all-black frames.
@@ -48,43 +48,22 @@ use anyhow::{Context, Result};
 //     retry on : すっかーけ。ただ水と化
 //     single 2x: すっかり一け。ただ水と化   <- more accurate
 //
-// The method also runs on ordinary body text.
+// The method also ran on ordinary body text.
 // Glyphs of 28-31px remain clear, but stay below the 32px threshold.
 // The method therefore added this cost to many reads.
 //
-// To re-enable this method, take these steps:
+// The retry stayed behind a `false` constant for a month and then left the tree.
+// Before a new attempt at this method, take these steps:
 //
-// 1. Set ADAPTIVE_RETRY.
-// 2. Measure with these commands:
+// 1. Measure with these commands:
 //      probe --at X,Y --repeat N            (warm timings, one process)
 //      probe --at X,Y --upscale 2|4         (single pass, no retry)
-// 3. Test against text with a known true string.
-// 4. Compare transcription accuracy, not only whether more characters appeared.
-// 5. Keep the method only when its accuracy gain justifies its measured cost.
+// 2. Test against text with a known true string.
+// 3. Compare transcription accuracy, not only whether more characters appeared.
+// 4. Keep the method only when its accuracy gain justifies its measured cost.
 //
-// A lower SMALL_GLYPH_PX value of about 22px costs less.
-// This change limits the retry to tiny text.
-
-/// Retry small text at a larger scale.
-const ADAPTIVE_RETRY: bool = false;
-
-/// Below this height, retry at RETRY_UPSCALE.
-const SMALL_GLYPH_PX: i32 = 32;
-
-/// This scale applies to a small-glyph retry.
-const RETRY_UPSCALE: i32 = 4;
-
-/// Return true when the tallest word looks small.
-///
-/// An empty result is not small because no retry can help.
-fn glyphs_look_small(lines: &[OcrLine]) -> bool {
-    lines
-        .iter()
-        .flat_map(|l| l.words.iter())
-        .map(|w| w.rect.h)
-        .max()
-        .is_some_and(|max_h| max_h < SMALL_GLYPH_PX)
-}
+// A lower threshold of about 22px costs less.
+// That change limits the retry to tiny text.
 
 /// `RegionRead` stores one region read and its source details.
 pub struct RegionRead {
@@ -336,14 +315,6 @@ impl TextSource {
         mask: CaptureMask,
     ) -> Result<RegionRead> {
         let (lines, frame) = self.recognise_at_capture(region, self.settings.upscale, mask)?;
-        let (lines, frame) = if ADAPTIVE_RETRY && glyphs_look_small(&lines) {
-            match self.recognise_at_capture(region, RETRY_UPSCALE, mask) {
-                Ok((bigger, big_frame)) if !bigger.is_empty() => (bigger, big_frame),
-                _ => (lines, frame),
-            }
-        } else {
-            (lines, frame)
-        };
         let resolved = resolve(&lines, cursor, self.settings.scan_alphanumeric);
         Ok(RegionRead {
             lines,
@@ -940,53 +911,6 @@ mod tests {
         let src = vec![1u8; 2 * 2 * 4];
         let (_, w2, h2) = upscale_by(&src, 2, 2, 4);
         assert_eq!((8, 8), (w2, h2));
-    }
-
-    fn word(text: &str, h: i32) -> OcrWord {
-        OcrWord { text: text.to_string(), rect: PhysRect { x: 0, y: 0, w: h, h } }
-    }
-
-    fn line(words: Vec<OcrWord>) -> OcrLine {
-        OcrLine { words }
-    }
-
-    #[test]
-    fn empty_lines_are_not_small() {
-        assert!(!glyphs_look_small(&[]));
-    }
-
-    #[test]
-    fn a_line_of_only_short_words_is_small() {
-        let lines = [line(vec![word("し", 27), word("な", 29)])];
-        assert!(glyphs_look_small(&lines));
-    }
-
-    #[test]
-    fn the_ceiling_itself_is_not_small() {
-        let lines = [line(vec![word("大", SMALL_GLYPH_PX)])];
-        assert!(!glyphs_look_small(&lines));
-    }
-
-    #[test]
-    fn one_past_the_ceiling_is_not_small() {
-        let lines = [line(vec![word("大", SMALL_GLYPH_PX + 1)])];
-        assert!(!glyphs_look_small(&lines));
-    }
-
-    #[test]
-    fn one_under_the_ceiling_is_small() {
-        let lines = [line(vec![word("大", SMALL_GLYPH_PX - 1)])];
-        assert!(glyphs_look_small(&lines));
-    }
-
-    /// One tall word keeps the region above the small-text threshold.
-    #[test]
-    fn a_single_tall_word_among_small_ones_is_not_small() {
-        let lines = [
-            line(vec![word("し", 27), word("な", 29)]),
-            line(vec![word("大", 40)]),
-        ];
-        assert!(!glyphs_look_small(&lines));
     }
 
     // -- the capture mask at the seam --

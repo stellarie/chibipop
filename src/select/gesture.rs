@@ -239,17 +239,6 @@ impl Gesture {
         }
     }
 
-    /// This alias names the call at the Controller seam.
-    pub fn input(
-        &mut self,
-        input: GestureInput,
-        env: GestureEnv,
-        source: &ItemSource<'_>,
-        selection: &mut CardSelection,
-    ) -> Vec<GestureEffect> {
-        self.handle(input, env, source, selection)
-    }
-
     /// Ends a chain without changing the current selection.
     pub fn reset(&mut self) {
         *self = Self::default();
