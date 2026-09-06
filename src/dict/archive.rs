@@ -133,6 +133,19 @@ pub fn for_each_meta_row(zip: &Path, mut on_row: impl FnMut(Value) -> Result<()>
         .map(|_| ())
 }
 
+/// Folds every term-meta row into one value.
+pub fn fold_meta_rows<T>(
+    zip: &Path,
+    mut init: T,
+    mut merge: impl FnMut(&mut T, Value),
+) -> Result<T> {
+    for_each_meta_row(zip, |row| {
+        merge(&mut init, row);
+        Ok(())
+    })?;
+    Ok(init)
+}
+
 /// Return whether any term-meta row satisfies `pred`.
 ///
 /// Use the same walk as [`for_each_meta_row`]. Stop after the first match. This
