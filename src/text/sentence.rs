@@ -27,10 +27,7 @@ const SENTENCE_CLOSERS: [char; 4] = ['」', '』', '）', ')'];
 ///
 /// The function uses physical pixels for every coordinate.
 pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRect) -> Vec<PhysRect> {
-    let thickness = match orientation {
-        Orientation::Horizontal => anchor.h,
-        Orientation::Vertical => anchor.w,
-    };
+    let thickness = orientation.thick(anchor);
     if thickness <= 0 || bounds.w <= 0 || bounds.h <= 0 || anchor.intersection(bounds).is_none() {
         return Vec::new();
     }
@@ -40,18 +37,9 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
         x: anchor.x.saturating_add(anchor.w / 2),
         y: anchor.y.saturating_add(anchor.h / 2),
     };
-    let (perpendicular_start, axis_start, axis_end) = match orientation {
-        Orientation::Horizontal => (
-            centre.y.saturating_sub(band_extent / 2),
-            bounds.x,
-            bounds.x.saturating_add(bounds.w),
-        ),
-        Orientation::Vertical => (
-            centre.x.saturating_sub(band_extent / 2),
-            bounds.y,
-            bounds.y.saturating_add(bounds.h),
-        ),
-    };
+    let perpendicular_start = orientation.cross(centre).saturating_sub(band_extent / 2);
+    let axis_start = orientation.lead(bounds);
+    let axis_end = orientation.trail(bounds);
 
     let tile_len = 2 * layout::TILE_LEN;
     let overlap = tile_len / 2;
@@ -65,20 +53,7 @@ pub fn probe_regions(anchor: PhysRect, orientation: Orientation, bounds: PhysRec
     while start < axis_end {
         let remaining = axis_end.saturating_sub(start);
         let len = remaining.min(tile_len);
-        let tile = match orientation {
-            Orientation::Horizontal => PhysRect {
-                x: start,
-                y: perpendicular_start,
-                w: len,
-                h: band_extent,
-            },
-            Orientation::Vertical => PhysRect {
-                x: perpendicular_start,
-                y: start,
-                w: band_extent,
-                h: len,
-            },
-        };
+        let tile = orientation.rect(start, len, perpendicular_start, band_extent);
         if let Some(tile) = layout::clamp_tile(tile, bounds) {
             regions.push(tile);
         }
@@ -139,7 +114,7 @@ pub fn sentence_at(
         .iter()
         .position(|row| row.iter().any(|word| std::ptr::eq(*word, anchor_word)))?;
     let anchor_thickness = row_thickness(&rows[anchor_row_index], orientation);
-    let anchor_extent = row_extent(&rows[anchor_row_index], orientation)?;
+    let anchor_extent = row_extent(&rows[anchor_row_index], orientation);
 
     rows.retain(|row| {
         layout::same_size(anchor_thickness, row_thickness(row, orientation))
@@ -156,30 +131,8 @@ pub fn sentence_at(
     let anchor_row_index = rows
         .iter()
         .position(|row| row.iter().any(|word| std::ptr::eq(*word, anchor_word)))?;
-    let mut first = anchor_row_index;
-    while first > 0 {
-        let gap = row_forward_gap(&rows[first - 1], &rows[first], orientation);
-        let gap_limit = row_thickness(&rows[first - 1], orientation)
-            .max(row_thickness(&rows[first], orientation))
-            * layout::WRAP_GAP_HALVES
-            / 2;
-        if gap > gap_limit {
-            break;
-        }
-        first -= 1;
-    }
-    let mut last = anchor_row_index;
-    while last + 1 < rows.len() {
-        let gap = row_forward_gap(&rows[last], &rows[last + 1], orientation);
-        let gap_limit = row_thickness(&rows[last], orientation)
-            .max(row_thickness(&rows[last + 1], orientation))
-            * layout::WRAP_GAP_HALVES
-            / 2;
-        if gap > gap_limit {
-            break;
-        }
-        last += 1;
-    }
+    let first = extend(&rows, anchor_row_index, -1, orientation);
+    let last = extend(&rows, anchor_row_index, 1, orientation);
 
     let mut text = String::new();
     let mut anchor_offset = None;
@@ -197,12 +150,43 @@ pub fn sentence_at(
     (!result.trim().is_empty()).then_some(result)
 }
 
+fn extend(
+    rows: &[Vec<&OcrWord>],
+    from: usize,
+    step: isize,
+    orientation: Orientation,
+) -> usize {
+    let mut index = from;
+    loop {
+        let next = match step {
+            -1 if index > 0 => index - 1,
+            1 if index + 1 < rows.len() => index + 1,
+            _ => break,
+        };
+        let (previous, next_row) = if step < 0 {
+            (&rows[next], &rows[index])
+        } else {
+            (&rows[index], &rows[next])
+        };
+        let gap = row_forward_gap(previous, next_row, orientation);
+        let gap_limit = row_thickness(previous, orientation)
+            .max(row_thickness(next_row, orientation))
+            * layout::WRAP_GAP_HALVES
+            / 2;
+        if gap > gap_limit {
+            break;
+        }
+        index = next;
+    }
+    index
+}
+
 fn group_rows(lines: &[OcrLine], orientation: Orientation) -> Vec<Vec<&OcrWord>> {
     let mut rows: Vec<Vec<&OcrWord>> = Vec::new();
     for line in lines {
         for word in &line.words {
-            let word_thickness = word_thickness(word, orientation);
-            let word_centre = word_perp_centre(word, orientation);
+            let word_thickness = orientation.thick(word.rect);
+            let word_centre = orientation.cross(word.rect.center());
             let existing = rows.iter().position(|row| {
                 let row_thickness = row_thickness(row, orientation);
                 layout::same_size(row_thickness, word_thickness)
@@ -218,17 +202,17 @@ fn group_rows(lines: &[OcrLine], orientation: Orientation) -> Vec<Vec<&OcrWord>>
     }
 
     for row in &mut rows {
-        row.sort_by_key(|word| word_lead(word, orientation));
+        row.sort_by_key(|word| orientation.lead(word.rect));
     }
 
     let mut split_rows = Vec::with_capacity(rows.len());
     for row in rows {
         let row_thickness = row_thickness(&row, orientation);
         let mut current = Vec::new();
-        let mut previous = None;
+        let mut previous: Option<&OcrWord> = None;
         for word in row {
             if let Some(previous) = previous {
-                let gap = word_lead(word, orientation) - word_trail(previous, orientation);
+                let gap = orientation.lead(word.rect) - orientation.trail(previous.rect);
                 if gap > row_thickness * 2 {
                     if !current.is_empty() {
                         split_rows.push(current);
@@ -272,7 +256,7 @@ fn dedupe_rows(
                 unique.push(word);
             }
         }
-        unique.sort_by_key(|word| word_lead(word, orientation));
+        unique.sort_by_key(|word| orientation.lead(word.rect));
         *row = unique;
     }
 }
@@ -309,77 +293,40 @@ fn anchor_character_offset(word: &OcrWord, anchor: PhysRect, orientation: Orient
         return 0;
     }
 
-    let (axis_start, axis_extent) = match orientation {
-        Orientation::Horizontal => (i64::from(word.rect.x), i64::from(word.rect.w)),
-        Orientation::Vertical => (i64::from(word.rect.y), i64::from(word.rect.h)),
-    };
+    let axis_start = i64::from(orientation.lead(word.rect));
+    let axis_extent = i64::from(orientation.len(word.rect));
     if axis_extent <= 0 {
         return 0;
     }
-    let axis_center = match orientation {
-        Orientation::Horizontal => i64::from(anchor.x) + i64::from(anchor.w) / 2,
-        Orientation::Vertical => i64::from(anchor.y) + i64::from(anchor.h) / 2,
-    };
+    let axis_center = i64::from(orientation.lead(anchor)) + i64::from(orientation.len(anchor)) / 2;
     let position = (axis_center - axis_start).clamp(0, axis_extent);
     let character_index =
         (position * character_count as i64 / axis_extent).min(character_count as i64 - 1) as usize;
     word.text.char_indices().nth(character_index).map_or(0, |(offset, _)| offset)
 }
 
-fn word_perp_centre(word: &OcrWord, orientation: Orientation) -> i32 {
-    let centre = word.rect.center();
-    match orientation {
-        Orientation::Horizontal => centre.y,
-        Orientation::Vertical => centre.x,
-    }
-}
-
-fn word_thickness(word: &OcrWord, orientation: Orientation) -> i32 {
-    match orientation {
-        Orientation::Horizontal => word.rect.h,
-        Orientation::Vertical => word.rect.w,
-    }
-}
-
-fn word_lead(word: &OcrWord, orientation: Orientation) -> i32 {
-    match orientation {
-        Orientation::Horizontal => word.rect.x,
-        Orientation::Vertical => word.rect.y,
-    }
-}
-
-fn word_trail(word: &OcrWord, orientation: Orientation) -> i32 {
-    match orientation {
-        Orientation::Horizontal => word.rect.x + word.rect.w,
-        Orientation::Vertical => word.rect.y + word.rect.h,
-    }
-}
-
 fn row_perp_centre(row: &[&OcrWord], orientation: Orientation) -> i32 {
-    let sum: i32 = row.iter().map(|word| word_perp_centre(word, orientation)).sum();
+    let sum: i32 = row.iter().map(|word| orientation.cross(word.rect.center())).sum();
     sum / row.len() as i32
 }
 
 fn row_thickness(row: &[&OcrWord], orientation: Orientation) -> i32 {
-    let sum: i32 = row.iter().map(|word| word_thickness(word, orientation)).sum();
+    let sum: i32 = row.iter().map(|word| orientation.thick(word.rect)).sum();
     sum / row.len() as i32
 }
 
-fn row_extent(row: &[&OcrWord], orientation: Orientation) -> Option<(i32, i32)> {
-    let first = row.first()?;
-    let mut start = word_lead(first, orientation);
-    let mut end = word_trail(first, orientation);
+fn row_extent(row: &[&OcrWord], orientation: Orientation) -> (i32, i32) {
+    let first = row[0];
+    let mut start = orientation.lead(first.rect);
+    let mut end = orientation.trail(first.rect);
     for word in &row[1..] {
-        start = start.min(word_lead(word, orientation));
-        end = end.max(word_trail(word, orientation));
+        start = start.min(orientation.lead(word.rect));
+        end = end.max(orientation.trail(word.rect));
     }
-    Some((start, end))
+    (start, end)
 }
 
-fn extent_overlap(a: (i32, i32), b: Option<(i32, i32)>) -> bool {
-    let Some(b) = b else {
-        return false;
-    };
+fn extent_overlap(a: (i32, i32), b: (i32, i32)) -> bool {
     let shorter = (a.1 - a.0).min(b.1 - b.0);
     let overlap = (a.1.min(b.1) - a.0.max(b.0)).max(0);
     shorter > 0 && overlap * 2 >= shorter
