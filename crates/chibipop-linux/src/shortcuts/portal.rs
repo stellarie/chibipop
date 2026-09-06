@@ -44,10 +44,12 @@
 //!   trigger during this process.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
+use crate::portal_request::{
+    self, handle_token, mangle_sender, Failure, PORTAL_BUS, PORTAL_PATH, RESPONSE_CANCELLED,
+    RESPONSE_SUCCESS,
+};
 use calloop::channel::SyncSender;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type as MessageType;
@@ -56,22 +58,11 @@ use zbus::MatchRule;
 
 use super::{Binding, Event, ShortcutId};
 
-/// The portal's well-known bus name.
-const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
-/// The portal's single object path. Every portal interface uses this path.
-const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 /// The interface that proves this rung's capability on the session bus.
 /// The probe checks advertised capability, not compositor identity.
 pub const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
-/// Shared across all portal interfaces. Method answers arrive here, and this
-/// interface provides the operation that closes a session.
-const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
-/// Response code 0 means success. Code 1 means that the user cancelled.
-/// Any other code means that the portal ended the request another way.
-const RESPONSE_SUCCESS: u32 = 0;
-const RESPONSE_CANCELLED: u32 = 1;
 
 /// `CreateSession` and `ListShortcuts` need no user input, so they answer
 /// quickly or indicate a problem.
@@ -368,8 +359,7 @@ fn dict_string(value: &Value<'_>, key: &str) -> Option<String> {
         .and_then(|(_, entry)| string_of(entry))
 }
 
-/// Call one portal method. Predict the Request path, register the match rule,
-/// *then* call the method and wait for `Response`.
+/// Call one portal method and map its response to the shortcuts error policy.
 fn request(
     conn: &Connection,
     sender: &str,
@@ -378,99 +368,17 @@ fn request(
     call: impl FnOnce(&str) -> zbus::Result<OwnedObjectPath>,
 ) -> Result<HashMap<String, OwnedValue>, Why> {
     let deadline = Instant::now() + budget;
-    let token = handle_token();
-    let predicted = request_path(sender, &token);
-    let watch = watch_response(conn, &predicted, step)?;
-
-    let handle = call(&token).map_err(|err| explain(step, err))?;
-    let watch = if handle.as_str() == predicted {
-        watch
-    } else {
-        // A portal can ignore `handle_token`. Listen at the path that the handle
-        // returns. A very fast reply can then escape the subscription, but the
-        // deadline prevents an endless wait.
-        drop(watch);
-        watch_response(conn, handle.as_str(), step)?
-    };
-    Ok(watch.wait(step, deadline, budget)?)
-}
-type Answer = Result<(u32, HashMap<String, OwnedValue>), String>;
-
-/// A subscription for one Request `Response`. Its own thread pumps the
-/// iterator.
-///
-/// A zbus iterator has no bounded wait. An unanswered dialog must not block
-/// this thread without end. A helper thread reads the iterator, and the
-/// caller uses `recv_timeout`.
-struct ResponseWatch {
-    rx: Receiver<Answer>,
-}
-
-fn watch_response(
-    conn: &Connection,
-    path: &str,
-    step: &'static str,
-) -> Result<ResponseWatch, Why> {
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .sender(PORTAL_BUS)
-        .and_then(|builder| builder.path(path.to_string()))
-        .and_then(|builder| builder.interface(REQUEST_INTERFACE))
-        .and_then(|builder| builder.member("Response"))
-        .map_err(|err| format!("{step}: bad match rule for {path}: {err}"))?
-        .build();
-    // One Response arrives for each Request. The queue only needs to outlive
-    // the interval between registration and the first read.
-    let iterator =
-        MessageIterator::for_match_rule(rule, conn, Some(2)).map_err(|err| explain(step, err))?;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("chibipop-shortcuts-req".to_string())
-        .spawn(move || {
-            let answer = match iterator.into_iter().next() {
-                Some(Ok(message)) => message
-                    .body()
-                    .deserialize::<(u32, HashMap<String, OwnedValue>)>()
-                    .map_err(|err| format!("{step}: malformed Response: {err}")),
-                Some(Err(err)) => Err(format!("{step}: bus error waiting: {err}")),
-                // No message means that the connection closed before the portal answered.
-                None => {
-                    Err(format!("{step}: the session bus closed before the portal answered"))
-                }
-            };
-            let _ = tx.send(answer);
-        })
-        .map_err(|err| format!("{step}: no thread for the wait: {err}"))?;
-
-    Ok(ResponseWatch { rx })
-}
-
-impl ResponseWatch {
-    /// Wait until the portal answers or `deadline` passes. `budget` describes the
-    /// timeout in the error message. A log must distinguish a slow bus from a
-    /// dialog with no answer.
-    fn wait(
-        self,
-        step: &'static str,
-        deadline: Instant,
-        budget: Duration,
-    ) -> Result<HashMap<String, OwnedValue>, String> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.rx.recv_timeout(remaining) {
-            Ok(Ok((RESPONSE_SUCCESS, results))) => Ok(results),
-            Ok(Ok((RESPONSE_CANCELLED, _))) => {
-                Err(format!("{step}: the user dismissed the shortcuts dialog"))
-            }
-            Ok(Ok((code, _))) => Err(format!("{step}: the portal ended the request (code {code})")),
-            Ok(Err(err)) => Err(err),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(format!("{step}: no answer within {}s", budget.as_secs()))
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(format!("{step}: the waiting thread stopped without answering"))
-            }
+    let response = portal_request::request(conn, sender, step, deadline, call).map_err(|failure| {
+        match failure {
+            Failure::Call(error) => explain(step, error),
+            Failure::TimedOut => format!("{step}: no answer within {}s", budget.as_secs()).into(),
+            Failure::Protocol(detail) => detail.into(),
         }
+    })?;
+    match response.code {
+        RESPONSE_SUCCESS => Ok(response.results),
+        RESPONSE_CANCELLED => Err(format!("{step}: the user dismissed the shortcuts dialog").into()),
+        code => Err(format!("{step}: the portal ended the request (code {code})").into()),
     }
 }
 
@@ -516,29 +424,6 @@ fn shortcuts_proxy(conn: &Connection) -> zbus::Result<Proxy<'static>> {
         PORTAL_PATH.to_string(),
         SHORTCUTS_INTERFACE.to_string(),
     )
-}
-
-/// Convert the unique bus name to an object-path element. Drop the leading
-/// `:` and replace every `.` with `_`, as `Request` specifies.
-fn mangle_sender(unique_name: &str) -> String {
-    unique_name.trim_start_matches(':').replace('.', "_")
-}
-
-/// Return the Request object path for `token`.
-fn request_path(sender: &str, token: &str) -> String {
-    format!("{PORTAL_PATH}/request/{sender}/{token}")
-}
-
-/// Return a fresh `handle_token`. The clock adds variation, and the counter
-/// makes it unique within this process. The value is a valid object-path element.
-fn handle_token() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("chibipop_{now:x}_{n}")
 }
 
 /// Turn a zbus failure into text that a user can act on.
@@ -790,33 +675,6 @@ mod tests {
         assert!(said.reason.contains("no thanks"), "{}", said.reason);
     }
 
-    // Check the predicted Request path used to avoid the race.
-
-    #[test]
-    fn a_unique_bus_name_becomes_a_path_element() {
-        assert_eq!("1_234", mangle_sender(":1.234"));
-        assert_eq!("1_2_345", mangle_sender(":1.2.345"));
-    }
-
-    #[test]
-    fn a_predicted_request_path_sits_under_the_portal_object() {
-        assert_eq!(
-            "/org/freedesktop/portal/desktop/request/1_234/chibipop_9_0",
-            request_path("1_234", "chibipop_9_0")
-        );
-    }
-
-    /// This test checks that the token uses a valid object-path alphabet.
-    /// The portal rejects a token with another alphabet.
-    #[test]
-    fn a_handle_token_is_a_valid_path_element() {
-        let token = handle_token();
-        assert!(
-            token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            "token {token:?} must match [A-Za-z0-9_]+"
-        );
-        assert_ne!(token, handle_token());
-    }
 
     /// Probe the local session bus. The test accepts either result, with or
     /// without a bus.
