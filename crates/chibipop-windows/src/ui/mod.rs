@@ -6,6 +6,8 @@ pub mod editor;
 pub mod media;
 pub mod overlay;
 pub mod render;
+#[cfg(test)]
+pub(super) mod settings_layout;
 pub mod settings_window;
 pub mod static_overlay;
 pub mod tray;

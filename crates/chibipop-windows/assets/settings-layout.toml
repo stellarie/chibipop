@@ -1,0 +1,332 @@
+version = 1
+
+[[tabs]]
+id = "popup"
+label = "Popup"
+
+[[tabs.sections]]
+id = "popup-appearance"
+label = "Appearance"
+
+[[tabs.sections.entries]]
+id = "popup-theme"
+label = "Color theme"
+
+[[tabs.sections.entries]]
+id = "popup-font"
+label = "Text style"
+
+[[tabs.sections.entries]]
+id = "popup-custom-style"
+label = "Customize popup style"
+
+[[tabs.sections]]
+id = "popup-size"
+label = "Size"
+
+[[tabs.sections.entries]]
+id = "popup-max-width"
+label = "Maximum width"
+help = "Percentage of the screen width."
+
+[[tabs.sections.entries]]
+id = "popup-max-height"
+label = "Maximum height"
+help = "Percentage of the screen height."
+
+[[tabs.sections.entries]]
+id = "popup-summary-length"
+label = "Summary length"
+help = "Maximum number of summary characters."
+
+[[tabs.sections]]
+id = "popup-behavior"
+label = "Behavior"
+
+[[tabs.sections.entries]]
+id = "popup-highlight"
+label = "Highlight the matched word"
+
+[[tabs.sections.entries]]
+id = "popup-scroll"
+label = "Scroll long entries"
+
+[[tabs.sections.entries]]
+id = "popup-edge-autoscroll"
+label = "Auto-scroll at the popup edge"
+
+[[tabs.sections.entries]]
+id = "popup-side-panel"
+label = "Show related words"
+
+[[tabs.sections.entries]]
+id = "popup-capture-exclusion"
+label = "Hide the popup from screen capture"
+
+[[tabs.sections]]
+id = "popup-content"
+label = "Entry content"
+
+[[tabs.sections.entries]]
+id = "popup-layout"
+label = "Entry layout"
+
+[[tabs.sections.entries]]
+id = "popup-dictionary-styling"
+label = "Use dictionary styling"
+
+[[tabs.sections.entries]]
+id = "popup-examples"
+label = "Show example sentences"
+
+[[tabs.sections.entries]]
+id = "popup-attributions"
+label = "Show sources and notes"
+
+[[tabs.sections.entries]]
+id = "popup-images"
+label = "Show images"
+
+[[tabs.sections.entries]]
+id = "popup-part-of-speech"
+label = "Show part-of-speech labels"
+
+[[tabs]]
+id = "shortcuts"
+label = "Shortcuts"
+
+[[tabs.sections]]
+id = "shortcut-popup"
+label = "Popup shortcuts"
+
+[[tabs.sections.entries]]
+id = "close-popup"
+label = "Close the popup"
+help = "Escape is always available."
+
+[[tabs.sections.entries]]
+id = "lookup-mode"
+label = "Lookup behavior"
+
+[[tabs.sections.entries]]
+id = "lookup-key"
+label = "Lookup key"
+
+[[tabs.sections]]
+id = "shortcut-actions"
+label = "Action shortcuts"
+
+[[tabs.sections.entries]]
+id = "anki-add-key"
+label = "Add result to Anki"
+
+[[tabs.sections.entries]]
+id = "static-region-key"
+label = "Sentence area"
+
+[[tabs.sections.entries]]
+id = "screenshot-key"
+label = "Save a screenshot"
+
+[[tabs.sections.entries]]
+id = "ocr-clipboard-key"
+label = "Copy screen text"
+
+[[tabs]]
+id = "dictionaries"
+label = "Dictionaries"
+
+[[tabs.sections]]
+id = "dictionary-terms"
+label = "Word definitions"
+
+[[tabs.sections.entries]]
+id = "dictionary-terms"
+label = "Term dictionaries"
+help = "Set the lookup order and enabled dictionaries."
+
+[[tabs.sections]]
+id = "dictionary-frequency"
+label = "Word frequency"
+
+[[tabs.sections.entries]]
+id = "dictionary-frequency"
+label = "Frequency dictionaries"
+help = "Set ranking behavior, order, and enabled dictionaries."
+
+[[tabs.sections]]
+id = "dictionary-pitch"
+label = "Pitch accent"
+
+[[tabs.sections.entries]]
+id = "dictionary-pitch"
+label = "Pitch dictionaries"
+help = "Set the display order and enabled dictionaries."
+
+[[tabs]]
+id = "text-recognition"
+label = "Text recognition"
+
+[[tabs.sections]]
+id = "recognition-engine"
+label = "Recognition engine"
+
+[[tabs.sections.entries]]
+id = "ocr-engine"
+label = "OCR engine"
+
+[[tabs.sections.entries]]
+id = "ocr-language"
+label = "OCR language"
+help = "The list includes installed and unavailable recognizers."
+
+[[tabs.sections.entries]]
+id = "ocr-passes"
+label = "OCR passes"
+help = "More passes read farther ahead, but may choose the wrong character."
+
+[[tabs.sections]]
+id = "recognition-capture"
+label = "Capture area"
+
+[[tabs.sections.entries]]
+id = "ocr-capture-size"
+label = "Capture size"
+help = "Vertical mode swaps the width and height."
+
+[[tabs.sections.entries]]
+id = "ocr-prefer-vertical"
+label = "Prefer vertical text"
+
+[[tabs.sections.entries]]
+id = "ocr-scan-alphanumeric"
+label = "Scan letters and numbers"
+
+[[tabs.sections.entries]]
+id = "ocr-discard-furigana"
+label = "Remove furigana"
+
+[[tabs.sections.entries]]
+id = "ocr-per-character"
+label = "Look up each character"
+help = "Available for live lookup only."
+
+[[tabs.sections]]
+id = "recognition-diagnostics"
+label = "Diagnostics"
+
+[[tabs.sections.entries]]
+id = "debug-capture-outline"
+label = "Outline the captured area"
+
+[[tabs.sections.entries]]
+id = "debug-engine"
+label = "Show the active OCR engine"
+
+[[tabs.sections.entries]]
+id = "debug-adapter"
+label = "Show adapter messages"
+
+[[tabs]]
+id = "anki"
+label = "Anki"
+
+[[tabs.sections]]
+id = "anki-connection"
+label = "Connection"
+
+[[tabs.sections.entries]]
+id = "anki-enabled"
+label = "Enable Anki"
+
+[[tabs.sections.entries]]
+id = "anki-notify-on-add"
+label = "Notify after adding a card"
+
+[[tabs.sections.entries]]
+id = "anki-url"
+label = "AnkiConnect address"
+
+[[tabs.sections.entries]]
+id = "anki-deck"
+label = "Deck"
+
+[[tabs.sections.entries]]
+id = "anki-model"
+label = "Note type"
+
+[[tabs.sections.entries]]
+id = "anki-refresh"
+label = "Refresh Anki choices"
+help = "Load decks, note types, and fields from Anki."
+
+[[tabs.sections]]
+id = "anki-card"
+label = "Card content"
+
+[[tabs.sections.entries]]
+id = "anki-include-screenshot"
+label = "Add a screenshot"
+
+[[tabs.sections.entries]]
+id = "screenshot-targets"
+label = "Screenshot capture"
+help = "Fixed modes remember the first region or window. Hold Alt to switch."
+
+[[tabs.sections.entries]]
+id = "anki-include-dictionary-name"
+label = "Include the dictionary name"
+
+[[tabs.sections.entries]]
+id = "anki-first-dictionary-only"
+label = "Use the first dictionary only"
+
+[[tabs.sections]]
+id = "anki-selection"
+label = "Selection"
+
+[[tabs.sections.entries]]
+id = "anki-selection-buttons"
+label = "Selection buttons"
+
+[[tabs.sections.entries]]
+id = "anki-selection-separator"
+label = "Selection separator"
+
+[[tabs.sections.entries]]
+id = "anki-triple-click"
+label = "Triple-click behavior"
+
+[[tabs.sections]]
+id = "anki-sentence"
+label = "Sentence capture"
+
+[[tabs.sections.entries]]
+id = "anki-sentence-mode"
+label = "Sentence source"
+
+[[tabs.sections.entries]]
+id = "anki-static-overlay"
+label = "Show the sentence area"
+help = "Available when sentence capture uses a fixed area."
+
+[[tabs.sections]]
+id = "anki-field-map"
+label = "Field mapping"
+
+[[tabs.sections.entries]]
+id = "anki-field-map"
+label = "Map note fields"
+help = "Choose which result value fills each Anki field."
+
+[[tabs]]
+id = "extensions"
+label = "Extensions"
+
+[[tabs.sections]]
+id = "extension-plugins"
+label = "Plugins"
+
+[[tabs.sections.entries]]
+id = "plugin-list"
+label = "Installed plugins"
