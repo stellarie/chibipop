@@ -98,8 +98,8 @@ defines the terms. Do not restate these files.
 
 - Write commit messages with Conventional Commits. Use a scope when a scope
   helps: `fix(ocr):`.
-- Land work in upstream `stellarie/chibipop` with a pull request from
-  `unusualcrow/chibipop`.
+- Push work branches to `stellarie/chibipop`. Open pull requests within that
+  repository.
 - Record the rationale for a decision in the pull request description. This
   repository has no directory for architecture decision records. Never create
   this directory.
