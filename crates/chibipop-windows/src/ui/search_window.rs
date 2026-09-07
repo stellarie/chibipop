@@ -673,7 +673,9 @@ mod tests {
                 }
             }
             window.poll();
-            if read_text(window.state.status.get()).contains(expected) { return; }
+            let ready = if expected == "candidate" { matches!(window.result, SearchResult::Found(_)) }
+                else { read_text(window.state.status.get()).contains(expected) };
+            if ready { return; }
             assert!(Instant::now() < deadline, "expected {expected:?}, got {:?}", read_text(window.state.status.get()));
             std::thread::sleep(Duration::from_millis(10));
         }
