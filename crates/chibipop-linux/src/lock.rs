@@ -16,13 +16,21 @@ use std::path::{Path, PathBuf};
 
 /// The daemon holds this lock for its entire lifetime.
 pub struct InstanceLock {
-    _file: File,
+    file: File,
     path: PathBuf,
 }
 
 impl InstanceLock {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for InstanceLock {
+    /// Closing only this descriptor can leave a forked child's copy locked
+    /// until exec. Release the shared flock before reporting rebuild completion.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -108,7 +116,7 @@ pub fn acquire_at(runtime_dir: &Path, file_name: &str) -> Result<InstanceLock, L
             let _ = file.rewind();
             let _ = write!(file, "{}", std::process::id());
             let _ = file.flush();
-            Ok(InstanceLock { _file: file, path })
+            Ok(InstanceLock { file, path })
         }
         Err(TryLockError::WouldBlock) => {
             let mut pid = String::new();
@@ -181,6 +189,44 @@ mod tests {
         }
         drop(first);
         acquire(&dir, "wayland-9").expect("freed by dropping the first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child can inherit the open lock file between fork and exec. Releasing
+    /// the parent guard must permit the next rebuild before that child executes.
+    #[test]
+    fn a_child_before_exec_does_not_keep_a_released_lock() {
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let dir = tmp("fork_release");
+        let first = acquire(&dir, "wayland-fork").unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        child.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let process = std::thread::spawn(move || {
+            let mut command = Command::new(executable);
+            command.arg("--list").stdout(Stdio::null());
+            // SAFETY: The child only reads and writes an existing socket before exec.
+            unsafe {
+                command.pre_exec(move || {
+                    child.write_all(b"ready")?;
+                    child.read_exact(&mut [0])?;
+                    Ok(())
+                });
+            }
+            command.status().unwrap()
+        });
+        parent.read_exact(&mut [0; 5]).unwrap();
+        drop(first);
+        let reacquired = acquire(&dir, "wayland-fork");
+        parent.write_all(b"go").unwrap();
+        assert!(process.join().unwrap().success());
+        assert!(reacquired.is_ok(), "the child must not extend the parent's lock lifetime");
+        drop(reacquired);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

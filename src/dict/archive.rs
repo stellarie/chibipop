@@ -1,5 +1,6 @@
 //! This module reads Yomitan archives.
 
+use crate::library::{Role, Roles};
 use anyhow::{Context, Result};
 use serde::de::{DeserializeSeed, IgnoredAny, SeqAccess, Visitor};
 use serde_json::value::RawValue;
@@ -49,6 +50,42 @@ pub struct TermRow<'a> {
 pub fn read_index(zip: &Path) -> Result<Value> {
     let mut archive = open_archive(zip)?;
     read_json(&mut archive, "index.json")
+}
+
+/// Inspect all roles with one open and one metadata walk. Independent role
+/// checks decompress frequency banks again just to establish that pitch is absent.
+///
+/// Keep roles found before a later metadata error, as the independent checks
+/// do. The index must remain readable because every Dictionary depends on it.
+/// The boolean reports whether all role questions succeeded. A cache must not
+/// preserve a partial result after a metadata read or parse error.
+pub(crate) fn read_roles(zip: &Path) -> (Roles, bool) {
+    let mut roles = Roles::default();
+    let Ok(mut archive) = open_archive(zip) else { return (roles, false) };
+    if read_json(&mut archive, "index.json").is_err() {
+        return (roles, false);
+    }
+    let names = archive_names(&archive);
+    if names.iter().any(|name| is_bank(name, "term_bank_")) {
+        roles.insert(Role::Terms);
+    }
+    for bank in sorted_banks(&names, "term_meta_bank_") {
+        let Ok(text) = read_entry(&mut archive, &bank) else { return (roles, false) };
+        let outcome = stream_rows(&text, &bank, &mut |row: Value| {
+            if super::frequency::is_freq_row(&row) {
+                roles.insert(Role::Frequency);
+            } else if super::pitch::is_pitch_row(&row) {
+                roles.insert(Role::Pitch);
+            }
+            Ok(!(roles.has(Role::Frequency) && roles.has(Role::Pitch)))
+        });
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(_) => return (roles, false),
+        }
+    }
+    (roles, true)
 }
 
 /// Read term bank rows in bank order.
@@ -579,10 +616,16 @@ fn text_field(raw: &RawValue) -> Option<Cow<'_, str>> {
     serde_json::from_str::<String>(json).ok().map(Cow::Owned)
 }
 
+/// Share the name rule between role detection and bank enumeration. The terms
+/// check needs only existence, not an allocated and sorted bank list.
+fn is_bank(name: &str, prefix: &str) -> bool {
+    name.starts_with(prefix) && name.ends_with(".json")
+}
+
 /// Return matching banks in sorted order.
 fn sorted_banks(names: &[String], prefix: &str) -> Vec<String> {
     let mut picked: Vec<String> =
-        names.iter().filter(|n| n.starts_with(prefix) && n.ends_with(".json")).cloned().collect();
+        names.iter().filter(|n| is_bank(n, prefix)).cloned().collect();
     sort_banks(&mut picked, prefix);
     picked
 }

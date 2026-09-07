@@ -2022,11 +2022,14 @@ mod tests {
         (dir.clone(), TempDirGuard(dir))
     }
 
+    /// Keep assertions about archives and the manifest independent of disposable
+    /// caches. A cache file does not represent a staged library change.
     fn files_in(dir: &Path) -> Vec<String> {
         let mut out: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".zip") || name == "library.json")
             .collect();
         out.sort();
         out

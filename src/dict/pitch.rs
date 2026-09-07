@@ -123,7 +123,7 @@ const SMALL_KANA: &str = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ
 /// banks have no pitch row. If it has no meta banks, use its central directory.
 ///
 /// Return `false` when this build cannot open or parse the archive. An
-/// unreadable archive supplies no role, as [`crate::library::kind_of`] reports.
+/// unreadable archive supplies no role, as [`crate::library::roles_of`] reports.
 pub fn supplies_pitch(archive: &Path) -> bool {
     archive::any_meta_row(archive, is_pitch_row).unwrap_or(false)
 }
@@ -230,8 +230,9 @@ pub fn marked_morae<'a>(reading: &'a str, position: &Position) -> Vec<MarkedMora
         .collect()
 }
 
-/// Returns true for a pitch row.
-fn is_pitch_row(row: &Value) -> bool {
+/// Share the row rule with the single-pass library inspector. Role detection
+/// and pitch loading must accept the same metadata rows.
+pub(crate) fn is_pitch_row(row: &Value) -> bool {
     row.as_array().is_some_and(|row| row.len() >= 3 && row[1].as_str() == Some("pitch"))
 }
 

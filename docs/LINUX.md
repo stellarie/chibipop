@@ -60,6 +60,15 @@ Both shortcuts wrap at the ends of the tab strip.
 The status line and **Apply** stay visible while a page scrolls.
 **Apply** saves the form regardless of the selected tab.
 
+Settings caches complete Dictionary role inspections in
+`library/.roles-v1.json` under the data directory. Before it reuses roles,
+settings checks the archive's device, inode, size, modification time, and change time.
+New or changed archives require inspection.
+
+The cache is disposable and separate from `library.json` and the archives.
+A missing or invalid cache requires inspection instead.
+Cache write failures do not prevent library access.
+
 ## Installing
 
 Three routes. All three carry the OCR models, so none of them downloads
