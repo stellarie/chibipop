@@ -406,7 +406,7 @@ impl SearchWindow {
             }
         }
         let status = match &self.result {
-            SearchResult::Empty if self.state.mode.get() == SearchMode::Sentence => "Paste a sentence above, then click a word below.".into(),
+            SearchResult::Empty if self.state.mode.get() == SearchMode::Sentence => "Paste a sentence, then click a word to see its candidates.".into(),
             SearchResult::Empty => "Type a Japanese word or expression.".into(),
             SearchResult::Miss => "No matching entries in the enabled dictionaries.".into(),
             SearchResult::Found(_) => format!("{} {}. Select a word to view its definition.",

@@ -305,7 +305,7 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                             search.status = match search.result {
                                 SearchResult::Found(_) => "Choose a candidate to open its definition.",
                                 SearchResult::Miss => "No matching entries in the enabled dictionaries.",
-                                SearchResult::Empty if search.mode == SearchMode::Sentence => "Click a word below to see its candidates.",
+                                SearchResult::Empty if search.mode == SearchMode::Sentence => "Paste a sentence, then click a word to see its candidates.",
                                 SearchResult::Empty => "Type or paste a Japanese word or expression.",
                             }.into();
                         }
