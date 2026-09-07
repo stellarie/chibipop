@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod ocr;
+pub mod runtime;
 
 // Core owns the vocabulary and the layout and hit-scan logic.
 // See `ARCHITECTURE.md#workspace-and-seams`.

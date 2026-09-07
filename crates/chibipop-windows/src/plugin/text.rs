@@ -55,6 +55,7 @@ pub struct PluginText {
     pub(crate) geometry: bool,
     pub(crate) language: String,
     pub(crate) timeout: Duration,
+    monitor: Option<crate::text::runtime::OcrMonitor>,
 }
 
 impl PluginText {
@@ -67,11 +68,17 @@ impl PluginText {
             geometry: cfg.provides_geometry,
             language: cfg.languages.first().cloned().unwrap_or_default(),
             timeout: Duration::from_millis(cfg.timeout_ms),
+            monitor: None,
         }
     }
 
     pub fn disabled(&self) -> bool {
         self.strikes.borrow().disabled()
+    }
+
+    pub fn with_monitor(mut self, monitor: crate::text::runtime::OcrMonitor) -> Self {
+        self.monitor = Some(monitor);
+        self
     }
 
     fn attempt(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
@@ -98,12 +105,18 @@ impl PluginText {
 impl chibipop::text::OcrEngine for PluginText {
     fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         if self.disabled() {
+            if let Some(monitor) = &self.monitor {
+                monitor.publish(&self.name, &self.language, false);
+            }
             let why = self.strikes.borrow().last_error().unwrap_or("no detail").to_string();
             bail!("plugin \"{}\" is disabled: {why}", self.name);
         }
         match self.attempt(buf, w, h) {
             Ok(lines) => {
                 self.strikes.borrow_mut().record(true);
+                if let Some(monitor) = &self.monitor {
+                    monitor.publish(&self.name, &self.language, true);
+                }
                 Ok(lines)
             }
             Err(e) => {
@@ -112,12 +125,18 @@ impl chibipop::text::OcrEngine for PluginText {
                 if let Some(notice) = strikes.record(false) {
                     eprintln!("chibipop: {}: {notice}", self.name);
                 }
+                if let Some(monitor) = &self.monitor {
+                    monitor.publish(&self.name, &self.language, !strikes.disabled());
+                }
                 Err(e)
             }
         }
     }
 
     fn set_language(&mut self, tag: &str) {
+        if let Some(monitor) = &self.monitor {
+            monitor.publish(&self.name, &self.language, !self.disabled());
+        }
         // Keep the first language from the manifest. Report a reload request when
         // its tag differs because this adapter does not change the manifest choice.
         if self.language.eq_ignore_ascii_case(tag) {

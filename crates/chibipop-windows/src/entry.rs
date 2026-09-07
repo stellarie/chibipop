@@ -158,6 +158,20 @@ pub fn run() -> Result<()> {
         rules: None,
         config: None,
     });
+    let _log_capture = if matches!(&command, Command::Run { .. } | Command::Settings { audit: false, .. }) {
+        match chibipop_windows::diagnostics::start_capture() {
+            Ok(capture) => {
+                eprintln!("chibipop: live diagnostics enabled");
+                Some(capture)
+            }
+            Err(error) => {
+                eprintln!("chibipop: live log capture unavailable: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     match command {
         Command::Lookup { text, dict, rules } => {
             let dict = dict_path(dict);
@@ -455,6 +469,7 @@ pub fn run() -> Result<()> {
                 dictionary.dicts().context("reading dictionary identities")?
             };
             if audit {
+                chibipop_windows::text::capture::init_dpi_awareness()?;
                 return chibipop_windows::ui::audit::run(&cfg, &dicts);
             }
             let plugins_root = chibipop::paths::beside_exe("plugins");

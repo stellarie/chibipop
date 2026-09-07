@@ -28,10 +28,11 @@ use crate::text::capture::{CaptureGuard, CaptureGuardMsg, WinCapture, WM_APP_CAP
 use crate::text::layout::CaptureSize;
 use crate::text::mask::CaptureMask;
 use crate::text::ocr::{recogniser_available, WinrtOcr};
+use crate::text::runtime::{OcrMonitor, OcrRuntime};
 use crate::ui::layout::anki_button_label;
 use crate::ui::overlay::Overlay;
 use crate::ui::render::{Renderer, SceneInputs};
-use crate::ui::settings_window::{ApplyMode, SettingsClick, SettingsOutcome, SettingsWindow};
+use crate::ui::settings_window::{ApplyMode, ApplyState, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::static_overlay::StaticRegionOverlay;
 use crate::ui::theme::Theme;
 use crate::ui::tray::{Tray, TrayCommand};
@@ -184,6 +185,85 @@ struct SettingsStatus {
     text: String,
 }
 
+/// Sequence guards every snapshot. The generation identifies the Apply it can complete.
+struct SaveResult {
+    sequence: u64,
+    generation: Option<u64>,
+    result: Result<()>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingApplySave {
+    generation: u64,
+    partial_failure: bool,
+}
+
+fn saved_apply_state(pending: &mut Option<PendingApplySave>, saved: &SaveResult) -> Option<ApplyState> {
+    let current = pending.as_ref()?;
+    if saved.generation != Some(current.generation) {
+        return None;
+    }
+    let state = if saved.result.is_ok() && !current.partial_failure {
+        ApplyState::Applied
+    } else {
+        ApplyState::Failed
+    };
+    *pending = None;
+    Some(state)
+}
+
+fn finish_save(
+    window: Option<&SettingsWindow>,
+    pending: &mut Option<PendingApplySave>,
+    saved: SaveResult,
+    path: &Path,
+    latest_sequence: u64,
+) {
+    let latest = saved.sequence == latest_sequence;
+    let current = if latest { saved_apply_state(pending, &saved) } else { None };
+    if let Some(state) = current {
+        if let Some(window) = window {
+            window.set_busy(false);
+            window.set_apply_state(state);
+        }
+    }
+    if let Err(error) = saved.result {
+        eprintln!("chibipop: could not save settings to {}: {error:#}", path.display());
+        if latest {
+            if let Some(window) = window {
+                window.set_status(if saved.generation.is_some() {
+                    "Could not save settings. See live logs. Changes will be lost on restart."
+                } else {
+                    "Could not save the sentence area. See live logs."
+                });
+            }
+        }
+    } else if latest && saved.generation.is_none() {
+        if let Some(window) = window {
+            window.set_status("Sentence area saved.");
+        }
+    }
+}
+
+fn preserve_live_capture_targets(updated: &mut Config, live: &Config, reset_screenshot: bool) {
+    updated.anki.static_region = live.anki.static_region;
+    if !reset_screenshot {
+        updated.actions.screenshot.fixed_region = live.actions.screenshot.fixed_region;
+        updated.actions.screenshot.fixed_window = live.actions.screenshot.fixed_window.clone();
+    }
+}
+
+fn quit_when_idle(outcome: Option<SettingsOutcome>, working: bool, pending: &mut bool) -> bool {
+    if matches!(outcome, Some(SettingsOutcome::Quit)) {
+        *pending = true;
+    }
+    if *pending && !working {
+        *pending = false;
+        return true;
+    }
+    false
+}
+
 impl SettingsStatus {
     fn any(text: String) -> Self {
         Self { gen: None, text }
@@ -208,14 +288,17 @@ pub fn settings_only(
     config_path: &Path,
     dict_path: &Path,
 ) -> Result<()> {
+    crate::text::capture::init_dpi_awareness()?;
     let library = library_dir();
     let form = form_with_library(&cfg, dicts, &library);
     let stale = settings::stale_order_entries(&cfg, dicts);
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
 
+    window.set_runtime_status("Not scanning", "Not running", cfg.anki.enabled);
     let mut rebuild: Option<InFlight> = None;
     let mut pending: Option<Config> = None;
+    let mut quit_requested = false;
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
@@ -294,8 +377,7 @@ pub fn settings_only(
         }
 
         if rebuild.is_some() {
-            // Ignore window outcomes while the child writes.
-            let _ = window.take_outcome();
+            let _ = quit_when_idle(window.take_outcome(), true, &mut quit_requested);
             // Read the result only after the child finishes.
             let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
                 continue;
@@ -312,11 +394,19 @@ pub fn settings_only(
                 Ok(()) => {
                     keep_apply(&flight, &window);
                     let updated = pending.take().unwrap_or_else(|| cfg.clone());
-                    updated
-                        .save(config_path)
-                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
+                    if let Err(error) = updated.save(config_path) {
+                        refuse_apply(&window, &error);
+                        if quit_requested {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                    window.set_apply_state(ApplyState::Applied);
                     println!("chibipop: rebuilt {}.", dict_path.display());
                     println!("chibipop: settings saved to {}.", config_path.display());
+                    if quit_when_idle(None, false, &mut quit_requested) {
+                        return Ok(());
+                    }
                     // Start the popup process with the new Dictionary.
                     match start_run(config_path, dict_path) {
                         Ok(()) => println!("chibipop: starting."),
@@ -330,7 +420,11 @@ pub fn settings_only(
                 Err(e) => {
                     undo_apply(&flight, &e);
                     report_failed_rebuild(&window, &e);
+                    window.set_apply_state(ApplyState::Failed);
                 }
+            }
+            if quit_when_idle(None, false, &mut quit_requested) {
+                return Ok(());
             }
             continue;
         }
@@ -347,9 +441,12 @@ pub fn settings_only(
                 }
                 // A font change does not need a rebuild.
                 if !edited.has_staged() {
-                    updated
-                        .save(config_path)
-                        .with_context(|| format!("saving settings to {}", config_path.display()))?;
+                    window.set_apply_state(ApplyState::Applying);
+                    if let Err(error) = updated.save(config_path) {
+                        refuse_apply(&window, &error);
+                        continue;
+                    }
+                    window.set_apply_state(ApplyState::Applied);
                     println!("chibipop: settings saved to {}.", config_path.display());
                     println!("chibipop: restart chibipop for them to take effect.");
                     return Ok(());
@@ -475,39 +572,35 @@ fn pump_rebuild(rx: &mpsc::Receiver<Progress>, w: &SettingsWindow) -> Option<Res
 
 /// Starts a rebuild and reports its status.
 fn begin_rebuild(w: &SettingsWindow) {
+    w.set_apply_state(ApplyState::Applying);
     w.set_busy(true);
     w.set_status("Rebuilding your dictionary. This can take a few minutes.");
 }
 
 /// Marks the settings window busy while files copy.
 fn begin_apply(w: &SettingsWindow) {
+    w.set_apply_state(ApplyState::Applying);
     w.set_busy(true);
     w.set_status("Applying your changes\u{2026}");
 }
 
 /// Reports why Apply did not run.
 fn refuse_apply(w: &SettingsWindow, e: &anyhow::Error) {
+    w.set_busy(false);
+    w.set_apply_state(ApplyState::Failed);
     w.set_status(&format!("Not applied: {e}"));
     eprintln!("chibipop: not applied: {e:#}");
 }
 
 /// Reports the active OCR engine.
-fn engine_status_line(cfg: &Config) -> String {
-    match resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled) {
-        EngineChoice::Builtin => "Engine: Built-in (Windows OCR)".to_string(),
-        EngineChoice::Plugin(name) => format!("Engine: {name}"),
-        EngineChoice::FellBack(name) => {
-            format!("Engine: {name} (not found — using Built-in)")
-        }
-    }
+fn engine_status_line(runtime: &OcrRuntime) -> String {
+    let (language, engine) = runtime_status_labels(runtime);
+    format!("OCR: {engine}; language: {language}")
 }
 
 /// Returns recent plugin stderr lines.
-fn adapter_status_line(cfg: &Config) -> String {
-    if !matches!(
-        resolve_engine(&cfg.ocr.engine, &cfg.plugins.enabled),
-        EngineChoice::Plugin(_)
-    ) {
+fn adapter_status_line(runtime: &OcrRuntime) -> String {
+    if runtime.engine.is_empty() || runtime.engine == "windows-ocr" {
         return "Adapter log: no plugin engine active".to_string();
     }
     let log = host::engine_log_lines();
@@ -1047,6 +1140,11 @@ fn service_settings_click(
     tid: u32,
     css_editor: &mut Option<crate::ui::editor::CssEditor>,
 ) {
+    if w.take_show_logs() {
+        if let Err(error) = crate::ui::log_window::show() {
+            w.set_status(&format!("Could not open live logs: {error}"));
+        }
+    }
     match w.take_click() {
         Some(SettingsClick::AnkiTest) => {
             w.set_status("Testing\u{2026}");
@@ -1111,9 +1209,49 @@ fn service_settings_click(
         None => {}
     }
 }
-/// Builds the Windows `WorkerParts` on the Worker thread.
-/// Capture and OCR backends are thread-affine. COM and the per-thread DXGI
-/// cache needs that thread, so the closure creates them when `Worker` starts.
+struct WorkerUi {
+    requests: mpsc::Receiver<crate::action::OcrRequest>,
+    monitor: OcrMonitor,
+}
+
+fn runtime_status_labels(runtime: &OcrRuntime) -> (String, String) {
+    let engine = match runtime.engine.as_str() {
+        "" => "Not running".to_string(),
+        "windows-ocr" => "Windows OCR".to_string(),
+        name => name.to_string(),
+    };
+    if !runtime.available {
+        let language = if runtime.language.is_empty() {
+            "Not scanning".to_string()
+        } else {
+            format!("{} (inactive)", runtime.language)
+        };
+        return (language, format!("{engine} (unavailable)"));
+    }
+    let language = if runtime.language.is_empty() { "Automatic" } else { &runtime.language };
+    (language.to_string(), engine)
+}
+
+fn sync_runtime_status(
+    window: Option<&SettingsWindow>,
+    monitor: &OcrMonitor,
+    anki_enabled: bool,
+    shown: &mut Option<(isize, OcrRuntime, bool)>,
+) {
+    let Some(window) = window else {
+        *shown = None;
+        return;
+    };
+    let next = (window.hwnd().0 as isize, monitor.snapshot(), anki_enabled);
+    if shown.as_ref() == Some(&next) {
+        return;
+    }
+    let (language, engine) = runtime_status_labels(&next.1);
+    window.set_runtime_status(&language, &engine, anki_enabled);
+    *shown = Some(next);
+}
+
+/// Capture and OCR objects stay on the Worker thread. Only their status crosses back.
 fn worker_open(
     dict_path: PathBuf,
     rules_path: PathBuf,
@@ -1124,13 +1262,18 @@ fn worker_open(
     // The plugins that this Worker can run.
     enabled_plugins: Vec<String>,
     // One-off OCR jobs (OCR-to-clipboard), handled between lookups.
-    ocr_request_rx: mpsc::Receiver<crate::action::OcrRequest>,
+    ui: WorkerUi,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
+        let WorkerUi { requests: ocr_request_rx, monitor } = ui;
         // Resolve the engine once. Do not save this choice.
-        let ocr: Box<dyn chibipop::text::OcrEngine> =
+        let (ocr, active_engine, active_language): (Box<dyn chibipop::text::OcrEngine>, String, String) =
             match resolve_plugin_engine(&ocr_engine, &enabled_plugins) {
-                Some(plugin) => plugin,
+                Some(plugin) => {
+                    let name = plugin.name.clone();
+                    let language = plugin.language.clone();
+                    (Box::new((*plugin).with_monitor(monitor.clone())), name, language)
+                }
                 None => {
                     let fallback = crate::config::default_ocr_language();
                     let substitute =
@@ -1144,7 +1287,11 @@ fn worker_open(
                         }
                         None => language,
                     };
-                    Box::new(WinrtOcr::new(&language).context("creating the OCR text source")?)
+                    let builtin = WinrtOcr::new(&language)
+                        .context("creating the OCR text source")?
+                        .with_monitor(monitor.clone());
+                    let active_language = builtin.active_language();
+                    (Box::new(builtin), "windows-ocr".into(), active_language)
                 }
             };
         // Contract 3 needs DPI before GDI.
@@ -1157,6 +1304,7 @@ fn worker_open(
         })?;
         let rules = load_rules(&rules_path)?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
+        monitor.publish(&active_engine, &active_language, true);
         Ok(WorkerParts {
             capture: Box::new(capture),
             ocr,
@@ -1212,6 +1360,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // It returns the ID of the thread that calls it.
     let main_tid = unsafe { GetCurrentThreadId() };
     let mut live = derive(&cfg);
+    let ocr_monitor = OcrMonitor::default();
     // Do not join the Worker. `join` hangs.
     let (worker, mut dicts) = Worker::spawn(
         // `Worker::spawn` reads the file itself.
@@ -1227,7 +1376,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             },
             cfg.ocr.engine.clone(),
             cfg.plugins.enabled.clone(),
-            ocr_request_rx,
+            WorkerUi { requests: ocr_request_rx, monitor: ocr_monitor.clone() },
         ),
         // The Worker posts a message after it pushes a result.
         move || unsafe {
@@ -1426,7 +1575,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
     let mut detect_gen = 0u64;
-    let (save_tx, save_rx) = mpsc::channel::<Result<()>>();
+    let (save_tx, save_rx) = mpsc::channel::<SaveResult>();
+    let mut apply_generation = 0u64;
+    let mut save_sequence = 0u64;
+    let mut pending_apply_save: Option<PendingApplySave> = None;
+    let mut quit_requested = false;
+    let mut shown_runtime = None;
     let mut css_editor: Option<crate::ui::editor::CssEditor> = None;
     let (screenshot_tx, screenshot_rx) = mpsc::channel::<crate::action::ScreenshotCommand>();
     let (screenshot_done_tx, screenshot_done_rx) =
@@ -1463,6 +1617,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     // Store the active in-place edit here.
     let mut edit: Option<EditFlight> = None;
     let mut edit_cfg: Option<(Config, bool)> = None;
+    sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
 
     // I4: keep all capture-guard code in one place.
     let drain_capture_guard = || {
@@ -1585,6 +1740,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             break; // 0 means WM_QUIT. -1 means an error. Stop the message loop in either case.
         }
 
+        sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
         // Route messages for the modeless settings window.
         if let Some(w) = &settings {
             // The region picker runs a nested message pump.
@@ -1762,6 +1918,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         config_path.to_path_buf(),
                         save_tx.clone(),
                         main_tid,
+                        pending_apply_save.as_ref().map(|pending| pending.generation),
+                        &mut save_sequence,
                     );
                     if let Some(ov) = &static_overlay {
                         if let Err(e) = ov.show(rect) {
@@ -1917,12 +2075,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             if let Some(w) = &settings {
                 if edit.is_some() {
-                    // Do not read window outcomes while the database changes.
-                    let _ = w.take_outcome();
+                    let _ = quit_when_idle(w.take_outcome(), true, &mut quit_requested);
                     let done = edit.as_ref().and_then(|f| pump_edit(&f.rx, w));
                     if let Some(done) = done {
                         edit = None;
-                        w.set_busy(false);
                         match done {
                             Err(e) => {
                                 edit_cfg = None;
@@ -1930,6 +2086,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             }
                             Ok(report) => {
                                 let report = *report;
+                                let partial_failure = !report.failed.is_empty();
                                 let status = edit_status(&report);
                                 let (mut updated, reset_screenshot_targets) = edit_cfg
                                     .take()
@@ -1943,12 +2100,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 }
                                 // A Dictionary Apply can outlive a target capture. Preserve that
                                 // target unless this Apply explicitly reset both target fields.
-                                if !reset_screenshot_targets {
-                                    updated.actions.screenshot.fixed_region =
-                                        cfg.actions.screenshot.fixed_region;
-                                    updated.actions.screenshot.fixed_window =
-                                        cfg.actions.screenshot.fixed_window.clone();
-                                }
+                                preserve_live_capture_targets(&mut updated, &cfg, reset_screenshot_targets);
                                 // Replace the stale Dictionary identity cache.
                                 dicts = report.dicts;
                                 w.clear_staged();
@@ -1972,12 +2124,15 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 );
                                 // Reload the Controller to discard stale results.
                                 drive!(Event::ConfigReloaded(Box::new(controller_config(&live),)));
+                                pending_apply_save = Some(PendingApplySave { generation: apply_generation, partial_failure });
                                 save_in_background(
                                     &mut save_job,
                                     updated,
                                     config_path.to_path_buf(),
                                     save_tx.clone(),
                                     main_tid,
+                                    Some(apply_generation),
+                                    &mut save_sequence,
                                 );
                                 w.set_status(&status);
                             }
@@ -1986,7 +2141,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 } else {
                     match w.take_outcome() {
                         // Keep the tray and hide only the settings window.
-                        Some(SettingsOutcome::Cancel) => settings = None,
+                        Some(SettingsOutcome::Cancel) => {
+                            pending_apply_save = None;
+                            settings = None;
+                        }
                         // The main thread handles this event directly.
                         Some(SettingsOutcome::Quit) => drive!(Event::Quit),
                         Some(SettingsOutcome::Apply) => {
@@ -1997,6 +2155,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 refuse_apply(w, &error);
                                 continue;
                             }
+                            apply_generation = apply_generation.wrapping_add(1);
+                            begin_apply(w);
                             if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
@@ -2049,20 +2209,20 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 w.reseed_per_language(&updated.dictionaries.per_language);
                                 w.clear_screenshot_reset_targets();
                                 cfg = updated.clone();
+                                pending_apply_save = Some(PendingApplySave { generation: apply_generation, partial_failure: false });
                                 save_in_background(
                                     &mut save_job,
                                     updated,
                                     config_path.to_path_buf(),
                                     save_tx.clone(),
                                     main_tid,
+                                    Some(apply_generation),
+                                    &mut save_sequence,
                                 );
                                 let mut status_parts = Vec::new();
-                                match &clamped {
-                                    Some(notice) => {
-                                        w.set_capture_fields(&cfg.ocr);
-                                        status_parts.push(notice.clone());
-                                    }
-                                    None => status_parts.push("Settings applied.".to_string()),
+                                if let Some(notice) = &clamped {
+                                    w.set_capture_fields(&cfg.ocr);
+                                    status_parts.push(notice.clone());
                                 }
                                 // A strategy, order, or checkbox change updates `term.freq` in place.
                                 // It never reads an archive. The database already stores the claims.
@@ -2070,12 +2230,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 if work == settings::DictionaryWork::Reindex {
                                     w.set_busy(true);
                                     let done = reindex_ranks(&db_path, &cfg, &dicts, w);
-                                    w.set_busy(false);
                                     status_parts.push(match done {
                                         Ok(rows) => {
                                             format!("Reranked {rows} term rows.")
                                         }
                                         Err(e) => {
+                                            if let Some(pending) = &mut pending_apply_save {
+                                                pending.partial_failure = true;
+                                            }
                                             eprintln!(
                                                 "chibipop: reranking failed: {e:#}"
                                             );
@@ -2084,10 +2246,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                     });
                                 }
                                 if cfg.debug.show_engine_log {
-                                    status_parts.push(engine_status_line(&cfg));
+                                    status_parts.push(engine_status_line(&ocr_monitor.snapshot()));
                                 }
                                 if cfg.debug.show_adapter_log {
-                                    status_parts.push(adapter_status_line(&cfg));
+                                    status_parts.push(adapter_status_line(&ocr_monitor.snapshot()));
                                 }
                                 w.set_status(&status_parts.join("\r\n"));
                                 let ms = t0.elapsed().as_millis();
@@ -2101,6 +2263,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         None => {}
                     }
                 }
+            }
+
+            if quit_when_idle(None, edit.is_some(), &mut quit_requested) {
+                drive!(Event::Quit);
             }
 
             // A trigger-key release retracts the popup.
@@ -2203,18 +2369,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         } else if msg.message == WM_APP_SAVED {
             while let Ok(result) = save_rx.try_recv() {
-                if let Err(e) = result {
-                    eprintln!(
-                        "chibipop: could not save settings to {}: {e:#}",
-                        config_path.display()
-                    );
-                    if let Some(w) = &settings {
-                        w.set_status(
-                            "Settings applied, but could not be saved - \
-                             they will be lost on restart.",
-                        );
-                    }
-                }
+                finish_save(settings.as_ref(), &mut pending_apply_save, result, config_path, save_sequence);
             }
         } else if msg.message == WM_APP_SCREENSHOT_DONE {
             while let Ok(result) = screenshot_done_rx.try_recv() {
@@ -2255,7 +2410,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }) {
             match cmd {
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
-                TrayCommand::Quit => drive!(Event::TrayAction(TrayAction::Quit)),
+                TrayCommand::Quit => {
+                    if quit_when_idle(Some(SettingsOutcome::Quit), edit.is_some(), &mut quit_requested) {
+                        drive!(Event::TrayAction(TrayAction::Quit));
+                    }
+                }
             }
             if std::mem::take(&mut want_settings) {
                 if let Some(w) = &settings {
@@ -2354,6 +2513,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     capture_guard_active.store(false, Ordering::SeqCst);
     // Wait for the save before `exit(0)`. Otherwise, the process can stop mid-write.
     join_save(&mut save_job);
+    while let Ok(result) = save_rx.try_recv() {
+        finish_save(None, &mut pending_apply_save, result, config_path, save_sequence);
+    }
+    crate::diagnostics::shutdown_capture();
     std::process::exit(0)
 }
 
@@ -2508,6 +2671,9 @@ fn handle_screenshot_save(
 
 /// Starts the popup process again with this argv.
 fn start_run(config_path: &Path, dict_path: &Path) -> Result<()> {
+    if !crate::diagnostics::shutdown_capture() {
+        bail!("could not restore output streams before restarting");
+    }
     let exe = std::env::current_exe().context("locating this executable")?;
     // Pass the configured paths explicitly. They can differ from the defaults.
     std::process::Command::new(exe)
@@ -3427,12 +3593,16 @@ fn save_in_background(
     prev: &mut Option<thread::JoinHandle<()>>,
     cfg: Config,
     path: PathBuf,
-    tx: mpsc::Sender<Result<()>>,
+    tx: mpsc::Sender<SaveResult>,
     main_tid: u32,
+    generation: Option<u64>,
+    sequence: &mut u64,
 ) {
     join_save(prev);
+    *sequence = sequence.wrapping_add(1);
+    let sequence = *sequence;
     *prev = Some(thread::spawn(move || {
-        let _ = tx.send(cfg.save(&path));
+        let _ = tx.send(SaveResult { sequence, generation, result: cfg.save(&path) });
         // SAFETY: This call wakes the main loop.
         unsafe {
             let _ = PostThreadMessageW(main_tid, WM_APP_SAVED, WPARAM(0), LPARAM(0));
@@ -4178,27 +4348,137 @@ mod tests {
 
     #[test]
     fn engine_status_names_a_running_plugin() {
-        let mut cfg = Config::default();
-        cfg.ocr.engine = "meikiocr".into();
-        cfg.plugins.enabled = vec!["meikiocr".into()];
-        assert_eq!("Engine: meikiocr", engine_status_line(&cfg));
+        let runtime = OcrRuntime { engine: "meikiocr".into(), language: "ja".into(), available: true };
+        assert_eq!("OCR: meikiocr; language: ja", engine_status_line(&runtime));
     }
 
     #[test]
     fn engine_status_names_the_builtin() {
+        let runtime = OcrRuntime { engine: "windows-ocr".into(), language: "zh-Hans".into(), available: true };
         assert_eq!(
-            "Engine: Built-in (Windows OCR)",
-            engine_status_line(&Config::default())
+            "OCR: Windows OCR; language: zh-Hans",
+            engine_status_line(&runtime)
         );
     }
 
     #[test]
     fn engine_status_names_a_missing_plugin() {
-        let mut cfg = Config::default();
-        cfg.ocr.engine = "meikiocr".into();
-        let s = engine_status_line(&cfg);
+        let runtime = OcrRuntime { engine: "meikiocr".into(), language: "ja".into(), available: false };
+        let s = engine_status_line(&runtime);
         assert!(s.contains("meikiocr"), "{s}");
-        assert!(s.contains("not found"), "{s}");
+        assert!(s.contains("unavailable"), "{s}");
+        assert!(s.contains("ja (inactive)"), "{s}");
+    }
+
+    #[test]
+    fn only_the_matching_successful_save_marks_the_apply_complete() {
+        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false });
+        for generation in [None, Some(1)] {
+            assert_eq!(None, saved_apply_state(&mut pending, &SaveResult { sequence: 0, generation, result: Ok(()) }));
+            assert!(pending.is_some());
+        }
+        assert_eq!(Some(ApplyState::Applied), saved_apply_state(&mut pending,
+            &SaveResult { sequence: 0, generation: Some(2), result: Ok(()) }));
+        assert_eq!(None, saved_apply_state(&mut pending,
+            &SaveResult { sequence: 0, generation: Some(2), result: Err(anyhow!("late failure")) }));
+    }
+
+    #[test]
+    fn failed_save_or_partial_dictionary_apply_is_never_successful() {
+        for partial_failure in [false, true] {
+            let mut pending = Some(PendingApplySave { generation: 9, partial_failure });
+            let result = if partial_failure { Ok(()) } else { Err(anyhow!("disk full")) };
+            assert_eq!(Some(ApplyState::Failed), saved_apply_state(&mut pending,
+                &SaveResult { sequence: 0, generation: Some(9), result }));
+        }
+    }
+
+    #[test]
+    fn stale_save_failure_cannot_replace_the_latest_success_message() {
+        let form = settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        window.set_status("Latest settings saved.");
+        let mut pending = Some(PendingApplySave { generation: 2, partial_failure: false });
+        finish_save(Some(&window), &mut pending,
+            SaveResult { sequence: 2, generation: Some(2), result: Ok(()) }, Path::new("unused.toml"), 2);
+        finish_save(Some(&window), &mut pending,
+            SaveResult { sequence: 1, generation: Some(1), result: Err(anyhow!("old failure")) }, Path::new("unused.toml"), 2);
+        let audit = crate::ui::audit::dump(window.hwnd());
+        let controls = audit["controls"].as_array().unwrap();
+        let detail = controls.iter().find(|control| control["id"] == 122).unwrap();
+        assert_eq!("Latest settings saved.", detail["text"]);
+        let state = controls.iter().find(|control| control["id"] == 193).unwrap();
+        assert_eq!("Apply: Applied", state["text"]);
+    }
+
+    #[test]
+    fn closing_during_a_write_is_remembered_and_exits_after_completion() {
+        let form = settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        window.set_busy(true);
+        // SAFETY: The test owns this live settings window and sends its native close message.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                window.hwnd(), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, None, None);
+        }
+        let mut pending = false;
+        assert!(!quit_when_idle(window.take_outcome(), true, &mut pending));
+        assert!(!quit_when_idle(None, true, &mut pending));
+        assert!(quit_when_idle(None, false, &mut pending));
+        assert!(!quit_when_idle(None, false, &mut pending));
+        assert!(!quit_when_idle(Some(SettingsOutcome::Cancel), false, &mut pending));
+    }
+
+    #[test]
+    fn only_current_background_save_results_change_the_detail_without_approving_edits() {
+        let form = settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        window.set_apply_state(ApplyState::Pending);
+        window.set_status("Current detail");
+        let mut pending = None;
+        finish_save(Some(&window), &mut pending,
+            SaveResult { sequence: 1, generation: None, result: Err(anyhow!("old")) }, Path::new("unused.toml"), 2);
+        let audit = crate::ui::audit::dump(window.hwnd());
+        let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
+        assert_eq!("Current detail", detail["text"]);
+        finish_save(Some(&window), &mut pending,
+            SaveResult { sequence: 2, generation: None, result: Err(anyhow!("current")) }, Path::new("unused.toml"), 2);
+        let audit = crate::ui::audit::dump(window.hwnd());
+        let detail = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 122).unwrap();
+        assert!(detail["text"].as_str().unwrap().contains("Could not save the sentence area"));
+        finish_save(Some(&window), &mut pending,
+            SaveResult { sequence: 3, generation: None, result: Ok(()) }, Path::new("unused.toml"), 3);
+        let audit = crate::ui::audit::dump(window.hwnd());
+        let state = audit["controls"].as_array().unwrap().iter().find(|control| control["id"] == 193).unwrap();
+        assert_eq!("Apply: Pending", state["text"]);
+    }
+
+    #[test]
+    fn dictionary_apply_preserves_later_captures_without_erasing_form_changes() {
+        let mut live = Config::default();
+        live.anki.static_region = Some([10, 20, 30, 40]);
+        live.actions.screenshot.fixed_region = Some([50, 60, 70, 80]);
+        let mut edited = Config::default();
+        edited.anki.deck = "New deck".into();
+        preserve_live_capture_targets(&mut edited, &live, false);
+        assert_eq!(live.anki.static_region, edited.anki.static_region);
+        assert_eq!(live.actions.screenshot.fixed_region, edited.actions.screenshot.fixed_region);
+        assert_eq!("New deck", edited.anki.deck);
+        edited.actions.screenshot.fixed_region = None;
+        preserve_live_capture_targets(&mut edited, &live, true);
+        assert_eq!(None, edited.actions.screenshot.fixed_region);
+        assert_eq!(live.anki.static_region, edited.anki.static_region);
+    }
+
+    #[test]
+    fn a_newer_snapshot_completes_an_apply_instead_of_its_superseded_save() {
+        let mut pending = Some(PendingApplySave { generation: 7, partial_failure: false });
+        finish_save(None, &mut pending,
+            SaveResult { sequence: 1, generation: Some(7), result: Err(anyhow!("superseded")) }, Path::new("unused.toml"), 2);
+        assert!(pending.is_some());
+        finish_save(None, &mut pending,
+            SaveResult { sequence: 2, generation: Some(7), result: Ok(()) }, Path::new("unused.toml"), 2);
+        assert!(pending.is_none());
     }
 
     #[test]
