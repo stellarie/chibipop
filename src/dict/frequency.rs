@@ -34,8 +34,9 @@ pub fn supplies_frequency(archive: &Path) -> bool {
     crate::dict::archive::any_meta_row(archive, is_freq_row).unwrap_or(false)
 }
 
-/// Returns true for a frequency row.
-fn is_freq_row(row: &serde_json::Value) -> bool {
+/// Share the row rule with the single-pass library inspector. Role detection
+/// and frequency loading must accept the same metadata rows.
+pub(crate) fn is_freq_row(row: &serde_json::Value) -> bool {
     row.as_array().is_some_and(|row| row.len() >= 3 && row[1].as_str() == Some("freq"))
 }
 

@@ -3,6 +3,9 @@
 //! `Library` lists archive files in one directory and the manifest that names
 //! them. `Library::load` reconciles the manifest with the directory on every
 //! read. This keeps the list correct after a manual edit or a crash.
+//! Unchanged archives reuse bank-derived roles from a disposable cache. File
+//! metadata invalidates the cache, so opening settings does not decompress every
+//! frequency bank just to search it again for pitch rows.
 //!
 //! `Pending` tracks one archive removal and its later rebuild.
 //! It moves a removed archive into a quarantine folder without deleting it.
@@ -16,6 +19,118 @@ use std::path::{Path, PathBuf};
 
 /// The file name of the manifest.
 const MANIFEST: &str = "library.json";
+
+/// A versioned cache, separate from the user-editable manifest. A missing or
+/// unreadable cache requires inspection, but never prevents library access.
+const ROLE_CACHE: &str = ".roles-v1.json";
+
+/// File size and modification time can survive an in-place edit or replacement.
+/// Bind cached roles to the file's device, inode, and change time as well.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ArchiveStamp {
+    size: u64,
+    modified: std::time::SystemTime,
+    device: u64,
+    inode: u64,
+    changed: (i64, i64),
+}
+
+impl ArchiveStamp {
+    /// Open the file before reading metadata. A cached role must not make an
+    /// archive appear readable after its permissions change.
+    #[cfg(unix)]
+    fn read(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::File::open(path).ok()?.metadata().ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        Some(Self {
+            size: metadata.len(),
+            modified: metadata.modified().ok()?,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+
+    /// Standard metadata has no change-time token on other platforms. Inspect
+    /// the archive instead of trusting a timestamp that a copy can preserve.
+    #[cfg(not(unix))]
+    fn read(_path: &Path) -> Option<Self> {
+        None
+    }
+}
+
+/// Keep the inspected roles beside their file identity, not beside a manifest
+/// claim. A manual manifest edit therefore cannot assign an archive a role.
+#[derive(Serialize, Deserialize)]
+struct CachedRoles {
+    stamp: ArchiveStamp,
+    roles: Roles,
+}
+
+/// Reuse inspection results across settings processes. An in-memory cache
+/// would disappear each time the settings window closes.
+struct RoleCache {
+    entries: std::collections::BTreeMap<String, CachedRoles>,
+    dirty: bool,
+}
+
+impl RoleCache {
+    /// Treat cache errors as misses. The archives remain the authority, and a
+    /// read-only library must still open.
+    fn load(dir: &Path) -> Self {
+        Self {
+            entries: std::fs::read(dir.join(ROLE_CACHE))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default(),
+            dirty: false,
+        }
+    }
+
+    /// Cache only a complete inspection of a file that stayed unchanged.
+    /// A failed metadata walk must not hide a role on later loads.
+    fn roles(&mut self, path: &Path, file: &str) -> Roles {
+        let stamp = ArchiveStamp::read(path);
+        if let Some(stamp) = &stamp {
+            if let Some(cached) = self.entries.get(file).filter(|cached| cached.stamp == *stamp) {
+                return cached.roles;
+            }
+        }
+        let (roles, complete) = crate::dict::archive::read_roles(path);
+        if complete && !roles.is_empty() {
+            if let Some(stamp) = stamp.filter(|stamp| ArchiveStamp::read(path).as_ref() == Some(stamp)) {
+                self.entries.insert(file.to_string(), CachedRoles { stamp, roles });
+                self.dirty = true;
+                return roles;
+            }
+        }
+        self.dirty |= self.entries.remove(file).is_some();
+        roles
+    }
+
+    /// Publish only changed cache data. Unique temporary files keep concurrent
+    /// loads from mixing their writes. Cache write failures do not change roles.
+    fn save(&mut self, dir: &Path) {
+        let before = self.entries.len();
+        self.entries.retain(|file, _| dir.join(file).is_file());
+        if !self.dirty && self.entries.len() == before {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec(&self.entries) else { return };
+        static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{ROLE_CACHE}.{}.{serial}.tmp", std::process::id()));
+        let Ok(mut file) = std::fs::File::create_new(&tmp) else { return };
+        let written = std::io::Write::write_all(&mut file, &bytes);
+        drop(file);
+        if written.and_then(|()| std::fs::rename(&tmp, dir.join(ROLE_CACHE))).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
 
 /// The folder name for a removed archive.
 ///
@@ -122,27 +237,14 @@ impl From<Roles> for Vec<Role> {
 
 /// Return the roles that the archive itself supplies.
 ///
-/// Ask one independent question for each role. Each question reads the archive
-/// banks.
+/// Read the index and bank roles in one archive inspection. Separate frequency
+/// and pitch checks would decompress the same metadata banks twice.
 /// If this build cannot read the archive's `index.json`, return no roles.
 /// The title, stylesheet, and media paths all depend on that file.
 /// Without it, the library keeps the entry as a file to remove, not a
 /// Dictionary with roles.
 pub fn roles_of(archive: &Path) -> Roles {
-    if crate::dict::archive::read_index(archive).is_err() {
-        return Roles::default();
-    }
-    let mut roles = Roles::default();
-    if crate::dict::archive::supplies_terms(archive) {
-        roles.insert(Role::Terms);
-    }
-    if crate::dict::frequency::supplies_frequency(archive) {
-        roles.insert(Role::Frequency);
-    }
-    if crate::dict::pitch::supplies_pitch(archive) {
-        roles.insert(Role::Pitch);
-    }
-    roles
+    crate::dict::archive::read_roles(archive).0
 }
 
 /// Describe one archive entry in the library.
@@ -150,7 +252,7 @@ pub fn roles_of(archive: &Path) -> Roles {
 pub struct Entry {
     pub file: String,
     pub name: String,
-    /// The library derives this field from the file on every load.
+    /// The library checks this field against the archive's file identity on load.
     /// A manifest from before `Roles` existed has the old single-valued `kind`
     /// field and no `roles` field.
     /// Such a manifest reads as the empty set. `reconcile` corrects the value
@@ -186,10 +288,11 @@ impl Library {
     /// Make the entry list match the files on disk.
     fn reconcile(&mut self, dir: &Path) {
         restore_quarantined(dir);
+        let mut cache = RoleCache::load(dir);
         self.entries.retain(|e| dir.join(&e.file).exists());
-        // Derive roles from each archive file.
+        // Reuse bank-derived roles only while the archive stays unchanged.
         for e in &mut self.entries {
-            e.roles = roles_of(&dir.join(&e.file));
+            e.roles = cache.roles(&dir.join(&e.file), &e.file);
         }
         let mut strays: Vec<String> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
@@ -204,13 +307,14 @@ impl Library {
         strays.sort();
         for file in strays {
             let path = dir.join(&file);
-            let roles = roles_of(&path);
+            let roles = cache.roles(&path, &file);
             let index = crate::dict::archive::read_index(&path).unwrap_or(Value::Null);
             self.entries.push(Entry { name: title_of(&index, &file), file, roles });
         }
         // Run this call last. The loop above appends stray files after the
         // manifest entries.
         self.collapse_duplicates(dir);
+        cache.save(dir);
     }
 
     /// Collapse byte-identical archives into one entry.
@@ -549,6 +653,22 @@ mod tests {
         Entry { file: file.to_string(), name: file.to_string(), roles: Roles::only(roles) }
     }
 
+    /// Store members without compression so the replacement tests control
+    /// archive length instead of depending on compression output.
+    fn write_role_archive(path: &Path, banks: &[(&str, &str)]) {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("index.json", options).unwrap();
+        zip.write_all(br#"{"title":"CacheFixture"}"#).unwrap();
+        for (name, text) in banks {
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
     #[test]
     fn a_missing_directory_loads_as_an_empty_library() {
         let (dir, _guard) = scratch("missing_dir");
@@ -754,6 +874,9 @@ mod tests {
         let mut lib = Library::default();
         lib.import(&dir, &fixture("terms.zip")).unwrap();
         lib.save(&dir).unwrap();
+        assert_eq!(
+            Roles::only(&[Role::Terms]), Library::load(&dir).unwrap().entries[0].roles,
+        );
         std::fs::write(dir.join("terms.zip"), b"corrupted since").unwrap();
 
         let loaded = Library::load(&dir).unwrap();
@@ -766,6 +889,113 @@ mod tests {
         assert_eq!(Roles::only(&[Role::Terms]), roles_of(&fixture("terms.zip")));
         assert_eq!(Roles::only(&[Role::Frequency]), roles_of(&fixture("freq.zip")));
         assert!(roles_of(Path::new("nope.zip")).is_empty());
+    }
+
+    /// The second mode can appear in a later bank. The first frequency row
+    /// must not end the shared inspection before it discovers pitch.
+    #[test]
+    fn one_inspection_finds_terms_and_both_metadata_roles() {
+        let (dir, _guard) = scratch("all_roles");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mixed.zip");
+        write_role_archive(&path, &[
+            ("term_bank_1.json", "[]"),
+            ("term_meta_bank_1.json", r#"[["word","freq",1]]"#),
+            ("term_meta_bank_2.json", r#"[["word","pitch",{"reading":"word","pitches":[]}]]"#),
+        ]);
+        assert_eq!(Roles::only(&Role::EVERY), roles_of(&path));
+    }
+
+    /// A later metadata error must not erase a role that the independent
+    /// readers already accepted. It must still prevent access to later banks.
+    #[test]
+    fn a_metadata_error_preserves_only_roles_found_before_it() {
+        let (dir, _guard) = scratch("partial_roles");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("partial.zip");
+        write_role_archive(&path, &[
+            ("term_bank_1.json", "[]"),
+            ("term_meta_bank_1.json", r#"[["word","freq",1],broken]"#),
+            ("term_meta_bank_2.json", r#"[["word","pitch",0]]"#),
+        ]);
+        let (roles, complete) = crate::dict::archive::read_roles(&path);
+        assert_eq!(Roles::only(&[Role::Terms, Role::Frequency]), roles);
+        assert!(!complete, "a parser error must not become a cached absence");
+    }
+
+    /// Length and modification time can both survive a replacement. Check an
+    /// ordinary edit and an edit that restores the previous modification time.
+    #[test]
+    fn a_same_length_archive_edit_invalidates_cached_roles() {
+        let (dir, _guard) = scratch("cached_replacement");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("changed.zip");
+        write_role_archive(&path, &[("term_meta_bank_1.json", r#"[["word","freq",10]]"#)]);
+        let first_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(first_time).unwrap();
+        let length = file.metadata().unwrap().len();
+        drop(file);
+        let lib = Library::load(&dir).unwrap();
+        assert_eq!(Roles::only(&[Role::Frequency]), lib.entries[0].roles);
+        lib.save(&dir).unwrap();
+
+        write_role_archive(&path, &[("term_meta_bank_1.json", r#"[["word","pitch",0]]"#)]);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(first_time + std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(length, file.metadata().unwrap().len(), "the replacement has the same length");
+        drop(file);
+
+        assert_eq!(Roles::only(&[Role::Pitch]), Library::load(&dir).unwrap().entries[0].roles);
+
+        write_role_archive(&path, &[("term_meta_bank_1.json", r#"[["word","freq",10]]"#)]);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(first_time + std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(length, file.metadata().unwrap().len());
+        drop(file);
+
+        assert_eq!(Roles::only(&[Role::Frequency]), Library::load(&dir).unwrap().entries[0].roles);
+
+        let replacement = dir.join("replacement");
+        write_role_archive(&replacement, &[("term_meta_bank_1.json", r#"[["word","pitch",0]]"#)]);
+        let file = std::fs::File::options().write(true).open(&replacement).unwrap();
+        file.set_modified(first_time + std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(length, file.metadata().unwrap().len());
+        drop(file);
+        std::fs::rename(replacement, &path).unwrap();
+
+        assert_eq!(Roles::only(&[Role::Pitch]), Library::load(&dir).unwrap().entries[0].roles);
+    }
+
+    /// The manifest is user-editable. A cache hit must restore the inspected
+    /// role instead of trusting a changed manifest claim.
+    #[test]
+    fn cached_roles_override_a_manual_manifest_role_change() {
+        let (dir, _guard) = scratch("cached_manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture("freq.zip"), dir.join("freq.zip")).unwrap();
+        let mut lib = Library::load(&dir).unwrap();
+        lib.entries[0].roles = Roles::only(&[Role::Terms]);
+        lib.save(&dir).unwrap();
+
+        assert_eq!(Roles::only(&[Role::Frequency]), Library::load(&dir).unwrap().entries[0].roles);
+    }
+
+    /// The cache is disposable. A bad cache and a failed cache write must
+    /// leave the same usable Dictionary list.
+    #[test]
+    fn cache_read_and_write_failures_do_not_hide_archives() {
+        let (dir, _guard) = scratch("cache_failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture("terms.zip"), dir.join("terms.zip")).unwrap();
+        std::fs::write(dir.join(ROLE_CACHE), b"not json").unwrap();
+        let lib = Library::load(&dir).unwrap();
+        assert_eq!(vec![dir.join("terms.zip")], lib.dict_paths(&dir));
+
+        std::fs::remove_file(dir.join(ROLE_CACHE)).unwrap();
+        std::fs::create_dir(dir.join(ROLE_CACHE)).unwrap();
+        let lib = Library::load(&dir).unwrap();
+        assert_eq!(vec![dir.join("terms.zip")], lib.dict_paths(&dir));
     }
 
     #[test]

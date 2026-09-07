@@ -78,8 +78,8 @@ settings process, control-socket verbs, and three diagnostics.
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
 `ocr-clipboard`, `static-region`. One verb per global action, never a
-scripting API. The settings window prints a ready-to-paste compositor bind for
-each one, naming the running binary's real path.
+scripting API. Compositor binds on the **Shortcuts** tab name the running
+binary's full path. See [Linux settings](LINUX.md#settings-window) for tab navigation.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
 run beside a live daemon. [`LINUX.md`](LINUX.md#command-line) carries the
