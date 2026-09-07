@@ -211,22 +211,6 @@ id = "ocr-per-character"
 label = "Look up each character"
 help = "Available for live lookup only."
 
-[[tabs.sections]]
-id = "recognition-diagnostics"
-label = "Diagnostics"
-
-[[tabs.sections.entries]]
-id = "debug-capture-outline"
-label = "Outline the captured area"
-
-[[tabs.sections.entries]]
-id = "debug-engine"
-label = "Show the active OCR engine"
-
-[[tabs.sections.entries]]
-id = "debug-adapter"
-label = "Show adapter messages"
-
 [[tabs]]
 id = "anki"
 label = "Anki"
@@ -330,3 +314,27 @@ label = "Plugins"
 [[tabs.sections.entries]]
 id = "plugin-list"
 label = "Installed plugins"
+
+[[tabs]]
+id = "debug"
+label = "Debug"
+
+[[tabs.sections]]
+id = "debug-diagnostics"
+label = "Diagnostics"
+
+[[tabs.sections.entries]]
+id = "debug-capture-outline"
+label = "Outline the captured area"
+
+[[tabs.sections.entries]]
+id = "debug-engine"
+label = "Show the active OCR engine"
+
+[[tabs.sections.entries]]
+id = "debug-adapter"
+label = "Show adapter messages"
+
+[[tabs.sections.entries]]
+id = "show-live-logs"
+label = "Show live logs"

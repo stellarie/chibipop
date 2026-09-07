@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 55] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 56] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
@@ -48,6 +48,7 @@ pub(super) const SETTING_INVENTORY: [SettingId; 55] = [
     SettingId::DebugCaptureOutline,
     SettingId::DebugEngine,
     SettingId::DebugAdapter,
+    SettingId::ShowLiveLogs,
     SettingId::AnkiEnabled,
     SettingId::AnkiNotifyOnAdd,
     SettingId::AnkiUrl,
@@ -107,6 +108,7 @@ pub(super) enum TabId {
     TextRecognition,
     Anki,
     Extensions,
+    Debug,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -130,6 +132,7 @@ pub(super) enum SectionId {
     AnkiSentence,
     AnkiFieldMap,
     ExtensionPlugins,
+    DebugDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -173,6 +176,7 @@ pub(super) enum SettingId {
     DebugCaptureOutline,
     DebugEngine,
     DebugAdapter,
+    ShowLiveLogs,
     AnkiEnabled,
     AnkiNotifyOnAdd,
     AnkiUrl,
@@ -328,13 +332,18 @@ mod tests {
                 "Text recognition",
                 "Anki",
                 "Extensions",
+                "Debug",
             ]
         );
-        assert_eq!(layout.tab_count(), 6);
+        assert_eq!(layout.tab_count(), 7);
         assert_eq!(layout.field_map_tab(), Some(4));
         assert!(layout.tab_needs_anki_detection(4));
         assert!(!layout.tab_needs_anki_detection(0));
         assert_eq!(layout.tab_label(1), Some("Shortcuts"));
+        assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 6);
+        assert_eq!(location(&layout, SettingId::DebugEngine).0, 6);
+        assert_eq!(location(&layout, SettingId::DebugAdapter).0, 6);
+        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 6);
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());
@@ -373,7 +382,7 @@ mod tests {
         layout.tabs[0].sections.extend(removed.sections);
 
         let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(parsed.tab_count(), 5);
+        assert_eq!(parsed.tab_count(), 6);
         assert_eq!(location(&parsed, SettingId::LookupMode).0, 0);
     }
 

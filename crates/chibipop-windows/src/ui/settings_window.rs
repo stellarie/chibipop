@@ -44,7 +44,10 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_NOCHANGEDIR, OPENFILENAMEW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi,
+    SystemParametersInfoForDpi,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, ReleaseCapture, SetCapture, SetFocus,
 };
@@ -75,6 +78,28 @@ pub enum ApplyMode {
     Live,
     /// Saves changes for the next application start.
     Standalone,
+}
+
+/// Current Apply state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyState {
+    Loaded,
+    Pending,
+    Applying,
+    Applied,
+    Failed,
+}
+
+impl ApplyState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Loaded => "Loaded",
+            Self::Pending => "Pending",
+            Self::Applying => "Applying",
+            Self::Applied => "Applied",
+            Self::Failed => "Failed",
+        }
+    }
 }
 
 // ---- Control identifiers ----
@@ -212,6 +237,9 @@ const ID_SCREENSHOT_KEY_CLEAR: i32 = 188;
 const ID_ANKI_ADD_KEY_CLEAR: i32 = 189;
 const ID_STATIC_REGION_KEY_CLEAR: i32 = 190;
 const ID_OCR_CLIPBOARD_KEY_CLEAR: i32 = 191;
+const ID_SHOW_LIVE_LOGS: i32 = 192;
+const ID_APPLY_STATE: i32 = 193;
+const ID_RUNTIME_STATUS: i32 = 194;
 
 
 /// The first field-map combo identifier.
@@ -266,12 +294,32 @@ struct BuiltEntry {
     height: i32,
 }
 
+#[derive(Clone, Copy)]
+enum HorizontalLayout {
+    Fixed,
+    Stretch,
+    MoveRight,
+    Quarter(u8),
+}
+
+struct ControlRuntime {
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    dropdown_height: Option<i32>,
+    horizontal: HorizontalLayout,
+    wraps: bool,
+}
+
 struct EntryRuntime {
     id: SettingId,
     label: String,
-    controls: Vec<HWND>,
+    controls: Vec<ControlRuntime>,
     top: Cell<i32>,
     base_height: Cell<i32>,
+    initial_height: i32,
 }
 
 struct SectionRuntime {
@@ -509,6 +557,8 @@ const WHILE_BUSY: [i32; 25] = [
 // ---- Layout dimensions in 96-DPI pixels ----
 
 const WIN_W: i32 = 560;
+const MIN_CLIENT_W: i32 = 520;
+const MIN_CLIENT_H: i32 = 430;
 const PAD: i32 = 14;
 const ROW_H: i32 = 24;
 const ROW_GAP: i32 = 6;
@@ -518,25 +568,26 @@ const BTN_PITCH: i32 = ROW_H + 4;
 const LABEL_W: i32 = 178;
 const FIELD_X: i32 = PAD + LABEL_W;
 const FIELD_W: i32 = WIN_W - FIELD_X - PAD - 16;
-/// The status control has space for about three lines of text.
-const STATUS_H: i32 = 58;
+const STATUS_H: i32 = 44;
 /// The first vertical coordinate below the tab strip.
 const CONTENT_Y: i32 = PAD + TAB_H + 4;
 /// The vertical offset below the top of the bottom row.
 const BOTTOM_UPDATE_DY: i32 = 20;
-const BOTTOM_STATUS_DY: i32 = BOTTOM_UPDATE_DY + ROW_H + 8 + GROUP_GAP;
-const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 2;
+const BOTTOM_APPLY_STATE_DY: i32 = BOTTOM_UPDATE_DY + ROW_H + 8 + GROUP_GAP;
+const BOTTOM_RUNTIME_DY: i32 = BOTTOM_APPLY_STATE_DY + ROW_H;
+const BOTTOM_STATUS_DY: i32 = BOTTOM_RUNTIME_DY + ROW_H;
+const BOTTOM_BTN_DY: i32 = BOTTOM_STATUS_DY + STATUS_H + 8;
 /// The height of the bottom row.
 const BOTTOM_H: i32 = BOTTOM_BTN_DY + ROW_H + 8;
-/// The horizontal coordinate of the right-aligned Apply button.
-const BOTTOM_APPLY_X: i32 = WIN_W - PAD - 144;
 /// Each bottom-row item stores a control identifier, a horizontal coordinate,
 /// and a vertical offset.
-const BOTTOM_ROW: [(i32, i32, i32); 5] = [
+const BOTTOM_ROW: [(i32, i32, i32); 7] = [
     (ID_UPDATES, PAD - 6, 0),
     (ID_CHECK_UPDATE, PAD, BOTTOM_UPDATE_DY),
+    (ID_APPLY_STATE, PAD, BOTTOM_APPLY_STATE_DY),
+    (ID_RUNTIME_STATUS, PAD, BOTTOM_RUNTIME_DY),
     (ID_STATUS, PAD, BOTTOM_STATUS_DY),
-    (ID_APPLY, BOTTOM_APPLY_X, BOTTOM_BTN_DY),
+    (ID_APPLY, 0, BOTTOM_BTN_DY),
     (ID_QUIT, PAD, BOTTOM_BTN_DY),
 ];
 /// The height of one scroll line at 96 DPI.
@@ -689,11 +740,19 @@ fn pane_class_name() -> PCWSTR {
 ///
 /// The application uses PER_MONITOR_AWARE_V2 mode.
 fn dpi_scale(hwnd: HWND, v: i32) -> i32 {
-    // SAFETY: The FFI call accepts a window handle. An invalid handle returns
-    // 0, and the caller then uses 96 DPI. The fallback leaves the size unchanged.
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
-    let dpi = if dpi == 0 { 96 } else { dpi };
+    let dpi = window_dpi(hwnd);
     (v as i64 * dpi as i64 / 96) as i32
+}
+
+fn window_dpi(hwnd: HWND) -> u32 {
+    // SAFETY: Invalid handles yield null roots and zero DPI.
+    unsafe {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        WINDOW_DPI.with(|slot| slot.get())
+            .filter(|(owner, _)| *owner == root.0 as isize)
+            .map(|(_, dpi)| dpi)
+            .unwrap_or_else(|| GetDpiForWindow(hwnd).max(96))
+    }
 }
 
 /// Gets the monitor work-area height.
@@ -731,6 +790,56 @@ fn client_h(hwnd: HWND) -> i32 {
     }
 }
 
+fn client_w(hwnd: HWND) -> i32 {
+    // SAFETY: `rc` is writable stack storage.
+    unsafe {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        rc.right - rc.left
+    }
+}
+
+fn dpi_unscale(hwnd: HWND, value: i32) -> i32 {
+    let dpi = window_dpi(hwnd) as i32;
+    value.saturating_mul(96).saturating_add(dpi / 2) / dpi
+}
+
+fn logical_client_w(hwnd: HWND) -> i32 {
+    ((i64::from(client_w(hwnd)) * 96) / i64::from(window_dpi(hwnd))).max(1) as i32
+}
+
+fn outer_size_for_client(hwnd: HWND, width: i32, height: i32, dpi: u32) -> WinResult<POINT> {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    // SAFETY: `rect` is writable stack storage.
+    unsafe {
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let ex = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        AdjustWindowRectExForDpi(&mut rect, style, false, ex, dpi)?;
+        if style.contains(WS_VSCROLL) {
+            rect.right += GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
+        }
+        if style.contains(WS_HSCROLL) {
+            rect.bottom += GetSystemMetricsForDpi(SM_CYHSCROLL, dpi);
+        }
+    }
+    Ok(POINT {
+        x: rect.right - rect.left,
+        y: rect.bottom - rect.top,
+    })
+}
+
+fn minimum_outer_size(hwnd: HWND) -> POINT {
+    let width = dpi_scale(hwnd, MIN_CLIENT_W);
+    let height = dpi_scale(hwnd, MIN_CLIENT_H);
+    outer_size_for_client(hwnd, width, height, window_dpi(hwnd))
+        .unwrap_or(POINT { x: width, y: height })
+}
+
 /// Positions the bottom row.
 ///
 /// The row stays a fixed distance above the bottom of the client area. Tab
@@ -741,26 +850,38 @@ fn place_bottom(hwnd: HWND) {
     if ch <= 0 {
         return;
     }
+    let width = logical_client_w(hwnd);
     let top = ch - dpi_scale(hwnd, BOTTOM_H + PAD);
-    // SAFETY: Each identifier in `BOTTOM_ROW` names a direct child that
-    // `hwnd` created in `build`. `GetDlgItem` returns `Err` on failure.
-    // `panes` has the same contract. `SWP_NOSIZE` keeps control sizes,
-    // `SWP_NOMOVE` keeps the band origin, and `SWP_NOZORDER` keeps
-    // the z-order position from `place_viewport`.
+    let apply_x = width - PAD - 144;
+    // SAFETY: Every handle is a live child; dimensions use the root's current DPI.
     unsafe {
         for (id, x, dy) in BOTTOM_ROW {
             let Ok(c) = GetDlgItem(Some(hwnd), id) else {
                 continue;
             };
+            let (control_w, control_h) = match id {
+                ID_UPDATES => (width - 2 * PAD, BOTTOM_H - 8),
+                ID_APPLY_STATE | ID_RUNTIME_STATUS => (width - 2 * PAD - 16, ROW_H),
+                ID_STATUS => (width - 2 * PAD - 16, STATUS_H),
+                ID_CHECK_UPDATE => (136, ROW_H),
+                ID_APPLY => (136, ROW_H + 4),
+                ID_QUIT => (116, ROW_H + 4),
+                _ => continue,
+            };
             let _ = SetWindowPos(
                 c,
                 None,
-                dpi_scale(hwnd, x),
+                dpi_scale(hwnd, if id == ID_APPLY { apply_x } else { x }),
                 top + dpi_scale(hwnd, dy),
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                dpi_scale(hwnd, control_w.max(1)),
+                dpi_scale(hwnd, control_h),
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
+        }
+        if let Ok(tab) = GetDlgItem(Some(hwnd), ID_TAB) {
+            let _ = SetWindowPos(tab, None, dpi_scale(hwnd, PAD - 6),
+                dpi_scale(hwnd, PAD), dpi_scale(hwnd, (width - 2 * PAD).max(1)),
+                dpi_scale(hwnd, TAB_H), SWP_NOZORDER | SWP_NOACTIVATE);
         }
         let Ok((viewport, _)) = panes(hwnd) else {
             return;
@@ -770,10 +891,10 @@ fn place_bottom(hwnd: HWND) {
             viewport,
             None,
             0,
-            0,
-            dpi_scale(hwnd, WIN_W),
+            dpi_scale(hwnd, CONTENT_Y),
+            client_w(hwnd),
             band,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
         // The page position changed, so repage the viewport.
         repage(hwnd, viewport);
@@ -787,7 +908,7 @@ fn place_bottom(hwnd: HWND) {
 fn repage(hwnd: HWND, viewport: HWND) {
     let mut si = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE,
+        fMask: SIF_RANGE | SIF_POS,
         ..Default::default()
     };
     // SAFETY: `si` starts with its own size and the call receives a mutable
@@ -796,7 +917,7 @@ fn repage(hwnd: HWND, viewport: HWND) {
     if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_err() {
         return;
     }
-    set_scroll_range(hwnd, si.nMax + 1, client_h(viewport));
+    set_scroll_range(hwnd, si.nMax + 1, client_h(viewport), si.nPos);
 }
 
 /// Scrolls the content pane vertically.
@@ -826,22 +947,33 @@ fn move_content(hwnd: HWND, y: i32) {
 /// Recalculates the scrollbar range.
 ///
 /// The dimensions use physical pixels. `content_h` gives the selected tab
-/// height, so short tabs need no scrollbar. `view_h` comes from the viewport.
-/// The position resets to 0 because pane content changed.
-fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32) {
+/// height, and `view_h` comes from the viewport.
+/// The scrollbar keeps its width on short pages to keep native client bounds stable.
+fn set_scroll_range(hwnd: HWND, content_h: i32, view_h: i32, position: i32) {
     let si = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
         nMin: 0,
         nMax: content_h.max(1) - 1,
         nPage: view_h.max(1) as u32,
-        nPos: 0,
+        nPos: position.clamp(0, (content_h.max(1) - view_h.max(1)).max(0)),
         ..Default::default()
     };
     // SAFETY: `hwnd` is the settings window. `si` is initialized and passed
     // as a const pointer. `SetScrollInfo` reads `si` during the call.
-    unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
-    move_content(hwnd, 0);
+    let actual = unsafe { SetScrollInfo(hwnd, SB_VERT, &si, true) };
+    move_content(hwnd, -actual);
+}
+
+fn scroll_position(hwnd: HWND) -> i32 {
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_POS,
+        ..Default::default()
+    };
+    // SAFETY: `info` is initialized writable stack storage.
+    unsafe { let _ = GetScrollInfo(hwnd, SB_VERT, &mut info); }
+    info.nPos
 }
 
 /// Moves the scroll position.
@@ -922,6 +1054,58 @@ thread_local! {
 
     // Stores active drag-row state for each `HWND`.
     static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
+
+    static RESIZED: Cell<Option<isize>> = const { Cell::new(None) };
+    static WINDOW_DPI: Cell<Option<(isize, u32)>> = const { Cell::new(None) };
+    static SHOW_LOGS: Cell<Option<isize>> = const { Cell::new(None) };
+    static USER_EDIT: Cell<Option<isize>> = const { Cell::new(None) };
+    static EDIT_TRACKING: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+fn record_user_edit(hwnd: HWND) {
+    let owner = hwnd.0 as isize;
+    let active = EDIT_TRACKING.with(|slot| slot.get() == Some(owner));
+    if active {
+        USER_EDIT.with(|slot| slot.set(Some(owner)));
+    }
+}
+
+fn without_edit_tracking(hwnd: HWND, action: impl FnOnce()) {
+    let owner = hwnd.0 as isize;
+    let active = EDIT_TRACKING.with(|slot| {
+        let active = slot.get() == Some(owner);
+        if active {
+            slot.set(None);
+        }
+        active
+    });
+    action();
+    if active {
+        EDIT_TRACKING.with(|slot| slot.set(Some(owner)));
+    }
+}
+
+fn user_edit_command(id: i32, notify: u16) -> bool {
+    if matches!(id, 1 | 2) {
+        return false;
+    }
+    if (ID_FIELD_MAP_BASE..ID_FIELD_MAP_BASE + 100).contains(&id) {
+        return notify == CBN_SELCHANGE as u16;
+    }
+    if (ID_PLUGIN_ENABLE_BASE..ID_PLUGIN_ENABLE_BASE + PLUGIN_ID_SPAN).contains(&id) {
+        return notify == BN_CLICKED as u16;
+    }
+    if matches!(
+        id,
+        ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
+            | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
+            | ID_TRIGGER_KEY | ID_ANKI_ADD_KEY | ID_STATIC_REGION_KEY
+            | ID_OCR_CLIPBOARD_KEY | ID_SCREENSHOT_HOTKEY | ID_STATUS
+            | ID_APPLY_STATE | ID_RUNTIME_STATUS
+    ) {
+        return false;
+    }
+    matches!(notify as u32, BN_CLICKED | CBN_SELCHANGE | CBN_EDITCHANGE | EN_CHANGE)
 }
 
 fn remember_conditional_tabs(hwnd: HWND, tabs: ConditionalTabs) {
@@ -1132,6 +1316,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let notify = (wparam.0 >> 16) as u16;
             // Any mouse click cancels key capture mode.
             unsafe { cancel_capture(hwnd) };
+            if user_edit_command(id, notify) {
+                record_user_edit(hwnd);
+            }
             // Role lists report events through WM_NOTIFY. List events do not
             // arrive here. `SECTIONS` defines each button association.
             if let Some((section, up)) = move_button(id) {
@@ -1177,6 +1364,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_ANKI_TEST => record_click(hwnd, SettingsClick::AnkiTest),
                 ID_CHECK_UPDATE => record_click(hwnd, SettingsClick::CheckUpdate),
                 ID_CSS_EDITOR => record_click(hwnd, SettingsClick::CssEditor),
+                ID_SHOW_LIVE_LOGS => SHOW_LOGS.with(|slot| slot.set(Some(hwnd.0 as isize))),
                 ID_SCREENSHOT_RESET => record_action(hwnd, Action::ResetScreenshotTargets),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
                 ID_MODE_LIVE | ID_MODE_HOLD | ID_MODE_TOGGLE | ID_MODE_PRESS => unsafe {
@@ -1235,6 +1423,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if nmhdr.code == LVN_ITEMCHANGED
                 && section_of_list(nmhdr.id_from as i32).is_some()
             {
+                // SAFETY: LVN_ITEMCHANGED supplies NMLISTVIEW.
+                let item = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
+                if (item.uOldState ^ item.uNewState) & LVIS_STATEIMAGEMASK.0 != 0 {
+                    record_user_edit(hwnd);
+                }
                 unsafe { update_list_buttons(hwnd) };
             }
             // Drag operations start here and continue below. The control detects
@@ -1268,8 +1461,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SIZE => {
-            // The position clamp also routes to this branch.
+            if wparam.0 != SIZE_MINIMIZED as usize {
+                RESIZED.with(|slot| slot.set(Some(hwnd.0 as isize)));
+            }
             place_bottom(hwnd);
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            let dpi = (wparam.0 & 0xffff) as u32;
+            if dpi != 0 && lparam.0 != 0 {
+                WINDOW_DPI.with(|slot| slot.set(Some((hwnd.0 as isize, dpi))));
+                RESIZED.with(|slot| slot.set(Some(hwnd.0 as isize)));
+                // SAFETY: WM_DPICHANGED supplies a valid RECT for this call.
+                unsafe {
+                    let rect = &*(lparam.0 as *const RECT);
+                    let _ = SetWindowPos(hwnd, None, rect.left, rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            if lparam.0 != 0 {
+                let minimum = minimum_outer_size(hwnd);
+                // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO.
+                unsafe {
+                    (*(lparam.0 as *mut MINMAXINFO)).ptMinTrackSize = minimum;
+                }
+            }
             LRESULT(0)
         }
         WM_VSCROLL => {
@@ -1294,8 +1514,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CLOSE => {
-            // The message produces the same outcome as the Escape key.
-            record_outcome(hwnd, SettingsOutcome::Cancel);
+            record_outcome(hwnd, SettingsOutcome::Quit);
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -1407,26 +1626,27 @@ unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
 /// Gets the system user interface font.
 ///
 /// Returns `None` to keep the default font.
-unsafe fn ui_font() -> Option<HFONT> {
+unsafe fn ui_font(dpi: u32) -> Option<HFONT> {
     let mut ncm = NONCLIENTMETRICSW {
         cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
         ..Default::default()
     };
     // SAFETY: `ncm` is stack storage with a size that matches its `cbSize`
-    // field, as the SystemParametersInfoW contract requires.
+    // field, as the SystemParametersInfoForDpi contract requires.
     let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
             std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
             Some(&mut ncm as *mut _ as *mut core::ffi::c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            0,
+            dpi,
         )
     }
     .is_ok();
     if !ok {
         return None;
     }
-    // SAFETY: `SystemParametersInfoW` populated `lfMessageFont` above.
+    // SAFETY: `SystemParametersInfoForDpi` populated `lfMessageFont` above.
     let font = unsafe { CreateFontIndirectW(&ncm.lfMessageFont) };
     if font.is_invalid() {
         None
@@ -2180,6 +2400,7 @@ unsafe fn finish_drag(hwnd: HWND) {
         for _ in 0..(to - drag.from).abs() {
             move_selected(hwnd, drag.section, to < drag.from);
         }
+        record_user_edit(hwnd);
     }
 }
 
@@ -2639,6 +2860,7 @@ fn apply_caption(mode: ApplyMode) -> &'static str {
 }
 
 /// Returns the Apply hint text.
+#[cfg(test)]
 fn apply_hint(mode: ApplyMode, staged: bool) -> &'static str {
     match (mode, staged) {
         (ApplyMode::Live, false) => "Applying saves your settings and uses them right away.",
@@ -2758,8 +2980,72 @@ fn measured_text_height(hwnd: HWND, font: Option<HFONT>, text: &str, width: i32)
             let _ = SelectObject(hdc, old);
         }
         let _ = ReleaseDC(Some(hwnd), hdc);
-        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+        let dpi = window_dpi(hwnd) as i32;
         ((height.max(1) * 96 + dpi - 1) / dpi).max(ROW_H)
+    }
+}
+
+unsafe extern "system" fn set_child_font(hwnd: HWND, font: LPARAM) -> windows::core::BOOL {
+    // SAFETY: EnumChildWindows supplies live descendants; the font stays owned by SettingsWindow.
+    unsafe { SendMessageW(hwnd, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1))); }
+    true.into()
+}
+
+unsafe fn capture_control_runtime(
+    content: HWND,
+    entry_top: i32,
+    hwnd: HWND,
+    font: Option<HFONT>,
+) -> ControlRuntime {
+    // SAFETY: `hwnd` is a live child of `content`.
+    unsafe {
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rect);
+        let mut point = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let _ = ScreenToClient(content, &mut point);
+        let x = dpi_unscale(content, point.x);
+        let y = dpi_unscale(content, point.y) - entry_top;
+        let width = dpi_unscale(content, rect.right - rect.left);
+        let height = dpi_unscale(content, rect.bottom - rect.top);
+        let id = GetDlgCtrlID(hwnd);
+        let horizontal = match id {
+            ID_SCREENSHOT_SUMMARY => HorizontalLayout::Stretch,
+            ID_MODE_LIVE => HorizontalLayout::Quarter(0),
+            ID_MODE_HOLD => HorizontalLayout::Quarter(1),
+            ID_MODE_TOGGLE => HorizontalLayout::Quarter(2),
+            ID_MODE_PRESS => HorizontalLayout::Quarter(3),
+            _ if x >= WIN_W - PAD - BTN_W - 16 => HorizontalLayout::MoveRight,
+            _ if x + width >= WIN_W - PAD - BTN_W - 24 => HorizontalLayout::Stretch,
+            _ => HorizontalLayout::Fixed,
+        };
+        let mut class = [0u16; 16];
+        let class_len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        let class_name = String::from_utf16_lossy(&class[..class_len]);
+        let dropdown_height = if class_name.eq_ignore_ascii_case("ComboBox") {
+            let mut dropped = RECT::default();
+            let result = SendMessageW(hwnd, CB_GETDROPPEDCONTROLRECT, None,
+                Some(LPARAM(&mut dropped as *mut _ as isize)));
+            (result.0 != 0).then(|| dpi_unscale(content, dropped.bottom - dropped.top))
+        } else {
+            None
+        };
+        let text = window_text(hwnd);
+        let measured = measured_text_height(content, font, &text, width);
+        let wraps = class_name.eq_ignore_ascii_case("Static")
+            && (measured - height).abs() <= 1;
+        ControlRuntime {
+            hwnd,
+            x,
+            y,
+            width,
+            height,
+            dropdown_height,
+            horizontal,
+            wraps,
+        }
     }
 }
 
@@ -2769,7 +3055,8 @@ pub struct SettingsWindow {
     viewport: HWND,
     /// Content window that scrolls inside the viewport pane.
     content: HWND,
-    font: Option<HFONT>,
+    font: Cell<Option<HFONT>>,
+    font_dpi: Cell<u32>,
     /// Numeric values for each combo box in insertion order. `read` uses
     /// this list to map selection indices back to values.
     widths: Vec<i64>,
@@ -2804,6 +3091,7 @@ pub struct SettingsWindow {
     apply_mode: ApplyMode,
     /// True while the settings controls are disabled.
     busy: Cell<bool>,
+    apply_state: Cell<ApplyState>,
 }
 
 impl SettingsWindow {
@@ -2839,7 +3127,8 @@ impl SettingsWindow {
                 WINDOW_EX_STYLE(0),
                 class_name(),
                 w!("chibipop settings"),
-                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL,
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+                    | WS_THICKFRAME | WS_VSCROLL,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 // Initial placeholder size. `fit_to` adjusts dimensions after build.
@@ -2852,13 +3141,16 @@ impl SettingsWindow {
             )
             .context("CreateWindowExW for the settings window")?;
 
-            let font = ui_font();
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            WINDOW_DPI.with(|slot| slot.set(Some((hwnd.0 as isize, dpi))));
+            let font = ui_font(dpi);
             let mut win = SettingsWindow {
                 hwnd,
                 // `build` creates the viewport and content panes.
                 viewport: HWND::default(),
                 content: HWND::default(),
-                font,
+                font: Cell::new(font),
+                font_dpi: Cell::new(dpi),
                 widths: Vec::new(),
                 heights: Vec::new(),
                 summaries: Vec::new(),
@@ -2879,6 +3171,11 @@ impl SettingsWindow {
                 current_tab: Cell::new(0),
                 apply_mode: mode,
                 busy: Cell::new(false),
+                apply_state: Cell::new(if form.has_staged() {
+                    ApplyState::Pending
+                } else {
+                    ApplyState::Loaded
+                }),
             };
             // `build` reports final layout height. The window sizes to
             // match content dimensions. Window frame borders and title bar
@@ -2891,7 +3188,11 @@ impl SettingsWindow {
             // Adjusts size and shows the window. Refer to `fit_to` for why
             // `ShowWindow` is not used here.
             win.fit_to(WIN_W, content_h + PAD);
+            win.reflow_all_tabs();
+            win.resize_content();
+            place_bottom(hwnd);
             win.reset_scroll();
+            EDIT_TRACKING.with(|slot| slot.set(Some(hwnd.0 as isize)));
             TAB.with(|cell| cell.set(Some((hwnd.0 as isize, 0))));
             win.wake();
             let _ = SetForegroundWindow(hwnd);
@@ -2936,6 +3237,17 @@ impl SettingsWindow {
                 Some(k)
             }
             _ => None,
+        })
+    }
+
+    /// Takes a live-log request.
+    pub fn take_show_logs(&self) -> bool {
+        SHOW_LOGS.with(|slot| match slot.get() {
+            Some(owner) if owner == self.hwnd.0 as isize => {
+                slot.set(None);
+                true
+            }
+            _ => false,
         })
     }
 
@@ -2994,6 +3306,24 @@ impl SettingsWindow {
     ///
     /// Calls the callback before it opens a file picker.
     pub fn pump(&self, before_blocking: impl FnOnce()) {
+        let resized = RESIZED.with(|slot| match slot.get() {
+            Some(owner) if owner == self.hwnd.0 as isize => {
+                slot.set(None);
+                true
+            }
+            _ => false,
+        });
+        if resized {
+            self.refresh_dpi_font();
+            place_bottom(self.hwnd);
+            self.reflow_all_tabs();
+            self.resize_content();
+        }
+        let edited = USER_EDIT.with(|slot| slot.get() == Some(self.hwnd.0 as isize));
+        if edited && self.apply_state.get() != ApplyState::Applying {
+            USER_EDIT.with(|slot| slot.set(None));
+            self.set_apply_state(ApplyState::Pending);
+        }
         self.pump_field_map();
         if self.take_condition_change() {
             self.reflow_all_tabs();
@@ -3114,9 +3444,9 @@ impl SettingsWindow {
 
     /// Prevents clipped target text.
     fn update_screenshot_summary(&self, text: &str) {
-        let width = WIN_W - 2 * PAD - BTN_W - 28;
-        let height = measured_text_height(self.hwnd, self.font, text, width);
-        let previous = self.screenshot_summary_height.replace(height);
+        let width = logical_client_w(self.hwnd) - 2 * PAD - BTN_W - 28;
+        let height = measured_text_height(self.hwnd, self.font.get(), text, width);
+        self.screenshot_summary_height.set(height);
         // SAFETY: The summary is a live child of this settings window. Updating
         // its text and dimensions preserves visibility and keyboard order.
         unsafe {
@@ -3127,16 +3457,47 @@ impl SettingsWindow {
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
-        if height != previous {
-            if let Some(entry) = self.tabs.iter().flat_map(|tab| &tab.sections)
-                .flat_map(|section| &section.entries)
-                .find(|entry| entry.id == SettingId::ScreenshotTargets) {
-                entry.base_height.set(entry.base_height.get().saturating_add(height - previous));
+        if let Some(tab) = self.entry_tab(SettingId::ScreenshotTargets) {
+            self.reflow_tab(tab);
+        }
+        self.ensure_room_for(self.layout_bottom());
+    }
+
+    /// Sets the Apply state.
+    pub fn set_apply_state(&self, state: ApplyState) {
+        let owner = self.hwnd.0 as isize;
+        let edited = USER_EDIT.with(|slot| slot.get() == Some(owner));
+        let state = if state == ApplyState::Applied && edited {
+            ApplyState::Pending
+        } else {
+            state
+        };
+        self.apply_state.set(state);
+        if state != ApplyState::Pending || edited {
+            USER_EDIT.with(|slot| {
+                if slot.get() == Some(owner) {
+                    slot.set(None);
+                }
+            });
+        }
+        let text = format!("Apply: {}", state.label());
+        // SAFETY: The footer control remains live until `Drop`.
+        unsafe {
+            if let Ok(control) = dlg_item(self.hwnd, ID_APPLY_STATE) {
+                let _ = SetWindowTextW(control, PCWSTR(wide(&text).as_ptr()));
             }
-            if let Some(tab) = self.entry_tab(SettingId::ScreenshotTargets) {
-                self.reflow_tab(tab);
+        }
+    }
+
+    /// Sets active runtime status.
+    pub fn set_runtime_status(&self, language: &str, engine: &str, anki_enabled: bool) {
+        let anki = if anki_enabled { "enabled" } else { "disabled" };
+        let text = format!("Language: {language} | OCR: {engine} | Anki: {anki}");
+        // SAFETY: The footer control remains live until `Drop`.
+        unsafe {
+            if let Ok(control) = dlg_item(self.hwnd, ID_RUNTIME_STATUS) {
+                let _ = SetWindowTextW(control, PCWSTR(wide(&text).as_ptr()));
             }
-            self.ensure_room_for(self.layout_bottom());
         }
     }
 
@@ -3145,33 +3506,34 @@ impl SettingsWindow {
         // SAFETY: `ID_CAPTURE_W` and `ID_CAPTURE_H` are valid descendants of
         // `self.hwnd` created in `build`. Each `dlg_item` lookup is validated,
         // and `SetWindowTextW` copies text buffers during execution.
-        unsafe {
-            for (id, px) in [
-                (ID_CAPTURE_W, ocr.capture_width),
-                (ID_CAPTURE_H, ocr.capture_height),
-            ] {
-                if let Ok(c) = dlg_item(self.hwnd, id) {
-                    let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
+        without_edit_tracking(self.hwnd, || {
+            // SAFETY: The controls remain live until `Drop`.
+            unsafe {
+                for (id, px) in [
+                    (ID_CAPTURE_W, ocr.capture_width),
+                    (ID_CAPTURE_H, ocr.capture_height),
+                ] {
+                    if let Ok(c) = dlg_item(self.hwnd, id) {
+                        let _ = SetWindowTextW(c, PCWSTR(wide(&px.to_string()).as_ptr()));
+                    }
                 }
             }
-        }
+        });
     }
 
     /// Updates Apply button label and status text.
     fn refresh_apply(&self) {
         let staged = self.staged.borrow();
         let has_staged = staged.has_staged();
-        // SAFETY: `ID_APPLY` and `ID_STATUS` are valid child windows of
-        // `self.hwnd` created in `build`. `SetWindowTextW` copies the strings.
+        // SAFETY: `ID_APPLY` is a live child window.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_APPLY) {
                 let caption = wide(apply_caption(self.apply_mode));
                 let _ = SetWindowTextW(c, PCWSTR(caption.as_ptr()));
             }
-            if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
-                let hint = wide(apply_hint(self.apply_mode, has_staged));
-                let _ = SetWindowTextW(c, PCWSTR(hint.as_ptr()));
-            }
+        }
+        if has_staged {
+            self.set_apply_state(ApplyState::Pending);
         }
     }
 
@@ -3445,59 +3807,80 @@ impl SettingsWindow {
         }
     }
 
-    unsafe fn shift_control(&self, control: HWND, delta_y: i32) {
-        if delta_y == 0 {
-            return;
-        }
-        // SAFETY: `control` is a live child of `self.content`.
-        unsafe {
-            let mut rect = RECT::default();
-            if GetWindowRect(control, &mut rect).is_err() {
-                return;
+    fn reflow_entry(&self, entry: &EntryRuntime, width: i32) {
+        let delta_w = width - WIN_W;
+        let mut rows: Vec<i32> = entry.controls.iter().map(|control| control.y).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let mut delta_y = 0;
+        for row in rows {
+            let mut row_delta = None;
+            for control in entry.controls.iter().filter(|control| control.y == row) {
+                let (x, control_w) = match control.horizontal {
+                    HorizontalLayout::Fixed => (control.x, control.width),
+                    HorizontalLayout::Stretch => {
+                        (control.x, (control.width + delta_w).max(40))
+                    }
+                    HorizontalLayout::MoveRight => (control.x + delta_w, control.width),
+                    HorizontalLayout::Quarter(index) => {
+                        let area = width - 2 * PAD - 20;
+                        let gap = 8;
+                        let item_w = (area - 3 * gap) / 4;
+                        (PAD + i32::from(index) * (item_w + gap), item_w)
+                    }
+                };
+                let height = if control.wraps {
+                    // SAFETY: The control remains live until `Drop`.
+                    let text = unsafe { window_text(control.hwnd) };
+                    measured_text_height(self.hwnd, self.font.get(), &text, control_w)
+                } else {
+                    control.height
+                };
+                let height_delta = height - control.height;
+                row_delta = Some(row_delta.map_or(height_delta, |delta: i32| {
+                    delta.max(height_delta)
+                }));
+                // SAFETY: The control is a live child of the content pane.
+                unsafe {
+                    let _ = SetWindowPos(
+                        control.hwnd,
+                        None,
+                        dpi_scale(self.hwnd, x),
+                        dpi_scale(self.hwnd, entry.top.get() + control.y + delta_y),
+                        dpi_scale(self.hwnd, control_w),
+                        dpi_scale(self.hwnd, control.dropdown_height.unwrap_or(height)),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    let id = GetDlgCtrlID(control.hwnd);
+                    if [ID_TERMS, ID_FREQS, ID_PITCH].contains(&id) {
+                        SendMessageW(
+                            control.hwnd,
+                            LVM_SETCOLUMNWIDTH,
+                            Some(WPARAM(0)),
+                            Some(LPARAM(LVSCW_AUTOSIZE_USEHEADER as isize)),
+                        );
+                    }
+                }
             }
-            let mut point = POINT { x: rect.left, y: rect.top };
-            if !ScreenToClient(self.content, &mut point).as_bool() {
-                return;
-            }
-            let _ = SetWindowPos(
-                control,
-                None,
-                point.x,
-                point.y + dpi_scale(self.hwnd, delta_y),
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            delta_y += row_delta.unwrap_or(0);
         }
+        entry.base_height.set((entry.initial_height + delta_y).max(ROW_H));
     }
 
     fn reflow_tab(&self, tab_index: u32) {
         let Some(tab) = self.tabs.get(tab_index as usize) else { return };
+        let width = logical_client_w(self.hwnd);
         let mut y = 0;
         for section in &tab.sections {
             let section_top = y;
-            let frame_delta = section_top - section.top.get();
-            // SAFETY: Runtime handles remain live descendants until `Drop`.
-            unsafe { self.shift_control(section.frame, frame_delta) };
             section.top.set(section_top);
             y += 20;
             for entry in &section.entries {
-                let delta = y - entry.top.get();
-                // SAFETY: Runtime handles remain live descendants until `Drop`.
-                unsafe {
-                    for &control in &entry.controls {
-                        self.shift_control(control, delta);
-                    }
-                    if entry.id == SettingId::AnkiFieldMap {
-                        for &control in self.field_map_extra.borrow().iter() {
-                            self.shift_control(control, delta);
-                        }
-                        for &(_, control) in self.field_map_rows.borrow().iter() {
-                            self.shift_control(control, delta);
-                        }
-                    }
-                }
                 entry.top.set(y);
+                self.reflow_entry(entry, width);
+                if entry.id == SettingId::AnkiFieldMap {
+                    self.repack_field_map();
+                }
                 y += self.entry_height(entry);
             }
             let height = (y - section_top + 8).max(28);
@@ -3507,11 +3890,11 @@ impl SettingsWindow {
                 let _ = SetWindowPos(
                     section.frame,
                     None,
-                    0,
-                    0,
-                    dpi_scale(self.hwnd, WIN_W - 2 * PAD),
+                    dpi_scale(self.hwnd, PAD - 6),
+                    dpi_scale(self.hwnd, section_top),
+                    dpi_scale(self.hwnd, width - 2 * PAD),
                     dpi_scale(self.hwnd, height),
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
             y += GROUP_GAP;
@@ -3531,7 +3914,7 @@ impl SettingsWindow {
         for section in &tab.sections {
             handles.push(section.frame);
             for entry in &section.entries {
-                handles.extend(entry.controls.iter().copied());
+                handles.extend(entry.controls.iter().map(|control| control.hwnd));
                 if entry.id == SettingId::AnkiFieldMap {
                     handles.extend(self.field_map_extra.borrow().iter().copied());
                     handles.extend(
@@ -3593,7 +3976,53 @@ impl SettingsWindow {
     /// Recalculates scroll range for the active tab and scrolls to top.
     fn reset_scroll(&self) {
         let content_h = dpi_scale(self.hwnd, self.tab_page_h(self.current_tab.get()));
-        set_scroll_range(self.hwnd, content_h, client_h(self.viewport));
+        set_scroll_range(self.hwnd, content_h, client_h(self.viewport), 0);
+    }
+
+    fn refresh_dpi_font(&self) {
+        let dpi = window_dpi(self.hwnd);
+        if self.font_dpi.get() == dpi {
+            return;
+        }
+        // SAFETY: The new font stays owned until every descendant switches away from it or is destroyed.
+        unsafe {
+            if let Some(font) = ui_font(dpi) {
+                let _ = EnumChildWindows(Some(self.hwnd), Some(set_child_font), LPARAM(font.0 as isize));
+                if let Some(previous) = self.font.replace(Some(font)) {
+                    let _ = DeleteObject(previous.into());
+                }
+                self.font_dpi.set(dpi);
+            }
+        }
+    }
+
+    fn keep_focus_visible(&self) {
+        // SAFETY: The focused descendant and both panes remain live during this owner-thread call.
+        unsafe {
+            let focus = GetFocus();
+            if !IsChild(self.content, focus).as_bool() || !IsWindowVisible(focus).as_bool() {
+                return;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(focus, &mut rect).is_err() {
+                return;
+            }
+            let mut origin = POINT { x: rect.left, y: rect.top };
+            if !ScreenToClient(self.content, &mut origin).as_bool() {
+                return;
+            }
+            let height = rect.bottom - rect.top;
+            scroll_to(self.hwnd, |info| {
+                let page = info.nPage as i32;
+                if origin.y < info.nPos || height >= page {
+                    origin.y
+                } else if origin.y + height > info.nPos + page {
+                    origin.y + height - page
+                } else {
+                    info.nPos
+                }
+            });
+        }
     }
 
     /// Shows the selected tab and hides all other tabs.
@@ -3614,8 +4043,8 @@ impl SettingsWindow {
                 for section in &runtime.sections {
                     let _ = ShowWindow(section.frame, cmd);
                     for entry in &section.entries {
-                        for &control in &entry.controls {
-                            let _ = ShowWindow(control, cmd);
+                        for control in &entry.controls {
+                            let _ = ShowWindow(control.hwnd, cmd);
                         }
                     }
                 }
@@ -3674,6 +4103,7 @@ impl SettingsWindow {
                 let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
             }
         }
+        record_user_edit(self.hwnd);
         true
     }
 
@@ -3681,14 +4111,17 @@ impl SettingsWindow {
     pub fn populate_combos(&self, decks: &[String], models: &[String], fields: Vec<String>) {
         // SAFETY: `ID_ANKI_DECK` and `ID_ANKI_MODEL` are valid descendants of
         // `self.hwnd` created in `build`. `SendMessageW` copies text buffers.
-        unsafe {
-            if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
-                fill_combo_if_changed(deck, decks);
+        without_edit_tracking(self.hwnd, || {
+            // SAFETY: The controls remain live until `Drop`.
+            unsafe {
+                if let Ok(deck) = dlg_item(self.hwnd, ID_ANKI_DECK) {
+                    fill_combo_if_changed(deck, decks);
+                }
+                if let Ok(model) = dlg_item(self.hwnd, ID_ANKI_MODEL) {
+                    fill_combo_if_changed(model, models);
+                }
             }
-            if let Ok(model) = dlg_item(self.hwnd, ID_ANKI_MODEL) {
-                fill_combo_if_changed(model, models);
-            }
-        }
+        });
         self.populate_field_map(fields);
     }
 
@@ -3746,28 +4179,35 @@ impl SettingsWindow {
         let label_start = usize::from(extra.len() == rows.len() + 1);
         let rows_n = field_map_rows_needed(rows.len());
         let y0 = self.field_map_dynamic_top();
+        let area_w = logical_client_w(self.hwnd) - 2 * PAD - 20;
+        let col_w = (area_w - COL_GAP) / 2;
+        let label_w = COL_LABEL_W.min(col_w / 2);
+        let combo_w = (col_w - label_w - COL_LABEL_GAP).max(80);
         // SAFETY: The vectors own live controls. Each row has one extra label,
         // preceded by the optional group frame. Moving preserves values and focus.
         unsafe {
             if label_start == 1 {
                 let height = if rows.is_empty() { 0 } else { 20 + rows_n * ROW_H + 8 };
-                let _ = SetWindowPos(extra[0], None, 0, 0,
-                    dpi_scale(self.hwnd, WIN_W - 2 * PAD), dpi_scale(self.hwnd, height),
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                let _ = SetWindowPos(extra[0], None,
+                    dpi_scale(self.hwnd, PAD - 6), dpi_scale(self.hwnd, y0),
+                    dpi_scale(self.hwnd, logical_client_w(self.hwnd) - 2 * PAD),
+                    dpi_scale(self.hwnd, height),
+                    SWP_NOZORDER | SWP_NOACTIVATE);
             }
             for (index, (_, combo)) in rows.iter().enumerate() {
                 let Ok(index_i32) = i32::try_from(index) else { break };
-                let x = PAD + index_i32 / rows_n * (COL_W + COL_GAP);
+                let x = PAD + index_i32 / rows_n * (col_w + COL_GAP);
                 let y = y0 + 20 + index_i32 % rows_n * ROW_H;
                 if let Some(&label) = extra.get(index + label_start) {
                     let _ = SetWindowPos(label, None,
-                        dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + 4), 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                        dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + 4),
+                        dpi_scale(self.hwnd, label_w), dpi_scale(self.hwnd, ROW_H),
+                        SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 let _ = SetWindowPos(*combo, None,
-                    dpi_scale(self.hwnd, x + COL_LABEL_W + COL_LABEL_GAP),
-                    dpi_scale(self.hwnd, y), 0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    dpi_scale(self.hwnd, x + label_w + COL_LABEL_GAP),
+                    dpi_scale(self.hwnd, y), dpi_scale(self.hwnd, combo_w),
+                    dpi_scale(self.hwnd, 140), SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
     }
@@ -3866,7 +4306,7 @@ impl SettingsWindow {
     }
 
     fn build_field_map_box(&self, field_count: usize) -> Option<HWND> {
-        let f = self.font;
+        let f = self.font.get();
         let page = self.content;
         let y0 = self.field_map_dynamic_top();
         let rows_n = field_map_rows_needed(field_count);
@@ -3898,7 +4338,7 @@ impl SettingsWindow {
         name: &str,
         existing: &[crate::config::FieldMapping],
     ) -> Option<(HWND, (String, HWND))> {
-        let f = self.font;
+        let f = self.font.get();
         let h = self.hwnd;
         let page = self.content;
         let y0 = self.field_map_dynamic_top();
@@ -3962,30 +4402,29 @@ impl SettingsWindow {
         }
     }
 
-    /// Adjusts window dimensions to fit page content.
-    ///
-    /// Dimensions do not decrease below initial layout sizes.
-    fn ensure_room_for(&self, needed_bottom: i32) {
-        let new_y0 = needed_bottom.max(self.bottom_y0);
-        // SAFETY: `self.content` is a valid descendant of `self.hwnd` created
-        // in `build`. `SWP_NOMOVE` keeps the origin, and `SWP_NOZORDER` keeps
-        // the placement from `place_viewport`.
+    /// Updates the scrollable page.
+    fn ensure_room_for(&self, _needed_bottom: i32) {
+        self.resize_content();
+    }
+
+    fn resize_content(&self) {
+        let height = (self.layout_bottom() - CONTENT_Y).max(1);
+        let position = scroll_position(self.hwnd);
+        // SAFETY: `self.content` remains live until `Drop`.
         unsafe {
-            // Keeps page content visible.
             let _ = SetWindowPos(
                 self.content,
                 None,
                 0,
                 0,
-                dpi_scale(self.hwnd, WIN_W),
-                dpi_scale(self.hwnd, new_y0 - CONTENT_Y),
+                client_w(self.hwnd),
+                dpi_scale(self.hwnd, height),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
-        // Adjusts window size downward when content shrinks.
-        self.fit_to(WIN_W, new_y0 + BOTTOM_H + PAD);
-        // The resize changed the band dimensions.
-        self.reset_scroll();
+        let content_h = dpi_scale(self.hwnd, self.tab_page_h(self.current_tab.get()));
+        set_scroll_range(self.hwnd, content_h, client_h(self.viewport), position);
+        self.keep_focus_visible();
     }
 
     /// Removes the selected dictionary row from all role sections.
@@ -4086,22 +4525,15 @@ impl SettingsWindow {
     /// Resizes the client area to `client_w` by `client_h` 96-DPI pixels,
     /// and displays the window.
     ///
-    /// `CreateWindowExW` requires outer window dimensions. `AdjustWindowRectEx`
-    /// calculates border and caption offsets for the target monitor DPI.
+    /// Frame metrics and the native scrollbar reserve space at the window DPI.
     fn fit_to(&self, client_w: i32, client_h: i32) {
         // SAFETY: `self.hwnd` is a valid window handle. `rc` is local stack
         // storage that the call modifies. Failure leaves the current window size.
         unsafe {
-            let mut rc = RECT {
-                left: 0,
-                top: 0,
-                right: dpi_scale(self.hwnd, client_w),
-                bottom: dpi_scale(self.hwnd, client_h),
-            };
-            let style = WINDOW_STYLE(GetWindowLongW(self.hwnd, GWL_STYLE) as u32);
-            let ex = WINDOW_EX_STYLE(GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32);
-            if AdjustWindowRectEx(&mut rc, style, false, ex).is_ok() {
-                let mut outer_h = rc.bottom - rc.top;
+            if let Ok(size) = outer_size_for_client(self.hwnd,
+                dpi_scale(self.hwnd, client_w), dpi_scale(self.hwnd, client_h),
+                window_dpi(self.hwnd)) {
+                let mut outer_h = size.y;
                 if let Some(cap) = work_area_height(self.hwnd) {
                     outer_h = outer_h.min(cap);
                 }
@@ -4110,7 +4542,7 @@ impl SettingsWindow {
                     None,
                     0,
                     0,
-                    rc.right - rc.left,
+                    size.x,
                     outer_h,
                     // Use SWP_SHOWWINDOW instead of a separate `ShowWindow` call.
                     // The first `ShowWindow` call in a process uses
@@ -4136,7 +4568,7 @@ impl SettingsWindow {
         unsafe {
             let h = self.hwnd;
             let page = self.content;
-            let f = self.font;
+            let f = self.font.get();
             let mut controls = Vec::new();
             let mut y = top;
             let mut help_rendered = false;
@@ -4625,6 +5057,11 @@ impl SettingsWindow {
             SettingId::DebugAdapter => {
                 checkbox!(ID_ADAPTER_LOG, form.cfg.debug.show_adapter_log);
             }
+            SettingId::ShowLiveLogs => {
+                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
+                    160, ROW_H, ID_SHOW_LIVE_LOGS, f)?);
+                y += ROW_H + ROW_GAP;
+            }
             SettingId::AnkiEnabled => { checkbox!(ID_ANKI_ENABLED, form.cfg.anki.enabled); }
             SettingId::AnkiNotifyOnAdd => {
                 checkbox!(ID_NOTIFY_ON_ADD, form.cfg.anki.notify_on_add);
@@ -4850,7 +5287,7 @@ impl SettingsWindow {
         stale: &[String],
         layout: &SettingsLayout,
     ) -> Result<i32> {
-        let f = self.font;
+        let f = self.font.get();
         let h = self.hwnd;
         // SAFETY: The main window owns every created child.
         unsafe {
@@ -4958,12 +5395,19 @@ impl SettingsWindow {
                         )?
                     };
                     y += built.height;
+                    let controls = built.controls.into_iter().map(|control| {
+                        // SAFETY: `build_entry` created each live child.
+                        unsafe {
+                            capture_control_runtime(self.content, built.top, control, self.font.get())
+                        }
+                    }).collect();
                     runtime_entries.push(EntryRuntime {
                         id: built.id,
                         label: built.label,
-                        controls: built.controls,
+                        controls,
                         top: Cell::new(built.top),
                         base_height: Cell::new(built.height),
+                        initial_height: built.height,
                     });
                 }
                 let section_height = (y - section_top + 8).max(28);
@@ -5019,12 +5463,12 @@ impl SettingsWindow {
             child(
                 h,
                 w!("BUTTON"),
-                "Updates",
+                "Status",
                 WINDOW_STYLE(BS_GROUPBOX as u32),
                 PAD - 6,
                 self.bottom_y0,
                 WIN_W - 2 * PAD,
-                ROW_H + 24,
+                BOTTOM_H - 8,
                 ID_UPDATES,
                 f,
             )?;
@@ -5040,11 +5484,39 @@ impl SettingsWindow {
                 ID_CHECK_UPDATE,
                 f,
             )?;
-            let staged = form.has_staged();
+            let apply_state = format!("Apply: {}", self.apply_state.get().label());
+            child(
+                h,
+                w!("STATIC"),
+                &apply_state,
+                WINDOW_STYLE(0),
+                PAD,
+                self.bottom_y0 + BOTTOM_APPLY_STATE_DY,
+                WIN_W - 2 * PAD - 16,
+                ROW_H,
+                ID_APPLY_STATE,
+                f,
+            )?;
+            let runtime = match self.apply_mode {
+                ApplyMode::Live => "OCR status is initializing.",
+                ApplyMode::Standalone => "Scanning is inactive.",
+            };
+            child(
+                h,
+                w!("STATIC"),
+                runtime,
+                WINDOW_STYLE(0),
+                PAD,
+                self.bottom_y0 + BOTTOM_RUNTIME_DY,
+                WIN_W - 2 * PAD - 16,
+                ROW_H,
+                ID_RUNTIME_STATUS,
+                f,
+            )?;
             child(
                 h,
                 w!("EDIT"),
-                apply_hint(self.apply_mode, staged),
+                "Ready.",
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD,
                 self.bottom_y0 + BOTTOM_STATUS_DY,
@@ -5058,7 +5530,7 @@ impl SettingsWindow {
                 w!("BUTTON"),
                 apply_caption(self.apply_mode),
                 WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
-                BOTTOM_APPLY_X,
+                WIN_W - PAD - 144,
                 self.bottom_y0 + BOTTOM_BTN_DY,
                 136,
                 ROW_H + 4,
@@ -5427,6 +5899,18 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
+        for slot in [&RESIZED, &SHOW_LOGS, &USER_EDIT, &EDIT_TRACKING] {
+            slot.with(|cell| {
+                if cell.get() == Some(self.hwnd.0 as isize) {
+                    cell.set(None);
+                }
+            });
+        }
+        WINDOW_DPI.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
         // The user can destroy a window during a drag. The operating system
         // releases capture, so this code clears the row that the drag stored.
         // A later button-up event cannot find that row.
@@ -5440,7 +5924,7 @@ impl Drop for SettingsWindow {
         // its children before it deletes the font.
         unsafe {
             let _ = DestroyWindow(self.hwnd);
-            if let Some(f) = self.font {
+            if let Some(f) = self.font.get() {
                 let _ = DeleteObject(f.into());
             }
         }
@@ -5628,7 +6112,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(6, window.tab_count());
+        assert_eq!(7, window.tab_count());
         assert_eq!(Some("Shortcuts"), window.tab_label(0));
         assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
         assert_eq!(Some(0), window.field_map_tab());
@@ -5650,6 +6134,416 @@ mod tests {
             SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0
         };
         assert_eq!(3, selected);
+    }
+
+    #[test]
+    fn native_window_resizes_maximizes_and_tracks_a_minimum() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The root window remains live for this test.
+        unsafe {
+            let style = WINDOW_STYLE(GetWindowLongW(window.hwnd, GWL_STYLE) as u32);
+            assert!(style.contains(WS_THICKFRAME));
+            assert!(style.contains(WS_MAXIMIZEBOX));
+            let mut limits = MINMAXINFO::default();
+            let _ = wndproc(
+                window.hwnd,
+                WM_GETMINMAXINFO,
+                WPARAM(0),
+                LPARAM(&mut limits as *mut _ as isize),
+            );
+            assert!(limits.ptMinTrackSize.x >= dpi_scale(window.hwnd, MIN_CLIENT_W));
+            assert!(limits.ptMinTrackSize.y >= dpi_scale(window.hwnd, MIN_CLIENT_H));
+        }
+
+        resize_client(&window, 700, 560);
+        let restored = outer_rect(&window);
+        // SAFETY: The test owns the native root window.
+        unsafe {
+            let _ = ShowWindow(window.hwnd, SW_MAXIMIZE);
+            window.pump(|| {});
+            assert!(IsZoomed(window.hwnd).as_bool());
+            let _ = ShowWindow(window.hwnd, SW_RESTORE);
+            window.pump(|| {});
+        }
+        let after = outer_rect(&window);
+        assert_eq!(restored.right - restored.left, after.right - after.left);
+        assert_eq!(restored.bottom - restored.top, after.bottom - after.top);
+    }
+
+    struct TestDpiContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT);
+
+    impl TestDpiContext {
+        fn per_monitor() -> Self {
+            use windows::Win32::UI::HiDpi::{
+                SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            };
+            // SAFETY: Only this test thread changes awareness; Drop restores it after all windows close.
+            let previous = unsafe {
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            };
+            assert!(!previous.0.is_null());
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestDpiContext {
+        fn drop(&mut self) {
+            // SAFETY: This is the previous valid context returned on the same thread.
+            unsafe { windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(self.0); }
+        }
+    }
+
+    fn assert_native_edges(window: &SettingsWindow) {
+        let width = client_w(window.hwnd);
+        let height = client_h(window.hwnd);
+        for id in [ID_TAB, ID_UPDATES, ID_CHECK_UPDATE, ID_APPLY_STATE,
+            ID_RUNTIME_STATUS, ID_STATUS, ID_APPLY, ID_QUIT] {
+            let rect = control_rect(window, id, window.hwnd);
+            assert!(rect.left >= 0 && rect.right <= width, "id {id}: {rect:?}, width {width}");
+            assert!(rect.top >= 0 && rect.bottom <= height, "id {id}: {rect:?}, height {height}");
+            assert!(rect.bottom > rect.top, "zero-height control {id}");
+        }
+        assert_eq!(width, client_w(window.viewport));
+        assert_eq!(width, client_w(window.content));
+        let viewport = control_rect(window, ID_VIEWPORT, window.hwnd);
+        let footer = control_rect(window, ID_UPDATES, window.hwnd);
+        assert!(viewport.bottom <= footer.top);
+        // SAFETY: These runtime handles remain live throughout the test.
+        unsafe {
+            for tab in &window.tabs {
+                for section in &tab.sections {
+                    for control in section.entries.iter().flat_map(|entry| &entry.controls)
+                        .map(|control| control.hwnd).chain(std::iter::once(section.frame))
+                    {
+                        let mut rect = RECT::default();
+                        GetWindowRect(control, &mut rect).unwrap();
+                        let mut point = POINT { x: rect.right, y: rect.top };
+                        assert!(ScreenToClient(window.content, &mut point).as_bool());
+                        assert!(point.x <= width, "control {:?} exceeds {width}: {}", control, point.x);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_minimum_and_fitted_sizes_reserve_scrollbar_and_client_edges() {
+        let _awareness = TestDpiContext::per_monitor();
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: Native DPI is read independently of the settings geometry helper.
+        let dpi = unsafe { GetDpiForWindow(window.hwnd) } as i32;
+        for (width, height) in [(520, 430), (560, 480), (760, 520)] {
+            resize_client(&window, width, height);
+            assert_eq!(width * dpi / 96, client_w(window.hwnd));
+            assert_eq!(height * dpi / 96, client_h(window.hwnd));
+            assert_native_edges(&window);
+            // SAFETY: The native combos and output rectangles remain live during each synchronous message.
+            unsafe {
+                for id in [ID_FONT, ID_OCR_LANG, ID_ANKI_DECK] {
+                    let mut dropped = RECT::default();
+                    assert_ne!(0, SendMessageW(dlg_item(window.hwnd, id).unwrap(),
+                        CB_GETDROPPEDCONTROLRECT, None,
+                        Some(LPARAM(&mut dropped as *mut _ as isize))).0);
+                    assert!(dropped.bottom - dropped.top >= 100 * dpi / 96,
+                        "combo {id} lost its drop-down height at client width {width}");
+                }
+            }
+            for tab in 0..window.tab_count() {
+                window.switch_tab(tab);
+                assert_eq!(width * dpi / 96, client_w(window.hwnd));
+            }
+        }
+        // SAFETY: The test supplies live, writable message storage.
+        unsafe {
+            let mut limits = MINMAXINFO::default();
+            SendMessageW(window.hwnd, WM_GETMINMAXINFO, None,
+                Some(LPARAM(&mut limits as *mut _ as isize)));
+            SetWindowPos(window.hwnd, None, 0, 0,
+                limits.ptMinTrackSize.x, limits.ptMinTrackSize.y,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+        }
+        window.pump(|| {});
+        assert_eq!(MIN_CLIENT_W * dpi / 96, client_w(window.hwnd));
+        assert_eq!(MIN_CLIENT_H * dpi / 96, client_h(window.hwnd));
+        assert_native_edges(&window);
+        assert_eq!(form, window.read(&form));
+    }
+
+    #[test]
+    fn resize_preserves_scroll_and_keeps_lower_focus_visible() {
+        let form = nondefault_form();
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::ScreenshotTargets, 0, 0, 0);
+        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        resize_client(&window, 700, 460);
+        let order = visible_tabstop_ids(&window);
+        // SAFETY: This thread owns the root and focusable descendants.
+        unsafe { SetFocus(Some(window.hwnd)).unwrap(); }
+        scroll_to(window.hwnd, |_| 180);
+        assert_eq!(180, scroll_position(window.hwnd));
+        resize_client(&window, 620, 480);
+        assert_eq!(180, scroll_position(window.hwnd));
+        let focus_top = control_top(&window, ID_SHOW_POS);
+        scroll_to(window.hwnd, |_| focus_top);
+        // SAFETY: The lower checkbox is visible on the active Popup tab.
+        unsafe { SetFocus(Some(dlg_item(window.hwnd, ID_SHOW_POS).unwrap())).unwrap(); }
+        resize_client(&window, 520, 430);
+        let focus = control_rect(&window, ID_SHOW_POS, window.viewport);
+        assert!(focus.top >= 0 && focus.bottom <= client_h(window.viewport), "{focus:?}");
+        assert!(scroll_position(window.hwnd) > 0);
+        assert_eq!(order, visible_tabstop_ids(&window));
+        let before = scroll_position(window.hwnd);
+        let size = outer_rect(&window);
+        window.refresh_screenshot_targets(&form.cfg.actions.screenshot);
+        assert_eq!(before, scroll_position(window.hwnd));
+        assert_eq!(size, outer_rect(&window));
+        let mut screenshot = form.cfg.actions.screenshot.clone();
+        screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "test-window".into(),
+            title: "A long game window title ".repeat(20),
+        });
+        window.refresh_screenshot_targets(&screenshot);
+        let focus = control_rect(&window, ID_SHOW_POS, window.viewport);
+        assert!(focus.top >= 0 && focus.bottom <= client_h(window.viewport), "{focus:?}");
+        assert!(scroll_position(window.hwnd) > before);
+        assert_eq!(size, outer_rect(&window));
+        // SAFETY: Resize and dynamic reflow keep the same focused child.
+        unsafe { assert_eq!(dlg_item(window.hwnd, ID_SHOW_POS).unwrap(), GetFocus()); }
+        window.switch_tab(1);
+        assert_eq!(0, scroll_position(window.hwnd));
+    }
+
+    #[test]
+    fn dynamic_reflow_clamps_scroll_when_content_shrinks() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        resize_client(&window, 620, 480);
+        window.switch_tab(window.field_map_tab().unwrap());
+        window.populate_fields((0..20).map(|index| format!("Field {index}")).collect());
+        while window.pending_field_map.borrow().is_some() { window.pump(|| {}); }
+        window.toggle_field_map();
+        // SAFETY: Moving focus to the root allows the scroll offset to be measured independently.
+        unsafe { SetFocus(Some(window.hwnd)).unwrap(); }
+        scroll_to(window.hwnd, |_| i32::MAX);
+        let before = scroll_position(window.hwnd);
+        let size = outer_rect(&window);
+        window.toggle_field_map();
+        let maximum = (dpi_scale(window.hwnd, window.tab_page_h(window.current_tab.get()))
+            - client_h(window.viewport)).max(0);
+        assert!(before > maximum);
+        assert_eq!(maximum, scroll_position(window.hwnd));
+        assert_eq!(size, outer_rect(&window));
+        // SAFETY: The content pane is a live child of the viewport.
+        unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(window.content, &mut rect).unwrap();
+            let mut origin = POINT { x: rect.left, y: rect.top };
+            assert!(ScreenToClient(window.viewport, &mut origin).as_bool());
+            assert_eq!(-maximum, origin.y);
+        }
+    }
+
+    #[test]
+    fn dpi_messages_update_font_geometry_and_dropdown_capacity() {
+        use windows::Win32::Graphics::Gdi::GetObjectW;
+        let _awareness = TestDpiContext::per_monitor();
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut font_heights = Vec::new();
+        for dpi in [96u32, 120, 144, 96] {
+            let rect = RECT { left: 30, top: 30, right: 1030, bottom: 750 };
+            // SAFETY: Synchronous delivery borrows the suggested rectangle for this call only.
+            unsafe {
+                SendMessageW(window.hwnd, WM_DPICHANGED,
+                    Some(WPARAM(dpi as usize | ((dpi as usize) << 16))),
+                    Some(LPARAM(&rect as *const _ as isize)));
+            }
+            window.pump(|| {});
+            assert_eq!(rect, outer_rect(&window));
+            assert_eq!(dpi, window.font_dpi.get());
+            assert_native_edges(&window);
+            // SAFETY: All control and font handles remain owned by this window.
+            unsafe {
+                let font = window.font.get().unwrap();
+                let mut logfont = LOGFONTW::default();
+                assert_ne!(0, GetObjectW(font.into(), std::mem::size_of::<LOGFONTW>() as i32,
+                    Some(&mut logfont as *mut _ as *mut core::ffi::c_void)));
+                font_heights.push(logfont.lfHeight.abs());
+                for id in [ID_THEME, ID_CAPTURE_W, ID_STATUS, ID_TAB, ID_RUNTIME_STATUS] {
+                    let control = dlg_item(window.hwnd, id).unwrap();
+                    assert_eq!(font.0 as isize, SendMessageW(control, WM_GETFONT, None, None).0);
+                }
+                for id in [ID_THEME, ID_FONT, ID_OCR_LANG, ID_MAX_WIDTH, ID_ANKI_DECK] {
+                    let combo = dlg_item(window.hwnd, id).unwrap();
+                    let mut dropped = RECT::default();
+                    assert_ne!(0, SendMessageW(combo, CB_GETDROPPEDCONTROLRECT, None,
+                        Some(LPARAM(&mut dropped as *mut _ as isize))).0);
+                    assert!(dropped.bottom - dropped.top >= (100 * dpi / 96) as i32,
+                        "collapsed combo {id} at {dpi} DPI: {dropped:?}");
+                }
+            }
+            assert_eq!(dpi_scale(window.hwnd, TAB_H),
+                client_h(dlg_item_for_test(&window, ID_TAB)));
+            assert_eq!(form, window.read(&form));
+        }
+        assert!(font_heights[0] < font_heights[1]);
+        assert!(font_heights[1] < font_heights[2]);
+        assert_eq!(font_heights[0], font_heights[3]);
+    }
+
+    fn dlg_item_for_test(window: &SettingsWindow, id: i32) -> HWND {
+        // SAFETY: The test owns the requested child window.
+        unsafe { dlg_item(window.hwnd, id).unwrap() }
+    }
+
+    #[test]
+    fn native_width_and_height_reflow_preserves_values() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        resize_client(&window, MIN_CLIENT_W, MIN_CLIENT_H);
+        let narrow_field = control_rect(&window, ID_THEME, window.content);
+        let narrow_status = control_rect(&window, ID_STATUS, window.hwnd);
+        let narrow_viewport = control_rect(&window, ID_VIEWPORT, window.hwnd);
+        let narrow_apply = control_rect(&window, ID_APPLY, window.hwnd);
+        let narrow_footer = control_rect(&window, ID_UPDATES, window.hwnd);
+        assert!(narrow_viewport.bottom <= narrow_footer.top);
+        assert!(narrow_status.bottom <= client_h(window.hwnd));
+
+        resize_client(&window, 760, 680);
+        let wide_field = control_rect(&window, ID_THEME, window.content);
+        let wide_status = control_rect(&window, ID_STATUS, window.hwnd);
+        let tall_viewport = control_rect(&window, ID_VIEWPORT, window.hwnd);
+        let wide_apply = control_rect(&window, ID_APPLY, window.hwnd);
+        assert!(wide_field.right - wide_field.left > narrow_field.right - narrow_field.left);
+        assert!(wide_status.right - wide_status.left > narrow_status.right - narrow_status.left);
+        assert!(tall_viewport.bottom - tall_viewport.top
+            > narrow_viewport.bottom - narrow_viewport.top);
+        assert!(wide_apply.left > narrow_apply.left);
+
+        window.populate_fields((0..4).map(|index| format!("Field {index}")).collect());
+        window.toggle_field_map();
+        let narrow_combo = {
+            resize_client(&window, MIN_CLIENT_W, 600);
+            control_rect(&window, ID_FIELD_MAP_BASE, window.content)
+        };
+        let narrow_second = control_rect(&window, ID_FIELD_MAP_BASE + 2, window.content);
+        assert!(narrow_combo.right < narrow_second.left);
+        let wide_combo = {
+            resize_client(&window, 760, 600);
+            control_rect(&window, ID_FIELD_MAP_BASE, window.content)
+        };
+        let wide_second = control_rect(&window, ID_FIELD_MAP_BASE + 2, window.content);
+        assert!(wide_combo.right < wide_second.left);
+        assert!(wide_combo.right - wide_combo.left > narrow_combo.right - narrow_combo.left);
+        assert_eq!(form, window.read(&form));
+    }
+
+    #[test]
+    fn dynamic_reflow_preserves_user_size_and_maximized_state() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        resize_client(&window, 720, 560);
+        let before = outer_rect(&window);
+        let mut screenshot = form.cfg.actions.screenshot.clone();
+        screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "test-window".into(),
+            title: "A long game window title ".repeat(20),
+        });
+        window.refresh_screenshot_targets(&screenshot);
+        window.populate_fields((0..12).map(|index| format!("Field {index}")).collect());
+        window.toggle_field_map();
+        let after = outer_rect(&window);
+        assert_eq!(before.right - before.left, after.right - after.left);
+        assert_eq!(before.bottom - before.top, after.bottom - after.top);
+
+        // SAFETY: The test owns the native root window.
+        unsafe {
+            let _ = ShowWindow(window.hwnd, SW_MAXIMIZE);
+            window.pump(|| {});
+            assert!(IsZoomed(window.hwnd).as_bool());
+            window.refresh_screenshot_targets(&screenshot);
+            window.populate_fields((0..8).map(|index| format!("Field {index}")).collect());
+            assert!(IsZoomed(window.hwnd).as_bool());
+            let _ = ShowWindow(window.hwnd, SW_RESTORE);
+            window.pump(|| {});
+        }
+    }
+
+    #[test]
+    fn footer_keeps_apply_runtime_and_operation_state_separate() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: Footer controls remain live for this test.
+        unsafe {
+            assert_eq!("Apply: Loaded", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+            assert_eq!(
+                "Scanning is inactive.",
+                window_text(dlg_item(window.hwnd, ID_RUNTIME_STATUS).unwrap()),
+            );
+        }
+        window.set_apply_state(ApplyState::Applied);
+        window.set_runtime_status("ja-JP", "builtin fallback", true);
+        window.set_status("Saved configuration.");
+        window.set_capture_fields(&form.cfg.ocr);
+        window.populate_combos(&[], &[], Vec::new());
+        window.switch_tab(1);
+        window.pump(|| {});
+        // SAFETY: Footer controls remain live for this test.
+        unsafe {
+            assert_eq!("Apply: Applied", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+            assert_eq!(
+                "Language: ja-JP | OCR: builtin fallback | Anki: enabled",
+                window_text(dlg_item(window.hwnd, ID_RUNTIME_STATUS).unwrap()),
+            );
+            assert_eq!(
+                "Saved configuration.",
+                window_text(dlg_item(window.hwnd, ID_STATUS).unwrap()),
+            );
+        }
+
+        send_command(&window, ID_SHOW_SCAN);
+        window.pump(|| {});
+        // SAFETY: The Apply state control remains live.
+        unsafe {
+            assert_eq!("Apply: Pending", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+        }
+        window.set_apply_state(ApplyState::Applying);
+        send_command(&window, ID_SHOW_SCAN);
+        window.pump(|| {});
+        // SAFETY: The Apply state control remains live.
+        unsafe {
+            assert_eq!("Apply: Applying", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+        }
+        window.set_apply_state(ApplyState::Applied);
+        // SAFETY: The control remains live.
+        unsafe {
+            assert_eq!("Apply: Pending", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+        }
+        window.set_apply_state(ApplyState::Applying);
+        window.set_apply_state(ApplyState::Failed);
+        // SAFETY: The Apply state control remains live.
+        unsafe {
+            assert_eq!("Apply: Failed", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+        }
+    }
+
+    #[test]
+    fn debug_action_is_separate_from_dirty_settings() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_eq!(7, window.tab_count());
+        assert_eq!(Some("Debug"), window.tab_label(6));
+        window.switch_tab(6);
+        send_command(&window, ID_SHOW_LIVE_LOGS);
+        window.pump(|| {});
+        assert!(window.take_show_logs());
+        assert!(!window.take_show_logs());
+        // SAFETY: The Apply state control remains live.
+        unsafe {
+            assert_eq!("Apply: Loaded", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
+        }
     }
 
     #[test]
@@ -5688,6 +6582,45 @@ mod tests {
         check_cancelled_field_rows(true);
     }
 
+    fn control_rect(window: &SettingsWindow, id: i32, parent: HWND) -> RECT {
+        // SAFETY: The test window owns the requested control.
+        unsafe {
+            let control = dlg_item(window.hwnd, id).expect("control should exist");
+            let mut rect = RECT::default();
+            GetWindowRect(control, &mut rect).expect("control rectangle");
+            let mut top_left = POINT {
+                x: rect.left,
+                y: rect.top,
+            };
+            let mut bottom_right = POINT {
+                x: rect.right,
+                y: rect.bottom,
+            };
+            assert!(ScreenToClient(parent, &mut top_left).as_bool());
+            assert!(ScreenToClient(parent, &mut bottom_right).as_bool());
+            RECT {
+                left: top_left.x,
+                top: top_left.y,
+                right: bottom_right.x,
+                bottom: bottom_right.y,
+            }
+        }
+    }
+
+    fn outer_rect(window: &SettingsWindow) -> RECT {
+        // SAFETY: The root window remains live for this test.
+        unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(window.hwnd, &mut rect).expect("window rectangle");
+            rect
+        }
+    }
+
+    fn resize_client(window: &SettingsWindow, width: i32, height: i32) {
+        window.fit_to(width, height);
+        window.pump(|| {});
+    }
+
     #[test]
     fn live_screenshot_targets_resize_and_reflow_their_entry() {
         let mut layout = SettingsLayout::embedded().unwrap();
@@ -5711,6 +6644,11 @@ mod tests {
         window.refresh_screenshot_targets(&screenshot);
         assert!(summary_height() > initial_height);
         assert!(control_top(&window, ID_THEME) > before, "updated summary still has its initial height");
+        resize_client(&window, 760, 600);
+        let wide_height = summary_height();
+        resize_client(&window, MIN_CLIENT_W, 600);
+        assert!(summary_height() > wide_height);
+        resize_client(&window, WIN_W, 600);
         send_command(&window, ID_SCREENSHOT_RESET);
         window.pump(|| {});
         assert_eq!(initial_height, summary_height());
@@ -6049,7 +6987,7 @@ mod tests {
         {
             assert_eq!(
                 ROW_H,
-                measured_text_height(window.hwnd, window.font, &entry.label, LABEL_W),
+                measured_text_height(window.hwnd, window.font.get(), &entry.label, LABEL_W),
                 "label wrapped: {}",
                 entry.label,
             );
@@ -6072,13 +7010,26 @@ mod tests {
         assert_eq!(TripleClick::SenseWithExamples, triple_click_at(-1));
     }
 
-    /// The X button quits standalone chibipop.
     #[test]
-    fn wm_close_records_a_cancel_outcome() {
+    fn wm_close_records_a_quit_outcome() {
         let hwnd = HWND(4242 as *mut core::ffi::c_void);
         let _ = unsafe { wndproc(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
         let got = OUTCOME.with(|c| c.get());
-        assert_eq!(Some((hwnd.0 as isize, SettingsOutcome::Cancel)), got);
+        assert_eq!(Some((hwnd.0 as isize, SettingsOutcome::Quit)), got);
+    }
+
+    #[test]
+    fn escape_cancels_and_close_quits_while_busy() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        send_command(&window, 2);
+        assert_eq!(Some(SettingsOutcome::Cancel), window.take_outcome());
+        window.set_busy(true);
+        // SAFETY: The test owns the native root window.
+        unsafe {
+            SendMessageW(window.hwnd, WM_CLOSE, None, None);
+        }
+        assert_eq!(Some(SettingsOutcome::Quit), window.take_outcome());
     }
 
     #[test]
