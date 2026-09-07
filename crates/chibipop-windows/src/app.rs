@@ -301,6 +301,7 @@ pub fn settings_only(
     let mut quit_requested = false;
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
+    let mut search_window: Option<crate::ui::search_window::SearchWindow> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
     let mut detect_gen = 0u64;
@@ -311,12 +312,18 @@ pub fn settings_only(
     // SAFETY: `msg` is this loop's stack storage, and `window` stays alive for
     // the whole loop. It drops only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        if let Some(search) = &mut search_window {
+            search.poll();
+            if search.handle_message(&msg) { continue; }
+        }
         // The settings window has no hooks, so there is nothing to disarm.
         window.pump(|| {});
+
 
         if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
             && window.handle_capture_key(msg.wParam.0 as u16)
         {
+            crate::input::hooks::clear_keyboard_actions();
             continue;
         }
 
@@ -349,6 +356,11 @@ pub fn settings_only(
             tid,
             &mut css_editor_so,
         );
+        if let Some(mode) = window.take_search_request() {
+            let config = crate::config::load_or_create(config_path)?;
+            open_search_window_mode(&mut search_window, dict_path,
+                &crate::paths::data_file("data/deconjugator.json"), &config, mode, None);
+        }
 
         // A tab switch starts deck, model, and field detection.
         if let Some(tab) = window.take_tab_change() {
@@ -1513,7 +1525,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
-    sync_search_hotkey(live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
     Hooks::set_mode(live.trigger_mode);
     Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
     Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
@@ -1780,6 +1793,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
                 && w.handle_capture_key(msg.wParam.0 as u16)
             {
+                crate::input::hooks::clear_keyboard_actions();
                 continue;
             }
 
@@ -1794,6 +1808,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 main_tid,
                 &mut css_editor,
             );
+            if let Some(mode) = w.take_search_request() {
+                drive!(Event::DismissRequested);
+                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg, mode, None);
+                search_focused = crate::ui::search_window::is_foreground();
+            }
 
             // Start deck, model, and field detection after a tab switch.
             if let Some(tab) = w.take_tab_change() {
@@ -1833,6 +1852,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 btn_prev_visible.set(false);
                 drive!(Event::DismissRequested);
                 open_search_window(&mut search_window, &db_path, &rules_path, &cfg);
+                search_focused = crate::ui::search_window::is_foreground();
+            }
+            if Hooks::take_action_hotkey(4) {
+                drive!(Event::DismissRequested);
+                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
+                    chibipop::search::SearchMode::Sentence, None);
                 search_focused = crate::ui::search_window::is_foreground();
             }
             if let Some(window) = &mut search_window {
@@ -2018,7 +2043,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             // Dispatch action hotkeys.
             for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
-                if slot == 1 || slot == 3 {
+                if slot == 1 || slot == 3 || slot == 4 {
                     continue;
                 }
                 if !Hooks::take_action_hotkey(slot) || search_focused {
@@ -2097,12 +2122,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         if let Err(e) = crate::clipboard::set_text(&text) {
                             eprintln!("chibipop: copying OCR text failed: {e:#}");
                         }
+                        if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search)
+                            && !text.trim().is_empty() {
+                            drive!(Event::DismissRequested);
+                            open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
+                                chibipop::search::SearchMode::Sentence, Some(&text));
+                        }
                     }
                     _ => {}
                 }
 
                 // Restore the windows after capture.
-                if had_popup {
+                if had_popup && controller.popup().is_some() {
                     set_parent_visibility(&parent_popups, true);
                     let _ = popup.show_without_activating();
                     if let Some(b) = &anki_button {
@@ -2901,6 +2932,7 @@ fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme
 /// Builds the Controller configuration from live settings.
 fn controller_config(live: &LiveSettings) -> ControllerConfig {
     ControllerConfig {
+        sub_popups: live.popup.sub_popups,
         trigger_mode: live.trigger_mode,
         per_character_lookup: live.per_character_lookup,
         scroll_popup: live.scroll_popup,
@@ -3495,6 +3527,7 @@ struct LiveSettings {
     actions_screenshot_hotkey: String,
     actions_ocr_clipboard_hotkey: Option<String>,
     actions_search_hotkey: Option<String>,
+    actions_sentence_search_hotkey: Option<String>,
     include_dictionary_name: bool,
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
@@ -3532,6 +3565,7 @@ fn derive(cfg: &Config) -> LiveSettings {
                 if let Some(clipboard) = &mut resolved.actions.ocr_clipboard { clipboard.hotkey = None; }
             }
             crate::config::HotkeyAction::Search => resolved.actions.search.hotkey = None,
+            crate::config::HotkeyAction::SentenceSearch => resolved.actions.search.sentence_hotkey = None,
             crate::config::HotkeyAction::Back => {}
         }
     }
@@ -3540,6 +3574,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         resolved.actions.screenshot.hotkey.clear();
         resolved.actions.ocr_clipboard = None;
         resolved.actions.search.hotkey = None;
+        resolved.actions.search.sentence_hotkey = None;
     }
     let cfg = &resolved;
     LiveSettings {
@@ -3593,6 +3628,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         actions_search_hotkey: cfg.actions.search.hotkey.clone(),
+        actions_sentence_search_hotkey: cfg.actions.search.sentence_hotkey.clone(),
         actions_ocr_clipboard_hotkey: cfg
             .actions
             .ocr_clipboard
@@ -3743,7 +3779,8 @@ fn apply_live(
         Some(vk) => Hooks::set_action_hotkey(2, vk, 0),
         None => Hooks::set_action_hotkey(2, 0, 0),
     }
-    sync_search_hotkey(live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
 }
 
 /// Registers the action when a valid key exists.
@@ -3756,10 +3793,10 @@ fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotke
     }
 }
 
-fn sync_search_hotkey(hotkey: Option<&str>) {
+fn sync_search_hotkey(slot: usize, hotkey: Option<&str>) {
     let (vk, modifiers) = hotkey.and_then(crate::config::parse_hotkey).unwrap_or((0, 0));
-    Hooks::set_action_hotkey(3, vk, modifiers);
-    let _ = Hooks::take_action_hotkey(3);
+    Hooks::set_action_hotkey(slot, vk, modifiers);
+    let _ = Hooks::take_action_hotkey(slot);
 }
 
 fn open_search_window(
@@ -3768,11 +3805,23 @@ fn open_search_window(
     rules: &Path,
     config: &Config,
 ) {
+    open_search_window_mode(window, database, rules, config, chibipop::search::SearchMode::Dictionary, None);
+}
+
+fn open_search_window_mode(
+    window: &mut Option<crate::ui::search_window::SearchWindow>,
+    database: &Path,
+    rules: &Path,
+    config: &Config,
+    mode: chibipop::search::SearchMode,
+    text: Option<&str>,
+) {
     if let Some(window) = window {
         window.update_config(config);
+        window.switch_mode(mode, text);
         window.show();
     } else {
-        match crate::ui::search_window::SearchWindow::open(database, rules, config) {
+        match crate::ui::search_window::SearchWindow::open_mode(database, rules, config, mode, text) {
             Ok(opened) => *window = Some(opened),
             Err(error) => eprintln!("chibipop: opening search failed: {error:#}"),
         }
@@ -3908,7 +3957,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.actions.enabled = false;
         cfg.anki.static_region_key = "f3".into();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f4".into()), hotkey_linux: None,
         });
         let live = derive(&cfg);
@@ -4202,7 +4251,7 @@ mod tests {
     #[test]
     fn derive_carries_the_ocr_clipboard_key() {
         let mut cfg = Config::default();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".to_string()),
             hotkey_linux: None,
         });

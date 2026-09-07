@@ -111,7 +111,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   platform is unsupported. A startup diagnostic names the missing capability.
 - Trigger rungs: the GlobalShortcuts portal, then a native compositor keybind into the
   control socket.
-- The portal shortcut identifiers are `trigger`, `anki-add`, and optional `search`.
+- The portal shortcut identifiers are `trigger`, `anki-add`, and optional `search` and `sentence-search`.
 - The system rejects evdev completely, even as a setting.
 - `keyboard_interactivity: none` is a strict rule. The popup never takes focus.
 - The control-socket verb set has one verb for each global action. It has `lookup` for Press
@@ -126,6 +126,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 ## Popup and measurement
 
 - Hovering painted Japanese text opens a child popup through dictionary lookup, without capture or OCR.
+- `popup.sub_popups` enables this behavior. Query assembly skips the invisible ruby word joiner and preserves visible word boundaries.
 - Parent popups remain visible. The Controller retains each parent's scroll, selections, and click history.
 - Returning to a parent retires its descendants. Root dismissal hides the complete popup chain.
 - A hover lookup ignores stale results after navigation. Selection drags do not open child popups.
@@ -303,6 +304,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 ## Dictionary and lookup
 
 - Direct search uses the existing lookup engine and presentation rules without capture or OCR.
+- Search displays candidates before a selected definition. Definitions reuse `PopupScene` and the existing native painters.
+- Sentence search uses the pinned Japanese analyzer. Clicks select complete UTF-8 word ranges and request dictionary candidates.
+- OCR-to-clipboard optionally opens Sentence search with the captured text. Linux transfers that text through bounded child stdin, not process arguments.
 - Search windows accept native text input. Windows uses native controls; Linux runs a separate iced process.
 - The optional search shortcuts belong to shared `Config` and participate in platform shortcut validation.
 - The tray Search item and configured shortcut use the same platform entry point.

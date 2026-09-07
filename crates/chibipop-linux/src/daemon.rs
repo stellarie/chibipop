@@ -145,9 +145,12 @@ pub(crate) struct App {
     /// cross-process use. This field guards the daemon.
     settings: SettingsChild,
     search: SettingsChild,
+    sentence_search: SettingsChild,
+    prefilled_searches: Vec<std::process::Child>,
     search_focused: bool,
     search_focus_error: bool,
     registered_search_key: Option<String>,
+    registered_sentence_search_key: Option<String>,
     /// Channel health and the SNI tray that mirrors it
     /// (ARCHITECTURE.md#platform-integration).
     /// This field also stores the daemon view. It works when no tray exists.
@@ -621,12 +624,13 @@ impl App {
     /// `Verb::AnkiAdd` is the only keyboard path to AnkiConnect.
     /// The socket `anki-add` and Portal `anki-add` shortcut therefore match.
     fn apply_verb(&mut self, verb: Verb) {
-        if self.refresh_search_focus() && !matches!(verb, Verb::Search | Verb::Reload | Verb::TriggerUp) {
+        if self.refresh_search_focus() && !matches!(verb, Verb::Search | Verb::SentenceSearch | Verb::Reload | Verb::TriggerUp) {
             return;
         }
         match verb {
             Verb::Reload => self.reload_config(),
             Verb::Search => self.spawn_search(),
+            Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
@@ -671,6 +675,12 @@ impl App {
             shortcuts::Event::Bound(bindings) => self.trigger_bound("bound", bindings),
             shortcuts::Event::Changed(bindings) => self.trigger_bound("re-bound", bindings),
             shortcuts::Event::Fired { id, activated } => {
+                if id == shortcuts::ShortcutId::SentenceSearch {
+                    let configured = configured_sentence_search_key(&self.config);
+                    if configured.is_none() || configured.as_deref() != self.registered_sentence_search_key.as_deref() {
+                        return;
+                    }
+                }
                 if id == shortcuts::ShortcutId::Search
                     && !search_shortcut_active(&self.config, self.registered_search_key.as_deref()) {
                     return;
@@ -1814,6 +1824,9 @@ impl App {
         // Log counts, not text. The text is screen content, and diagnostics do
         // not use lookup opt-in (ARCHITECTURE.md#platform-integration).
         let chars = text.chars().count();
+        if self.config.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search) {
+            self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text));
+        }
         let Some(board) = self.clipboard.as_ref() else {
             self.log.diag(&clipboard::unavailable_line());
             return;
@@ -3152,6 +3165,7 @@ impl App {
     fn handle_tray(&mut self, request: TrayRequest) {
         match request {
             TrayRequest::OpenSearch => self.spawn_search(),
+            TrayRequest::OpenSentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
             TrayRequest::OpenSettings => self.spawn_settings(),
             TrayRequest::Quit => {
                 self.log.diag("tray: quit requested - shutting down");
@@ -3222,9 +3236,22 @@ impl App {
     }
 
     fn spawn_search(&mut self) {
+        self.spawn_search_mode(chibipop::search::SearchMode::Dictionary, None);
+    }
+
+    fn spawn_search_mode(&mut self, mode: chibipop::search::SearchMode, text: Option<&str>) {
         self.dismiss_popup_tree();
-        let outcome = crate::search::search_command(&self.paths)
-            .and_then(|mut command| self.search.spawn_if_absent(&mut command));
+        self.prefilled_searches.retain_mut(|child| child.try_wait().ok().flatten().is_none());
+        let prefill = text.filter(|text| !text.trim().is_empty());
+        let outcome = if let Some(text) = prefill {
+            self.spawn_prefilled_search(mode, text)
+        } else {
+            crate::search::search_command_mode(&self.paths, mode, None).and_then(|mut command| {
+                if mode == chibipop::search::SearchMode::Sentence {
+                    self.sentence_search.spawn_if_absent(&mut command)
+                } else { self.search.spawn_if_absent(&mut command) }
+            })
+        };
         match outcome {
             Ok(SpawnOutcome::Spawned(pid)) => self.log.diag(&format!("search: spawned pid {pid}")),
             Ok(SpawnOutcome::AlreadyRunning(pid)) => {
@@ -3232,6 +3259,30 @@ impl App {
             }
             Err(error) => self.log.diag(&format!("search: spawn failed: {error}")),
         }
+    }
+
+    fn spawn_prefilled_search(&mut self, mode: chibipop::search::SearchMode,
+        text: &str) -> std::io::Result<SpawnOutcome> {
+        let mut command = crate::search::search_stdin_command_mode(&self.paths, mode)?;
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let Some(mut input) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other("search child has no stdin pipe"));
+        };
+        let text = text.to_owned();
+        if let Err(error) = std::thread::Builder::new().name("search-stdin".into()).spawn(move || {
+            if let Err(error) = std::io::Write::write_all(&mut input, text.as_bytes()) {
+                eprintln!("chibipop: sending search text through stdin failed: {error}");
+            }
+        }) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        self.prefilled_searches.push(child);
+        Ok(SpawnOutcome::Spawned(pid))
     }
 
     /// Give a glossary citation to the desktop browser.
@@ -3519,6 +3570,12 @@ fn configured_search_key(config: &chibipop::config::Config) -> Option<String> {
         .map(shortcuts::normalize_trigger)
 }
 
+fn configured_sentence_search_key(config: &chibipop::config::Config) -> Option<String> {
+    config.actions.search.sentence_hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty())
+        .map(shortcuts::normalize_trigger)
+}
+
 fn search_shortcut_active(config: &chibipop::config::Config, registered: Option<&str>) -> bool {
     let configured = configured_search_key(config);
     configured.is_some() && configured.as_deref() == registered
@@ -3535,6 +3592,7 @@ fn search_blocks_event(event: &Event) -> bool {
 
 fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
     ControllerConfig {
+        sub_popups: config.popup.sub_popups,
         trigger_mode: config.trigger.mode,
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
@@ -4107,9 +4165,12 @@ pub fn run(paths: Paths) -> Result<()> {
         last_move: Instant::now(),
         settings: SettingsChild::new(),
         search: SettingsChild::new(),
+        sentence_search: SettingsChild::new(),
+        prefilled_searches: Vec::new(),
         search_focused: false,
         search_focus_error: false,
         registered_search_key: configured_search_key(&config),
+        registered_sentence_search_key: configured_sentence_search_key(&config),
         tray: tray_handle,
         worker: None,
         analysis,
@@ -4511,9 +4572,12 @@ mod tests {
             gesture_ticks_left: 0,
             settings: SettingsChild::new(),
             search: SettingsChild::new(),
+            sentence_search: SettingsChild::new(),
+            prefilled_searches: Vec::new(),
             search_focused: false,
             search_focus_error: false,
             registered_search_key: None,
+            registered_sentence_search_key: None,
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
             trace: false,

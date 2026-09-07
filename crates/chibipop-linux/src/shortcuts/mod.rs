@@ -61,12 +61,13 @@ pub enum ShortcutId {
     /// focus, so this action needs a global shortcut on Wayland.
     AnkiAdd,
     Search,
+    SentenceSearch,
 }
 
 impl ShortcutId {
     /// The complete set in the order that the daemon registers it. The
     /// fixed-size array makes the identifier set part of the application.
-    pub const ALL: [ShortcutId; 3] = [ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search];
+    pub const ALL: [ShortcutId; 4] = [ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search, ShortcutId::SentenceSearch];
 
     /// This function returns the stable identifier on the wire. Hyprland prefixes
     /// this value with the portal app ID. The ID can depend on the process that
@@ -76,6 +77,7 @@ impl ShortcutId {
             ShortcutId::Trigger => "trigger",
             ShortcutId::AnkiAdd => "anki-add",
             ShortcutId::Search => "search",
+            ShortcutId::SentenceSearch => "sentence-search",
         }
     }
 
@@ -92,6 +94,7 @@ impl ShortcutId {
             ShortcutId::Trigger => "Hold to look up the Japanese text under the cursor",
             ShortcutId::AnkiAdd => "Add the word shown in the popup to Anki",
             ShortcutId::Search => "Open dictionary search",
+            ShortcutId::SentenceSearch => "Open sentence search",
         }
     }
 }
@@ -264,6 +267,10 @@ pub fn preferred(config: &chibipop::config::Config) -> Vec<(ShortcutId, String)>
         .filter(|key| config.actions.enabled && !key.trim().is_empty()) {
         shortcuts.push((ShortcutId::Search, normalize_trigger(key)));
     }
+    if let Some(key) = config.actions.search.sentence_hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty()) {
+        shortcuts.push((ShortcutId::SentenceSearch, normalize_trigger(key)));
+    }
     shortcuts
 }
 
@@ -344,6 +351,8 @@ pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
         (ShortcutId::AnkiAdd, false, _) => Action::Nothing,
         (ShortcutId::Search, true, _) => Action::Verb(Verb::Search),
         (ShortcutId::Search, false, _) => Action::Nothing,
+        (ShortcutId::SentenceSearch, true, _) => Action::Verb(Verb::SentenceSearch),
+        (ShortcutId::SentenceSearch, false, _) => Action::Nothing,
     }
 }
 
@@ -394,8 +403,8 @@ mod tests {
     /// Stable identifiers preserve saved portal bindings.
     #[test]
     fn shortcut_ids_round_trip() {
-        assert_eq!(3, ShortcutId::ALL.len());
-        assert_eq!(["trigger", "anki-add", "search"], ShortcutId::ALL.map(ShortcutId::as_str));
+        assert_eq!(4, ShortcutId::ALL.len());
+        assert_eq!(["trigger", "anki-add", "search", "sentence-search"], ShortcutId::ALL.map(ShortcutId::as_str));
         for id in ShortcutId::ALL {
             assert_eq!(Some(id), ShortcutId::parse(id.as_str()));
             assert!(!id.description().is_empty(), "{id:?} needs dialog text");
@@ -412,8 +421,14 @@ mod tests {
         assert!(preferred(&config).contains(&(ShortcutId::Search, "LOGO+F5".into())));
         assert_eq!(action(ShortcutId::Search, true, TriggerMode::HoldKey), Action::Verb(Verb::Search));
         assert_eq!(action(ShortcutId::Search, false, TriggerMode::HoldKey), Action::Nothing);
+        assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::SentenceSearch));
+        config.actions.search.sentence_hotkey_linux = Some("SUPER+F6".into());
+        assert!(preferred(&config).contains(&(ShortcutId::SentenceSearch, "LOGO+F6".into())));
+        assert_eq!(action(ShortcutId::SentenceSearch, true, TriggerMode::HoldKey), Action::Verb(Verb::SentenceSearch));
+        assert_eq!(action(ShortcutId::SentenceSearch, false, TriggerMode::HoldKey), Action::Nothing);
         config.actions.enabled = false;
         assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::Search));
+        assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::SentenceSearch));
     }
 
     /// The configuration supplies both shortcut chords. The fixed result

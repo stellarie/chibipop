@@ -259,6 +259,7 @@ pub enum Command {
 /// these settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControllerConfig {
+    pub sub_popups: bool,
     pub trigger_mode: TriggerMode,
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
@@ -289,6 +290,29 @@ pub struct ControllerConfig {
     pub separator: Separator,
     /// What a triple-click selects.
     pub triple_click: TripleClick,
+}
+
+impl ControllerConfig {
+    pub fn for_search(config: &crate::config::Config) -> Self {
+        Self {
+            sub_popups: config.popup.sub_popups,
+            trigger_mode: TriggerMode::Press,
+            per_character_lookup: false,
+            scroll_popup: config.popup.scroll_popup,
+            anki_enabled: false,
+            sentence_probe: false,
+            include_dictionary_name: config.anki.include_dictionary_name,
+            first_dict_only: config.anki.first_dict_only,
+            summary_chars: config.popup.summary_chars,
+            log_lookups: config.debug.show_lookup_log,
+            tick_ms: 20,
+            roles: config.popup.render_settings().roles,
+            edge_autoscroll: config.popup.edge_autoscroll,
+            primary_additive: config.anki.selection_buttons == crate::config::SelectionButtons::PrimaryAdditive,
+            separator: config.anki.selection_separator.into(),
+            triple_click: config.anki.triple_click,
+        }
+    }
 }
 
 /// This freeze applies only in Live mode.
@@ -628,6 +652,10 @@ impl Controller {
     }
 
     fn popup_hover(&mut self, local: PhysPoint, query: Option<String>) -> Vec<Command> {
+        if !self.cfg.sub_popups {
+            self.cancel_hover();
+            return Vec::new();
+        }
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         if s.placed.is_none() || s.last_drag_point.is_some() || self.hover_buttons != 0 {
             return Vec::new();
@@ -647,6 +675,7 @@ impl Controller {
     }
 
     fn popup_hover_at(&mut self, depth: usize, local: PhysPoint, query: Option<String>) -> Vec<Command> {
+        if !self.cfg.sub_popups { return Vec::new(); }
         if depth == self.parents.len() { return self.popup_hover(local, query); }
         let Some(parent) = self.parents.get(depth) else { return Vec::new() };
         if self.hover_buttons != 0 || query.as_ref().is_none_or(String::is_empty) || parent.hovered == query {
@@ -658,6 +687,7 @@ impl Controller {
     }
 
     fn hover_tick(&mut self) -> Vec<Command> {
+        if !self.cfg.sub_popups { self.cancel_hover(); return Vec::new(); }
         if self.hover_candidate.as_ref().is_none_or(|(_, _, deadline)| self.clock < *deadline) {
             return Vec::new();
         }
@@ -819,6 +849,7 @@ impl Controller {
                 self.cancel_hover();
                 self.cfg = *cfg;
                 let mut out = self.enter_parent(0);
+                if let Some(surface) = &mut self.surface { surface.hovered = None; }
                 let id = self.next_lookup_request();
                 out.push(Command::RequestReload { id });
                 out
@@ -1888,6 +1919,28 @@ mod tests {
     }
 
     #[test]
+    fn disabled_sub_popups_cancel_pending_work_and_can_be_reenabled() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        let id = hover_request(&mut c, "犬");
+        let mut disabled = cfg();
+        disabled.sub_popups = false;
+        c.handle(Event::ConfigReloaded(Box::new(disabled.clone())));
+        assert!(c.handle(Event::LookupResult {
+            id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        }).is_empty());
+        c.handle(Event::PopupHover { local: PhysPoint { x: 20, y: 30 }, query: Some("犬".into()) });
+        assert!((0..20).flat_map(|_| c.handle(Event::GestureTick))
+            .all(|command| !matches!(command, Command::RequestDrillDown { .. })));
+        c.handle(Event::ConfigReloaded(Box::new(cfg())));
+        hover_child(&mut c, "犬");
+        assert_eq!(c.popup_depth(), 1);
+        c.handle(Event::ConfigReloaded(Box::new(disabled)));
+        assert_eq!(c.popup_depth(), 0);
+        assert!(c.popup().is_some());
+    }
+
+    #[test]
     fn parent_click_is_armed_and_activates_without_ever_entering_child() {
         let mut c = Controller::new(cfg());
         shown(&mut c);
@@ -2086,6 +2139,7 @@ mod tests {
 
     fn cfg() -> ControllerConfig {
         ControllerConfig {
+            sub_popups: true,
             sentence_probe: false,
             trigger_mode: TriggerMode::Live,
             per_character_lookup: false,

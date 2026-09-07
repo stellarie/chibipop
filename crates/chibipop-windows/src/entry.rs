@@ -74,6 +74,10 @@ enum Command {
     /// Open dictionary search.
     Search {
         #[arg(long)]
+        sentence: bool,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
         dict: Option<PathBuf>,
         #[arg(long)]
         rules: Option<PathBuf>,
@@ -463,12 +467,16 @@ pub fn run() -> Result<()> {
                 println!();
             }
         }
-        Command::Search { dict, rules, config } => {
+        Command::Search { dict, rules, config, sentence, text } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
             let config_path = config.unwrap_or_else(default_config_path);
             let cfg = chibipop::config::load_or_create(&config_path)?;
-            let mut search = chibipop_windows::ui::search_window::SearchWindow::open(&dict, &rules, &cfg)?;
+            chibipop_windows::text::capture::init_dpi_awareness()?;
+            let mode = if sentence { chibipop::search::SearchMode::Sentence }
+                else { chibipop::search::SearchMode::Dictionary };
+            let mut search = chibipop_windows::ui::search_window::SearchWindow::open_mode(
+                &dict, &rules, &cfg, mode, text.as_deref())?;
             search.set_config_path(&config_path);
             while search.is_visible() {
                 use windows::Win32::UI::WindowsAndMessaging::{MSG, PeekMessageW, TranslateMessage, DispatchMessageW, PM_REMOVE};

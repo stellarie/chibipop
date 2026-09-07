@@ -4,12 +4,19 @@
 
 Run these checks in a disposable install with Japanese term dictionaries.
 
-- Open Search from the tray. Enter a Japanese word and submit it.
+- Open Dictionary search from the tray and from the Dictionaries settings tab.
+- Type a Japanese word. Confirm candidates appear without pressing Enter.
+- Select a candidate. Confirm its complete definition opens in popup layout and uses the configured theme.
 - Confirm the result uses the enabled dictionaries and their configured order.
 - Enter a conjugated word. Confirm the result includes its dictionary form.
 - Submit an empty query, then a missing word. Confirm each state clears old results.
 - Submit another valid word. Confirm the window still responds.
 - Enter Japanese through an IME. Confirm candidate selection does not submit unfinished composition.
+- Open Sentence search from Dictionaries settings and its shortcut. Paste a Japanese sentence.
+- Click a word in the sentence view. Confirm the complete word is highlighted and its candidates appear.
+- Select another sentence word. Confirm old definitions and hover requests cannot replace the new candidates.
+- Select a candidate and confirm the definition opens with normal popup styling.
+- Capture each search shortcut by pressing a key combination. Cancel one capture with Escape and clear another.
 - Configure the search shortcut, apply, close Search, and reopen it with that shortcut.
 - Change the shortcut. Confirm the old shortcut stops opening Search.
 - On Linux, restart after adding or changing a portal shortcut. Confirm the offered chord in the desktop's shortcut settings.
@@ -28,8 +35,21 @@ Run these checks in a disposable install with Japanese term dictionaries.
 - Press Back or Escape. Confirm navigation retires the appropriate descendants.
 - Dismiss the root popup. Confirm every child disappears and no invisible surface captures input.
 - Repeat near screen edges and with popup scrolling. Confirm children remain reachable and correctly hit-tested.
+- Hover a word that combines ruby base text and kana, such as ruby-backed 食 followed by べる. Confirm lookup uses 食べる.
+- Disable hover sub-popups. Confirm the root still works and hovering opens no child. Re-enable and repeat.
+- Enable the OCR-to-clipboard Sentence search option. Capture text and confirm both clipboard output and prefilled Sentence search.
+- Disable that option and repeat. Confirm capture copies text without opening Sentence search.
 - In Press mode, look up visible text between staggered popups. Confirm popup masking preserves that text.
 - Repeat on Windows and Linux. Record unavailable IME, portal, compositor, or display checks separately.
+
+The Windows real-pointer regression requires an available desktop and Japanese OCR:
+
+```bash
+cargo test -p chibipop-windows --test popup_hover_live -- --ignored --nocapture --test-threads=1
+cargo test -p chibipop-windows --lib native_definition_hover_and_disable_toggle -- --ignored --nocapture --test-threads=1
+```
+
+Run desktop tests sequentially. Other visible tests can cover the OCR source or take pointer focus.
 
 Run this after any large change. It is ordered cheapest-first: **if a tier fails, stop and fix
 before running the next one.**

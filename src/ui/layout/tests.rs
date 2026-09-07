@@ -43,6 +43,15 @@ fn hover_queries_cover_glossary_with_selection_disabled_and_unicode_offsets() {
     assert_eq!(scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(), Some("野家".into()));
 }
 
+#[test]
+fn hover_queries_join_ruby_base_with_following_kana() {
+    let p = rich(&sc(r#"[{"tag":"ruby","content":["食",{"tag":"rt","content":"た"}]},"べる"]"#));
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text.contains('食')).unwrap();
+    let point = (elem.pen.0 + elem.font_size * ADVANCE * 0.25, elem.pen.1 + 1.0);
+    assert_eq!(scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(), Some("食べる".into()));
+}
+
 /// This constant sets the advance per UTF-16 unit as a fraction of the font size.
 const ADVANCE: f32 = 0.5;
 /// This constant sets the line height as a multiple of the font size.

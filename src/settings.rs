@@ -393,6 +393,7 @@ pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<Strin
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.actions.search.hotkey = form.cfg.actions.search.hotkey.clone();
+    out.actions.search.sentence_hotkey = form.cfg.actions.search.sentence_hotkey.clone();
     out.trigger = form.cfg.trigger.clone();
     out.popup = form.cfg.popup.clone();
     out.ocr = form.cfg.ocr.clone();
@@ -420,9 +421,10 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     // The section stays when either chord has a value. The code can clear one
     // chord and keep the other.
     let hotkey_linux = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone());
+    let open_sentence_search = form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|a| a.open_sentence_search);
     out.actions.ocr_clipboard = match (&form.ocr_clipboard_key, &hotkey_linux) {
-        (None, None) => None,
-        (hotkey, hotkey_linux) => Some(OcrClipboardConfig {
+        (None, None) if !open_sentence_search => None,
+        (hotkey, hotkey_linux) => Some(OcrClipboardConfig { open_sentence_search,
             hotkey: hotkey.clone(),
             hotkey_linux: hotkey_linux.clone(),
         }),
@@ -771,7 +773,7 @@ mod tests {
         cfg.anki.add_key_linux = "SUPER+K".to_string();
         cfg.anki.static_region_key_linux = "SUPER+R".to_string();
         cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".to_string());
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".into()),
             hotkey_linux: Some("SUPER+C".into()),
         });
@@ -1097,7 +1099,7 @@ mod tests {
     #[test]
     fn ocr_clipboard_key_round_trips_through_the_form() {
         let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".into()),
             hotkey_linux: None,
         });
@@ -1126,7 +1128,7 @@ mod tests {
     #[test]
     fn an_unset_ocr_clipboard_key_disables_the_action() {
         let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".into()),
             hotkey_linux: None,
         });
@@ -1140,7 +1142,7 @@ mod tests {
     #[test]
     fn an_unset_ocr_clipboard_key_keeps_the_linux_twin() {
         let mut cfg = cfg_with(&[]);
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".into()),
             hotkey_linux: Some("SUPER+C".into()),
         });
@@ -1148,7 +1150,7 @@ mod tests {
         form.ocr_clipboard_key = None;
 
         assert_eq!(
-            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("SUPER+C".into()) }),
+            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("SUPER+C".into()) }),
             apply_to(&form, &cfg).actions.ocr_clipboard
         );
     }

@@ -38,6 +38,7 @@ pub enum TrayRequest {
     /// The user activated the Settings menu item.
     OpenSettings,
     OpenSearch,
+    OpenSentenceSearch,
     /// The user activated the Quit menu item.
     Quit,
     /// A tray diagnostic. The daemon writes it to the `Log`.
@@ -102,8 +103,13 @@ impl ksni::Tray for ChibipopTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items = vec![
             StandardItem {
-                label: "Search".into(),
+                label: "Dictionary search".into(),
                 activate: Box::new(|tray: &mut Self| tray.ask(TrayRequest::OpenSearch)),
+                ..Default::default()
+            }.into(),
+            StandardItem {
+                label: "Sentence search".into(),
+                activate: Box::new(|tray: &mut Self| tray.ask(TrayRequest::OpenSentenceSearch)),
                 ..Default::default()
             }.into(),
             StandardItem {
@@ -284,7 +290,8 @@ mod tests {
         let (tray, _rx) = tray(&Selection::Rung(Rung::ImageCopyCapture));
         assert_eq!(
             vec![
-                ("Search".to_string(), true),
+                ("Dictionary search".to_string(), true),
+                ("Sentence search".to_string(), true),
                 ("Settings".to_string(), true),
                 ("-".to_string(), false),
                 ("Capture: wlr-screencopy region capture".to_string(), false),
@@ -308,8 +315,10 @@ mod tests {
         activate(&mut tray, "Settings");
         assert_eq!(Ok(TrayRequest::OpenSettings), rx.try_recv());
 
-        activate(&mut tray, "Search");
+        activate(&mut tray, "Dictionary search");
         assert_eq!(Ok(TrayRequest::OpenSearch), rx.try_recv());
+        activate(&mut tray, "Sentence search");
+        assert_eq!(Ok(TrayRequest::OpenSentenceSearch), rx.try_recv());
 
         activate(&mut tray, "Quit");
         assert_eq!(Ok(TrayRequest::Quit), rx.try_recv());

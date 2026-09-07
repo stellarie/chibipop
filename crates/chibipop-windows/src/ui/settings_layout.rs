@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 57] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
@@ -18,6 +18,11 @@ pub(super) const SETTING_INVENTORY: [SettingId; 57] = [
     SettingId::ScreenshotKey,
     SettingId::OcrClipboardKey,
     SettingId::SearchKey,
+    SettingId::SentenceSearchKey,
+    SettingId::OpenDictionarySearch,
+    SettingId::OpenSentenceSearch,
+    SettingId::OcrSentenceSearch,
+    SettingId::PopupSubPopups,
     SettingId::PopupTheme,
     SettingId::PopupFont,
     SettingId::PopupCustomStyle,
@@ -115,6 +120,7 @@ pub(super) enum TabId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum SectionId {
+    DictionarySearch,
     PopupAppearance,
     PopupSize,
     PopupBehavior,
@@ -147,6 +153,11 @@ pub(super) enum SettingId {
     ScreenshotKey,
     OcrClipboardKey,
     SearchKey,
+    SentenceSearchKey,
+    OpenDictionarySearch,
+    OpenSentenceSearch,
+    OcrSentenceSearch,
+    PopupSubPopups,
     PopupTheme,
     PopupFont,
     PopupCustomStyle,
@@ -374,7 +385,7 @@ mod tests {
         layout.tabs[tab_index].sections[2].entries.push(entry);
 
         let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(location(&parsed, SettingId::PopupTheme), (0, 2, 5));
+        assert_eq!(location(&parsed, SettingId::PopupTheme), (0, 2, 6));
     }
 
     #[test]

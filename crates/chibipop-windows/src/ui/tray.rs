@@ -308,7 +308,7 @@ unsafe fn build_menu() -> Result<HMENU> {
 
 unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
     unsafe {
-        AppendMenuW(hmenu, MF_STRING, ID_SEARCH as usize, w!("Search…"))
+        AppendMenuW(hmenu, MF_STRING, ID_SEARCH as usize, w!("Dictionary search…"))
             .context("AppendMenuW Search")?;
         AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
             .context("AppendMenuW Settings")?;

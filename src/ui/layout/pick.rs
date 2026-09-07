@@ -88,8 +88,9 @@ impl PopupScene {
                     continue;
                 }
                 if !lookup_character(ch) { return Ok(None); }
-                let query: String = elem.text[byte..].chars().take_while(|ch| lookup_character(*ch))
-                    .take(32).collect();
+                let query: String = elem.text[byte..].chars()
+                    .take_while(|ch| lookup_character(*ch) || *ch == '\u{2060}')
+                    .filter(|ch| *ch != '\u{2060}').take(32).collect();
                 return Ok(Some(query));
             }
         }

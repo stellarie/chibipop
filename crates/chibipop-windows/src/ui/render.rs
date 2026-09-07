@@ -1195,3 +1195,34 @@ fn color_f((r, g, b): (u8, u8, u8)) -> D2D1_COLOR_F {
     }
 }
 
+#[cfg(test)]
+mod hover_tests {
+    use super::*;
+    use crate::present::{Card, GlossBlock};
+
+    #[test]
+    fn real_directwrite_gloss_glyphs_produce_hover_queries_without_a_window() {
+        let card = Card {
+            written: Some("猫".into()), reading: Some("ねこ".into()), pos: vec![],
+            inflections: vec![], freq: None, blocks: vec![GlossBlock::parse("Fixture", r#"["犬は鳥を見る。"]"#)],
+            match_len: 1, pitch: vec![],
+        };
+        let presentation = Presentation { top: Some(card.clone()), all_cards: vec![card],
+            collapsed: vec![], sentence: None, surface: None };
+        let theme = Theme::dark();
+        let text = Text::new().unwrap();
+        let scene = scene_of(&text, SceneInputs {
+            presentation: &presentation, theme: &theme, show_back: false, side_panel: false,
+            render: crate::config::PopupConfig::default().render_settings(), selection: None,
+        }, (424.0, 600.0)).unwrap();
+        let elem = scene.elems.iter().find(|elem| elem.text == "犬は鳥を見る。").unwrap();
+        let spans: Vec<_> = elem.styled_spans(&theme.font_name).collect();
+        let mut glyphs = Vec::new();
+        text.measurer().caret_boxes(MeasureRun { spans: &spans, max_w: elem.wrap_w }, &[0], &mut glyphs).unwrap();
+        let glyph = glyphs[0];
+        assert!(glyph.w > 0.0 && glyph.h > 0.0);
+        let point = (elem.pen.0 + glyph.x + glyph.w / 2.0, elem.pen.1 + glyph.y + glyph.h / 2.0);
+        assert_eq!(scene.hover_query(point, 0.0, &theme.font_name, &mut text.measurer()).unwrap(), Some("犬は鳥を見る".into()));
+    }
+}
+

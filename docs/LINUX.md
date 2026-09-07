@@ -478,7 +478,8 @@ your frequency lists there and Apply.
   because drawing the box is how you decide to switch to Static. The chord
   (`anki.static_region_key_linux`, unset by default) is **native-channel only**:
   it gets no GlobalShortcuts portal id. The portal exposes lookup and Anki add,
-  plus Search when its shortcut is configured. The static-region key still
+  plus Dictionary search and Sentence search when their shortcuts are configured.
+  The static-region key still
   needs a native compositor binding. The settings window renders the
   bind for whatever chord you type, e.g.
 

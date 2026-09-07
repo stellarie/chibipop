@@ -11,6 +11,83 @@ use crate::lookup::sqlite::SqliteDictionary;
 use crate::present::{self, DictInfo, PresentConfig, Presentation};
 use anyhow::Result;
 use std::path::Path;
+use std::ops::Range;
+use std::path::PathBuf;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    #[default]
+    Dictionary,
+    Sentence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub index: usize,
+    pub headword: String,
+    pub reading: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentenceToken {
+    pub range: Range<usize>,
+    pub text: String,
+    pub selectable: bool,
+}
+
+pub fn sentence_token_at(tokens: &[SentenceToken], byte: usize) -> Option<&SentenceToken> {
+    tokens.iter().find(|token| token.selectable && token.range.contains(&byte))
+}
+
+pub struct SentenceAnalyzer {
+    model: PathBuf,
+    analyzer: Option<crate::analysis::Analyzer>,
+    attempted: bool,
+}
+
+impl SentenceAnalyzer {
+    pub fn new(model: PathBuf) -> Self {
+        Self { model, analyzer: None, attempted: false }
+    }
+
+    pub fn tokenize(&mut self, text: &str) -> Vec<SentenceToken> {
+        if !self.attempted && !text.trim().is_empty() {
+            self.attempted = true;
+            match crate::analysis::Analyzer::load(&self.model) {
+                Ok(analyzer) => self.analyzer = Some(analyzer),
+                Err(error) => eprintln!("chibipop: sentence analysis unavailable: {error:#}"),
+            }
+        }
+        let ranges = match &mut self.analyzer {
+            Some(analyzer) => analyzer.analyze(text).words,
+            None => crate::analysis::fallback_words(text),
+        };
+        sentence_tokens(text, &ranges)
+    }
+
+    pub fn fallback_active(&self) -> bool { self.attempted && self.analyzer.is_none() }
+}
+
+fn sentence_tokens(text: &str, ranges: &[Range<usize>]) -> Vec<SentenceToken> {
+    let token = |range: Range<usize>, selectable: bool| SentenceToken {
+        text: text[range.clone()].to_string(), range, selectable,
+    };
+    let mut tokens = Vec::new();
+    let mut end = 0;
+    for range in ranges {
+        if range.start < end || range.start >= range.end || range.end > text.len()
+            || !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+            continue;
+        }
+        if range.start > end { tokens.push(token(end..range.start, false)); }
+        let selectable = text[range.clone()].chars().any(char::is_alphanumeric);
+        tokens.push(token(range.clone(), selectable));
+        end = range.end;
+    }
+    if end < text.len() { tokens.push(token(end..text.len(), false)); }
+    tokens
+}
 
 pub struct SearchService {
     dictionary: SqliteDictionary,
@@ -24,6 +101,28 @@ pub enum SearchResult {
     Empty,
     Miss,
     Found(Box<Presentation>),
+}
+
+pub fn candidates(result: &SearchResult) -> Vec<Candidate> {
+    let SearchResult::Found(presentation) = result else { return Vec::new() };
+    presentation.all_cards.iter().enumerate().map(|(index, card)| {
+        let summary: String = card.blocks.iter().flat_map(|block| &block.entries)
+            .flat_map(|entry| &entry.glosses).next().map(String::as_str).unwrap_or("")
+            .chars().take(80).collect();
+        Candidate {
+            index, headword: card.written.as_ref().or(card.reading.as_ref()).cloned().unwrap_or_default(),
+            reading: card.reading.clone().unwrap_or_default(), summary,
+        }
+    }).collect()
+}
+
+pub fn selected_presentation(result: &SearchResult, index: usize) -> Option<Presentation> {
+    let SearchResult::Found(presentation) = result else { return None };
+    let card = presentation.all_cards.get(index)?.clone();
+    Some(Presentation {
+        top: Some(card.clone()), all_cards: vec![card], collapsed: Vec::new(),
+        sentence: presentation.sentence.clone(), surface: presentation.surface.clone(),
+    })
 }
 
 impl SearchService {
@@ -118,6 +217,42 @@ mod tests {
     use crate::lookup::model::FakeDictionary;
 
     #[test]
+    fn sentence_tokens_preserve_text_and_select_full_words_at_byte_offsets() {
+        let text = "猫は食べました。\n 鳥";
+        let ranges = [0..3, 3..6, 6..21, 21..24, 26..29];
+        let tokens = sentence_tokens(text, &ranges);
+        assert_eq!(tokens.iter().map(|token| token.text.as_str()).collect::<String>(), text);
+        let selected = sentence_token_at(&tokens, 12).unwrap();
+        assert_eq!(selected.text, "食べました");
+        assert_eq!(selected.range, 6..21);
+        assert!(sentence_token_at(&tokens, 21).is_none());
+        assert!(sentence_token_at(&tokens, 24).is_none());
+        assert!(sentence_token_at(&tokens, text.len()).is_none());
+    }
+
+    #[test]
+    fn sentence_analysis_groups_real_japanese_inflections() {
+        let model = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/ipadic/system.dic");
+        let mut analyzer = SentenceAnalyzer::new(model);
+        let text = "猫は食べました。";
+        let tokens = analyzer.tokenize(text);
+        assert!(!analyzer.fallback_active());
+        assert_eq!(sentence_token_at(&tokens, text.find("べ").unwrap()).unwrap().text, "食べました");
+        assert_eq!(tokens.iter().map(|token| token.text.as_str()).collect::<String>(), text);
+    }
+
+    #[test]
+    fn missing_sentence_model_falls_back_without_losing_unicode_or_spacing() {
+        let mut analyzer = SentenceAnalyzer::new(PathBuf::from("missing-sentence-model.dic"));
+        let text = "𠮷野家で 食べる。\n";
+        let tokens = analyzer.tokenize(text);
+        assert!(analyzer.fallback_active());
+        assert_eq!(tokens.iter().map(|token| token.text.as_str()).collect::<String>(), text);
+        assert!(sentence_token_at(&tokens, 0).is_some());
+        assert!(sentence_token_at(&tokens, text.len() - 1).is_none());
+    }
+
+    #[test]
     fn japanese_repeated_empty_miss_and_dictionary_filter() {
         let mut dictionary = FakeDictionary::new();
         for id in 1..=14 {
@@ -164,6 +299,14 @@ mod tests {
             assert_eq!(service.search("　").unwrap(), SearchResult::Empty);
             assert_eq!(service.search("絶対にない検索").unwrap(), SearchResult::Miss);
             let first = service.search("食べました").unwrap();
+            let choices = candidates(&first);
+            assert!(!choices.is_empty());
+            let index = choices.iter().find(|candidate| candidate.headword == "食べる").unwrap().index;
+            let selected = selected_presentation(&first, index).unwrap();
+            assert_eq!(selected.top.as_ref().unwrap().written.as_deref(), Some("食べる"));
+            assert_eq!(selected.all_cards.len(), 1);
+            assert!(selected.collapsed.is_empty());
+            assert!(selected_presentation(&first, usize::MAX).is_none());
             let text = result_text(&first);
             assert!(text.contains("食べる"), "{text}");
             assert!(text.contains("to eat"), "{text}");

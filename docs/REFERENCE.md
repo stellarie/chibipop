@@ -53,6 +53,7 @@ The two binaries do not share a command line. Windows first, then Linux.
 | `chibipop run` | The popup application. |
 | `chibipop settings` | The settings window alone — no popup, no hooks, no OCR. |
 | `chibipop search` | Opens a dictionary search window with Japanese text input. No OCR. |
+| `chibipop search --sentence` | Opens sentence input, word selection, and dictionary candidates. |
 | `chibipop settings --audit` | Dumps the settings window's control tree as JSON and exits. No visible window; for diffing a layout change. |
 | `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → ranked hits → match box. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
@@ -61,13 +62,29 @@ The two binaries do not share a command line. Windows first, then Linux.
 
 ### Direct search
 
-`chibipop search` opens the direct dictionary search window.
-`chibipop ctl search` asks the running daemon to open its search window.
-The tray **Search** item uses the same daemon entry point.
+`chibipop search` opens Dictionary search. Candidates update while you type.
+Select a candidate to open its definition in the normal popup layout.
+The search interface follows the popup theme, font, and spacing.
 
 Search uses the configured dictionary database, enabled dictionaries, and
 dictionary order. It accepts dictionary forms and conjugated Japanese text.
-Enter submits the query. Empty input and missing entries clear previous results.
+Empty input and missing entries clear previous results.
+
+Open either search mode from **Settings > Dictionaries**. The tray also opens
+Dictionary search. In **Settings > Shortcuts**, select a search shortcut
+button, then press a key or key combination. Escape cancels capture; Clear
+removes the shortcut.
+
+Sentence search opens with `chibipop search --sentence` on Windows or
+`chibipop sentence-search` on Linux. Paste text, then click a word in the
+sentence view. The selected word is highlighted and its candidates appear.
+Select a candidate to open its definition. Word grouping uses the committed
+Japanese analysis model; unavailable analysis uses the existing basic fallback.
+
+Linux accepts `chibipop ctl search` and `chibipop ctl sentence-search` for
+compositor bindings. Both search commands accept explicit `--text` input.
+Linux also accepts `--read-stdin` or `--stdin`, limited to 65,536 UTF-8 bytes.
+OCR handoff uses stdin so captured text does not appear in process arguments.
 
 The optional search shortcuts live under `[actions.search]`:
 
@@ -75,15 +92,25 @@ The optional search shortcuts live under `[actions.search]`:
 [actions.search]
 hotkey = "Ctrl+Shift+F"
 hotkey_linux = "CTRL+SHIFT+F"
+sentence_hotkey = "Ctrl+Shift+G"
+sentence_hotkey_linux = "CTRL+SHIFT+G"
 ```
 
-Both shortcuts default to unset. Configure them in **Settings > Shortcuts**.
+All search shortcuts default to unset. Configure them in **Settings > Shortcuts**.
 Shortcut validation rejects conflicts before Apply. On Linux, native compositor
 bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
 Windows applies shortcut changes immediately. Linux offers portal chords at
 startup; restart after adding or changing one, then confirm it in the desktop's
 shortcut settings. Apply disables a cleared or changed old portal shortcut
 immediately. Native compositor bindings remain under the compositor's control.
+
+`popup.sub_popups` defaults to `true`. **Open definitions when hovering over
+popup text** controls this option in **Settings > Popup**. Turning it off
+stops hover sub-popups while preserving normal dictionary lookup.
+
+`actions.ocr_clipboard.open_sentence_search` defaults to `false`. **Open copied
+screen text in sentence search** enables it. Captured text still goes to the
+clipboard and also opens Sentence search. Empty capture results open no window.
 
 ### Linux
 
