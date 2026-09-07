@@ -24,6 +24,13 @@ Run these checks in a disposable install with Japanese term dictionaries.
 - Clear the shortcut. Confirm the tray entry still opens Search.
 - Try a conflicting shortcut. Confirm Apply explains the conflict without saving it.
 - Keep Search focused. Confirm typing does not trigger OCR, screenshots, or Anki actions.
+- Press Escape while search is pending. Confirm no late result reopens a window.
+- Select a candidate, focus its definition, and press Escape. Confirm the definition closes and no hover reply revives it.
+- Cancel region, window, and unsaved fixed-target screenshot selection with Escape. Confirm no screenshot or card is saved.
+- On Windows, cancel OCR while recognition is pending. Confirm the clipboard and Sentence search remain unchanged.
+- Check dark and light themes. Confirm input borders, bounded centered buttons, and bordered result cards remain clear.
+- Confirm candidate words are bold, summaries italic, and pasted sentence text larger than ordinary text.
+- Apply custom CSS colors, borders, font sizes, and styles. Confirm search controls and selected definitions use the changes.
 - Close and reopen Search. Confirm the daemon remains running and creates no duplicate search window.
 - Change dictionary selection, apply, and search again. Confirm the result uses the current configuration.
 - Open an OCR popup over known Japanese text. Hover Japanese text inside its definition.
@@ -47,6 +54,7 @@ The Windows real-pointer regression requires an available desktop and Japanese O
 ```bash
 cargo test -p chibipop-windows --test popup_hover_live -- --ignored --nocapture --test-threads=1
 cargo test -p chibipop-windows --lib native_definition_hover_and_disable_toggle -- --ignored --nocapture --test-threads=1
+cargo test -p chibipop-windows --lib native_escape_cancels_without_a_focused_selector_message -- --ignored --nocapture --test-threads=1
 ```
 
 Run desktop tests sequentially. Other visible tests can cover the OCR source or take pointer focus.

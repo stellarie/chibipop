@@ -2,8 +2,28 @@
 
 Style the popup with a CSS file. Share the file to share a theme.
 
-**chibipop reads `popup.css` on Windows only.** The Linux popup does not
-read it, and upstream issue #53 tracks that gap.
+Windows popups and both search modes read `popup.css` beside `chibipop.exe`.
+Linux dictionary and sentence search read `popup.css` beside the active configuration file.
+The Linux OCR popup does not read CSS; issue #53 tracks that separate gap.
+
+## Search controls
+
+Dictionary and sentence search use the same CSS parser and theme values as definition popups.
+The controls retain visible boundaries and use these text roles:
+
+| Selector | Search role |
+|---|---|
+| `.popup` | Background, control borders, padding, font family, and opacity. |
+| `.headword` | Candidate words and the search heading. Words are bold by default. |
+| `.reading` | Candidate readings. |
+| `.collapsed` | Candidate definition summaries. Summaries are italic by default. |
+| `.body` | Input text and full definition text. Sentence text uses a larger derived size. |
+| `.dimmed` | Instructions and status text. |
+
+Explicit CSS font styles override the search defaults.
+The full definition keeps its normal popup text styles.
+On Windows, **Save & Apply** updates open search windows too.
+On Linux, changes apply on the next search request or when search reopens.
 
 ## Quick start
 

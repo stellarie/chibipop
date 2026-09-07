@@ -9,7 +9,7 @@ use chibipop::ui::theme::Theme;
 use chibipop_linux::media::MediaSurfaces;
 use iced::widget::{button, column, container, image, mouse_area, rich_text, row,
     scrollable, span, text, text_editor, text_input};
-use iced::{window, Color, Element, Length, Point, Size, Task};
+use iced::{font, window, Color, Element, Length, Point, Size, Task};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -33,6 +33,10 @@ fn search_command_base(paths: &Paths, mode: SearchMode) -> std::io::Result<Comma
     }).arg("--data-dir").arg(&paths.data_dir);
     crate::signals::unmasked(&mut command);
     Ok(command)
+}
+
+fn popup_css_path(paths: &Paths) -> PathBuf {
+    paths.config_file.with_file_name("popup.css")
 }
 
 pub fn search_command_mode(paths: &Paths, mode: SearchMode, initial: Option<&str>) -> std::io::Result<Command> {
@@ -59,24 +63,27 @@ pub fn run(paths: Paths, mode: SearchMode, initial: String) -> Result<()> {
         }
     } else { None };
     let config = chibipop::config::load_or_create(&paths.config_file)?;
+    let css_path = popup_css_path(&paths);
     let focus_path = focus_path(&paths)?;
     focus::prepare(&focus_path).context("preparing search focus")?;
     let worker = std::sync::Arc::new(Worker::new(paths)?);
     let mut engine = TextEngine::new(&config.popup.font);
-    let theme = crate::search_popup::theme(&config, &mut engine);
+    let theme = crate::search_popup::theme(&config, Some(&css_path), &mut engine);
     let font = iced::Font::with_name(Box::leak(theme.font_name.into_boxed_str()));
     iced::daemon(move || {
         let (main, open) = window::open(window::Settings {
             size: Size::new(760.0, 640.0), min_size: Some(Size::new(340.0, 260.0)),
+            transparent: true,
             ..window::Settings::default()
         });
         let mut engine = TextEngine::new(&config.popup.font);
-        let theme = crate::search_popup::theme(&config, &mut engine);
+        let theme = crate::search_popup::theme(&config, Some(&css_path), &mut engine);
         let mut search = Search {
             mode, query: initial.clone(), editor: text_editor::Content::with_text(&initial),
             tokens: Vec::new(), selected: None, result: SearchResult::Empty, status: String::new(),
             generation: 0, worker: worker.clone(), busy: false, pending: None,
-            main, definitions: Vec::new(), config: config.clone(), theme, font, engine,
+            main, definitions: Vec::new(), config: config.clone(), css_path: css_path.clone(),
+            theme, font, engine,
             media: None, focused: HashSet::new(), hovered: HashSet::new(),
             focus_path: focus_path.clone(), focus: None,
         };
@@ -123,6 +130,7 @@ struct Search {
     main: window::Id,
     definitions: Vec<(window::Id, Definition)>,
     config: Config,
+    css_path: PathBuf,
     theme: Theme,
     font: iced::Font,
     engine: TextEngine,
@@ -227,6 +235,54 @@ impl Search {
         Task::batch(tasks)
     }
 
+    fn cancel_hovers(&mut self) {
+        if self.pending.as_ref().is_some_and(|job| matches!(job.target, Target::Hover(_, _))) {
+            self.pending = None;
+        }
+        for (_, definition) in &mut self.definitions {
+            definition.hovered = None;
+            definition.generation = definition.generation.wrapping_add(1);
+        }
+    }
+
+    fn cancel_all(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = None;
+        self.cancel_hovers();
+    }
+
+    fn apply_config(&mut self, config: Config, database: PathBuf) -> (Option<String>, Task<Message>) {
+        let theme = crate::search_popup::theme(
+            &config, Some(&self.css_path), &mut self.engine,
+        );
+        let repaint = config != self.config || theme != self.theme;
+        if theme.font_name != self.theme.font_name {
+            self.font = iced::Font::with_name(Box::leak(theme.font_name.clone().into_boxed_str()));
+        }
+        self.config = config;
+        self.theme = theme;
+        self.media = MediaSurfaces::open(&database).ok();
+        if !repaint { return (None, Task::none()); }
+        self.cancel_hovers();
+        let mut failure = None;
+        let mut windows = Vec::new();
+        for (id, definition) in &mut self.definitions {
+            if let Err(error) = definition.restyle(
+                &self.config, &self.theme, &mut self.engine,
+                self.media.as_mut(),
+            ) {
+                failure = Some(format!("Cannot apply search theme: {error:#}"));
+            } else {
+                windows.push(window::set_min_size(*id, None)
+                    .chain(window::set_max_size(*id, None))
+                    .chain(window::resize(*id, definition.size))
+                    .chain(window::set_min_size(*id, Some(definition.size)))
+                    .chain(window::set_max_size(*id, Some(definition.size))));
+            }
+        }
+        (failure, Task::batch(windows))
+    }
+
     fn open_definition(&mut self, presentation: chibipop::present::Presentation) -> Task<Message> {
         if self.definitions.len() >= MAX_DEFINITIONS {
             self.status = "Close a definition window before opening another level.".into();
@@ -291,17 +347,14 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
             if valid {
                 match reply {
                     Err(error) => search.status = error,
-                    Ok(reply) => match target {
+                    Ok(reply) => {
+                        let Reply { result, tokens, config, database } = *reply;
+                        let (theme_failure, windows) = search.apply_config(config, database);
+                        tasks.push(windows);
+                        match target {
                         Target::Input(_) | Target::Word(_) => {
-                            search.config = reply.config;
-                            let theme = crate::search_popup::theme(&search.config, &mut search.engine);
-                            if theme.font_name != search.theme.font_name {
-                                search.font = iced::Font::with_name(Box::leak(theme.font_name.clone().into_boxed_str()));
-                            }
-                            search.theme = theme;
-                            search.media = MediaSurfaces::open(&reply.database).ok();
-                            if matches!(target, Target::Input(_)) { search.tokens = reply.tokens; }
-                            search.result = reply.result;
+                            if matches!(target, Target::Input(_)) { search.tokens = tokens; }
+                            search.result = result;
                             search.status = match search.result {
                                 SearchResult::Found(_) => "Choose a candidate to open its definition.",
                                 SearchResult::Miss => "No matching entries in the enabled dictionaries.",
@@ -310,14 +363,16 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                             }.into();
                         }
                         Target::Hover(id, _) => {
-                            if let Some(presentation) = selected_presentation(&reply.result, 0) {
+                            if let Some(presentation) = selected_presentation(&result, 0) {
                                 if let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) {
                                     tasks.push(search.close_from(depth + 1));
                                     tasks.push(search.open_definition(presentation));
                                 }
                             }
                         }
-                    },
+                        }
+                        if let Some(error) = theme_failure { search.status = error; }
+                    }
                 }
             }
             if let Some(job) = search.pending.take() { tasks.push(search.enqueue(job)); }
@@ -386,7 +441,12 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
         Message::Back(id) => {
             if let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) {
                 let parent = depth.checked_sub(1).map_or(search.main, |index| search.definitions[index].0);
+                search.cancel_hovers();
                 return Task::batch([search.close_from(depth), window::gain_focus(parent)]);
+            }
+            if id == search.main {
+                search.cancel_all();
+                return Task::batch([search.close_from(0), iced::exit()]);
             }
         }
         Message::Click(id) => {
@@ -424,9 +484,44 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
 
 fn color(rgb: (u8, u8, u8)) -> Color { Color::from_rgb8(rgb.0, rgb.1, rgb.2) }
 
+fn panel_color(rgb: (u8, u8, u8), opacity: f32) -> Color {
+    Color { a: opacity.clamp(0.0, 1.0), ..color(rgb) }
+}
+
+fn themed_font(base: iced::Font, weight: u16, italic: bool) -> iced::Font {
+    let weight = match weight {
+        ..=149 => font::Weight::Thin,
+        150..=249 => font::Weight::ExtraLight,
+        250..=349 => font::Weight::Light,
+        350..=449 => font::Weight::Normal,
+        450..=549 => font::Weight::Medium,
+        550..=649 => font::Weight::Semibold,
+        650..=749 => font::Weight::Bold,
+        750..=849 => font::Weight::ExtraBold,
+        _ => font::Weight::Black,
+    };
+    let style = if italic { font::Style::Italic } else { font::Style::Normal };
+    iced::Font { weight, style, ..base }
+}
+
+fn sentence_size(theme: &Theme) -> f32 {
+    (theme.body_size * 1.35)
+        .max(theme.headword_size + 2.0)
+        .max(theme.collapsed_size + 2.0)
+}
+
 fn border(theme: &Theme) -> iced::Border {
-    iced::Border { color: color(theme.border), width: theme.border_width,
+    iced::Border { color: panel_color(theme.border, theme.opacity), width: theme.border_width.max(1.0),
         radius: (theme.corner_radius as f32).into() }
+}
+
+fn search_button(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(panel_color(if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+            theme.separator
+        } else { theme.background }, theme.opacity).into()),
+        text_color: color(theme.body_text), border: border(theme), ..button::Style::default()
+    }
 }
 
 fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
@@ -443,22 +538,35 @@ fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
     }
     let theme = &search.theme;
     let pad = theme.padding.max(0) as f32;
+    let body_font = themed_font(search.font, theme.body_weight, theme.body_italic);
+    let headword_font = themed_font(search.font, theme.headword_weight, theme.headword_italic);
+    let reading_font = themed_font(search.font, theme.reading_weight, theme.reading_italic);
+    let collapsed_font = themed_font(search.font, theme.collapsed_weight, theme.collapsed_italic);
+    let dimmed_font = themed_font(search.font, theme.dimmed_weight, theme.dimmed_italic);
     let input: Element<'_, Message> = match search.mode {
         SearchMode::Dictionary => text_input("Japanese word or expression", &search.query)
             .id("search-query").on_input(Message::Input).on_submit(Message::Submit)
-            .font(search.font).size(theme.body_size).padding(pad).style(move |_, _| text_input::Style {
-                background: color(theme.background).into(), border: border(theme),
+            .font(body_font).size(theme.body_size).padding(pad).style(move |_, _| text_input::Style {
+                background: panel_color(theme.background, theme.opacity).into(), border: border(theme),
                 icon: color(theme.body_text), placeholder: color(theme.dimmed_text),
                 value: color(theme.body_text), selection: color(theme.accent),
             }).into(),
         SearchMode::Sentence => text_editor(&search.editor).id("search-query").on_action(Message::Edit)
-            .font(search.font).size(theme.body_size).padding(pad).height(140).style(move |_, _| text_editor::Style {
-                background: color(theme.background).into(), border: border(theme),
+            .font(body_font).size(sentence_size(theme)).padding(pad).height(140).style(move |_, _| text_editor::Style {
+                background: panel_color(theme.background, theme.opacity).into(), border: border(theme),
                 placeholder: color(theme.dimmed_text), value: color(theme.body_text), selection: color(theme.accent),
             }).into(),
     };
-    let mut content = column![text(title(search.mode)).font(search.font).size(theme.headword_size)
-        .color(color(theme.headword_text)), input].spacing(pad);
+    let label = |value| text(value).font(dimmed_font).size(theme.dimmed_size).color(color(theme.dimmed_text));
+    let input_label = if search.mode == SearchMode::Sentence { "Sentence to search" } else { "Word or expression" };
+    let submit_label = if search.mode == SearchMode::Sentence { "Update sentence" } else { "Search" };
+    let action = |value| button(text(value).font(body_font).size(theme.body_size)
+        .width(Length::Fill).align_x(iced::Center)).padding(pad).width(Length::Fill)
+        .style(move |_, status| search_button(theme, status));
+    let mut content = column![text(title(search.mode)).font(headword_font).size(theme.headword_size)
+        .color(color(theme.headword_text)), label(input_label), input,
+        row![action(submit_label).on_press(Message::Submit), action("Close").on_press(Message::Back(search.main))]
+            .spacing(pad)].spacing(pad);
     if search.mode == SearchMode::Sentence {
         let spans = search.tokens.iter().enumerate().map(|(index, token)| {
             let mut token_span = span(token.text.as_str()).color(color(theme.body_text));
@@ -470,26 +578,30 @@ fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
             }
             token_span
         }).collect::<Vec<_>>();
-        content = content.push(scrollable(rich_text(spans).font(search.font).size(theme.body_size)
-            .on_link_click(Message::Word)).height(120));
+        content = content.push(label("Select a word"))
+            .push(container(scrollable(rich_text(spans).font(body_font).size(sentence_size(theme))
+                .on_link_click(Message::Word)).height(100)).width(Length::Fill).padding(pad)
+                .style(move |_| container::Style { border: border(theme), ..container::Style::default() }));
     }
-    content = content.push(text(&search.status).font(search.font).size(theme.dimmed_size).color(color(theme.dimmed_text)));
+    content = content.push(text(&search.status).font(dimmed_font).size(theme.dimmed_size).color(color(theme.dimmed_text)));
+    content = content.push(label("Matching words"));
     let mut rows = column![].spacing(pad);
     for candidate in candidates(&search.result) {
-        let heading = row![text(candidate.headword).font(search.font).size(theme.headword_size).color(color(theme.headword_text)),
-            text(candidate.reading).font(search.font).size(theme.reading_size).color(color(theme.reading_text))].spacing(pad);
-        rows = rows.push(button(column![heading, text(candidate.summary).font(search.font).size(theme.body_size)]
-            .spacing(pad / 2.0)).width(Length::Fill).padding(pad)
-            .style(move |_, status| button::Style {
-                background: Some(color(if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                    theme.separator
-                } else { theme.background }).into()),
-                text_color: color(theme.body_text), border: border(theme), ..button::Style::default()
-            }).on_press(Message::Candidate(candidate.index)));
+        let heading = row![text(candidate.headword).font(headword_font).size(theme.headword_size).color(color(theme.headword_text)),
+            text(candidate.reading).font(reading_font).size(theme.reading_size).color(color(theme.reading_text))]
+            .spacing(pad).align_y(iced::Center);
+        let label = column![heading, text(candidate.summary).font(collapsed_font)
+            .size(theme.collapsed_size).color(color(theme.collapsed_text))]
+            .spacing(pad / 2.0).width(Length::Fill).align_x(iced::Center);
+        rows = rows.push(button(label).width(Length::Fill).padding(pad)
+            .style(move |_, status| search_button(theme, status)).on_press(Message::Candidate(candidate.index)));
     }
     container(content.push(scrollable(rows).height(Length::Fill))).padding(pad)
-        .style(move |_| container::Style { background: Some(color(theme.background).into()),
-            text_color: Some(color(theme.body_text)), ..container::Style::default() }).into()
+        .style(move |_| container::Style {
+            background: Some(panel_color(theme.background, theme.opacity).into()),
+            text_color: Some(color(theme.body_text)), border: border(theme),
+            ..container::Style::default()
+        }).into()
 }
 
 fn data_file(relative: &str) -> PathBuf {
@@ -649,12 +761,13 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let config = Config::default();
         let mut engine = TextEngine::new("Noto Sans CJK JP");
-        let theme = crate::search_popup::theme(&config, &mut engine);
+        let theme = crate::search_popup::theme(&config, None, &mut engine);
         (Search {
             mode: SearchMode::Dictionary, query: String::new(), editor: text_editor::Content::new(),
             tokens: Vec::new(), selected: None, result: SearchResult::Empty, status: String::new(),
             generation: 0, worker: std::sync::Arc::new(Worker { sender }), busy: false, pending: None,
-            main: window::Id::unique(), definitions: Vec::new(), config, theme, font: iced::Font::DEFAULT, engine, media: None,
+            main: window::Id::unique(), definitions: Vec::new(), config,
+            css_path: PathBuf::new(), theme, font: iced::Font::DEFAULT, engine, media: None,
             focus_path: PathBuf::new(), focus: None, focused: HashSet::new(), hovered: HashSet::new(),
         }, receiver)
     }
@@ -670,6 +783,7 @@ mod tests {
         let command = search_command_mode(&paths, SearchMode::Dictionary, None).unwrap();
         assert!(command.get_args().any(|arg| arg == "search"));
         assert!(!command.get_args().any(|arg| arg == "--text"));
+        assert_eq!(popup_css_path(&paths), PathBuf::from("/tmp/popup.css"));
     }
 
     #[test]
@@ -777,5 +891,75 @@ mod tests {
         assert!(search.hovered.is_empty());
         assert!(search.focused.is_empty());
         assert!(search.focus.is_none());
+    }
+
+    #[test]
+    fn escape_from_a_definition_cancels_hover_reopen_work() {
+        let (mut search, receiver) = fixture();
+        let parent = window::Id::unique();
+        let child = window::Id::unique();
+        for id in [parent, child] {
+            let definition = Definition::new(
+                crate::popup::canned(), &search.config, &search.theme,
+                &mut search.engine, search.media.as_mut(),
+            ).unwrap();
+            search.definitions.push((id, definition));
+        }
+        search.definitions[0].1.hovered = Some("猫".into());
+        search.definitions[0].1.generation = 4;
+        let active = Target::Hover(parent, 4);
+        let _ = search.enqueue(Job {
+            target: active.clone(), query: "猫".into(), tokenize: false,
+        });
+        assert_eq!(receiver.recv().unwrap().0.query, "猫");
+        search.pending = Some(Job {
+            target: Target::Hover(child, 1), query: "犬".into(), tokenize: false,
+        });
+
+        let _ = update(&mut search, Message::Back(child));
+        assert_eq!(search.definitions.len(), 1);
+        assert!(search.definitions[0].1.hovered.is_none());
+        assert_eq!(search.definitions[0].1.generation, 5);
+        assert!(search.pending.is_none());
+        let _ = update(&mut search, Message::Finished(active, Ok(Box::new(Reply {
+            result: SearchResult::Found(Box::new(crate::popup::canned())),
+            tokens: Vec::new(), config: Config::default(), database: PathBuf::new(),
+        }))));
+        assert_eq!(search.definitions.len(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn escape_from_main_invalidates_all_search_work() {
+        let (mut search, _) = fixture();
+        search.generation = 8;
+        search.busy = true;
+        search.pending = Some(Job {
+            target: Target::Input(8), query: "猫".into(), tokenize: false,
+        });
+        let main = search.main;
+        let _ = update(&mut search, Message::Back(main));
+        assert_eq!(search.generation, 9);
+        assert!(search.pending.is_none());
+        assert!(search.definitions.is_empty());
+    }
+
+    #[test]
+    fn search_font_roles_and_sentence_scale_match_the_theme() {
+        let (mut search, _) = fixture();
+        search.theme.headword_weight = 700;
+        search.theme.collapsed_italic = true;
+        search.theme.body_size = 20.0;
+        search.theme.headword_size = 30.0;
+        search.theme.collapsed_size = 32.0;
+        let headword = themed_font(
+            search.font, search.theme.headword_weight, search.theme.headword_italic,
+        );
+        let summary = themed_font(
+            search.font, search.theme.collapsed_weight, search.theme.collapsed_italic,
+        );
+        assert_eq!(headword.weight, font::Weight::Bold);
+        assert_eq!(summary.style, font::Style::Italic);
+        assert_eq!(sentence_size(&search.theme), 34.0);
     }
 }

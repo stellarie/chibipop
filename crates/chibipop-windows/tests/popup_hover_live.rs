@@ -201,10 +201,39 @@ fn run_hover(mode: TriggerMode, enabled: bool) {
         if fixture.visible_popups().len() >= 2 {
             assert!(enabled, "disabled sub-popups opened a child");
             eprintln!("real hover passed: {mode:?}");
+            cancel_popups(&fixture, true);
             return;
         }
     }
     assert!(!enabled, "hover never opened a visible child in {mode:?} at root {rect:?}: {}", fixture.logs());
     assert_eq!(fixture.visible_popups().len(), 1, "disabling sub-popups must preserve the root");
     eprintln!("disabled hover passed: {mode:?}");
+    cancel_popups(&fixture, false);
+}
+
+fn cancel_popups(fixture: &Fixture, child: bool) {
+    // SAFETY: Only the fixture's own source window receives the injected Escape keys.
+    unsafe {
+        SetWindowPos(fixture.word, Some(HWND_TOPMOST), 20, 20, 240, 100, SWP_SHOWWINDOW).unwrap();
+        assert!(SetForegroundWindow(fixture.word).as_bool());
+    }
+    let escape = || {
+        let event = |flags| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 {
+            ki: KEYBDINPUT { wVk: VK_ESCAPE, dwFlags: flags, ..Default::default() },
+        } };
+        // SAFETY: The fixture has focus and both initialized input records are live.
+        unsafe { assert_eq!(SendInput(&[event(KEYBD_EVENT_FLAGS(0)), event(KEYEVENTF_KEYUP)],
+            std::mem::size_of::<INPUT>() as i32), 2); }
+    };
+    let wait_count = |count| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.visible_popups().len() != count {
+            assert!(Instant::now() < deadline, "Escape expected {count} popup(s): {}", fixture.logs());
+            pause(Duration::from_millis(30));
+        }
+    };
+    if child { escape(); wait_count(1); }
+    escape(); wait_count(0);
+    pause(Duration::from_millis(250));
+    assert!(fixture.visible_popups().is_empty(), "cancelled work reopened the popup");
 }

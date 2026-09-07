@@ -312,6 +312,12 @@ pub fn settings_only(
     // SAFETY: `msg` is this loop's stack storage, and `window` stays alive for
     // the whole loop. It drops only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        if let Some(editor) = &css_editor_so {
+            if matches!(editor.take_outcome(), Some(crate::ui::editor::EditorOutcome::Applied)) {
+                if let Some(search) = &mut search_window { search.update_config(&cfg); }
+            }
+            if !editor.is_visible() { css_editor_so = None; }
+        }
         if let Some(search) = &mut search_window {
             search.poll();
             if search.handle_message(&msg) { continue; }
@@ -1776,7 +1782,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
         search_was_focused = search_focused;
 
-        if search_window.as_ref().is_some_and(|window| window.handle_message(&msg)) {
+        let _ = Hooks::take_back();
+        if Hooks::take_escape() && !search_focused {
+            if controller.popup_depth() > 0 {
+                crate::input::hooks::discard_keyboard_actions();
+                drive!(Event::BackRequested);
+            } else {
+                crate::input::hooks::cancel_keyboard_actions();
+                drive!(Event::DismissRequested);
+            }
+        }
+
+        if search_window.as_mut().is_some_and(|window| window.handle_message(&msg)) {
             continue;
         }
 
@@ -2115,6 +2132,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let _ = screenshot_tx.send(cmd);
                         }
                     }
+                    Some(crate::action::ActionOutcome::Cancelled) => {
+                        crate::input::hooks::discard_keyboard_actions();
+                    }
                     Some(crate::action::ActionOutcome::Failed(msg)) => {
                         eprintln!("chibipop: action failed: {msg}");
                     }
@@ -2143,13 +2163,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 sync_anki_button(anki_button.as_ref(), controller.popup(), &theme);
             }
 
-            if Hooks::take_back() && !search_focused {
-                drive!(Event::BackRequested);
-            }
-
             if let Some(ed) = &css_editor {
                 if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
                     theme = theme_from_config(&live.popup);
+                    if let Some(window) = &mut search_window { window.update_config(&cfg); }
                     if let Some(v) = controller.popup() {
                         let selection = controller.selection();
                         let scroll = v.scroll;

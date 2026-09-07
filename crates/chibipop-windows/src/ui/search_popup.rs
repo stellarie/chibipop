@@ -38,15 +38,36 @@ pub(super) struct SearchPopup {
 
 pub(super) enum Action { Lookup(String), Back }
 
-pub(super) fn theme(config: &Config) -> Theme {
+fn base_theme(config: &Config) -> Theme {
     let mut theme = if config.popup.theme == "light" { Theme::light() } else { Theme::dark() };
     theme.font_name.clone_from(&config.popup.font);
-    if let Ok(css) = std::fs::read_to_string(crate::paths::beside_exe("popup.css")) {
-        for error in super::css::parse(&css, &mut theme) {
+    theme
+}
+
+fn apply_css(mut theme: Theme, css: Option<&str>) -> Theme {
+    if let Some(css) = css {
+        for error in super::css::parse(css, &mut theme) {
             eprintln!("chibipop: popup.css:{}: {}", error.line, error.message);
         }
     }
     theme
+}
+
+pub(super) fn theme(config: &Config) -> Theme {
+    let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
+    apply_css(base_theme(config), css.as_deref())
+}
+
+pub(super) fn controls_theme(config: &Config) -> Theme {
+    let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
+    controls_theme_with_css(config, css.as_deref())
+}
+
+fn controls_theme_with_css(config: &Config, css: Option<&str>) -> Theme {
+    let mut theme = base_theme(config);
+    theme.headword_weight = 700;
+    theme.collapsed_italic = true;
+    apply_css(theme, css)
 }
 
 impl SearchPopup {
@@ -57,7 +78,8 @@ impl SearchPopup {
         // SAFETY: This thread owns the HWND and stable event allocation until window destruction.
         unsafe {
             let style = GetWindowLongPtrW(window.hwnd(), GWL_EXSTYLE);
-            SetWindowLongPtrW(window.hwnd(), GWL_EXSTYLE, style & !(WS_EX_TRANSPARENT.0 as isize));
+            SetWindowLongPtrW(window.hwnd(), GWL_EXSTYLE,
+                style & !((WS_EX_TRANSPARENT | WS_EX_NOACTIVATE).0 as isize));
             SetWindowLongPtrW(window.hwnd(), GWLP_HWNDPARENT, owner.0 as isize);
             SetWindowPos(window.hwnd(), None, anchor.x, anchor.y, 1, 1,
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED)?;
@@ -74,7 +96,46 @@ impl SearchPopup {
         let mut popup = Self { renderer, window, events, presentation, theme,
             config: config.clone(), scroll: 0, max_scroll: 0, has_parent };
         popup.place(anchor)?;
+        if !has_parent { popup.activate(); }
         Ok(popup)
+    }
+
+    pub(super) fn activate(&self) {
+        // SAFETY: This thread owns the definition HWND and its keyboard handling.
+        unsafe {
+            let _ = SetForegroundWindow(self.window.hwnd());
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(self.window.hwnd()));
+        }
+    }
+
+    pub(super) fn update_config(&mut self, config: &Config) -> Result<()> {
+        let anchor = self.anchor()?;
+        self.config = config.clone();
+        self.theme = theme(config);
+        // SAFETY: The window belongs to this thread. Alpha is bounded before conversion.
+        unsafe {
+            SetLayeredWindowAttributes(self.window.hwnd(), COLORREF(0),
+                (self.theme.opacity.clamp(0.0, 1.0) * 255.0).round() as u8, LWA_ALPHA)?;
+        }
+        self.place(anchor)
+    }
+
+    pub(super) fn owns_window(&self, hwnd: HWND) -> bool {
+        self.window.hwnd() == hwnd
+    }
+
+    #[cfg(test)]
+    pub(super) fn hwnd(&self) -> HWND {
+        self.window.hwnd()
+    }
+
+    pub(super) fn hide(&self) {
+        // SAFETY: This thread owns the live popup HWND.
+        unsafe { let _ = ShowWindow(self.window.hwnd(), SW_HIDE); }
+    }
+
+    pub(super) fn close_requested(&self) -> bool {
+        self.events.close.get()
     }
 
     fn place(&mut self, anchor: PhysPoint) -> Result<()> {
@@ -169,7 +230,7 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         let point = PhysPoint { x: lp.0 as i16 as i32, y: (lp.0 >> 16) as i16 as i32 };
         match msg {
             WM_NCHITTEST => return LRESULT(HTCLIENT as isize),
-            WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+            WM_MOUSEACTIVATE => return LRESULT(MA_ACTIVATE as isize),
             WM_LBUTTONUP => { events.click.set(Some(point)); return LRESULT(0); }
             WM_MOUSEMOVE => { events.pointer.set(Some(point)); return LRESULT(0); }
             WM_MOUSEWHEEL => {
@@ -178,8 +239,34 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_PAINT => events.repaint.set(true),
             WM_CLOSE => { events.close.set(true); return LRESULT(0); }
+            WM_KEYDOWN if wp.0 == 27 => {
+                if lp.0 & (1 << 30) != 0 { return LRESULT(0); }
+                events.close.set(true);
+                return LRESULT(0);
+            }
             _ => {}
         }
         DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_defaults_allow_explicit_css_font_overrides() {
+        let default = controls_theme_with_css(&Config::default(), None);
+        assert_eq!(700, default.headword_weight);
+        assert!(default.collapsed_italic);
+
+        let css = ".headword { font-weight: 500; }\n.collapsed { font-style: normal; }";
+        let overridden = controls_theme_with_css(&Config::default(), Some(css));
+        assert_eq!(500, overridden.headword_weight);
+        assert!(!overridden.collapsed_italic);
+
+        let popup = apply_css(base_theme(&Config::default()), None);
+        assert_eq!(Theme::dark().headword_weight, popup.headword_weight);
+        assert_eq!(Theme::dark().collapsed_italic, popup.collapsed_italic);
     }
 }

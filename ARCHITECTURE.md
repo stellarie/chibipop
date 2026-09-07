@@ -308,6 +308,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Sentence search uses the pinned Japanese analyzer. Clicks select complete UTF-8 word ranges and request dictionary candidates.
 - OCR-to-clipboard optionally opens Sentence search with the captured text. Linux transfers that text through bounded child stdin, not process arguments.
 - Search windows accept native text input. Windows uses native controls; Linux runs a separate iced process.
+- Search controls and definitions use the existing CSS parser and theme roles. Candidate summaries use the collapsed text role.
+- Windows search reads CSS beside the executable. Linux search reads it beside the active config file.
+- Escape dismisses active search windows and invalidates pending replies. Native IME composition handles its own Escape first.
+- Windows capture operations observe Escape independently of selector focus. Cancelled OCR waits discard late results without clipboard changes.
 - The optional search shortcuts belong to shared `Config` and participate in platform shortcut validation.
 - The tray Search item and configured shortcut use the same platform entry point.
 - Linux Search holds a runtime focus lock while its input window has focus. The daemon suppresses lookup and actions during that interval.
