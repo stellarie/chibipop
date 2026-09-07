@@ -188,9 +188,19 @@ be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
 
-Windows settings use six tabs: Popup, Shortcuts, Dictionaries, Text recognition,
-Anki, and Extensions. All shortcut controls appear together on Shortcuts.
+Windows settings use seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
 Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
+
+Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.
+The footer separates Apply progress from the active OCR language, OCR engine, and Anki enablement.
+It reports successful Apply only after the matching save completes. Unsaved controls do not change the runtime line.
+Changing the OCR engine still requires a restart; the runtime line names the backend currently running.
+
+**Debug > Show live logs** opens a separate window with bounded recent output and live updates.
+Selecting text or reading older output pauses following. Returning to the tail resumes it.
+Closing the viewer leaves chibipop running. Closing the settings window with X exits the process after any active write finishes.
+Escape retains the live settings hide behavior.
 
 The embedded `crates/chibipop-windows/assets/settings-layout.toml` controls organization
 and labels. Developers can reorder entries or move them between sections and tabs, then rebuild.

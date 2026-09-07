@@ -131,9 +131,13 @@ other programs.
 
 ## 5. Settings
 
-Everything is in the settings window. Press **Apply** to save. Your
-changes take effect at once — chibipop does not restart, and you do not
-lose the pop-up you were looking at.
+Use the settings window to change preferences. Press **Apply** to save.
+Most changes take effect at once. Changing the Windows OCR engine still needs a restart.
+
+On Windows, resize or maximize settings to give controls more room. The footer shows
+Apply progress, the active OCR language and engine, and whether Anki is enabled.
+Open **Debug > Show live logs** to inspect recent and live output in another window.
+The settings window's X exits chibipop. Closing the log viewer closes that viewer.
 
 **Where the file lives.** Your settings are in a file called
 `chibipop.toml`. On Windows it sits beside the program. On Linux it is in
@@ -387,7 +391,7 @@ prints the reason.
 
 ### Checking which engine is running
 
-Tick **Show the active OCR engine** on the *Text recognition* tab and
+Tick **Show the active OCR engine** on the *Debug* tab and
 press **Apply**. The status bar names it.
 
 To watch the engine's own messages, start chibipop from a terminal:

@@ -44,7 +44,7 @@ class ManualRegressionTests(unittest.TestCase):
             | numbered("1.29", 1, 4)
             | numbered("1.30", 1, 10)
             | numbered("2", 1, 14)
-            | {"2.11a", "2.11b", "2.11c", "2.11d", "2.11e"}
+            | {"2.11a", "2.11b", "2.11c", "2.11d", "2.11e", "2.11f"}
             | {"2.14a", "2.14b", "2.14c", "2.14d", "2.14e", "2.14f"}
         )
         self.assertSetEqual(ids, required)

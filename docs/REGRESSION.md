@@ -1739,166 +1739,45 @@ mismatch (BACKLOG item 35) alike. The code alone never says which one regressed.
 **Cleanup.** Delete the `plugins` folder created for setup. It ships with no release package,
 `target/` is gitignored regardless, and nothing else in the tree depends on it.
 
-### 1.26 The scrollable settings window — added 2026-08-19, not run
+### 1.26 The scrollable settings window
 
-**Why this exists.** Tasks 3-6 of the scrollable-settings-window plan (`BACKLOG.md` §11-12) each
-verified their own piece during the build, against a standalone binary and a synthetically shrunk
-viewport — real measurements, but never run together as one pass, and never against a live window
-at real display scaling. This collects them into one checklist so a future change to this window
-has one page to run rather than four task reports to re-read.
+**Setup.** Open Windows settings. Drag the window borders to make it narrower, wider, shorter, and taller.
+Maximize the window, then restore it. The controls must adapt and keep their values.
+Dynamic field rows and screenshot-target text must respect the size selected by the user.
 
-> [!warning] Not run as written. Read the per-step notes for what already has build-time evidence
-> and what is genuinely unexercised. Step 6 cannot be automated at all; step 7 was deliberately
-> deferred and is owed — see `progress.md`'s log for why.
+1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Shortcuts,
+   Dictionaries, Text recognition, Anki, Extensions, and Debug. Repeat the visible check after resizing.
+   The footer must remain reachable. `settings --audit` checks a separate, newly opened window.
+2. **Scrolling depends on page height.** The reserved scrollbar is disabled when the page fits. Tall pages scroll inside the viewport.
+   Group frames, help text, lists, and combo boxes must fit the client width.
+3. **Wheel scrolling clamps at both ends.** Repeated scrolling must not drift past the page boundaries.
+4. **Tab switches reset scroll to the top.** Scroll down, switch away, then return to the tab.
+5. **Controls keep working after reflow.** Change lookup mode, open combo lists, edit values, and expand field mapping.
+   Combo lists must retain multiple visible rows. Keyboard order must follow the visible layout.
+   Resize while a lower control has focus. Keep it visible and preserve the previous scroll position where possible.
+6. **Drag the scrollbar thumb.** Content must follow and remain at the selected position after release.
+7. **Check display scaling.** Repeat at 100%, 125%, and 150%. Move between displays when available.
+   Labels, fonts, minimum sizes, field-map columns, and the footer must remain usable.
 
-**Setup.** `./target/release/chibipop.exe settings`. The window is not user-resizable — its size is
-always computed from content and clamped to the work area by `fit_to` — so step 1's shrunk-window
-half, and steps 2-4 and 6 in full, need the viewport shorter than its tallest tab's content before
-there is anything to test. Two ways to
-get there: run step 7 first (150% scaling makes `fit_to`'s own clamp bite for real), or resize the
-window from a second process with `SetWindowPos`, which is what Tasks 4 and 5 did throughout the
-build — see their reports for the exact call shape. Either way, **resize the window, not the scroll
-info**: a scroll range written in from outside is read back by the writer, never by chibipop, so
-every scroll clamps to 0 for a reason that has nothing to do with the window under test (Task 4's
-trap, hit once during the build).
+Native tests cover dimensions, client edges, focus, scrolling, and reflow. Physical display and visual checks still require desktop acceptance.
 
-1. **Every tab shows Apply at the same y.** Switch through all four tabs at the window's natural
-   size and read the `y` of the control with id **100** (`Apply & Restart`) on each —
-   `chibipop settings --audit` reports this directly, as `rect.y`, without opening a visible window
-   at all. Expect the **same y on all four**. Measured during the build, natural size: **548, 548,
-   548, 548**. Repeat after using Setup to shrink the window by 200px: expect again the same y on
-   all four, lower than before. Measured during the build: **348, 348, 348, 348**.
-2. **A tab taller than the viewport gets a scrollbar; a shorter one does not.** At natural size no
-   tab can ever exceed the viewport — the viewport is built from the same cross-tab `max()` that
-   governs the window, so this is a structural guarantee, not a per-machine measurement — and no
-   scrollbar should appear on any tab. Shrink the window below the tallest tab's content height
-   (Setup) and switch to that tab: a vertical scrollbar appears and the client area narrows by
-   `SM_CXVSCROLL`. Measured during the build: client width **470 → 453** (17px) the moment the bar
-   appeared. Switch to a tab shorter than the shrunk viewport: the bar disappears again.
-3. **The wheel scrolls the content, and clamps at both ends without drift.** With the window shrunk
-   (Setup) and a tall tab selected, hover the content pane and turn the wheel. One notch should move
-   the content **three lines** — measured during the build, one line is 20px logical, so one notch
-   is 60px. Keep scrolling past the end: the content must stop at the true maximum and go no
-   further. Measured during the build, 40 consecutive line-downs drove it to exactly the clamped
-   maximum and no further, and 80 line-ups symmetrically returned to exactly the top — over-scrolling
-   past either end does not drift past it, and repeating the same sequence reproduced the same
-   numbers every time.
-4. **Switching tabs resets the scroll position to the top.** Scroll a tab down, click a different
-   tab, then click back. The first tab must be back at its top position, not where it was left.
-   Measured during the build: a tab scrolled to its maximum returned to position 0 on re-selection.
-5. **Every control on every tab is where it was, and still responds — the reparenting check.** This
-   is Task 3's own verification and is worth re-running after any further change to this file: on
-   each tab, operate a control with a visible effect (the Hold key radio enabling the trigger-key
-   button on Shortcuts; selecting a row in the Dictionaries lists to enable Move up/down; expanding
-   the Anki field map) and confirm it responds, not silently swallowed by the viewport or content
-   pane. The old five-tab build measured this with `ChildWindowFromPointEx`, resolved against the window tree
-   rather than the desktop: **0 of 26/21/23/21/68** controls swallowed across General, Dictionaries,
-   OCR/Debug, Anki and Anki expanded. These historical counts do not validate the current six-tab layout.
-   `chibipop settings --audit`'s `tab_ring` / `tab_ring_reverse`,
-   diffed against a known-good dump, is the fast version of this same check, though it proves the
-   Tab-key ring rather than the mouse-hit path.
-6. **Drag the scrollbar thumb by hand.** With the window shrunk (Setup) and the bar visible, grab
-   the thumb and drag it up and down. The content must track the drag smoothly and stay wherever it
-   is released. **This step cannot be automated or verified synthetically, and that is a property of
-   the mechanism, not of this harness.** `WM_VSCROLL` with `SB_THUMBTRACK` reads `nTrackPos`, a
-   field only the scroll bar's own thumb-drag code ever sets — Task 4 confirmed a synthetic
-   `WM_VSCROLL` correctly does nothing, because it cannot populate that field. A human at the
-   keyboard is the only instrument that can exercise this arm.
-7. **At 150% display scaling, the Apply row is reachable on every tab.** Change Windows display
-   scaling to 150%, restart chibipop, and repeat steps 1-4. Apply must be visible or reachable by
-   scrolling on every tab, never clipped off the bottom of the screen with no way down to it.
-   **This step is owed, not run.** It was deliberately not attempted anywhere in this plan — display
-   scaling is a system-wide setting, not something to flip while oniichan was away from the
-   keyboard. `BACKLOG.md` §11 records that headroom at 150% was already thin before this plan; this
-   is the step that confirms whether the fix actually holds there.
+### 1.27 Live-apply engine switching (transitions)
 
-**What was measured during the build, for context — not a substitute for running this.** Steps 1-2
-came from Task 5, step 5 from Task 3, steps 3-4 from Task 4, each against a standalone, throwaway
-binary and config — never oniichan's install — with the window pinned off-screen or driven by
-`PostMessage`/`SetWindowPos` rather than a real mouse. None of it was run as this checklist, end to
-end, on a live window with a human watching. That is what actually running this item still buys,
-and step 6 cannot be bought any other way.
+The Windows footer reports the active backend and its actual language. It reports an unavailable backend after three plugin failures.
+Engine hot-swap, automatic fallback after those failures, and a popup failure notice remain unimplemented.
+Changing the configured engine requires a restart. A separate plugin-test process cannot prove the daemon's state.
 
-### 1.27 Live-Apply engine switching transitions — added 2026-08-19, not run
+1. **Enable a provider.** On Extensions, check Enable beside an installed provider. Confirm its configured enabled state.
+2. **Select the provider.** Choose it under Text recognition and Apply. The runtime footer must keep naming the backend still running.
+   Restart chibipop, then verify the provider name and its served language. Perform a real lookup.
+3. **Return to Windows OCR.** Select Built-in, Apply, and restart. Verify Windows OCR and its actual language in the footer.
+4. **Reach three failures in the running provider.** Use a controlled provider or fixture through the daemon's lookup path.
+   The footer must retain its name and language, mark it unavailable, and show the language as inactive.
+   Live logs must contain the failure details. The daemon does not automatically switch to Windows OCR or show a new popup notice.
+5. **Check recovery boundaries.** A successful lookup before the threshold resets the failure streak.
+   After the provider is disabled, ordinary Apply does not restart it. Restart the daemon after correcting the provider failure.
 
-**Why this exists.** Tasks 4–6 of the plugin-system round wired plugin discovery, loading, hosting,
-and state tracking. Task 7 added the `Strikes` counter, which disables a plugin after three
-consecutive failures and raises a notice naming it — a live notification on the worker thread that
-the running recogniser has changed. All five observable transitions below touch the engine field of
-a running worker, which `apply_settings` (`src/text/ocr.rs:311`) does not know about yet. This
-checklist captures the five transitions a future hot-swap wiring must preserve. Each one is a
-hover observed with the resolved word recorded — **"it should work" is not evidence**.
-
-> [!warning] Hot-swap is not wired — what is and is not verifiable today
-> `WorkerSettings` and `derive()` carry no engine field yet. Live hot-swap of the running recogniser
-> is **not implemented**. What *is* observable today:
->
-> - Steps 1 and 2: Plugin enable and selection with a fresh lookup on each Apply.
-> - Step 3: Reverting to Built-in.
-> - The part of step 4 where the plugin disables itself *without* an Apply — the `Strikes` counter
->   fires on the worker thread and makes `PluginText::recognise` return errors permanently, failing
->   silently on all subsequent hovers with no auto-revert to Built-in.
->
-> What *cannot* be verified today (steps 4 and 5's auto-revert and popup notice are not implemented;
-> hot-swap and the notice feature will ship together):
->
-> - Step 2's "the next hover uses it" after an Apply that *merely* changes the engine selection,
->   with no crash or new plugin-enable to trigger a forced reload. Apply would have to swap the
->   recogniser while it runs; that is not implemented.
-> - Step 4's revert: the auto-revert to Built-in, and the popup notice naming the disabled plugin,
->   are future work. Currently when `Strikes` disables the plugin on the worker thread, all hovers
->   fail silently with no notice.
-> - Step 5's notice: no popup notice exists for plugin failures. Errors go to stderr only.
-> - Neither step can show that an Apply-while-popup-visible case lands the change in the live
->   instance instead of queuing it until a fresh lookup.
-
-**Setup.** `./target/release/chibipop.exe run`. Open Settings, go to **Text recognition** tab. Have a
-corpus page (Japanese text) ready to hover.
-
-1. **Enable a plugin.** On **Extensions**, check **Enable** beside an installed plugin.
-   Record its enabled state. Selecting the provider as the OCR engine starts it in the next step.
-
-2. **Select it as the engine.** On **Text recognition**, use the **OCR engine** dropdown to select the plugin as
-   the engine (it will be listed by name). Press Apply. Hover a word in your corpus **on the same
-   line and orientation the test used for step 1**. The next hover must use the plugin's
-   recogniser, not Windows OCR. Compare the word resolved, the hit-rank order, or the match box —
-   anything that differs between the two engines. **This step requires hot-swap: an Apply that
-   merely changes the engine selection must make the next hover use it. Without hot-swap, this
-   half is blocked.**
-
-3. **Select Built-in again.** In the **OCR engine** dropdown, select Built-in and press Apply.
-   Hover the same text. It must use Windows OCR and resolve the same word you got in step 1
-   (if step 1 resolved anything). The revert is silent — no notice, no restart.
-
-4. **Disable an enabled plugin while it is the engine.** *(The auto-revert to Built-in and popup
-   notice described below are not yet implemented. Currently the plugin disables and all hovers fail
-   silently. These will ship with hot-swap.)* Leave the engine set to that plugin. Press Apply to
-   confirm the setting, then hover and exhaust it: three hovers must each raise an error (any error,
-   from the plugin). The third error fires the `Strikes` counter on the worker thread. The plugin
-   disables itself **without an Apply** — you will see no notice in the window, but the internal
-   disable fires. On the fourth hover, chibipop must revert to Built-in **and raise a notice** on
-   the popup saying the plugin failed and was disabled. Record the plugin name in the notice. **The
-   first three errors are the test; the notice is the observable that proves the revert.** The revert
-   happens on the worker thread, not on an Apply; this is what `Strikes` exists for.
-
-   **Critical detail:** the disable happens on the worker thread with no coordination to the UI.
-   A future hot-swap wiring must ensure that an Apply-while-disabled case does not resurrect the
-   plugin or leave the UI and the worker out of sync. As written this step exercises neither
-   (`Strikes` fires and disables; a manual Apply to change the engine lands after it). The gap
-   is owed and is recorded here rather than hidden.
-
-5. **Three failures in a row, auto-disable and notice.** *(The popup notice is not yet implemented.
-   Currently the plugin disables and hovers fail silently. This will ship with hot-swap.)* Select a
-   plugin that is not the current engine (to avoid step 4's behavior). Leave the settings window
-   alone — do not Apply. On the main window or corpus page, use `chibipop.exe plugin test <name>`
-   from the command line to send three errors to the running instance *without* any Apply in between.
-   The `Strikes` counter must fire, the plugin must disable itself, and a fresh hover with any
-   engine (plugin or Built-in) must show the notice **once** on the popup — "Plugin <name> failed 3
-   times; disabled." The notice must **not** reappear on the next hover. Repeat the command and
-   confirm it still disables once per three failures, not persistently. The disabled flag must survive
-   an Apply (the plugin stays off unless re-enabled by hand in the UI), and the `Strikes` counter
-   must reset when a lookup succeeds. Do not re-enable the plugin during this step — that is a
-   separate case.
+The crash-provider integration test verifies the concrete strike-to-status path without changing the user's Anki or plugin configuration.
 
 ### 1.28 Fresh install with discovered meikiocr — added 2026-08-19, not run
 
@@ -1925,8 +1804,8 @@ exists.
    list without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with six tabs: Popup, Shortcuts, Dictionaries, Text recognition,
-   Anki, and Extensions. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
+2. `chibipop.exe settings` opens with seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+   Anki, Extensions, and Debug. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
 3. The **OCR engine** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
    `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
@@ -2156,58 +2035,27 @@ selector test as proof of the live screen, compositor, or Anki path.
     with **`IsWindowVisible` = False** while `ChibipopSettingsClass` is True. That is
     `own_console()` hiding a console it owns alone. A visible black box here means
     `GetConsoleProcessList` returned something other than 1.
-11b. **The Apply button's caption and hint.** Two processes open the same window and only one of
-    them promises a restart. What the code does, as of 2026-08-13
-    (`apply_caption` `src/ui/settings_window.rs:954`, `apply_hint` `:959`):
+11b. **Apply and runtime status.** Check the separate Apply state, runtime line, and operation detail.
+    Editing a setting changes its state to Pending. Apply changes it to Applying.
+    A matching successful save changes it to Applied. Validation, save, or partial dictionary failures must show Failed.
+    Old save results must not replace the current state or leave a false failure message.
+    The runtime line shows the active OCR language and engine, including fallback or disabled-backend state, and applied Anki enablement.
+    Standalone settings show that scanning is inactive. Unsaved controls must not change the reported runtime.
+    A different OCR engine still requires a restart; the status line reports the backend actually running.
+    A successful standalone Apply saves and closes. A standalone dictionary rebuild starts a fresh daemon after saving.
 
-| Opened by | Dictionary staged? | Caption | Hint |
-|---|---|---|---|
-| `chibipop run` | no | **Apply** | "Applying saves your settings and uses them right away." |
-| `chibipop run` | yes | **Apply** | "Applying saves your settings and rebuilds your dictionary." |
-| `chibipop settings` | either | **Apply & Restart** | "Applying saves your settings and restarts chibipop." |
+11e. **Close through the top-right X.** Click X in standalone settings and in the running daemon's settings.
+    Both must exit the process. The daemon's tray, hooks, popup, and other owned windows must stop.
+    If an operation is writing, remember the close request, finish that operation, then exit.
+    Escape retains its separate behavior: it hides live settings while the daemon continues.
+    `tests/settings_lifecycle.rs` checks actual process exit through the native close command.
 
-   **Row 2 changed on 2026-08-13** and this table moved with it, which is the whole lesson of the
-   correction below. `chibipop run` used to read **Apply & Restart** with a restart hint when a
-   dictionary was staged; it no longer restarts, so it no longer says so. The caption now varies
-   only by `ApplyMode` — `apply_caption` lost its `staged` parameter entirely — while the hint
-   still varies by both. `chibipop settings` is untouched and still hands off to a fresh process.
-   In the source that caption reads `"Apply && Restart"` — `&&` renders as one `&`, and a single
-   `&` would render as an accelerator underline instead (see the traps table).
+11f. **Live logs.** On Debug, press **Show live logs**. A separate window must show recent and new output.
+    Resize it, select and copy text, and scroll back while output continues.
+    Selection and history must remain stable; returning to the tail resumes updates.
+    Close the viewer with X. Chibipop must continue. Reopen it and confirm that recent logs remain available.
+    Output redirected to a terminal or file must remain valid. Only recent logs are retained in the viewer.
 
-> [!warning] Corrected 2026-08-09 — this entry described behaviour that has never existed
-> It asserted `chibipop settings` shows caption **"Apply"** plus a hint "Restart chibipop to use
-> them", and blamed a `restarts` flag when they did not match. Three things were checked against
-> the source, and all three came back against the entry:
->
-> - That hint string appears **nowhere in `src/`**. It exists only in this branch's plan and design
->   spec, which are working notes and are not published with the repo.
-> - There is **no `restarts` flag** anywhere in the codebase.
-> - The caption has been a hardcoded "Apply & Restart" in **both** processes for its entire history.
->
-> So **11b could not have passed on any commit, before this branch or after it** — it was a
-> checklist item written from a design document rather than from the program, and every run that
-> "passed" it passed it by not looking.
->
-> The ruling was to **fix the doc, not the behaviour**: changing what `chibipop settings` says is a
-> product decision, not a regression fix. The open question — that window says "Apply & Restart"
-> and then restarts nothing — is recorded as **BACKLOG 9**.
->
-> **The lesson is the general one.** A checklist item copied from a spec asserts what someone
-> intended; only an item written against the program asserts what it does. When they disagree the
-> spec is not automatically wrong, but the checklist is not evidence either way.
-11e. **Close via the X (`WM_CLOSE`), not Escape or a button.** In `settings_only`
-    (`chibipop settings`, or `chibipop run` before a dictionary exists) it fully exits
-    chibipop, same as "Quit chibipop" — there is no tray to fall back on, so `wndproc`'s
-    `WM_CLOSE` records the same `Cancel` outcome Escape does, and `settings_only`'s own match
-    arm already treats `Cancel` and `Quit` alike. In a normal `chibipop run` (tray already up)
-    it only destroys the settings window; hooks, popup and tray keep running. ✅
-    **Agent-verified 2026-08-01**: `EnumWindows` filtered by pid, `PostMessageW(WM_CLOSE)` on
-    `ChibipopSettingsClass`, `Get-Process` read after — `settings_only` exits with no
-    stdout/stderr (a silent, successful return); `run` loses only `ChibipopSettingsClass` from
-    the window list, with `ChibipopTrayOwnerClass` and the popup and overlay classes unchanged
-    at the same pid. Suspected broken beforehand from reading `wndproc` alone: `WM_CLOSE` only
-    ever records `Cancel`, which reads like "only Quit can end a windowless run" until you also
-    read `settings_only`'s match arm. The two sites carry comments pointing at each other now.
 12. **Reorder dictionaries → Apply** → order changes, and **`chibipop.toml` still holds the
     original substrings**, merely reordered. Invisible from the UI; check the file.
 13. **Open Settings, touch nothing, Apply** → the TOML is unchanged apart from formatting, and it
