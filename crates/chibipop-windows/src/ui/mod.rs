@@ -4,6 +4,7 @@ pub mod audit;
 pub mod console;
 pub mod editor;
 pub mod media;
+pub mod log_window;
 pub mod overlay;
 pub mod render;
 pub(super) mod settings_layout;
