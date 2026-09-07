@@ -771,9 +771,12 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let label_h = (scaled(palette.theme.dimmed_size + 6.0, palette.scale)).max(20);
         let width = (rect.right - pad * 2).max(80);
         let sentence = state.mode.get() == SearchMode::Sentence;
-        let input_h = if sentence { line * 3 } else { line };
-        let _ = MoveWindow(state.input_label.get(), pad, pad, width, label_h, true);
-        let input_y = pad + label_h;
+        let input_h = if sentence { (line * 4).max(scaled(160.0, palette.scale)) }
+            else { (line * 2).max(scaled(72.0, palette.scale)) };
+        let top = pad.max(scaled(12.0, palette.scale));
+        let gap = scaled(8.0 + palette.theme.border_width, palette.scale);
+        let _ = MoveWindow(state.input_label.get(), pad, top, width, label_h, true);
+        let input_y = top + label_h + gap;
         let _ = MoveWindow(state.input.get(), pad, input_y, width, input_h, true);
         let buttons_y = input_y + input_h + pad;
         let button_w = (150.0 * palette.scale).round() as i32;
@@ -783,7 +786,7 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let sentence_label_y = buttons_y + line + pad;
         let _ = ShowWindow(state.sentence_label.get(), if sentence { SW_SHOW } else { SW_HIDE });
         let _ = MoveWindow(state.sentence_label.get(), pad, sentence_label_y, width, label_h, true);
-        let sentence_y = sentence_label_y + label_h;
+        let sentence_y = sentence_label_y + label_h + gap;
         let _ = ShowWindow(state.sentence.get(), if sentence { SW_SHOW } else { SW_HIDE });
         let _ = MoveWindow(state.sentence.get(), pad, sentence_y, width, line * 3, true);
         let status_y = if sentence { sentence_y + line * 3 + pad } else { sentence_y };
@@ -972,6 +975,26 @@ unsafe extern "system" fn input_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         if hwnd == state.input.get() {
             match msg {
+                WM_SETFOCUS => {
+                    let result = DefSubclassProc(hwnd, msg, wp, lp);
+                    let mut point = POINT::default();
+                    if GetCaretPos(&mut point).is_ok() {
+                        let palette = state.palette.borrow();
+                        let size = if state.mode.get() == SearchMode::Sentence {
+                            (palette.theme.body_size * 1.35).max(palette.theme.headword_size + 2.0)
+                                .max(palette.theme.collapsed_size + 2.0)
+                        } else { palette.theme.body_size };
+                        if CreateCaret(hwnd, None, scaled(2.0, palette.scale), scaled(size, palette.scale)).is_ok() {
+                            let _ = SetCaretPos(point.x, point.y);
+                            let _ = ShowCaret(Some(hwnd));
+                        }
+                    }
+                    return result;
+                }
+                WM_SETCURSOR if lp.0 as u16 == HTCLIENT as u16 => {
+                    if let Ok(cursor) = LoadCursorW(None, IDC_IBEAM) { let _ = SetCursor(Some(cursor)); }
+                    return LRESULT(1);
+                }
                 WM_IME_START => state.composing.set(true),
                 WM_IME_END => { state.composing.set(false); state.submit.set(true); }
                 WM_KEYDOWN if wp.0 == 13 && !state.composing.get() && state.mode.get() == SearchMode::Dictionary => {
