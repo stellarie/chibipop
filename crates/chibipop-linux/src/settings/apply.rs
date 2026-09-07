@@ -55,6 +55,7 @@ pub struct LinuxFields {
     /// absence stays typed, and the map from an empty text box stays at
     /// the UI edge.
     pub ocr_clipboard_key_linux: Option<String>,
+    pub search_key_linux: Option<String>,
     pub layer: PopupLayer,
     pub show_lookup_log: bool,
 }
@@ -63,6 +64,7 @@ impl LinuxFields {
     pub fn from_config(cfg: &Config) -> LinuxFields {
         LinuxFields {
             trigger_key_linux: cfg.trigger.trigger_key_linux.clone(),
+            search_key_linux: cfg.actions.search.hotkey_linux.clone(),
             add_key_linux: cfg.anki.add_key_linux.clone(),
             static_region_key_linux: cfg.anki.static_region_key_linux.clone(),
             screenshot_key_linux: cfg.actions.screenshot.hotkey_linux.clone(),
@@ -78,6 +80,7 @@ impl LinuxFields {
     }
 
     pub fn apply_over(&self, cfg: &mut Config) {
+        cfg.actions.search.hotkey_linux = self.search_key_linux.clone();
         cfg.trigger.trigger_key_linux = self.trigger_key_linux.clone();
         cfg.anki.add_key_linux = self.add_key_linux.clone();
         cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
@@ -429,6 +432,7 @@ mod tests {
             screenshot_key_linux: Some("SUPER+S".into()),
             screenshot_save_dir: "shots".into(),
             ocr_clipboard_key_linux: Some("SUPER+C".into()),
+            search_key_linux: Some("SUPER+F".into()),
             layer: PopupLayer::Top,
             show_lookup_log: true,
         };

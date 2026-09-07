@@ -23,6 +23,7 @@ use std::time::Duration;
 /// not an API for scripts (ARCHITECTURE.md#input-ladders).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
+    Search,
     Reload,
     TriggerDown,
     TriggerUp,
@@ -50,7 +51,7 @@ pub enum Verb {
     StaticRegion,
 }
 
-pub const VERBS: [Verb; 9] = [
+pub const VERBS: [Verb; 10] = [
     Verb::Reload,
     Verb::TriggerDown,
     Verb::TriggerUp,
@@ -60,11 +61,13 @@ pub const VERBS: [Verb; 9] = [
     Verb::Screenshot,
     Verb::OcrClipboard,
     Verb::StaticRegion,
+    Verb::Search,
 ];
 
 impl Verb {
     pub fn as_str(self) -> &'static str {
         match self {
+            Verb::Search => "search",
             Verb::Reload => "reload",
             Verb::TriggerDown => "trigger-down",
             Verb::TriggerUp => "trigger-up",
@@ -102,6 +105,7 @@ impl StubState {
     /// the `OK` reply's tail.
     pub fn apply(&mut self, verb: Verb) -> String {
         match verb {
+            Verb::Search => "opening dictionary search".to_string(),
             Verb::Reload => {
                 self.reloads += 1;
                 format!("reload #{} requested", self.reloads)
@@ -270,7 +274,7 @@ mod tests {
     fn the_wire_names_are_the_forever_contract() {
         assert_eq!(
             "reload, trigger-down, trigger-up, toggle, lookup, anki-add, screenshot, \
-             ocr-clipboard, static-region",
+             ocr-clipboard, static-region, search",
             verb_list()
         );
     }
@@ -288,7 +292,8 @@ mod tests {
     /// caption states.
     #[test]
     fn the_static_region_verb_is_native_channel_only() {
-        assert_eq!(2, crate::shortcuts::ShortcutId::ALL.len(), "the portal id set is closed");
+        use crate::shortcuts::ShortcutId;
+        assert_eq!([ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search], ShortcutId::ALL);
         assert!(
             !crate::shortcuts::ShortcutId::ALL
                 .iter()

@@ -15,6 +15,7 @@ pub mod lookup;
 pub mod paths;
 pub mod present;
 pub mod select;
+pub mod search;
 pub mod settings;
 pub mod shot;
 pub mod text;

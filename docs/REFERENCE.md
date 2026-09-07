@@ -52,11 +52,38 @@ The two binaries do not share a command line. Windows first, then Linux.
 |---|---|
 | `chibipop run` | The popup application. |
 | `chibipop settings` | The settings window alone — no popup, no hooks, no OCR. |
+| `chibipop search` | Opens a dictionary search window with Japanese text input. No OCR. |
 | `chibipop settings --audit` | Dumps the settings window's control tree as JSON and exits. No visible window; for diffing a layout change. |
 | `chibipop lookup 食べた` | Dictionary lookup only. No screen, no OCR. |
 | `chibipop probe --at 1200,400` | One point, every stage printed: capture region → OCR lines and word boxes → resolved span → ranked hits → match box. Tells apart "OCR saw nothing" from "OCR saw text but nothing near the cursor". |
 | `chibipop watch` | Follows the cursor and prints a lookup whenever the hovered word changes. Ctrl-C to stop. |
 | `chibipop build-dict --library DIR --out FILE` | Builds `chibipop.sqlite` from a folder of Yomitan `.zip` archives, printing one line per archive. Term archives are ordered by filename, which is what assigns `dict_id`; frequency archives are detected by their `index.json`. |
+
+### Direct search
+
+`chibipop search` opens the direct dictionary search window.
+`chibipop ctl search` asks the running daemon to open its search window.
+The tray **Search** item uses the same daemon entry point.
+
+Search uses the configured dictionary database, enabled dictionaries, and
+dictionary order. It accepts dictionary forms and conjugated Japanese text.
+Enter submits the query. Empty input and missing entries clear previous results.
+
+The optional search shortcuts live under `[actions.search]`:
+
+```toml
+[actions.search]
+hotkey = "Ctrl+Shift+F"
+hotkey_linux = "CTRL+SHIFT+F"
+```
+
+Both shortcuts default to unset. Configure them in **Settings > Shortcuts**.
+Shortcut validation rejects conflicts before Apply. On Linux, native compositor
+bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
+Windows applies shortcut changes immediately. Linux offers portal chords at
+startup; restart after adding or changing one, then confirm it in the desktop's
+shortcut settings. Apply disables a cleared or changed old portal shortcut
+immediately. Native compositor bindings remain under the compositor's control.
 
 ### Linux
 

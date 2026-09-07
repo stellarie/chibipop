@@ -111,7 +111,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   platform is unsupported. A startup diagnostic names the missing capability.
 - Trigger rungs: the GlobalShortcuts portal, then a native compositor keybind into the
   control socket.
-- The portal shortcut identifier set has exactly two members: `trigger` and `anki-add`.
+- The portal shortcut identifiers are `trigger`, `anki-add`, and optional `search`.
 - The system rejects evdev completely, even as a setting.
 - `keyboard_interactivity: none` is a strict rule. The popup never takes focus.
 - The control-socket verb set has one verb for each global action. It has `lookup` for Press
@@ -124,6 +124,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `App::apply_verb` is the only target function.
 
 ## Popup and measurement
+
+- Hovering painted Japanese text opens a child popup through dictionary lookup, without capture or OCR.
+- Parent popups remain visible. The Controller retains each parent's scroll, selections, and click history.
+- Returning to a parent retires its descendants. Root dismissal hides the complete popup chain.
+- A hover lookup ignores stale results after navigation. Selection drags do not open child popups.
 
 - `TextMeasure` takes an ordered list of styled spans and a wrap width. It returns
   per-line and per-span geometry and a baseline for each line.
@@ -192,8 +197,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   the hook latch.
 - Press mode has no Frozen grab or Dwell re-check. Each trigger press performs one live masked
   grab. Text found keeps the popup shown. A press with no text hides it. A press over the popup
-  also hides it because the mask gives no text. Cursor movement and key release do nothing, and
+  also hides it because the mask gives no text. Screen cursor movement and key release do nothing, and
   per-character lookup is inert.
+  Hovering text inside an existing popup can still open a child popup.
 - A wrap probe follows pass 1 when the lookup would run past the line end and the box did
   not clip the line. Pass 1 must show no continuation. A continuation near pass 1's lead
   edge can be clipped and does not suppress a probe. The probe uses one bounded
@@ -295,6 +301,13 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   over the old file.
 
 ## Dictionary and lookup
+
+- Direct search uses the existing lookup engine and presentation rules without capture or OCR.
+- Search windows accept native text input. Windows uses native controls; Linux runs a separate iced process.
+- The optional search shortcuts belong to shared `Config` and participate in platform shortcut validation.
+- The tray Search item and configured shortcut use the same platform entry point.
+- Linux Search holds a runtime focus lock while its input window has focus. The daemon suppresses lookup and actions during that interval.
+- Linux offers configured portal chords at startup. Apply rejects events from cleared, disabled, or changed Search registrations until restart.
 
 - The system derives the roles of a Dictionary by inspecting its banks. It never derives
   roles from a filename, and a user never declares them.

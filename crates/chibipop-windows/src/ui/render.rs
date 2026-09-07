@@ -574,6 +574,15 @@ impl Renderer {
         )
     }
 
+    pub fn hover_query(&mut self, local: PhysPoint, scroll: i32) -> Option<String> {
+        let scene = self.scene.as_ref()?;
+        let scale = self.dpi_scale();
+        scene.hover_query(
+            (local.x as f32 / scale, local.y as f32 / scale),
+            scroll as f32 / scale, &self.scene_font, &mut self.text.measurer(),
+        ).ok().flatten()
+    }
+
     /// Returns `(width, view_h, content_h)`.
     ///
     /// This function returns all three values in physical pixels.

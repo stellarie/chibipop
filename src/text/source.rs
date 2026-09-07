@@ -836,10 +836,9 @@ fn to_desktop(
 }
 
 fn mask_label(mask: CaptureMask, region: PhysRect) -> String {
-    mask.overlap_in(region).map_or_else(
-        || "none".to_string(),
-        |rect| format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h),
-    )
+    let rectangles: Vec<_> = mask.overlap_in(region)
+        .map(|rect| format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h)).collect();
+    if rectangles.is_empty() { "none".to_string() } else { rectangles.join(";") }
 }
 
 /// Grab, mask, and upscale by `factor`. Return BGRA pixels.

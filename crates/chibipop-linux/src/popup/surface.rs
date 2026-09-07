@@ -149,6 +149,7 @@ struct Pending {
 
 /// One output's surface.
 struct Panel {
+    depth: usize,
     /// A stable value across removals, unlike a position in `panels`.
     /// The `wp_fractional_scale_v1` object that the code creates with
     /// a surface carries this id in its user data for the whole life
@@ -180,6 +181,8 @@ struct Panel {
 
 /// Everything the popup owns.
 pub struct Popup {
+    parents: Vec<SavedPopup>,
+    parents_hidden: bool,
     /// The queue that created every popup object. The code stores
     /// this queue so the popup's own API needs no `QueueHandle`
     /// argument. The daemon reaches the popup from a control-socket
@@ -258,6 +261,31 @@ pub struct Popup {
     /// code no longer paints.
     hits: Option<HitScene>,
     notes: Vec<String>,
+}
+
+struct SavedPopup {
+    shown: Shown,
+    request: ShowRequest,
+    scene: Option<PopupScene>,
+    hits: Option<HitScene>,
+}
+
+fn preferred_for_output<K: PartialEq>(
+    output: K,
+    panels: impl Iterator<Item = (K, Option<u32>)>,
+) -> Option<u32> {
+    panels.filter(|(key, _)| *key == output)
+        .find_map(|(_, preferred)| preferred.filter(|scale| *scale > 0))
+}
+
+fn rescale_popups(
+    active: &mut Visibility,
+    mut parents: impl Iterator<Item = Shown>,
+    id: usize,
+    scale: f64,
+) -> bool {
+    let parent_changed = parents.any(|shown| shown.output == id && place::scale_moved(shown.scale, scale));
+    active.rescale(id, scale) || parent_changed
 }
 
 impl Popup {
@@ -363,6 +391,8 @@ impl Popup {
         let media = open_media(db, &mut notes);
 
         Ok(Popup {
+            parents: Vec::new(),
+            parents_hidden: false,
             qh: qh.clone(),
             compositor,
             outputs: OutputState::new(globals, qh),
@@ -430,6 +460,7 @@ impl Popup {
     pub fn screens(&self) -> Vec<Screen> {
         self.panels
             .iter()
+            .filter(|p| p.depth == 0)
             .map(|p| Screen {
                 id: p.id,
                 output: p.output.clone(),
@@ -634,8 +665,14 @@ impl Popup {
     pub fn pointer_move(&mut self, pos: (f64, f64)) -> Option<Interaction> {
         self.pointer.motion(pos);
         self.hover();
-        if !self.pointer.forwards_motion() {
-            return None;
+        let panel = self.pointer.focus()?.panel;
+        if let Some((depth, parent)) = self.parents.iter().enumerate().find(|(_, parent)| parent.shown.output == panel) {
+            let hits = parent.hits.as_ref()?;
+            let local = hits.local(pos);
+            let query = parent.scene.as_ref()?.hover_query(
+                (local.x as f32, local.y as f32), hits.scroll, &self.theme.font_name, &mut self.text,
+            ).ok().flatten();
+            return Some(Interaction::HoverAt { depth, local, query });
         }
         let local = {
             let hits = self.hits.as_ref()?;
@@ -644,6 +681,9 @@ impl Popup {
             }
             hits.local(pos)
         };
+        if !self.pointer.forwards_motion() {
+            return Some(Interaction::Hover { local, query: self.hover_query(local) });
+        }
         let text = self.text_hit(local);
         self.last_text = text;
         Some(Interaction::Move { local, text })
@@ -699,6 +739,72 @@ impl Popup {
             )
             .ok()
             .flatten()
+    }
+
+    fn hover_query(&mut self, local: PhysPoint) -> Option<String> {
+        self.scene.as_ref()?.hover_query(
+            (local.x as f32, local.y as f32), self.hits.as_ref()?.scroll,
+            &self.theme.font_name, &mut self.text,
+        ).ok().flatten()
+    }
+
+    pub fn depth_of(&self, surface: &WlSurface) -> Option<usize> {
+        let panel = self.panel_of(surface)?;
+        if self.vis.shown().is_some_and(|shown| shown.output == panel) {
+            return Some(self.parents.len());
+        }
+        self.parents.iter().position(|saved| saved.shown.output == panel)
+    }
+
+    pub fn push_parent(&mut self) {
+        let Some(shown) = self.vis.shown() else { return };
+        let Some(request) = self.current.take() else { return };
+        self.parents.push(SavedPopup {
+            shown, request, scene: self.scene.take(), hits: self.hits.take(),
+        });
+        self.vis = Visibility::Hidden;
+    }
+
+    pub fn restore_parent(&mut self, depth: usize) {
+        if depth >= self.parents.len() { return; }
+        if let Some(slot) = self.vis.hide().and_then(|id| self.slot(id)) {
+            self.clear(slot);
+        }
+        while self.parents.len() > depth + 1 {
+            let saved = self.parents.pop().expect("descendant exists");
+            if let Some(slot) = self.slot(saved.shown.output) { self.clear(slot); }
+        }
+        let saved = self.parents.pop().expect("parent exists");
+        self.vis = Visibility::Shown(saved.shown);
+        self.current = Some(saved.request);
+        self.scene = saved.scene;
+        self.hits = saved.hits;
+    }
+
+    pub fn clear_parents(&mut self) {
+        while let Some(saved) = self.parents.pop() {
+            if let Some(slot) = self.slot(saved.shown.output) { self.clear(slot); }
+        }
+        self.parents_hidden = false;
+    }
+
+    fn restore_parent_pixels(&mut self) -> Result<()> {
+        if !self.parents_hidden { return Ok(()); }
+        for depth in 0..self.parents.len() {
+            let saved = &self.parents[depth];
+            let Some(scene) = saved.scene.clone() else { continue };
+            let pending = Pending {
+                placement: saved.shown.placement, scale: saved.shown.scale,
+                theme: physical_theme(&self.theme, saved.shown.scale), scene,
+                scroll: saved.request.scroll as f32,
+            };
+            if let Some(slot) = self.slot(saved.shown.output) {
+                self.panels[slot].awaiting_frame = None;
+                self.commit_show(slot, pending)?;
+            }
+        }
+        self.parents_hidden = false;
+        Ok(())
     }
 
     /// The primary-button press for the scripted path.
@@ -835,7 +941,11 @@ impl Popup {
     /// xdg-output info completes. Two surfaces on one output would
     /// show two popups.
     pub fn map_one(&mut self, output: &WlOutput) {
-        if self.panels.iter().any(|p| &p.output == output) {
+        self.map_depth(output, 0);
+    }
+
+    fn map_depth(&mut self, output: &WlOutput, depth: usize) {
+        if self.panels.iter().any(|p| &p.output == output && p.depth == depth) {
             return;
         }
         let qh = self.qh.clone();
@@ -843,6 +953,7 @@ impl Popup {
         let Some(info) = self.outputs.info(output) else { return };
         let geo = place::geometry_of(&info);
         let id = self.next_id;
+        let preferred = preferred_for_output(output, self.panels.iter().map(|panel| (&panel.output, panel.preferred)));
 
         // With no shell, there is no surface. The code creates
         // nothing and spends nothing. The daemon already reported
@@ -876,13 +987,14 @@ impl Popup {
             layer_name(self.layer),
         ));
         self.panels.push(Panel {
+            depth,
             id,
             output: output.clone(),
             geo,
             layer,
             viewport,
             _scale: scale,
-            preferred: None,
+            preferred,
             configured: None,
             awaiting_frame: None,
             pending: None,
@@ -892,14 +1004,9 @@ impl Popup {
     /// An output went away, or the compositor closed its surface.
     /// This event leads to routine recreation, not an error.
     pub fn drop_output(&mut self, output: &WlOutput) {
-        let Some(slot) = self.panels.iter().position(|p| &p.output == output) else { return };
-        let id = self.panels[slot].id;
-        if self.vis.shown().is_some_and(|s| s.output == id) {
-            self.vis = Visibility::Hidden;
-            self.current = None;
-        }
-        self.panels.remove(slot);
-        self.notes.push(format!("popup: layer surface {id} closed; {} left", self.panels.len()));
+        self.clear_parents();
+        self.hide();
+        self.panels.retain(|panel| &panel.output != output);
     }
 
     /// A `closed` event names a surface, not an output.
@@ -982,10 +1089,14 @@ impl Popup {
     /// returned [`Placed`] back to the Controller as
     /// `Event::PopupPlaced`.
     pub fn show(&mut self, req: &ShowRequest) -> Result<Placed> {
+        let depth = self.parents.len();
+        let outputs: Vec<_> = self.outputs.outputs().collect();
+        for output in outputs { self.map_depth(&output, depth); }
+        self.restore_parent_pixels()?;
         if self.panels.is_empty() {
             return Err(anyhow!("no layer surface exists yet"));
         }
-        let id = place::output_at(self.panels.iter().map(|p| (p.id, &p.geo)), req.anchor)
+        let id = place::output_at(self.panels.iter().filter(|p| p.depth == depth).map(|p| (p.id, &p.geo)), req.anchor)
             .ok_or_else(|| anyhow!("no output geometry to place against"))?;
         let slot = self.slot(id).ok_or_else(|| anyhow!("output {id} has no surface"))?;
 
@@ -1026,6 +1137,9 @@ impl Popup {
         let content_h = scene.content_h.ceil() as i32;
         let view_h = scene.view_h.ceil() as i32;
 
+        if self.vis.shown().is_none_or(|shown| shown.output != id) {
+            self.panels[slot].awaiting_frame = None;
+        }
         if let Some(stale) = self.vis.show(Shown { output: id, placement, scale }) {
             if let Some(stale) = self.slot(stale) {
                 self.clear(stale);
@@ -1068,19 +1182,22 @@ impl Popup {
             self.clear(slot);
         }
         self.current = None;
+        let panels: Vec<_> = self.parents.iter().map(|saved| saved.shown.output).collect();
+        for id in panels {
+            if let Some(slot) = self.slot(id) { self.clear(slot); }
+        }
+        self.parents_hidden = !self.parents.is_empty();
     }
 
-    /// Handle one `preferred_scale` event. The code records the
-    /// value, and re-renders when this surface is the one currently
-    /// shown. The scale is never latched, so this is the only place
-    /// that corrects a compositor that first sends 1.0 and then sends
-    /// 1.5.
+    /// Report changes against active and saved popup geometry.
+    /// Matching initial notifications preserve the chain. A changed
+    /// saved parent must reach the daemon's dismissal path too.
     pub fn preferred_scale(&mut self, id: usize, scale_120ths: u32) -> bool {
         let Some(slot) = self.slot(id) else { return false };
         let panel = &mut self.panels[slot];
         panel.preferred = Some(scale_120ths);
         let scale = place::fractional(Some(scale_120ths), &panel.geo);
-        self.vis.rescale(id, scale)
+        rescale_popups(&mut self.vis, self.parents.iter().map(|parent| parent.shown), id, scale)
     }
 
     /// Where the surface with this stable id sits in `panels`.
@@ -1176,16 +1293,22 @@ impl Popup {
         if highlights > 0 {
             self.notes.push(format!("popup: painted {highlights} selection highlight box(es)"));
         }
-        self.scene = Some(pending.scene.clone());
+        let panel_id = self.panels[idx].id;
+        let parent_depth = self.parents.iter().position(|saved| saved.shown.output == panel_id);
+        if let Some(depth) = parent_depth {
+            self.parents[depth].scene = Some(pending.scene.clone());
+        } else {
+            self.scene = Some(pending.scene.clone());
+        }
 
         // The targets that a click resolves against come from the
         // frame that the code paints right now, never from a
         // remembered frame. This rule keeps a hit honest across a
         // scroll, where the offset moves, and across a scale change,
         // where every rect changes too.
-        let panel_id = self.panels[idx].id;
-        let region = InputRegion::of(self.vis, panel_id, pending.placement.logical);
-        self.hits = match region {
+        let visibility = parent_depth.map_or(self.vis, |depth| Visibility::Shown(self.parents[depth].shown));
+        let region = InputRegion::of(visibility, panel_id, pending.placement.logical);
+        let hits = match region {
             InputRegion::Panel { .. } => Some(HitScene::of(
                 panel_id,
                 &pending.scene,
@@ -1194,6 +1317,8 @@ impl Popup {
             )),
             InputRegion::Empty => None,
         };
+        if let Some(depth) = parent_depth { self.parents[depth].hits = hits; }
+        else { self.hits = hits; }
 
         let panel = &mut self.panels[idx];
         if let Some(viewport) = &panel.viewport {
@@ -1231,11 +1356,13 @@ impl Popup {
         self.panels[idx].pending = None;
         if self.hits.as_ref().is_some_and(|h| h.panel == self.panels[idx].id) {
             self.hits = None;
+            self.scene = None;
+            self.dragging = false;
+            self.last_text = None;
         }
-        self.scene = None;
-        self.dragging = false;
-        self.last_text = None;
-        self.pointer.cancel();
+        if self.pointer.focus().is_some_and(|focus| focus.panel == self.panels[idx].id) {
+            self.pointer.cancel();
+        }
         self.hidden_frame(idx, logical);
     }
 
@@ -1496,11 +1623,12 @@ impl OutputHandler for App {
     }
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<App>, output: WlOutput) {
+        if !self.popup_mut().parents.is_empty() { self.dismiss_popup_tree(); }
         {
             let popup = self.popup_mut();
             if let Some(info) = popup.outputs.info(&output) {
                 let geo = place::geometry_of(&info);
-                if let Some(panel) = popup.panels.iter_mut().find(|p| p.output == output) {
+                for panel in popup.panels.iter_mut().filter(|p| p.output == output) {
                     panel.geo = geo;
                 }
             }
@@ -1509,6 +1637,7 @@ impl OutputHandler for App {
     }
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<App>, output: WlOutput) {
+        self.dismiss_popup_tree();
         self.catcher_output_destroyed(&output);
         self.popup_mut().drop_output(&output);
         self.flush_popup_notes();
@@ -1551,4 +1680,57 @@ impl ProvidesRegistryState for App {
     }
 
     registry_handlers![OutputState, SeatState];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(id: usize, scale: f64) -> Shown {
+        let rect = PhysRect { x: 10, y: 20, w: 240, h: 120 };
+        let monitor = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
+        Shown { output: id, placement: place::derive(rect, monitor, scale), scale }
+    }
+
+    #[test]
+    fn child_inherits_its_output_scale_and_first_matching_notification_is_inert() {
+        let preferred = preferred_for_output(2, [(1, Some(120)), (2, None), (2, Some(180))].into_iter());
+        assert_eq!(preferred, Some(180));
+        let geo = OutputGeometry::default();
+        let mut active = Visibility::Shown(shown(7, place::fractional(preferred, &geo)));
+        let parents = [shown(4, 1.5)];
+        assert!(!rescale_popups(&mut active, parents.into_iter(), 7, 1.5));
+        assert_eq!(active.shown().unwrap().placement.logical, (160, 80));
+        assert!(!rescale_popups(&mut active, parents.into_iter(), 7, 1.5));
+    }
+
+    #[test]
+    fn unknown_output_does_not_inherit_another_outputs_preferred_scale() {
+        assert_eq!(preferred_for_output(2, [(1, Some(180)), (2, Some(0))].into_iter()), None);
+        let geo = OutputGeometry { logical_w: 960, mode_w: 1920, ..OutputGeometry::default() };
+        let mut active = Visibility::Shown(shown(7, place::fractional(None, &geo)));
+        assert!(!rescale_popups(&mut active, std::iter::empty(), 7, 2.0));
+    }
+
+    #[test]
+    fn changed_saved_parent_scale_reports_geometry_invalidation() {
+        let child = shown(7, 1.5);
+        let parent = shown(4, 1.5);
+        let mut active = Visibility::Shown(child);
+        assert!(!rescale_popups(&mut active, [parent].into_iter(), 4, 1.5));
+        assert!(rescale_popups(&mut active, [parent].into_iter(), 4, 2.0));
+        assert_eq!(active, Visibility::Shown(child));
+        assert!(rescale_popups(&mut Visibility::Hidden, [parent].into_iter(), 4, 2.0));
+        assert!(!rescale_popups(&mut active, [parent].into_iter(), 99, 2.0));
+    }
+
+    #[test]
+    fn active_scale_changes_report_once_and_keep_other_geometry_unchanged() {
+        let parent = shown(4, 1.5);
+        let mut active = Visibility::Shown(shown(7, 1.5));
+        assert!(rescale_popups(&mut active, [parent].into_iter(), 7, 2.0));
+        assert_eq!(active.shown().unwrap().scale, 2.0);
+        assert!(!rescale_popups(&mut active, [parent].into_iter(), 7, 2.0));
+        assert!(!rescale_popups(&mut Visibility::Hidden, std::iter::empty(), 7, 2.0));
+    }
 }

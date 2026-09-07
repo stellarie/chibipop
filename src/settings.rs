@@ -392,6 +392,7 @@ pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<Strin
 /// Converts the form back into its source Config.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
+    out.actions.search.hotkey = form.cfg.actions.search.hotkey.clone();
     out.trigger = form.cfg.trigger.clone();
     out.popup = form.cfg.popup.clone();
     out.ocr = form.cfg.ocr.clone();
@@ -458,6 +459,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.dictionaries.per_language = per_language;
     out
 }
+
 
 /// Reports capture-size values that `apply_to` changed.
 pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
@@ -2743,3 +2745,21 @@ mod tests {
 
 }
 
+#[cfg(test)]
+mod search_settings_tests {
+    use super::*;
+
+    #[test]
+    fn search_form_updates_windows_and_preserves_linux() {
+        let mut config = Config::default();
+        config.actions.search.hotkey = Some("F8".into());
+        config.actions.search.hotkey_linux = Some("SUPER+F8".into());
+        let mut form = from_config(&config, &[]);
+        form.cfg.actions.search.hotkey = Some("Ctrl+F7".into());
+        let saved = apply_to(&form, &config);
+        assert_eq!(saved.actions.search.hotkey.as_deref(), Some("Ctrl+F7"));
+        assert_eq!(saved.actions.search.hotkey_linux, config.actions.search.hotkey_linux);
+        form.cfg.actions.search.hotkey = None;
+        assert_eq!(apply_to(&form, &config).actions.search.hotkey, None);
+    }
+}

@@ -90,7 +90,8 @@ pub enum TriggerMode {
     /// Runs one lookup at the cursor for each key press, like Yomitan. The
     /// popup stays until the next press finds no text or the user clicks
     /// outside it. The lookup reads a live grab with the popup masked, so a
-    /// press over the popup is a miss and hides it. Hover never follows.
+    /// press over the popup is a miss and hides it. Screen OCR hover never follows.
+    /// Hovering existing popup text can still open child popups.
     Press,
     /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]
@@ -878,7 +879,16 @@ pub struct ActionsConfig {
     pub enabled: bool,
     pub screenshot: ScreenshotConfig,
     pub ocr_clipboard: Option<OcrClipboardConfig>,
+    pub search: SearchConfig,
 }
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    pub hotkey: Option<String>,
+    pub hotkey_linux: Option<String>,
+}
+
 
 /// Fixed modes keep a target instead of asking for one on every add.
 /// Window identity stays separate from geometry so a moved window remains the target.
@@ -959,6 +969,7 @@ impl Default for ActionsConfig {
             enabled: true,
             screenshot: ScreenshotConfig::default(),
             ocr_clipboard: None,
+            search: SearchConfig::default(),
         }
     }
 }
@@ -1015,7 +1026,7 @@ impl Default for Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard }
+pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard, Search }
 
 impl HotkeyAction {
     pub fn name(self) -> &'static str {
@@ -1026,13 +1037,14 @@ impl HotkeyAction {
             Self::StaticRegion => "Static region",
             Self::Screenshot => "Screenshot",
             Self::OcrClipboard => "OCR clipboard",
+            Self::Search => "Search",
         }
     }
 }
 
 fn windows_hotkeys_overlap(a: HotkeyAction, first: &str, b: HotkeyAction, second: &str) -> bool {
     let parse = |action, key| match action {
-        HotkeyAction::Screenshot => parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
+        HotkeyAction::Screenshot | HotkeyAction::Search => parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
         HotkeyAction::Back | HotkeyAction::Trigger | HotkeyAction::AnkiAdd =>
             parse_trigger_key(key).map(|vk| (vk, None)),
         _ => parse_trigger_key(key).map(|vk| (vk, Some(0))),
@@ -1060,6 +1072,11 @@ impl Config {
     /// Reject bindings that can fire two actions on the same keypress.
     pub fn validate_hotkeys(&self, platform: Platform) -> Result<()> {
         if platform == Platform::Windows && self.actions.enabled
+            && self.actions.search.hotkey.as_deref().is_some_and(|key|
+                !key.trim().is_empty() && parse_hotkey(key).is_none()) {
+            anyhow::bail!("Search shortcut is invalid. Use a key such as F5 or Ctrl+Shift+F.");
+        }
+        if platform == Platform::Windows && self.actions.enabled
             && !self.actions.screenshot.hotkey.trim().is_empty()
             && parse_hotkey(&self.actions.screenshot.hotkey).is_none() {
             anyhow::bail!("Screenshot shortcut is invalid. Use a key such as F5 or Ctrl+Shift+S.");
@@ -1086,6 +1103,8 @@ impl Config {
                 self.actions.screenshot.hotkey.as_str()
             } else { self.actions.screenshot.hotkey_linux.as_deref().unwrap_or("") })),
             (OcrClipboard, self.actions.ocr_clipboard.as_ref().filter(|_| self.actions.enabled)
+                .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
+            (Search, self.actions.enabled.then_some(&self.actions.search)
                 .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
         ];
         let mut accepted = Vec::new();
@@ -3133,5 +3152,30 @@ mod tests {
                 "{text}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod search_config_tests {
+    use super::*;
+
+    #[test]
+    fn search_shortcuts_round_trip_and_validate() {
+        let mut config = Config::default();
+        assert_eq!(config.actions.search, SearchConfig::default());
+        config.actions.search.hotkey = Some("Ctrl+F5".into());
+        config.actions.search.hotkey_linux = Some("SUPER+F5".into());
+        let saved = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap().actions.search, config.actions.search);
+        config.validate_hotkeys(Platform::Windows).unwrap();
+        config.actions.search.hotkey = Some(config.actions.screenshot.hotkey.clone());
+        assert!(config.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Search conflicts"));
+        config.actions.search.hotkey = Some("not a key".into());
+        assert!(config.validate_hotkeys(Platform::Windows).is_err());
+        config.actions.search.hotkey = None;
+        config.actions.search.hotkey_linux = Some(config.trigger.trigger_key_linux.clone());
+        assert!(config.validate_hotkeys(Platform::Linux).is_err());
+        config.actions.enabled = false;
+        config.validate_hotkeys(Platform::Linux).unwrap();
     }
 }

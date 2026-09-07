@@ -366,6 +366,10 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
 ///
 /// It reads the event rather than current key state.
 unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
+    if crate::ui::search_window::is_foreground() {
+        clear_keyboard_actions();
+        return;
+    }
     // SAFETY: `keyboard_hook_proc` calls this only with `code >= 0`. Under
     // the `WH_KEYBOARD_LL` contract, `lparam` points to a live
     // `KBDLLHOOKSTRUCT` that the OS owns for the duration of this call.
@@ -407,6 +411,20 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
         let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
         transition_trigger_state(false, still_held, mode);
     }
+}
+
+pub fn clear_keyboard_actions() {
+    KEY_DOWN.store(false, Ordering::SeqCst);
+    TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+    PENDING_PRESS.store(false, Ordering::SeqCst);
+    PENDING_ADD.store(false, Ordering::SeqCst);
+    PENDING_BACK.store(false, Ordering::SeqCst);
+    for pending in &PENDING_ACTION { pending.store(false, Ordering::SeqCst); }
+}
+
+#[cfg(test)]
+pub(crate) fn search_keyboard_test_guard() -> impl Sized {
+    (tests::trigger_guard(), tests::add_hotkey_guard(), tests::back_guard())
 }
 
 /// This function stores one popup button edge in screen coordinates.
@@ -917,7 +935,7 @@ mod tests {
     /// The tests share trigger transition state.
     static TRIGGER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
         TRIGGER_STATE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1182,8 +1200,26 @@ mod tests {
     /// The tests share the hotkey state.
     static ADD_HOTKEY_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
         ADD_HOTKEY_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn search_focus_clears_held_trigger_and_pending_actions() {
+        let _trigger = trigger_guard();
+        let _actions = add_hotkey_guard();
+        let _back = back_guard();
+        KEY_DOWN.store(true, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(true, Ordering::SeqCst);
+        PENDING_PRESS.store(true, Ordering::SeqCst);
+        PENDING_ADD.store(true, Ordering::SeqCst);
+        PENDING_BACK.store(true, Ordering::SeqCst);
+        for pending in &PENDING_ACTION { pending.store(true, Ordering::SeqCst); }
+        clear_keyboard_actions();
+        for state in [&KEY_DOWN, &TRIGGER_PHYSICAL, &PENDING_PRESS, &PENDING_ADD, &PENDING_BACK] {
+            assert!(!state.load(Ordering::SeqCst));
+        }
+        assert!(PENDING_ACTION.iter().all(|pending| !pending.load(Ordering::SeqCst)));
     }
 
     #[test]
@@ -1317,7 +1353,7 @@ mod tests {
 
     static BACK_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn back_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn back_guard() -> std::sync::MutexGuard<'static, ()> {
         BACK_STATE.lock().unwrap_or_else(|e| e.into_inner())
     }
 

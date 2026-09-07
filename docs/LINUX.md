@@ -143,10 +143,11 @@ one-line press bind for the native channel.
 
 **Press mode** runs one lookup at the cursor for each trigger-key press. The lookup reads a live
 grab with the popup masked, so Press mode does not use a Frozen grab. If it finds text, the popup
-shows and stays. Hover never follows the cursor, and no Dwell re-check runs. A press with no text
+shows and stays. OCR does not follow cursor movement, and no Dwell re-check runs. A press with no text
 hides the popup. A press over the popup also hides it because the mask gives no text. A button press
 outside the popup also hides it.
 The key release does nothing. Per-character lookup is inert in Press mode.
+Hovering Japanese text inside a popup still opens a child popup. Its parent stays visible.
 
 On Hyprland, bind Press mode with one line:
 
@@ -476,9 +477,9 @@ your frequency lists there and Apply.
   `Esc` or right-click to cancel — and it works in **any** sentence mode,
   because drawing the box is how you decide to switch to Static. The chord
   (`anki.static_region_key_linux`, unset by default) is **native-channel only**:
-  it gets no GlobalShortcuts portal id, so the portal consent dialog stays at
-  two entries — the portal shortcut id set is frozen at exactly two — and the
-  compositor bind is the only way to reach it. The settings window renders the
+  it gets no GlobalShortcuts portal id. The portal exposes lookup and Anki add,
+  plus Search when its shortcut is configured. The static-region key still
+  needs a native compositor binding. The settings window renders the
   bind for whatever chord you type, e.g.
 
   ```

@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAYICON: u32 = WM_APP + 2;
 
 const ID_SETTINGS: u32 = 1001;
+const ID_SEARCH: u32 = 1004;
 const ID_QUIT: u32 = 1003;
 
 /// The icon id. This process adds one icon only.
@@ -27,6 +28,7 @@ const ICON_BYTES: &[u8] = include_bytes!("../../assets/chibipop.ico");
 /// The menu item that the user picked.
 pub enum TrayCommand {
     OpenSettings,
+    OpenSearch,
     Quit,
 }
 
@@ -228,6 +230,7 @@ impl Tray {
 
             match cmd.0 as u32 {
                 ID_SETTINGS => Some(TrayCommand::OpenSettings),
+                ID_SEARCH => Some(TrayCommand::OpenSearch),
                 ID_QUIT => Some(TrayCommand::Quit),
                 _ => None, // the user dismissed the menu
             }
@@ -305,6 +308,8 @@ unsafe fn build_menu() -> Result<HMENU> {
 
 unsafe fn populate_menu(hmenu: HMENU) -> Result<()> {
     unsafe {
+        AppendMenuW(hmenu, MF_STRING, ID_SEARCH as usize, w!("Search…"))
+            .context("AppendMenuW Search")?;
         AppendMenuW(hmenu, MF_STRING, ID_SETTINGS as usize, w!("Settings…"))
             .context("AppendMenuW Settings")?;
         AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).context("AppendMenuW separator")?;

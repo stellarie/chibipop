@@ -43,6 +43,7 @@ enum Command {
     /// (ARCHITECTURE.md#settings-and-config). A settings crash must not stop
     /// live hover.
     Settings,
+    Search,
     /// Connect to the Wayland display, print the capability report, and exit.
     Probe,
     /// Grab screen regions with the capture backend and write PNG files.
@@ -96,6 +97,7 @@ pub fn run() -> ExitCode {
         Command::Run => daemon::run(paths),
         Command::Ctl { verb } => ctl(&paths, &verb),
         Command::Settings => settings::run(paths),
+        Command::Search => crate::search::run(paths),
         Command::Probe => probe(),
         Command::CaptureDump { region, out, dwell, full } => {
             capture_dump(&paths, region.as_deref(), out, dwell, full)

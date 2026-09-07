@@ -1,5 +1,36 @@
 # chibipop — regression checklist
 
+## Hover sub-popups and direct search (#71, #44)
+
+Run these checks in a disposable install with Japanese term dictionaries.
+
+- Open Search from the tray. Enter a Japanese word and submit it.
+- Confirm the result uses the enabled dictionaries and their configured order.
+- Enter a conjugated word. Confirm the result includes its dictionary form.
+- Submit an empty query, then a missing word. Confirm each state clears old results.
+- Submit another valid word. Confirm the window still responds.
+- Enter Japanese through an IME. Confirm candidate selection does not submit unfinished composition.
+- Configure the search shortcut, apply, close Search, and reopen it with that shortcut.
+- Change the shortcut. Confirm the old shortcut stops opening Search.
+- On Linux, restart after adding or changing a portal shortcut. Confirm the offered chord in the desktop's shortcut settings.
+- For native Linux shortcuts, update the compositor binding to `chibipop ctl search`.
+- Clear the shortcut. Confirm the tray entry still opens Search.
+- Try a conflicting shortcut. Confirm Apply explains the conflict without saving it.
+- Keep Search focused. Confirm typing does not trigger OCR, screenshots, or Anki actions.
+- Close and reopen Search. Confirm the daemon remains running and creates no duplicate search window.
+- Change dictionary selection, apply, and search again. Confirm the result uses the current configuration.
+- Open an OCR popup over known Japanese text. Hover Japanese text inside its definition.
+- Confirm a child popup appears and its parent remains visible.
+- Hover text inside the child. Confirm a further child opens without another OCR capture.
+- Move back to a parent. Confirm its scroll, selection, and click history remain intact.
+- Without entering the child, click or scroll its parent. Confirm the parent still accepts input.
+- Move across whitespace, hold over one word, and drag a selection. Confirm these actions do not repeatedly open children.
+- Press Back or Escape. Confirm navigation retires the appropriate descendants.
+- Dismiss the root popup. Confirm every child disappears and no invisible surface captures input.
+- Repeat near screen edges and with popup scrolling. Confirm children remain reachable and correctly hit-tested.
+- In Press mode, look up visible text between staggered popups. Confirm popup masking preserves that text.
+- Repeat on Windows and Linux. Record unavailable IME, portal, compositor, or display checks separately.
+
 Run this after any large change. It is ordered cheapest-first: **if a tier fails, stop and fix
 before running the next one.**
 

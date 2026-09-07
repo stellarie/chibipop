@@ -132,6 +132,11 @@ label = "Save a screenshot"
 id = "ocr-clipboard-key"
 label = "Copy screen text"
 
+[[tabs.sections.entries]]
+id = "search-key"
+label = "Open dictionary search"
+help = "Enter a key such as F5 or Ctrl+Shift+F. Leave blank to disable the shortcut."
+
 [[tabs]]
 id = "dictionaries"
 label = "Dictionaries"

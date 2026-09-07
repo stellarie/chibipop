@@ -7,6 +7,13 @@ It reads the pixels, so it works on anything — a game, a video, a PDF, a
 picture. Nothing needs to cooperate with it. It runs on Windows and on
 Linux.
 
+Hover Japanese text inside a pop-up to open a child pop-up. The parent stays
+visible, so you can follow a definition without losing your place.
+
+To look up a word by typing, choose **Search** from the tray menu. Enter a
+Japanese word or expression and press **Enter**. Set a search shortcut in
+**Settings > Shortcuts** if you want to open this window from the keyboard.
+
 <img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
 ---

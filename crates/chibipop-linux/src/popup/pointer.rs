@@ -82,6 +82,9 @@ pub enum Hit {
 /// One popup-local interaction, ready to become a Controller `Event`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Interaction {
+    HoverAt { depth: usize, local: PhysPoint, query: Option<String> },
+    Exit,
+    Hover { local: PhysPoint, query: Option<String> },
     /// Whole wheel notches, in core's sign: wheel-up is positive.
     Scroll { notches: i32 },
     /// A button press on the panel.
@@ -653,11 +656,18 @@ pub fn frame<'a>(popup: &mut Popup, events: impl Iterator<Item = &'a PointerEven
             PointerEventKind::Enter { serial } => {
                 if let Some(panel) = panel {
                     popup.pointer_enter(panel, event.position, Some(*serial));
+                    if let Some(interaction) = popup.pointer_move(event.position) {
+                        out.push(interaction);
+                    }
                 }
             }
             PointerEventKind::Leave { .. } => {
                 if let Some(panel) = panel {
                     popup.pointer_leave(panel);
+                    out.push(Interaction::Exit);
+                    if popup.shown().is_some_and(|shown| shown.output == panel) {
+                        out.push(Interaction::Hover { local: PhysPoint { x: 0, y: 0 }, query: None });
+                    }
                 }
             }
             PointerEventKind::Motion { .. } => {

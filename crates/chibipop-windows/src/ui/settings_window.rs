@@ -240,6 +240,7 @@ const ID_OCR_CLIPBOARD_KEY_CLEAR: i32 = 191;
 const ID_SHOW_LIVE_LOGS: i32 = 192;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
+const ID_SEARCH_KEY: i32 = 195;
 
 
 /// The first field-map combo identifier.
@@ -2449,6 +2450,7 @@ fn windows_hotkey_value(
         AnkiAdd => &config.anki.add_key,
         StaticRegion => &config.anki.static_region_key,
         Screenshot => &config.actions.screenshot.hotkey,
+        Search => config.actions.search.hotkey.as_deref().unwrap_or(""),
         OcrClipboard => config
             .actions
             .ocr_clipboard
@@ -4773,6 +4775,11 @@ impl SettingsWindow {
                     FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_OCR_CLIPBOARD_KEY_CLEAR, f)?);
                 y += label_h.max(ROW_H) + ROW_GAP;
             }
+            SettingId::SearchKey => {
+                labelled_row!(w!("EDIT"), form.cfg.actions.search.hotkey.as_deref().unwrap_or(""),
+                    WS_TABSTOP | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32), ID_SEARCH_KEY, ROW_H);
+                help!();
+            }
             SettingId::PopupTheme => {
                 let combo = labelled_row!(w!("COMBOBOX"), "",
                     WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
@@ -5760,6 +5767,10 @@ impl SettingsWindow {
             form.cfg.actions.screenshot.capture_mode = screenshot_capture_mode;
             form.screenshot_reset_targets = screenshot_reset_targets;
             form.ocr_clipboard_key = ocr_clipboard_key;
+            if let Ok(control) = dlg_item(h, ID_SEARCH_KEY) {
+                let key = window_text(control).trim().to_string();
+                form.cfg.actions.search.hotkey = (!key.is_empty()).then_some(key);
+            }
             form.cfg.anki.show_static_overlay = checked(ID_SHOW_STATIC_OVERLAY);
             form.cfg.anki.include_dictionary_name = checked(ID_INCLUDE_DICTIONARY_NAME);
             form.cfg.anki.first_dict_only = checked(ID_FIRST_DICT_ONLY);

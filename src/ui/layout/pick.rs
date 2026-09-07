@@ -53,6 +53,49 @@ pub(super) fn highlights(
 }
 
 impl PopupScene {
+    pub fn hover_query(
+        &self,
+        local: (f32, f32),
+        scroll: f32,
+        font: &str,
+        m: &mut dyn TextMeasure,
+    ) -> Result<Option<String>, MeasureError> {
+        if local.1 < 0.0 || local.1 >= self.view_h {
+            return Ok(None);
+        }
+        for elem in &self.elems {
+            if !matches!(elem.kind, ElemKind::Text | ElemKind::Headword | ElemKind::Collapsed)
+                || elem.text.is_empty()
+            {
+                continue;
+            }
+            let y = local.1 + scroll - elem.pen.1;
+            if y < 0.0 || y >= elem.rect.h { continue; }
+            let spans: Vec<_> = elem.styled_spans(font).collect();
+            let run = MeasureRun { spans: &spans, max_w: elem.wrap_w };
+            let mut measured = Measured::default();
+            m.measure(run, &mut measured)?;
+            let offsets: Vec<_> = elem.text.char_indices()
+                .map(|(byte, _)| utf16_offset(&elem.text, byte as u32)).collect();
+            let mut boxes = Vec::new();
+            m.caret_boxes(run, &offsets, &mut boxes)?;
+            for ((byte, ch), glyph) in elem.text.char_indices().zip(boxes) {
+                let line = measured.lines.get(line_index(&measured, glyph.y));
+                let slack = line.map_or(0.0, |line| (elem.wrap_w - line.w).max(0.0))
+                    * elem.align.slack_before();
+                let x = local.0 - elem.pen.0 - slack;
+                if x < glyph.x || x >= glyph.x + glyph.w || y < glyph.y || y >= glyph.y + glyph.h {
+                    continue;
+                }
+                if !lookup_character(ch) { return Ok(None); }
+                let query: String = elem.text[byte..].chars().take_while(|ch| lookup_character(*ch))
+                    .take(32).collect();
+                return Ok(Some(query));
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve a popup-local point to the nearest sourced document address.
     ///
     /// A point in a paragraph gap uses the nearest sourced element. A point in
@@ -94,6 +137,10 @@ impl PopupScene {
         let byte = byte_offset(&elem.text, offset);
         Ok(Some(TextAddr { entry: origin.entry, addr: source_addr(elem, byte) }))
     }
+}
+
+fn lookup_character(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '々' | '〆' | 'ヶ' | 'ー')
 }
 
 fn source_ranges(elem: &SceneElem, selection: &CardSelection, entry: u32) -> Vec<(u32, u32)> {

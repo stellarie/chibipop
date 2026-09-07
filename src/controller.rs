@@ -110,6 +110,11 @@ pub enum TrayAction {
 /// An input event for the Controller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    DismissRequested,
+    PopupHover { local: PhysPoint, query: Option<String> },
+    PopupHoverAt { depth: usize, local: PhysPoint, query: Option<String> },
+    PopupActivated { depth: usize },
+    PopupEntered { depth: usize },
     /// A dispatch tick with the live cursor and the Anki button height.
     /// The height is zero when the button is not visible.
     Tick { cursor: PhysPoint, button_h: i32 },
@@ -176,6 +181,9 @@ pub enum Event {
 /// The instruction that the Controller returns to the platform bin.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    PushPopup,
+    RestorePopup { depth: usize },
+    ClearPopupParents,
     /// Request a hover lookup at this physical point.
     ///
     /// `popup` is the core popup's on-screen rectangle while the lookup runs.
@@ -446,6 +454,7 @@ enum PlaceKind {
 /// State for one shown popup.
 #[derive(Debug, Clone, PartialEq)]
 struct Surface {
+    hovered: Option<String>,
     /// The rectangle of the hovered glyph.
     anchor: PhysRect,
     /// The axis along which the hold can grow.
@@ -500,6 +509,11 @@ pub struct PopupView<'a> {
 
 /// The Controller state machine for hover and popup events.
 pub struct Controller {
+    hover_buttons: u8,
+    pointer_depth: Option<usize>,
+    parents: Vec<Surface>,
+    hover_candidate: Option<(String, PhysPoint, u64)>,
+    hover_request: Option<(RequestId, PhysPoint)>,
     cfg: ControllerConfig,
     /// The current popup, when one exists.
     surface: Option<Surface>,
@@ -540,6 +554,11 @@ pub struct Controller {
 impl Controller {
     pub fn new(cfg: ControllerConfig) -> Self {
         Self {
+            hover_buttons: 0,
+            pointer_depth: None,
+            parents: Vec::new(),
+            hover_candidate: None,
+            hover_request: None,
             cfg,
             surface: None,
             pending_scan: Vec::new(),
@@ -570,9 +589,159 @@ impl Controller {
             view_h: p.view_h,
             presentation: &s.presentation,
             anki: &s.anki,
-            show_back: !s.history.is_empty(),
+            show_back: !s.history.is_empty() || !self.parents.is_empty(),
             selection: &s.selection,
         })
+    }
+
+    pub fn popup_depth(&self) -> usize {
+        self.parents.len()
+    }
+
+    pub fn parent_popup(&self, depth: usize) -> Option<PopupView<'_>> {
+        let s = self.parents.get(depth)?;
+        let p = s.placed?;
+        Some(PopupView {
+            popup: p.popup, anchor: s.anchor, scroll: s.scroll,
+            content_h: p.content_h, view_h: p.view_h,
+            presentation: &s.presentation, anki: &s.anki,
+            show_back: depth > 0 || !s.history.is_empty(), selection: &s.selection,
+        })
+    }
+
+    pub fn popup_at(&self, point: PhysPoint) -> Option<usize> {
+        if self.shown_popup().is_some_and(|rect| rect.contains(point)) {
+            return Some(self.parents.len());
+        }
+        self.parents.iter().rposition(|s| s.placed.is_some_and(|p| p.popup.contains(point)))
+    }
+
+    pub fn popup_rects(&self) -> Vec<PhysRect> {
+        self.parents.iter().chain(self.surface.iter()).filter_map(|s| s.placed.map(|p| p.popup)).collect()
+    }
+
+    fn cancel_hover(&mut self) {
+        self.hover_candidate = None;
+        if self.hover_request.take().is_some() {
+            self.next_lookup_request();
+        }
+    }
+
+    fn popup_hover(&mut self, local: PhysPoint, query: Option<String>) -> Vec<Command> {
+        let Some(s) = self.surface.as_ref() else { return Vec::new() };
+        if s.placed.is_none() || s.last_drag_point.is_some() || self.hover_buttons != 0 {
+            return Vec::new();
+        }
+        let query = query.filter(|q| !q.is_empty());
+        if s.hovered == query {
+            return Vec::new();
+        }
+        self.cancel_hover();
+        self.surface.as_mut().expect("surface exists").hovered = query.clone();
+        if let Some(query) = query {
+            self.next_lookup_request();
+            let delay = 300u64.div_ceil(u64::from(self.cfg.tick_ms.max(1)));
+            self.hover_candidate = Some((query, local, self.clock.saturating_add(delay)));
+        }
+        Vec::new()
+    }
+
+    fn popup_hover_at(&mut self, depth: usize, local: PhysPoint, query: Option<String>) -> Vec<Command> {
+        if depth == self.parents.len() { return self.popup_hover(local, query); }
+        let Some(parent) = self.parents.get(depth) else { return Vec::new() };
+        if self.hover_buttons != 0 || query.as_ref().is_none_or(String::is_empty) || parent.hovered == query {
+            return Vec::new();
+        }
+        let mut out = self.enter_parent(depth);
+        out.extend(self.popup_hover(local, query));
+        out
+    }
+
+    fn hover_tick(&mut self) -> Vec<Command> {
+        if self.hover_candidate.as_ref().is_none_or(|(_, _, deadline)| self.clock < *deadline) {
+            return Vec::new();
+        }
+        let Some((text, local, _)) = self.hover_candidate.take() else { return Vec::new() };
+        if self.surface.as_ref().is_none_or(|s| s.placed.is_none() || s.last_drag_point.is_some()) {
+            return Vec::new();
+        }
+        let id = self.next_lookup_request();
+        self.hover_request = Some((id, local));
+        vec![Command::RequestDrillDown { id, text }]
+    }
+
+    fn enter_parent(&mut self, depth: usize) -> Vec<Command> {
+        if depth >= self.parents.len() {
+            return Vec::new();
+        }
+        self.cancel_hover();
+        self.next_lookup_request();
+        self.parents.truncate(depth + 1);
+        self.surface = self.parents.pop();
+        self.hover_buttons = 0;
+        self.pointer_depth = Some(depth);
+        self.awaiting = None;
+        self.pending_cursor = None;
+        let mut out = vec![Command::RestorePopup { depth }, Command::SetDragging(false), Command::SyncAnkiButton];
+        if let Some(s) = self.surface.as_ref() {
+            out.push(self.repaint(s.scroll));
+        }
+        out.push(Command::SetBackArmed(self.has_history()));
+        if self.cfg.anki_enabled {
+            if let Some(s) = self.surface.as_mut().filter(|s| s.analysis.is_none()) {
+                self.generation = self.generation.wrapping_add(1);
+                s.analysis_generation = self.generation;
+                let mut texts = Vec::new();
+                if let Some(card) = &s.presentation.top {
+                    for (entry, gloss) in entries(card) {
+                        for leaf in leaves(&gloss.doc, self.cfg.roles) {
+                            let text = leaf_text(&gloss.doc, leaf.path);
+                            if !text.is_empty() { texts.push(((entry, leaf.path), text.to_string())); }
+                        }
+                    }
+                }
+                if !texts.is_empty() { out.push(Command::RequestAnalysis { generation: self.generation, texts }); }
+            }
+        }
+        out
+    }
+
+    fn popup_entered(&mut self, depth: usize) -> Vec<Command> {
+        if self.hover_buttons != 0 { return Vec::new(); }
+        if self.pointer_depth == Some(depth) { return Vec::new(); }
+        self.pointer_depth = (depth <= self.parents.len()).then_some(depth);
+        self.enter_parent(depth)
+    }
+
+    fn push_hover(&mut self, presentation: Presentation, local: PhysPoint) -> Vec<Command> {
+        let Some(parent) = self.surface.as_ref() else { return Vec::new() };
+        let Some(placed) = parent.placed else { return Vec::new() };
+        let same_word = presentation.top.as_ref().zip(parent.presentation.top.as_ref())
+            .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
+        if presentation.top.is_none() || same_word
+            || self.parents.len() >= 16
+        {
+            return Vec::new();
+        }
+        let anchor = PhysRect {
+            x: placed.popup.x.saturating_add(local.x),
+            y: placed.popup.y.saturating_add(local.y), w: 1, h: 1,
+        };
+        let mut parent = self.surface.take().expect("parent exists");
+        parent.gesture.reset();
+        parent.pressed_link = None;
+        parent.last_drag_point = None;
+        let parents = std::mem::take(&mut self.parents);
+        let mut out = self.ready(presentation, anchor, Orientation::Horizontal, None, Vec::new());
+        self.parents = parents;
+        self.pointer_depth = Some(self.parents.len());
+        self.parents.push(parent);
+        out.retain(|cmd| !matches!(cmd, Command::ClearPopupParents));
+        for cmd in &mut out {
+            if let Command::ShowPopup { show_back, .. } = cmd { *show_back = true; }
+        }
+        out.insert(0, Command::PushPopup);
+        out
     }
 
     /// The Anki state before and after popup placement.
@@ -597,6 +766,24 @@ impl Controller {
     /// Handle one `Event` through the Controller.
     pub fn handle(&mut self, event: Event) -> Vec<Command> {
         match event {
+            Event::DismissRequested => {
+                self.next_lookup_request();
+                let mut out = self.hide();
+                self.last_accepted = None;
+                self.last_dispatch = None;
+                self.armed_ticks = 0;
+                out.extend([
+                    Command::SetDragging(false), Command::SetScrollArmed(false),
+                    Command::SetClickArmed(false), Command::SetAddArmed(false), Command::DiscardScroll,
+                ]);
+                out
+            }
+            Event::PopupHover { local, query } => self.popup_hover(local, query),
+            Event::PopupHoverAt { depth, local, query } => self.popup_hover_at(depth, local, query),
+            Event::PopupActivated { depth } => {
+                if self.hover_buttons != 0 { Vec::new() } else { self.enter_parent(depth) }
+            }
+            Event::PopupEntered { depth } => self.popup_entered(depth),
             Event::Tick { cursor, button_h } => self.tick(cursor, button_h),
             Event::GestureTick => self.gesture_tick(),
             Event::Scrolled { notches } => self.scrolled(notches),
@@ -629,9 +816,12 @@ impl Controller {
             Event::AnalysisReady { generation, words } => self.analysis_ready(generation, words),
             Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
             Event::ConfigReloaded(cfg) => {
+                self.cancel_hover();
                 self.cfg = *cfg;
+                let mut out = self.enter_parent(0);
                 let id = self.next_lookup_request();
-                vec![Command::RequestReload { id }]
+                out.push(Command::RequestReload { id });
+                out
             }
             Event::TrayAction(TrayAction::OpenSettings) => vec![Command::OpenSettings],
             Event::TrayAction(TrayAction::Quit) | Event::Quit => vec![Command::Exit],
@@ -660,14 +850,17 @@ impl Controller {
         let tick = self.clock;
         self.button_h = button_h;
         let placed = self.surface.as_ref().and_then(|s| s.placed);
-        // Use the popup's own rectangle.
-        let over_popup = placed.is_some_and(|p| p.popup.contains(cursor));
-        let over_popup_or_btn = placed.is_some_and(|p| {
+        let depth = self.popup_at(cursor);
+        let hovered = depth.and_then(|depth| {
+            if depth == self.parents.len() { self.surface.as_ref() } else { self.parents.get(depth) }
+        }).and_then(|surface| surface.placed);
+        let over_popup = hovered.is_some();
+        let over_popup_or_btn = over_popup || placed.is_some_and(|p| {
             PhysRect { h: p.popup.h + button_h, ..p.popup }.contains(cursor)
         });
         let armed = self.cfg.scroll_popup
             && over_popup
-            && placed.is_some_and(|p| p.content_h > p.view_h);
+            && hovered.is_some_and(|p| p.content_h > p.view_h);
 
         let mut out = vec![
             Command::SetScrollArmed(armed),
@@ -675,7 +868,7 @@ impl Controller {
             Command::SetAddArmed(self.surface.is_some() && self.cfg.anki_enabled),
         ];
         if let (Some(p), Some(s)) = (placed, self.surface.as_ref()) {
-            if over_popup {
+            if depth == Some(self.parents.len()) {
                 out.push(Command::SetCursorShape {
                     local: PhysPoint { x: cursor.x - p.popup.x, y: cursor.y - p.popup.y },
                     scroll: s.scroll,
@@ -692,16 +885,19 @@ impl Controller {
         out.push(Command::SetBackArmed(self.has_history()));
         out.extend(self.run_gesture(GestureInput::Tick { tick }));
         out.extend(self.edge_autoscroll());
+        out.extend(self.hover_tick());
         out
     }
 
     fn gesture_tick(&mut self) -> Vec<Command> {
         self.clock = self.clock.wrapping_add(1);
-        self.run_gesture(GestureInput::Tick { tick: self.clock })
+        let mut out = self.run_gesture(GestureInput::Tick { tick: self.clock });
+        out.extend(self.hover_tick());
+        out
     }
 
     fn has_history(&self) -> bool {
-        self.surface.as_ref().is_some_and(|s| !s.history.is_empty())
+        !self.parents.is_empty() || self.surface.as_ref().is_some_and(|s| !s.history.is_empty())
     }
 
     fn repaint(&self, scroll: i32) -> Command {
@@ -709,6 +905,7 @@ impl Controller {
     }
 
     fn scrolled(&mut self, notches: i32) -> Vec<Command> {
+        self.cancel_hover();
         if notches == 0 {
             return Vec::new();
         }
@@ -732,6 +929,8 @@ impl Controller {
         hit: Option<HitAction>,
         text: Option<TextAddr>,
     ) -> Vec<Command> {
+        self.cancel_hover();
+        self.hover_buttons |= match button { Button::Primary => 1, Button::Secondary => 2 };
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
         let anki = self.cfg.anki_enabled;
@@ -785,6 +984,7 @@ impl Controller {
     }
 
     fn pointer_up(&mut self, local: PhysPoint, button: Button) -> Vec<Command> {
+        self.hover_buttons &= !match button { Button::Primary => 1, Button::Secondary => 2 };
         if !self.cfg.anki_enabled {
             return Vec::new();
         }
@@ -912,6 +1112,7 @@ impl Controller {
     }
 
     fn add_requested(&mut self) -> Vec<Command> {
+        self.cancel_hover();
         if self.surface.is_none() || !self.cfg.anki_enabled {
             return Vec::new();
         }
@@ -1015,6 +1216,11 @@ impl Controller {
     }
 
     fn pop_history(&mut self) -> Vec<Command> {
+        self.cancel_hover();
+        self.next_lookup_request();
+        if self.surface.as_ref().is_some_and(|s| s.history.is_empty()) && !self.parents.is_empty() {
+            return self.enter_parent(self.parents.len() - 1);
+        }
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
             return Vec::new();
@@ -1044,6 +1250,8 @@ impl Controller {
             return Vec::new();
         }
         self.last_accepted = None;
+        self.cancel_hover();
+        self.parents.clear();
         self.pending_cursor = None;
         // Invalidate any lookup that has not returned.
         self.next_lookup_request();
@@ -1099,6 +1307,9 @@ impl Controller {
     }
 
     fn cursor_moved(&mut self, pos: PhysPoint) -> Vec<Command> {
+        if let Some(depth) = self.popup_at(pos) {
+            return self.popup_entered(depth);
+        }
         if !self.mode_eligible() || !self.gate_open(pos) {
             return Vec::new();
         }
@@ -1121,6 +1332,7 @@ impl Controller {
 
     /// Ask the lookup question at `pos` with the shown popup as the mask.
     fn dispatch_lookup(&mut self, pos: PhysPoint) -> Vec<Command> {
+        self.cancel_hover();
         let popup = self.shown_popup();
         let id = self.next_lookup_request();
         self.last_dispatch = Some(pos);
@@ -1159,7 +1371,8 @@ impl Controller {
             TriggerMode::Toggle => self.trigger_held,
             _ => false,
         };
-        live && self
+        live && self.parents.is_empty() && self.hover_request.is_none()
+            && self.hover_candidate.is_none() && self
             .surface
             .as_ref()
             .is_some_and(|s| s.placed.is_some() && s.history.is_empty())
@@ -1176,6 +1389,11 @@ impl Controller {
     /// Press mode has no sticky region. A press over the popup is a deliberate
     /// lookup that the mask turns into a miss, which hides the popup.
     fn frozen(&self, p: PhysPoint) -> bool {
+        if self.parents.iter().any(|s| s.placed.is_some_and(|placed| {
+            in_sticky(p, s.hold, s.hold, placed.popup)
+        })) {
+            return true;
+        }
         if matches!(self.cfg.trigger_mode, TriggerMode::Press) {
             return false;
         }
@@ -1198,6 +1416,14 @@ impl Controller {
             // This result is superseded, not an error.
             return Vec::new();
         }
+        if self.hover_request.is_some_and(|(request, _)| request == id) {
+            let (_, local) = self.hover_request.take().expect("matching request");
+            return match outcome {
+                LookupOutcome::DrillDown(presentation) => self.push_hover(*presentation, local),
+                LookupOutcome::Failed(message) => vec![Command::WarnLookupFailed(message)],
+                _ => Vec::new(),
+            };
+        }
         match outcome {
             LookupOutcome::Hide => self.hide(),
             LookupOutcome::Failed(msg) => {
@@ -1214,6 +1440,23 @@ impl Controller {
     }
 
     fn sentence_result(&mut self, id: RequestId, text: Option<String>) -> Vec<Command> {
+        for parent in &mut self.parents {
+            let pending = if parent.pending_sentence.as_ref().is_some_and(|pending| pending.id == id) {
+                parent.pending_sentence.take()
+            } else {
+                parent.history.iter_mut().find_map(|entry| {
+                    if entry.pending_sentence.as_ref().is_some_and(|pending| pending.id == id) {
+                        entry.pending_sentence.take()
+                    } else { None }
+                })
+            };
+            if let Some(mut pending) = pending {
+                if let Some(sentence) = text {
+                    pending.fields.insert("sentence".to_string(), bold_surface(&sentence, pending.surface.as_deref()));
+                }
+                return vec![Command::AddNote { expr: pending.expr, fields: pending.fields }];
+            }
+        }
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         let pending = if s
             .pending_sentence
@@ -1246,6 +1489,10 @@ impl Controller {
     }
 
     fn hide(&mut self) -> Vec<Command> {
+        self.hover_buttons = 0;
+        self.cancel_hover();
+        self.parents.clear();
+        self.pointer_depth = None;
         self.surface = None;
         self.awaiting = None;
         self.pending_scan.clear();
@@ -1282,7 +1529,13 @@ impl Controller {
             }
         }
         let HoldRects { hold, hold_char } = hold_regions(anchor, matched, orientation);
+        self.cancel_hover();
+        if !self.parents.is_empty() {
+            self.parents.clear();
+            out.push(Command::ClearPopupParents);
+        }
         self.surface = Some(Surface {
+            hovered: None,
             anchor,
             orientation,
             hold,
@@ -1343,7 +1596,7 @@ impl Controller {
             presentation: Box::new(s.presentation.clone()),
             anchor: s.anchor,
             scroll: s.scroll,
-            show_back: !s.history.is_empty(),
+            show_back: self.has_history(),
         }]
     }
 
@@ -1442,6 +1695,9 @@ impl Controller {
         match kind {
             // No popup exists on screen to keep.
             PlaceKind::Fresh => {
+                if !self.parents.is_empty() {
+                    return self.enter_parent(self.parents.len() - 1);
+                }
                 self.surface = None;
                 self.pending_scan.clear();
                 self.pending_cursor = None;
@@ -1481,6 +1737,12 @@ impl Controller {
         generation: u64,
         dupes: Option<HashSet<String>>,
     ) -> Vec<Command> {
+        if let Some(parent) = self.parents.iter_mut().find(|s| s.generation == generation) {
+            parent.anki.checking = false;
+            parent.anki.connected = dupes.is_some();
+            if let Some(dupes) = dupes { parent.anki.dupes = dupes; }
+            return Vec::new();
+        }
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.generation != generation || s.placed.is_none() {
             return Vec::new();
@@ -1497,6 +1759,23 @@ impl Controller {
     }
 
     fn note_added(&mut self, expr: String, failed: bool) -> Vec<Command> {
+        for parent in &mut self.parents {
+            let matches = |p: &Presentation| p.top.as_ref().is_some_and(|card| {
+                card.written.as_deref().or(card.reading.as_deref()) == Some(expr.as_str())
+            });
+            let target = if parent.anki.adding && matches(&parent.presentation) {
+                Some(&mut parent.anki)
+            } else {
+                parent.history.iter_mut().find(|entry| entry.anki.adding && matches(&entry.presentation))
+                    .map(|entry| &mut entry.anki)
+            };
+            if let Some(anki) = target {
+                anki.adding = false;
+                anki.failed = failed;
+                if !failed { anki.added.insert(expr); }
+                return Vec::new();
+            }
+        }
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
             return Vec::new();
@@ -1556,6 +1835,254 @@ mod tests {
     use super::*;
     use crate::select::SelRange;
     use crate::present::{Card, CollapsedRow, GlossBlock};
+
+    fn hover_request(c: &mut Controller, query: &str) -> RequestId {
+        c.handle(Event::PopupHover { local: PhysPoint { x: 50, y: 70 }, query: Some(query.into()) });
+        let commands: Vec<_> = (0..16).flat_map(|_| c.handle(Event::GestureTick)).collect();
+        commands.into_iter().find_map(|cmd| match cmd {
+            Command::RequestDrillDown { id, .. } => Some(id), _ => None,
+        }).expect("hover must issue dictionary lookup")
+    }
+
+    fn hover_child(c: &mut Controller, word: &str) {
+        let id = hover_request(c, word);
+        let commands = c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of(word))) });
+        assert!(commands.contains(&Command::PushPopup));
+        let depth = c.popup_depth() as i32;
+        c.handle(placed(PhysRect { x: 100 + depth * 150, y: 160 + depth * 60, ..POPUP }, 700, 200));
+    }
+
+    #[test]
+    fn hover_parent_reentry_restores_the_correct_level_and_preserves_state() {
+        let mut c = Controller::new(cfg());
+        shown_sized(&mut c, 700, 200);
+        c.handle(Event::Scrolled { notches: -2 });
+        c.surface.as_mut().unwrap().selection.card_mut(0).replace(SelRange {
+            start: TextAddr { entry: 0, addr: crate::select::DocAddr::START },
+            end: TextAddr { entry: 0, addr: crate::select::DocAddr::END },
+        });
+        hover_child(&mut c, "犬");
+        let root = c.parents[0].clone();
+        c.handle(Event::Scrolled { notches: -3 });
+        hover_child(&mut c, "鳥");
+        let parent = c.parents[1].clone();
+        c.handle(Event::PopupEntered { depth: 2 });
+        let commands = c.handle(Event::PopupEntered { depth: 1 });
+        assert!(commands.contains(&Command::RestorePopup { depth: 1 }));
+        assert_eq!(c.surface.as_ref(), Some(&parent));
+        assert_eq!(c.parents, vec![root.clone()]);
+        c.handle(Event::BackRequested);
+        assert_eq!(c.surface.as_ref(), Some(&root));
+        assert!(c.parents.is_empty());
+    }
+
+    #[test]
+    fn hover_stationary_parent_does_not_immediately_close_its_child() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+        assert!(c.handle(Event::PopupEntered { depth: 0 }).is_empty());
+        assert_eq!(c.popup_depth(), 1);
+        c.handle(Event::PopupEntered { depth: 1 });
+        assert!(c.handle(Event::PopupEntered { depth: 0 }).contains(&Command::RestorePopup { depth: 0 }));
+    }
+
+    #[test]
+    fn parent_click_is_armed_and_activates_without_ever_entering_child() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+        let point = PhysPoint { x: POPUP.x + 10, y: POPUP.y + 10 };
+        let commands = c.handle(Event::Tick { cursor: point, button_h: 0 });
+        assert!(commands.contains(&Command::SetClickArmed(true)));
+        assert_eq!(c.popup_depth(), 1);
+        assert!(c.handle(Event::PopupActivated { depth: 0 }).contains(&Command::RestorePopup { depth: 0 }));
+        let commands = c.handle(Event::PointerDown {
+            local: PhysPoint { x: 10, y: 10 }, button: Button::Primary,
+            hit: Some(HitAction::DrillDown("魚".into())), text: None,
+        });
+        assert!(commands.iter().any(|command| matches!(command, Command::RequestDrillDown { text, .. } if text == "魚")));
+        assert_eq!(c.popup_depth(), 0);
+        assert_eq!(c.popup().unwrap().presentation.top.as_ref().unwrap().written.as_deref(), Some("猫"));
+    }
+
+    #[test]
+    fn parent_scroll_is_armed_and_changes_parent_without_entering_child() {
+        let mut c = Controller::new(cfg());
+        shown_sized(&mut c, 700, 200);
+        hover_child(&mut c, "犬");
+        c.surface.as_mut().unwrap().placed.as_mut().unwrap().content_h = 200;
+        let point = PhysPoint { x: POPUP.x + 10, y: POPUP.y + 10 };
+        let commands = c.handle(Event::Tick { cursor: point, button_h: 0 });
+        assert!(commands.contains(&Command::SetScrollArmed(true)));
+        assert_eq!(c.popup_depth(), 1);
+        c.handle(Event::PopupActivated { depth: 0 });
+        c.handle(Event::Scrolled { notches: -1 });
+        assert_eq!(c.popup_depth(), 0);
+        assert_eq!(c.popup().unwrap().scroll, SCROLL_STEP_PX);
+        assert_eq!(c.popup().unwrap().content_h, 700);
+    }
+
+    #[test]
+    fn parent_hover_preserves_same_item_but_activates_another_item() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+        let local = PhysPoint { x: 50, y: 70 };
+        assert!(c.handle(Event::PopupHoverAt { depth: 0, local, query: Some("犬".into()) }).is_empty());
+        assert_eq!(c.popup_depth(), 1);
+        assert!(c.handle(Event::PopupHoverAt { depth: 0, local, query: None }).is_empty());
+        assert_eq!(c.popup_depth(), 1);
+        assert!(c.handle(Event::PopupHoverAt { depth: 0, local, query: Some("鳥".into()) })
+            .contains(&Command::RestorePopup { depth: 0 }));
+        assert_eq!(c.popup_depth(), 0);
+        assert!(c.hover_candidate.as_ref().is_some_and(|(query, _, _)| query == "鳥"));
+    }
+
+    #[test]
+    fn deliberate_parent_activation_does_not_retarget_an_active_drag() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+        c.handle(Event::PointerDown { local: PhysPoint { x: 10, y: 10 }, button: Button::Primary, hit: None, text: None });
+        assert!(c.handle(Event::PopupActivated { depth: 0 }).is_empty());
+        assert!(c.handle(Event::PopupHoverAt { depth: 0, local: PhysPoint { x: 50, y: 70 }, query: Some("鳥".into()) }).is_empty());
+        assert_eq!(c.popup_depth(), 1);
+        c.handle(Event::PointerUp { local: PhysPoint { x: 10, y: 10 }, button: Button::Primary });
+        assert!(c.handle(Event::PopupActivated { depth: 0 }).contains(&Command::RestorePopup { depth: 0 }));
+    }
+
+    #[test]
+    fn hover_parent_analysis_restarts_only_for_the_restored_top_card() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = Controller::new(config);
+        shown(&mut c);
+        let gloss = GlossBlock::parse("Test", r#"["親の文章"]"#);
+        c.surface.as_mut().unwrap().presentation.top.as_mut().unwrap().blocks = vec![gloss];
+        hover_child(&mut c, "犬");
+        let child_generation = c.surface.as_ref().unwrap().analysis_generation;
+        let commands = c.handle(Event::BackRequested);
+        let (generation, texts) = commands.iter().find_map(|cmd| match cmd {
+            Command::RequestAnalysis { generation, texts } => Some((*generation, texts)), _ => None,
+        }).expect("restored parent must request interrupted analysis");
+        assert!(generation > child_generation);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].1, "親の文章");
+        assert!(c.handle(Event::AnalysisReady { generation: child_generation, words: WordMap::new() }).is_empty());
+        assert!(c.surface.as_ref().unwrap().analysis.is_none());
+    }
+
+    #[test]
+    fn hover_parent_anki_replies_cannot_mark_the_child() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        let generation = c.surface.as_ref().unwrap().generation;
+        c.surface.as_mut().unwrap().anki.adding = true;
+        hover_child(&mut c, "犬");
+        c.handle(Event::DupesChecked { generation, dupes: Some(HashSet::from(["猫".into()])) });
+        c.handle(Event::NoteAdded { expr: "猫".into(), failed: false });
+        assert!(c.parents[0].anki.dupes.contains("猫"));
+        assert!(c.parents[0].anki.added.contains("猫"));
+        assert!(!c.parents[0].anki.adding);
+        assert!(c.anki().unwrap().added.is_empty());
+    }
+
+    #[test]
+    fn hover_replies_after_leaving_back_and_dismiss_are_rejected() {
+        for action in [0, 1, 2] {
+            let mut c = Controller::new(cfg());
+            shown(&mut c);
+            hover_child(&mut c, "犬");
+            let id = hover_request(&mut c, "鳥");
+            match action {
+                0 => { c.handle(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None }); }
+                1 => { c.handle(Event::BackRequested); }
+                _ => { c.handle(Event::DismissRequested); }
+            }
+            let before = c.surface.clone();
+            assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("鳥"))) }).is_empty());
+            assert_eq!(c.surface, before);
+        }
+    }
+
+    #[test]
+    fn hover_depth_is_bounded_and_dismiss_retires_every_descendant() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        for depth in 0..16 { hover_child(&mut c, &format!("語{depth}")); }
+        let id = hover_request(&mut c, "限界");
+        assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("限界"))) }).is_empty());
+        assert_eq!(c.popup_depth(), 16);
+        assert_eq!(c.popup_rects().len(), 17);
+        assert!(c.handle(Event::DismissRequested).contains(&Command::HidePopup));
+        assert!(c.popup_rects().is_empty());
+        assert_eq!(c.popup_depth(), 0);
+        assert!(c.hover_request.is_none());
+    }
+
+    #[test]
+    fn hover_same_query_and_same_headword_do_not_open_again() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        let id = hover_request(&mut c, "猫");
+        assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))) }).is_empty());
+        c.handle(Event::PopupHover { local: PhysPoint { x: 51, y: 70 }, query: Some("猫".into()) });
+        assert!((0..20).flat_map(|_| c.handle(Event::GestureTick)).all(|cmd| !matches!(cmd, Command::RequestDrillDown { .. })));
+        assert_eq!(c.popup_depth(), 0);
+    }
+
+    #[test]
+    fn hover_failure_and_failed_placement_keep_the_parent() {
+        let mut c = Controller::new(cfg());
+        shown_sized(&mut c, 700, 200);
+        c.handle(Event::Scrolled { notches: -2 });
+        let id = hover_request(&mut c, "失敗");
+        let before = c.surface.clone();
+        let commands = c.handle(Event::LookupResult { id, outcome: LookupOutcome::Failed("missing dictionary".into()) });
+        assert_eq!(commands, vec![Command::WarnLookupFailed("missing dictionary".into())]);
+        assert_eq!(c.surface, before);
+        let id = hover_request(&mut c, "犬");
+        let before = c.surface.clone();
+        c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))) });
+        assert!(c.handle(Event::PopupPlaceFailed).contains(&Command::RestorePopup { depth: 0 }));
+        assert_eq!(c.surface, before);
+        assert_eq!(c.popup_depth(), 0);
+    }
+
+    #[test]
+    fn hover_mouse_press_and_selection_drag_cancel_pending_lookup() {
+        let mut c = Controller::new(cfg());
+        shown(&mut c);
+        let id = hover_request(&mut c, "犬");
+        c.handle(Event::PointerDown { local: PhysPoint { x: 1, y: 1 }, button: Button::Primary, hit: None, text: None });
+        assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))) }).is_empty());
+        c.surface.as_mut().unwrap().last_drag_point = Some(PhysPoint { x: 10, y: 10 });
+        c.handle(Event::PopupHover { local: PhysPoint { x: 20, y: 20 }, query: Some("鳥".into()) });
+        assert!((0..20).flat_map(|_| c.handle(Event::GestureTick)).all(|cmd| !matches!(cmd, Command::RequestDrillDown { .. })));
+    }
+
+    #[test]
+    fn dismiss_requested_works_in_every_trigger_mode_and_invalidates_root_reply() {
+        for mode in [TriggerMode::Live, TriggerMode::Press, TriggerMode::HoldKey, TriggerMode::Toggle] {
+            let mut config = cfg();
+            config.trigger_mode = mode;
+            let mut c = Controller::new(config);
+            c.handle(Event::TriggerDown);
+            shown(&mut c);
+            hover_child(&mut c, "犬");
+            let id = c.latest_lookup;
+            let commands = c.handle(Event::DismissRequested);
+            for command in [Command::SetDragging(false), Command::SetScrollArmed(false),
+                Command::SetClickArmed(false), Command::SetAddArmed(false), Command::DiscardScroll]
+            {
+                assert!(commands.contains(&command));
+            }
+            assert!(c.popup_rects().is_empty());
+            assert!(c.handle(ready_id(id, "古い", ANCHOR)).is_empty());
+            assert!(c.popup().is_none());
+        }
+    }
 
     fn cfg() -> ControllerConfig {
         ControllerConfig {

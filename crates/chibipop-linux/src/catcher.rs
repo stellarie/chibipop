@@ -102,6 +102,21 @@ pub fn input_region_rects(
     regions
 }
 
+fn stack_input_regions(screen: PhysRect, scale: f64, logical: (i32, i32), popups: &[PhysRect]) -> Vec<RegionRect> {
+    let mut regions = vec![RegionRect { x: 0, y: 0, w: logical.0.max(0), h: logical.1.max(0) }];
+    for popup in popups {
+        let outside = input_region_rects(screen, scale, logical, *popup);
+        regions = regions.iter().flat_map(|a| outside.iter().filter_map(move |b| {
+            let x = a.x.max(b.x);
+            let y = a.y.max(b.y);
+            let right = a.x.saturating_add(a.w).min(b.x.saturating_add(b.w));
+            let bottom = a.y.saturating_add(a.h).min(b.y.saturating_add(b.h));
+            (right > x && bottom > y).then_some(RegionRect { x, y, w: right - x, h: bottom - y })
+        })).collect();
+    }
+    regions
+}
+
 /// One full-output catcher surface.
 struct Pane {
     id: usize,
@@ -124,7 +139,7 @@ pub struct Catcher {
     pool: SlotPool,
     layer: Layer,
     panes: Vec<Pane>,
-    popup: Option<PhysRect>,
+    popups: Vec<PhysRect>,
     shape: Option<WpCursorShapeDeviceV1>,
     shape_pointer: Option<WlPointer>,
     notes: Vec<String>,
@@ -148,7 +163,7 @@ impl Catcher {
             pool,
             layer: popup.layer(),
             panes: Vec::new(),
-            popup: None,
+            popups: Vec::new(),
             shape: None,
             shape_pointer: None,
             notes: Vec::new(),
@@ -177,8 +192,8 @@ impl Catcher {
     /// A pane is created only when this method first needs its output. The
     /// popup rectangle stays in physical pixels until `input_region_rects`
     /// applies popup placement's conversion.
-    pub fn show(&mut self, screens: &[Screen], popup: PhysRect) {
-        self.popup = Some(popup);
+    pub fn show(&mut self, screens: &[Screen], popups: &[PhysRect]) {
+        self.popups = popups.to_vec();
 
         for idx in 0..self.panes.len() {
             if !screens.iter().any(|screen| screen.id == self.panes[idx].id) {
@@ -209,7 +224,7 @@ impl Catcher {
     ///
     /// The transparent buffer stays attached and no layer surface is unmapped.
     pub fn hide(&mut self) {
-        self.popup = None;
+        self.popups.clear();
         for idx in 0..self.panes.len() {
             self.panes[idx].active = false;
             self.commit_region(idx);
@@ -416,21 +431,20 @@ impl Catcher {
     }
 
     fn set_region(&mut self, idx: usize) {
-        let (logical, rect, scale, active, popup, surface) = {
+        let (logical, rect, scale, active, surface) = {
             let pane = &self.panes[idx];
             (
                 pane.configured,
                 pane.rect,
                 pane.scale,
                 pane.active,
-                self.popup,
                 pane.layer.wl_surface().clone(),
             )
         };
         let Ok(region) = Region::new(&self.compositor) else { return };
         if active {
-            if let (Some(logical), Some(popup)) = (logical, popup) {
-                for part in input_region_rects(rect, scale, logical, popup) {
+            if let Some(logical) = logical {
+                for part in stack_input_regions(rect, scale, logical, &self.popups) {
                     region.add(part.x, part.y, part.w, part.h);
                 }
             }
@@ -442,6 +456,20 @@ impl Catcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_and_child_holes_keep_the_gap_clickable() {
+        let screen = PhysRect { x: 0, y: 0, w: 100, h: 100 };
+        let popups = [PhysRect { x: 10, y: 10, w: 30, h: 30 }, PhysRect { x: 50, y: 20, w: 30, h: 30 }];
+        let regions = stack_input_regions(screen, 1.0, (100, 100), &popups);
+        for x in 0..100 {
+            for y in 0..100 {
+                let captured = regions.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h);
+                let in_popup = popups.iter().any(|r| r.contains(chibipop::geom::PhysPoint { x, y }));
+                assert_eq!(captured, !in_popup, "{x},{y}");
+            }
+        }
+    }
 
     #[test]
     fn input_region_leaves_a_popup_sized_hole() {

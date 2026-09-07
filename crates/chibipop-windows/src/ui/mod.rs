@@ -9,6 +9,7 @@ pub mod overlay;
 pub mod render;
 pub(super) mod settings_layout;
 pub mod settings_window;
+pub mod search_window;
 pub mod static_overlay;
 pub mod tray;
 pub mod window;

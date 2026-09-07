@@ -776,6 +776,7 @@ enum Message {
     /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
     OcrClipboardKey(String),
+    SearchKey(String),
     /// The sentence-capture picker label. [`SENTENCE_MODES`] maps it back, so the
     /// call site does not compare strings or indexes.
     SentenceModePicked(String),
@@ -914,6 +915,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // counterpart also rejects this sentinel.
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
+        }
+        Message::SearchKey(v) => {
+            app.linux.search_key_linux = (!v.trim().is_empty()).then(|| v.trim().to_string());
         }
         Message::SentenceModePicked(label) => {
             app.form.cfg.anki.sentence_mode = value_of(&SENTENCE_MODES, &label, SentenceMode::Sentence);
@@ -1311,6 +1315,16 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
              the channel that owns it: a compositor line to paste, or the portal key \
              that your desktop's shortcut editor changes."
         ),
+        card("Dictionary search", column![
+            labeled("Open search shortcut", text_input("Disabled", app.linux.search_key_linux.as_deref().unwrap_or(""))
+                .on_input(Message::SearchKey)),
+            hint("Leave blank to disable. Apply immediately stops a cleared, disabled, or changed portal shortcut."),
+            hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."),
+            hint("For a compositor binding, use the command below with your preferred key:"),
+            snippet_box(snippets::bind_snippet(app.compositor,
+                app.linux.search_key_linux.as_deref().unwrap_or("SUPER+F"),
+                &app.exe, snippets::Bind::Press(crate::control::Verb::Search))),
+        ].spacing(10)),
         card("Trigger", column![
             mode,
             checkbox(app.form.cfg.trigger.per_character_lookup)
