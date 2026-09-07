@@ -271,7 +271,7 @@ struct EntryRuntime {
     label: String,
     controls: Vec<HWND>,
     top: Cell<i32>,
-    base_height: i32,
+    base_height: Cell<i32>,
 }
 
 struct SectionRuntime {
@@ -2795,6 +2795,7 @@ pub struct SettingsWindow {
     pending_field_map: RefCell<Option<PendingFieldMap>>,
     /// True when the field-map section is collapsed.
     field_map_collapsed: Cell<bool>,
+    screenshot_summary_height: Cell<i32>,
     /// Maximum bottom vertical coordinate among all tabs.
     bottom_y0: i32,
     /// Index of the active tab.
@@ -2873,6 +2874,7 @@ impl SettingsWindow {
                 field_map_extra: RefCell::new(Vec::new()),
                 pending_field_map: RefCell::new(None),
                 field_map_collapsed: Cell::new(true),
+                screenshot_summary_height: Cell::new(0),
                 bottom_y0: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
@@ -3061,13 +3063,10 @@ impl SettingsWindow {
             staged.cfg.actions.screenshot.fixed_window = None;
             staged.screenshot_reset_targets = true;
         }
-        let summary = wide("No saved screenshot targets.");
+        self.update_screenshot_summary("No saved screenshot targets.");
         // SAFETY: These controls are created by `build` and remain live until
         // this window drops.
         unsafe {
-            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_SUMMARY) {
-                let _ = SetWindowTextW(c, PCWSTR(summary.as_ptr()));
-            }
             if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_RESET) {
                 let _ = EnableWindow(c, false);
             }
@@ -3103,17 +3102,41 @@ impl SettingsWindow {
                 staged.cfg.actions.screenshot.fixed_window.clone(),
             )
         };
-        let summary = wide(&screenshot_target_summary_values(region, window.as_ref()));
+        self.update_screenshot_summary(&screenshot_target_summary_values(region, window.as_ref()));
         let has_target = !self.busy.get() && (region.is_some() || window.is_some());
-        // SAFETY: These controls are created by `build` and remain live until
-        // this window drops. `SetWindowTextW` copies the string during the call.
+        // SAFETY: The reset button belongs to this live settings window.
         unsafe {
-            if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_SUMMARY) {
-                let _ = SetWindowTextW(c, PCWSTR(summary.as_ptr()));
-            }
             if let Ok(c) = dlg_item(self.hwnd, ID_SCREENSHOT_RESET) {
                 let _ = EnableWindow(c, has_target);
             }
+        }
+    }
+
+    /// Prevents clipped target text.
+    fn update_screenshot_summary(&self, text: &str) {
+        let width = WIN_W - 2 * PAD - BTN_W - 28;
+        let height = measured_text_height(self.hwnd, self.font, text, width);
+        let previous = self.screenshot_summary_height.replace(height);
+        // SAFETY: The summary is a live child of this settings window. Updating
+        // its text and dimensions preserves visibility and keyboard order.
+        unsafe {
+            if let Ok(control) = dlg_item(self.hwnd, ID_SCREENSHOT_SUMMARY) {
+                let _ = SetWindowTextW(control, PCWSTR(wide(text).as_ptr()));
+                let _ = SetWindowPos(control, None, 0, 0,
+                    dpi_scale(self.hwnd, width), dpi_scale(self.hwnd, height),
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        if height != previous {
+            if let Some(entry) = self.tabs.iter().flat_map(|tab| &tab.sections)
+                .flat_map(|section| &section.entries)
+                .find(|entry| entry.id == SettingId::ScreenshotTargets) {
+                entry.base_height.set(entry.base_height.get().saturating_add(height - previous));
+            }
+            if let Some(tab) = self.entry_tab(SettingId::ScreenshotTargets) {
+                self.reflow_tab(tab);
+            }
+            self.ensure_room_for(self.layout_bottom());
         }
     }
 
@@ -3416,9 +3439,9 @@ impl SettingsWindow {
 
     fn entry_height(&self, entry: &EntryRuntime) -> i32 {
         match entry.id {
-            SettingId::AnkiFieldMap => self.field_map_entry_height(entry.base_height),
+            SettingId::AnkiFieldMap => self.field_map_entry_height(entry.base_height.get()),
             SettingId::AnkiStaticOverlay if !self.sentence_is_static() => 0,
-            _ => entry.base_height,
+            _ => entry.base_height.get(),
         }
     }
 
@@ -3814,7 +3837,7 @@ impl SettingsWindow {
             .flat_map(|tab| &tab.sections)
             .flat_map(|section| &section.entries)
             .find(|entry| entry.id == SettingId::AnkiFieldMap)
-            .map_or(0, |entry| entry.top.get() + entry.base_height)
+            .map_or(0, |entry| entry.top.get() + entry.base_height.get())
     }
 
     /// Places the viewport immediately below the tab strip in z-order.
@@ -4667,6 +4690,7 @@ impl SettingsWindow {
                 let summary = screenshot_target_summary(form);
                 let summary_h = measured_text_height(h, f, &summary,
                     WIN_W - 2 * PAD - BTN_W - 28);
+                self.screenshot_summary_height.set(summary_h);
                 controls.push(child(page, w!("STATIC"), &summary, WINDOW_STYLE(0), PAD, y,
                     WIN_W - 2 * PAD - BTN_W - 28, summary_h, ID_SCREENSHOT_SUMMARY, f)?);
                 let reset = child(page, w!("BUTTON"), "Clear saved targets", WS_TABSTOP,
@@ -4939,7 +4963,7 @@ impl SettingsWindow {
                         label: built.label,
                         controls: built.controls,
                         top: Cell::new(built.top),
-                        base_height: built.height,
+                        base_height: Cell::new(built.height),
                     });
                 }
                 let section_height = (y - section_top + 8).max(28);
@@ -5662,6 +5686,35 @@ mod tests {
     fn cancelling_partial_field_rows_reflows_the_retained_controls() {
         check_cancelled_field_rows(false);
         check_cancelled_field_rows(true);
+    }
+
+    #[test]
+    fn live_screenshot_targets_resize_and_reflow_their_entry() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::ScreenshotTargets, 0, 0, 0);
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let before = control_top(&window, ID_THEME);
+        // SAFETY: The captured test window owns the summary for this closure's lifetime.
+        let summary_height = || unsafe {
+            let control = dlg_item(window.hwnd, ID_SCREENSHOT_SUMMARY).unwrap();
+            let mut rect = RECT::default();
+            GetWindowRect(control, &mut rect).unwrap();
+            rect.bottom - rect.top
+        };
+        let initial_height = summary_height();
+        let mut screenshot = form.cfg.actions.screenshot.clone();
+        screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
+            app_id: "test-window".into(),
+            title: "A long game window title ".repeat(20),
+        });
+        window.refresh_screenshot_targets(&screenshot);
+        assert!(summary_height() > initial_height);
+        assert!(control_top(&window, ID_THEME) > before, "updated summary still has its initial height");
+        send_command(&window, ID_SCREENSHOT_RESET);
+        window.pump(|| {});
+        assert_eq!(initial_height, summary_height());
+        assert_eq!(before, control_top(&window, ID_THEME));
     }
 
     fn check_cancelled_field_rows(empty_result: bool) {
