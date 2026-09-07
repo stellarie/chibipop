@@ -203,20 +203,24 @@ impl SettingsLayout {
         Self::parse(EMBEDDED_LAYOUT).context("invalid embedded settings layout")
     }
 
+    #[cfg(test)]
     pub(super) fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
+    #[cfg(test)]
     pub(super) fn tab_label(&self, index: usize) -> Option<&str> {
         self.tabs.get(index).map(|tab| tab.label.as_str())
     }
 
+    #[cfg(test)]
     pub(super) fn field_map_tab(&self) -> Option<usize> {
         self.tabs
             .iter()
             .position(|tab| tab.contains(SettingId::AnkiFieldMap))
     }
 
+    #[cfg(test)]
     pub(super) fn tab_needs_anki_detection(&self, index: usize) -> bool {
         self.tabs.get(index).is_some_and(|tab| {
             [
@@ -267,6 +271,7 @@ impl SettingsLayout {
     }
 }
 
+#[cfg(test)]
 impl TabSpec {
     fn contains(&self, id: SettingId) -> bool {
         self.sections

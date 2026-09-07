@@ -13,17 +13,20 @@ use crate::settings::{
     DictRow, SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
 use crate::text::ocr::tag_matches;
+use crate::ui::settings_layout::{EntrySpec, SettingId, SettingsLayout, TabId};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use windows::core::{w, Error, PCWSTR, PWSTR, Result as WinResult};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::core::{w, Error, HRESULT, PCWSTR, PWSTR, Result as WinResult};
+use windows::Win32::Foundation::{
+    ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetMonitorInfoW, GetSysColor,
-    MonitorFromWindow, PtInRect, ReleaseDC, ScreenToClient, COLOR_BTNFACE, COLOR_WINDOWTEXT,
-    ENUMLOGFONTEXW, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET,
-    TEXTMETRICW,
+    CreateFontIndirectW, DeleteObject, DrawTextW, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
+    GetSysColor, MonitorFromWindow, PtInRect, ReleaseDC, ScreenToClient, SelectObject,
+    COLOR_BTNFACE, COLOR_WINDOWTEXT, DT_CALCRECT, DT_WORDBREAK, ENUMLOGFONTEXW, HFONT,
+    LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
@@ -128,11 +131,11 @@ const ID_VIEWPORT: i32 = 143;
 const ID_CONTENT: i32 = 144;
 /// The Updates group box.
 const ID_UPDATES: i32 = 145;
-/// The Engine combo box on the OCR tab.
+/// The OCR engine combo box.
 const ID_ENGINE: i32 = 146;
-/// The Configure button on the OCR tab.
+/// OCR Configure button.
 const ID_ENGINE_CONFIGURE: i32 = 147;
-/// The Engine log checkbox on the OCR tab.
+/// The engine log checkbox.
 const ID_ENGINE_LOG: i32 = 148;
 /// The Adapter log checkbox.
 const ID_ADAPTER_LOG: i32 = 149;
@@ -150,7 +153,7 @@ const ID_SCREENSHOT_RESET: i32 = 185;
 const ID_NOTIFY_ON_ADD: i32 = 151;
 /// The Customize CSS button.
 const ID_CSS_EDITOR: i32 = 152;
-/// The Sentence combo box on the Anki tab.
+/// The sentence mode combo box.
 const ID_SENTENCE_MODE: i32 = 156;
 /// The Static region key button.
 const ID_STATIC_REGION_KEY: i32 = 157;
@@ -164,7 +167,7 @@ const ID_STATIC_CAPTURE_HINT: i32 = 160;
 const ID_FIRST_DICT_ONLY: i32 = 161;
 /// The OCR clipboard key button.
 const ID_OCR_CLIPBOARD_KEY: i32 = 162;
-/// The Layout mode combo box on the General tab.
+/// The popup layout combo box.
 const ID_LAYOUT_MODE: i32 = 163;
 /// The Dictionary styling checkbox.
 const ID_DICT_STYLING: i32 = 164;
@@ -206,6 +209,9 @@ const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 const ID_DISCARD_FURIGANA: i32 = 186;
 const ID_SCREENSHOT_HOTKEY: i32 = 187;
 const ID_SCREENSHOT_KEY_CLEAR: i32 = 188;
+const ID_ANKI_ADD_KEY_CLEAR: i32 = 189;
+const ID_STATIC_REGION_KEY_CLEAR: i32 = 190;
+const ID_OCR_CLIPBOARD_KEY_CLEAR: i32 = 191;
 
 
 /// The first field-map combo identifier.
@@ -250,6 +256,43 @@ impl PendingFieldMap {
             next: 0,
         }
     }
+}
+
+struct BuiltEntry {
+    id: SettingId,
+    label: String,
+    controls: Vec<HWND>,
+    top: i32,
+    height: i32,
+}
+
+struct EntryRuntime {
+    id: SettingId,
+    label: String,
+    controls: Vec<HWND>,
+    top: Cell<i32>,
+    base_height: i32,
+}
+
+struct SectionRuntime {
+    frame: HWND,
+    top: Cell<i32>,
+    height: Cell<i32>,
+    entries: Vec<EntryRuntime>,
+}
+
+struct TabRuntime {
+    id: TabId,
+    label: String,
+    sections: Vec<SectionRuntime>,
+    page_height: Cell<i32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ConditionalTabs {
+    engine: Option<u32>,
+    static_key: Option<u32>,
+    static_overlay: Option<u32>,
 }
 
 /// The sentence capture combo box in fill order.
@@ -407,6 +450,7 @@ const PLUGIN_ID_SPAN: i32 = 100;
 // Win32 messages for the tab control.
 const TCM_FIRST: u32 = 0x1300;
 const TCM_GETCURSEL_MSG: u32 = TCM_FIRST + 11;
+const TCM_SETCURSEL_MSG: u32 = TCM_FIRST + 12;
 const TCM_INSERTITEMW_MSG: u32 = TCM_FIRST + 62;
 const TCIF_TEXT_VAL: u32 = 0x0001;
 // TCN_SELCHANGE = -551 as u32.
@@ -503,6 +547,7 @@ const WHEEL_LINES: i32 = 3;
 // ---- Dictionaries tab ----
 
 /// The height of one text line above each list.
+#[cfg(test)]
 const DICT_CAP_H: i32 = 18;
 /// The dictionary list height matches a column of four buttons.
 const DICT_LIST_H: i32 = 3 * BTN_PITCH + ROW_H;
@@ -514,6 +559,7 @@ const _: () = assert!((DICT_LIST_H - 2) / 17 >= 6);
 /// The strategy row belongs to the Frequency list only. It gives the rule
 /// for that list. If the row appeared elsewhere, users can think that it
 /// also reduces the other two lists. Refer to ARCHITECTURE.md#dictionary-and-lookup.
+#[cfg(test)]
 fn role_group_h(role: Role) -> i32 {
     let strategy = if role == Role::Frequency { ROW_H + ROW_GAP } else { 0 };
     20 + DICT_CAP_H + strategy + DICT_LIST_H + 8
@@ -530,7 +576,7 @@ const COL_COMBO_W: i32 = COL_W - COL_LABEL_W - COL_LABEL_GAP;
 const COL_DROPPED_W: i32 = 150;
 const COL_LABEL_MAX_CHARS: usize = 18;
 
-// ---- Plugins tab ----
+// ---- Plugins ----
 
 /// The status area height allows a long refusal reason.
 const PLUGIN_STATUS_H: i32 = ROW_H + 16;
@@ -552,10 +598,6 @@ struct Section {
     down: i32,
     add: i32,
     remove: i32,
-    /// The caption of the group box.
-    group: &'static str,
-    /// The text line above the list.
-    hint: &'static str,
 }
 
 /// The three sections use [`Role::EVERY`] order.
@@ -572,8 +614,6 @@ const SECTIONS: [Section; 3] = [
         down: ID_TERMS_DOWN,
         add: ID_TERMS_ADD,
         remove: ID_TERMS_REMOVE,
-        group: "Terms \u{2014} the definitions a lookup shows",
-        hint: "Topmost first, for the selected OCR language. Untick to skip one.",
     },
     Section {
         role: Role::Frequency,
@@ -582,8 +622,6 @@ const SECTIONS: [Section; 3] = [
         down: ID_FREQ_DOWN,
         add: ID_FREQ_ADD,
         remove: ID_FREQ_REMOVE,
-        group: "Frequency data \u{2014} how common each word is",
-        hint: "Topmost first. Untick to leave a list out of the ranking.",
     },
     Section {
         role: Role::Pitch,
@@ -592,8 +630,6 @@ const SECTIONS: [Section; 3] = [
         down: ID_PITCH_DOWN,
         add: ID_PITCH_ADD,
         remove: ID_PITCH_REMOVE,
-        group: "Pitch accent \u{2014} how each word is said",
-        hint: "Topmost first. Untick to hide a dictionary's accents.",
     },
 ];
 
@@ -876,11 +912,27 @@ thread_local! {
     // Stores a queued OCR language selection.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
+    static CONDITION_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
+
+    static CONDITIONAL_TABS: RefCell<Option<(isize, ConditionalTabs)>> =
+        const { RefCell::new(None) };
+
     // Stores plugin directories for each `HWND`.
     static PLUGIN_DIRS: RefCell<Option<(isize, Vec<PathBuf>)>> = const { RefCell::new(None) };
 
     // Stores active drag-row state for each `HWND`.
     static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
+}
+
+fn remember_conditional_tabs(hwnd: HWND, tabs: ConditionalTabs) {
+    CONDITIONAL_TABS.with(|slot| *slot.borrow_mut() = Some((hwnd.0 as isize, tabs)));
+}
+
+fn conditional_tabs(hwnd: HWND) -> ConditionalTabs {
+    CONDITIONAL_TABS.with(|slot| match *slot.borrow() {
+        Some((owner, tabs)) if owner == hwnd.0 as isize => tabs,
+        _ => ConditionalTabs::default(),
+    })
 }
 
 fn record_outcome(hwnd: HWND, outcome: SettingsOutcome) {
@@ -1035,6 +1087,22 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
     }
 }
 
+unsafe fn clear_captured_key(
+    hwnd: HWND,
+    id: i32,
+    cell: &'static std::thread::LocalKey<Cell<Option<(isize, u16)>>>,
+) {
+    // SAFETY: Capture state belongs to this live window.
+    unsafe { cancel_capture(hwnd) };
+    cell.with(|slot| slot.set(Some((hwnd.0 as isize, 0))));
+    // SAFETY: `id` names a live key button owned by `hwnd`.
+    unsafe {
+        if let Ok(button) = dlg_item(hwnd, id) {
+            let _ = SetWindowTextW(button, w!("Not set"));
+        }
+    }
+}
+
 /// Ends key capture mode without changes.
 unsafe fn cancel_capture(hwnd: HWND) {
     // SAFETY: `id` originates from `CAPTURING`, which `begin_capture` sets
@@ -1087,6 +1155,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 return LRESULT(0);
             }
             if id == ID_SENTENCE_MODE && notify == CBN_SELCHANGE as u16 {
+                CONDITION_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
                 unsafe { update_static_controls(hwnd) };
                 return LRESULT(0);
             }
@@ -1124,6 +1193,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_OCR_CLIPBOARD_KEY => unsafe { begin_capture(hwnd, ID_OCR_CLIPBOARD_KEY) },
                 ID_SCREENSHOT_HOTKEY => unsafe { begin_capture(hwnd, ID_SCREENSHOT_HOTKEY) },
                 ID_SCREENSHOT_KEY_CLEAR => {
+                    // SAFETY: Capture state belongs to this live window.
+                    unsafe { cancel_capture(hwnd) };
                     SCREENSHOT_CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0))));
                     // SAFETY: The button is a descendant of this live settings window.
                     unsafe {
@@ -1132,6 +1203,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                     }
                 }
+                ID_ANKI_ADD_KEY_CLEAR => unsafe {
+                    clear_captured_key(hwnd, ID_ANKI_ADD_KEY, &ANKI_CAPTURED_VK);
+                },
+                ID_STATIC_REGION_KEY_CLEAR => unsafe {
+                    clear_captured_key(hwnd, ID_STATIC_REGION_KEY, &SR_CAPTURED_VK);
+                },
+                ID_OCR_CLIPBOARD_KEY_CLEAR => unsafe {
+                    clear_captured_key(hwnd, ID_OCR_CLIPBOARD_KEY, &OCR_CLIP_CAPTURED_VK);
+                },
                 _ => {}
             }
             LRESULT(0)
@@ -1248,7 +1328,10 @@ unsafe fn register_class(hinstance: HINSTANCE) -> Result<()> {
             ..Default::default()
         };
         if RegisterClassExW(&wc) == 0 {
-            return Err(Error::from_thread()).context("RegisterClassExW");
+            let error = Error::from_thread();
+            if error.code() != HRESULT::from_win32(ERROR_CLASS_ALREADY_EXISTS.0) {
+                return Err(error).context("RegisterClassExW");
+            }
         }
     }
 
@@ -1310,7 +1393,10 @@ unsafe fn register_pane_class(hinstance: HINSTANCE) -> Result<()> {
             ..Default::default()
         };
         if RegisterClassExW(&wc) == 0 {
-            return Err(Error::from_thread()).context("RegisterClassExW for the pane class");
+            let error = Error::from_thread();
+            if error.code() != HRESULT::from_win32(ERROR_CLASS_ALREADY_EXISTS.0) {
+                return Err(error).context("RegisterClassExW for the pane class");
+            }
         }
     }
 
@@ -2121,6 +2207,45 @@ fn should_show_configure(engine_combo_index: isize) -> bool {
     engine_combo_index > 0
 }
 
+fn first_provider_directories(
+    entries: impl IntoIterator<Item = (String, PathBuf)>,
+) -> HashMap<String, PathBuf> {
+    let mut directories = HashMap::new();
+    for (name, directory) in entries {
+        directories.entry(name).or_insert(directory);
+    }
+    directories
+}
+
+fn windows_hotkey_value(
+    config: &crate::config::Config,
+    action: crate::config::HotkeyAction,
+) -> &str {
+    use crate::config::HotkeyAction::*;
+    match action {
+        Back => "Escape",
+        Trigger => &config.trigger.trigger_key,
+        AnkiAdd => &config.anki.add_key,
+        StaticRegion => &config.anki.static_region_key,
+        Screenshot => &config.actions.screenshot.hotkey,
+        OcrClipboard => config
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .and_then(|action| action.hotkey.as_deref())
+            .unwrap_or(""),
+    }
+}
+
+unsafe fn selected_tab(hwnd: HWND) -> Option<u32> {
+    // SAFETY: `ID_TAB` names the live tab control when the window is built.
+    unsafe {
+        dlg_item(hwnd, ID_TAB)
+            .ok()
+            .and_then(|tab| u32::try_from(SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0).ok())
+    }
+}
+
 /// Updates OCR language availability and configuration button display.
 unsafe fn update_engine_controls(hwnd: HWND) {
     // SAFETY: Each identifier names a valid descendant of `hwnd` created
@@ -2134,11 +2259,8 @@ unsafe fn update_engine_controls(hwnd: HWND) {
             let _ = EnableWindow(lang, idx <= 0);
         }
         if let Ok(cfg_btn) = dlg_item(hwnd, ID_ENGINE_CONFIGURE) {
-            let mut on_ocr_tab = false;
-            if let Ok(tab) = dlg_item(hwnd, ID_TAB) {
-                on_ocr_tab = SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0 == 2;
-            }
-            let cmd = if on_ocr_tab && should_show_configure(idx) {
+            let on_owner_tab = selected_tab(hwnd) == conditional_tabs(hwnd).engine;
+            let cmd = if on_owner_tab && should_show_configure(idx) {
                 SW_SHOW
             } else {
                 SW_HIDE
@@ -2148,7 +2270,7 @@ unsafe fn update_engine_controls(hwnd: HWND) {
     }
 }
 
-/// Shows or hides controls for static capture mode.
+/// Updates static controls.
 unsafe fn update_static_controls(hwnd: HWND) {
     // SAFETY: Each identifier names a valid descendant of `hwnd`
     // created in `build`.
@@ -2156,18 +2278,25 @@ unsafe fn update_static_controls(hwnd: HWND) {
         let is_static = dlg_item(hwnd, ID_SENTENCE_MODE)
             .map(|c| SendMessageW(c, CB_GETCURSEL, None, None).0)
             .is_ok_and(|i| sentence_mode_at(i) == SentenceMode::Static);
-        let cmd = if is_static { SW_SHOW } else { SW_HIDE };
-        if let Ok(c) = dlg_item(hwnd, ID_STATIC_REGION_LABEL) {
-            let _ = ShowWindow(c, cmd);
+        let selected = selected_tab(hwnd);
+        let tabs = conditional_tabs(hwnd);
+        let key_visible = selected == tabs.static_key;
+        let key_cmd = if key_visible { SW_SHOW } else { SW_HIDE };
+        for id in [
+            ID_STATIC_REGION_LABEL,
+            ID_STATIC_REGION_KEY,
+            ID_STATIC_REGION_KEY_CLEAR,
+        ] {
+            if let Ok(c) = dlg_item(hwnd, id) {
+                let _ = ShowWindow(c, key_cmd);
+            }
         }
-        if let Ok(c) = dlg_item(hwnd, ID_STATIC_REGION_KEY) {
-            let _ = ShowWindow(c, cmd);
-        }
-        if let Ok(c) = dlg_item(hwnd, ID_SHOW_STATIC_OVERLAY) {
-            let _ = ShowWindow(c, cmd);
-        }
-        if let Ok(c) = dlg_item(hwnd, ID_STATIC_CAPTURE_HINT) {
-            let _ = ShowWindow(c, cmd);
+        let overlay_visible = is_static && selected == tabs.static_overlay;
+        let overlay_cmd = if overlay_visible { SW_SHOW } else { SW_HIDE };
+        for id in [ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
+            if let Ok(c) = dlg_item(hwnd, id) {
+                let _ = ShowWindow(c, overlay_cmd);
+            }
         }
     }
 }
@@ -2484,6 +2613,7 @@ fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
 }
 
 /// Calculates group box height for a specified number of rows.
+#[cfg(test)]
 fn plugins_group_h(n: usize) -> i32 {
     let body = if n == 0 {
         40
@@ -2495,12 +2625,8 @@ fn plugins_group_h(n: usize) -> i32 {
 }
 
 /// Returns the toggle glyph for a collapsed or expanded state.
-fn field_map_toggle_label(collapsed: bool) -> &'static str {
-    if collapsed {
-        "Field mapping \u{25B6}"
-    } else {
-        "Field mapping \u{25BC}"
-    }
+fn field_map_toggle_label(label: &str, collapsed: bool) -> String {
+    format!("{label} {}", if collapsed { '\u{25B6}' } else { '\u{25BC}' })
 }
 
 /// Escapes ampersands for Windows control label display.
@@ -2556,7 +2682,10 @@ fn resolved_captured_key(
     cell.with(|c| c.get())
         .and_then(|(h, vk)| (h == hwnd.0 as isize).then_some(vk))
         .or_else(|| crate::config::parse_trigger_key(template))
-        .map_or_else(|| template.to_string(), stored_trigger_key)
+        .map_or_else(
+            || template.to_string(),
+            |vk| if vk == 0 { String::new() } else { stored_trigger_key(vk) },
+        )
 }
 
 /// Returns the hotkey string representation to persist.
@@ -2600,6 +2729,40 @@ fn stored_trigger_key(vk: u16) -> String {
         _ => format!("0x{vk:02X}"),
     }
 }
+
+fn measured_text_height(hwnd: HWND, font: Option<HFONT>, text: &str, width: i32) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    // SAFETY: The DC belongs to `hwnd`. The selected font remains live.
+    unsafe {
+        let hdc = GetDC(Some(hwnd));
+        if hdc.is_invalid() {
+            return ROW_H;
+        }
+        let old = font.map(|value| SelectObject(hdc, value.into()));
+        let mut buffer = wide(text);
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: dpi_scale(hwnd, width),
+            bottom: 0,
+        };
+        let height = DrawTextW(
+            hdc,
+            &mut buffer,
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK,
+        );
+        if let Some(old) = old {
+            let _ = SelectObject(hdc, old);
+        }
+        let _ = ReleaseDC(Some(hwnd), hdc);
+        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+        ((height.max(1) * 96 + dpi - 1) / dpi).max(ROW_H)
+    }
+}
+
 pub struct SettingsWindow {
     hwnd: HWND,
     /// Viewport window that clips the content pane.
@@ -2622,16 +2785,7 @@ pub struct SettingsWindow {
     engine_dirs: HashMap<String, PathBuf>,
     /// Stores changes that require an Apply update.
     staged: RefCell<SettingsForm>,
-    /// Control handles for the General tab only.
-    general_ctrls: Vec<HWND>,
-    /// Control handles for the Dictionaries tab.
-    dict_ctrls: Vec<HWND>,
-    /// Control handles for the OCR and Debug tab.
-    ocr_ctrls: Vec<HWND>,
-    /// Control handles for the Anki tab only.
-    anki_ctrls: Vec<HWND>,
-    /// Control handles for the Plugins tab only.
-    plugin_ctrls: Vec<HWND>,
+    tabs: Vec<TabRuntime>,
     /// Plugin names in checkbox order.
     plugin_names: Vec<String>,
     /// Map from Anki field name to combo box handle.
@@ -2641,10 +2795,6 @@ pub struct SettingsWindow {
     pending_field_map: RefCell<Option<PendingFieldMap>>,
     /// True when the field-map section is collapsed.
     field_map_collapsed: Cell<bool>,
-    /// Vertical coordinate where static Anki rows end.
-    anki_static_bottom: i32,
-    /// Height of each tab page in 96-DPI pixels.
-    tab_heights: [i32; 5],
     /// Maximum bottom vertical coordinate among all tabs.
     bottom_y0: i32,
     /// Index of the active tab.
@@ -2664,6 +2814,17 @@ impl SettingsWindow {
     ///
     /// `mode` sets the Apply button label and action.
     pub fn open(form: &SettingsForm, stale: &[String], mode: ApplyMode) -> Result<SettingsWindow> {
+        let layout = SettingsLayout::embedded()?;
+        Self::open_with_layout(form, stale, mode, layout)
+    }
+
+    pub(super) fn open_with_layout(
+        form: &SettingsForm,
+        stale: &[String],
+        mode: ApplyMode,
+        layout: SettingsLayout,
+    ) -> Result<SettingsWindow> {
+        layout.validate()?;
         // SAFETY: Window creation FFI calls below use handles owned by this
         // function. Early returns from `?` do not leak resources.
         unsafe {
@@ -2706,18 +2867,12 @@ impl SettingsWindow {
                 engine_names: Vec::new(),
                 engine_dirs: HashMap::new(),
                 staged: RefCell::new(form.clone()),
-                general_ctrls: Vec::new(),
-                dict_ctrls: Vec::new(),
-                ocr_ctrls: Vec::new(),
-                anki_ctrls: Vec::new(),
-                plugin_ctrls: Vec::new(),
+                tabs: Vec::new(),
                 plugin_names: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
                 field_map_extra: RefCell::new(Vec::new()),
                 pending_field_map: RefCell::new(None),
                 field_map_collapsed: Cell::new(true),
-                anki_static_bottom: 0,
-                tab_heights: [0; 5],
                 bottom_y0: 0,
                 current_tab: Cell::new(0),
                 apply_mode: mode,
@@ -2726,7 +2881,7 @@ impl SettingsWindow {
             // `build` reports final layout height. The window sizes to
             // match content dimensions. Window frame borders and title bar
             // are accounted for so buttons remain visible across display DPIs.
-            let content_h = win.build(form, stale)?;
+            let content_h = win.build(form, stale, &layout)?;
             // Populates both sides from a single vector.
             if let Some(tag) = win.selected_language() {
                 win.staged.borrow_mut().dict_list_language = tag;
@@ -2734,8 +2889,9 @@ impl SettingsWindow {
             // Adjusts size and shows the window. Refer to `fit_to` for why
             // `ShowWindow` is not used here.
             win.fit_to(WIN_W, content_h + PAD);
-            // Displays the General tab at top scroll offset.
             win.reset_scroll();
+            TAB.with(|cell| cell.set(Some((hwnd.0 as isize, 0))));
+            win.wake();
             let _ = SetForegroundWindow(hwnd);
             Ok(win)
         }
@@ -2837,6 +2993,12 @@ impl SettingsWindow {
     /// Calls the callback before it opens a file picker.
     pub fn pump(&self, before_blocking: impl FnOnce()) {
         self.pump_field_map();
+        if self.take_condition_change() {
+            self.reflow_all_tabs();
+            // SAFETY: Conditional controls remain live descendants.
+            unsafe { update_static_controls(self.hwnd) };
+            self.ensure_room_for(self.layout_bottom());
+        }
         if self.take_language_change() {
             self.rescope_dicts();
         }
@@ -3143,15 +3305,266 @@ impl SettingsWindow {
         })
     }
 
+    pub fn tab_count(&self) -> u32 {
+        u32::try_from(self.tabs.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn tab_label(&self, index: u32) -> Option<&str> {
+        self.tabs.get(index as usize).map(|tab| tab.label.as_str())
+    }
+
+    pub(super) fn tab_id(&self, index: u32) -> Option<TabId> {
+        self.tabs.get(index as usize).map(|tab| tab.id)
+    }
+
+    pub fn field_map_tab(&self) -> Option<u32> {
+        self.entry_tab(SettingId::AnkiFieldMap)
+    }
+
+    pub fn tab_needs_anki_detection(&self, index: u32) -> bool {
+        self.tabs.get(index as usize).is_some_and(|tab| {
+            [
+                SettingId::AnkiDeck,
+                SettingId::AnkiModel,
+                SettingId::AnkiRefresh,
+                SettingId::AnkiFieldMap,
+            ]
+            .iter()
+            .any(|&id| tab.sections.iter().any(|section| {
+                section.entries.iter().any(|entry| entry.id == id)
+            }))
+        })
+    }
+
+    fn entry_tab(&self, id: SettingId) -> Option<u32> {
+        self.tabs.iter().enumerate().find_map(|(tab_index, tab)| {
+            tab.sections
+                .iter()
+                .any(|section| section.entries.iter().any(|entry| entry.id == id))
+                .then_some(tab_index as u32)
+        })
+    }
+
+    #[cfg(test)]
+    fn entry_top(&self, id: SettingId) -> Option<i32> {
+        self.tabs.iter().find_map(|tab| {
+            tab.sections.iter().find_map(|section| {
+                section
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.top.get())
+            })
+        })
+    }
+
+    fn entry_label(&self, id: SettingId) -> Option<&str> {
+        self.tabs.iter().find_map(|tab| {
+            tab.sections.iter().find_map(|section| {
+                section
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.label.as_str())
+            })
+        })
+    }
+
+    fn sentence_is_static(&self) -> bool {
+        // SAFETY: The sentence combo remains live until `Drop`.
+        unsafe {
+            dlg_item(self.hwnd, ID_SENTENCE_MODE)
+                .map(|control| SendMessageW(control, CB_GETCURSEL, None, None).0)
+                .is_ok_and(|index| sentence_mode_at(index) == SentenceMode::Static)
+        }
+    }
+
+    pub fn validate_hotkeys(&self, pending: &crate::config::Config) -> Result<()> {
+        let error = match pending.validate_hotkeys(crate::config::Platform::Windows) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if let Some(&(first, second)) = pending
+            .hotkey_conflicts(crate::config::Platform::Windows)
+            .first()
+        {
+            let conflict = format!("{} conflicts with {}", second.name(), first.name());
+            if error.to_string().starts_with(&conflict) {
+                anyhow::bail!(
+                    "{} ({}) conflicts with {} ({}). Choose different keys.",
+                    second.name(),
+                    windows_hotkey_value(pending, second),
+                    first.name(),
+                    windows_hotkey_value(pending, first),
+                );
+            }
+        }
+        Err(error)
+    }
+
+    fn field_map_entry_height(&self, base_height: i32) -> i32 {
+        let count = self.pending_field_map.borrow().as_ref().map_or_else(
+            || self.field_map_rows.borrow().len(),
+            |pending| pending.fields.len(),
+        );
+        if count == 0 || self.field_map_collapsed.get() {
+            base_height
+        } else {
+            base_height + 20 + field_map_rows_needed(count) * ROW_H + 8
+        }
+    }
+
+    fn entry_height(&self, entry: &EntryRuntime) -> i32 {
+        match entry.id {
+            SettingId::AnkiFieldMap => self.field_map_entry_height(entry.base_height),
+            SettingId::AnkiStaticOverlay if !self.sentence_is_static() => 0,
+            _ => entry.base_height,
+        }
+    }
+
+    unsafe fn shift_control(&self, control: HWND, delta_y: i32) {
+        if delta_y == 0 {
+            return;
+        }
+        // SAFETY: `control` is a live child of `self.content`.
+        unsafe {
+            let mut rect = RECT::default();
+            if GetWindowRect(control, &mut rect).is_err() {
+                return;
+            }
+            let mut point = POINT { x: rect.left, y: rect.top };
+            if !ScreenToClient(self.content, &mut point).as_bool() {
+                return;
+            }
+            let _ = SetWindowPos(
+                control,
+                None,
+                point.x,
+                point.y + dpi_scale(self.hwnd, delta_y),
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    fn reflow_tab(&self, tab_index: u32) {
+        let Some(tab) = self.tabs.get(tab_index as usize) else { return };
+        let mut y = 0;
+        for section in &tab.sections {
+            let section_top = y;
+            let frame_delta = section_top - section.top.get();
+            // SAFETY: Runtime handles remain live descendants until `Drop`.
+            unsafe { self.shift_control(section.frame, frame_delta) };
+            section.top.set(section_top);
+            y += 20;
+            for entry in &section.entries {
+                let delta = y - entry.top.get();
+                // SAFETY: Runtime handles remain live descendants until `Drop`.
+                unsafe {
+                    for &control in &entry.controls {
+                        self.shift_control(control, delta);
+                    }
+                    if entry.id == SettingId::AnkiFieldMap {
+                        for &control in self.field_map_extra.borrow().iter() {
+                            self.shift_control(control, delta);
+                        }
+                        for &(_, control) in self.field_map_rows.borrow().iter() {
+                            self.shift_control(control, delta);
+                        }
+                    }
+                }
+                entry.top.set(y);
+                y += self.entry_height(entry);
+            }
+            let height = (y - section_top + 8).max(28);
+            section.height.set(height);
+            // SAFETY: The frame remains a live child until `Drop`.
+            unsafe {
+                let _ = SetWindowPos(
+                    section.frame,
+                    None,
+                    0,
+                    0,
+                    dpi_scale(self.hwnd, WIN_W - 2 * PAD),
+                    dpi_scale(self.hwnd, height),
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            y += GROUP_GAP;
+        }
+        tab.page_height.set(y);
+    }
+
+    fn reflow_all_tabs(&self) {
+        for index in 0..self.tab_count() {
+            self.reflow_tab(index);
+        }
+    }
+
+    fn reorder_tab_z_order(&self, tab_index: u32) {
+        let Some(tab) = self.tabs.get(tab_index as usize) else { return };
+        let mut handles = Vec::new();
+        for section in &tab.sections {
+            handles.push(section.frame);
+            for entry in &section.entries {
+                handles.extend(entry.controls.iter().copied());
+                if entry.id == SettingId::AnkiFieldMap {
+                    handles.extend(self.field_map_extra.borrow().iter().copied());
+                    handles.extend(
+                        self.field_map_rows
+                            .borrow()
+                            .iter()
+                            .map(|(_, control)| *control),
+                    );
+                }
+            }
+        }
+        // SAFETY: Every handle is a live child of the content pane.
+        unsafe {
+            let mut after = HWND_TOP;
+            for control in handles {
+                let _ = SetWindowPos(
+                    control,
+                    Some(after),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                after = control;
+            }
+        }
+    }
+
+    fn layout_bottom(&self) -> i32 {
+        CONTENT_Y
+            + self
+                .tabs
+                .iter()
+                .map(|tab| tab.page_height.get())
+                .max()
+                .unwrap_or(0)
+    }
+
+    fn take_condition_change(&self) -> bool {
+        CONDITION_CHANGED.with(|cell| match cell.get() {
+            Some(owner) if owner == self.hwnd.0 as isize => {
+                cell.set(None);
+                true
+            }
+            _ => false,
+        })
+    }
+
     /// Tab page height in page coordinates.
     ///
-    /// The Anki tab expands with field-map rows. The method measures
-    /// this height from the field-map rows.
+    /// Returns the page height.
     fn tab_page_h(&self, tab: u32) -> i32 {
-        if tab == 3 {
-            return self.field_map_bottom() - CONTENT_Y;
-        }
-        self.tab_heights.get(tab as usize).copied().unwrap_or(0)
+        self.tabs
+            .get(tab as usize)
+            .map_or(0, |runtime| runtime.page_height.get())
     }
 
     /// Recalculates scroll range for the active tab and scrolls to top.
@@ -3164,28 +3577,29 @@ impl SettingsWindow {
     pub fn switch_tab(&self, tab: u32) {
         // SAFETY: `self.hwnd` remains valid until `Drop`.
         unsafe { cancel_capture(self.hwnd) };
-        let groups = [
-            &self.general_ctrls,
-            &self.dict_ctrls,
-            &self.ocr_ctrls,
-            &self.anki_ctrls,
-            &self.plugin_ctrls,
-        ];
-        if tab as usize >= groups.len() {
+        if tab as usize >= self.tabs.len() {
             return;
         }
         self.current_tab.set(tab);
-        // SAFETY: Every window handle in every group was created in
-        // `build` as a descendant of `self.hwnd` and persists until destruction.
+        // SAFETY: Runtime handles remain live descendants until `Drop`.
         unsafe {
-            for (i, ctrls) in groups.iter().enumerate() {
+            if let Ok(control) = dlg_item(self.hwnd, ID_TAB) {
+                SendMessageW(control, TCM_SETCURSEL_MSG, Some(WPARAM(tab as usize)), None);
+            }
+            for (i, runtime) in self.tabs.iter().enumerate() {
                 let cmd = if i as u32 == tab { SW_SHOW } else { SW_HIDE };
-                for &c in *ctrls {
-                    let _ = ShowWindow(c, cmd);
+                for section in &runtime.sections {
+                    let _ = ShowWindow(section.frame, cmd);
+                    for entry in &section.entries {
+                        for &control in &entry.controls {
+                            let _ = ShowWindow(control, cmd);
+                        }
+                    }
                 }
             }
             self.apply_field_map_visibility();
             update_engine_controls(self.hwnd);
+            update_static_controls(self.hwnd);
         }
         self.reset_scroll();
     }
@@ -3199,18 +3613,26 @@ impl SettingsWindow {
         unsafe {
             self.apply_field_map_visibility();
             if let Ok(btn) = dlg_item(self.hwnd, ID_FIELD_MAP_TOGGLE) {
-                let text = field_map_toggle_label(collapsed);
-                let _ = SetWindowTextW(btn, PCWSTR(wide(text).as_ptr()));
+                let label = self.entry_label(SettingId::AnkiFieldMap).unwrap_or("Field mapping");
+                let text = field_map_toggle_label(label, collapsed);
+                let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
             }
         }
-        self.ensure_room_for(self.field_map_bottom());
+        if let Some(tab) = self.field_map_tab() {
+            self.reflow_tab(tab);
+            self.reorder_tab_z_order(tab);
+        }
+        self.ensure_room_for(self.layout_bottom());
     }
 
     /// Records captured key code `vk`. Returns true if accepted.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
         let screenshot = CAPTURING.with(|c| c.get())
             == Some((self.hwnd.0 as isize, ID_SCREENSHOT_HOTKEY));
-        if screenshot && vk == 0x1B {
+        let capturing = CAPTURING.with(|c| {
+            c.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize)
+        });
+        if capturing && vk == 0x1B {
             // SAFETY: Capture belongs to this live settings window.
             unsafe { cancel_capture(self.hwnd); }
             return true;
@@ -3260,12 +3682,20 @@ impl SettingsWindow {
     /// fields have no row. `merged_field_map` keeps those mappings during save.
     /// Set a field row to `"(none)"` to remove its mapping.
     fn populate_field_map(&self, fields: Vec<String>) {
-        let needs_rebuild = {
+        let (needs_rebuild, cancelled_pending) = {
             let rows = self.field_map_rows.borrow();
             let mut pending = self.pending_field_map.borrow_mut();
-            begin_field_map_result(&fields, &rows, &mut pending)
+            let cancelled_pending = pending.is_some();
+            (begin_field_map_result(&fields, &rows, &mut pending), cancelled_pending)
         };
         if !needs_rebuild {
+            if cancelled_pending {
+                self.repack_field_map();
+                if let Some(tab) = self.field_map_tab() {
+                    self.reflow_tab(tab);
+                }
+                self.ensure_room_for(self.layout_bottom());
+            }
             return;
         }
         // SAFETY: Every window handle in `field_map_extra` and `field_map_rows`
@@ -3285,6 +3715,38 @@ impl SettingsWindow {
         }
         *self.pending_field_map.borrow_mut() = Some(PendingFieldMap::new(fields, existing));
         self.pump_field_map();
+    }
+
+    fn repack_field_map(&self) {
+        let rows = self.field_map_rows.borrow();
+        let extra = self.field_map_extra.borrow();
+        let label_start = usize::from(extra.len() == rows.len() + 1);
+        let rows_n = field_map_rows_needed(rows.len());
+        let y0 = self.field_map_dynamic_top();
+        // SAFETY: The vectors own live controls. Each row has one extra label,
+        // preceded by the optional group frame. Moving preserves values and focus.
+        unsafe {
+            if label_start == 1 {
+                let height = if rows.is_empty() { 0 } else { 20 + rows_n * ROW_H + 8 };
+                let _ = SetWindowPos(extra[0], None, 0, 0,
+                    dpi_scale(self.hwnd, WIN_W - 2 * PAD), dpi_scale(self.hwnd, height),
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            for (index, (_, combo)) in rows.iter().enumerate() {
+                let Ok(index_i32) = i32::try_from(index) else { break };
+                let x = PAD + index_i32 / rows_n * (COL_W + COL_GAP);
+                let y = y0 + 20 + index_i32 % rows_n * ROW_H;
+                if let Some(&label) = extra.get(index + label_start) {
+                    let _ = SetWindowPos(label, None,
+                        dpi_scale(self.hwnd, x), dpi_scale(self.hwnd, y + 4), 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                let _ = SetWindowPos(*combo, None,
+                    dpi_scale(self.hwnd, x + COL_LABEL_W + COL_LABEL_GAP),
+                    dpi_scale(self.hwnd, y), 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
     }
 
     fn pump_field_map(&self) {
@@ -3313,7 +3775,11 @@ impl SettingsWindow {
         };
         // SAFETY: Each window handle was created as a valid descendant of `self.hwnd`.
         unsafe { self.apply_field_map_visibility() };
-        self.ensure_room_for(self.field_map_bottom());
+        if let Some(tab) = self.field_map_tab() {
+            self.reflow_tab(tab);
+            self.reorder_tab_z_order(tab);
+        }
+        self.ensure_room_for(self.layout_bottom());
         if has_more {
             self.wake();
         }
@@ -3327,7 +3793,8 @@ impl SettingsWindow {
     }
     /// Shows or hides field-map rows based on collapse state.
     unsafe fn apply_field_map_visibility(&self) {
-        let visible = self.current_tab.get() == 3 && !self.field_map_collapsed.get();
+        let visible = self.field_map_tab() == Some(self.current_tab.get())
+            && !self.field_map_collapsed.get();
         let cmd = if visible { SW_SHOW } else { SW_HIDE };
         // SAFETY: Each window handle here is a valid descendant of `self.hwnd`
         // created in `build_field_map_rows`.
@@ -3341,20 +3808,13 @@ impl SettingsWindow {
         }
     }
 
-    /// Calculates bottom vertical coordinate of the field-map area.
-    ///
-    /// Expressed in window coordinates that match `bottom_y0`.
-    fn field_map_bottom(&self) -> i32 {
-        let n = self.pending_field_map.borrow().as_ref().map_or_else(
-            || self.field_map_rows.borrow().len(),
-            |pending| pending.fields.len(),
-        );
-        let page = if n == 0 || self.field_map_collapsed.get() {
-            self.anki_static_bottom
-        } else {
-            self.anki_static_bottom + 20 + field_map_rows_needed(n) * ROW_H + 8
-        };
-        CONTENT_Y + page
+    fn field_map_dynamic_top(&self) -> i32 {
+        self.tabs
+            .iter()
+            .flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.entries)
+            .find(|entry| entry.id == SettingId::AnkiFieldMap)
+            .map_or(0, |entry| entry.top.get() + entry.base_height)
     }
 
     /// Places the viewport immediately below the tab strip in z-order.
@@ -3385,7 +3845,7 @@ impl SettingsWindow {
     fn build_field_map_box(&self, field_count: usize) -> Option<HWND> {
         let f = self.font;
         let page = self.content;
-        let y0 = self.anki_static_bottom;
+        let y0 = self.field_map_dynamic_top();
         let rows_n = field_map_rows_needed(field_count);
         let map_h = 20 + rows_n * ROW_H + 8;
         // SAFETY: `h` is `self.hwnd` and `page` is its content pane.
@@ -3418,7 +3878,7 @@ impl SettingsWindow {
         let f = self.font;
         let h = self.hwnd;
         let page = self.content;
-        let y0 = self.anki_static_bottom;
+        let y0 = self.field_map_dynamic_top();
         let rows_n = field_map_rows_needed(total);
         let idx_i32 = i32::try_from(idx).ok()?;
         let col = idx_i32 / rows_n;
@@ -3640,92 +4100,772 @@ impl SettingsWindow {
         }
     }
 
-    /// Creates all window controls and returns the final vertical coordinate.
-    unsafe fn build(&mut self, form: &SettingsForm, stale: &[String]) -> Result<i32> {
+    unsafe fn build_entry(
+        &mut self,
+        spec: &EntrySpec,
+        form: &SettingsForm,
+        stale: &[String],
+        plugin_names: &mut Vec<String>,
+        plugin_dirs: &mut Vec<PathBuf>,
+        top: i32,
+    ) -> Result<BuiltEntry> {
+        // SAFETY: Every FFI call uses the live settings window and content pane.
+        unsafe {
+            let h = self.hwnd;
+            let page = self.content;
+            let f = self.font;
+            let mut controls = Vec::new();
+            let mut y = top;
+            let mut help_rendered = false;
+
+        macro_rules! labelled_row {
+            ($class:expr, $text:expr, $style:expr, $id:expr, $height:expr) => {{
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(
+                    page,
+                    w!("STATIC"),
+                    &spec.label,
+                    WINDOW_STYLE(0),
+                    PAD,
+                    y + 4,
+                    LABEL_W,
+                    label_h,
+                    0,
+                    f,
+                )?);
+                let control = child(
+                    page,
+                    $class,
+                    $text,
+                    $style,
+                    FIELD_X,
+                    y,
+                    FIELD_W,
+                    $height,
+                    $id,
+                    f,
+                )?;
+                controls.push(control);
+                y += label_h.max(ROW_H) + ROW_GAP;
+                control
+            }};
+        }
+
+        macro_rules! checkbox {
+            ($id:expr, $checked:expr) => {{
+                let control = child(
+                    page,
+                    w!("BUTTON"),
+                    &spec.label,
+                    WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                    PAD,
+                    y,
+                    WIN_W - 2 * PAD - 20,
+                    ROW_H,
+                    $id,
+                    f,
+                )?;
+                SendMessageW(
+                    control,
+                    BM_SETCHECK,
+                    Some(WPARAM(if $checked { 1 } else { 0 })),
+                    None,
+                );
+                controls.push(control);
+                y += ROW_H + ROW_GAP;
+                control
+            }};
+        }
+
+        macro_rules! help {
+            () => {{
+                help_rendered = true;
+                if let Some(text) = spec.help.as_deref() {
+                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(
+                        page,
+                        w!("STATIC"),
+                        text,
+                        WINDOW_STYLE(0),
+                        PAD,
+                        y,
+                        WIN_W - 2 * PAD - 20,
+                        height,
+                        0,
+                        f,
+                    )?);
+                    y += height + ROW_GAP;
+                }
+            }};
+        }
+
+        match spec.id {
+            SettingId::ClosePopup => {
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, 0, f)?);
+                controls.push(child(page, w!("STATIC"), "Escape", WINDOW_STYLE(0), FIELD_X,
+                    y + 4, FIELD_W, ROW_H, 0, f)?);
+                y += label_h.max(ROW_H) + ROW_GAP;
+                help!();
+            }
+            SettingId::LookupMode => {
+                let label_h = measured_text_height(h, f, &spec.label, WIN_W - 2 * PAD - 20);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, WIN_W - 2 * PAD - 20, label_h, 0, f)?);
+                y += label_h;
+                let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
+                let is_toggle = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Toggle);
+                let is_press = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Press);
+                let is_hold = !is_live && !is_toggle && !is_press;
+                for (index, (text, id, checked)) in [
+                    ("Live", ID_MODE_LIVE, is_live),
+                    ("Hold key", ID_MODE_HOLD, is_hold),
+                    ("Toggle", ID_MODE_TOGGLE, is_toggle),
+                    ("Press key", ID_MODE_PRESS, is_press),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let style = WINDOW_STYLE(BS_AUTORADIOBUTTON as u32)
+                        | if index == 0 { WS_GROUP | WS_TABSTOP } else { WINDOW_STYLE(0) };
+                    let control = child(page, w!("BUTTON"), text, style,
+                        PAD + index as i32 * 130, y, 120, ROW_H, id, f)?;
+                    SendMessageW(control, BM_SETCHECK,
+                        Some(WPARAM(if checked { 1 } else { 0 })), None);
+                    controls.push(control);
+                }
+                y += ROW_H + ROW_GAP;
+            }
+            SettingId::LookupKey => {
+                let key_vk = crate::config::parse_trigger_key(&form.cfg.trigger.trigger_key)
+                    .unwrap_or(0x10);
+                CAPTURED_VK.with(|cell| cell.set(Some((h.0 as isize, key_vk))));
+                let key_name = crate::config::trigger_key_name(key_vk);
+                let button = labelled_row!(w!("BUTTON"), &key_name, WS_TABSTOP,
+                    ID_TRIGGER_KEY, ROW_H);
+                let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
+                let _ = EnableWindow(button, !is_live);
+            }
+            SettingId::AnkiAddKey => {
+                let parsed = crate::config::parse_trigger_key(&form.cfg.anki.add_key);
+                ANKI_CAPTURED_VK.with(|cell| {
+                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
+                });
+                let name = parsed.map(crate::config::trigger_key_name)
+                    .unwrap_or_else(|| "Not set".to_string());
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, 0, f)?);
+                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
+                    FIELD_W - 80, ROW_H, ID_ANKI_ADD_KEY, f)?);
+                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
+                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_ANKI_ADD_KEY_CLEAR, f)?);
+                y += label_h.max(ROW_H) + ROW_GAP;
+            }
+            SettingId::StaticRegionKey => {
+                let parsed = crate::config::parse_trigger_key(&form.cfg.anki.static_region_key);
+                SR_CAPTURED_VK.with(|cell| {
+                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
+                });
+                let name = parsed.map(crate::config::trigger_key_name)
+                    .unwrap_or_else(|| "Not set".to_string());
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, ID_STATIC_REGION_LABEL, f)?);
+                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
+                    FIELD_W - 80, ROW_H, ID_STATIC_REGION_KEY, f)?);
+                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
+                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_STATIC_REGION_KEY_CLEAR, f)?);
+                y += label_h.max(ROW_H) + ROW_GAP;
+            }
+            SettingId::ScreenshotKey => {
+                SCREENSHOT_CAPTURED_VK.with(|cell| cell.set(None));
+                let name = crate::config::parse_trigger_key(&form.cfg.actions.screenshot.hotkey)
+                    .map(crate::config::trigger_key_name)
+                    .unwrap_or_else(|| {
+                        if form.cfg.actions.screenshot.hotkey.is_empty() {
+                            "Not set".to_string()
+                        } else {
+                            form.cfg.actions.screenshot.hotkey.clone()
+                        }
+                    });
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, 0, f)?);
+                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
+                    FIELD_W - 80, ROW_H, ID_SCREENSHOT_HOTKEY, f)?);
+                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
+                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_SCREENSHOT_KEY_CLEAR, f)?);
+                y += label_h.max(ROW_H) + ROW_GAP;
+                help!();
+            }
+            SettingId::OcrClipboardKey => {
+                let parsed = crate::config::parse_trigger_key(
+                    form.ocr_clipboard_key.as_deref().unwrap_or(""),
+                );
+                OCR_CLIP_CAPTURED_VK.with(|cell| {
+                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
+                });
+                let name = parsed.map(crate::config::trigger_key_name)
+                    .unwrap_or_else(|| "Not set".to_string());
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, 0, f)?);
+                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
+                    FIELD_W - 80, ROW_H, ID_OCR_CLIPBOARD_KEY, f)?);
+                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
+                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_OCR_CLIPBOARD_KEY_CLEAR, f)?);
+                y += label_h.max(ROW_H) + ROW_GAP;
+            }
+            SettingId::PopupTheme => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_THEME, 220);
+                for (index, name) in ["dark", "light"].into_iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                    if form.cfg.popup.theme == name {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+                if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+                }
+            }
+            SettingId::PopupFont => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_FONT, 260);
+                let mut families = japanese_font_families();
+                if !families.iter().any(|name| name == &form.cfg.popup.font) {
+                    families.push(form.cfg.popup.font.clone());
+                    families.sort();
+                }
+                for (index, name) in families.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                    if name == &form.cfg.popup.font {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+                self.fonts = families;
+            }
+            SettingId::PopupCustomStyle => {
+                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
+                    WIN_W - 2 * PAD - 20, ROW_H, ID_CSS_EDITOR, f)?);
+                y += ROW_H + ROW_GAP;
+            }
+            SettingId::PopupMaxWidth => {
+                self.widths = numeric_choices(MAX_WIDTH_RANGE.0 as i64,
+                    MAX_WIDTH_RANGE.1 as i64, 5, form.cfg.popup.max_width_percent as i64);
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_MAX_WIDTH, 220);
+                fill_numeric(combo, &self.widths, form.cfg.popup.max_width_percent as i64);
+                help!();
+            }
+            SettingId::PopupMaxHeight => {
+                self.heights = numeric_choices(MAX_HEIGHT_RANGE.0 as i64,
+                    MAX_HEIGHT_RANGE.1 as i64, 5, form.cfg.popup.max_height_percent as i64);
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_MAX_HEIGHT, 220);
+                fill_numeric(combo, &self.heights, form.cfg.popup.max_height_percent as i64);
+                help!();
+            }
+            SettingId::PopupSummaryLength => {
+                self.summaries = numeric_choices(SUMMARY_RANGE.0 as i64,
+                    SUMMARY_RANGE.1 as i64, 10, form.cfg.popup.summary_chars as i64);
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_SUMMARY, 220);
+                fill_numeric(combo, &self.summaries, form.cfg.popup.summary_chars as i64);
+                help!();
+            }
+            SettingId::PopupHighlight => { checkbox!(ID_HIGHLIGHT, form.cfg.popup.highlight_match); }
+            SettingId::PopupScroll => { checkbox!(ID_SCROLL, form.cfg.popup.scroll_popup); }
+            SettingId::PopupEdgeAutoscroll => {
+                checkbox!(ID_EDGE_AUTOSCROLL, form.cfg.popup.edge_autoscroll);
+            }
+            SettingId::PopupSidePanel => { checkbox!(ID_SIDE_PANEL, form.cfg.popup.side_panel); }
+            SettingId::PopupCaptureExclusion => {
+                checkbox!(ID_EXCLUDE, form.cfg.popup.exclude_from_capture);
+            }
+            SettingId::PopupLayout => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_LAYOUT_MODE, 220);
+                for (index, (mode, text)) in LAYOUT_MODES.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(text).as_ptr() as isize)));
+                    if form.cfg.popup.layout_mode == *mode {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+                if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+                }
+            }
+            SettingId::PopupDictionaryStyling => {
+                checkbox!(ID_DICT_STYLING, form.cfg.popup.dictionary_styling);
+            }
+            SettingId::PopupExamples => { checkbox!(ID_SHOW_EXAMPLES, form.cfg.popup.show_examples); }
+            SettingId::PopupAttributions => {
+                checkbox!(ID_SHOW_ATTRIBUTIONS, form.cfg.popup.show_attributions);
+            }
+            SettingId::PopupImages => { checkbox!(ID_SHOW_IMAGES, form.cfg.popup.show_images); }
+            SettingId::PopupPartOfSpeech => {
+                checkbox!(ID_SHOW_POS, form.cfg.popup.show_part_of_speech);
+            }
+            SettingId::DictionaryTerms
+            | SettingId::DictionaryFrequency
+            | SettingId::DictionaryPitch => {
+                let role = match spec.id {
+                    SettingId::DictionaryTerms => Role::Terms,
+                    SettingId::DictionaryFrequency => Role::Frequency,
+                    SettingId::DictionaryPitch => Role::Pitch,
+                    _ => unreachable!(),
+                };
+                let section = SECTIONS.iter().find(|section| section.role == role)
+                    .expect("dictionary role should exist");
+                let title_h = measured_text_height(h, f, &spec.label, WIN_W - 2 * PAD - 20);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y, WIN_W - 2 * PAD - 20, title_h, 0, f)?);
+                y += title_h;
+                help!();
+                let button_x = WIN_W - PAD - BTN_W - 8;
+                let list_w = button_x - 2 * PAD + 4;
+                if role == Role::Frequency {
+                    controls.push(child(page, w!("STATIC"), "Combine ranks by",
+                        WINDOW_STYLE(0), PAD, y + 4, 110, ROW_H, 0, f)?);
+                    let ranking = child(page, w!("COMBOBOX"), "",
+                        WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                        PAD + 114, y, list_w - 114, 120, ID_RANKING, f)?;
+                    controls.push(ranking);
+                    for (index, (strategy, text)) in RANKING_STRATEGIES.iter().enumerate() {
+                        SendMessageW(ranking, CB_ADDSTRING, None,
+                            Some(LPARAM(wide(text).as_ptr() as isize)));
+                        if *strategy == form.cfg.dictionaries.ranking_strategy {
+                            SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(index)), None);
+                        }
+                    }
+                    if SendMessageW(ranking, CB_GETCURSEL, None, None).0 < 0 {
+                        SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(0)), None);
+                    }
+                    y += ROW_H + ROW_GAP;
+                }
+                let list = make_role_list(page, y, list_w, section.list, f)?;
+                controls.push(list);
+                fill_role_list(list, form.list(role), 0);
+                for (row, (text, id)) in [
+                    ("Move up", section.up),
+                    ("Move down", section.down),
+                    ("Add\u{2026}", section.add),
+                    ("Remove", section.remove),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    controls.push(child(page, w!("BUTTON"), text, WS_TABSTOP, button_x,
+                        y + row as i32 * BTN_PITCH, BTN_W, ROW_H, id, f)?);
+                }
+                y += DICT_LIST_H + 8;
+                if spec.id == SettingId::DictionaryTerms
+                    && form.library_empty
+                    && !form.terms.is_empty()
+                {
+                    let text = "chibipop is using a dictionary built outside the app. Adding or \
+                        removing here rebuilds from this list only. Import the original ZIP files first.";
+                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, 0, f)?);
+                    y += height + ROW_GAP;
+                }
+                if spec.id == SettingId::DictionaryTerms && !stale.is_empty() {
+                    let text = format!(
+                        "\"{}\" names no installed dictionary. Its place is kept; remove the row if it is gone.",
+                        stale.join("\", \"")
+                    );
+                    let height = measured_text_height(h, f, &text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), &text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, 0, f)?);
+                    y += height + ROW_GAP;
+                }
+            }
+            SettingId::OcrEngine => {
+                let found = crate::plugin::discover::discover(&crate::paths::beside_exe("plugins"));
+                let mut names = vec!["builtin".to_string()];
+                names.extend(discovered_text_providers(&found));
+                if form.cfg.ocr.engine != "builtin" && !names.contains(&form.cfg.ocr.engine) {
+                    names.push(form.cfg.ocr.engine.clone());
+                }
+                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y + 4, LABEL_W, label_h, 0, f)?);
+                let combo = child(page, w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    FIELD_X, y, FIELD_W - BTN_W - 8, 220, ID_ENGINE, f)?;
+                controls.push(combo);
+                for name in &names {
+                    let shown = if name == "builtin" { "Built-in (Windows OCR)" } else { name };
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(shown).as_ptr() as isize)));
+                }
+                let index = names.iter().position(|name| name == &form.cfg.ocr.engine)
+                    .unwrap_or(0);
+                SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                self.engine_names = names;
+                self.engine_dirs = first_provider_directories(found.iter().filter_map(
+                    |(dir, parsed)| {
+                        let manifest = parsed.as_ref().ok()?;
+                        manifest.roles
+                            .contains(&crate::plugin::manifest::Role::TextProvider)
+                            .then(|| (manifest.name.clone(), dir.clone()))
+                    },
+                ));
+                let configure = child(page, w!("BUTTON"), "Configure\u{2026}", WS_TABSTOP,
+                    FIELD_X + FIELD_W - BTN_W, y, BTN_W, ROW_H, ID_ENGINE_CONFIGURE, f)?;
+                controls.push(configure);
+                let _ = ShowWindow(configure, SW_HIDE);
+                y += label_h.max(ROW_H) + ROW_GAP;
+            }
+            SettingId::OcrLanguage => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_OCR_LANG, 220);
+                let languages = language_choices(
+                    crate::text::ocr::installed_recognisers(),
+                    &form.cfg.ocr.language,
+                );
+                for (name, _) in &languages {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(name).as_ptr() as isize)));
+                }
+                if let Some(index) = language_index(&languages, &form.cfg.ocr.language) {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                }
+                self.ocr_langs = languages.into_iter().map(|(_, tag)| tag).collect();
+                let engine_index = dlg_item(h, ID_ENGINE)
+                    .map(|engine| SendMessageW(engine, CB_GETCURSEL, None, None).0)
+                    .unwrap_or(0);
+                let _ = EnableWindow(combo, engine_index <= 0);
+                help!();
+            }
+            SettingId::OcrPasses => {
+                self.passes = numeric_choices(PASSES_RANGE.0 as i64, PASSES_RANGE.1 as i64,
+                    1, form.cfg.ocr.max_ocr_passes as i64);
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_PASSES, 160);
+                fill_numeric(combo, &self.passes, form.cfg.ocr.max_ocr_passes as i64);
+                help!();
+            }
+            SettingId::OcrCaptureSize => {
+                let title_h = measured_text_height(h, f, &spec.label, WIN_W - 2 * PAD - 20);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
+                    y, WIN_W - 2 * PAD - 20, title_h, 0, f)?);
+                y += title_h;
+                for (label, id, value) in [
+                    ("Width (px)", ID_CAPTURE_W, form.cfg.ocr.capture_width),
+                    ("Height (px)", ID_CAPTURE_H, form.cfg.ocr.capture_height),
+                ] {
+                    controls.push(child(page, w!("STATIC"), label, WINDOW_STYLE(0), PAD,
+                        y + 4, LABEL_W, ROW_H, 0, f)?);
+                    controls.push(child(page, w!("EDIT"), &value.to_string(),
+                        WS_TABSTOP | WS_BORDER, FIELD_X, y, FIELD_W, ROW_H, id, f)?);
+                    y += ROW_H + ROW_GAP;
+                }
+                help!();
+            }
+            SettingId::OcrPreferVertical => {
+                checkbox!(ID_PREFER_VERT, form.cfg.ocr.prefer_vertical);
+            }
+            SettingId::OcrScanAlphanumeric => {
+                checkbox!(ID_SCAN_ALNUM, form.cfg.ocr.scan_alphanumeric);
+            }
+            SettingId::OcrDiscardFurigana => {
+                checkbox!(ID_DISCARD_FURIGANA, form.cfg.ocr.discard_furigana);
+            }
+            SettingId::OcrPerCharacter => {
+                let control = checkbox!(ID_PER_CHAR, form.cfg.trigger.per_character_lookup);
+                let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
+                let _ = EnableWindow(control, is_live);
+                help!();
+            }
+            SettingId::DebugCaptureOutline => {
+                checkbox!(ID_SHOW_SCAN, form.cfg.debug.show_scan_region);
+            }
+            SettingId::DebugEngine => {
+                checkbox!(ID_ENGINE_LOG, form.cfg.debug.show_engine_log);
+            }
+            SettingId::DebugAdapter => {
+                checkbox!(ID_ADAPTER_LOG, form.cfg.debug.show_adapter_log);
+            }
+            SettingId::AnkiEnabled => { checkbox!(ID_ANKI_ENABLED, form.cfg.anki.enabled); }
+            SettingId::AnkiNotifyOnAdd => {
+                checkbox!(ID_NOTIFY_ON_ADD, form.cfg.anki.notify_on_add);
+            }
+            SettingId::AnkiUrl => {
+                labelled_row!(w!("EDIT"), &form.cfg.anki.url, WS_TABSTOP | WS_BORDER,
+                    ID_ANKI_URL, ROW_H);
+            }
+            SettingId::AnkiDeck => {
+                let combo = labelled_row!(w!("COMBOBOX"), &form.cfg.anki.deck,
+                    WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_ANKI_DECK, 160);
+                SendMessageW(combo, WM_SETTEXT, None,
+                    Some(LPARAM(wide(&form.cfg.anki.deck).as_ptr() as isize)));
+            }
+            SettingId::AnkiModel => {
+                let combo = labelled_row!(w!("COMBOBOX"), &form.cfg.anki.model,
+                    WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_ANKI_MODEL, 160);
+                SendMessageW(combo, WM_SETTEXT, None,
+                    Some(LPARAM(wide(&form.cfg.anki.model).as_ptr() as isize)));
+            }
+            SettingId::AnkiRefresh => {
+                controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
+                    160, ROW_H, ID_ANKI_TEST, f)?);
+                if let Some(text) = spec.help.as_deref() {
+                    help_rendered = true;
+                    let width = WIN_W - PAD - (PAD + 168) - 20;
+                    let height = measured_text_height(h, f, text, width);
+                    controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD + 168,
+                        y + 2, width, height, 0, f)?);
+                    y += height.max(ROW_H) + ROW_GAP;
+                } else {
+                    help_rendered = true;
+                    y += ROW_H + ROW_GAP;
+                }
+            }
+            SettingId::AnkiIncludeScreenshot => {
+                checkbox!(ID_INCLUDE_SCREENSHOT, form.cfg.actions.screenshot.include_on_add);
+            }
+            SettingId::ScreenshotTargets => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_SCREENSHOT_MODE, 180);
+                for (index, mode) in ScreenshotMode::ALL.iter().enumerate() {
+                    let label = mode.to_string();
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(&label).as_ptr() as isize)));
+                    if *mode == form.cfg.actions.screenshot.capture_mode {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+                if SendMessageW(combo, CB_GETCURSEL, None, None).0 < 0 {
+                    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(0)), None);
+                }
+                help_rendered = true;
+                if let Some(text) = spec.help.as_deref() {
+                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, ID_SCREENSHOT_HINT, f)?);
+                    y += height + ROW_GAP;
+                }
+                let summary = screenshot_target_summary(form);
+                let summary_h = measured_text_height(h, f, &summary,
+                    WIN_W - 2 * PAD - BTN_W - 28);
+                controls.push(child(page, w!("STATIC"), &summary, WINDOW_STYLE(0), PAD, y,
+                    WIN_W - 2 * PAD - BTN_W - 28, summary_h, ID_SCREENSHOT_SUMMARY, f)?);
+                let reset = child(page, w!("BUTTON"), "Clear saved targets", WS_TABSTOP,
+                    WIN_W - PAD - BTN_W - 8, y, BTN_W, ROW_H, ID_SCREENSHOT_RESET, f)?;
+                let has_target = form.cfg.actions.screenshot.fixed_region.is_some()
+                    || form.cfg.actions.screenshot.fixed_window.is_some();
+                let _ = EnableWindow(reset, has_target);
+                controls.push(reset);
+                y += summary_h.max(ROW_H) + ROW_GAP;
+            }
+            SettingId::AnkiIncludeDictionaryName => {
+                checkbox!(ID_INCLUDE_DICTIONARY_NAME, form.cfg.anki.include_dictionary_name);
+            }
+            SettingId::AnkiFirstDictionaryOnly => {
+                checkbox!(ID_FIRST_DICT_ONLY, form.cfg.anki.first_dict_only);
+            }
+            SettingId::AnkiSelectionButtons => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_SELECTION_BUTTONS, 160);
+                for (index, (value, text)) in SELECTION_BUTTONS.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(text).as_ptr() as isize)));
+                    if *value == form.cfg.anki.selection_buttons {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+            }
+            SettingId::AnkiSelectionSeparator => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_SELECTION_SEPARATOR, 180);
+                for (index, (value, text)) in SELECTION_SEPARATORS.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(text).as_ptr() as isize)));
+                    if *value == form.cfg.anki.selection_separator {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+            }
+            SettingId::AnkiTripleClick => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_TRIPLE_CLICK, 180);
+                for (index, (value, text)) in TRIPLE_CLICKS.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(text).as_ptr() as isize)));
+                    if *value == form.cfg.anki.triple_click {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+            }
+            SettingId::AnkiSentenceMode => {
+                let combo = labelled_row!(w!("COMBOBOX"), "",
+                    WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                    ID_SENTENCE_MODE, 180);
+                for (index, (value, text)) in SENTENCE_MODES.iter().enumerate() {
+                    SendMessageW(combo, CB_ADDSTRING, None,
+                        Some(LPARAM(wide(text).as_ptr() as isize)));
+                    if *value == form.cfg.anki.sentence_mode {
+                        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+                    }
+                }
+            }
+            SettingId::AnkiStaticOverlay => {
+                checkbox!(ID_SHOW_STATIC_OVERLAY, form.cfg.anki.show_static_overlay);
+                help_rendered = true;
+                if let Some(text) = spec.help.as_deref() {
+                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, ID_STATIC_CAPTURE_HINT, f)?);
+                    y += height + ROW_GAP;
+                }
+            }
+            SettingId::AnkiFieldMap => {
+                let text = field_map_toggle_label(&spec.label, self.field_map_collapsed.get());
+                controls.push(child(page, w!("BUTTON"), &text, WS_TABSTOP, PAD, y,
+                    200, ROW_H, ID_FIELD_MAP_TOGGLE, f)?);
+                y += ROW_H + ROW_GAP;
+                help!();
+            }
+            SettingId::PluginList => {
+                let root = crate::paths::beside_exe("plugins");
+                let found = crate::plugin::discover::discover(&root);
+                let title_h = measured_text_height(h, f, &spec.label, WIN_W - 2 * PAD - 20);
+                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD, y,
+                    WIN_W - 2 * PAD - 20, title_h, 0, f)?);
+                y += title_h + ROW_GAP;
+                let enabled = form.cfg.plugins.enabled.clone();
+                let button_x = WIN_W - PAD - BTN_W - 8;
+                if found.is_empty() {
+                    let text = format!("No plugins found in {}.", root.display());
+                    let height = measured_text_height(h, f, &text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), &text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, 0, f)?);
+                    y += height + ROW_GAP;
+                } else {
+                    for (index, (dir, parsed)) in found.iter().enumerate() {
+                        if index > 0 {
+                            y += ROW_GAP;
+                        }
+                        let row = plugin_row(dir, parsed, &enabled);
+                        plugin_names.push(plugin_key(dir, parsed));
+                        plugin_dirs.push(dir.clone());
+                        controls.push(child(page, w!("STATIC"), &row.label, WINDOW_STYLE(0), PAD,
+                            y + 4, button_x - PAD - 8, ROW_H, 0, f)?);
+                        let checkbox = child(page, w!("BUTTON"), "Enable",
+                            WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                            button_x, y, BTN_W, ROW_H,
+                            ID_PLUGIN_ENABLE_BASE + index as i32, f)?;
+                        SendMessageW(checkbox, BM_SETCHECK,
+                            Some(WPARAM(if row.checked { 1 } else { 0 })), None);
+                        let _ = EnableWindow(checkbox, row.can_enable);
+                        controls.push(checkbox);
+                        controls.push(child(page, w!("STATIC"), &row.roles, WINDOW_STYLE(0), PAD,
+                            y + ROW_H + 4, button_x - PAD - 8, ROW_H, 0, f)?);
+                        let status_y = y + 2 * ROW_H;
+                        controls.push(child(page, w!("STATIC"), &row.status, WINDOW_STYLE(0), PAD,
+                            status_y, button_x - PAD - 8, PLUGIN_STATUS_H, 0, f)?);
+                        controls.push(child(page, w!("BUTTON"), "Configure", WS_TABSTOP,
+                            button_x, status_y, BTN_W, ROW_H,
+                            ID_PLUGIN_CONFIGURE_BASE + index as i32, f)?);
+                        y += PLUGIN_ROW_H;
+                    }
+                }
+            }
+        }
+
+            if !help_rendered {
+                if let Some(text) = spec.help.as_deref() {
+                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                    controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y,
+                        WIN_W - 2 * PAD - 20, height, 0, f)?);
+                    y += height + ROW_GAP;
+                }
+            }
+
+            if let Some(&control) = controls.first() {
+                let style = GetWindowLongW(control, GWL_STYLE) as u32 | WS_GROUP.0;
+                SetWindowLongW(control, GWL_STYLE, style as i32);
+            }
+
+            Ok(BuiltEntry {
+                id: spec.id,
+                label: spec.label.clone(),
+                controls,
+                top,
+                height: y - top,
+            })
+        }
+    }
+
+    /// Builds settings controls.
+    unsafe fn build(
+        &mut self,
+        form: &SettingsForm,
+        stale: &[String],
+        layout: &SettingsLayout,
+    ) -> Result<i32> {
         let f = self.font;
         let h = self.hwnd;
-        let mut y = PAD;
-        let mut gen: Vec<HWND> = Vec::new();
-        let mut dict: Vec<HWND> = Vec::new();
-        let mut ocr: Vec<HWND> = Vec::new();
-        let mut ank: Vec<HWND> = Vec::new();
-        let mut plug: Vec<HWND> = Vec::new();
-        let mut plugin_names: Vec<String> = Vec::new();
-        let mut plugin_dirs: Vec<PathBuf> = Vec::new();
-
-        // SAFETY: `h` is the window created by `open`. Child controls belong
-        // to `h` or its internal panes. Parents are created before children.
-        // Child window handles persist until destruction of `h`.
+        // SAFETY: The main window owns every created child.
         unsafe {
-            // Tabs and role lists require Common Controls initialization.
-            let icex = INITCOMMONCONTROLSEX {
+            let controls = INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
                 dwICC: ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES,
             };
-            let _ = InitCommonControlsEx(&icex);
-
-            // ---- Tab control ----
-            let tab = child(
+            let _ = InitCommonControlsEx(&controls);
+            let tab_control = child(
                 h,
                 w!("SysTabControl32"),
                 "",
                 WS_TABSTOP | WS_CLIPSIBLINGS,
                 PAD - 6,
-                y,
+                PAD,
                 WIN_W - 2 * PAD,
                 TAB_H,
                 ID_TAB,
                 f,
             )?;
-            let mut t0 = wide("General");
-            let mut item = TcItemW {
-                mask: TCIF_TEXT_VAL,
-                dw_state: 0,
-                dw_state_mask: 0,
-                psz_text: t0.as_mut_ptr(),
-                cch_text_max: 0,
-                i_image: -1,
-                l_param: 0,
-            };
-            SendMessageW(
-                tab,
-                TCM_INSERTITEMW_MSG,
-                Some(WPARAM(0)),
-                Some(LPARAM(&item as *const _ as isize)),
-            );
-            let mut t1 = wide("Dictionaries");
-            item.psz_text = t1.as_mut_ptr();
-            SendMessageW(
-                tab,
-                TCM_INSERTITEMW_MSG,
-                Some(WPARAM(1)),
-                Some(LPARAM(&item as *const _ as isize)),
-            );
-            let mut t2 = wide("OCR / Debug");
-            item.psz_text = t2.as_mut_ptr();
-            SendMessageW(
-                tab,
-                TCM_INSERTITEMW_MSG,
-                Some(WPARAM(2)),
-                Some(LPARAM(&item as *const _ as isize)),
-            );
-            let mut t3 = wide("Anki");
-            item.psz_text = t3.as_mut_ptr();
-            SendMessageW(
-                tab,
-                TCM_INSERTITEMW_MSG,
-                Some(WPARAM(3)),
-                Some(LPARAM(&item as *const _ as isize)),
-            );
-            let mut t4 = wide("Plugins");
-            item.psz_text = t4.as_mut_ptr();
-            SendMessageW(
-                tab,
-                TCM_INSERTITEMW_MSG,
-                Some(WPARAM(4)),
-                Some(LPARAM(&item as *const _ as isize)),
-            );
-            // The height stays 0 until the band height is known.
+            for (index, tab) in layout.tabs.iter().enumerate() {
+                let mut text = wide(&tab.label);
+                let item = TcItemW {
+                    mask: TCIF_TEXT_VAL,
+                    dw_state: 0,
+                    dw_state_mask: 0,
+                    psz_text: text.as_mut_ptr(),
+                    cch_text_max: 0,
+                    i_image: -1,
+                    l_param: 0,
+                };
+                SendMessageW(
+                    tab_control,
+                    TCM_INSERTITEMW_MSG,
+                    Some(WPARAM(index)),
+                    Some(LPARAM(&item as *const _ as isize)),
+                );
+            }
+
             self.viewport = child(
                 h,
                 pane_class_name(),
@@ -3750,1378 +4890,115 @@ impl SettingsWindow {
                 ID_CONTENT,
                 None,
             )?;
-            // Without WS_EX_CONTROLPARENT, Tab skips every page.
             for pane in [self.viewport, self.content] {
                 let ex = GetWindowLongW(pane, GWL_EXSTYLE) as u32 | WS_EX_CONTROLPARENT.0;
                 SetWindowLongW(pane, GWL_EXSTYLE, ex as i32);
             }
-            // `y` now counts from the page top, not from the window top.
-            let page = self.content;
-            y = 0;
+        }
 
-            let group = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(
-                    page,
-                    w!("BUTTON"),
-                    text,
-                    WINDOW_STYLE(BS_GROUPBOX as u32),
-                    PAD - 6,
-                    y,
-                    WIN_W - 2 * PAD,
-                    height,
-                    0,
-                    f,
-                )
-            };
-            // The same box, but WS_GROUP ends the group before it.
-            let group_start = |text: &str, y: i32, height: i32| -> WinResult<HWND> {
-                child(
-                    page,
-                    w!("BUTTON"),
-                    text,
-                    WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
-                    PAD - 6,
-                    y,
-                    WIN_W - 2 * PAD,
-                    height,
-                    0,
-                    f,
-                )
-            };
-            let label = |text: &str, y: i32| -> WinResult<HWND> {
-                child(
-                    page,
-                    w!("STATIC"),
-                    text,
-                    WINDOW_STYLE(0),
-                    PAD,
-                    y + 4,
-                    LABEL_W,
-                    ROW_H,
-                    0,
-                    f,
-                )
-            };
-
-            // ---- Trigger ----
-            gen.push(group("Trigger", y, ROW_H + ROW_GAP + ROW_H + 26)?);
-            y += 20;
-            // Live, Hold key, Toggle, and Press key share one radio group.
-            // Press key shares the trigger key and runs one lookup per press.
-            // Four 120-pixel radios at PAD, PAD + 130, PAD + 260, and PAD + 390
-            // end at x=524 inside the 532-pixel group box.
-            let live = child(
-                page,
-                w!("BUTTON"),
-                "Live",
-                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32) | WS_GROUP | WS_TABSTOP,
-                PAD,
-                y,
-                120,
-                ROW_H,
-                ID_MODE_LIVE,
-                f,
-            )?;
-            gen.push(live);
-            let hold = child(
-                page,
-                w!("BUTTON"),
-                "Hold key",
-                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
-                PAD + 130,
-                y,
-                120,
-                ROW_H,
-                ID_MODE_HOLD,
-                f,
-            )?;
-            gen.push(hold);
-            let toggle = child(
-                page,
-                w!("BUTTON"),
-                "Toggle",
-                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
-                PAD + 260,
-                y,
-                120,
-                ROW_H,
-                ID_MODE_TOGGLE,
-                f,
-            )?;
-            gen.push(toggle);
-            let press = child(
-                page,
-                w!("BUTTON"),
-                "Press key",
-                WINDOW_STYLE(BS_AUTORADIOBUTTON as u32),
-                PAD + 390,
-                y,
-                120,
-                ROW_H,
-                ID_MODE_PRESS,
-                f,
-            )?;
-            gen.push(press);
-            let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
-            let is_toggle = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Toggle);
-            let is_press = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Press);
-            let is_hold = !is_live && !is_toggle && !is_press;
-            SendMessageW(
-                live,
-                BM_SETCHECK,
-                Some(WPARAM(if is_live { 1 } else { 0 })),
-                None,
-            );
-            SendMessageW(
-                hold,
-                BM_SETCHECK,
-                Some(WPARAM(if is_hold { 1 } else { 0 })),
-                None,
-            );
-            SendMessageW(
-                toggle,
-                BM_SETCHECK,
-                Some(WPARAM(if is_toggle { 1 } else { 0 })),
-                None,
-            );
-            SendMessageW(
-                press,
-                BM_SETCHECK,
-                Some(WPARAM(if is_press { 1 } else { 0 })),
-                None,
-            );
-            y += ROW_H + ROW_GAP;
-            gen.push(label("Trigger key", y)?);
-            let key_vk = crate::config::parse_trigger_key(&form.cfg.trigger.trigger_key).unwrap_or(0x10);
-            CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
-            let key_name = crate::config::trigger_key_name(key_vk);
-            let key_btn = child(
-                page,
-                w!("BUTTON"),
-                &key_name,
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_TRIGGER_KEY,
-                f,
-            )?;
-            gen.push(key_btn);
-            let _ = EnableWindow(key_btn, !is_live);
-            y += ROW_H + 18;
-
-            // ---- Popup ----
-            // WS_GROUP ends the four-mode radio group above. Without it, the group runs
-            // to the end of the window. Arrow keys then walk out of the Live, Hold key,
-            // Toggle, and Press key buttons into the combos.
-            gen.push(group_start(
-                "Popup",
-                y,
-                7 * (ROW_H + ROW_GAP) + 4 * ROW_H + 30,
-            )?);
-            y += 20;
-            gen.push(label("Theme", y)?);
-            let theme = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_THEME,
-                f,
-            )?;
-            gen.push(theme);
-            for (i, name) in ["dark", "light"].iter().enumerate() {
-                SendMessageW(
-                    theme,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)),
-                );
-                if form.cfg.popup.theme == *name {
-                    SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(theme, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H + ROW_GAP;
-
-            gen.push(label("Font", y)?);
-            let fonts_hwnd = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                260,
-                ID_FONT,
-                f,
-            )?;
-            gen.push(fonts_hwnd);
-            let mut families = japanese_font_families();
-            // Keep a configured font when the system does not list it.
-            // The code preserves the stored value until the user changes it.
-            if !families.iter().any(|x| x == &form.cfg.popup.font) {
-                families.push(form.cfg.popup.font.clone());
-                families.sort();
-            }
-            for (i, name) in families.iter().enumerate() {
-                SendMessageW(
-                    fonts_hwnd,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)),
-                );
-                if name == &form.cfg.popup.font {
-                    SendMessageW(fonts_hwnd, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            self.fonts = families;
-            y += ROW_H + ROW_GAP;
-
-            gen.push(child(
-                page,
-                w!("BUTTON"),
-                "Customize CSS\u{2026}",
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_CSS_EDITOR,
-                f,
-            )?);
-            y += ROW_H + ROW_GAP;
-
-            self.widths = numeric_choices(
-                MAX_WIDTH_RANGE.0 as i64,
-                MAX_WIDTH_RANGE.1 as i64,
-                5,
-                form.cfg.popup.max_width_percent as i64,
-            );
-            gen.push(label("Max width (% of screen)", y)?);
-            let mw = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_MAX_WIDTH,
-                f,
-            )?;
-            gen.push(mw);
-            fill_numeric(mw, &self.widths, form.cfg.popup.max_width_percent as i64);
-            y += ROW_H + ROW_GAP;
-
-            self.heights = numeric_choices(
-                MAX_HEIGHT_RANGE.0 as i64,
-                MAX_HEIGHT_RANGE.1 as i64,
-                5,
-                form.cfg.popup.max_height_percent as i64,
-            );
-            gen.push(label("Max height (% of screen)", y)?);
-            let mh = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_MAX_HEIGHT,
-                f,
-            )?;
-            gen.push(mh);
-            fill_numeric(mh, &self.heights, form.cfg.popup.max_height_percent as i64);
-            y += ROW_H + ROW_GAP;
-
-            self.summaries = numeric_choices(
-                SUMMARY_RANGE.0 as i64,
-                SUMMARY_RANGE.1 as i64,
-                10,
-                form.cfg.popup.summary_chars as i64,
-            );
-            gen.push(label("Summary length (characters)", y)?);
-            let sm = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_SUMMARY,
-                f,
-            )?;
-            gen.push(sm);
-            fill_numeric(sm, &self.summaries, form.cfg.popup.summary_chars as i64);
-            y += ROW_H + ROW_GAP + 4;
-
-            let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
-                let c = child(
-                    page,
-                    w!("BUTTON"),
-                    text,
-                    WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                    PAD,
-                    y,
-                    WIN_W - 2 * PAD - 20,
-                    ROW_H,
-                    id,
-                    f,
-                )?;
-                SendMessageW(c, BM_SETCHECK, Some(WPARAM(if on { 1 } else { 0 })), None);
-                Ok(c)
-            };
-            gen.push(check(
-                "Box the word being defined",
-                ID_HIGHLIGHT,
-                form.cfg.popup.highlight_match,
-                y,
-            )?);
-            y += ROW_H;
-            gen.push(check(
-                "Scroll long entries with the wheel",
-                ID_SCROLL,
-                form.cfg.popup.scroll_popup,
-                y,
-            )?);
-            y += ROW_H;
-            gen.push(check(
-                "Auto-scroll while dragging at the popup edge",
-                ID_EDGE_AUTOSCROLL,
-                form.cfg.popup.edge_autoscroll,
-                y,
-            )?);
-            y += ROW_H;
-            gen.push(check(
-                "Show related words beside the popup",
-                ID_SIDE_PANEL,
-                form.cfg.popup.side_panel,
-                y,
-            )?);
-            y += ROW_H;
-            gen.push(check(
-                "Hide the popup from screen capture",
-                ID_EXCLUDE,
-                form.cfg.popup.exclude_from_capture,
-                y,
-            )?);
-            y += ROW_H + 18;
-
-            // ---- Entry content ----
-            // The render settings have a separate group, not four more rows
-            // under Popup. The Linux window groups them in the same way.
-            // These six fields define entry content. The rows above define
-            // panel size. Both windows must keep every portable field.
-            y += 12;
-            gen.push(group("Entry content", y, ROW_H + ROW_GAP + 5 * ROW_H + 30)?);
-            y += 20;
-            gen.push(label("Layout", y)?);
-            let layout_combo = child(page, w!("COMBOBOX"), "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X, y, FIELD_W, 220, ID_LAYOUT_MODE, f)?;
-            gen.push(layout_combo);
-            for (i, (mode, text)) in LAYOUT_MODES.iter().enumerate() {
-                SendMessageW(layout_combo, CB_ADDSTRING, None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)));
-                if form.cfg.popup.layout_mode == *mode {
-                    SendMessageW(layout_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(layout_combo, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(layout_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H + ROW_GAP;
-            gen.push(check("Use the dictionary's own fonts and colours", ID_DICT_STYLING,
-                  form.cfg.popup.dictionary_styling, y)?);
-            y += ROW_H;
-            gen.push(check("Show example sentences", ID_SHOW_EXAMPLES,
-                  form.cfg.popup.show_examples, y)?);
-            y += ROW_H;
-            gen.push(check("Show attributions and footnotes", ID_SHOW_ATTRIBUTIONS,
-                  form.cfg.popup.show_attributions, y)?);
-            y += ROW_H;
-            gen.push(check("Show images", ID_SHOW_IMAGES, form.cfg.popup.show_images, y)?);
-            y += ROW_H;
-            gen.push(check("Show part-of-speech labels inside the entry", ID_SHOW_POS,
-                  form.cfg.popup.show_part_of_speech, y)?);
-            y += ROW_H + 18;
-            y += 12;
-            gen.push(group("Actions", y, 4 * ROW_H + 2 * ROW_GAP + 38)?);
-            y += 20;
-            gen.push(label("Entry screenshot key", y)?);
-            SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
-            let screenshot_key_name = crate::config::parse_trigger_key(&form.cfg.actions.screenshot.hotkey)
-                .map(crate::config::trigger_key_name)
-                .unwrap_or_else(|| if form.cfg.actions.screenshot.hotkey.is_empty() {
-                    "Not set".to_string()
-                } else { form.cfg.actions.screenshot.hotkey.clone() });
-            gen.push(child(page, w!("BUTTON"), &screenshot_key_name, WS_TABSTOP,
-                FIELD_X, y, FIELD_W - 80, ROW_H, ID_SCREENSHOT_HOTKEY, f)?);
-            gen.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
-                FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_SCREENSHOT_KEY_CLEAR, f)?);
-            y += ROW_H + ROW_GAP;
-            gen.push(child(page, w!("STATIC"),
-                "With an entry open, saves a PNG using the screenshot mode in Anki settings.\r\nAdds the entry to Anki when connected.",
-                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 2 * ROW_H, 0, f)?);
-            y += 2 * ROW_H + ROW_GAP;
-            gen.push(label("OCR clipboard key", y)?);
-            let ocr_clipboard_vk =
-                crate::config::parse_trigger_key(form.ocr_clipboard_key.as_deref().unwrap_or(""));
-            OCR_CLIP_CAPTURED_VK.with(|c| {
-                c.set(ocr_clipboard_vk.map(|vk| (h.0 as isize, vk)));
-            });
-            let ocr_clipboard_name = ocr_clipboard_vk
-                .map(crate::config::trigger_key_name)
-                .unwrap_or_else(|| "Not set".to_string());
-            gen.push(child(
-                page,
-                w!("BUTTON"),
-                &ocr_clipboard_name,
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_OCR_CLIPBOARD_KEY,
-                f,
-            )?);
-            y += ROW_H + 18;
-            let y_general = y;
-
-            // ---- Dictionaries ----
-            //
-            // The window shows one section for each role. Each section lists
-            // every installed dictionary for that role and gives each row a
-            // checkbox. Each section keeps its own order. A mixed archive
-            // appears in every section that provides its data because the
-            // enabled flag belongs to each role. Do not disable its frequency
-            // data when the user clears its definitions
-            // (ARCHITECTURE.md#dictionary-and-lookup).
-            y = 0;
-            let bx = WIN_W - PAD - BTN_W - 8;
-            let list_w = bx - 2 * PAD + 4;
-            let hint_w = WIN_W - 2 * PAD - 20;
-            for (n, section) in SECTIONS.iter().enumerate() {
-                if n > 0 {
-                    y += GROUP_GAP;
-                }
-                // WS_GROUP ends the box before it, so only the first box can
-                // go without it.
-                let box_h = role_group_h(section.role);
-                dict.push(if n == 0 {
-                    group(section.group, y, box_h)?
-                } else {
-                    group_start(section.group, y, box_h)?
-                });
-                y += 20;
-                dict.push(child(page, w!("STATIC"), section.hint,
-                    WINDOW_STYLE(0), PAD, y, hint_w, DICT_CAP_H, 0, f)?);
-                y += DICT_CAP_H;
-                if section.role == Role::Frequency {
-                    // The strategy row belongs to this list only. It changes
-                    // the dictionary order for this list, not for the other two.
-                    dict.push(child(page, w!("STATIC"), "Combine ranks by",
-                        WINDOW_STYLE(0), PAD, y + 4, 110, ROW_H, 0, f)?);
-                    let ranking = child(page, w!("COMBOBOX"), "",
-                        WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                        PAD + 114, y, list_w - 114, 120, ID_RANKING, f)?;
-                    dict.push(ranking);
-                    for (at, (strategy, text)) in RANKING_STRATEGIES.iter().enumerate() {
-                        SendMessageW(ranking, CB_ADDSTRING, None,
-                            Some(LPARAM(wide(text).as_ptr() as isize)));
-                        if *strategy == form.cfg.dictionaries.ranking_strategy {
-                            SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(at)), None);
-                        }
-                    }
-                    // If no ranking is selected, choose the first item.
-                    // The default and read-back values stay consistent.
-                    if SendMessageW(ranking, CB_GETCURSEL, None, None).0 < 0 {
-                        SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(0)), None);
-                    }
-                    y += ROW_H + ROW_GAP;
-                }
-                let list = make_role_list(page, y, list_w, section.list, f)?;
-                dict.push(list);
-                fill_role_list(list, form.list(section.role), 0);
-                for (row, (text, id)) in [
-                    ("Move up", section.up),
-                    ("Move down", section.down),
-                    ("Add\u{2026}", section.add),
-                    ("Remove", section.remove),
-                ]
-                .iter()
-                .enumerate()
-                {
-                    dict.push(child(page, w!("BUTTON"), text, WS_TABSTOP,
-                          bx, y + row as i32 * BTN_PITCH, BTN_W, ROW_H, *id, f)?);
-                }
-                y += DICT_LIST_H + 8;
-            }
-            y += GROUP_GAP;
-
-            // A rebuild uses the library only.
-            if form.library_empty && !form.terms.is_empty() {
-                dict.push(child(page, w!("STATIC"),
-                    "chibipop is using a dictionary built outside the app. Adding or \
-                     removing here rebuilds from this list only — import your original \
-                     .zip files first.",
-                    WINDOW_STYLE(0), PAD, y, hint_w, 44, 0, f)?);
-                y += 48;
-            }
-
-            // Keep a configured name when no installed dictionary matches it.
-            // The archive can have a new name or an unavailable path.
-            // Do not rewrite the lists in either case
-            // (ARCHITECTURE.md#dictionary-and-lookup).
-            if !stale.is_empty() {
-                let msg = format!(
-                    "\"{}\" names no installed dictionary — it may have been renamed, or \
-                     live on a drive that is not plugged in. Its place is kept; remove \
-                     the row if it is gone for good.",
-                    stale.join("\", \"")
-                );
-                dict.push(child(page, w!("STATIC"), &msg, WINDOW_STYLE(0),
-                      PAD, y, hint_w, 32, 0, f)?);
-                y += 36;
-            }
-            let y_dict = y;
-
-            // ---- OCR / Debug ----
-            y = 0;
-            ocr.push(group("OCR / Debug", y, 16 * ROW_H + 38)?);
-            y += 20;
-            let plugins_root = crate::paths::beside_exe("plugins");
-            let found = crate::plugin::discover::discover(&plugins_root);
-            let mut engine_names = vec!["builtin".to_string()];
-            engine_names.extend(discovered_text_providers(&found));
-            // The combo still offers the configured engine.
-            if form.cfg.ocr.engine != "builtin" && !engine_names.contains(&form.cfg.ocr.engine) {
-                engine_names.push(form.cfg.ocr.engine.clone());
-            }
-            ocr.push(label("OCR engine", y)?);
-            let engine = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W - BTN_W - 8,
-                220,
-                ID_ENGINE,
-                f,
-            )?;
-            ocr.push(engine);
-            for name in &engine_names {
-                let shown = if name == "builtin" {
-                    "Built-in (Windows OCR)"
-                } else {
-                    name
+        let mut runtime_tabs = Vec::with_capacity(layout.tabs.len());
+        let mut plugin_names = Vec::new();
+        let mut plugin_dirs = Vec::new();
+        for tab in &layout.tabs {
+            let mut y = 0;
+            let mut runtime_sections = Vec::with_capacity(tab.sections.len());
+            for section in &tab.sections {
+                let section_top = y;
+                // SAFETY: The content pane owns this frame.
+                let frame = unsafe {
+                    child(
+                        self.content,
+                        w!("BUTTON"),
+                        &section.label,
+                        WINDOW_STYLE(BS_GROUPBOX as u32) | WS_GROUP,
+                        PAD - 6,
+                        section_top,
+                        WIN_W - 2 * PAD,
+                        28,
+                        0,
+                        f,
+                    )?
                 };
-                SendMessageW(
-                    engine,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(shown).as_ptr() as isize)),
-                );
-            }
-            let engine_idx = engine_names
-                .iter()
-                .position(|n| n == &form.cfg.ocr.engine)
-                .unwrap_or(0);
-            SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
-            self.engine_names = engine_names;
-            let mut engine_dirs = HashMap::new();
-            for (dir, parsed) in &found {
-                if let Ok(m) = parsed {
-                    if m.roles
-                        .contains(&crate::plugin::manifest::Role::TextProvider)
-                        && !engine_dirs.contains_key(&m.name)
-                    {
-                        engine_dirs.insert(m.name.clone(), dir.clone());
-                    }
+                y += 20;
+                let mut runtime_entries = Vec::with_capacity(section.entries.len());
+                for entry in &section.entries {
+                    // SAFETY: Each builder creates children of the live content pane.
+                    let built = unsafe {
+                        self.build_entry(
+                            entry,
+                            form,
+                            stale,
+                            &mut plugin_names,
+                            &mut plugin_dirs,
+                            y,
+                        )?
+                    };
+                    y += built.height;
+                    runtime_entries.push(EntryRuntime {
+                        id: built.id,
+                        label: built.label,
+                        controls: built.controls,
+                        top: Cell::new(built.top),
+                        base_height: built.height,
+                    });
                 }
-            }
-            self.engine_dirs = engine_dirs;
-            let cfg_btn = child(
-                page,
-                w!("BUTTON"),
-                "Configure…",
-                WS_TABSTOP,
-                FIELD_X + FIELD_W - BTN_W,
-                y,
-                BTN_W,
-                ROW_H,
-                ID_ENGINE_CONFIGURE,
-                f,
-            )?;
-            ocr.push(cfg_btn);
-            let _ = ShowWindow(cfg_btn, SW_HIDE);
-            y += ROW_H;
-            ocr.push(label("OCR language", y)?);
-            let lang = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_OCR_LANG,
-                f,
-            )?;
-            ocr.push(lang);
-            let langs = language_choices(
-                crate::text::ocr::installed_recognisers(),
-                &form.cfg.ocr.language,
-            );
-            for (name, _) in &langs {
-                SendMessageW(
-                    lang,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(name).as_ptr() as isize)),
-                );
-            }
-            if let Some(i) = language_index(&langs, &form.cfg.ocr.language) {
-                SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
-            }
-            self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
-            let _ = EnableWindow(lang, engine_idx == 0);
-            y += ROW_H;
-            ocr.push(child(
-                page,
-                w!("STATIC"),
-                "Installed recognizers, plus any marked (not installed).",
-                WINDOW_STYLE(0),
-                PAD,
-                y + 4,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                0,
-                f,
-            )?);
-            y += ROW_H;
-            self.passes = numeric_choices(
-                PASSES_RANGE.0 as i64,
-                PASSES_RANGE.1 as i64,
-                1,
-                form.cfg.ocr.max_ocr_passes as i64,
-            );
-            ocr.push(label("OCR passes per hover", y)?);
-            let ps = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                160,
-                ID_PASSES,
-                f,
-            )?;
-            ocr.push(ps);
-            fill_numeric(ps, &self.passes, form.cfg.ocr.max_ocr_passes as i64);
-            y += ROW_H;
-            ocr.push(child(
-                page,
-                w!("STATIC"),
-                "1 = no tiling. Higher reads further ahead but can resolve the wrong character.",
-                WINDOW_STYLE(0),
-                PAD,
-                y,
-                WIN_W - 2 * PAD - 20,
-                28,
-                0,
-                f,
-            )?);
-            y += 28;
-            ocr.push(label("Capture width (px)", y)?);
-            ocr.push(child(
-                page,
-                w!("EDIT"),
-                &form.cfg.ocr.capture_width.to_string(),
-                WS_TABSTOP | WS_BORDER,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_CAPTURE_W,
-                f,
-            )?);
-            y += ROW_H;
-            ocr.push(label("Capture height (px)", y)?);
-            ocr.push(child(
-                page,
-                w!("EDIT"),
-                &form.cfg.ocr.capture_height.to_string(),
-                WS_TABSTOP | WS_BORDER,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_CAPTURE_H,
-                f,
-            )?);
-            y += ROW_H;
-            ocr.push(child(
-                page,
-                w!("STATIC"),
-                "Vertical mode swaps these two values.",
-                WINDOW_STYLE(0),
-                PAD,
-                y + 4,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                0,
-                f,
-            )?);
-            y += ROW_H;
-            ocr.push(check(
-                "Prefer vertical text (manga, VN)",
-                ID_PREFER_VERT,
-                form.cfg.ocr.prefer_vertical,
-                y,
-            )?);
-            y += ROW_H;
-            ocr.push(check(
-                "Scan alphanumeric text",
-                ID_SCAN_ALNUM,
-                form.cfg.ocr.scan_alphanumeric,
-                y,
-            )?);
-            y += ROW_H;
-            ocr.push(check(
-                "Discard furigana from OCR text",
-                ID_DISCARD_FURIGANA,
-                form.cfg.ocr.discard_furigana,
-                y,
-            )?);
-            y += ROW_H;
-            let per_char = check(
-                "Look up each character as you hover",
-                ID_PER_CHAR,
-                form.cfg.trigger.per_character_lookup,
-                y,
-            )?;
-            ocr.push(per_char);
-            let _ = EnableWindow(per_char, is_live);
-            y += ROW_H;
-            ocr.push(child(
-                page,
-                w!("STATIC"),
-                "Live mode only. Off: the popup holds while the cursor stays on \
-                 the matched word.",
-                WINDOW_STYLE(0),
-                PAD,
-                y,
-                WIN_W - 2 * PAD - 20,
-                28,
-                0,
-                f,
-            )?);
-            y += 28;
-            let scan = child(
-                page,
-                w!("BUTTON"),
-                "Outline what each hover captured",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD,
-                y,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                ID_SHOW_SCAN,
-                f,
-            )?;
-            ocr.push(scan);
-            SendMessageW(
-                scan,
-                BM_SETCHECK,
-                Some(WPARAM(if form.cfg.debug.show_scan_region { 1 } else { 0 })),
-                None,
-            );
-            y += ROW_H;
-            ocr.push(check(
-                "Show which OCR engine is active",
-                ID_ENGINE_LOG,
-                form.cfg.debug.show_engine_log,
-                y,
-            )?);
-            y += ROW_H;
-            ocr.push(check(
-                "Show adapter log in status bar",
-                ID_ADAPTER_LOG,
-                form.cfg.debug.show_adapter_log,
-                y,
-            )?);
-            y += ROW_H + 18;
-            let y_ocr = y;
-
-            // ---- Anki (own tab) ----
-            y = 0;
-            ank.push(group("Anki", y, 16 * ROW_H + 34)?);
-            y += 20;
-            let anki_chk = child(
-                page,
-                w!("BUTTON"),
-                "Enable Anki integration",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD,
-                y,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                ID_ANKI_ENABLED,
-                f,
-            )?;
-            ank.push(anki_chk);
-            SendMessageW(
-                anki_chk,
-                BM_SETCHECK,
-                Some(WPARAM(if form.cfg.anki.enabled { 1 } else { 0 })),
-                None,
-            );
-            y += ROW_H;
-            ank.push(check(
-                "Show notification when a card is added",
-                ID_NOTIFY_ON_ADD,
-                form.cfg.anki.notify_on_add,
-                y,
-            )?);
-            y += ROW_H;
-            ank.push(label("AnkiConnect URL", y)?);
-            ank.push(child(
-                page,
-                w!("EDIT"),
-                &form.cfg.anki.url,
-                WS_TABSTOP | WS_BORDER,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_ANKI_URL,
-                f,
-            )?);
-            y += ROW_H;
-            ank.push(label("Deck", y)?);
-            let deck = child(
-                page,
-                w!("COMBOBOX"),
-                &form.cfg.anki.deck,
-                WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                160,
-                ID_ANKI_DECK,
-                f,
-            )?;
-            ank.push(deck);
-            SendMessageW(
-                deck,
-                WM_SETTEXT,
-                None,
-                Some(LPARAM(wide(&form.cfg.anki.deck).as_ptr() as isize)),
-            );
-            y += ROW_H;
-            ank.push(label("Note type", y)?);
-            let model = child(
-                page,
-                w!("COMBOBOX"),
-                &form.cfg.anki.model,
-                WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                160,
-                ID_ANKI_MODEL,
-                f,
-            )?;
-            ank.push(model);
-            SendMessageW(
-                model,
-                WM_SETTEXT,
-                None,
-                Some(LPARAM(wide(&form.cfg.anki.model).as_ptr() as isize)),
-            );
-            y += ROW_H;
-            ank.push(label("Shortcut key", y)?);
-            let add_vk = crate::config::parse_trigger_key(&form.cfg.anki.add_key).unwrap_or(0x41);
-            ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
-            let add_name = crate::config::trigger_key_name(add_vk);
-            ank.push(child(
-                page,
-                w!("BUTTON"),
-                &add_name,
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_ANKI_ADD_KEY,
-                f,
-            )?);
-            y += ROW_H;
-            ank.push(check(
-                "Include screenshot when adding",
-                ID_INCLUDE_SCREENSHOT,
-                form.cfg.actions.screenshot.include_on_add,
-                y,
-            )?);
-            y += ROW_H;
-            ank.push(label("Screenshot capture mode", y)?);
-            let screenshot_mode = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                180,
-                ID_SCREENSHOT_MODE,
-                f,
-            )?;
-            ank.push(screenshot_mode);
-            for (i, mode) in ScreenshotMode::ALL.iter().enumerate() {
-                let text = mode.to_string();
-                SendMessageW(
-                    screenshot_mode,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(&text).as_ptr() as isize)),
-                );
-                if *mode == form.cfg.actions.screenshot.capture_mode {
-                    SendMessageW(screenshot_mode, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(screenshot_mode, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(screenshot_mode, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H;
-            ank.push(child(
-                page,
-                w!("STATIC"),
-                "Fixed modes save the first target. Hold Alt to switch region and window.",
-                WINDOW_STYLE(0),
-                PAD,
-                y + 4,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                ID_SCREENSHOT_HINT,
-                f,
-            )?);
-            y += ROW_H;
-            let target_summary = screenshot_target_summary(form);
-            ank.push(child(
-                page,
-                w!("STATIC"),
-                &target_summary,
-                WINDOW_STYLE(0),
-                PAD,
-                y + 4,
-                WIN_W - 2 * PAD - 20,
-                ROW_H,
-                ID_SCREENSHOT_SUMMARY,
-                f,
-            )?);
-            y += ROW_H;
-            let reset = child(
-                page,
-                w!("BUTTON"),
-                "Clear saved screenshot targets",
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_SCREENSHOT_RESET,
-                f,
-            )?;
-            ank.push(reset);
-            let has_target =
-                form.cfg.actions.screenshot.fixed_region.is_some() || form.cfg.actions.screenshot.fixed_window.is_some();
-            let _ = EnableWindow(reset, has_target);
-            y += ROW_H;
-            ank.push(check(
-                "Include dictionary name",
-                ID_INCLUDE_DICTIONARY_NAME,
-                form.cfg.anki.include_dictionary_name,
-                y,
-            )?);
-            y += ROW_H;
-            ank.push(check(
-                "First dictionary only",
-                ID_FIRST_DICT_ONLY,
-                form.cfg.anki.first_dict_only,
-                y,
-            )?);
-            y += ROW_H;
-            ank.push(label("Selection buttons", y)?);
-            let selection_buttons = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                180,
-                ID_SELECTION_BUTTONS,
-                f,
-            )?;
-            ank.push(selection_buttons);
-            for (i, (value, text)) in SELECTION_BUTTONS.iter().enumerate() {
-                SendMessageW(
-                    selection_buttons,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)),
-                );
-                if form.cfg.anki.selection_buttons == *value {
-                    SendMessageW(selection_buttons, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(selection_buttons, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(selection_buttons, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H;
-            ank.push(label("Selection separator", y)?);
-            let selection_separator = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                180,
-                ID_SELECTION_SEPARATOR,
-                f,
-            )?;
-            ank.push(selection_separator);
-            for (i, (value, text)) in SELECTION_SEPARATORS.iter().enumerate() {
-                SendMessageW(
-                    selection_separator,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)),
-                );
-                if form.cfg.anki.selection_separator == *value {
-                    SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(selection_separator, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H;
-            ank.push(label("Triple-click", y)?);
-            let triple_click = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                180,
-                ID_TRIPLE_CLICK,
-                f,
-            )?;
-            ank.push(triple_click);
-            for (i, (value, text)) in TRIPLE_CLICKS.iter().enumerate() {
-                SendMessageW(
-                    triple_click,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)),
-                );
-                if form.cfg.anki.triple_click == *value {
-                    SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(triple_click, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(1)), None);
-            }
-            y += ROW_H;
-            ank.push(label("Sentence capture", y)?);
-            let sentence_combo = child(
-                page,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                FIELD_X,
-                y,
-                FIELD_W,
-                220,
-                ID_SENTENCE_MODE,
-                f,
-            )?;
-            ank.push(sentence_combo);
-            for (i, (mode, text)) in SENTENCE_MODES.iter().enumerate() {
-                SendMessageW(
-                    sentence_combo,
-                    CB_ADDSTRING,
-                    None,
-                    Some(LPARAM(wide(text).as_ptr() as isize)),
-                );
-                if form.cfg.anki.sentence_mode == *mode {
-                    SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
-                }
-            }
-            if SendMessageW(sentence_combo, CB_GETCURSEL, None, None).0 < 0 {
-                SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
-            }
-            y += ROW_H;
-            let is_static = form.cfg.anki.sentence_mode == SentenceMode::Static;
-            ank.push(child(
-                page,
-                w!("STATIC"),
-                "Region hotkey",
-                WINDOW_STYLE(0),
-                PAD,
-                y + 4,
-                LABEL_W,
-                ROW_H,
-                ID_STATIC_REGION_LABEL,
-                f,
-            )?);
-            let sr_vk = crate::config::parse_trigger_key(&form.cfg.anki.static_region_key);
-            let sr_label = sr_vk
-                .map(crate::config::trigger_key_name)
-                .unwrap_or_else(|| {
-                    if form.cfg.anki.static_region_key.is_empty() {
-                        "Not set".to_string()
-                    } else {
-                        form.cfg.anki.static_region_key.clone()
-                    }
-                });
-            SR_CAPTURED_VK.with(|c| {
-                c.set(sr_vk.map(|vk| (h.0 as isize, vk)));
-            });
-            ank.push(child(
-                page,
-                w!("BUTTON"),
-                &sr_label,
-                WS_TABSTOP,
-                FIELD_X,
-                y,
-                FIELD_W,
-                ROW_H,
-                ID_STATIC_REGION_KEY,
-                f,
-            )?);
-            y += ROW_H;
-            ank.push(check(
-                "Show capture region outline",
-                ID_SHOW_STATIC_OVERLAY,
-                form.cfg.anki.show_static_overlay,
-                y,
-            )?);
-            y += ROW_H;
-            ank.push(child(
-                page,
-                w!("STATIC"),
-                "Tip: enable capture exclusion in General for best results",
-                WINDOW_STYLE(0),
-                PAD,
-                y,
-                WIN_W - 2 * PAD,
-                ROW_H,
-                ID_STATIC_CAPTURE_HINT,
-                f,
-            )?);
-            if !is_static {
-                for &id in &[
-                    ID_STATIC_REGION_LABEL,
-                    ID_STATIC_REGION_KEY,
-                    ID_SHOW_STATIC_OVERLAY,
-                    ID_STATIC_CAPTURE_HINT,
-                ] {
-                    if let Ok(c) = dlg_item(h, id) {
-                        let _ = ShowWindow(c, SW_HIDE);
-                    }
-                }
-            }
-            y += ROW_H;
-            ank.push(child(
-                page,
-                w!("BUTTON"),
-                "Refresh",
-                WS_TABSTOP,
-                PAD,
-                y,
-                80,
-                ROW_H,
-                ID_ANKI_TEST,
-                f,
-            )?);
-            ank.push(child(
-                page,
-                w!("STATIC"),
-                "Click to load decks and field mappings from Anki",
-                WINDOW_STYLE(0),
-                PAD + 88,
-                y + 2,
-                WIN_W - 2 * PAD - 96,
-                ROW_H,
-                0,
-                f,
-            )?);
-            y += ROW_H + 8 + GROUP_GAP;
-
-            // ---- Field-map toggle ----
-            let toggle_text = field_map_toggle_label(self.field_map_collapsed.get());
-            ank.push(child(
-                page,
-                w!("BUTTON"),
-                toggle_text,
-                WS_TABSTOP,
-                PAD,
-                y,
-                160,
-                ROW_H,
-                ID_FIELD_MAP_TOGGLE,
-                f,
-            )?);
-            y += ROW_H + 8;
-
-            let y_ank = y;
-
-            // ---- Plugins ----
-            y = 0;
-            let plugins_root = crate::paths::beside_exe("plugins");
-            let found = crate::plugin::discover::discover(&plugins_root);
-            let enabled_plugins = form.cfg.plugins.enabled.clone();
-            plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
-            y += 20;
-            if found.is_empty() {
-                plug.push(child(
-                    page,
-                    w!("STATIC"),
-                    &format!("No plugins found in {}.", plugins_root.display()),
-                    WINDOW_STYLE(0),
-                    PAD,
-                    y,
-                    WIN_W - 2 * PAD - 20,
-                    36,
-                    0,
-                    f,
-                )?);
-                y += 40;
-            } else {
-                for (idx, (dir, parsed)) in found.iter().enumerate() {
-                    if idx > 0 {
-                        y += ROW_GAP;
-                    }
-                    let ry = y;
-                    let idx = idx as i32;
-                    let row = plugin_row(dir, parsed, &enabled_plugins);
-                    plugin_names.push(plugin_key(dir, parsed));
-                    plugin_dirs.push(dir.clone());
-                    plug.push(child(
-                        page,
-                        w!("STATIC"),
-                        &row.label,
-                        WINDOW_STYLE(0),
-                        PAD,
-                        ry + 4,
-                        bx - PAD - 8,
-                        ROW_H,
-                        0,
-                        f,
-                    )?);
-                    let chk = child(
-                        page,
-                        w!("BUTTON"),
-                        "Enable",
-                        WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                        bx,
-                        ry,
-                        BTN_W,
-                        ROW_H,
-                        ID_PLUGIN_ENABLE_BASE + idx,
-                        f,
-                    )?;
-                    SendMessageW(
-                        chk,
-                        BM_SETCHECK,
-                        Some(WPARAM(if row.checked { 1 } else { 0 })),
+                let section_height = (y - section_top + 8).max(28);
+                // SAFETY: The frame remains a live child.
+                unsafe {
+                    let _ = SetWindowPos(
+                        frame,
                         None,
+                        0,
+                        0,
+                        dpi_scale(h, WIN_W - 2 * PAD),
+                        dpi_scale(h, section_height),
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                     );
-                    let _ = EnableWindow(chk, row.can_enable);
-                    plug.push(chk);
-                    plug.push(child(
-                        page,
-                        w!("STATIC"),
-                        &row.roles,
-                        WINDOW_STYLE(0),
-                        PAD,
-                        ry + ROW_H + 4,
-                        bx - PAD - 8,
-                        ROW_H,
-                        0,
-                        f,
-                    )?);
-                    let status_y = ry + 2 * ROW_H;
-                    plug.push(child(
-                        page,
-                        w!("STATIC"),
-                        &row.status,
-                        WINDOW_STYLE(0),
-                        PAD,
-                        status_y,
-                        bx - PAD - 8,
-                        PLUGIN_STATUS_H,
-                        0,
-                        f,
-                    )?);
-                    plug.push(child(
-                        page,
-                        w!("BUTTON"),
-                        "Configure",
-                        WS_TABSTOP,
-                        bx,
-                        status_y,
-                        BTN_W,
-                        ROW_H,
-                        ID_PLUGIN_CONFIGURE_BASE + idx,
-                        f,
-                    )?);
-                    y = ry + PLUGIN_ROW_H;
                 }
+                runtime_sections.push(SectionRuntime {
+                    frame,
+                    top: Cell::new(section_top),
+                    height: Cell::new(section_height),
+                    entries: runtime_entries,
+                });
+                y += GROUP_GAP;
             }
-            y += 8 + GROUP_GAP;
-            let y_plugins = y;
+            runtime_tabs.push(TabRuntime {
+                id: tab.id,
+                label: tab.label.clone(),
+                sections: runtime_sections,
+                page_height: Cell::new(y),
+            });
+        }
+        self.tabs = runtime_tabs;
+        debug_assert_eq!(layout.tabs.len(), self.tabs.len());
+        for index in 0..layout.tabs.len() {
+            debug_assert_eq!(Some(layout.tabs[index].id), self.tab_id(index as u32));
+            debug_assert_eq!(Some(layout.tabs[index].label.as_str()), self.tab_label(index as u32));
+        }
+        self.plugin_names = plugin_names;
+        remember_plugin_dirs(h, plugin_dirs);
 
-            // `y` counts from the window top from this point.
-            // `place_bottom` positions these controls again.
-            let bottom_y0 = y_general.max(y_dict).max(y_ocr).max(y_ank).max(y_plugins) + CONTENT_Y;
+        remember_conditional_tabs(
+            h,
+            ConditionalTabs {
+                engine: self.entry_tab(SettingId::OcrEngine),
+                static_key: self.entry_tab(SettingId::StaticRegionKey),
+                static_overlay: self.entry_tab(SettingId::AnkiStaticOverlay),
+            },
+        );
+        self.reflow_all_tabs();
+        self.bottom_y0 = self.layout_bottom();
 
-            // ---- Updates ----
-            // The Updates box stays on `h`, not on the pane.
+        // SAFETY: Bottom controls are direct children of the live main window.
+        unsafe {
             child(
                 h,
                 w!("BUTTON"),
                 "Updates",
                 WINDOW_STYLE(BS_GROUPBOX as u32),
                 PAD - 6,
-                bottom_y0,
+                self.bottom_y0,
                 WIN_W - 2 * PAD,
                 ROW_H + 24,
                 ID_UPDATES,
@@ -5133,15 +5010,12 @@ impl SettingsWindow {
                 "Check for updates",
                 WS_TABSTOP,
                 PAD,
-                bottom_y0 + BOTTOM_UPDATE_DY,
+                self.bottom_y0 + BOTTOM_UPDATE_DY,
                 136,
                 ROW_H,
                 ID_CHECK_UPDATE,
                 f,
             )?;
-
-            // ---- Apply / Cancel ----
-            // The Apply / Cancel box also shows the progress line.
             let staged = form.has_staged();
             child(
                 h,
@@ -5149,7 +5023,7 @@ impl SettingsWindow {
                 apply_hint(self.apply_mode, staged),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_BORDER | WS_VSCROLL,
                 PAD,
-                bottom_y0 + BOTTOM_STATUS_DY,
+                self.bottom_y0 + BOTTOM_STATUS_DY,
                 WIN_W - 2 * PAD - 16,
                 STATUS_H,
                 ID_STATUS,
@@ -5161,28 +5035,26 @@ impl SettingsWindow {
                 apply_caption(self.apply_mode),
                 WINDOW_STYLE(BS_DEFPUSHBUTTON as u32) | WS_TABSTOP,
                 BOTTOM_APPLY_X,
-                bottom_y0 + BOTTOM_BTN_DY,
+                self.bottom_y0 + BOTTOM_BTN_DY,
                 136,
                 ROW_H + 4,
                 ID_APPLY,
                 f,
             )?;
-            // Quit sits at the far left, not beside Apply.
             child(
                 h,
                 w!("BUTTON"),
                 "Quit chibipop",
                 WS_TABSTOP,
                 PAD,
-                bottom_y0 + BOTTOM_BTN_DY,
+                self.bottom_y0 + BOTTOM_BTN_DY,
                 116,
                 ROW_H + 4,
                 ID_QUIT,
                 f,
             )?;
 
-            // The tabs occupy this band.
-            let band_h = bottom_y0 - CONTENT_Y;
+            let band_h = self.bottom_y0 - CONTENT_Y;
             let _ = SetWindowPos(
                 self.viewport,
                 None,
@@ -5202,28 +5074,11 @@ impl SettingsWindow {
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
             self.place_viewport();
-
-            self.anki_static_bottom = y_ank;
-            self.tab_heights = [y_general, y_dict, y_ocr, y_ank, y_plugins];
-            self.bottom_y0 = bottom_y0;
-
-            // The window starts on the General tab.
-            for &c in dict.iter().chain(&ocr).chain(&ank).chain(&plug) {
-                let _ = ShowWindow(c, SW_HIDE);
-            }
-
             update_list_buttons(h);
         }
-        self.general_ctrls = gen;
-        self.dict_ctrls = dict;
-        self.ocr_ctrls = ocr;
-        self.anki_ctrls = ank;
-        self.plugin_ctrls = plug;
-        self.plugin_names = plugin_names;
-        remember_plugin_dirs(h, plugin_dirs);
+        self.switch_tab(0);
         Ok(self.bottom_y0 + BOTTOM_H)
     }
-
     /// Returns the current values of the controls as a form.
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
         // SAFETY: every id below names a live descendant of `self.hwnd`.
@@ -5485,6 +5340,20 @@ impl Drop for SettingsWindow {
                 c.set(None);
             }
         });
+        CONDITION_CHANGED.with(|c| {
+            if c.get().is_some_and(|h| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        CONDITIONAL_TABS.with(|c| {
+            let mut slot = c.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|(h, _)| *h == self.hwnd.0 as isize)
+            {
+                *slot = None;
+            }
+        });
         CAPTURING.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
@@ -5581,6 +5450,558 @@ fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<Dic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
+        for tab in &mut layout.tabs {
+            for section in &mut tab.sections {
+                if let Some(index) = section.entries.iter().position(|entry| entry.id == id) {
+                    return section.entries.remove(index);
+                }
+            }
+        }
+        panic!("missing layout entry {id:?}");
+    }
+
+    fn move_layout_entry(
+        layout: &mut SettingsLayout,
+        id: SettingId,
+        tab: usize,
+        section: usize,
+        index: usize,
+    ) {
+        let entry = remove_layout_entry(layout, id);
+        layout.tabs[tab].sections[section].entries.insert(index, entry);
+    }
+
+    fn control_top(window: &SettingsWindow, id: i32) -> i32 {
+        // SAFETY: The test window owns the requested control.
+        unsafe {
+            let control = dlg_item(window.hwnd, id).expect("control should exist");
+            let mut rect = RECT::default();
+            GetWindowRect(control, &mut rect).expect("control rectangle");
+            let mut point = POINT { x: rect.left, y: rect.top };
+            assert!(ScreenToClient(window.content, &mut point).as_bool());
+            point.y
+        }
+    }
+
+    fn select_sentence_mode(window: &SettingsWindow, mode: SentenceMode) {
+        let index = SENTENCE_MODES
+            .iter()
+            .position(|(candidate, _)| *candidate == mode)
+            .expect("sentence mode should exist");
+        // SAFETY: The test window owns the sentence combo.
+        unsafe {
+            let combo = dlg_item(window.hwnd, ID_SENTENCE_MODE).expect("sentence combo");
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+            let command = ID_SENTENCE_MODE as usize | ((CBN_SELCHANGE as usize) << 16);
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(command)), None);
+        }
+        window.pump(|| {});
+    }
+
+    fn send_command(window: &SettingsWindow, id: i32) {
+        // SAFETY: The command targets a control owned by this test window.
+        unsafe {
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(id as usize)), None);
+        }
+    }
+
+    fn visible_tabstop_ids(window: &SettingsWindow) -> Vec<i32> {
+        let mut ids = Vec::new();
+        // SAFETY: The loop follows live content-pane siblings.
+        unsafe {
+            let mut next = GetWindow(window.content, GW_CHILD);
+            while let Ok(control) = next {
+                let style = GetWindowLongW(control, GWL_STYLE) as u32;
+                if style & WS_TABSTOP.0 != 0 && IsWindowVisible(control).as_bool() {
+                    ids.push(GetDlgCtrlID(control));
+                }
+                next = GetWindow(control, GW_HWNDNEXT);
+            }
+        }
+        ids
+    }
+
+    fn nondefault_form() -> SettingsForm {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.trigger.mode = crate::config::TriggerMode::Toggle;
+        form.cfg.trigger.trigger_key = "f6".into();
+        form.cfg.trigger.per_character_lookup = true;
+        form.cfg.popup.theme = "light".into();
+        form.cfg.popup.exclude_from_capture = true;
+        form.cfg.popup.max_width_percent = 35;
+        form.cfg.popup.max_height_percent = 55;
+        form.cfg.popup.summary_chars = 70;
+        form.cfg.popup.font = "Akari test font".into();
+        form.cfg.popup.highlight_match = false;
+        form.cfg.popup.scroll_popup = false;
+        form.cfg.popup.edge_autoscroll = false;
+        form.cfg.popup.side_panel = true;
+        form.cfg.popup.layout_mode = LayoutMode::Compact;
+        form.cfg.popup.dictionary_styling = false;
+        form.cfg.popup.show_examples = false;
+        form.cfg.popup.show_attributions = false;
+        form.cfg.popup.show_images = false;
+        form.cfg.popup.show_part_of_speech = true;
+        form.cfg.dictionaries.ranking_strategy = RankingStrategy::Median;
+        form.cfg.ocr.max_ocr_passes = 2;
+        form.cfg.ocr.prefer_vertical = true;
+        form.cfg.ocr.capture_width = 333;
+        form.cfg.ocr.capture_height = 222;
+        form.cfg.ocr.scan_alphanumeric = false;
+        form.cfg.ocr.discard_furigana = false;
+        form.cfg.ocr.language = "zz-ZZ".into();
+        form.dict_list_language = "zz-ZZ".into();
+        form.cfg.ocr.engine = "missing-provider".into();
+        form.cfg.debug.show_scan_region = true;
+        form.cfg.debug.show_lookup_log = true;
+        form.cfg.debug.show_engine_log = true;
+        form.cfg.debug.show_adapter_log = true;
+        form.cfg.anki.enabled = true;
+        form.cfg.anki.url = "http://127.0.0.1:9999".into();
+        form.cfg.anki.deck = "Akari deck".into();
+        form.cfg.anki.model = "Akari model".into();
+        form.cfg.anki.add_key = "f2".into();
+        form.cfg.anki.notify_on_add = false;
+        form.cfg.anki.sentence_mode = SentenceMode::Static;
+        form.cfg.anki.static_region_key = "f3".into();
+        form.cfg.anki.show_static_overlay = false;
+        form.cfg.anki.include_dictionary_name = false;
+        form.cfg.anki.first_dict_only = true;
+        form.cfg.anki.selection_buttons = SelectionButtons::PrimaryReplacing;
+        form.cfg.anki.selection_separator = SelectionSeparator::LineBreak;
+        form.cfg.anki.triple_click = TripleClick::Line;
+        form.cfg.actions.screenshot.hotkey = "f4".into();
+        form.cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".into());
+        form.cfg.actions.screenshot.include_on_add = true;
+        form.cfg.actions.screenshot.capture_mode = ScreenshotMode::FixedRegion;
+        form.cfg.actions.screenshot.fixed_region = Some([10, 20, 300, 200]);
+        form.terms = vec![DictRow { name: "Terms".into(), enabled: false }];
+        form.frequency = vec![DictRow { name: "Frequency".into(), enabled: true }];
+        form.pitch = vec![DictRow { name: "Pitch".into(), enabled: false }];
+        form.field_map = Some(vec![crate::config::FieldMapping {
+            anki_field: "Front".into(),
+            source: "expression".into(),
+        }]);
+        form.ocr_clipboard_key = Some("f5".into());
+        form
+    }
+
+    #[test]
+    fn runtime_tabs_follow_layout_and_queue_the_initial_selection() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        layout.tabs.swap(0, 1);
+        layout.tabs[1].sections.swap(0, 1);
+        move_layout_entry(&mut layout, SettingId::AnkiFieldMap, 0, 0, 0);
+        layout.validate().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+
+        assert_eq!(6, window.tab_count());
+        assert_eq!(Some("Shortcuts"), window.tab_label(0));
+        assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
+        assert_eq!(Some(0), window.field_map_tab());
+        assert!(window.tab_needs_anki_detection(0));
+        assert_eq!(Some(0), window.take_tab_change());
+
+        window.switch_tab(1);
+        assert!(control_top(&window, ID_MAX_WIDTH) < control_top(&window, ID_THEME));
+        let audit = crate::ui::audit::dump(window.hwnd);
+        let ring = audit["tab_ring"].as_array().unwrap();
+        let width_index = ring.iter().position(|id| id.as_i64() == Some(i64::from(ID_MAX_WIDTH))).unwrap();
+        let theme_index = ring.iter().position(|id| id.as_i64() == Some(i64::from(ID_THEME))).unwrap();
+        assert!(width_index < theme_index);
+
+        window.switch_tab(3);
+        // SAFETY: The tab control belongs to the live test window.
+        let selected = unsafe {
+            let tab = dlg_item(window.hwnd, ID_TAB).unwrap();
+            SendMessageW(tab, TCM_GETCURSEL_MSG, None, None).0
+        };
+        assert_eq!(3, selected);
+    }
+
+    #[test]
+    fn reordered_entries_set_positions_and_radio_group_boundaries() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::LookupMode, 0, 0, 0);
+        layout.validate().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+        window.switch_tab(0);
+
+        assert!(window.entry_top(SettingId::LookupMode) < window.entry_top(SettingId::PopupTheme));
+        // SAFETY: These controls belong to one live dialog group.
+        unsafe {
+            let press = dlg_item(window.hwnd, ID_MODE_PRESS).unwrap();
+            let next = GetNextDlgGroupItem(window.content, Some(press), false).unwrap();
+            let next_id = GetDlgCtrlID(next);
+            assert!(
+                [ID_MODE_LIVE, ID_MODE_HOLD, ID_MODE_TOGGLE, ID_MODE_PRESS]
+                    .contains(&next_id),
+                "radio group escaped to control {next_id}",
+            );
+            assert_ne!(dlg_item(window.hwnd, ID_THEME).unwrap(), next);
+        }
+    }
+
+    #[test]
+    fn cancelling_partial_field_rows_reflows_the_retained_controls() {
+        check_cancelled_field_rows(false);
+        check_cancelled_field_rows(true);
+    }
+
+    fn check_cancelled_field_rows(empty_result: bool) {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::AnkiFieldMap, 0, 0, 0);
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        window.toggle_field_map();
+        let fields = (0..30).map(|index| format!("Field {index}")).collect();
+        window.populate_fields(fields);
+        assert!(window.pending_field_map.borrow().is_some());
+        let before = control_top(&window, ID_THEME);
+        let retained: Vec<_> = window.field_map_rows.borrow().iter().map(|(name, _)| name.clone()).collect();
+        let first_combo = window.field_map_rows.borrow()[0].1;
+        // SAFETY: The test owns this live field combo.
+        unsafe { SendMessageW(first_combo, CB_SETCURSEL, Some(WPARAM(1)), None); }
+        window.populate_fields(if empty_result { Vec::new() } else { retained.clone() });
+        assert!(window.pending_field_map.borrow().is_none());
+        assert!(control_top(&window, ID_THEME) < before, "cancelled rows still reserve the old height");
+        assert_eq!(first_combo, window.field_map_rows.borrow()[0].1);
+        // SAFETY: Repacking must retain the same live combo and its value.
+        assert_eq!(1, unsafe { SendMessageW(first_combo, CB_GETCURSEL, None, None).0 });
+        for index in 0..retained.len() {
+            assert!(control_top(&window, ID_FIELD_MAP_BASE + index as i32) + dpi_scale(window.hwnd, ROW_H)
+                <= control_top(&window, ID_THEME), "retained row overlaps the following entry");
+        }
+        window.toggle_field_map();
+        window.toggle_field_map();
+        for index in 0..retained.len() {
+            assert!(control_top(&window, ID_FIELD_MAP_BASE + index as i32) + dpi_scale(window.hwnd, ROW_H)
+                <= control_top(&window, ID_THEME));
+        }
+    }
+
+    #[test]
+    fn moved_field_map_reflows_following_entries_for_expand_and_chunks() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::AnkiFieldMap, 0, 0, 0);
+        layout.validate().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+        window.switch_tab(0);
+        let collapsed_top = control_top(&window, ID_THEME);
+
+        window.populate_fields((0..6).map(|index| format!("Field {index}")).collect());
+        // SAFETY: The first chunk creates identifiers 200 through 203.
+        unsafe {
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_FIELD_MAP_BASE).unwrap()).as_bool());
+        }
+        window.toggle_field_map();
+        let expanded_top = control_top(&window, ID_THEME);
+        assert!(expanded_top > collapsed_top);
+        // SAFETY: Expanded rows belong to the selected owner tab.
+        unsafe {
+            assert!(IsWindowVisible(dlg_item(window.hwnd, ID_FIELD_MAP_BASE).unwrap()).as_bool());
+            assert!(IsWindowVisible(dlg_item(window.hwnd, ID_FIELD_MAP_BASE + 1).unwrap()).as_bool());
+        }
+        let ring = visible_tabstop_ids(&window);
+        let position = |id| ring.iter().position(|candidate| *candidate == id).unwrap();
+        assert!(position(ID_FIELD_MAP_TOGGLE) < position(ID_FIELD_MAP_BASE));
+        assert!(position(ID_FIELD_MAP_BASE) < position(ID_FIELD_MAP_BASE + 1));
+        assert!(position(ID_FIELD_MAP_BASE + 1) < position(ID_THEME));
+        window.pump(|| {});
+        window.pump(|| {});
+        assert_eq!(expanded_top, control_top(&window, ID_THEME));
+        window.toggle_field_map();
+        assert_eq!(collapsed_top, control_top(&window, ID_THEME));
+    }
+
+    #[test]
+    fn conditional_entries_intersect_state_with_their_owner_tabs() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        move_layout_entry(&mut layout, SettingId::AnkiStaticOverlay, 0, 0, 0);
+        layout.validate().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+        window.switch_tab(0);
+        let collapsed_top = control_top(&window, ID_THEME);
+        // SAFETY: The overlay is hidden when sentence mode is not static.
+        unsafe {
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
+        }
+        window.switch_tab(1);
+        // SAFETY: The shortcut stays visible and editable.
+        unsafe {
+            let key = dlg_item(window.hwnd, ID_STATIC_REGION_KEY).unwrap();
+            assert!(IsWindowVisible(key).as_bool());
+            assert!(windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(key).as_bool());
+        }
+
+        select_sentence_mode(&window, SentenceMode::Static);
+        window.switch_tab(1);
+        // SAFETY: Static mode enables the discoverable shortcut.
+        unsafe {
+            let key = dlg_item(window.hwnd, ID_STATIC_REGION_KEY).unwrap();
+            assert!(windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(key).as_bool());
+        }
+        window.switch_tab(0);
+        // SAFETY: The overlay appears only on its owner tab.
+        unsafe {
+            assert!(IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
+        }
+        assert!(control_top(&window, ID_THEME) > collapsed_top);
+        window.switch_tab(4);
+        // SAFETY: The owner tab is hidden.
+        unsafe {
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
+        }
+        select_sentence_mode(&window, SentenceMode::Sentence);
+        window.switch_tab(0);
+        assert_eq!(collapsed_top, control_top(&window, ID_THEME));
+    }
+
+    #[test]
+    fn duplicate_provider_names_keep_the_first_discovered_directory() {
+        let first = PathBuf::from("C:/plugins/first");
+        let second = PathBuf::from("C:/plugins/second");
+        let directories = first_provider_directories([
+            ("provider".to_string(), first.clone()),
+            ("provider".to_string(), second),
+        ]);
+        assert_eq!(Some(&first), directories.get("provider"));
+    }
+
+    #[test]
+    fn every_nondefault_setting_round_trips_through_the_reordered_window() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        layout.tabs.rotate_left(2);
+        for tab in &mut layout.tabs {
+            tab.sections.reverse();
+            for section in &mut tab.sections {
+                section.entries.reverse();
+            }
+        }
+        layout.validate().unwrap();
+        let form = nondefault_form();
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+
+        let read = window.read(&form);
+        assert_eq!(form, read);
+        assert_eq!(
+            crate::settings::apply_to(&form, &form.cfg),
+            crate::settings::apply_to(&read, &form.cfg),
+        );
+    }
+
+    #[test]
+    fn optional_shortcuts_preserve_untouched_and_cancelled_values() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_eq!(form, window.read(&form));
+
+        for id in [
+            ID_ANKI_ADD_KEY,
+            ID_STATIC_REGION_KEY,
+            ID_SCREENSHOT_HOTKEY,
+            ID_OCR_CLIPBOARD_KEY,
+        ] {
+            send_command(&window, id);
+            assert!(window.handle_capture_key(0x1B));
+        }
+        assert_eq!(form, window.read(&form));
+    }
+
+    #[test]
+    fn optional_shortcuts_rebind_independently() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        for (id, key) in [
+            (ID_ANKI_ADD_KEY, 0x76),
+            (ID_STATIC_REGION_KEY, 0x77),
+            (ID_SCREENSHOT_HOTKEY, 0x78),
+            (ID_OCR_CLIPBOARD_KEY, 0x79),
+        ] {
+            send_command(&window, id);
+            assert!(window.handle_capture_key(key));
+        }
+        let read = window.read(&form);
+        assert_eq!("f7", read.cfg.anki.add_key);
+        assert_eq!("f8", read.cfg.anki.static_region_key);
+        assert_eq!("f9", read.cfg.actions.screenshot.hotkey);
+        assert_eq!(Some("f10"), read.ocr_clipboard_key.as_deref());
+        assert!(read.screenshot_hotkey_edited);
+        assert_eq!("f6", read.cfg.trigger.trigger_key);
+    }
+
+    #[test]
+    fn optional_clear_cancels_active_capture_and_uses_disabled_values() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        for (key, clear) in [
+            (ID_ANKI_ADD_KEY, ID_ANKI_ADD_KEY_CLEAR),
+            (ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR),
+            (ID_SCREENSHOT_HOTKEY, ID_SCREENSHOT_KEY_CLEAR),
+            (ID_OCR_CLIPBOARD_KEY, ID_OCR_CLIPBOARD_KEY_CLEAR),
+        ] {
+            send_command(&window, key);
+            assert!(CAPTURING.with(|cell| cell.get()).is_some());
+            send_command(&window, clear);
+            assert!(CAPTURING.with(|cell| cell.get()).is_none());
+            // SAFETY: The key control stays live after Clear.
+            unsafe {
+                assert_eq!("Not set", window_text(dlg_item(window.hwnd, key).unwrap()));
+            }
+        }
+        window.switch_tab(0);
+        let read = window.read(&form);
+        assert!(read.cfg.anki.add_key.is_empty());
+        assert!(read.cfg.anki.static_region_key.is_empty());
+        assert!(read.cfg.actions.screenshot.hotkey.is_empty());
+        assert!(read.ocr_clipboard_key.is_none());
+        assert!(read.screenshot_hotkey_edited);
+        assert_eq!("f6", read.cfg.trigger.trigger_key);
+    }
+
+    #[test]
+    fn static_region_clear_works_outside_static_sentence_mode() {
+        let mut form = nondefault_form();
+        form.cfg.anki.sentence_mode = SentenceMode::Sentence;
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        window.switch_tab(1);
+        // SAFETY: The shortcut stays enabled outside static mode.
+        unsafe {
+            let key = dlg_item(window.hwnd, ID_STATIC_REGION_KEY).unwrap();
+            assert!(windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(key).as_bool());
+        }
+        send_command(&window, ID_STATIC_REGION_KEY_CLEAR);
+        assert!(window.read(&form).cfg.anki.static_region_key.is_empty());
+    }
+
+    #[test]
+    fn native_hotkey_conflict_names_both_actions_and_keys() {
+        let mut config = crate::config::Config::default();
+        config.trigger.trigger_key = "f2".into();
+        config.actions.screenshot.hotkey = "F2".into();
+        let form = crate::settings::from_config(&config, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+
+        let error = window.validate_hotkeys(&config).unwrap_err().to_string();
+        assert!(error.contains("Screenshot (F2)"), "{error}");
+        assert!(error.contains("Lookup trigger (f2)"), "{error}");
+    }
+
+    #[test]
+    fn every_supplied_help_value_renders_once() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        let help = "Unique lookup key help";
+        for tab in &mut layout.tabs {
+            for section in &mut tab.sections {
+                if let Some(entry) = section.entries.iter_mut()
+                    .find(|entry| entry.id == SettingId::LookupKey)
+                {
+                    entry.help = Some(help.into());
+                }
+            }
+        }
+        layout.validate().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(
+            &form,
+            &[],
+            ApplyMode::Standalone,
+            layout,
+        )
+        .unwrap();
+        let mut count = 0;
+        // SAFETY: The loop follows live content-pane siblings.
+        unsafe {
+            let mut next = GetWindow(window.content, GW_CHILD);
+            while let Ok(control) = next {
+                if window_text(control) == help {
+                    count += 1;
+                }
+                next = GetWindow(control, GW_HWNDNEXT);
+            }
+            assert!(dlg_item(window.hwnd, ID_SCREENSHOT_HINT).is_ok());
+            assert!(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).is_ok());
+        }
+        assert_eq!(1, count);
+    }
+
+    #[test]
+    fn embedded_row_labels_fit_the_live_label_column() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let row_ids = [
+            SettingId::LookupKey,
+            SettingId::AnkiAddKey,
+            SettingId::StaticRegionKey,
+            SettingId::ScreenshotKey,
+            SettingId::OcrClipboardKey,
+            SettingId::PopupTheme,
+            SettingId::PopupFont,
+            SettingId::PopupMaxWidth,
+            SettingId::PopupMaxHeight,
+            SettingId::PopupSummaryLength,
+            SettingId::PopupLayout,
+            SettingId::OcrEngine,
+            SettingId::OcrLanguage,
+            SettingId::OcrPasses,
+            SettingId::AnkiUrl,
+            SettingId::AnkiDeck,
+            SettingId::AnkiModel,
+            SettingId::ScreenshotTargets,
+            SettingId::AnkiSelectionButtons,
+            SettingId::AnkiSelectionSeparator,
+            SettingId::AnkiTripleClick,
+            SettingId::AnkiSentenceMode,
+        ];
+        for entry in layout.tabs.iter().flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.entries)
+            .filter(|entry| row_ids.contains(&entry.id))
+        {
+            assert_eq!(
+                ROW_H,
+                measured_text_height(window.hwnd, window.font, &entry.label, LABEL_W),
+                "label wrapped: {}",
+                entry.label,
+            );
+        }
+    }
 
     #[test]
     fn selection_combo_tables_cover_all_modes() {
@@ -5984,8 +6405,8 @@ mod tests {
 
     #[test]
     fn field_map_toggle_label_shows_the_fold_direction() {
-        assert!(field_map_toggle_label(true).ends_with('\u{25B6}'));
-        assert!(field_map_toggle_label(false).ends_with('\u{25BC}'));
+        assert_eq!("Custom mapping \u{25B6}", field_map_toggle_label("Custom mapping", true));
+        assert_eq!("Custom mapping \u{25BC}", field_map_toggle_label("Custom mapping", false));
     }
 
     /// The client area must determine the window size. A guessed constant must
@@ -7386,7 +7807,7 @@ mod tests {
         assert_eq!(NoWork, work(&untick(ID_PITCH)));
     }
 
-    // ---- Plugins tab ----
+    // ---- Plugins ----
 
     fn manifest_stub(
         name: &str,

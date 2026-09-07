@@ -270,7 +270,7 @@ pub fn settings_only(
         // A tab switch starts deck, model, and field detection.
         if let Some(tab) = window.take_tab_change() {
             window.switch_tab(tab);
-            if tab == 3 {
+            if window.tab_needs_anki_detection(tab) {
                 spawn_detect(
                     next_anki_detect_generation(&mut detect_gen),
                     window.anki_url(),
@@ -341,7 +341,7 @@ pub fn settings_only(
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
                 let updated = settings::apply_to(&edited, &cfg);
-                if let Err(error) = updated.validate_hotkeys(crate::config::Platform::Windows) {
+                if let Err(error) = window.validate_hotkeys(&updated) {
                     refuse_apply(&window, &error);
                     continue;
                 }
@@ -1615,7 +1615,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             // Start deck, model, and field detection after a tab switch.
             if let Some(tab) = w.take_tab_change() {
                 w.switch_tab(tab);
-                if tab == 3 {
+                if w.tab_needs_anki_detection(tab) {
                     spawn_detect(
                         next_anki_detect_generation(&mut detect_gen),
                         w.anki_url(),
@@ -1993,7 +1993,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
-                            if let Err(error) = updated.validate_hotkeys(crate::config::Platform::Windows) {
+                            if let Err(error) = w.validate_hotkeys(&updated) {
                                 refuse_apply(w, &error);
                                 continue;
                             }

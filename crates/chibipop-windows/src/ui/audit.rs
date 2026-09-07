@@ -30,29 +30,38 @@ pub fn run(cfg: &Config, dicts: &[DictInfo]) -> Result<()> {
     let stale = crate::settings::stale_order_entries(cfg, dicts);
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
+    println!("{}", serde_json::to_string_pretty(&collect(&window))?);
+    Ok(())
+}
+
+fn collect(window: &SettingsWindow) -> Value {
     let root = window.hwnd();
     conceal(root);
 
     let mut dumps = Vec::new();
-    for tab in 0..5u32 {
+    for tab in 0..window.tab_count() {
         window.switch_tab(tab);
         conceal(root);
-        dumps.push(labelled(root, tab, false));
+        dumps.push(labelled(window, tab, false));
     }
-    // Tab 3 remains visible after this toggle.
-    window.toggle_field_map();
-    conceal(root);
-    dumps.push(labelled(root, 3, true));
-
-    println!("{}", serde_json::to_string_pretty(&json!({ "dumps": dumps }))?);
-    Ok(())
+    if let Some(tab) = window.field_map_tab() {
+        window.switch_tab(tab);
+        window.toggle_field_map();
+        conceal(root);
+        dumps.push(labelled(window, tab, true));
+        window.toggle_field_map();
+        conceal(root);
+    }
+    json!({ "dumps": dumps })
 }
 
 /// Adds `tab` and `field_map_expanded` to one audit record.
-fn labelled(root: HWND, tab: u32, expanded: bool) -> Value {
-    let mut v = dump(root);
+fn labelled(window: &SettingsWindow, tab: u32, expanded: bool) -> Value {
+    let mut v = dump(window.hwnd());
     if let Some(o) = v.as_object_mut() {
         o.insert("tab".into(), json!(tab));
+        o.insert("tab_id".into(), json!(window.tab_id(tab)));
+        o.insert("tab_label".into(), json!(window.tab_label(tab)));
         o.insert("field_map_expanded".into(), json!(expanded));
     }
     v
@@ -210,5 +219,83 @@ fn conceal(root: HWND) {
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         let _ = ShowWindow(root, SW_HIDE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::settings_layout::{SettingId, SettingsLayout};
+    use std::collections::HashSet;
+
+    const REQUIRED_STATIC_IDS: &[i64] = &[
+        100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+        116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130,
+        131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 143, 144, 145, 146, 147,
+        148, 149, 150, 151, 152, 153, 154, 156, 157, 158, 159, 160, 161, 162, 163,
+        164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178,
+        179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191,
+    ];
+
+    #[test]
+    fn audit_follows_runtime_tabs_and_expands_the_field_map_owner() {
+        let form = crate::settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let data = collect(&window);
+        let dumps = data["dumps"].as_array().unwrap();
+        assert_eq!(dumps.len(), window.tab_count() as usize + 1);
+        for tab in 0..window.tab_count() {
+            let record = &dumps[tab as usize];
+            assert_eq!(record["tab"], tab);
+            assert_eq!(record["tab_label"], window.tab_label(tab).unwrap());
+            assert_eq!(record["tab_id"], json!(window.tab_id(tab)));
+            assert_eq!(record["field_map_expanded"], false);
+            let mut identifiers = HashSet::new();
+            for control in record["controls"].as_array().unwrap() {
+                let id = control["id"].as_i64().unwrap();
+                if id > 0 && control["depth"].as_u64().unwrap() <= 2 {
+                    assert!(identifiers.insert(id), "duplicate control {id} on tab {tab}");
+                }
+            }
+            for id in REQUIRED_STATIC_IDS {
+                assert!(identifiers.contains(id), "missing required control {id} on tab {tab}");
+            }
+        }
+        let expanded = dumps.last().unwrap();
+        assert_eq!(expanded["tab"], window.field_map_tab().unwrap());
+        assert_eq!(expanded["field_map_expanded"], true);
+    }
+
+    #[test]
+    fn audit_expands_field_rows_after_the_component_moves_to_popup() {
+        let mut layout = SettingsLayout::embedded().unwrap();
+        let mut field_map = None;
+        for tab in &mut layout.tabs {
+            for section in &mut tab.sections {
+                if let Some(index) = section.entries.iter().position(|entry| entry.id == SettingId::AnkiFieldMap) {
+                    field_map = Some(section.entries.remove(index));
+                }
+            }
+        }
+        layout.tabs[0].sections[0].entries.insert(0, field_map.unwrap());
+        let form = crate::settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        window.populate_fields(vec!["Expression".into(), "Reading".into()]);
+        let data = collect(&window);
+        let dumps = data["dumps"].as_array().unwrap();
+        let expanded = dumps.last().unwrap();
+        assert_eq!(expanded["tab"], 0);
+        assert_eq!(expanded["tab_label"], "Popup");
+        for id in [200, 201] {
+            for collapsed in &dumps[..dumps.len() - 1] {
+                let control = collapsed["controls"].as_array().unwrap().iter()
+                    .find(|control| control["id"] == id).unwrap();
+                assert_eq!(control["visible"], false);
+            }
+            let control = expanded["controls"].as_array().unwrap().iter()
+                .find(|control| control["id"] == id).unwrap();
+            assert_eq!(control["visible"], true);
+            assert!(expanded["tab_ring"].as_array().unwrap().contains(&json!(id)));
+        }
     }
 }
