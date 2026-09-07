@@ -1039,22 +1039,18 @@ a bug in the overlay, not in the mask.
 
 ### 1.14 Per-character retrigger
 
-**The procedure spans two tabs, and that is not a mistake.** The checkbox **Look up each character
-as you hover** is on the **OCR / Debug** tab; the **Trigger** radios that gate it are on
-**General**. The checkbox is greyed out unless the trigger mode is Live, so setting this up means
-moving between the two. (It was on General until 2026-08-11 — putting it there grew the window from
-594 to 652 logical px on *every* tab, which at 150% scaling risked pushing the Apply row off the
-bottom. See BACKLOG 11.)
+The per-character lookup checkbox is on **Text recognition**. The lookup mode controls are on
+**Shortcuts**. The checkbox is disabled unless lookup mode is Live.
 
-With trigger mode **Live** (General) and **Look up each character as you hover** on (OCR / Debug),
+With lookup mode **Live** (Shortcuts) and per-character lookup on (Text recognition),
 hover the first character of a two-character word (経験) in **horizontal** text, then move one
 character right **without leaving the line**. The popup must change to 験's entry. Turn the setting
 off, press Apply, and repeat: the popup must now hold on 経験.
 
 - In both states, moving onto the popup must hold it, and wheel-scroll and kanji drill-down must
   still work. That is the property the split freeze/reach rects exist to preserve.
-- In hold-key mode the setting is inert **and the checkbox greys out**, by design. Switch Trigger
-  to `Hold key` on General and watch the checkbox disable on OCR / Debug; the grey-out uses the
+- In hold-key mode the setting is inert **and the checkbox greys out**, by design. Change lookup mode
+  to `Hold key` on Shortcuts and watch the checkbox disable on Text recognition; the grey-out uses the
   same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
 - **The PID must not change** across either Apply. This setting is consumed on the pump thread in
   the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
@@ -1086,7 +1082,7 @@ construction, not by convention.)*
 
 ### 1.15 OCR language
 
-The **OCR language** dropdown is the first row of the **OCR / Debug** group.
+The **OCR language** dropdown appears on **Text recognition**.
 
 Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
 "no restart", not a proxy — then hover the **same Japanese text you were resolving a moment ago**
@@ -1277,7 +1273,7 @@ Set the first language's list to one dictionary and the second language's to the
    — and every one of them still answers hovers. The tab and the runtime must agree; the tab
    showing them all as excluded while all of them answered was a defect on this branch. **Then the
    second route, which is the one that was actually broken:** give the stale entry to the language
-   you are *not* on, start, and switch **OCR language** to it on **OCR / Debug** before opening
+   you are *not* on, start, and switch **OCR language** to it on **Text recognition** before opening
    **Dictionaries**. Same expectation — a full *Searched* box and an empty *Not searched* one.
    The two routes run different code (`from_config` when the window opens, `scope_rows` on the
    switch) and only the first was guarded until 2026-08-12, so running the open route alone passes
@@ -1793,11 +1789,12 @@ trap, hit once during the build).
 5. **Every control on every tab is where it was, and still responds — the reparenting check.** This
    is Task 3's own verification and is worth re-running after any further change to this file: on
    each tab, operate a control with a visible effect (the Hold key radio enabling the trigger-key
-   button on General; selecting a row in the Dictionaries lists to enable Move up/down; expanding
+   button on Shortcuts; selecting a row in the Dictionaries lists to enable Move up/down; expanding
    the Anki field map) and confirm it responds, not silently swallowed by the viewport or content
-   pane. Measured during the build with `ChildWindowFromPointEx`, resolved against the window tree
+   pane. The old five-tab build measured this with `ChildWindowFromPointEx`, resolved against the window tree
    rather than the desktop: **0 of 26/21/23/21/68** controls swallowed across General, Dictionaries,
-   OCR/Debug, Anki and Anki expanded. `chibipop settings --audit`'s `tab_ring` / `tab_ring_reverse`,
+   OCR/Debug, Anki and Anki expanded. These historical counts do not validate the current six-tab layout.
+   `chibipop settings --audit`'s `tab_ring` / `tab_ring_reverse`,
    diffed against a known-good dump, is the fast version of this same check, though it proves the
    Tab-key ring rather than the mouse-hit path.
 6. **Drag the scrollbar thumb by hand.** With the window shrunk (Setup) and the bar visible, grab
@@ -1855,14 +1852,13 @@ hover observed with the resolved word recorded — **"it should work" is not evi
 > - Neither step can show that an Apply-while-popup-visible case lands the change in the live
 >   instance instead of queuing it until a fresh lookup.
 
-**Setup.** `./target/release/chibipop.exe run`. Open Settings, go to **OCR / Debug** tab. Have a
+**Setup.** `./target/release/chibipop.exe run`. Open Settings, go to **Text recognition** tab. Have a
 corpus page (Japanese text) ready to hover.
 
-1. **Enable a plugin.** In the **Plugin** listbox, select an available plugin (if any are listed
-   under "Available plugins") and click **Enable**. The status line must show the plugin starting,
-   then **Ready**. Record it started without crashing and reported its state.
+1. **Enable a plugin.** On **Extensions**, check **Enable** beside an installed plugin.
+   Record its enabled state. Selecting the provider as the OCR engine starts it in the next step.
 
-2. **Select it as the engine.** Switch to the **OCR language** dropdown and select the plugin as
+2. **Select it as the engine.** On **Text recognition**, use the **OCR engine** dropdown to select the plugin as
    the engine (it will be listed by name). Press Apply. Hover a word in your corpus **on the same
    line and orientation the test used for step 1**. The next hover must use the plugin's
    recogniser, not Windows OCR. Compare the word resolved, the hit-rank order, or the match box —
@@ -1870,7 +1866,7 @@ corpus page (Japanese text) ready to hover.
    merely changes the engine selection must make the next hover use it. Without hot-swap, this
    half is blocked.**
 
-3. **Select Built-in again.** In the **OCR language** dropdown, select Built-in and press Apply.
+3. **Select Built-in again.** In the **OCR engine** dropdown, select Built-in and press Apply.
    Hover the same text. It must use Windows OCR and resolve the same word you got in step 1
    (if step 1 resolved anything). The revert is silent — no notice, no restart.
 
@@ -1929,13 +1925,13 @@ exists.
    list without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with **five tabs**: General, Dictionaries, OCR / Debug, Anki,
-   Plugins (`src/ui/settings_window.rs:2484-2508`).
-3. The **OCR engine** dropdown on OCR / Debug lists **"Built-in (Windows OCR)"**
+2. `chibipop.exe settings` opens with six tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+   Anki, and Extensions. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
+3. The **OCR engine** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
    `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
    includes every successfully parsed discovered text-provider.
-4. The **Plugins** tab does not say "No plugins found" here. `discover()` finds
+4. The **Extensions** tab does not say "No plugins found" here. `discover()` finds
    `plugins/meikiocr` and lists one row: **"meikiocr 0.1.0"**, status
    **"Enabled"**, with the **Enable** checkbox checked. The state comes from the
    in-memory config extended before `settings_only`; it is not read from disk.

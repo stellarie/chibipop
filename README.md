@@ -147,10 +147,10 @@ covers everything in it. See
   your cursor, in pixels. Vertical mode swaps the two numbers.
 - **Scan alphanumeric text** — on by default. Turn it off to ignore
   English words. Mixed text like 「3人」 still works either way.
-- **Per-character lookup** (*OCR / Debug* tab) — off by default. Turn it
+- **Per-character lookup** (*Text recognition* tab) — off by default. Turn it
   on to look up every character as you move the cursor, rather than whole
   words. Live mode only.
-- **OCR language** (*OCR / Debug* tab) — **Windows only.** Which language
+- **OCR language** (*Text recognition* tab) — **Windows only.** Which language
   the recogniser reads. Add more languages in Windows Settings > Language
   & region. Linux always reads Japanese.
 - **Per-language dictionary list** (*Dictionaries* tab) — give each
@@ -373,7 +373,7 @@ chibipop finds it on its own.
 
 1. **Install meikiocr.** Follow its own README. You need Python, with
    meikiocr, OpenCV and ONNX Runtime.
-2. **Tell chibipop where it is.** In Settings, on the *OCR / Debug* tab:
+2. **Tell chibipop where it is.** In Settings, on the *Text recognition* tab:
    1. choose **meikiocr** in the **OCR engine** dropdown;
    2. click **Configure...**;
    3. pick any file inside your meikiocr folder.
@@ -387,7 +387,7 @@ prints the reason.
 
 ### Checking which engine is running
 
-Tick **Show which OCR engine is active** on the *OCR / Debug* tab and
+Tick **Show the active OCR engine** on the *Text recognition* tab and
 press **Apply**. The status bar names it.
 
 To watch the engine's own messages, start chibipop from a terminal:
