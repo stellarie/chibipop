@@ -179,14 +179,33 @@ one box where `probe` shows several.
 
 `chibipop settings --audit` opens the settings window off-screen and hidden,
 and prints one JSON document — `{"dumps": [...]}` — instead of showing
-anything: one dump per tab, plus a fifth for the Anki tab with its field map
-expanded. Each dump carries the client size and every control's `id`,
+anything: one dump per layout tab, plus one for the tab containing the expanded field map.
+Each dump includes its tab index, stable `tab_id`, label, client size, and every control's `id`,
 `parent_id`, `class`, `text`, `rect` (`x`/`y`/`w`/`h`), `visible`, `enabled`
 and `tabstop`, plus the Tab-key ring in both directions (`tab_ring`,
 `tab_ring_reverse`). It sends no input and draws no pixel, so two builds can
 be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
+
+Windows settings use seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
+Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
+
+Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.
+The footer separates Apply progress from the active OCR language, OCR engine, and Anki enablement.
+It reports successful Apply only after the matching save completes. Unsaved controls do not change the runtime line.
+Changing the OCR engine still requires a restart; the runtime line names the backend currently running.
+
+**Debug > Show live logs** opens a separate window with bounded recent output and live updates.
+Selecting text or reading older output pauses following. Returning to the tail resumes it.
+Closing the viewer leaves chibipop running. Closing the settings window with X exits the process after any active write finishes.
+Escape retains the live settings hide behavior.
+
+The embedded `crates/chibipop-windows/assets/settings-layout.toml` controls organization
+and labels. Developers can reorder entries or move them between sections and tabs, then rebuild.
+The loader rejects unknown identifiers and incomplete layouts. Rust retains all setting behavior
+and configuration keys. This file does not change the Linux settings renderer.
 
 ### Paths
 
@@ -701,7 +720,7 @@ behaviour and still the default. Entries are matched by name substring,
 exactly as `display_order` is.
 
 Set this in the settings window — the **Dictionaries** tab is scoped to the
-OCR language selected on **OCR / Debug**, and shows that language's list in a
+OCR language selected on **Text recognition**, and shows that language's list in a
 **Searched** box with the rest in a **Not searched** box below it. Changing the
 language re-scopes the tab immediately, before Apply.
 

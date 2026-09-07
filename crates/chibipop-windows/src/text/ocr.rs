@@ -154,6 +154,7 @@ fn language_action(current: &str, requested: &str, available: impl FnOnce() -> b
 pub struct WinrtOcr {
     engine: OcrEngine,
     language: String,
+    monitor: Option<crate::text::runtime::OcrMonitor>,
 }
 
 impl WinrtOcr {
@@ -162,12 +163,22 @@ impl WinrtOcr {
         // Without this call, later WinRT calls can return `CO_E_NOTINITIALIZED`.
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).context("RoInitialize")? };
         let engine = make_engine(language)?;
-        Ok(WinrtOcr { engine, language: language.to_string() })
+        Ok(WinrtOcr { engine, language: language.to_string(), monitor: None })
     }
 
     /// Returns the engine that `new` created.
     pub fn engine(&self) -> &OcrEngine {
         &self.engine
+    }
+
+    pub(crate) fn with_monitor(mut self, monitor: crate::text::runtime::OcrMonitor) -> Self {
+        self.monitor = Some(monitor);
+        self
+    }
+
+    pub(crate) fn active_language(&self) -> String {
+        self.engine.RecognizerLanguage().and_then(|language| language.LanguageTag())
+            .map_or_else(|_| self.language.clone(), |tag| tag.to_string())
     }
 }
 
@@ -193,6 +204,9 @@ impl chibipop::text::OcrEngine for WinrtOcr {
                     self.language
                 ),
             },
+        }
+        if let Some(monitor) = &self.monitor {
+            monitor.publish("windows-ocr", &self.active_language(), true);
         }
     }
 
@@ -251,6 +265,24 @@ mod tests {
     #[test]
     fn a_nonsense_tag_is_not_available() {
         assert!(!recogniser_available("xx-Fake"));
+    }
+
+    #[test]
+    fn refused_language_change_reports_the_engine_language_that_remains_active() {
+        let Some(tag) = OcrEngine::AvailableRecognizerLanguages().ok()
+            .and_then(|languages| languages.into_iter().next())
+            .and_then(|language| language.LanguageTag().ok()) else {
+                eprintln!("UNAVAILABLE: no installed OCR recognizer");
+                return;
+            };
+        let monitor = crate::text::runtime::OcrMonitor::default();
+        let mut engine = WinrtOcr::new(&tag.to_string()).unwrap().with_monitor(monitor.clone());
+        chibipop::text::OcrEngine::set_language(&mut engine, &tag.to_string());
+        let before = monitor.snapshot();
+        chibipop::text::OcrEngine::set_language(&mut engine, "xx-Fake");
+        assert_eq!(before, monitor.snapshot());
+        assert_eq!(engine.active_language(), before.language);
+        assert!(before.available);
     }
 
     /// This test passes on every machine.

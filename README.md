@@ -131,9 +131,13 @@ other programs.
 
 ## 5. Settings
 
-Everything is in the settings window. Press **Apply** to save. Your
-changes take effect at once — chibipop does not restart, and you do not
-lose the pop-up you were looking at.
+Use the settings window to change preferences. Press **Apply** to save.
+Most changes take effect at once. Changing the Windows OCR engine still needs a restart.
+
+On Windows, resize or maximize settings to give controls more room. The footer shows
+Apply progress, the active OCR language and engine, and whether Anki is enabled.
+Open **Debug > Show live logs** to inspect recent and live output in another window.
+The settings window's X exits chibipop. Closing the log viewer closes that viewer.
 
 **Where the file lives.** Your settings are in a file called
 `chibipop.toml`. On Windows it sits beside the program. On Linux it is in
@@ -147,10 +151,10 @@ covers everything in it. See
   your cursor, in pixels. Vertical mode swaps the two numbers.
 - **Scan alphanumeric text** — on by default. Turn it off to ignore
   English words. Mixed text like 「3人」 still works either way.
-- **Per-character lookup** (*OCR / Debug* tab) — off by default. Turn it
+- **Per-character lookup** (*Text recognition* tab) — off by default. Turn it
   on to look up every character as you move the cursor, rather than whole
   words. Live mode only.
-- **OCR language** (*OCR / Debug* tab) — **Windows only.** Which language
+- **OCR language** (*Text recognition* tab) — **Windows only.** Which language
   the recogniser reads. Add more languages in Windows Settings > Language
   & region. Linux always reads Japanese.
 - **Per-language dictionary list** (*Dictionaries* tab) — give each
@@ -373,7 +377,7 @@ chibipop finds it on its own.
 
 1. **Install meikiocr.** Follow its own README. You need Python, with
    meikiocr, OpenCV and ONNX Runtime.
-2. **Tell chibipop where it is.** In Settings, on the *OCR / Debug* tab:
+2. **Tell chibipop where it is.** In Settings, on the *Text recognition* tab:
    1. choose **meikiocr** in the **OCR engine** dropdown;
    2. click **Configure...**;
    3. pick any file inside your meikiocr folder.
@@ -387,7 +391,7 @@ prints the reason.
 
 ### Checking which engine is running
 
-Tick **Show which OCR engine is active** on the *OCR / Debug* tab and
+Tick **Show the active OCR engine** on the *Debug* tab and
 press **Apply**. The status bar names it.
 
 To watch the engine's own messages, start chibipop from a terminal:

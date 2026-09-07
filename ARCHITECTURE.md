@@ -260,6 +260,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 ## Settings and config
 
+- Windows embeds `crates/chibipop-windows/assets/settings-layout.toml`. The typed layout
+  owns tab, section, and entry order, labels, and help. Rust owns control identifiers,
+  conditions, validation, persistence, and dynamic components. Parsing must reject missing
+  or duplicate entries before controls are created. Editing the asset requires a rebuild.
+- Windows settings reflow controls in current client dimensions and preserve user sizing.
+  Runtime status comes from the concrete OCR backend. Save sequences reject stale results.
+  The settings X requests process exit after active writes. The Debug viewer closes independently.
+- Interactive Windows commands tee output into a bounded live log. Machine-readable commands
+  keep their output contract. Restore original streams before spawning a replacement daemon.
 - Settings reject conflicting platform shortcuts before applying or saving changes.
   Validation compares the complete pending form, including the editable Windows screenshot shortcut.
   Users can swap keys in one Apply. An unedited Windows screenshot field remains untouched by a Linux Apply.

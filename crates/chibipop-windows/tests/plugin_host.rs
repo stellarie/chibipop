@@ -81,6 +81,29 @@ fn a_clean_exchange_returns_words() {
 }
 
 #[test]
+fn concrete_plugin_strikes_report_unavailability_and_keep_the_served_language() {
+    use chibipop::text::OcrEngine;
+    use chibipop_windows::plugin::text::PluginText;
+    use chibipop_windows::text::runtime::OcrMonitor;
+
+    let manifest = fixture("crash");
+    let host = host::spawn(&manifest, std::path::Path::new(".")).unwrap();
+    let monitor = OcrMonitor::default();
+    let mut plugin = PluginText::new(host, &manifest).with_monitor(monitor.clone());
+    plugin.set_language("ko");
+    assert_eq!("ja", monitor.snapshot().language);
+    assert!(monitor.snapshot().available);
+    for _ in 0..3 {
+        assert!(plugin.recognise(&[0, 0, 0, 255], 1, 1).is_err());
+    }
+    assert!(plugin.disabled());
+    let status = monitor.snapshot();
+    assert!(!status.available);
+    assert_eq!("echo", status.engine);
+    assert_eq!("ja", status.language);
+}
+
+#[test]
 fn a_hang_times_out_without_killing_the_test() {
     let m = fixture("hang");
     let mut h = host::spawn(&m, std::path::Path::new(".")).unwrap();

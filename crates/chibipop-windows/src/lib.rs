@@ -22,6 +22,8 @@ pub mod app;
 #[cfg(windows)]
 pub mod clipboard;
 #[cfg(windows)]
+pub mod diagnostics;
+#[cfg(windows)]
 pub mod input;
 #[cfg(windows)]
 pub mod lock;
