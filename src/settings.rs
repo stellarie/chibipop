@@ -58,6 +58,8 @@ pub struct SettingsForm {
     pub field_map: Option<Vec<FieldMapping>>,
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
+    /// Only the Windows editor can change this platform field.
+    pub screenshot_hotkey_edited: bool,
     /// Saved targets can change while this form is open.
     /// Only an explicit reset can remove a target from the latest Config.
     pub screenshot_reset_targets: bool,
@@ -366,6 +368,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .ocr_clipboard
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
+        screenshot_hotkey_edited: false,
         screenshot_reset_targets: false,
     }
 }
@@ -423,6 +426,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
             hotkey_linux: hotkey_linux.clone(),
         }),
     };
+    if form.screenshot_hotkey_edited {
+        out.actions.screenshot.hotkey = form.cfg.actions.screenshot.hotkey.trim().to_string();
+    }
     out.clamp_ranges(None);
     // Each role list becomes an enabled array and a disabled array. Each array
     // keeps its rows in screen order. An unreadable file remains a row for
@@ -1064,6 +1070,26 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn an_unedited_screenshot_shortcut_preserves_the_latest_saved_value() {
+        let mut cfg = cfg_with(&[]);
+        let form = from_config(&cfg, &dicts());
+        cfg.actions.screenshot.hotkey = "f10".into();
+        assert_eq!(apply_to(&form, &cfg).actions.screenshot.hotkey, "f10");
+    }
+
+    #[test]
+    fn an_edited_screenshot_shortcut_replaces_the_saved_value_and_keeps_the_linux_key() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.hotkey_linux = Some("ALT+S".into());
+        let mut form = from_config(&cfg, &dicts());
+        form.cfg.actions.screenshot.hotkey = " F5 ".into();
+        form.screenshot_hotkey_edited = true;
+        let pending = apply_to(&form, &cfg);
+        assert_eq!(pending.actions.screenshot.hotkey, "F5");
+        assert_eq!(pending.actions.screenshot.hotkey_linux.as_deref(), Some("ALT+S"));
     }
 
     #[test]

@@ -204,6 +204,8 @@ const ID_TRIPLE_CLICK: i32 = 180;
 const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 /// Furigana filter checkbox.
 const ID_DISCARD_FURIGANA: i32 = 186;
+const ID_SCREENSHOT_HOTKEY: i32 = 187;
+const ID_SCREENSHOT_KEY_CLEAR: i32 = 188;
 
 
 /// The first field-map combo identifier.
@@ -863,6 +865,7 @@ thread_local! {
 
     // Stores the OCR clipboard virtual key code for each `HWND`.
     static OCR_CLIP_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+    static SCREENSHOT_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
 
     // Stores the field-map toggle click flag for each `HWND`.
     static FIELD_MAP_TOGGLE: Cell<Option<isize>> = const { Cell::new(None) };
@@ -1026,7 +1029,9 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
         let prev = window_text(btn);
         CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
         CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
-        let _ = SetWindowTextW(btn, w!("Press a key..."));
+        let prompt = if id == ID_SCREENSHOT_HOTKEY { w!("Press one key (Esc cancels)") }
+            else { w!("Press a key...") };
+        let _ = SetWindowTextW(btn, prompt);
     }
 }
 
@@ -1117,6 +1122,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
                 ID_STATIC_REGION_KEY => unsafe { begin_capture(hwnd, ID_STATIC_REGION_KEY) },
                 ID_OCR_CLIPBOARD_KEY => unsafe { begin_capture(hwnd, ID_OCR_CLIPBOARD_KEY) },
+                ID_SCREENSHOT_HOTKEY => unsafe { begin_capture(hwnd, ID_SCREENSHOT_HOTKEY) },
+                ID_SCREENSHOT_KEY_CLEAR => {
+                    SCREENSHOT_CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0))));
+                    // SAFETY: The button is a descendant of this live settings window.
+                    unsafe {
+                        if let Ok(button) = dlg_item(hwnd, ID_SCREENSHOT_HOTKEY) {
+                            let _ = SetWindowTextW(button, w!("Not set"));
+                        }
+                    }
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -2525,6 +2540,7 @@ fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
         ID_TRIGGER_KEY => &CAPTURED_VK,
         ID_STATIC_REGION_KEY => &SR_CAPTURED_VK,
         ID_OCR_CLIPBOARD_KEY => &OCR_CLIP_CAPTURED_VK,
+        ID_SCREENSHOT_HOTKEY => &SCREENSHOT_CAPTURED_VK,
         _ => &ANKI_CAPTURED_VK,
     };
     cell.with(|c| c.set(Some((mine, vk))));
@@ -2556,6 +2572,13 @@ fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
 /// Formats the static region hotkey string to persist.
 fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
     resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
+}
+
+fn resolved_screenshot_key(hwnd: HWND, template: &str) -> String {
+    SCREENSHOT_CAPTURED_VK.with(|c| c.get())
+        .filter(|(owner, _)| *owner == hwnd.0 as isize)
+        .map(|(_, vk)| if vk == 0 { String::new() } else { stored_trigger_key(vk) })
+        .unwrap_or_else(|| template.to_string())
 }
 
 /// Formats the OCR clipboard hotkey string to persist.
@@ -3185,6 +3208,16 @@ impl SettingsWindow {
 
     /// Records captured key code `vk`. Returns true if accepted.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
+        let screenshot = CAPTURING.with(|c| c.get())
+            == Some((self.hwnd.0 as isize, ID_SCREENSHOT_HOTKEY));
+        if screenshot && vk == 0x1B {
+            // SAFETY: Capture belongs to this live settings window.
+            unsafe { cancel_capture(self.hwnd); }
+            return true;
+        }
+        if screenshot && matches!(vk, 0x10..=0x12 | 0xA0..=0xA5) {
+            return true;
+        }
         let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
             return false;
         };
@@ -4127,8 +4160,24 @@ impl SettingsWindow {
                   form.cfg.popup.show_part_of_speech, y)?);
             y += ROW_H + 18;
             y += 12;
-            gen.push(group("Actions", y, ROW_H + 38)?);
+            gen.push(group("Actions", y, 4 * ROW_H + 2 * ROW_GAP + 38)?);
             y += 20;
+            gen.push(label("Entry screenshot key", y)?);
+            SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
+            let screenshot_key_name = crate::config::parse_trigger_key(&form.cfg.actions.screenshot.hotkey)
+                .map(crate::config::trigger_key_name)
+                .unwrap_or_else(|| if form.cfg.actions.screenshot.hotkey.is_empty() {
+                    "Not set".to_string()
+                } else { form.cfg.actions.screenshot.hotkey.clone() });
+            gen.push(child(page, w!("BUTTON"), &screenshot_key_name, WS_TABSTOP,
+                FIELD_X, y, FIELD_W - 80, ROW_H, ID_SCREENSHOT_HOTKEY, f)?);
+            gen.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
+                FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_SCREENSHOT_KEY_CLEAR, f)?);
+            y += ROW_H + ROW_GAP;
+            gen.push(child(page, w!("STATIC"),
+                "With an entry open, saves a PNG using the screenshot mode in Anki settings.\r\nAdds the entry to Anki when connected.",
+                WINDOW_STYLE(0), PAD, y, WIN_W - 2 * PAD - 20, 2 * ROW_H, 0, f)?);
+            y += 2 * ROW_H + ROW_GAP;
             gen.push(label("OCR clipboard key", y)?);
             let ocr_clipboard_vk =
                 crate::config::parse_trigger_key(form.ocr_clipboard_key.as_deref().unwrap_or(""));
@@ -5263,6 +5312,8 @@ impl SettingsWindow {
             };
 
             let trigger_key = resolved_trigger_key(h, &template.cfg.trigger.trigger_key);
+            let screenshot_hotkey = resolved_screenshot_key(h, &template.cfg.actions.screenshot.hotkey);
+            let screenshot_hotkey_edited = screenshot_hotkey != template.cfg.actions.screenshot.hotkey;
             let anki_add_key = resolved_anki_add_key(h, &template.cfg.anki.add_key);
             let ocr_clipboard_key =
                 resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
@@ -5353,6 +5404,8 @@ impl SettingsWindow {
             form.cfg.anki.static_region_key =
                 resolved_sr_key(h, &template.cfg.anki.static_region_key);
             form.cfg.actions.screenshot.include_on_add = checked(ID_INCLUDE_SCREENSHOT);
+            form.cfg.actions.screenshot.hotkey = screenshot_hotkey;
+            form.screenshot_hotkey_edited = screenshot_hotkey_edited;
             form.cfg.actions.screenshot.capture_mode = screenshot_capture_mode;
             form.screenshot_reset_targets = screenshot_reset_targets;
             form.ocr_clipboard_key = ocr_clipboard_key;
@@ -5453,6 +5506,11 @@ impl Drop for SettingsWindow {
             }
         });
         OCR_CLIP_CAPTURED_VK.with(|c| {
+            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
+                c.set(None);
+            }
+        });
+        SCREENSHOT_CAPTURED_VK.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
@@ -5717,6 +5775,78 @@ mod tests {
 
     fn dummy_hwnd(n: isize) -> HWND {
         HWND(n as *mut core::ffi::c_void)
+    }
+
+    #[test]
+    fn pending_capture_keys_and_screenshot_shortcut_are_validated_together() {
+        let mut cfg = crate::config::Config::default();
+        cfg.trigger.trigger_key = "f2".into();
+        cfg.anki.static_region_key = "f3".into();
+        cfg.actions.screenshot.hotkey = "f2".into();
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+            hotkey: Some("f5".into()), hotkey_linux: None,
+        });
+        let form = crate::settings::from_config(&cfg, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        for (id, vk) in [(ID_TRIGGER_KEY, 0x72), (ID_STATIC_REGION_KEY, 0x71),
+            (ID_OCR_CLIPBOARD_KEY, 0x73)] {
+            CAPTURING.with(|c| c.set(Some((window.hwnd.0 as isize, id))));
+            assert!(window.handle_capture_key(vk));
+        }
+        CAPTURING.with(|c| c.set(Some((window.hwnd.0 as isize, ID_SCREENSHOT_HOTKEY))));
+        assert!(window.handle_capture_key(0x74));
+        let edited = window.read(&form);
+        let pending = crate::settings::apply_to(&edited, &cfg);
+        pending.validate_hotkeys(crate::config::Platform::Windows).unwrap();
+        assert_eq!(pending.trigger.trigger_key, "f3");
+        assert_eq!(pending.anki.static_region_key, "f2");
+        assert_eq!(pending.actions.screenshot.hotkey, "f5");
+        assert_eq!(pending.actions.ocr_clipboard.unwrap().hotkey.as_deref(), Some("f4"));
+        assert_eq!(cfg.actions.screenshot.hotkey, "f2");
+
+        CAPTURING.with(|c| c.set(Some((window.hwnd.0 as isize, ID_SCREENSHOT_HOTKEY))));
+        assert!(window.handle_capture_key(0x72));
+        let pending = crate::settings::apply_to(&window.read(&form), &cfg);
+        assert!(pending.validate_hotkeys(crate::config::Platform::Windows).unwrap_err()
+            .to_string().contains("Screenshot conflicts with Lookup trigger"));
+        assert_eq!(window.read(&form).cfg.trigger.trigger_key, "f3");
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "f3");
+    }
+
+    #[test]
+    fn screenshot_key_capture_preserves_cancels_rebinds_and_clears() {
+        let cfg = crate::config::Config::default();
+        let form = crate::settings::from_config(&cfg, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "ctrl+shift+s");
+        assert!(!window.read(&form).screenshot_hotkey_edited);
+        // SAFETY: These commands target controls owned by the live settings window.
+        unsafe {
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(ID_SCREENSHOT_HOTKEY as usize)), None);
+        }
+        assert!(window.handle_capture_key(0x10));
+        assert!(CAPTURING.with(|c| c.get()).is_some());
+        assert!(window.handle_capture_key(0x1B));
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "ctrl+shift+s");
+        assert!(CAPTURING.with(|c| c.get()).is_none());
+        // SAFETY: The same capture button remains live.
+        unsafe {
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(ID_SCREENSHOT_HOTKEY as usize)), None);
+        }
+        assert!(window.handle_capture_key(0x78));
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "f9");
+        assert_eq!(crate::config::parse_trigger_key(&window.read(&form).cfg.anki.add_key),
+            crate::config::parse_trigger_key(&form.cfg.anki.add_key));
+        // SAFETY: The Clear button belongs to this same live window.
+        unsafe {
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(ID_SCREENSHOT_KEY_CLEAR as usize)), None);
+        }
+        let cleared = window.read(&form);
+        assert!(cleared.cfg.actions.screenshot.hotkey.is_empty());
+        assert!(cleared.screenshot_hotkey_edited);
+        assert!(crate::settings::apply_to(&cleared, &cfg).actions.screenshot.hotkey.is_empty());
+        drop(window);
+        assert!(SCREENSHOT_CAPTURED_VK.with(|c| c.get()).is_none());
     }
 
     #[test]

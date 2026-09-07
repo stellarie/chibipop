@@ -24,6 +24,15 @@ use anyhow::{Context, Result};
 /// The function returns an error when dimensions are not positive or the
 /// buffer has fewer than `w * h * 4` bytes.
 pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
+    encode_png(bgra, w, h, png::Compression::default())
+}
+
+/// Trade wire size for latency when a local OCR process consumes the PNG immediately.
+pub fn encode_bgra_to_png_fast(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
+    encode_png(bgra, w, h, png::Compression::Fast)
+}
+
+fn encode_png(bgra: &[u8], w: i32, h: i32, compression: png::Compression) -> Result<Vec<u8>> {
     let dims = u32::try_from(w).ok().zip(u32::try_from(h).ok());
     let Some((w, h)) = dims.filter(|(w, h)| *w > 0 && *h > 0) else {
         anyhow::bail!("a PNG needs positive dimensions, not {w}x{h}");
@@ -44,6 +53,7 @@ pub fn encode_bgra_to_png(bgra: &[u8], w: i32, h: i32) -> Result<Vec<u8>> {
 
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_compression(compression);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().context("writing the PNG header")?;
@@ -72,6 +82,15 @@ mod tests {
         // BGRA stores blue 0, green 0, red 255, and an unused alpha byte.
         let png = encode_bgra_to_png(&[0, 0, 0xff, 0x00], 1, 1).unwrap();
         assert_eq!((1, 1, vec![0xff, 0, 0]), decode(&png));
+    }
+
+    #[test]
+    fn fast_transport_png_preserves_every_color_byte() {
+        let bgra: Vec<u8> = (0..37 * 19 * 4).map(|i| (i % 251) as u8).collect();
+        assert_eq!(decode(&encode_bgra_to_png(&bgra, 37, 19).unwrap()),
+            decode(&encode_bgra_to_png_fast(&bgra, 37, 19).unwrap()));
+        assert!(encode_bgra_to_png_fast(&[], 1, 1).is_err());
+        assert!(encode_bgra_to_png_fast(&[], 0, 0).is_err());
     }
 
     #[test]

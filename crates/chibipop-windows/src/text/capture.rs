@@ -220,6 +220,7 @@ struct DxgiState {
     last: Option<ID3D11Texture2D>,
     tex_w: u32,
     tex_h: u32,
+    staging: Option<(i32, i32, ID3D11Texture2D)>,
 }
 
 /// Return whether `r` lies completely inside `mon`.
@@ -244,6 +245,31 @@ thread_local! {
     ///
     /// The resources remain thread-affine.
     static DXGI: RefCell<Option<DxgiState>> = const { RefCell::new(None) };
+    static DXGI_FAILURE: RefCell<Option<(Instant, PhysRect, String)>> = const { RefCell::new(None) };
+}
+
+const DXGI_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+fn capture_dxgi_with_retry(region: PhysRect) -> Result<Vec<u8>> {
+    let monitor = monitor_bounds_containing(region.center());
+    DXGI_FAILURE.with(|cell| {
+        let mut failure = cell.borrow_mut();
+        if let Some((until, previous, reason)) = failure.as_ref() {
+            if *previous == monitor && Instant::now() < *until {
+                anyhow::bail!("DXGI retry deferred: {reason}");
+            }
+        }
+        match capture_dxgi(region) {
+            Ok(buf) => {
+                *failure = None;
+                Ok(buf)
+            }
+            Err(error) => {
+                *failure = Some((Instant::now() + DXGI_RETRY_DELAY, monitor, format!("{error:#}")));
+                Err(error)
+            }
+        }
+    })
 }
 
 /// Capture a region with DXGI first.
@@ -251,7 +277,7 @@ thread_local! {
 /// Use GDI `BitBlt` when DXGI fails or returns a flat frame.
 fn capture_region(region: PhysRect) -> Result<Frame> {
     let started = Instant::now();
-    let result = match capture_dxgi(region) {
+    let result = match capture_dxgi_with_retry(region) {
         // A flat frame cannot provide text, so use the fallback.
         Ok(buf) if !is_uniform(&buf) => Ok(Frame {
             buf,
@@ -517,7 +543,7 @@ fn store_desktop(st: &mut DxgiState, res: &IDXGIResource) -> Result<()> {
 }
 
 /// Copy `region` from the retained desktop frame.
-fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
+fn copy_out(st: &mut DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
     let (w, h) = (region.w, region.h);
     let len = (w as usize)
         .checked_mul(h as usize)
@@ -551,10 +577,13 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
             CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
             ..Default::default()
         };
-        let mut staging = None;
-        // SAFETY: The code initializes every field in `stg_desc` before this call.
-        st.dev.CreateTexture2D(&stg_desc, None, Some(&mut staging))?;
-        let staging: ID3D11Texture2D = staging.context("no staging texture")?;
+        if !st.staging.as_ref().is_some_and(|(cw, ch, _)| (*cw, *ch) == (w, h)) {
+            let mut staging = None;
+            // SAFETY: The initialized description belongs to this device.
+            st.dev.CreateTexture2D(&stg_desc, None, Some(&mut staging))?;
+            st.staging = Some((w, h, staging.context("no staging texture")?));
+        }
+        let staging = &st.staging.as_ref().context("no staging texture")?.2;
 
         let src_box = D3D11_BOX {
             left: sx,
@@ -565,10 +594,10 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
             back: 1,
         };
         // SAFETY: The code checked the box bounds against the retained texture above.
-        st.ctx.CopySubresourceRegion(&staging, 0, 0, 0, 0, src, 0, Some(&src_box));
+        st.ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, src, 0, Some(&src_box));
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        st.ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        st.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
 
         let mut buf = vec![0u8; len];
         let src_pitch = mapped.RowPitch as usize;
@@ -584,7 +613,7 @@ fn copy_out(st: &DxgiState, region: &PhysRect) -> Result<Vec<u8>> {
             buf[off..off + dst_pitch].copy_from_slice(src);
         }
 
-        st.ctx.Unmap(&staging, 0);
+        st.ctx.Unmap(staging, 0);
         Ok(buf)
     }
 }
@@ -635,10 +664,10 @@ fn init_dxgi(region: &PhysRect) -> Result<DxgiState> {
                         Some(&mut dev),
                         None,
                         Some(&mut ctx),
-                    )?;
+                    ).context("creating the DXGI capture device")?;
                     let dev = dev.context("no D3D11 device")?;
                     let ctx = ctx.context("no D3D11 context")?;
-                    let dup = o1.DuplicateOutput(&dev)?;
+                    let dup = o1.DuplicateOutput(&dev).context("duplicating the desktop output")?;
                     return Ok(DxgiState {
                         dev,
                         ctx,
@@ -647,6 +676,7 @@ fn init_dxgi(region: &PhysRect) -> Result<DxgiState> {
                         last: None,
                         tex_w: 0,
                         tex_h: 0,
+                        staging: None,
                     });
                 }
                 oi += 1;

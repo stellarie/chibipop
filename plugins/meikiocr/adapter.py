@@ -217,8 +217,11 @@ def reading_order(lines):
 
 def recognise(params):
     """One wire Word per meikiocr character. bbox is [x1,y1,x2,y2]."""
+    started = time.perf_counter()
     img = decode_png(params["image_png"])
+    decoded = time.perf_counter()
     raw = _ocr.run_ocr(img)
+    inferred = time.perf_counter()
 
     # Trap 3. A detected box whose chars all fail rec_threshold survives
     # with text == ''. len(raw) counts boxes, not readable lines.
@@ -242,6 +245,9 @@ def recognise(params):
         # ignore an unknown field, so it rides along rather than dying.
         lines.append({"text": ln["text"], "words": words,
                       "is_vertical": bool(ln.get("is_vertical"))})
+    log(f"stages decode_ms={1000 * (decoded - started):.3f} "
+        f"inference_ms={1000 * (inferred - decoded):.3f} "
+        f"geometry_ms={1000 * (time.perf_counter() - inferred):.3f}")
     return {"lines": lines}
 
 

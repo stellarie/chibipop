@@ -81,7 +81,9 @@ pub struct RegionRead {
 ///
 /// Word rects already use physical pixels, so reuse only clones these lines.
 ///
-/// The reuse key is `(region, factor, mask)`.
+/// The reuse key is `(region, factor, mask, pixels)`.
+/// Pixels are compared exactly after masking and scaling, even when damage metadata is absent.
+/// Each generation holds at most 16 MiB of pixels. Larger reads still run OCR normally.
 /// `unchanged` describes the *raw* pixels that the backend copied.
 /// The code applies the mask before OCR sees those pixels, so the mask belongs in the key.
 /// A popup over a still region leaves the raw grab unchanged but changes the question.
@@ -95,7 +97,10 @@ struct Recognised {
     factor: i32,
     mask: CaptureMask,
     lines: Vec<OcrLine>,
+    pixels: Option<std::sync::Arc<[u8]>>,
 }
+
+const PIXEL_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 struct CaptureLog<'a> {
     frame: &'a Frame,
@@ -197,9 +202,11 @@ impl TextSource {
             words,
         );
         if self.show_lookup_log {
+            use std::fmt::Write;
+            let mut message = String::new();
             for (line_index, line) in lines.iter().enumerate() {
                 for (word_index, word) in line.words.iter().enumerate() {
-                    eprintln!(
+                    let _ = writeln!(&mut message,
                         "chibipop: ocr job=one_off line={} word={} text={:?} rect={},{} {}x{}",
                         line_index,
                         word_index,
@@ -211,6 +218,7 @@ impl TextSource {
                     );
                 }
             }
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), message.as_bytes());
         }
         Ok(lines)
     }
@@ -416,22 +424,20 @@ impl TextSource {
             }
         };
         let capture_ms = capture_started.elapsed().as_secs_f64() * 1000.0;
-        if frame.unchanged {
-            if let Some(lines) = self.reuse(region, factor, mask) {
-                self.log_capture(CaptureLog {
-                    frame: &frame,
-                    region,
-                    factor,
-                    mask,
-                    reused: true,
-                    capture_ms,
-                    ocr_ms: 0.0,
-                    lines: &lines,
-                    outcome: "ok",
-                    error: None,
-                });
-                return Ok((lines, frame));
-            }
+        if let Some(lines) = self.reuse(region, factor, mask, &frame.buf) {
+            self.log_capture(CaptureLog {
+                frame: &frame,
+                region,
+                factor,
+                mask,
+                reused: true,
+                capture_ms,
+                ocr_ms: 0.0,
+                lines: &lines,
+                outcome: "ok",
+                error: None,
+            });
+            return Ok((lines, frame));
         }
         let ocr_started = std::time::Instant::now();
         let raw = match self.ocr.recognise(&frame.buf, frame.w, frame.h) {
@@ -473,14 +479,15 @@ impl TextSource {
             outcome: "ok",
             error: None,
         });
-        self.remember(region, factor, mask, &lines);
+        self.remember(region, factor, mask, &lines, &frame.buf);
         Ok((lines, frame))
     }
 
     fn log_capture(&self, log: CaptureLog<'_>) {
+        use std::fmt::Write;
         let words = log.lines.iter().map(|line| line.words.len()).sum::<usize>();
-        eprintln!(
-            "chibipop: capture region={},{} {}x{} factor={} mask={} source={} fallback={} unchanged={} reused={} bytes={} capture_ms={:.3} ocr_ms={:.3} lines={} words={} outcome={}",
+        let mut message = format!(
+            "chibipop: capture region={},{} {}x{} factor={} mask={} source={} fallback={} unchanged={} reused={} bytes={} capture_ms={:.3} ocr_ms={:.3} lines={} words={} outcome={}\n",
             log.region.x,
             log.region.y,
             log.region.w,
@@ -499,16 +506,17 @@ impl TextSource {
             log.outcome,
         );
         if let Some(error) = log.error {
-            eprintln!("chibipop: capture stage=ocr outcome=failed error={error:#}");
+            let _ = writeln!(&mut message, "chibipop: capture stage=ocr outcome=failed error={error:#}");
         }
         if !self.show_lookup_log {
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), message.as_bytes());
             return;
         }
         for (line_index, line) in log.lines.iter().enumerate() {
             let text = line.words.iter().map(|word| word.text.as_str()).collect::<String>();
-            eprintln!("chibipop: capture line={} text={text:?}", line_index);
+            let _ = writeln!(&mut message, "chibipop: capture line={} text={text:?}", line_index);
             for (word_index, word) in line.words.iter().enumerate() {
-                eprintln!(
+                let _ = writeln!(&mut message,
                     "chibipop: capture word={} line={} text={:?} rect={},{} {}x{}",
                     word_index,
                     line_index,
@@ -520,6 +528,7 @@ impl TextSource {
                 );
             }
         }
+        let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), message.as_bytes());
     }
 
     /// Return this pass's pixels from the frozen frame or a live grab.
@@ -542,15 +551,27 @@ impl TextSource {
         region: PhysRect,
         factor: i32,
         mask: CaptureMask,
+        pixels: &[u8],
     ) -> Option<Vec<OcrLine>> {
         let same =
-            |r: &&Recognised| r.region == region && r.factor == factor && r.mask == mask;
+            |r: &&Recognised| r.region == region && r.factor == factor && r.mask == mask
+                && r.pixels.as_deref() == Some(pixels);
         if let Some(hit) = self.recognised.iter().find(same) {
             return Some(hit.lines.clone());
         }
         let hit = self.previous.iter().find(same)?;
         let lines = hit.lines.clone();
-        self.recognised.push(Recognised { region, factor, mask, lines: lines.clone() });
+        let used: usize = self.recognised.iter()
+            .filter(|r| r.region != region || r.factor != factor || r.mask != mask)
+            .filter_map(|r| r.pixels.as_ref())
+            .map(|p| p.len()).sum();
+        let pixels = hit.pixels.as_ref()
+            .filter(|p| p.len() <= PIXEL_CACHE_BYTES.saturating_sub(used)).cloned();
+        let entry = Recognised { region, factor, mask, lines: lines.clone(), pixels };
+        match self.recognised.iter_mut().find(|r| r.region == region && r.factor == factor && r.mask == mask) {
+            Some(slot) => *slot = entry,
+            None => self.recognised.push(entry),
+        }
         Some(lines)
     }
 
@@ -561,8 +582,14 @@ impl TextSource {
         factor: i32,
         mask: CaptureMask,
         lines: &[OcrLine],
+        pixels: &[u8],
     ) {
-        let entry = Recognised { region, factor, mask, lines: lines.to_vec() };
+        let used: usize = self.recognised.iter()
+            .filter(|r| r.region != region || r.factor != factor || r.mask != mask)
+            .filter_map(|r| r.pixels.as_ref()).map(|p| p.len()).sum();
+        let pixels = (pixels.len() <= PIXEL_CACHE_BYTES.saturating_sub(used))
+            .then(|| std::sync::Arc::from(pixels));
+        let entry = Recognised { region, factor, mask, lines: lines.to_vec(), pixels };
         let slot = self
             .recognised
             .iter_mut()
@@ -865,16 +892,18 @@ fn finish_grab(
 pub fn upscale_by(src: &[u8], w: i32, h: i32, factor: i32) -> (Vec<u8>, i32, i32) {
     let (w2, h2) = (w * factor, h * factor);
     let mut dst = vec![0u8; (w2 as usize) * (h2 as usize) * 4];
-    for y in 0..h2 as usize {
-        let sy = y / factor as usize;
-        for x in 0..w2 as usize {
-            let sx = x / factor as usize;
-            let si = (sy * w as usize + sx) * 4;
-            let di = (y * w2 as usize + x) * 4;
-            dst[di] = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
-            dst[di + 3] = 0xFF;
+    let pitch = w2 as usize * 4;
+    for y in 0..h as usize {
+        let row = y * factor as usize * pitch;
+        for (x, pixel) in src[y * w as usize * 4..(y + 1) * w as usize * 4]
+            .as_chunks::<4>().0.iter().enumerate() {
+            let start = row + x * factor as usize * 4;
+            for dest in dst[start..start + factor as usize * 4].as_chunks_mut::<4>().0 {
+                *dest = [pixel[0], pixel[1], pixel[2], 0xFF];
+            }
+        }
+        for repeat in 1..factor as usize {
+            dst.copy_within(row..row + pitch, row + repeat * pitch);
         }
     }
     (dst, w2, h2)
@@ -950,7 +979,7 @@ mod tests {
         fn grab(&mut self, region: PhysRect) -> Result<Frame> {
             self.grabs.set(self.grabs.get() + 1);
             Ok(Frame {
-                buf: vec![0u8; (region.w * region.h * 4) as usize],
+                buf: vec![if self.unchanged { 0 } else { self.grabs.get() as u8 }; (region.w * region.h * 4) as usize],
 
                 w: region.w,
                 h: region.h,
@@ -1279,6 +1308,91 @@ mod tests {
         let again = source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("second read");
         assert_eq!(runs.get(), 2);
         assert!(!again.unchanged);
+    }
+
+    #[test]
+    fn identical_pixels_reuse_even_without_backend_damage_tracking() {
+        let (mut source, runs) = paced(false);
+        source.capture = Box::new(SolidCapture);
+        let first = source.resolve_in_region(AT, BOX, CaptureMask::NONE).unwrap();
+        let second = source.resolve_in_region(AT, BOX, CaptureMask::NONE).unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(first.lines, second.lines);
+    }
+
+    #[test]
+    fn a_changed_pixel_overrides_an_unchanged_backend_claim() {
+        let (mut source, runs) = paced(false);
+        source.capture = Box::new(SolidCapture);
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).unwrap();
+        source.capture = Box::new(Paced { unchanged: true, grabs: std::cell::Cell::new(0) });
+        source.resolve_in_region(AT, BOX, CaptureMask::NONE).unwrap();
+        assert_eq!(runs.get(), 2);
+    }
+
+    #[test]
+    fn pixel_cache_respects_its_budget_on_insert_and_promotion() {
+        let (mut source, _) = paced(false);
+        let pixels = vec![1; PIXEL_CACHE_BYTES];
+        source.remember(BOX, 1, CaptureMask::NONE, &[], &pixels);
+        source.remember(OTHER, 1, CaptureMask::NONE, &[], &[2]);
+        assert!(source.recognised[1].pixels.is_none());
+        source.previous = std::mem::take(&mut source.recognised);
+        source.remember(OTHER, 1, CaptureMask::NONE, &[], &[2]);
+        assert!(source.reuse(BOX, 1, CaptureMask::NONE, &pixels).is_some());
+        assert!(source.recognised[1].pixels.is_none());
+    }
+
+    #[test]
+    fn promoting_old_pixels_replaces_the_newer_entry_instead_of_duplicating_it() {
+        let (mut source, _) = paced(false);
+        source.remember(BOX, 1, CaptureMask::NONE, &[], &[1]);
+        source.previous = std::mem::take(&mut source.recognised);
+        source.remember(BOX, 1, CaptureMask::NONE, &[], &[2]);
+        assert!(source.reuse(BOX, 1, CaptureMask::NONE, &[1]).is_some());
+        assert_eq!(source.recognised.len(), 1);
+        assert_eq!(source.recognised[0].pixels.as_deref(), Some(&[1][..]));
+    }
+
+    #[test]
+    fn a_failed_new_recognition_cannot_reuse_older_pixels() {
+        struct FailOnce(Rc<std::cell::Cell<u32>>);
+        impl OcrEngine for FailOnce {
+            fn recognise(&self, _: &[u8], _: i32, _: i32) -> Result<Vec<OcrLine>> {
+                self.0.set(self.0.get() + 1);
+                if self.0.get() == 1 { anyhow::bail!("injected recognition failure"); }
+                Ok(Vec::new())
+            }
+            fn set_language(&mut self, _: &str) {}
+            fn name(&self) -> &str { "fail-once" }
+            fn provides_geometry(&self) -> bool { true }
+        }
+        let (mut source, _) = paced(false);
+        source.capture = Box::new(SolidCapture);
+        assert!(!source.recognise_at_capture(BOX, 1, CaptureMask::NONE).unwrap().0.is_empty());
+        source.capture = Box::new(Paced { unchanged: true, grabs: std::cell::Cell::new(0) });
+        let calls = Rc::new(std::cell::Cell::new(0));
+        source.ocr = Box::new(FailOnce(calls.clone()));
+        assert!(source.recognise_at_capture(BOX, 1, CaptureMask::NONE).is_err());
+        assert!(source.recognise_at_capture(BOX, 1, CaptureMask::NONE).unwrap().0.is_empty());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn row_expansion_matches_nearest_neighbor_for_odd_shapes() {
+        for (w, h) in [(1, 1), (3, 5), (7, 2)] {
+            let src: Vec<u8> = (0..w * h * 4).map(|v| v as u8).collect();
+            for factor in [1, 2, 3, 4] {
+                let (dst, dw, dh) = upscale_by(&src, w, h, factor);
+                for y in 0..dh {
+                    for x in 0..dw {
+                        let si = (((y / factor) * w + x / factor) * 4) as usize;
+                        let di = ((y * dw + x) * 4) as usize;
+                        assert_eq!(&dst[di..di + 4], &[src[si], src[si + 1], src[si + 2], 255]);
+                    }
+                }
+            }
+        }
     }
 
     /// The `unchanged` flag does not promise stored words.
