@@ -15,6 +15,8 @@
 #[cfg(target_os = "linux")]
 mod capture;
 #[cfg(target_os = "linux")]
+mod portal_request;
+#[cfg(target_os = "linux")]
 mod clipboard;
 #[cfg(target_os = "linux")]
 mod control;

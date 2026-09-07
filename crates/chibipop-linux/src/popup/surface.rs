@@ -378,7 +378,7 @@ impl Popup {
             media,
             db: db.to_path_buf(),
             theme,
-            layer: layer_of(config.popup_layer()),
+            layer: layer_of(config.popup.layer),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
             side_panel: config.popup.side_panel,
             render: config.popup.render_settings(),
@@ -934,7 +934,7 @@ impl Popup {
         // as a key. The worker reopens its own handle in response to
         // the same event.
         self.media = open_media(&self.db, &mut self.notes);
-        let layer = layer_of(config.popup_layer());
+        let layer = layer_of(config.popup.layer);
         if layer != self.layer {
             self.layer = layer;
             for panel in &self.panels {

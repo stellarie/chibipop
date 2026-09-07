@@ -44,19 +44,15 @@
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use zbus::blocking::{Connection, MessageIterator, Proxy};
-use zbus::message::Type as MessageType;
-use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
-use zbus::MatchRule;
+use crate::portal_request::{
+    self, handle_token, mangle_sender, Failure, PORTAL_BUS, PORTAL_PATH, RESPONSE_CANCELLED,
+    RESPONSE_ENDED, RESPONSE_SUCCESS,
+};
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 
-/// The well-known D-Bus name for the portal.
-pub const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
-/// The object path that contains all portal interfaces.
-pub const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 /// The ScreenCast interface that this module uses.
 pub const SCREENCAST_INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 
@@ -66,6 +62,7 @@ pub const SOURCE_MONITOR: u32 = 1;
 /// This module does not use SPA mode EMBEDDED (2). EMBEDDED adds the cursor
 /// to OCR pixels, but the cursor rung needs cursor coordinates.
 pub const CURSOR_MODE_HIDDEN: u32 = 1;
+
 /// The portal sends the cursor as PipeWire metadata next to the pixels. This
 /// mode supplies cursor rung 2.
 pub const CURSOR_MODE_METADATA: u32 = 4;
@@ -79,17 +76,8 @@ pub const PERSIST_UNTIL_REVOKED: u32 = 2;
 /// distinguish unsupported persistence from a refused grant.
 pub const PERSIST_MIN_VERSION: u32 = 4;
 
-/// The interface that sends the deferred response for each portal method.
-const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 /// The interface that closes a portal session.
 const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
-/// `Response` code 0 means that the portal completed the request.
-const RESPONSE_SUCCESS: u32 = 0;
-/// `Response` code 1 means that the user canceled the request.
-const RESPONSE_CANCELLED: u32 = 1;
-/// `Response` code 2 means that the portal ended the request. A stale
-/// restore token also produces this code.
-const RESPONSE_ENDED: u32 = 2;
 
 /// A monitor stream that `Start` returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,121 +394,30 @@ fn select_sources_options<'a>(
     options
 }
 
-/// Calls one portal method after it registers the `Response` subscription.
-/// The code predicts the Request path and registers the match rule before
-/// the method call.
-///
-/// `call` receives the `handle_token` and returns the portal Request handle.
+/// Calls one portal method and maps its response to the capture error policy.
 fn request(
     conn: &Connection,
     sender: &str,
     step: &'static str,
     deadline: Instant,
-    call: impl FnOnce(&str) -> zbus::Result<OwnedObjectPath>,
+    call: impl FnOnce(&str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>,
 ) -> Result<HashMap<String, OwnedValue>, PortalError> {
-    let token = handle_token();
-    let predicted = request_path(sender, &token);
-    // Register the watch before the call. A restored session can answer instantly.
-    let watch = watch_response(conn, &predicted, step)?;
-
-    let handle = call(&token).map_err(|err| classify(step, err))?;
-    let watch = if handle.as_str() == predicted {
-        watch
-    } else {
-        // A portal older than xdg-desktop-portal 0.9 can ignore `handle_token`.
-        // Listen at the returned handle path in that case. A fast reply can already
-        // be lost. The deadline prevents an indefinite wait. The abandoned iterator
-        // thread ends when `open` closes the connection.
-        drop(watch);
-        watch_response(conn, handle.as_str(), step)?
-    };
-
-    watch.wait(step, deadline)
-}
-
-/// A `Request.Response` payload: the spec's `(ua{sv})`.
-type Answer = Result<(u32, HashMap<String, OwnedValue>), PortalError>;
-
-/// A registered subscription to one Request's `Response`. A separate thread
-/// reads its messages.
-struct ResponseWatch {
-    rx: Receiver<Answer>,
-}
-
-/// Registers the match rule for `Response` at `path` and starts the reader
-/// thread. The function returns after the bus adds the rule. The caller can
-/// issue the method only after this point.
-fn watch_response(
-    conn: &Connection,
-    path: &str,
-    step: &'static str,
-) -> Result<ResponseWatch, PortalError> {
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .sender(PORTAL_BUS)
-        .and_then(|builder| builder.path(path.to_string()))
-        .and_then(|builder| builder.interface(REQUEST_INTERFACE))
-        .and_then(|builder| builder.member("Response"))
-        .map_err(|err| PortalError::Protocol(format!("{step}: bad match rule for {path}: {err}")))?
-        .build();
-    // One Response exists for each Request. The queue only needs to outlive the
-    // interval between registration and the first read.
-    let iterator = MessageIterator::for_match_rule(rule, conn, Some(2))
-        .map_err(|err| classify(step, err))?;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("chibipop-portal-req".to_string())
-        .spawn(move || {
-            // Each Request has one Response. The thread reads the first message and then
-            // stops.
-            let answer = match iterator.into_iter().next() {
-                Some(Ok(message)) => message
-                    .body()
-                    .deserialize::<(u32, HashMap<String, OwnedValue>)>()
-                    .map_err(|err| {
-                        PortalError::Protocol(format!("{step}: malformed Response: {err}"))
-                    }),
-                Some(Err(err)) => {
-                    Err(PortalError::Protocol(format!("{step}: bus error waiting: {err}")))
-                }
-                // The iterator ended because the connection closed. This ends an abandoned
-                // wait.
-                None => Err(PortalError::Protocol(format!(
-                    "{step}: the session bus closed before the portal answered"
-                ))),
-            };
-            let _ = tx.send(answer);
-        })
-        .map_err(|err| PortalError::Protocol(format!("{step}: no thread for the wait: {err}")))?;
-
-    Ok(ResponseWatch { rx })
-}
-
-impl ResponseWatch {
-    /// Waits until the portal answers or `deadline` passes. It maps the
-    /// specification's three response codes to [`PortalError`].
-    fn wait(
-        self,
-        step: &'static str,
-        deadline: Instant,
-    ) -> Result<HashMap<String, OwnedValue>, PortalError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.rx.recv_timeout(remaining) {
-            Ok(Ok((RESPONSE_SUCCESS, results))) => Ok(results),
-            Ok(Ok((RESPONSE_CANCELLED, _))) => Err(PortalError::Denied),
-            Ok(Ok((RESPONSE_ENDED, _))) => Err(PortalError::Ended(format!(
-                "the portal closed {step} itself; a stale restore token looks like this too"
-            ))),
-            Ok(Ok((code, _))) => Err(PortalError::Protocol(format!(
-                "{step}: response code {code} is not one the spec defines"
-            ))),
-            Ok(Err(err)) => Err(err),
-            Err(RecvTimeoutError::Timeout) => Err(PortalError::TimedOut(step.to_string())),
-            Err(RecvTimeoutError::Disconnected) => Err(PortalError::Protocol(format!(
-                "{step}: the waiting thread stopped without answering"
-            ))),
+    let response = portal_request::request(conn, sender, step, deadline, call).map_err(|failure| {
+        match failure {
+            Failure::Call(error) => classify(step, error),
+            Failure::TimedOut => PortalError::TimedOut(step.to_string()),
+            Failure::Protocol(detail) => PortalError::Protocol(detail),
         }
+    })?;
+    match response.code {
+        RESPONSE_SUCCESS => Ok(response.results),
+        RESPONSE_CANCELLED => Err(PortalError::Denied),
+        RESPONSE_ENDED => Err(PortalError::Ended(format!(
+            "the portal closed {step} itself; a stale restore token looks like this too"
+        ))),
+        code => Err(PortalError::Protocol(format!(
+            "{step}: response code {code} is not one the spec defines"
+        ))),
     }
 }
 
@@ -532,32 +429,6 @@ fn screencast_proxy(conn: &Connection) -> zbus::Result<Proxy<'static>> {
         PORTAL_PATH.to_string(),
         SCREENCAST_INTERFACE.to_string(),
     )
-}
-
-/// Converts the unique bus name to an object-path element. It drops the
-/// first `:` and replaces every `.` with `_`, as the Request documentation
-/// specifies.
-fn mangle_sender(unique_name: &str) -> String {
-    unique_name.trim_start_matches(':').replace('.', "_")
-}
-
-/// Returns the path where the portal places the Request object for `token`.
-fn request_path(sender: &str, token: &str) -> String {
-    format!("{PORTAL_PATH}/request/{sender}/{token}")
-}
-
-/// Creates a fresh `handle_token`. The token is a valid object-path element.
-/// The counter and clock make it unique within this process. The code needs
-/// no `rand` dependency. The token prevents collisions with other libraries
-/// on the same connection. It is not a secret.
-fn handle_token() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|since| since.subsec_nanos())
-        .unwrap_or(0);
-    format!("chibipop_{}_{seq}_{nanos}", std::process::id())
 }
 
 /// Reads every stream in a `Start` result's `streams` (`a(ua{sv})`). It drops
@@ -688,43 +559,6 @@ mod tests {
             .collect()
     }
 
-    // -- predicted Request path --
-
-    /// Tests the name conversion that the Request documentation specifies. The
-    /// result lets the code register a subscription before the call.
-    #[test]
-    fn a_unique_bus_name_becomes_a_path_element() {
-        assert_eq!(mangle_sender(":1.234"), "1_234");
-        assert_eq!(mangle_sender(":1.2.345"), "1_2_345");
-        assert_eq!(mangle_sender("1.42"), "1_42");
-    }
-
-    #[test]
-    fn a_predicted_request_path_sits_under_the_portal_object() {
-        assert_eq!(
-            request_path("1_234", "chibipop_9_0_1"),
-            "/org/freedesktop/portal/desktop/request/1_234/chibipop_9_0_1"
-        );
-    }
-
-    /// The portal rejects an invalid object-path element before the call. The
-    /// token alphabet is therefore part of the contract.
-    #[test]
-    fn a_handle_token_is_a_valid_path_element() {
-        let token = handle_token();
-        assert!(!token.is_empty());
-        assert!(
-            token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            "token {token:?} must match [A-Za-z0-9_]+"
-        );
-    }
-
-    #[test]
-    fn handle_tokens_differ_across_calls() {
-        let first = handle_token();
-        let second = handle_token();
-        assert_ne!(first, second);
-    }
 
     // -- tray and log text --
 

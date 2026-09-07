@@ -11,38 +11,20 @@ pub struct CssError {
     pub message: String,
 }
 
-/// Parsed CSS properties that override Theme values.
+/// One parsed CSS declaration.
 #[derive(Debug, Clone, PartialEq)]
-struct Property {
-    color: Option<(u8, u8, u8)>,
-    accent: Option<(u8, u8, u8)>,
-    font_size: Option<f32>,
-    font_family: Option<String>,
-    font_weight: Option<u16>,
-    font_style_italic: Option<bool>,
-    border_radius: Option<i32>,
-    border_width: Option<f32>,
-    padding: Option<i32>,
-    height: Option<f32>,
-    opacity: Option<f32>,
-}
-
-impl Property {
-    fn empty() -> Self {
-        Self {
-            color: None,
-            accent: None,
-            font_size: None,
-            font_family: None,
-            font_weight: None,
-            font_style_italic: None,
-            border_radius: None,
-            border_width: None,
-            padding: None,
-            height: None,
-            opacity: None,
-        }
-    }
+enum Decl {
+    Accent((u8, u8, u8)),
+    Color((u8, u8, u8)),
+    FontSize(f32),
+    FontFamily(String),
+    FontWeight(u16),
+    Italic(bool),
+    BorderRadius(i32),
+    BorderWidth(f32),
+    Padding(i32),
+    Height(f32),
+    Opacity(f32),
 }
 
 /// CSS class selectors that this module supports.
@@ -124,56 +106,47 @@ fn parse_font_weight(s: &str) -> Option<u16> {
 }
 
 /// Parse one CSS property value.
-fn parse_property(name: &str, value: &str, out: &mut Property) -> Result<(), String> {
-    match name {
-        "--accent" => match parse_hex_color(value) {
-            Some(c) => out.accent = Some(c),
-            None => return Err(format!("bad color: {value}")),
-        },
-        "color" | "background-color" | "border-color" => match parse_hex_color(value) {
-            Some(c) => out.color = Some(c),
-            None => return Err(format!("bad color: {value}")),
-        },
-        "font-size" => match parse_px_f32(value) {
-            Some(s) => out.font_size = Some(s),
-            None => return Err(format!("bad font-size: {value}")),
-        },
-        "font-family" => match parse_font_family(value) {
-            Some(f) => out.font_family = Some(f),
-            None => return Err(format!("bad font-family: {value}")),
-        },
-        "font-weight" => match parse_font_weight(value) {
-            Some(w) => out.font_weight = Some(w),
-            None => return Err(format!("bad font-weight: {value}")),
-        },
+fn parse_property(name: &str, value: &str) -> Result<Option<Decl>, String> {
+    let decl = match name {
+        "--accent" => parse_hex_color(value)
+            .map(Decl::Accent)
+            .ok_or_else(|| format!("bad color: {value}"))?,
+        "color" | "background-color" | "border-color" => parse_hex_color(value)
+            .map(Decl::Color)
+            .ok_or_else(|| format!("bad color: {value}"))?,
+        "font-size" => parse_px_f32(value)
+            .map(Decl::FontSize)
+            .ok_or_else(|| format!("bad font-size: {value}"))?,
+        "font-family" => parse_font_family(value)
+            .map(Decl::FontFamily)
+            .ok_or_else(|| format!("bad font-family: {value}"))?,
+        "font-weight" => parse_font_weight(value)
+            .map(Decl::FontWeight)
+            .ok_or_else(|| format!("bad font-weight: {value}"))?,
         "font-style" => match value.trim() {
-            "italic" => out.font_style_italic = Some(true),
-            "normal" => out.font_style_italic = Some(false),
+            "italic" => Decl::Italic(true),
+            "normal" => Decl::Italic(false),
             _ => return Err(format!("bad font-style: {value}")),
         },
-        "border-radius" => match parse_px_i32(value) {
-            Some(r) => out.border_radius = Some(r),
-            None => return Err(format!("bad border-radius: {value}")),
-        },
-        "border-width" => match parse_px_f32(value) {
-            Some(w) => out.border_width = Some(w),
-            None => return Err(format!("bad border-width: {value}")),
-        },
-        "padding" => match parse_px_i32(value) {
-            Some(p) => out.padding = Some(p),
-            None => return Err(format!("bad padding: {value}")),
-        },
-        "height" => match parse_px_f32(value) {
-            Some(h) => out.height = Some(h),
-            None => return Err(format!("bad height: {value}")),
-        },
+        "border-radius" => parse_px_i32(value)
+            .map(Decl::BorderRadius)
+            .ok_or_else(|| format!("bad border-radius: {value}"))?,
+        "border-width" => parse_px_f32(value)
+            .map(Decl::BorderWidth)
+            .ok_or_else(|| format!("bad border-width: {value}"))?,
+        "padding" => parse_px_i32(value)
+            .map(Decl::Padding)
+            .ok_or_else(|| format!("bad padding: {value}"))?,
+        "height" => parse_px_f32(value)
+            .map(Decl::Height)
+            .ok_or_else(|| format!("bad height: {value}"))?,
         "opacity" => match value.trim().parse::<f32>() {
-            Ok(o) if (0.0..=1.0).contains(&o) => out.opacity = Some(o),
+            Ok(o) if (0.0..=1.0).contains(&o) => Decl::Opacity(o),
             _ => return Err(format!("bad opacity: {value}")),
         },
-        _ => {}
-    }
-    Ok(())
+        _ => return Ok(None),
+    };
+    Ok(Some(decl))
 }
 
 /// Remove `/* ... */` comments from CSS text.
@@ -269,163 +242,107 @@ pub fn parse(css: &str, base: &mut Theme) -> Vec<CssError> {
                 continue;
             }
 
-            let mut prop = Property::empty();
-            if let Err(msg) = parse_property(name, value, &mut prop) {
-                errors.push(CssError {
+            match parse_property(name, value) {
+                Ok(Some(decl)) => apply(class, name, decl, base),
+                Ok(None) => {}
+                Err(msg) => errors.push(CssError {
                     line: prop_line,
                     message: msg,
-                });
-                continue;
+                }),
             }
-
-            apply_property(class, name, &prop, base);
         }
     }
 
     errors
 }
 
-/// Apply text weight and italic style to a Theme.
-fn apply_text_style(prop: &Property, weight: &mut u16, italic: &mut bool) {
-    if let Some(w) = prop.font_weight {
-        *weight = w;
-    }
-    if let Some(i) = prop.font_style_italic {
-        *italic = i;
+/// The color, size, weight, and italic slots of one text selector.
+type TextSlots<'a> = (&'a mut (u8, u8, u8), &'a mut f32, &'a mut u16, &'a mut bool);
+
+/// Return the Theme slots for one text selector.
+fn text_slots<'a>(theme: &'a mut Theme, class: &str) -> Option<TextSlots<'a>> {
+    match class {
+        "headword" => Some((
+            &mut theme.headword_text,
+            &mut theme.headword_size,
+            &mut theme.headword_weight,
+            &mut theme.headword_italic,
+        )),
+        "reading" => Some((
+            &mut theme.reading_text,
+            &mut theme.reading_size,
+            &mut theme.reading_weight,
+            &mut theme.reading_italic,
+        )),
+        "body" => Some((
+            &mut theme.body_text,
+            &mut theme.body_size,
+            &mut theme.body_weight,
+            &mut theme.body_italic,
+        )),
+        "dict-label" => Some((
+            &mut theme.dict_label_text,
+            &mut theme.dict_label_size,
+            &mut theme.dict_label_weight,
+            &mut theme.dict_label_italic,
+        )),
+        "collapsed" => Some((
+            &mut theme.collapsed_text,
+            &mut theme.collapsed_size,
+            &mut theme.collapsed_weight,
+            &mut theme.collapsed_italic,
+        )),
+        "dimmed" => Some((
+            &mut theme.dimmed_text,
+            &mut theme.dimmed_size,
+            &mut theme.dimmed_weight,
+            &mut theme.dimmed_italic,
+        )),
+        "frequency" => Some((
+            &mut theme.frequency_text,
+            &mut theme.frequency_size,
+            &mut theme.frequency_weight,
+            &mut theme.frequency_italic,
+        )),
+        _ => None,
     }
 }
 
 /// Apply one parsed CSS property to a Theme.
-fn apply_property(class: &str, name: &str, prop: &Property, theme: &mut Theme) {
-    if name == "--accent" {
-        if let Some(c) = prop.accent {
-            theme.accent = c;
+fn apply(class: &str, name: &str, decl: Decl, theme: &mut Theme) {
+    if let Decl::Accent(c) = decl {
+        theme.accent = c;
+        return;
+    }
+    if class == "popup" {
+        match (name, decl) {
+            ("background-color", Decl::Color(c)) => theme.background = c,
+            ("border-color", Decl::Color(c)) => theme.border = c,
+            ("border-radius", Decl::BorderRadius(r)) => theme.corner_radius = r,
+            ("border-width", Decl::BorderWidth(w)) => theme.border_width = w,
+            ("padding", Decl::Padding(p)) => theme.padding = p,
+            ("font-family", Decl::FontFamily(f)) => theme.font_name = f,
+            ("opacity", Decl::Opacity(o)) => theme.opacity = o,
+            _ => {}
         }
         return;
     }
-    match class {
-        "popup" => match name {
-            "background-color" => {
-                if let Some(c) = prop.color {
-                    theme.background = c;
-                }
-            }
-            "border-color" => {
-                if let Some(c) = prop.color {
-                    theme.border = c;
-                }
-            }
-            "border-radius" => {
-                if let Some(r) = prop.border_radius {
-                    theme.corner_radius = r;
-                }
-            }
-            "border-width" => {
-                if let Some(w) = prop.border_width {
-                    theme.border_width = w;
-                }
-            }
-            "padding" => {
-                if let Some(p) = prop.padding {
-                    theme.padding = p;
-                }
-            }
-            "font-family" => {
-                if let Some(ref f) = prop.font_family {
-                    theme.font_name = f.clone();
-                }
-            }
-            "opacity" => {
-                if let Some(o) = prop.opacity {
-                    theme.opacity = o;
-                }
-            }
+    if class == "separator" {
+        match decl {
+            Decl::Color(c) => theme.separator = c,
+            Decl::Height(h) => theme.separator_height = h,
             _ => {}
-        },
-        "headword" => {
-            if let Some(c) = prop.color {
-                theme.headword_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.headword_size = s;
-            }
-            apply_text_style(prop, &mut theme.headword_weight, &mut theme.headword_italic);
         }
-        "reading" => {
-            if let Some(c) = prop.color {
-                theme.reading_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.reading_size = s;
-            }
-            apply_text_style(prop, &mut theme.reading_weight, &mut theme.reading_italic);
+        return;
+    }
+    if let Some((text, size, weight, italic)) = text_slots(theme, class) {
+        match decl {
+            Decl::Color(c) => *text = c,
+            Decl::FontSize(s) => *size = s,
+            Decl::FontWeight(w) => *weight = w,
+            Decl::Italic(i) => *italic = i,
+            _ => {}
         }
-        "body" => {
-            if let Some(c) = prop.color {
-                theme.body_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.body_size = s;
-            }
-            apply_text_style(prop, &mut theme.body_weight, &mut theme.body_italic);
-        }
-        "dict-label" => {
-            if let Some(c) = prop.color {
-                theme.dict_label_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.dict_label_size = s;
-            }
-            apply_text_style(
-                prop,
-                &mut theme.dict_label_weight,
-                &mut theme.dict_label_italic,
-            );
-        }
-        "collapsed" => {
-            if let Some(c) = prop.color {
-                theme.collapsed_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.collapsed_size = s;
-            }
-            apply_text_style(
-                prop,
-                &mut theme.collapsed_weight,
-                &mut theme.collapsed_italic,
-            );
-        }
-        "dimmed" => {
-            if let Some(c) = prop.color {
-                theme.dimmed_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.dimmed_size = s;
-            }
-            apply_text_style(prop, &mut theme.dimmed_weight, &mut theme.dimmed_italic);
-        }
-        "frequency" => {
-            if let Some(c) = prop.color {
-                theme.frequency_text = c;
-            }
-            if let Some(s) = prop.font_size {
-                theme.frequency_size = s;
-            }
-            apply_text_style(
-                prop,
-                &mut theme.frequency_weight,
-                &mut theme.frequency_italic,
-            );
-        }
-        "separator" => {
-            if let Some(c) = prop.color {
-                theme.separator = c;
-            }
-            if let Some(h) = prop.height {
-                theme.separator_height = h;
-            }
-        }
-        _ => {}
     }
 }
 

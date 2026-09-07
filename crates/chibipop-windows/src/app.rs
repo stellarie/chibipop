@@ -1057,15 +1057,14 @@ fn service_settings_click(
             let detect_tx = detect_tx.clone();
             thread::spawn(move || {
                 let status = anki::check_connection(&url);
-                let detect =
-                    matches!(status, Ok(true)).then(|| detect_all(gen, url.clone(), model.clone()));
-                let msg = match &status {
-                    Ok(true) => detect.as_ref().map_or_else(
+                let detect = status.then(|| detect_all(gen, url.clone(), model.clone()));
+                let msg = if status {
+                    detect.as_ref().map_or_else(
                         || "AnkiConnect is reachable.".into(),
                         |result| reachable_message(&model, &result.fields),
-                    ),
-                    Ok(false) => "AnkiConnect did not respond.".into(),
-                    Err(e) => format!("Anki test failed: {e:#}"),
+                    )
+                } else {
+                    "AnkiConnect did not respond.".into()
                 };
                 let _ = tx.send(SettingsStatus::anki(gen, msg));
                 if let Some(result) = detect {
@@ -2469,7 +2468,7 @@ fn spawn_add_note(
     let field_map = live.anki_field_map.clone();
     let tx = add_tx.clone();
     thread::spawn(move || {
-        let err = anki::add_note(&url, &deck, &model, &fields, &field_map)
+        let err = anki::add_note(&url, &deck, &model, &fields, &field_map, None)
             .err()
             .map(|e| format!("{e:#}"));
         let _ = tx.send(AddNoteResult { expr, err });

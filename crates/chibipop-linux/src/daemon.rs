@@ -520,6 +520,7 @@ impl AnkiCall {
                     &anki.model,
                     &fields,
                     &anki.field_map,
+                    None,
                 );
                 AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
             }
@@ -3592,73 +3593,42 @@ impl AsFd for Listening {
     }
 }
 
-/// The AnkiConnect answer channel on the pump.
+/// Register a receiver on the pump. Every `Msg` goes to one `App` method.
+/// `Event::Closed` needs no action: a closed sender means the thread behind
+/// it is gone, and the daemon reports that through its own diagnostics.
 ///
-/// Use one helper for both call sites. Tests build an `App` too.
-/// An answer that reaches no `Event` would make the add lifecycle
-/// (add, added, failed) impossible to test.
-fn anki_channel(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<AnkiOutcome>> {
-    let (tx, rx) = calloop::channel::channel::<AnkiOutcome>();
-    pump.insert_source(rx, |event, _, app: &mut App| {
-        if let calloop::channel::Event::Msg(outcome) = event {
-            app.handle_anki(outcome);
-        }
-    })
-    .map_err(|e| anyhow::anyhow!("registering the AnkiConnect answer channel: {e}"))?;
-    Ok(tx)
-}
-
-/// The selected region's pixel channel on the pump.
-///
-/// This is the twin of `anki_channel`.
-/// The grab runs on its own thread, and tests build an `App` too.
-/// A grab that reaches no `App` method would make the screenshot flow
-/// impossible to test.
-fn shot_channel(
+/// Use one helper for every channel. Tests build an `App` too. A message
+/// that reaches no `App` method would make the add lifecycle (add, added,
+/// failed), the screenshot flow, and the one-off OCR job impossible to test.
+/// - AnkiConnect answers come from the call threads.
+/// - Selected-region pixels come from the grab thread.
+/// - One-off OCR lines come from the Worker's thread. The recognizer runs
+///   there (ARCHITECTURE.md#ocr-engine) because the engine is thread-affine.
+/// - Clipboard notes come from the offer's own connection and thread
+///   (`clipboard`). The log lives here (ARCHITECTURE.md#platform-integration).
+fn register<T: 'static>(
     pump: &LoopHandle<'static, App>,
-) -> Result<calloop::channel::Sender<Result<Frame, String>>> {
-    let (tx, rx) = calloop::channel::channel::<Result<Frame, String>>();
-    pump.insert_source(rx, |event, _, app: &mut App| {
-        if let calloop::channel::Event::Msg(grabbed) = event {
-            app.handle_shot(grabbed);
+    rx: calloop::channel::Channel<T>,
+    label: &'static str,
+    handle: fn(&mut App, T),
+) -> Result<()> {
+    pump.insert_source(rx, move |event, _, app: &mut App| {
+        if let calloop::channel::Event::Msg(msg) = event {
+            handle(app, msg);
         }
     })
-    .map_err(|e| anyhow::anyhow!("registering the screenshot pixel channel: {e}"))?;
-    Ok(tx)
+    .map_err(|e| anyhow::anyhow!("registering the {label}: {e}"))?;
+    Ok(())
 }
 
-/// The one-off OCR job's answer channel on the pump.
-///
-/// This is the twin of `shot_channel`, one stage later.
-/// The recognizer runs on the Worker's thread
-/// (ARCHITECTURE.md#ocr-engine). The engine is thread-affine.
-/// Its lines arrive as an Event, not as a blocked pump.
-fn ocr_text_channel(
+/// Open an unbounded channel whose receiver is registered on the pump.
+fn channel<T: 'static>(
     pump: &LoopHandle<'static, App>,
-) -> Result<calloop::channel::Sender<Result<Vec<OcrLine>, String>>> {
-    let (tx, rx) = calloop::channel::channel::<Result<Vec<OcrLine>, String>>();
-    pump.insert_source(rx, |event, _, app: &mut App| {
-        if let calloop::channel::Event::Msg(read) = event {
-            app.handle_ocr_text(read);
-        }
-    })
-    .map_err(|e| anyhow::anyhow!("registering the OCR text channel: {e}"))?;
-    Ok(tx)
-}
-
-/// The clipboard thread's diagnostic channel on the pump.
-///
-/// The offer lives on a connection and its own thread (`clipboard`).
-/// The log lives here (ARCHITECTURE.md#platform-integration).
-/// Its messages travel as text, like an AnkiConnect failure.
-fn clipboard_notes(pump: &LoopHandle<'static, App>) -> Result<calloop::channel::Sender<String>> {
-    let (tx, rx) = calloop::channel::channel::<String>();
-    pump.insert_source(rx, |event, _, app: &mut App| {
-        if let calloop::channel::Event::Msg(line) = event {
-            app.log.diag(&line);
-        }
-    })
-    .map_err(|e| anyhow::anyhow!("registering the clipboard note channel: {e}"))?;
+    label: &'static str,
+    handle: fn(&mut App, T),
+) -> Result<calloop::channel::Sender<T>> {
+    let (tx, rx) = calloop::channel::channel::<T>();
+    register(pump, rx, label, handle)?;
     Ok(tx)
 }
 
@@ -3954,12 +3924,10 @@ pub fn run(paths: Paths) -> Result<()> {
         },
     );
 
-    // AnkiConnect answers come from the call threads.
-    // Selected-region pixels come from the grab thread.
-    // One-off OCR lines come from the Worker's thread.
-    let anki_tx = anki_channel(&event_loop.handle())?;
-    let shot_tx = shot_channel(&event_loop.handle())?;
-    let ocr_tx = ocr_text_channel(&event_loop.handle())?;
+    let pump = event_loop.handle();
+    let anki_tx = channel(&pump, "AnkiConnect answer channel", App::handle_anki)?;
+    let shot_tx = channel(&pump, "screenshot pixel channel", App::handle_shot)?;
+    let ocr_tx = channel(&pump, "OCR text channel", App::handle_ocr_text)?;
 
     // The writable selection uses its own connection and thread.
     // A compositor without the data-control protocol (stock GNOME) reports one
@@ -3968,8 +3936,8 @@ pub fn run(paths: Paths) -> Result<()> {
     // Both globals let a compositor add support and let the install self-heal
     // (ARCHITECTURE.md#capture-and-masking).
     // A bind failure is not fatal. Log it and keep the other channels.
-    let clipboard = match clipboard::Clipboard::bind(&globals, clipboard_notes(&event_loop.handle())?)
-    {
+    let notes = channel(&pump, "clipboard note channel", |app, line: String| app.log.diag(&line))?;
+    let clipboard = match clipboard::Clipboard::bind(&globals, notes) {
         Ok(Some(board)) => {
             log.diag(&format!(
                 "clipboard: {} bound on its own connection - `ocr-clipboard` can copy here",
@@ -4164,26 +4132,11 @@ pub fn run(paths: Paths) -> Result<()> {
     // diagnostics.
     // Register the receiver for every rung so it outlives the sender.
     // The native rung starts no sender. An idle channel causes no wakeups.
-    event_loop
-        .handle()
-        .insert_source(shortcut_rx, |event, _, app: &mut App| {
-            if let calloop::channel::Event::Msg(event) = event {
-                app.handle_shortcut(event);
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("registering the shortcut channel: {e}"))?;
+    register(&pump, shortcut_rx, "shortcut channel", App::handle_shortcut)?;
 
-    // Menu activations and tray diagnostics run on this thread.
-    // `Event::Closed` needs no action. The tray thread exit means a trayless
-    // session.
-    event_loop
-        .handle()
-        .insert_source(tray_rx, |event, _, app: &mut App| {
-            if let calloop::channel::Event::Msg(request) = event {
-                app.handle_tray(request);
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("registering the tray channel: {e}"))?;
+    // Menu activations and tray diagnostics run on this thread. The tray
+    // thread exit means a trayless session.
+    register(&pump, tray_rx, "tray channel", App::handle_tray)?;
 
     // `signalfd` was blocked at the top of `run`. Now the pump reads it.
     // Every daemon thread inherited that mask, so process SIGINT/SIGTERM has
@@ -4312,15 +4265,7 @@ mod tests {
 
         let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-        let (tray_tx, tray_rx) = calloop::channel::channel::<TrayRequest>();
-        event_loop
-            .handle()
-            .insert_source(tray_rx, |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(request) = event {
-                    app.handle_tray(request);
-                }
-            })
-            .unwrap();
+        let tray_tx = channel(&event_loop.handle(), "tray channel", App::handle_tray).unwrap();
         tray_tx.send(TrayRequest::Quit).unwrap();
 
         let escape = event_loop.get_signal();
@@ -4425,13 +4370,16 @@ mod tests {
                 db: dir.join("chibipop.sqlite"),
             },
             worker_ping,
-            anki_tx: anki_channel(&event_loop.handle()).expect("the anki answer channel"),
-            shot_tx: shot_channel(&event_loop.handle()).expect("the screenshot pixel channel"),
+            anki_tx: channel(&event_loop.handle(), "anki answer channel", App::handle_anki)
+                .expect("the anki answer channel"),
+            shot_tx: channel(&event_loop.handle(), "screenshot pixel channel", App::handle_shot)
+                .expect("the screenshot pixel channel"),
             shot: None,
             // No pipeline means no engine can serve a job.
             // A test that needs one installs it (`fake_worker`).
             ocr_jobs: worker::OcrJobs::disconnected(),
-            ocr_tx: ocr_text_channel(&event_loop.handle()).expect("the OCR text channel"),
+            ocr_tx: channel(&event_loop.handle(), "OCR text channel", App::handle_ocr_text)
+                .expect("the OCR text channel"),
             ocr_job: None,
             // No compositor means no data-control connection.
             // This also matches the GNOME state that these tests can assert

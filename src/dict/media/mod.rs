@@ -828,13 +828,9 @@ fn decode_jpeg(bytes: &[u8]) -> Decoded {
 /// animated definition would harm the popup more than a static definition.
 fn decode_gif(bytes: &[u8]) -> Decoded {
     /// [`MAX_PIXELS`] in RGBA8 bytes for `gif`'s frame limiter.
-    /// A `const` match proves that this value is not zero at compile time.
-    /// No unwrap can reach a paint path.
+    /// [`MAX_PIXELS`] is non-zero, so this constant always has a value.
     const FRAME_CAP: std::num::NonZeroU64 =
-        match std::num::NonZeroU64::new(MAX_PIXELS as u64 * 4) {
-            Some(cap) => cap,
-            None => panic!("MAX_PIXELS is not zero"),
-        };
+        std::num::NonZeroU64::new(MAX_PIXELS as u64 * 4).expect("MAX_PIXELS is non-zero");
 
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::RGBA);

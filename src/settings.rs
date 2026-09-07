@@ -3,11 +3,7 @@
 //! The settings process edits a shared Config through this form.
 //! The core keeps Dictionary roles, language lists, and staged changes here.
 
-use crate::config::{
-    Config, FieldMapping, LayoutMode, OcrClipboardConfig, SelectionButtons, SelectionSeparator,
-    SentenceMode, TriggerMode, TripleClick,
-};
-use crate::dict::frequency::RankingStrategy;
+use crate::config::{Config, FieldMapping, OcrClipboardConfig};
 use crate::library::{roles_of, Library, Pending, Role, Roles};
 use crate::present::DictInfo;
 use anyhow::{Context, Result};
@@ -23,24 +19,10 @@ pub use crate::config::{
 /// The fields that the settings window edits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsForm {
-    pub mode: TriggerMode,
-    pub trigger_key: String,
-    pub theme: String,
-    pub font: String,
-    pub max_width_percent: u8,
-    pub max_height_percent: u8,
-    pub summary_chars: usize,
-    pub highlight_match: bool,
-    pub scroll_popup: bool,
-    pub edge_autoscroll: bool,
-    pub side_panel: bool,
-    pub layout_mode: LayoutMode,
-    pub dictionary_styling: bool,
-    pub show_examples: bool,
-    pub show_attributions: bool,
-    pub show_images: bool,
-    pub show_part_of_speech: bool,
-    pub exclude_from_capture: bool,
+    /// The edited copy of the Config. `apply_to` copies the sections that this
+    /// form owns onto the latest saved Config, so a field that no window renders
+    /// keeps the saved value.
+    pub cfg: Config,
     /// The terms Dictionary list. It contains every Dictionary that the config
     /// names or that the Library holds with that role, in priority order. Each
     /// row has its own checkbox.
@@ -55,24 +37,9 @@ pub struct SettingsForm {
     pub frequency: Vec<DictRow>,
     /// The pitch Dictionary list. This checkbox is the only pitch enable switch.
     pub pitch: Vec<DictRow>,
-    /// The rule that reduces Reported frequencies from enabled frequency
-    /// Dictionaries to one Frequency rank.
-    pub ranking_strategy: RankingStrategy,
+    /// The language whose terms list this form edits. `cfg.ocr.language` can
+    /// change in the window; the rows still belong to this language.
     pub dict_list_language: String,
-    pub per_language: BTreeMap<String, Vec<String>>,
-    pub max_ocr_passes: u8,
-    pub prefer_vertical: bool,
-    pub capture_width: i32,
-    pub capture_height: i32,
-    pub scan_alphanumeric: bool,
-    pub discard_furigana: bool,
-    pub per_character_lookup: bool,
-    pub ocr_language: String,
-    /// "builtin" or the name of a plugin.
-    pub engine: String,
-    pub show_scan_region: bool,
-    pub show_engine_log: bool,
-    pub show_adapter_log: bool,
     pub freq_changed: bool,
     pub staged_adds: Vec<StagedAdd>,
     pub staged_removes: Vec<String>,
@@ -81,11 +48,6 @@ pub struct SettingsForm {
     ///
     /// The window lists these files but does not order them.
     pub unreadable: Vec<String>,
-    pub anki_enabled: bool,
-    pub anki_url: String,
-    pub anki_deck: String,
-    pub anki_model: String,
-    pub anki_add_key: String,
     /// `None` means that this window has no answer about the field map, so Apply
     /// leaves the saved map unchanged. Windows fills its rows from a live
     /// AnkiConnect `modelFieldNames` call. That call returns an empty vector when
@@ -94,33 +56,13 @@ pub struct SettingsForm {
     /// learned field names must not wipe a good field map. `Some(vec![])` means
     /// that a user mapped no fields. That is an answer, and the form saves it.
     pub field_map: Option<Vec<FieldMapping>>,
-    pub notify_on_add: bool,
-    pub sentence_mode: SentenceMode,
-    pub static_region_key: String,
-    pub show_static_overlay: bool,
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
-    pub include_screenshot: bool,
-    pub screenshot_hotkey: String,
     /// Only the Windows editor can change this platform field.
     pub screenshot_hotkey_edited: bool,
-    pub screenshot_capture_mode: crate::config::ScreenshotMode,
-    pub screenshot_fixed_region: Option<[i32; 4]>,
-    pub screenshot_fixed_window: Option<crate::config::ScreenshotWindow>,
     /// Saved targets can change while this form is open.
     /// Only an explicit reset can remove a target from the latest Config.
     pub screenshot_reset_targets: bool,
-    /// This setting controls whether Anki glossary fields include each Dictionary name.
-    pub include_dictionary_name: bool,
-    /// Whether the note uses only the top Dictionary's Entry.
-    pub first_dict_only: bool,
-    /// This setting selects the physical button that applies a glossary selection.
-    pub selection_buttons: SelectionButtons,
-    /// This setting selects the separator that joins selected glossary fragments.
-    pub selection_separator: SelectionSeparator,
-    /// This setting selects the content for a triple-click.
-    pub triple_click: TripleClick,
-    pub enabled_plugins: Vec<String>,
 }
 
 /// One Dictionary row in one role list.
@@ -224,7 +166,7 @@ impl SettingsForm {
 
     /// Copies the per-language lists that Apply wrote.
     pub fn reseed_per_language(&mut self, written: &BTreeMap<String, Vec<String>>) {
-        self.per_language = written.clone();
+        self.cfg.dictionaries.per_language = written.clone();
     }
 
     /// Returns true when this row names a staged import.
@@ -256,8 +198,8 @@ pub fn shown_name(source: &Path) -> Option<String> {
 /// that language and the language already has a list. Without this check,
 /// Apply can assign one language's arrangement to another language's tag.
 pub fn is_scoped(form: &SettingsForm) -> bool {
-    form.dict_list_language == form.ocr_language
-        && form.per_language.contains_key(&form.ocr_language)
+    form.dict_list_language == form.cfg.ocr.language
+        && form.cfg.dictionaries.per_language.contains_key(&form.cfg.ocr.language)
 }
 
 /// Merges the form's Dictionary rows with the Library.
@@ -410,75 +352,24 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
     }
 
     SettingsForm {
-        mode: cfg.trigger.mode,
-        trigger_key: cfg.trigger.trigger_key.clone(),
-        theme: cfg.popup.theme.clone(),
-        font: cfg.popup.font.clone(),
-        max_width_percent: cfg.popup.max_width_percent,
-        max_height_percent: cfg.popup.max_height_percent,
-        summary_chars: cfg.popup.summary_chars,
-        highlight_match: cfg.popup.highlight_match,
-        scroll_popup: cfg.popup.scroll_popup,
-        edge_autoscroll: cfg.popup.edge_autoscroll,
-        side_panel: cfg.popup.side_panel,
-        layout_mode: cfg.popup.layout_mode,
-        dictionary_styling: cfg.popup.dictionary_styling,
-        show_examples: cfg.popup.show_examples,
-        show_attributions: cfg.popup.show_attributions,
-        show_images: cfg.popup.show_images,
-        show_part_of_speech: cfg.popup.show_part_of_speech,
-        exclude_from_capture: cfg.popup.exclude_from_capture,
+        cfg: cfg.clone(),
         terms,
         frequency,
         pitch,
-        ranking_strategy: cfg.dictionaries.ranking_strategy,
         dict_list_language: cfg.ocr.language.clone(),
-        per_language: cfg.dictionaries.per_language.clone(),
-        max_ocr_passes: cfg.ocr.max_ocr_passes,
-        prefer_vertical: cfg.ocr.prefer_vertical,
-        capture_width: cfg.ocr.capture_width,
-        capture_height: cfg.ocr.capture_height,
-        scan_alphanumeric: cfg.ocr.scan_alphanumeric,
-        discard_furigana: cfg.ocr.discard_furigana,
-        per_character_lookup: cfg.trigger.per_character_lookup,
-        ocr_language: cfg.ocr.language.clone(),
-        engine: cfg.ocr.engine.clone(),
-        show_scan_region: cfg.debug.show_scan_region,
-        show_engine_log: cfg.debug.show_engine_log,
-        show_adapter_log: cfg.debug.show_adapter_log,
         freq_changed: false,
         staged_adds: Vec::new(),
         staged_removes: Vec::new(),
         library_empty: false,
         unreadable: Vec::new(),
-        anki_enabled: cfg.anki.enabled,
-        anki_url: cfg.anki.url.clone(),
-        anki_deck: cfg.anki.deck.clone(),
-        anki_model: cfg.anki.model.clone(),
-        anki_add_key: cfg.anki.add_key.clone(),
         field_map: Some(cfg.anki.field_map.clone()),
-        notify_on_add: cfg.anki.notify_on_add,
-        sentence_mode: cfg.anki.sentence_mode,
-        static_region_key: cfg.anki.static_region_key.clone(),
-        show_static_overlay: cfg.anki.show_static_overlay,
         ocr_clipboard_key: cfg
             .actions
             .ocr_clipboard
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
-        include_screenshot: cfg.actions.screenshot.include_on_add,
-        screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         screenshot_hotkey_edited: false,
-        screenshot_capture_mode: cfg.actions.screenshot.capture_mode,
-        screenshot_fixed_region: cfg.actions.screenshot.fixed_region,
-        screenshot_fixed_window: cfg.actions.screenshot.fixed_window.clone(),
         screenshot_reset_targets: false,
-        include_dictionary_name: cfg.anki.include_dictionary_name,
-        first_dict_only: cfg.anki.first_dict_only,
-        selection_buttons: cfg.anki.selection_buttons,
-        selection_separator: cfg.anki.selection_separator,
-        triple_click: cfg.anki.triple_click,
-        enabled_plugins: cfg.plugins.enabled.clone(),
     }
 }
 
@@ -501,55 +392,29 @@ pub fn scoped_entry(rows: &[DictRow], unreadable: &[String]) -> Option<Vec<Strin
 /// Converts the form back into its source Config.
 pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
-    out.trigger.mode = form.mode;
-    out.trigger.trigger_key = form.trigger_key.clone();
-    out.popup.theme = form.theme.clone();
-    out.popup.font = form.font.clone();
-    out.popup.max_width_percent =
-        form.max_width_percent.clamp(MAX_WIDTH_RANGE.0, MAX_WIDTH_RANGE.1);
-    out.popup.max_height_percent =
-        form.max_height_percent.clamp(MAX_HEIGHT_RANGE.0, MAX_HEIGHT_RANGE.1);
-    out.popup.summary_chars = form.summary_chars.clamp(SUMMARY_RANGE.0, SUMMARY_RANGE.1);
-    out.popup.highlight_match = form.highlight_match;
-    out.popup.scroll_popup = form.scroll_popup;
-    out.popup.edge_autoscroll = form.edge_autoscroll;
-    out.popup.side_panel = form.side_panel;
-    out.popup.layout_mode = form.layout_mode;
-    out.popup.dictionary_styling = form.dictionary_styling;
-    out.popup.show_examples = form.show_examples;
-    out.popup.show_attributions = form.show_attributions;
-    out.popup.show_images = form.show_images;
-    out.popup.show_part_of_speech = form.show_part_of_speech;
-    out.popup.exclude_from_capture = form.exclude_from_capture;
-    out.ocr.max_ocr_passes = form.max_ocr_passes.clamp(PASSES_RANGE.0, PASSES_RANGE.1);
-    out.ocr.prefer_vertical = form.prefer_vertical;
-    out.ocr.capture_width = form.capture_width.clamp(CAPTURE_W_RANGE.0, CAPTURE_W_RANGE.1);
-    out.ocr.capture_height = form.capture_height.clamp(CAPTURE_H_RANGE.0, CAPTURE_H_RANGE.1);
-    out.ocr.scan_alphanumeric = form.scan_alphanumeric;
-    out.ocr.discard_furigana = form.discard_furigana;
-    out.trigger.per_character_lookup = form.per_character_lookup;
-    out.ocr.language = form.ocr_language.clone();
-    out.ocr.engine = form.engine.clone();
-    out.debug.show_scan_region = form.show_scan_region;
-    out.debug.show_engine_log = form.show_engine_log;
-    out.debug.show_adapter_log = form.show_adapter_log;
-    out.anki.enabled = form.anki_enabled;
-    out.anki.url = form.anki_url.clone();
-    out.anki.deck = form.anki_deck.clone();
-    out.anki.model = form.anki_model.clone();
-    out.anki.add_key = form.anki_add_key.clone();
-    out.anki.notify_on_add = form.notify_on_add;
-    if let Some(field_map) = &form.field_map {
-        out.anki.field_map = field_map.clone();
+    out.trigger = form.cfg.trigger.clone();
+    out.popup = form.cfg.popup.clone();
+    out.ocr = form.cfg.ocr.clone();
+    out.debug = form.cfg.debug.clone();
+    out.anki = form.cfg.anki.clone();
+    out.plugins.enabled = form.cfg.plugins.enabled.clone();
+    out.actions.screenshot.include_on_add = form.cfg.actions.screenshot.include_on_add;
+    out.actions.screenshot.capture_mode = form.cfg.actions.screenshot.capture_mode;
+    // Fields that no form renders keep the latest saved value. The daemon writes
+    // `anki.static_region` and the screenshot targets while a window is open, and
+    // the Linux overlay (`LinuxFields::apply_over`) owns the `_linux` twins,
+    // `popup.layer`, and `debug.show_lookup_log`.
+    out.trigger.trigger_key_linux = cfg.trigger.trigger_key_linux.clone();
+    out.anki.add_key_linux = cfg.anki.add_key_linux.clone();
+    out.anki.static_region_key_linux = cfg.anki.static_region_key_linux.clone();
+    out.anki.static_region = cfg.anki.static_region;
+    out.popup.layer = cfg.popup.layer;
+    out.debug.show_lookup_log = cfg.debug.show_lookup_log;
+    out.anki.field_map = form.field_map.clone().unwrap_or_else(|| cfg.anki.field_map.clone());
+    if form.screenshot_reset_targets {
+        out.actions.screenshot.fixed_region = None;
+        out.actions.screenshot.fixed_window = None;
     }
-    out.anki.sentence_mode = form.sentence_mode;
-    out.anki.static_region_key = form.static_region_key.clone();
-    out.anki.show_static_overlay = form.show_static_overlay;
-    out.anki.include_dictionary_name = form.include_dictionary_name;
-    out.anki.first_dict_only = form.first_dict_only;
-    out.anki.selection_buttons = form.selection_buttons;
-    out.anki.selection_separator = form.selection_separator;
-    out.anki.triple_click = form.triple_click;
     // The form renders only the Windows chord, so the Linux chord stays unchanged.
     // The section stays when either chord has a value. The code can clear one
     // chord and keep the other.
@@ -561,16 +426,10 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
             hotkey_linux: hotkey_linux.clone(),
         }),
     };
-    out.actions.screenshot.include_on_add = form.include_screenshot;
     if form.screenshot_hotkey_edited {
-        out.actions.screenshot.hotkey = form.screenshot_hotkey.trim().to_string();
+        out.actions.screenshot.hotkey = form.cfg.actions.screenshot.hotkey.trim().to_string();
     }
-    out.actions.screenshot.capture_mode = form.screenshot_capture_mode;
-    if form.screenshot_reset_targets {
-        out.actions.screenshot.fixed_region = None;
-        out.actions.screenshot.fixed_window = None;
-    }
-    out.plugins.enabled = form.enabled_plugins.clone();
+    out.clamp_ranges(None);
     // Each role list becomes an enabled array and a disabled array. Each array
     // keeps its rows in screen order. An unreadable file remains a row for
     // removal, but it is not a Dictionary and reaches neither array.
@@ -587,13 +446,13 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         };
         out.dictionaries.set_lists(role, named(true), named(false));
     }
-    out.dictionaries.ranking_strategy = form.ranking_strategy;
+    out.dictionaries.ranking_strategy = form.cfg.dictionaries.ranking_strategy;
     out.dictionaries.display_order.clear();
 
-    let mut per_language = form.per_language.clone();
+    let mut per_language = form.cfg.dictionaries.per_language.clone();
     if is_scoped(form) {
         if let Some(named) = scoped_entry(&form.terms, &form.unreadable) {
-            per_language.insert(form.ocr_language.clone(), named);
+            per_language.insert(form.cfg.ocr.language.clone(), named);
         }
     }
     out.dictionaries.per_language = per_language;
@@ -603,11 +462,19 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
 /// Reports capture-size values that `apply_to` changed.
 pub fn clamp_notice(form: &SettingsForm, applied: &Config) -> Option<String> {
     let mut parts = Vec::new();
-    if form.capture_width != applied.ocr.capture_width {
-        parts.push(axis_notice("width", form.capture_width, applied.ocr.capture_width));
+    if form.cfg.ocr.capture_width != applied.ocr.capture_width {
+        parts.push(axis_notice(
+            "width",
+            form.cfg.ocr.capture_width,
+            applied.ocr.capture_width,
+        ));
     }
-    if form.capture_height != applied.ocr.capture_height {
-        parts.push(axis_notice("height", form.capture_height, applied.ocr.capture_height));
+    if form.cfg.ocr.capture_height != applied.ocr.capture_height {
+        parts.push(axis_notice(
+            "height",
+            form.cfg.ocr.capture_height,
+            applied.ocr.capture_height,
+        ));
     }
     if parts.is_empty() {
         None
@@ -806,7 +673,10 @@ pub fn drift_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TriggerMode;
+    use crate::config::{
+        LayoutMode, SelectionButtons, SelectionSeparator, SentenceMode, TriggerMode, TripleClick,
+    };
+    use crate::dict::frequency::RankingStrategy;
 
     fn dicts() -> Vec<DictInfo> {
         vec![
@@ -905,7 +775,7 @@ mod tests {
         });
         cfg.popup.layer = crate::config::PopupLayer::Top;
         let mut form = from_config(&cfg, &dicts());
-        form.theme = "light".to_string();
+        form.cfg.popup.theme = "light".to_string();
         let out = apply_to(&form, &cfg);
         assert_eq!("SUPER+J", out.trigger.trigger_key_linux);
         assert_eq!("SUPER+K", out.anki.add_key_linux);
@@ -1056,37 +926,37 @@ mod tests {
             (
                 "layout_mode",
                 |c| c.popup.layout_mode = LayoutMode::Compact,
-                |f| f.layout_mode == LayoutMode::Compact,
+                |f| f.cfg.popup.layout_mode == LayoutMode::Compact,
                 |c| c.popup.layout_mode == LayoutMode::Compact,
             ),
             (
                 "dictionary_styling",
                 |c| c.popup.dictionary_styling = false,
-                |f| !f.dictionary_styling,
+                |f| !f.cfg.popup.dictionary_styling,
                 |c| !c.popup.dictionary_styling,
             ),
             (
                 "show_examples",
                 |c| c.popup.show_examples = false,
-                |f| !f.show_examples,
+                |f| !f.cfg.popup.show_examples,
                 |c| !c.popup.show_examples,
             ),
             (
                 "show_attributions",
                 |c| c.popup.show_attributions = false,
-                |f| !f.show_attributions,
+                |f| !f.cfg.popup.show_attributions,
                 |c| !c.popup.show_attributions,
             ),
             (
                 "show_images",
                 |c| c.popup.show_images = false,
-                |f| !f.show_images,
+                |f| !f.cfg.popup.show_images,
                 |c| !c.popup.show_images,
             ),
             (
                 "show_part_of_speech",
                 |c| c.popup.show_part_of_speech = true,
-                |f| f.show_part_of_speech,
+                |f| f.cfg.popup.show_part_of_speech,
                 |c| c.popup.show_part_of_speech,
             ),
         ];
@@ -1104,7 +974,7 @@ mod tests {
         let mut cfg = cfg_with(&["大辞林", "Jitendex"]);
         cfg.anki.add_key = "f2".into();
         let form = from_config(&cfg, &dicts());
-        assert_eq!("f2", form.anki_add_key);
+        assert_eq!("f2", form.cfg.anki.add_key);
         assert_eq!("f2", apply_to(&form, &cfg).anki.add_key);
     }
 
@@ -1167,7 +1037,7 @@ mod tests {
             app_id: "reader".into(),
             title: "日本語".into(),
         });
-        form.screenshot_capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        form.cfg.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
         let out = apply_to(&form, &cfg);
         assert_eq!(cfg.actions.screenshot.fixed_region, out.actions.screenshot.fixed_region);
         assert_eq!(cfg.actions.screenshot.fixed_window, out.actions.screenshot.fixed_window);
@@ -1215,7 +1085,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.actions.screenshot.hotkey_linux = Some("ALT+S".into());
         let mut form = from_config(&cfg, &dicts());
-        form.screenshot_hotkey = " F5 ".into();
+        form.cfg.actions.screenshot.hotkey = " F5 ".into();
         form.screenshot_hotkey_edited = true;
         let pending = apply_to(&form, &cfg);
         assert_eq!(pending.actions.screenshot.hotkey, "F5");
@@ -1286,7 +1156,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.include_dictionary_name = false;
         let form = from_config(&cfg, &dicts());
-        assert!(!form.include_dictionary_name);
+        assert!(!form.cfg.anki.include_dictionary_name);
         let out = apply_to(&form, &cfg);
         assert!(!out.anki.include_dictionary_name);
     }
@@ -1295,7 +1165,7 @@ mod tests {
     fn first_dict_only_defaults_to_false() {
         let cfg = Config::default();
         let form = from_config(&cfg, &dicts());
-        assert!(!form.first_dict_only);
+        assert!(!form.cfg.anki.first_dict_only);
     }
 
     #[test]
@@ -1303,7 +1173,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.first_dict_only = true;
         let form = from_config(&cfg, &dicts());
-        assert!(form.first_dict_only);
+        assert!(form.cfg.anki.first_dict_only);
         let out = apply_to(&form, &cfg);
         assert!(out.anki.first_dict_only);
     }
@@ -1313,7 +1183,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.sentence_mode = SentenceMode::All;
         let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::All, form.sentence_mode);
+        assert_eq!(SentenceMode::All, form.cfg.anki.sentence_mode);
         let out = apply_to(&form, &cfg);
         assert_eq!(SentenceMode::All, out.anki.sentence_mode);
     }
@@ -1322,7 +1192,7 @@ mod tests {
     fn sentence_mode_defaults_to_sentence_in_the_form() {
         let cfg = Config::default();
         let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Sentence, form.sentence_mode);
+        assert_eq!(SentenceMode::Sentence, form.cfg.anki.sentence_mode);
     }
 
     #[test]
@@ -1330,7 +1200,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.static_region_key = "alt+r".to_string();
         let form = from_config(&cfg, &dicts());
-        assert_eq!("alt+r", form.static_region_key);
+        assert_eq!("alt+r", form.cfg.anki.static_region_key);
         let out = apply_to(&form, &cfg);
         assert_eq!("alt+r", out.anki.static_region_key);
     }
@@ -1340,7 +1210,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.sentence_mode = SentenceMode::Static;
         let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Static, form.sentence_mode);
+        assert_eq!(SentenceMode::Static, form.cfg.anki.sentence_mode);
         let out = apply_to(&form, &cfg);
         assert_eq!(SentenceMode::Static, out.anki.sentence_mode);
     }
@@ -1350,7 +1220,7 @@ mod tests {
         let mut cfg = cfg_with(&[]);
         cfg.anki.sentence_mode = SentenceMode::Sentence;
         let form = from_config(&cfg, &dicts());
-        assert_eq!(SentenceMode::Sentence, form.sentence_mode);
+        assert_eq!(SentenceMode::Sentence, form.cfg.anki.sentence_mode);
         let out = apply_to(&form, &cfg);
         assert_eq!(SentenceMode::Sentence, out.anki.sentence_mode);
     }
@@ -1359,10 +1229,10 @@ mod tests {
     fn out_of_range_numbers_are_clamped_not_rejected() {
         let cfg = cfg_with(&[]);
         let mut form = from_config(&cfg, &dicts());
-        form.max_width_percent = 250;
-        form.max_height_percent = 250;
-        form.summary_chars = 1;
-        form.max_ocr_passes = 99;
+        form.cfg.popup.max_width_percent = 250;
+        form.cfg.popup.max_height_percent = 250;
+        form.cfg.popup.summary_chars = 1;
+        form.cfg.ocr.max_ocr_passes = 99;
         let out = apply_to(&form, &cfg);
         assert_eq!(MAX_WIDTH_RANGE.1, out.popup.max_width_percent);
         assert_eq!(MAX_HEIGHT_RANGE.1, out.popup.max_height_percent);
@@ -1374,8 +1244,8 @@ mod tests {
     fn apply_to_clamps_the_capture_size() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.capture_width = 99_999;
-        form.capture_height = 1;
+        form.cfg.ocr.capture_width = 99_999;
+        form.cfg.ocr.capture_height = 1;
         let out = apply_to(&form, &cfg);
         assert_eq!(CAPTURE_W_RANGE.1, out.ocr.capture_width);
         assert_eq!(CAPTURE_H_RANGE.0, out.ocr.capture_height);
@@ -1385,7 +1255,7 @@ mod tests {
     fn a_clamped_height_is_named_in_the_notice() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.capture_height = 1;
+        form.cfg.ocr.capture_height = 1;
         let out = apply_to(&form, &cfg);
         assert_eq!(
             Some("Capture height raised to the 80px minimum.".to_string()),
@@ -1397,7 +1267,7 @@ mod tests {
     fn a_clamped_width_is_named_with_its_ceiling() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.capture_width = 99_999;
+        form.cfg.ocr.capture_width = 99_999;
         let out = apply_to(&form, &cfg);
         assert_eq!(
             Some("Capture width lowered to the 1600px maximum.".to_string()),
@@ -1409,8 +1279,8 @@ mod tests {
     fn both_clamped_axes_are_both_reported() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.capture_width = 1;
-        form.capture_height = 9_999;
+        form.cfg.ocr.capture_width = 1;
+        form.cfg.ocr.capture_height = 9_999;
         let notice = clamp_notice(&form, &apply_to(&form, &cfg)).expect("both were clamped");
         assert!(notice.contains("Capture width raised to the 100px minimum."), "{notice}");
         assert!(notice.contains("Capture height lowered to the 600px maximum."), "{notice}");
@@ -1420,8 +1290,8 @@ mod tests {
     fn in_range_capture_values_produce_no_notice() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.capture_width = 500;
-        form.capture_height = 220;
+        form.cfg.ocr.capture_width = 500;
+        form.cfg.ocr.capture_height = 220;
         assert_eq!(None, clamp_notice(&form, &apply_to(&form, &cfg)));
     }
 
@@ -1429,7 +1299,7 @@ mod tests {
     fn apply_to_carries_scan_alphanumeric() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.scan_alphanumeric = false;
+        form.cfg.ocr.scan_alphanumeric = false;
         assert!(!apply_to(&form, &cfg).ocr.scan_alphanumeric);
     }
 
@@ -1438,7 +1308,7 @@ mod tests {
         let mut config = Config::default();
         config.ocr.discard_furigana = false;
         let form = from_config(&config, &dicts());
-        assert!(!form.discard_furigana);
+        assert!(!form.cfg.ocr.discard_furigana);
         assert!(!apply_to(&form, &config).ocr.discard_furigana);
     }
 
@@ -1446,7 +1316,7 @@ mod tests {
     fn apply_to_carries_per_character_lookup() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.per_character_lookup = true;
+        form.cfg.trigger.per_character_lookup = true;
         assert!(apply_to(&form, &cfg).trigger.per_character_lookup);
     }
 
@@ -1454,7 +1324,7 @@ mod tests {
     fn apply_to_carries_the_ocr_language() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.ocr_language = "zh-Hans".to_string();
+        form.cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", apply_to(&form, &cfg).ocr.language);
     }
 
@@ -1463,9 +1333,9 @@ mod tests {
     fn from_config_seeds_per_character_lookup() {
         let mut cfg = Config::default();
         cfg.trigger.per_character_lookup = true;
-        assert!(from_config(&cfg, &dicts()).per_character_lookup);
+        assert!(from_config(&cfg, &dicts()).cfg.trigger.per_character_lookup);
         assert!(
-            !from_config(&Config::default(), &dicts()).per_character_lookup,
+            !from_config(&Config::default(), &dicts()).cfg.trigger.per_character_lookup,
             "must default off"
         );
     }
@@ -1475,15 +1345,15 @@ mod tests {
     fn from_config_seeds_the_ocr_language() {
         let mut cfg = Config::default();
         cfg.ocr.language = "zh-Hans".to_string();
-        assert_eq!("zh-Hans", from_config(&cfg, &dicts()).ocr_language);
-        assert_eq!("ja", from_config(&Config::default(), &dicts()).ocr_language);
+        assert_eq!("zh-Hans", from_config(&cfg, &dicts()).cfg.ocr.language);
+        assert_eq!("ja", from_config(&Config::default(), &dicts()).cfg.ocr.language);
     }
 
     #[test]
     fn apply_to_carries_the_engine() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.engine = "meikiocr".to_string();
+        form.cfg.ocr.engine = "meikiocr".to_string();
         assert_eq!("meikiocr", apply_to(&form, &cfg).ocr.engine);
     }
 
@@ -1492,15 +1362,15 @@ mod tests {
     fn from_config_seeds_the_engine() {
         let mut cfg = Config::default();
         cfg.ocr.engine = "meikiocr".to_string();
-        assert_eq!("meikiocr", from_config(&cfg, &dicts()).engine);
-        assert_eq!("builtin", from_config(&Config::default(), &dicts()).engine);
+        assert_eq!("meikiocr", from_config(&cfg, &dicts()).cfg.ocr.engine);
+        assert_eq!("builtin", from_config(&Config::default(), &dicts()).cfg.ocr.engine);
     }
 
     #[test]
     fn apply_to_carries_enabled_plugins() {
         let cfg = Config::default();
         let mut form = from_config(&cfg, &dicts());
-        form.enabled_plugins = vec!["meikiocr".to_string()];
+        form.cfg.plugins.enabled = vec!["meikiocr".to_string()];
         assert_eq!(
             vec!["meikiocr".to_string()],
             apply_to(&form, &cfg).plugins.enabled
@@ -1514,9 +1384,9 @@ mod tests {
         cfg.plugins.enabled = vec!["meikiocr".to_string()];
         assert_eq!(
             vec!["meikiocr".to_string()],
-            from_config(&cfg, &dicts()).enabled_plugins
+            from_config(&cfg, &dicts()).cfg.plugins.enabled
         );
-        assert!(from_config(&Config::default(), &dicts()).enabled_plugins.is_empty());
+        assert!(from_config(&Config::default(), &dicts()).cfg.plugins.enabled.is_empty());
     }
 
     #[test]
@@ -1553,7 +1423,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.ocr.language = "ja".to_string();
         let mut form = from_config(&cfg, &dicts());
-        form.per_language.insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
+        form.cfg.dictionaries.per_language.insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         form.terms = vec![DictRow { name: "大辞林　第四版".to_string(), enabled: true }];
         let out = apply_to(&form, &cfg);
         assert_eq!(
@@ -1611,7 +1481,7 @@ mod tests {
             .per_language
             .insert("zh-Hans-CN".to_string(), vec!["中日大辞典".to_string()]);
         let mut form = from_config(&cfg, &dicts());
-        form.ocr_language = "zh-Hans-CN".to_string();
+        form.cfg.ocr.language = "zh-Hans-CN".to_string();
         let out = apply_to(&form, &cfg);
         assert_eq!(
             vec!["中日大辞典".to_string()],
@@ -2867,5 +2737,6 @@ mod tests {
         assert!(text.contains("no longer in your library: freq.zip"), "{text}");
         assert!(!text.contains("not in the database"), "{text}");
     }
+
 }
 

@@ -238,7 +238,7 @@ impl ServeNudge {
     }
 }
 
-/// Work that a drained batch completes before its newest hover.
+/// Work that a drained batch completes before its newest lookup.
 /// The state includes settings and trigger-mode freeze state.
 ///
 /// Keep state changes and sentence probes in arrival order. A reload and a press change state.
@@ -250,15 +250,19 @@ enum Pre {
     Sentence(RequestId, SentenceProbe),
 }
 
-fn trigger_name(kind: &TriggerKind) -> &'static str {
-    match kind {
-        TriggerKind::Hover(_) => "hover",
-        TriggerKind::Sentence(_) => "sentence",
-        TriggerKind::DrillDown(_) => "drill_down",
-        TriggerKind::Reload(_) => "reload",
-        TriggerKind::Freeze(_) => "freeze",
-        TriggerKind::Thaw => "thaw",
-        TriggerKind::Serve => "serve",
+/// The newest lookup that a drained batch runs after its state changes.
+enum Lookup {
+    Hover(Hover),
+    DrillDown(String),
+}
+
+impl Lookup {
+    /// The `kind=` value of the request log lines.
+    fn name(&self) -> &'static str {
+        match self {
+            Lookup::Hover(_) => "hover",
+            Lookup::DrillDown(_) => "drill_down",
+        }
     }
 }
 
@@ -312,27 +316,31 @@ fn log_state_complete(id: RequestId, kind: &str, outcome: &str, started: Instant
     );
 }
 
-/// Keep the newest hover, every state change, and every sentence probe.
+/// Keep the newest lookup, every state change, and every sentence probe.
 ///
-/// State changes and sentence probes remain in arrival order. Hovers coalesce
-/// because only the newest hover is useful.
-fn drain(first: Trigger, rx: &mpsc::Receiver<Trigger>) -> (Option<Trigger>, Vec<Pre>) {
+/// State changes and sentence probes remain in arrival order. Lookups coalesce
+/// because only the newest lookup is useful.
+fn drain(
+    first: Trigger,
+    rx: &mpsc::Receiver<Trigger>,
+) -> (Option<(RequestId, Lookup)>, Vec<Pre>) {
     let mut pre = Vec::new();
-    let mut hover = None;
+    let mut lookup = None;
     let mut take = |t: Trigger| match t.kind {
         TriggerKind::Reload(s) => pre.push(Pre::Reload(t.id, *s)),
         TriggerKind::Freeze(at) => pre.push(Pre::Freeze(t.id, at)),
         TriggerKind::Thaw => pre.push(Pre::Thaw(t.id)),
         TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
+        TriggerKind::Hover(h) => lookup = Some((t.id, Lookup::Hover(h))),
+        TriggerKind::DrillDown(text) => lookup = Some((t.id, Lookup::DrillDown(text))),
         // The wake already arrived.
         TriggerKind::Serve => {}
-        _ => hover = Some(t),
     };
     take(first);
     while let Ok(next) = rx.try_recv() {
         take(next);
     }
-    (hover, pre)
+    (lookup, pre)
 }
 
 /// State that a lookup uses after a reload.
@@ -440,7 +448,7 @@ fn worker_main(
             hook(&source);
         }
         let Ok(first) = trigger_rx.recv() else { break };
-        let (hover, pre) = drain(first, &trigger_rx);
+        let (lookup, pre) = drain(first, &trigger_rx);
         for change in pre {
             match change {
                 Pre::Reload(id, s) => {
@@ -490,35 +498,27 @@ fn worker_main(
                 }
             }
         }
-        let Some(trigger) = hover else {
+        let Some((id, lookup)) = lookup else {
             continue;
         };
 
         // One bad frame does not stop the Worker.
-        let id = trigger.id;
-        let kind = trigger_name(&trigger.kind);
+        let kind = lookup.name();
         let started = Instant::now();
         log_request_start(id, kind);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match &trigger.kind {
-                TriggerKind::Hover(h) => {
-                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, *h)
+            match lookup {
+                Lookup::Hover(h) => {
+                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, h)
                 }
-                TriggerKind::DrillDown(text) => resolve_drilldown(
+                Lookup::DrillDown(text) => resolve_drilldown(
                     id,
                     dict.as_ref(),
                     &engine,
                     &state.dicts,
                     &state.present_cfg,
-                    text,
+                    &text,
                 ),
-                TriggerKind::Reload(_)
-                | TriggerKind::Freeze(_)
-                | TriggerKind::Thaw
-                | TriggerKind::Sentence(_)
-                | TriggerKind::Serve => {
-                    LookupOutcome::Failed("a state change reached the hover path".to_string())
-                }
             }
         }))
         .unwrap_or_else(|_| LookupOutcome::Failed("a hover lookup panicked".to_string()));
@@ -1021,8 +1021,9 @@ mod tests {
         let older = TriggerKind::Hover(Hover { at, mask: CaptureMask::NONE });
         let first = Trigger { kind: older, id: RequestId(1) };
         let (hover, pre) = drain(first, &rx);
-        let hover = hover.expect("a hover survives");
-        assert!(matches!(hover.kind, TriggerKind::Hover(h) if h.at.x == 9), "newest hover wins");
+        let (id, lookup) = hover.expect("a hover survives");
+        assert_eq!(RequestId(3), id);
+        assert!(matches!(lookup, Lookup::Hover(h) if h.at.x == 9), "newest hover wins");
         let passes: Vec<u8> = pre
             .iter()
             .filter_map(|p| match p {
@@ -1058,8 +1059,9 @@ mod tests {
         };
 
         let (hover, pre) = drain(first, &rx);
-
-        assert!(matches!(hover.map(|t| t.kind), Some(TriggerKind::Hover(h)) if h.at == second_at));
+        let (id, lookup) = hover.expect("the newest hover");
+        assert_eq!(RequestId(3), id);
+        assert!(matches!(lookup, Lookup::Hover(h) if h.at == second_at));
         assert!(matches!(
             pre.as_slice(),
             [Pre::Sentence(id, probe)]

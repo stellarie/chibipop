@@ -22,10 +22,9 @@
 //! case.
 
 use super::{
-    leaves, DocAddr, DocRange, GlossDoc, ItemType, Kind, Leaf, NodeId, NodePath, Role, RoleFilter,
-    Separator, Tag,
+    DocRange, GlossDoc, ItemType, Kind, NodeId, NodePath, Role, RoleFilter, Separator, Tag,
 };
-use std::collections::HashMap;
+use super::select::SelectionPlan;
 
 /// A line-break mark that waits in the render buffer for [`tidy`].
 ///
@@ -107,7 +106,7 @@ pub fn plain_selected(
     roles: RoleFilter,
     separator: Separator,
 ) -> Vec<String> {
-    let Some(plan) = PlainPlan::new(doc, ranges, roles) else { return Vec::new() };
+    let Some(plan) = SelectionPlan::new(doc, ranges, roles) else { return Vec::new() };
     let mut out = Vec::new();
     for (index, id) in doc.items().enumerate() {
         let Some(path) = NodePath::ROOT.child(index) else { continue };
@@ -152,11 +151,7 @@ impl PlainRendered {
     }
 }
 
-struct PlainPlan {
-    leaves: Vec<Leaf>,
-    intervals: HashMap<NodePath, Vec<(u32, u32)>>,
-    indexes: HashMap<NodePath, usize>,
-}
+
 
 /// Shared inputs for one selected plain-text tree walk.
 ///
@@ -164,93 +159,15 @@ struct PlainPlan {
 #[derive(Clone, Copy)]
 struct PlainWalk<'a> {
     doc: &'a GlossDoc,
-    plan: &'a PlainPlan,
+    plan: &'a SelectionPlan,
     roles: RoleFilter,
     separator: Separator,
 }
-
-
-fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
-    let mut prefix = NodePath::ROOT;
-    for &step in addr.path.steps() {
-        let Some(next) = prefix.child(step as usize) else { break };
-        prefix = next;
-        if prefix.resolve(doc).is_some_and(|id| doc.node(id).tag == Tag::Ruby) {
-            return DocAddr { path: prefix, byte: end as u32 };
-        }
-    }
-    addr
-}
-
-impl PlainPlan {
-    fn new(doc: &GlossDoc, ranges: &[DocRange], roles: RoleFilter) -> Option<Self> {
-        let mut union: Vec<DocRange> = ranges
-            .iter()
-            .copied()
-            .map(|range| DocRange {
-                start: atomic_endpoint(doc, range.start, false),
-                end: atomic_endpoint(doc, range.end, true),
-            })
-            .collect();
-        union.retain(|range| range.start < range.end);
-        union.sort_by_key(|range| (range.start, range.end));
-        let mut merged: Vec<DocRange> = Vec::with_capacity(union.len());
-        for range in union {
-            if let Some(last) = merged.last_mut() {
-                if range.start <= last.end {
-                    if range.end > last.end {
-                        last.end = range.end;
-                    }
-                    continue;
-                }
-            }
-            merged.push(range);
-        }
-        if merged.is_empty() {
-            return None;
-        }
-        let visible = leaves(doc, roles);
-        if visible.is_empty() {
-            return None;
-        }
-        let mut intervals = HashMap::new();
-        let mut indexes = HashMap::new();
-        for (index, leaf) in visible.iter().copied().enumerate() {
-            indexes.insert(leaf.path, index);
-            let leaf_start = DocAddr { path: leaf.path, byte: 0 };
-            let leaf_end = DocAddr { path: leaf.path, byte: leaf.len };
-            let mut covered: Vec<(u32, u32)> = Vec::new();
-            for range in &merged {
-                if range.end <= leaf_start || range.start >= leaf_end {
-                    continue;
-                }
-                let start =
-                    if range.start.path < leaf.path { 0 } else { range.start.byte.min(leaf.len) };
-                let end =
-                    if range.end.path > leaf.path { leaf.len } else { range.end.byte.min(leaf.len) };
-                if start < end {
-                    if let Some(previous) = covered.last_mut() {
-                        if start <= previous.1 {
-                            previous.1 = previous.1.max(end);
-                            continue;
-                        }
-                    }
-                    covered.push((start, end));
-                }
-            }
-            if !covered.is_empty() {
-                intervals.insert(leaf.path, covered);
-            }
-        }
-        (!intervals.is_empty()).then_some(PlainPlan { leaves: visible, intervals, indexes })
-    }
-}
-
 fn selected_item(
     doc: &GlossDoc,
     id: NodeId,
     path: NodePath,
-    plan: &PlainPlan,
+    plan: &SelectionPlan,
     roles: RoleFilter,
     separator: Separator,
 ) -> PlainRendered {
@@ -347,7 +264,7 @@ fn selected_node(
         }
         return PlainRendered::empty();
     }
-    if !has_selected_child(doc, id, path, plan) {
+    if !plan.has_selected_child(doc, id, path) {
         return PlainRendered::empty();
     }
     let own_container = top_level || doc.is_block(id) || matches!(node.tag, Tag::Td | Tag::Th);
@@ -508,7 +425,7 @@ fn list_text(fragments: &[PlainFragment]) -> String {
 fn join_plain_fragments(
     fragments: &[PlainFragment],
     separator: Separator,
-    plan: &PlainPlan,
+    plan: &SelectionPlan,
 ) -> String {
     let mut text = String::new();
     for (index, fragment) in fragments.iter().enumerate() {
@@ -532,7 +449,7 @@ fn plain_separator(separator: Separator) -> &'static str {
 fn has_plain_gap(
     previous: Option<PlainPosition>,
     current: Option<PlainPosition>,
-    plan: &PlainPlan,
+    plan: &SelectionPlan,
 ) -> bool {
     let (Some(previous), Some(current)) = (previous, current) else { return false };
     if current.leaf == previous.leaf {
@@ -544,17 +461,8 @@ fn has_plain_gap(
     true
 }
 
-fn has_selected_child(doc: &GlossDoc, id: NodeId, path: NodePath, plan: &PlainPlan) -> bool {
-    if plan.intervals.contains_key(&path) {
-        return true;
-    }
-    doc.children(id).enumerate().any(|(index, child)| {
-        path.child(index)
-            .is_some_and(|child_path| has_selected_child(doc, child, child_path, plan))
-    })
-}
 
-fn break_between(path: NodePath, item_path: NodePath, plan: &PlainPlan) -> bool {
+fn break_between(path: NodePath, item_path: NodePath, plan: &SelectionPlan) -> bool {
     let before = plan.intervals.keys().any(|leaf| is_prefix(item_path, *leaf) && *leaf < path);
     let after = plan.intervals.keys().any(|leaf| is_prefix(item_path, *leaf) && *leaf > path);
     before && after
@@ -829,6 +737,7 @@ fn collapse_spaces(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::DocAddr;
     use super::super::tests::doc;
     use super::*;
     use serde_json::{json, Value};

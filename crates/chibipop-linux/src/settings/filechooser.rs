@@ -29,27 +29,15 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use zbus::blocking::{Connection, MessageIterator, Proxy};
-use zbus::message::Type as MessageType;
+use crate::portal_request::{
+    self, mangle_sender, Failure, PORTAL_BUS, PORTAL_PATH, RESPONSE_CANCELLED, RESPONSE_SUCCESS,
+};
+use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{Array, OwnedValue, Signature, Structure, Value};
-use zbus::MatchRule;
 
-/// The portal's well-known bus name.
-const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
-/// The portal's only object path. Every portal interface uses it.
-const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-/// The interface that this module calls.
 const FILECHOOSER_INTERFACE: &str = "org.freedesktop.portal.FileChooser";
-/// Object path for a portal method's deferred response.
-const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
-
-/// `Response` code 0 means success. Code 1 means that the user dismissed the dialog.
-const RESPONSE_SUCCESS: u32 = 0;
-const RESPONSE_CANCELLED: u32 = 1;
 
 /// Allow a person 600 seconds to choose files.
 /// No other operation blocks. The window continues to render, and only the
@@ -92,35 +80,29 @@ pub fn pick(title: &str) -> Result<Picked, String> {
     )
     .map_err(explain)?;
 
-    let token = handle_token();
-    let predicted = request_path(&sender, &token);
-    let watch = watch_response(&conn, &predicted)?;
-
-    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
-    options.insert("handle_token", Value::from(token.as_str()));
-    options.insert("multiple", Value::from(true));
-    options.insert("directory", Value::from(false));
-    options.insert("modal", Value::from(true));
-    options.insert("accept_label", Value::from("Add"));
-    options.insert("filters", Value::from(filters()));
-    // No parent window. An `xdg_toplevel` handle requires `xdg-foreign`, which
-    // iced does not expose. `modal` still asks the portal for a dialog that
-    // the user cannot lose behind the window.
-    let handle: zbus::zvariant::OwnedObjectPath =
-        proxy.call("OpenFile", &("", title, options)).map_err(explain)?;
-
-    let watch = if handle.as_str() == predicted {
-        watch
-    } else {
-        // If the portal ignores `handle_token`, listen at the actual handle path.
-        // A very fast reply can escape this watcher. The deadline prevents an
-        // indefinite wait.
-        drop(watch);
-        watch_response(&conn, handle.as_str())?
-    };
-    let (code, results) = watch.wait(deadline)?;
-    match code {
-        RESPONSE_SUCCESS => Ok(uris(&results)),
+    let response = portal_request::request(&conn, &sender, "OpenFile", deadline, |token| {
+        let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+        options.insert("handle_token", Value::from(token));
+        options.insert("multiple", Value::from(true));
+        options.insert("directory", Value::from(false));
+        options.insert("modal", Value::from(true));
+        options.insert("accept_label", Value::from("Add"));
+        options.insert("filters", Value::from(filters()));
+        // No parent window. An `xdg_toplevel` handle requires `xdg-foreign`, which
+        // iced does not expose. `modal` still asks the portal for a dialog that
+        // the user cannot lose behind the window.
+        proxy.call("OpenFile", &("", title, options))
+    })
+    .map_err(|failure| match failure {
+        Failure::Call(error) => explain(error),
+        Failure::TimedOut => format!(
+            "the file dialog did not answer within {} minutes",
+            DIALOG.as_secs() / 60
+        ),
+        Failure::Protocol(detail) => detail,
+    })?;
+    match response.code {
+        RESPONSE_SUCCESS => Ok(uris(&response.results)),
         RESPONSE_CANCELLED => Ok(Picked::Cancelled),
         other => Err(format!("the file dialog ended without an answer (code {other})")),
     }
@@ -213,97 +195,6 @@ fn file_uri_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_vec(out)))
 }
 
-/// A `Request.Response` payload with the spec's `(ua{sv})` format.
-/// The result can also explain why no payload arrived.
-type Answer = Result<(u32, HashMap<String, OwnedValue>), String>;
-
-/// A subscription to one Request's `Response`.
-/// Its thread reads messages from the bus.
-///
-/// The zbus blocking iterator has no bounded wait.
-/// A dialog with no answer can keep its reader thread waiting.
-/// Let the caller use `recv_timeout` for the deadline.
-struct ResponseWatch {
-    rx: mpsc::Receiver<Answer>,
-}
-
-fn watch_response(conn: &Connection, path: &str) -> Result<ResponseWatch, String> {
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .sender(PORTAL_BUS)
-        .and_then(|builder| builder.path(path.to_string()))
-        .and_then(|builder| builder.interface(REQUEST_INTERFACE))
-        .and_then(|builder| builder.member("Response"))
-        .map_err(|err| format!("bad match rule for {path}: {err}"))?
-        .build();
-    // One Response exists for each Request. The iterator keeps its message queue
-    // from registration until the reader receives the first Response or the connection closes.
-    let iterator =
-        MessageIterator::for_match_rule(rule, conn, Some(2)).map_err(explain)?;
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("chibipop-filechooser-req".to_string())
-        .spawn(move || {
-            let answer = match iterator.into_iter().next() {
-                Some(Ok(message)) => message
-                    .body()
-                    .deserialize::<(u32, HashMap<String, OwnedValue>)>()
-                    .map_err(|err| format!("the file dialog sent a malformed answer: {err}")),
-                Some(Err(err)) => Err(format!("bus error waiting on the file dialog: {err}")),
-                // The iterator ended because the connection closed.
-                None => {
-                    Err("the session bus closed before the file dialog answered".to_string())
-                }
-            };
-            let _ = tx.send(answer);
-        })
-        .map_err(|err| format!("no thread to wait on the file dialog: {err}"))?;
-
-    Ok(ResponseWatch { rx })
-}
-
-impl ResponseWatch {
-    /// Wait until the portal answers or `deadline` passes.
-    fn wait(self, deadline: Instant) -> Answer {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.rx.recv_timeout(remaining) {
-            Ok(answer) => answer,
-            Err(RecvTimeoutError::Timeout) => Err(format!(
-                "the file dialog did not answer within {} minutes",
-                DIALOG.as_secs() / 60
-            )),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err("the thread waiting on the file dialog stopped".to_string())
-            }
-        }
-    }
-}
-
-/// Convert the unique bus name to an object-path element.
-/// Remove `:` at the start.
-/// Replace each `.` with `_`, as the Request docs specify.
-fn mangle_sender(unique_name: &str) -> String {
-    unique_name.trim_start_matches(':').replace('.', "_")
-}
-
-/// Return the object path where the portal puts the Request for `token`.
-fn request_path(sender: &str, token: &str) -> String {
-    format!("{PORTAL_PATH}/request/{sender}/{token}")
-}
-
-/// Make a token unique in this process with a counter and hard to guess from the clock.
-/// The portal requires a token that no other request uses.
-fn handle_token() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("chibipop_{now}_{n}")
-}
-
 /// Convert a bus failure to text for the user status line.
 /// A desktop without a FileChooser portal needs a specific message.
 /// The typed path beside the button still works, so the message says so.
@@ -324,6 +215,7 @@ fn explain(err: zbus::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portal_request::handle_token;
 
     /// A unit test cannot fake whether a real xdg-desktop-portal accepts this
     /// exact `OpenFile` payload. A wrong `filters` signature returns a
@@ -365,7 +257,7 @@ mod tests {
             conn,
             PORTAL_BUS.to_string(),
             handle.as_str().to_string(),
-            REQUEST_INTERFACE.to_string(),
+            "org.freedesktop.portal.Request".to_string(),
         )
         .expect("the Request proxy");
         let _: zbus::Result<()> = request.call("Close", &());
@@ -432,12 +324,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn two_tokens_are_never_the_same_request_path() {
-        assert_ne!(handle_token(), handle_token());
-        assert_eq!(
-            "/org/freedesktop/portal/desktop/request/1_23/tok",
-            request_path(&mangle_sender(":1.23"), "tok")
-        );
-    }
 }

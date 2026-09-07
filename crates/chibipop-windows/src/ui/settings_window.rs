@@ -285,8 +285,8 @@ fn screenshot_mode_at(selection: isize) -> ScreenshotMode {
 /// Formats the saved fixed targets for the Anki settings page.
 fn screenshot_target_summary(form: &SettingsForm) -> String {
     screenshot_target_summary_values(
-        form.screenshot_fixed_region,
-        form.screenshot_fixed_window.as_ref(),
+        form.cfg.actions.screenshot.fixed_region,
+        form.cfg.actions.screenshot.fixed_window.as_ref(),
     )
 }
 
@@ -2895,8 +2895,8 @@ impl SettingsWindow {
     unsafe fn reset_screenshot_targets(&self) {
         {
             let mut staged = self.staged.borrow_mut();
-            staged.screenshot_fixed_region = None;
-            staged.screenshot_fixed_window = None;
+            staged.cfg.actions.screenshot.fixed_region = None;
+            staged.cfg.actions.screenshot.fixed_window = None;
             staged.screenshot_reset_targets = true;
         }
         let summary = wide("No saved screenshot targets.");
@@ -2934,11 +2934,11 @@ impl SettingsWindow {
             if staged.screenshot_reset_targets {
                 return;
             }
-            staged.screenshot_fixed_region = screenshot.fixed_region;
-            staged.screenshot_fixed_window = screenshot.fixed_window.clone();
+            staged.cfg.actions.screenshot.fixed_region = screenshot.fixed_region;
+            staged.cfg.actions.screenshot.fixed_window = screenshot.fixed_window.clone();
             (
-                staged.screenshot_fixed_region,
-                staged.screenshot_fixed_window.clone(),
+                staged.cfg.actions.screenshot.fixed_region,
+                staged.cfg.actions.screenshot.fixed_window.clone(),
             )
         };
         let summary = wide(&screenshot_target_summary_values(region, window.as_ref()));
@@ -3005,8 +3005,8 @@ impl SettingsWindow {
                     let enabled = if id == ID_SCREENSHOT_RESET && !busy {
                         let staged = self.staged.borrow();
                         !staged.screenshot_reset_targets
-                            && (staged.screenshot_fixed_region.is_some()
-                                || staged.screenshot_fixed_window.is_some())
+                            && (staged.cfg.actions.screenshot.fixed_region.is_some()
+                                || staged.cfg.actions.screenshot.fixed_window.is_some())
                     } else {
                         !busy
                     };
@@ -3101,19 +3101,19 @@ impl SettingsWindow {
         unsafe {
             let Some(rows) = lv_rows(self.hwnd, ID_TERMS) else { return };
             staged.terms = rows;
-            staged.ocr_language = prev.clone();
+            staged.cfg.ocr.language = prev.clone();
             if crate::settings::is_scoped(&staged) {
                 if let Some(keys) = crate::settings::scoped_entry(
                     &staged.terms, &staged.unreadable) {
-                    staged.per_language.insert(prev, keys);
+                    staged.cfg.dictionaries.per_language.insert(prev, keys);
                 }
             }
             let all: Vec<String> = staged.terms.iter().map(|row| row.name.clone()).collect();
-            let list = staged.per_language.get(&next).cloned().unwrap_or_default();
+            let list = staged.cfg.dictionaries.per_language.get(&next).cloned().unwrap_or_default();
             let scoped = scope_rows(&all, &list, &staged.unreadable);
             staged.terms = scoped;
             staged.dict_list_language = next.clone();
-            staged.ocr_language = next;
+            staged.cfg.ocr.language = next;
             if let Ok(terms) = dlg_item(self.hwnd, ID_TERMS) {
                 fill_role_list(terms, &staged.terms, 0);
             }
@@ -3862,9 +3862,9 @@ impl SettingsWindow {
                 f,
             )?;
             gen.push(press);
-            let is_live = matches!(form.mode, crate::config::TriggerMode::Live);
-            let is_toggle = matches!(form.mode, crate::config::TriggerMode::Toggle);
-            let is_press = matches!(form.mode, crate::config::TriggerMode::Press);
+            let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
+            let is_toggle = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Toggle);
+            let is_press = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Press);
             let is_hold = !is_live && !is_toggle && !is_press;
             SendMessageW(
                 live,
@@ -3892,7 +3892,7 @@ impl SettingsWindow {
             );
             y += ROW_H + ROW_GAP;
             gen.push(label("Trigger key", y)?);
-            let key_vk = crate::config::parse_trigger_key(&form.trigger_key).unwrap_or(0x10);
+            let key_vk = crate::config::parse_trigger_key(&form.cfg.trigger.trigger_key).unwrap_or(0x10);
             CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, key_vk))));
             let key_name = crate::config::trigger_key_name(key_vk);
             let key_btn = child(
@@ -3942,7 +3942,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(name).as_ptr() as isize)),
                 );
-                if form.theme == *name {
+                if form.cfg.popup.theme == *name {
                     SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -3968,8 +3968,8 @@ impl SettingsWindow {
             let mut families = japanese_font_families();
             // Keep a configured font when the system does not list it.
             // The code preserves the stored value until the user changes it.
-            if !families.iter().any(|x| x == &form.font) {
-                families.push(form.font.clone());
+            if !families.iter().any(|x| x == &form.cfg.popup.font) {
+                families.push(form.cfg.popup.font.clone());
                 families.sort();
             }
             for (i, name) in families.iter().enumerate() {
@@ -3979,7 +3979,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(name).as_ptr() as isize)),
                 );
-                if name == &form.font {
+                if name == &form.cfg.popup.font {
                     SendMessageW(fonts_hwnd, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4004,7 +4004,7 @@ impl SettingsWindow {
                 MAX_WIDTH_RANGE.0 as i64,
                 MAX_WIDTH_RANGE.1 as i64,
                 5,
-                form.max_width_percent as i64,
+                form.cfg.popup.max_width_percent as i64,
             );
             gen.push(label("Max width (% of screen)", y)?);
             let mw = child(
@@ -4020,14 +4020,14 @@ impl SettingsWindow {
                 f,
             )?;
             gen.push(mw);
-            fill_numeric(mw, &self.widths, form.max_width_percent as i64);
+            fill_numeric(mw, &self.widths, form.cfg.popup.max_width_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.heights = numeric_choices(
                 MAX_HEIGHT_RANGE.0 as i64,
                 MAX_HEIGHT_RANGE.1 as i64,
                 5,
-                form.max_height_percent as i64,
+                form.cfg.popup.max_height_percent as i64,
             );
             gen.push(label("Max height (% of screen)", y)?);
             let mh = child(
@@ -4043,14 +4043,14 @@ impl SettingsWindow {
                 f,
             )?;
             gen.push(mh);
-            fill_numeric(mh, &self.heights, form.max_height_percent as i64);
+            fill_numeric(mh, &self.heights, form.cfg.popup.max_height_percent as i64);
             y += ROW_H + ROW_GAP;
 
             self.summaries = numeric_choices(
                 SUMMARY_RANGE.0 as i64,
                 SUMMARY_RANGE.1 as i64,
                 10,
-                form.summary_chars as i64,
+                form.cfg.popup.summary_chars as i64,
             );
             gen.push(label("Summary length (characters)", y)?);
             let sm = child(
@@ -4066,7 +4066,7 @@ impl SettingsWindow {
                 f,
             )?;
             gen.push(sm);
-            fill_numeric(sm, &self.summaries, form.summary_chars as i64);
+            fill_numeric(sm, &self.summaries, form.cfg.popup.summary_chars as i64);
             y += ROW_H + ROW_GAP + 4;
 
             let check = |text: &str, id: i32, on: bool, y: i32| -> WinResult<HWND> {
@@ -4088,35 +4088,35 @@ impl SettingsWindow {
             gen.push(check(
                 "Box the word being defined",
                 ID_HIGHLIGHT,
-                form.highlight_match,
+                form.cfg.popup.highlight_match,
                 y,
             )?);
             y += ROW_H;
             gen.push(check(
                 "Scroll long entries with the wheel",
                 ID_SCROLL,
-                form.scroll_popup,
+                form.cfg.popup.scroll_popup,
                 y,
             )?);
             y += ROW_H;
             gen.push(check(
                 "Auto-scroll while dragging at the popup edge",
                 ID_EDGE_AUTOSCROLL,
-                form.edge_autoscroll,
+                form.cfg.popup.edge_autoscroll,
                 y,
             )?);
             y += ROW_H;
             gen.push(check(
                 "Show related words beside the popup",
                 ID_SIDE_PANEL,
-                form.side_panel,
+                form.cfg.popup.side_panel,
                 y,
             )?);
             y += ROW_H;
             gen.push(check(
                 "Hide the popup from screen capture",
                 ID_EXCLUDE,
-                form.exclude_from_capture,
+                form.cfg.popup.exclude_from_capture,
                 y,
             )?);
             y += ROW_H + 18;
@@ -4137,7 +4137,7 @@ impl SettingsWindow {
             for (i, (mode, text)) in LAYOUT_MODES.iter().enumerate() {
                 SendMessageW(layout_combo, CB_ADDSTRING, None,
                     Some(LPARAM(wide(text).as_ptr() as isize)));
-                if form.layout_mode == *mode {
+                if form.cfg.popup.layout_mode == *mode {
                     SendMessageW(layout_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4146,29 +4146,29 @@ impl SettingsWindow {
             }
             y += ROW_H + ROW_GAP;
             gen.push(check("Use the dictionary's own fonts and colours", ID_DICT_STYLING,
-                  form.dictionary_styling, y)?);
+                  form.cfg.popup.dictionary_styling, y)?);
             y += ROW_H;
             gen.push(check("Show example sentences", ID_SHOW_EXAMPLES,
-                  form.show_examples, y)?);
+                  form.cfg.popup.show_examples, y)?);
             y += ROW_H;
             gen.push(check("Show attributions and footnotes", ID_SHOW_ATTRIBUTIONS,
-                  form.show_attributions, y)?);
+                  form.cfg.popup.show_attributions, y)?);
             y += ROW_H;
-            gen.push(check("Show images", ID_SHOW_IMAGES, form.show_images, y)?);
+            gen.push(check("Show images", ID_SHOW_IMAGES, form.cfg.popup.show_images, y)?);
             y += ROW_H;
             gen.push(check("Show part-of-speech labels inside the entry", ID_SHOW_POS,
-                  form.show_part_of_speech, y)?);
+                  form.cfg.popup.show_part_of_speech, y)?);
             y += ROW_H + 18;
             y += 12;
             gen.push(group("Actions", y, 4 * ROW_H + 2 * ROW_GAP + 38)?);
             y += 20;
             gen.push(label("Entry screenshot key", y)?);
             SCREENSHOT_CAPTURED_VK.with(|c| c.set(None));
-            let screenshot_key_name = crate::config::parse_trigger_key(&form.screenshot_hotkey)
+            let screenshot_key_name = crate::config::parse_trigger_key(&form.cfg.actions.screenshot.hotkey)
                 .map(crate::config::trigger_key_name)
-                .unwrap_or_else(|| if form.screenshot_hotkey.is_empty() {
+                .unwrap_or_else(|| if form.cfg.actions.screenshot.hotkey.is_empty() {
                     "Not set".to_string()
-                } else { form.screenshot_hotkey.clone() });
+                } else { form.cfg.actions.screenshot.hotkey.clone() });
             gen.push(child(page, w!("BUTTON"), &screenshot_key_name, WS_TABSTOP,
                 FIELD_X, y, FIELD_W - 80, ROW_H, ID_SCREENSHOT_HOTKEY, f)?);
             gen.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
@@ -4243,7 +4243,7 @@ impl SettingsWindow {
                     for (at, (strategy, text)) in RANKING_STRATEGIES.iter().enumerate() {
                         SendMessageW(ranking, CB_ADDSTRING, None,
                             Some(LPARAM(wide(text).as_ptr() as isize)));
-                        if *strategy == form.ranking_strategy {
+                        if *strategy == form.cfg.dictionaries.ranking_strategy {
                             SendMessageW(ranking, CB_SETCURSEL, Some(WPARAM(at)), None);
                         }
                     }
@@ -4309,8 +4309,8 @@ impl SettingsWindow {
             let mut engine_names = vec!["builtin".to_string()];
             engine_names.extend(discovered_text_providers(&found));
             // The combo still offers the configured engine.
-            if form.engine != "builtin" && !engine_names.contains(&form.engine) {
-                engine_names.push(form.engine.clone());
+            if form.cfg.ocr.engine != "builtin" && !engine_names.contains(&form.cfg.ocr.engine) {
+                engine_names.push(form.cfg.ocr.engine.clone());
             }
             ocr.push(label("OCR engine", y)?);
             let engine = child(
@@ -4341,7 +4341,7 @@ impl SettingsWindow {
             }
             let engine_idx = engine_names
                 .iter()
-                .position(|n| n == &form.engine)
+                .position(|n| n == &form.cfg.ocr.engine)
                 .unwrap_or(0);
             SendMessageW(engine, CB_SETCURSEL, Some(WPARAM(engine_idx)), None);
             self.engine_names = engine_names;
@@ -4388,7 +4388,7 @@ impl SettingsWindow {
             ocr.push(lang);
             let langs = language_choices(
                 crate::text::ocr::installed_recognisers(),
-                &form.ocr_language,
+                &form.cfg.ocr.language,
             );
             for (name, _) in &langs {
                 SendMessageW(
@@ -4398,7 +4398,7 @@ impl SettingsWindow {
                     Some(LPARAM(wide(name).as_ptr() as isize)),
                 );
             }
-            if let Some(i) = language_index(&langs, &form.ocr_language) {
+            if let Some(i) = language_index(&langs, &form.cfg.ocr.language) {
                 SendMessageW(lang, CB_SETCURSEL, Some(WPARAM(i)), None);
             }
             self.ocr_langs = langs.into_iter().map(|(_, tag)| tag).collect();
@@ -4421,7 +4421,7 @@ impl SettingsWindow {
                 PASSES_RANGE.0 as i64,
                 PASSES_RANGE.1 as i64,
                 1,
-                form.max_ocr_passes as i64,
+                form.cfg.ocr.max_ocr_passes as i64,
             );
             ocr.push(label("OCR passes per hover", y)?);
             let ps = child(
@@ -4437,7 +4437,7 @@ impl SettingsWindow {
                 f,
             )?;
             ocr.push(ps);
-            fill_numeric(ps, &self.passes, form.max_ocr_passes as i64);
+            fill_numeric(ps, &self.passes, form.cfg.ocr.max_ocr_passes as i64);
             y += ROW_H;
             ocr.push(child(
                 page,
@@ -4456,7 +4456,7 @@ impl SettingsWindow {
             ocr.push(child(
                 page,
                 w!("EDIT"),
-                &form.capture_width.to_string(),
+                &form.cfg.ocr.capture_width.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X,
                 y,
@@ -4470,7 +4470,7 @@ impl SettingsWindow {
             ocr.push(child(
                 page,
                 w!("EDIT"),
-                &form.capture_height.to_string(),
+                &form.cfg.ocr.capture_height.to_string(),
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X,
                 y,
@@ -4496,28 +4496,28 @@ impl SettingsWindow {
             ocr.push(check(
                 "Prefer vertical text (manga, VN)",
                 ID_PREFER_VERT,
-                form.prefer_vertical,
+                form.cfg.ocr.prefer_vertical,
                 y,
             )?);
             y += ROW_H;
             ocr.push(check(
                 "Scan alphanumeric text",
                 ID_SCAN_ALNUM,
-                form.scan_alphanumeric,
+                form.cfg.ocr.scan_alphanumeric,
                 y,
             )?);
             y += ROW_H;
             ocr.push(check(
                 "Discard furigana from OCR text",
                 ID_DISCARD_FURIGANA,
-                form.discard_furigana,
+                form.cfg.ocr.discard_furigana,
                 y,
             )?);
             y += ROW_H;
             let per_char = check(
                 "Look up each character as you hover",
                 ID_PER_CHAR,
-                form.per_character_lookup,
+                form.cfg.trigger.per_character_lookup,
                 y,
             )?;
             ocr.push(per_char);
@@ -4553,21 +4553,21 @@ impl SettingsWindow {
             SendMessageW(
                 scan,
                 BM_SETCHECK,
-                Some(WPARAM(if form.show_scan_region { 1 } else { 0 })),
+                Some(WPARAM(if form.cfg.debug.show_scan_region { 1 } else { 0 })),
                 None,
             );
             y += ROW_H;
             ocr.push(check(
                 "Show which OCR engine is active",
                 ID_ENGINE_LOG,
-                form.show_engine_log,
+                form.cfg.debug.show_engine_log,
                 y,
             )?);
             y += ROW_H;
             ocr.push(check(
                 "Show adapter log in status bar",
                 ID_ADAPTER_LOG,
-                form.show_adapter_log,
+                form.cfg.debug.show_adapter_log,
                 y,
             )?);
             y += ROW_H + 18;
@@ -4593,14 +4593,14 @@ impl SettingsWindow {
             SendMessageW(
                 anki_chk,
                 BM_SETCHECK,
-                Some(WPARAM(if form.anki_enabled { 1 } else { 0 })),
+                Some(WPARAM(if form.cfg.anki.enabled { 1 } else { 0 })),
                 None,
             );
             y += ROW_H;
             ank.push(check(
                 "Show notification when a card is added",
                 ID_NOTIFY_ON_ADD,
-                form.notify_on_add,
+                form.cfg.anki.notify_on_add,
                 y,
             )?);
             y += ROW_H;
@@ -4608,7 +4608,7 @@ impl SettingsWindow {
             ank.push(child(
                 page,
                 w!("EDIT"),
-                &form.anki_url,
+                &form.cfg.anki.url,
                 WS_TABSTOP | WS_BORDER,
                 FIELD_X,
                 y,
@@ -4622,7 +4622,7 @@ impl SettingsWindow {
             let deck = child(
                 page,
                 w!("COMBOBOX"),
-                &form.anki_deck,
+                &form.cfg.anki.deck,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X,
                 y,
@@ -4636,14 +4636,14 @@ impl SettingsWindow {
                 deck,
                 WM_SETTEXT,
                 None,
-                Some(LPARAM(wide(&form.anki_deck).as_ptr() as isize)),
+                Some(LPARAM(wide(&form.cfg.anki.deck).as_ptr() as isize)),
             );
             y += ROW_H;
             ank.push(label("Note type", y)?);
             let model = child(
                 page,
                 w!("COMBOBOX"),
-                &form.anki_model,
+                &form.cfg.anki.model,
                 WINDOW_STYLE(CBS_DROPDOWN as u32) | WS_TABSTOP | WS_VSCROLL,
                 FIELD_X,
                 y,
@@ -4657,11 +4657,11 @@ impl SettingsWindow {
                 model,
                 WM_SETTEXT,
                 None,
-                Some(LPARAM(wide(&form.anki_model).as_ptr() as isize)),
+                Some(LPARAM(wide(&form.cfg.anki.model).as_ptr() as isize)),
             );
             y += ROW_H;
             ank.push(label("Shortcut key", y)?);
-            let add_vk = crate::config::parse_trigger_key(&form.anki_add_key).unwrap_or(0x41);
+            let add_vk = crate::config::parse_trigger_key(&form.cfg.anki.add_key).unwrap_or(0x41);
             ANKI_CAPTURED_VK.with(|c| c.set(Some((h.0 as isize, add_vk))));
             let add_name = crate::config::trigger_key_name(add_vk);
             ank.push(child(
@@ -4680,7 +4680,7 @@ impl SettingsWindow {
             ank.push(check(
                 "Include screenshot when adding",
                 ID_INCLUDE_SCREENSHOT,
-                form.include_screenshot,
+                form.cfg.actions.screenshot.include_on_add,
                 y,
             )?);
             y += ROW_H;
@@ -4706,7 +4706,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(&text).as_ptr() as isize)),
                 );
-                if *mode == form.screenshot_capture_mode {
+                if *mode == form.cfg.actions.screenshot.capture_mode {
                     SendMessageW(screenshot_mode, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4755,20 +4755,20 @@ impl SettingsWindow {
             )?;
             ank.push(reset);
             let has_target =
-                form.screenshot_fixed_region.is_some() || form.screenshot_fixed_window.is_some();
+                form.cfg.actions.screenshot.fixed_region.is_some() || form.cfg.actions.screenshot.fixed_window.is_some();
             let _ = EnableWindow(reset, has_target);
             y += ROW_H;
             ank.push(check(
                 "Include dictionary name",
                 ID_INCLUDE_DICTIONARY_NAME,
-                form.include_dictionary_name,
+                form.cfg.anki.include_dictionary_name,
                 y,
             )?);
             y += ROW_H;
             ank.push(check(
                 "First dictionary only",
                 ID_FIRST_DICT_ONLY,
-                form.first_dict_only,
+                form.cfg.anki.first_dict_only,
                 y,
             )?);
             y += ROW_H;
@@ -4793,7 +4793,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(text).as_ptr() as isize)),
                 );
-                if form.selection_buttons == *value {
+                if form.cfg.anki.selection_buttons == *value {
                     SendMessageW(selection_buttons, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4822,7 +4822,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(text).as_ptr() as isize)),
                 );
-                if form.selection_separator == *value {
+                if form.cfg.anki.selection_separator == *value {
                     SendMessageW(selection_separator, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4851,7 +4851,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(text).as_ptr() as isize)),
                 );
-                if form.triple_click == *value {
+                if form.cfg.anki.triple_click == *value {
                     SendMessageW(triple_click, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4880,7 +4880,7 @@ impl SettingsWindow {
                     None,
                     Some(LPARAM(wide(text).as_ptr() as isize)),
                 );
-                if form.sentence_mode == *mode {
+                if form.cfg.anki.sentence_mode == *mode {
                     SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(i)), None);
                 }
             }
@@ -4888,7 +4888,7 @@ impl SettingsWindow {
                 SendMessageW(sentence_combo, CB_SETCURSEL, Some(WPARAM(0)), None);
             }
             y += ROW_H;
-            let is_static = form.sentence_mode == SentenceMode::Static;
+            let is_static = form.cfg.anki.sentence_mode == SentenceMode::Static;
             ank.push(child(
                 page,
                 w!("STATIC"),
@@ -4901,14 +4901,14 @@ impl SettingsWindow {
                 ID_STATIC_REGION_LABEL,
                 f,
             )?);
-            let sr_vk = crate::config::parse_trigger_key(&form.static_region_key);
+            let sr_vk = crate::config::parse_trigger_key(&form.cfg.anki.static_region_key);
             let sr_label = sr_vk
                 .map(crate::config::trigger_key_name)
                 .unwrap_or_else(|| {
-                    if form.static_region_key.is_empty() {
+                    if form.cfg.anki.static_region_key.is_empty() {
                         "Not set".to_string()
                     } else {
-                        form.static_region_key.clone()
+                        form.cfg.anki.static_region_key.clone()
                     }
                 });
             SR_CAPTURED_VK.with(|c| {
@@ -4930,7 +4930,7 @@ impl SettingsWindow {
             ank.push(check(
                 "Show capture region outline",
                 ID_SHOW_STATIC_OVERLAY,
-                form.show_static_overlay,
+                form.cfg.anki.show_static_overlay,
                 y,
             )?);
             y += ROW_H;
@@ -5007,7 +5007,7 @@ impl SettingsWindow {
             y = 0;
             let plugins_root = crate::paths::beside_exe("plugins");
             let found = crate::plugin::discover::discover(&plugins_root);
-            let enabled_plugins = form.enabled_plugins.clone();
+            let enabled_plugins = form.cfg.plugins.enabled.clone();
             plug.push(group("Plugins", y, plugins_group_h(found.len()))?);
             y += 20;
             if found.is_empty() {
@@ -5279,42 +5279,42 @@ impl SettingsWindow {
             let font = {
                 let i = combo_index(ID_FONT);
                 if i < 0 {
-                    template.font.clone()
+                    template.cfg.popup.font.clone()
                 } else {
                     self.fonts
                         .get(i as usize)
                         .cloned()
-                        .unwrap_or_else(|| template.font.clone())
+                        .unwrap_or_else(|| template.cfg.popup.font.clone())
                 }
             };
             let ocr_language = {
                 let i = combo_index(ID_OCR_LANG);
                 if i < 0 {
-                    template.ocr_language.clone()
+                    template.cfg.ocr.language.clone()
                 } else {
                     self.ocr_langs
                         .get(i as usize)
                         .cloned()
-                        .unwrap_or_else(|| template.ocr_language.clone())
+                        .unwrap_or_else(|| template.cfg.ocr.language.clone())
                 }
             };
 
             let engine = {
                 let i = combo_index(ID_ENGINE);
                 if i < 0 {
-                    template.engine.clone()
+                    template.cfg.ocr.engine.clone()
                 } else {
                     self.engine_names
                         .get(i as usize)
                         .cloned()
-                        .unwrap_or_else(|| template.engine.clone())
+                        .unwrap_or_else(|| template.cfg.ocr.engine.clone())
                 }
             };
 
-            let trigger_key = resolved_trigger_key(h, &template.trigger_key);
-            let screenshot_hotkey = resolved_screenshot_key(h, &template.screenshot_hotkey);
-            let screenshot_hotkey_edited = screenshot_hotkey != template.screenshot_hotkey;
-            let anki_add_key = resolved_anki_add_key(h, &template.anki_add_key);
+            let trigger_key = resolved_trigger_key(h, &template.cfg.trigger.trigger_key);
+            let screenshot_hotkey = resolved_screenshot_key(h, &template.cfg.actions.screenshot.hotkey);
+            let screenshot_hotkey_edited = screenshot_hotkey != template.cfg.actions.screenshot.hotkey;
+            let anki_add_key = resolved_anki_add_key(h, &template.cfg.anki.add_key);
             let ocr_clipboard_key =
                 resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
 
@@ -5338,100 +5338,91 @@ impl SettingsWindow {
             let saved = template.field_map.as_deref().unwrap_or_default();
             let field_map = Some(merged_field_map(saved, &readings));
 
-            SettingsForm {
-                mode: if checked(ID_MODE_PRESS) {
-                    crate::config::TriggerMode::Press
-                } else if checked(ID_MODE_TOGGLE) {
-                    crate::config::TriggerMode::Toggle
-                } else if checked(ID_MODE_HOLD) {
-                    crate::config::TriggerMode::HoldKey
-                } else {
-                    crate::config::TriggerMode::Live
-                },
-                trigger_key,
-                theme: theme.to_string(),
-                font,
-                max_width_percent: pick(
-                    &self.widths,
-                    ID_MAX_WIDTH,
-                    template.max_width_percent as i64,
-                ) as u8,
-                max_height_percent: pick(
-                    &self.heights,
-                    ID_MAX_HEIGHT,
-                    template.max_height_percent as i64,
-                ) as u8,
-                summary_chars: pick(&self.summaries, ID_SUMMARY, template.summary_chars as i64)
-                    as usize,
-                highlight_match: checked(ID_HIGHLIGHT),
-                scroll_popup: checked(ID_SCROLL),
-                edge_autoscroll: checked(ID_EDGE_AUTOSCROLL),
-                side_panel: checked(ID_SIDE_PANEL),
-                layout_mode: layout_mode_at(combo_index(ID_LAYOUT_MODE)),
-                dictionary_styling: checked(ID_DICT_STYLING),
-                show_examples: checked(ID_SHOW_EXAMPLES),
-                show_attributions: checked(ID_SHOW_ATTRIBUTIONS),
-                show_images: checked(ID_SHOW_IMAGES),
-                show_part_of_speech: checked(ID_SHOW_POS),
-                exclude_from_capture: checked(ID_EXCLUDE),
-                terms,
-                frequency,
-                pitch,
-                ranking_strategy: ranking_strategy_at(combo_index(ID_RANKING)),
-                dict_list_language: staged.dict_list_language.clone(),
-                per_language: staged.per_language.clone(),
-                max_ocr_passes: pick(&self.passes, ID_PASSES, template.max_ocr_passes as i64) as u8,
-                prefer_vertical: checked(ID_PREFER_VERT),
-                capture_width: px(ID_CAPTURE_W, template.capture_width),
-                capture_height: px(ID_CAPTURE_H, template.capture_height),
-                scan_alphanumeric: checked(ID_SCAN_ALNUM),
-                discard_furigana: checked(ID_DISCARD_FURIGANA),
-                per_character_lookup: checked(ID_PER_CHAR),
-                ocr_language,
-                engine,
-                show_scan_region: checked(ID_SHOW_SCAN),
-                show_engine_log: checked(ID_ENGINE_LOG),
-                show_adapter_log: checked(ID_ADAPTER_LOG),
-                freq_changed: staged.freq_changed,
-                staged_adds: staged.staged_adds.clone(),
-                staged_removes: staged.staged_removes.clone(),
-                library_empty: staged.library_empty,
-                unreadable: staged.unreadable.clone(),
-                anki_enabled: checked(ID_ANKI_ENABLED),
-                anki_url: text_of(ID_ANKI_URL),
-                anki_deck: text_of(ID_ANKI_DECK),
-                anki_model: text_of(ID_ANKI_MODEL),
-                anki_add_key,
-                field_map,
-                notify_on_add: checked(ID_NOTIFY_ON_ADD),
-                sentence_mode,
-                static_region_key: resolved_sr_key(h, &template.static_region_key),
-                include_screenshot: checked(ID_INCLUDE_SCREENSHOT),
-                screenshot_hotkey,
-                screenshot_hotkey_edited,
-                screenshot_capture_mode,
-                screenshot_fixed_region: (!screenshot_reset_targets)
-                    .then_some(template.screenshot_fixed_region)
-                    .flatten(),
-                screenshot_fixed_window: (!screenshot_reset_targets)
-                    .then(|| template.screenshot_fixed_window.clone())
-                    .flatten(),
-                screenshot_reset_targets,
-                ocr_clipboard_key,
-                show_static_overlay: checked(ID_SHOW_STATIC_OVERLAY),
-                include_dictionary_name: checked(ID_INCLUDE_DICTIONARY_NAME),
-                first_dict_only: checked(ID_FIRST_DICT_ONLY),
-                selection_buttons,
-                selection_separator,
-                triple_click,
-                enabled_plugins: self
-                    .plugin_names
-                    .iter()
-                    .enumerate()
-                    .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
-                    .map(|(_, name)| name.clone())
-                    .collect(),
-            }
+            let mut form = template.clone();
+            form.cfg.trigger.mode = if checked(ID_MODE_PRESS) {
+                crate::config::TriggerMode::Press
+            } else if checked(ID_MODE_TOGGLE) {
+                crate::config::TriggerMode::Toggle
+            } else if checked(ID_MODE_HOLD) {
+                crate::config::TriggerMode::HoldKey
+            } else {
+                crate::config::TriggerMode::Live
+            };
+            form.cfg.trigger.trigger_key = trigger_key;
+            form.cfg.popup.theme = theme.to_string();
+            form.cfg.popup.font = font;
+            form.cfg.popup.max_width_percent =
+                pick(&self.widths, ID_MAX_WIDTH, template.cfg.popup.max_width_percent as i64) as u8;
+            form.cfg.popup.max_height_percent =
+                pick(&self.heights, ID_MAX_HEIGHT, template.cfg.popup.max_height_percent as i64)
+                    as u8;
+            form.cfg.popup.summary_chars =
+                pick(&self.summaries, ID_SUMMARY, template.cfg.popup.summary_chars as i64) as usize;
+            form.cfg.popup.highlight_match = checked(ID_HIGHLIGHT);
+            form.cfg.popup.scroll_popup = checked(ID_SCROLL);
+            form.cfg.popup.edge_autoscroll = checked(ID_EDGE_AUTOSCROLL);
+            form.cfg.popup.side_panel = checked(ID_SIDE_PANEL);
+            form.cfg.popup.layout_mode = layout_mode_at(combo_index(ID_LAYOUT_MODE));
+            form.cfg.popup.dictionary_styling = checked(ID_DICT_STYLING);
+            form.cfg.popup.show_examples = checked(ID_SHOW_EXAMPLES);
+            form.cfg.popup.show_attributions = checked(ID_SHOW_ATTRIBUTIONS);
+            form.cfg.popup.show_images = checked(ID_SHOW_IMAGES);
+            form.cfg.popup.show_part_of_speech = checked(ID_SHOW_POS);
+            form.cfg.popup.exclude_from_capture = checked(ID_EXCLUDE);
+            form.terms = terms;
+            form.frequency = frequency;
+            form.pitch = pitch;
+            form.cfg.dictionaries.ranking_strategy = ranking_strategy_at(combo_index(ID_RANKING));
+            form.dict_list_language = staged.dict_list_language.clone();
+            form.cfg.dictionaries.per_language = staged.cfg.dictionaries.per_language.clone();
+            form.cfg.ocr.max_ocr_passes =
+                pick(&self.passes, ID_PASSES, template.cfg.ocr.max_ocr_passes as i64) as u8;
+            form.cfg.ocr.prefer_vertical = checked(ID_PREFER_VERT);
+            form.cfg.ocr.capture_width = px(ID_CAPTURE_W, template.cfg.ocr.capture_width);
+            form.cfg.ocr.capture_height = px(ID_CAPTURE_H, template.cfg.ocr.capture_height);
+            form.cfg.ocr.scan_alphanumeric = checked(ID_SCAN_ALNUM);
+            form.cfg.ocr.discard_furigana = checked(ID_DISCARD_FURIGANA);
+            form.cfg.trigger.per_character_lookup = checked(ID_PER_CHAR);
+            form.cfg.ocr.language = ocr_language;
+            form.cfg.ocr.engine = engine;
+            form.cfg.debug.show_scan_region = checked(ID_SHOW_SCAN);
+            form.cfg.debug.show_engine_log = checked(ID_ENGINE_LOG);
+            form.cfg.debug.show_adapter_log = checked(ID_ADAPTER_LOG);
+            form.freq_changed = staged.freq_changed;
+            form.staged_adds = staged.staged_adds.clone();
+            form.staged_removes = staged.staged_removes.clone();
+            form.library_empty = staged.library_empty;
+            form.unreadable = staged.unreadable.clone();
+            form.cfg.anki.enabled = checked(ID_ANKI_ENABLED);
+            form.cfg.anki.url = text_of(ID_ANKI_URL);
+            form.cfg.anki.deck = text_of(ID_ANKI_DECK);
+            form.cfg.anki.model = text_of(ID_ANKI_MODEL);
+            form.cfg.anki.add_key = anki_add_key;
+            form.field_map = field_map;
+            form.cfg.anki.notify_on_add = checked(ID_NOTIFY_ON_ADD);
+            form.cfg.anki.sentence_mode = sentence_mode;
+            form.cfg.anki.static_region_key =
+                resolved_sr_key(h, &template.cfg.anki.static_region_key);
+            form.cfg.actions.screenshot.include_on_add = checked(ID_INCLUDE_SCREENSHOT);
+            form.cfg.actions.screenshot.hotkey = screenshot_hotkey;
+            form.screenshot_hotkey_edited = screenshot_hotkey_edited;
+            form.cfg.actions.screenshot.capture_mode = screenshot_capture_mode;
+            form.screenshot_reset_targets = screenshot_reset_targets;
+            form.ocr_clipboard_key = ocr_clipboard_key;
+            form.cfg.anki.show_static_overlay = checked(ID_SHOW_STATIC_OVERLAY);
+            form.cfg.anki.include_dictionary_name = checked(ID_INCLUDE_DICTIONARY_NAME);
+            form.cfg.anki.first_dict_only = checked(ID_FIRST_DICT_ONLY);
+            form.cfg.anki.selection_buttons = selection_buttons;
+            form.cfg.anki.selection_separator = selection_separator;
+            form.cfg.anki.triple_click = triple_click;
+            form.cfg.plugins.enabled = self
+                .plugin_names
+                .iter()
+                .enumerate()
+                .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
+                .map(|(_, name)| name.clone())
+                .collect();
+            form
         }
     }
 }
@@ -5818,8 +5809,8 @@ mod tests {
         let pending = crate::settings::apply_to(&window.read(&form), &cfg);
         assert!(pending.validate_hotkeys(crate::config::Platform::Windows).unwrap_err()
             .to_string().contains("Screenshot conflicts with Lookup trigger"));
-        assert_eq!(window.read(&form).trigger_key, "f3");
-        assert_eq!(window.read(&form).screenshot_hotkey, "f3");
+        assert_eq!(window.read(&form).cfg.trigger.trigger_key, "f3");
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "f3");
     }
 
     #[test]
@@ -5827,7 +5818,7 @@ mod tests {
         let cfg = crate::config::Config::default();
         let form = crate::settings::from_config(&cfg, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        assert_eq!(window.read(&form).screenshot_hotkey, "ctrl+shift+s");
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "ctrl+shift+s");
         assert!(!window.read(&form).screenshot_hotkey_edited);
         // SAFETY: These commands target controls owned by the live settings window.
         unsafe {
@@ -5836,22 +5827,22 @@ mod tests {
         assert!(window.handle_capture_key(0x10));
         assert!(CAPTURING.with(|c| c.get()).is_some());
         assert!(window.handle_capture_key(0x1B));
-        assert_eq!(window.read(&form).screenshot_hotkey, "ctrl+shift+s");
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "ctrl+shift+s");
         assert!(CAPTURING.with(|c| c.get()).is_none());
         // SAFETY: The same capture button remains live.
         unsafe {
             SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(ID_SCREENSHOT_HOTKEY as usize)), None);
         }
         assert!(window.handle_capture_key(0x78));
-        assert_eq!(window.read(&form).screenshot_hotkey, "f9");
-        assert_eq!(crate::config::parse_trigger_key(&window.read(&form).anki_add_key),
-            crate::config::parse_trigger_key(&form.anki_add_key));
+        assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "f9");
+        assert_eq!(crate::config::parse_trigger_key(&window.read(&form).cfg.anki.add_key),
+            crate::config::parse_trigger_key(&form.cfg.anki.add_key));
         // SAFETY: The Clear button belongs to this same live window.
         unsafe {
             SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(ID_SCREENSHOT_KEY_CLEAR as usize)), None);
         }
         let cleared = window.read(&form);
-        assert!(cleared.screenshot_hotkey.is_empty());
+        assert!(cleared.cfg.actions.screenshot.hotkey.is_empty());
         assert!(cleared.screenshot_hotkey_edited);
         assert!(crate::settings::apply_to(&cleared, &cfg).actions.screenshot.hotkey.is_empty());
         drop(window);
@@ -7251,7 +7242,7 @@ mod tests {
         form.terms = rows(&[("Terms A", true), ("Terms B", false)]);
         form.frequency = rows(&[("Freq A", true), ("Freq B", true)]);
         form.pitch = rows(&[("Pitch A", false)]);
-        form.ranking_strategy = RankingStrategy::Median;
+        form.cfg.dictionaries.ranking_strategy = RankingStrategy::Median;
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
             .expect("opening the settings window");
 
@@ -7260,7 +7251,7 @@ mod tests {
         assert_eq!(form.terms, back.terms);
         assert_eq!(form.frequency, back.frequency);
         assert_eq!(form.pitch, back.pitch);
-        assert_eq!(RankingStrategy::Median, back.ranking_strategy);
+        assert_eq!(RankingStrategy::Median, back.cfg.dictionaries.ranking_strategy);
     }
 
     /// A checkbox affects only its section. A Move button affects only its

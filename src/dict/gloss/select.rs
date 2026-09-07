@@ -5,6 +5,7 @@
 //! renderer apply the same range boundaries.
 
 use super::{GlossDoc, Kind, NodeId, NodePath, RoleFilter, Tag};
+use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// One position in a [`GlossDoc`]: a role-visible leaf and a byte offset in it.
@@ -101,6 +102,110 @@ pub fn leaf_text(doc: &GlossDoc, path: NodePath) -> &str {
         return "";
     }
     doc.text(id)
+}
+
+/// The selected byte intervals of every role-visible leaf, from a set of ranges.
+/// Both selected-range renderers (`html`, `plain`) build the same plan.
+pub(super) struct SelectionPlan {
+    pub leaves: Vec<Leaf>,
+    pub intervals: HashMap<NodePath, Vec<(u32, u32)>>,
+    pub indexes: HashMap<NodePath, usize>,
+}
+
+impl SelectionPlan {
+    /// `None` when no range covers a visible leaf.
+    pub(super) fn new(doc: &GlossDoc, ranges: &[DocRange], roles: RoleFilter) -> Option<Self> {
+        let mut union: Vec<DocRange> = ranges
+            .iter()
+            .copied()
+            .map(|range| DocRange {
+                start: atomic_endpoint(doc, range.start, false),
+                end: atomic_endpoint(doc, range.end, true),
+            })
+            .collect();
+        union.retain(|range| range.start < range.end);
+        union.sort_by_key(|range| (range.start, range.end));
+        let mut merged: Vec<DocRange> = Vec::with_capacity(union.len());
+        for range in union {
+            if let Some(last) = merged.last_mut() {
+                if range.start <= last.end {
+                    if range.end > last.end {
+                        last.end = range.end;
+                    }
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+        if merged.is_empty() {
+            return None;
+        }
+        let visible = leaves(doc, roles);
+        if visible.is_empty() {
+            return None;
+        }
+        let mut intervals = HashMap::new();
+        let mut indexes = HashMap::new();
+        for (index, leaf) in visible.iter().copied().enumerate() {
+            indexes.insert(leaf.path, index);
+            let leaf_start = DocAddr { path: leaf.path, byte: 0 };
+            let leaf_end = DocAddr { path: leaf.path, byte: leaf.len };
+            let mut covered: Vec<(u32, u32)> = Vec::new();
+            for range in &merged {
+                if range.end <= leaf_start || range.start >= leaf_end {
+                    continue;
+                }
+                let start =
+                    if range.start.path < leaf.path { 0 } else { range.start.byte.min(leaf.len) };
+                let end =
+                    if range.end.path > leaf.path { leaf.len } else { range.end.byte.min(leaf.len) };
+                if start < end {
+                    if let Some(previous) = covered.last_mut() {
+                        if start <= previous.1 {
+                            previous.1 = previous.1.max(end);
+                            continue;
+                        }
+                    }
+                    covered.push((start, end));
+                }
+            }
+            if !covered.is_empty() {
+                intervals.insert(leaf.path, covered);
+            }
+        }
+        (!intervals.is_empty()).then_some(SelectionPlan { leaves: visible, intervals, indexes })
+    }
+
+    /// Every visible leaf is fully selected, so whole rendering is equivalent.
+    pub(super) fn covers_all(&self) -> bool {
+        self.leaves.iter().all(|leaf| {
+            self.intervals
+                .get(&leaf.path)
+                .is_some_and(|covered| covered.len() == 1 && covered[0] == (0, leaf.len))
+        })
+    }
+
+    pub(super) fn has_selected_child(&self, doc: &GlossDoc, id: NodeId, path: NodePath) -> bool {
+        if self.intervals.contains_key(&path) {
+            return true;
+        }
+        doc.children(id).enumerate().any(|(index, child)| {
+            path.child(index)
+                .is_some_and(|child_path| self.has_selected_child(doc, child, child_path))
+        })
+    }
+}
+
+fn atomic_endpoint(doc: &GlossDoc, addr: DocAddr, end: bool) -> DocAddr {
+    let mut prefix = NodePath::ROOT;
+    for &step in addr.path.steps() {
+        let Some(next) = prefix.child(step as usize) else { break };
+        prefix = next;
+        if prefix.resolve(doc).is_some_and(|id| doc.node(id).tag == Tag::Ruby) {
+            return DocAddr { path: prefix, byte: end as u32 };
+        }
+    }
+    addr
 }
 
 /// Returns the range from the first visible leaf to the end of the last one.

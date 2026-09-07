@@ -704,6 +704,10 @@ impl Controller {
         self.surface.as_ref().is_some_and(|s| !s.history.is_empty())
     }
 
+    fn repaint(&self, scroll: i32) -> Command {
+        Command::RepaintPopup { scroll, show_back: self.has_history() }
+    }
+
     fn scrolled(&mut self, notches: i32) -> Vec<Command> {
         if notches == 0 {
             return Vec::new();
@@ -718,10 +722,7 @@ impl Controller {
             return Vec::new();
         }
         s.scroll = next;
-        vec![Command::RepaintPopup {
-            scroll: next,
-            show_back: !s.history.is_empty(),
-        }]
+        vec![self.repaint(next)]
     }
 
     fn pointer_down(
@@ -733,19 +734,19 @@ impl Controller {
     ) -> Vec<Command> {
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
-        if !self.cfg.anki_enabled {
-            return self.action_on_press(local, hit);
-        }
+        let anki = self.cfg.anki_enabled;
 
         match hit {
             Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
             Some(HitAction::Back) => self.pop_history(),
             Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
-            Some(HitAction::DrillDown(query)) if text.is_none() => {
+            Some(HitAction::DrillDown(query)) if text.is_none() || !anki => {
                 let id = self.next_lookup_request();
                 vec![Command::RequestDrillDown { id, text: query }]
             }
-            None if text.is_none() && local.y >= p.popup.h => self.start_add(),
+            Some(HitAction::OpenUrl(url)) if !anki => vec![Command::OpenUrl(url)],
+            None if text.is_none() && local.y >= p.popup.h && anki => self.start_add(),
+            _ if !anki => Vec::new(),
             hit => {
                 let link = matches!(hit, Some(HitAction::OpenUrl(_)) | Some(HitAction::DrillDown(_)));
                 let s = self.surface.as_mut().expect("checked above");
@@ -797,24 +798,6 @@ impl Controller {
         out
     }
 
-    fn action_on_press(&mut self, local: PhysPoint, hit: Option<HitAction>) -> Vec<Command> {
-        let Some(s) = self.surface.as_ref() else { return Vec::new() };
-        let Some(p) = s.placed else { return Vec::new() };
-        match hit {
-            Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
-            Some(HitAction::DrillDown(text)) => {
-                let id = self.next_lookup_request();
-                vec![Command::RequestDrillDown { id, text }]
-            }
-            Some(HitAction::OpenUrl(url)) => vec![Command::OpenUrl(url)],
-            Some(HitAction::Back) => self.pop_history(),
-            Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
-            // A click below the popup targets the button.
-            None if local.y >= p.popup.h && self.cfg.anki_enabled => self.start_add(),
-            None => Vec::new(),
-        }
-    }
-
     fn expand_entry(&mut self, index: usize) -> Vec<Command> {
         let summary = self.cfg.summary_chars;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
@@ -846,10 +829,8 @@ impl Controller {
         selection.set_entry(entry, extent, on);
         s.gesture.reset();
         s.pressed_link = None;
-        vec![Command::RepaintPopup {
-            scroll: s.scroll,
-            show_back: !s.history.is_empty(),
-        }]
+        let scroll = s.scroll;
+        vec![self.repaint(scroll)]
     }
 
     fn run_gesture(&mut self, input: GestureInput) -> Vec<Command> {
@@ -880,10 +861,8 @@ impl Controller {
             match effect {
                 GestureEffect::Repaint => {
                     if let Some(s) = self.surface.as_ref() {
-                        out.push(Command::RepaintPopup {
-                            scroll: s.scroll,
-                            show_back: !s.history.is_empty(),
-                        });
+                        let scroll = s.scroll;
+                        out.push(self.repaint(scroll));
                     }
                 }
                 GestureEffect::OpenLink => {
@@ -929,10 +908,7 @@ impl Controller {
             return Vec::new();
         }
         s.scroll = next;
-        vec![Command::RepaintPopup {
-            scroll: next,
-            show_back: !s.history.is_empty(),
-        }]
+        vec![self.repaint(next)]
     }
 
     fn add_requested(&mut self) -> Vec<Command> {
