@@ -1172,14 +1172,14 @@ pub fn parse_hotkey(s: &str) -> Option<(u16, u8)> {
     let (key, mod_parts) = parts.split_last()?;
     let mut mods = 0u8;
     for part in mod_parts {
-        match part.to_ascii_lowercase().as_str() {
+        match part.trim().to_ascii_lowercase().as_str() {
             "ctrl" | "control" => mods |= MOD_CTRL,
             "shift" => mods |= MOD_SHIFT,
             "alt" => mods |= MOD_ALT,
             _ => return None,
         }
     }
-    let vk = parse_trigger_key(key)?;
+    let vk = parse_trigger_key(key.trim())?;
     Some((vk, mods))
 }
 
@@ -1226,7 +1226,94 @@ impl Default for Config {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard }
+
+impl HotkeyAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Back => "Back (Escape)",
+            Self::Trigger => "Lookup trigger",
+            Self::AnkiAdd => "Add to Anki",
+            Self::StaticRegion => "Static region",
+            Self::Screenshot => "Screenshot",
+            Self::OcrClipboard => "OCR clipboard",
+        }
+    }
+}
+
+fn windows_hotkeys_overlap(a: HotkeyAction, first: &str, b: HotkeyAction, second: &str) -> bool {
+    let parse = |action, key| match action {
+        HotkeyAction::Screenshot => parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
+        HotkeyAction::Back | HotkeyAction::Trigger | HotkeyAction::AnkiAdd =>
+            parse_trigger_key(key).map(|vk| (vk, None)),
+        _ => parse_trigger_key(key).map(|vk| (vk, Some(0))),
+    };
+    let (Some((avk, amods)), Some((bvk, bmods))) = (parse(a, first), parse(b, second)) else { return false };
+    let family = |vk| match vk { 0xA0 | 0xA1 => 0x10, 0xA2 | 0xA3 => 0x11, 0xA4 | 0xA5 => 0x12, _ => vk };
+    let same_key = avk == bvk || (family(avk) == family(bvk) && (avk <= 0x12 || bvk <= 0x12));
+    same_key && (amods.is_none() || bmods.is_none() || amods == bmods)
+}
+
+fn linux_hotkey(key: &str) -> String {
+    let upper = key.trim().to_ascii_uppercase();
+    let mut parts: Vec<_> = upper.split('+').map(str::trim).collect();
+    let Some(key) = parts.pop() else { return String::new() };
+    let mut mods: Vec<_> = parts.into_iter().map(|m| match m {
+        "CONTROL" | "CTRL" => "CTRL", "WIN" | "LOGO" | "SUPER" => "SUPER", _ => m,
+    }).collect();
+    mods.sort_unstable();
+    mods.dedup();
+    let key = parse_trigger_key(key).map_or_else(|| key.to_string(), |vk| format!("{vk:X}"));
+    format!("{}+{key}", mods.join("+"))
+}
+
 impl Config {
+    /// Reject bindings that can fire two actions on the same keypress.
+    pub fn validate_hotkeys(&self, platform: Platform) -> Result<()> {
+        if platform == Platform::Windows && self.actions.enabled
+            && !self.actions.screenshot.hotkey.trim().is_empty()
+            && parse_hotkey(&self.actions.screenshot.hotkey).is_none() {
+            anyhow::bail!("Screenshot shortcut is invalid. Use a key such as F5 or Ctrl+Shift+S.");
+        }
+        if let Some((first, second)) = self.hotkey_conflicts(platform).first() {
+            anyhow::bail!("{} conflicts with {}. Choose different keys.", second.name(), first.name());
+        }
+        Ok(())
+    }
+
+    pub fn hotkey_conflicts(&self, platform: Platform) -> Vec<(HotkeyAction, HotkeyAction)> {
+        use HotkeyAction::*;
+        let windows = platform == Platform::Windows;
+        let bindings = [
+            (Back, windows.then_some("0x1B")),
+            (Trigger, Some(self.trigger_key_for(platform))),
+            (AnkiAdd, self.anki.enabled.then_some(self.add_key_for(platform))),
+            (StaticRegion, self.actions.enabled.then_some(if windows {
+                self.anki.static_region_key.as_str()
+            } else { self.anki.static_region_key_linux.as_str() })),
+            (Screenshot, self.actions.enabled.then_some(if windows {
+                self.actions.screenshot.hotkey.as_str()
+            } else { self.actions.screenshot.hotkey_linux.as_deref().unwrap_or("") })),
+            (OcrClipboard, self.actions.ocr_clipboard.as_ref().filter(|_| self.actions.enabled)
+                .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
+        ];
+        let mut accepted = Vec::new();
+        let mut conflicts = Vec::new();
+        for (action, key) in bindings {
+            let Some(key) = key.filter(|key| !key.trim().is_empty()) else { continue };
+            if let Some(&(first, _)) = accepted.iter().find(|&&(earlier, previous)| {
+                if windows { windows_hotkeys_overlap(earlier, previous, action, key) }
+                else { linux_hotkey(previous) == linux_hotkey(key) }
+            }) {
+                conflicts.push((first, action));
+            } else {
+                accepted.push((action, key));
+            }
+        }
+        conflicts
+    }
+
     /// Saves the config as a TOML file.
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut text = toml::to_string_pretty(self)
@@ -1382,6 +1469,84 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_shortcuts_do_not_conflict_on_either_platform() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            Config::default().validate_hotkeys(platform).unwrap();
+        }
+    }
+
+    #[test]
+    fn screenshot_shortcuts_accept_spacing_and_reject_invalid_edits() {
+        assert_eq!(parse_hotkey(" ctrl + shift + s "), parse_hotkey("Ctrl+Shift+S"));
+        let mut cfg = Config::default();
+        cfg.actions.screenshot.hotkey = "not a key".into();
+        assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("invalid"));
+        cfg.actions.screenshot.hotkey.clear();
+        cfg.validate_hotkeys(Platform::Windows).unwrap();
+    }
+
+    #[test]
+    fn shortcut_aliases_and_bare_keys_conflict_with_chords() {
+        let mut cfg = Config::default();
+        cfg.trigger.trigger_key = "s".into();
+        assert_eq!(vec![(HotkeyAction::Trigger, HotkeyAction::Screenshot)], cfg.hotkey_conflicts(Platform::Windows));
+        cfg.trigger.trigger_key = "F2".into();
+        cfg.anki.static_region_key = "0x71".into();
+        assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Static region conflicts with Lookup trigger"));
+    }
+
+    #[test]
+    fn modifiers_distinguish_action_chords_but_not_bare_triggers() {
+        let mut cfg = Config::default();
+        cfg.anki.static_region_key = "s".into();
+        cfg.validate_hotkeys(Platform::Windows).unwrap();
+        cfg.actions.screenshot.hotkey = "S".into();
+        assert!(cfg.validate_hotkeys(Platform::Windows).is_err());
+    }
+
+    #[test]
+    fn disabled_actions_and_disabled_anki_do_not_reserve_keys() {
+        let mut cfg = Config::default();
+        cfg.actions.enabled = false;
+        cfg.anki.enabled = false;
+        cfg.trigger.trigger_key = "a".into();
+        cfg.actions.screenshot.hotkey = "a".into();
+        cfg.anki.static_region_key = "a".into();
+        cfg.validate_hotkeys(Platform::Windows).unwrap();
+    }
+
+    #[test]
+    fn escape_and_generic_modifier_aliases_are_reserved_correctly() {
+        let mut cfg = Config::default();
+        cfg.anki.enabled = true;
+        cfg.trigger.trigger_key = "0x1B".into();
+        assert_eq!((HotkeyAction::Back, HotkeyAction::Trigger), cfg.hotkey_conflicts(Platform::Windows)[0]);
+        cfg.trigger.trigger_key = "shift".into();
+        cfg.anki.add_key = "0xA1".into();
+        assert!(cfg.validate_hotkeys(Platform::Windows).is_err());
+        cfg.trigger.trigger_key = "0xA0".into();
+        cfg.validate_hotkeys(Platform::Windows).unwrap();
+    }
+
+    #[test]
+    fn linux_shortcuts_compare_modifier_order_case_and_aliases() {
+        let mut cfg = Config::default();
+        cfg.anki.enabled = true;
+        cfg.trigger.trigger_key_linux = "Control+Shift+F2".into();
+        cfg.anki.add_key_linux = " shift + ctrl + f2 ".into();
+        assert!(cfg.validate_hotkeys(Platform::Linux).is_err());
+        cfg.validate_hotkeys(Platform::Windows).unwrap();
+    }
+
+    #[test]
+    fn clipboard_cannot_share_the_static_region_key() {
+        let mut cfg = Config::default();
+        cfg.anki.static_region_key = "f3".into();
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { hotkey: Some("F3".into()), hotkey_linux: None });
+        assert_eq!(vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)], cfg.hotkey_conflicts(Platform::Windows));
+    }
 
     /// A path that is unique for each process and each test.
     fn tmp(name: &str) -> std::path::PathBuf {

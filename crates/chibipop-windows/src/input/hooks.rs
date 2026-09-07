@@ -646,7 +646,9 @@ impl Hooks {
 
     /// Arms or disarms wheel capture.
     pub fn set_scroll_armed(armed: bool) {
-        SCROLL_ARMED.store(armed, Ordering::SeqCst);
+        if SCROLL_ARMED.swap(armed, Ordering::SeqCst) != armed {
+            eprintln!("chibipop: action=set_scroll_armed armed={armed}");
+        }
     }
 
     /// Returns whether wheel capture is armed.
@@ -682,7 +684,9 @@ impl Hooks {
 
     /// Arms or disarms the add-to-Anki hotkey.
     pub fn set_add_armed(armed: bool) {
-        ANKI_ADD_ARMED.store(armed, Ordering::SeqCst);
+        if ANKI_ADD_ARMED.swap(armed, Ordering::SeqCst) != armed {
+            eprintln!("chibipop: action=set_add_armed armed={armed}");
+        }
     }
 
     /// Takes one stored add-to-Anki press.
@@ -712,6 +716,9 @@ impl Hooks {
     /// This function arms or disarms popup pointer capture.
     pub fn set_click_armed(armed: bool) {
         let changed = CLICK_ARMED.swap(armed, Ordering::SeqCst) != armed;
+        if changed {
+            eprintln!("chibipop: action=set_click_armed armed={armed}");
+        }
         if changed && !armed {
             POINTER_BUTTONS.store(0, Ordering::SeqCst);
         }
@@ -783,7 +790,9 @@ impl Hooks {
 
     /// Arms or disarms Back for the Escape key.
     pub fn set_back_armed(armed: bool) {
-        BACK_ARMED.store(armed, Ordering::SeqCst);
+        if BACK_ARMED.swap(armed, Ordering::SeqCst) != armed {
+            eprintln!("chibipop: action=set_back_armed armed={armed}");
+        }
     }
 
     /// Takes one stored Back action.

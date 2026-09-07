@@ -75,7 +75,7 @@ impl PluginText {
     }
 
     fn attempt(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
-        let png = crate::image::encode_bgra_to_png(buf, w, h)?;
+        let png = crate::image::encode_bgra_to_png_fast(buf, w, h)?;
         let params = RecogniseParams {
             image_png: base64::engine::general_purpose::STANDARD.encode(&png),
             // The request image defines its own frame, so the region starts at the origin.

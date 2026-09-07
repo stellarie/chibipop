@@ -2458,7 +2458,10 @@ impl App {
     }
 
     fn execute(&mut self, cmd: Command) {
-        self.log.diag(&Self::command_diagnostic(&cmd));
+        if !matches!(cmd, Command::SetScrollArmed(_) | Command::SetClickArmed(_)
+            | Command::SetAddArmed(_) | Command::SetBackArmed(_)) {
+            self.log.diag(&Self::command_diagnostic(&cmd));
+        }
         match cmd {
             // OCR must not read our popup while a live grab runs.
             // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).

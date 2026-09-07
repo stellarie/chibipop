@@ -66,6 +66,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 ## Capture and masking
 
+- OCR reuse requires exact masked, scaled pixels and the same region, scale, and mask.
+  Each of two generations retains at most 16 MiB of pixels. Uncached reads still run OCR.
+- Windows reuses the current crop's DXGI staging texture. A failed DXGI attempt backs off
+  for one second on that monitor while BitBlt continues capturing fresh pixels.
 - Two Linux capture backends exist: wlr-screencopy v3 is primary, and portal ScreenCast
   with PipeWire is the fallback.
 - Capture backend selection reads the advertised capability. It never reads the compositor
@@ -256,6 +260,12 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 ## Settings and config
 
+- Settings reject conflicting platform shortcuts before applying or saving changes.
+  Validation compares the complete pending form, including the editable Windows screenshot shortcut.
+  Users can swap keys in one Apply. An unedited Windows screenshot field remains untouched by a Linux Apply.
+  Windows suppresses lower-priority legacy conflicts in memory and reports them without rewriting the file.
+  Priority is Back/Escape, lookup, Anki add, static region, screenshot, then OCR clipboard.
+  Linux validates configured chords; compositor bindings remain external configuration.
 - Linux settings run as a separate `chibipop settings` process with iced. The daemon
   contains no GUI toolkit.
 - The shared `Config` and `SettingsForm` model lives in core. Both platform bins render

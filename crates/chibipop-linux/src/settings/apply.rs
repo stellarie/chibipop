@@ -164,6 +164,7 @@ pub fn apply(
         .with_context(|| format!("re-reading {}", config_path.display()))?;
     let mut out = chibipop::settings::apply_to(form, &cfg);
     linux.apply_over(&mut out);
+    out.validate_hotkeys(chibipop::config::Platform::Linux)?;
     let notices = chibipop::settings::clamp_notice(form, &out).into_iter().collect();
     out.save(config_path)?;
     // Apply the rule before the `reload`. Without this step the daemon

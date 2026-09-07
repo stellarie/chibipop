@@ -3,7 +3,7 @@
 use chibipop::geom::PhysRect;
 use chibipop::text::layout::{OcrLine, OcrWord};
 use anyhow::{Context, Result};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use windows::core::HSTRING;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
@@ -16,16 +16,16 @@ fn wait_blocking<T>(op: windows_future::IAsyncOperation<T>) -> Result<T>
 where
     T: windows::core::RuntimeType + 'static,
 {
-    let deadline = Instant::now() + OCR_TIMEOUT;
-    loop {
-        if op.Status()? != windows_future::AsyncStatus::Started {
-            return Ok(op.GetResults()?);
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("OCR did not finish within {OCR_TIMEOUT:?}");
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    let (send, recv) = std::sync::mpsc::sync_channel(1);
+    op.SetCompleted(&windows_future::AsyncOperationCompletedHandler::new(move |_, _| {
+        let _ = send.try_send(());
+        Ok(())
+    }))?;
+    if recv.recv_timeout(OCR_TIMEOUT).is_err() {
+        let _ = op.Cancel();
+        anyhow::bail!("OCR did not finish within {OCR_TIMEOUT:?}");
     }
+    Ok(op.GetResults()?)
 }
 
 /// Sets the limit for one OCR call.

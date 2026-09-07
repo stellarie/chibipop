@@ -341,6 +341,10 @@ pub fn settings_only(
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
                 let updated = settings::apply_to(&edited, &cfg);
+                if let Err(error) = updated.validate_hotkeys(crate::config::Platform::Windows) {
+                    refuse_apply(&window, &error);
+                    continue;
+                }
                 // A font change does not need a rebuild.
                 if !edited.has_staged() {
                     updated
@@ -1362,15 +1366,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     Hooks::set_mode(live.trigger_mode);
-    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
-        Hooks::set_trigger_key(vk);
-    }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
-        Hooks::set_add_hotkey(vk);
-    }
-    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
-        Hooks::set_action_hotkey(0, vk, mods);
-    }
+    Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
+    Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
+    let (vk, mods) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey).unwrap_or((0, 0));
+    Hooks::set_action_hotkey(0, vk, mods);
     match crate::config::parse_trigger_key(&live.static_region_key) {
         Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
         None => Hooks::set_action_hotkey(1, 0, 0),
@@ -1995,6 +1994,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let t0 = std::time::Instant::now();
                             let edited = w.read(&form_with_library(&cfg, &dicts, &library));
                             let updated = settings::apply_to(&edited, &cfg);
+                            if let Err(error) = updated.validate_hotkeys(crate::config::Platform::Windows) {
+                                refuse_apply(w, &error);
+                                continue;
+                            }
                             if edited.has_staged() {
                                 match LibraryLock::acquire(&library) {
                                     Err(e) => refuse_apply(w, &e),
@@ -2417,6 +2420,7 @@ fn show_presentation(
     anchor: PhysRect,
     scroll: i32,
 ) -> Result<(PhysRect, i32, i32)> {
+    let started = std::time::Instant::now();
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
     let max_h = ((monitor.h * max_height_percent) / 100).max(1);
@@ -2425,12 +2429,19 @@ fn show_presentation(
     let (w, view_h, content_h) = renderer
         .measure(inputs, (max_w, max_h))
         .context("measuring popup content")?;
+    let measured = std::time::Instant::now();
 
     let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
     popup.show_at(rect).context("moving/showing the popup")?;
+    let shown = std::time::Instant::now();
     renderer
         .paint(inputs, scroll)
         .context("painting the popup")?;
+    eprintln!("chibipop: popup stage=present measure_ms={:.3} show_ms={:.3} paint_ms={:.3} elapsed_ms={:.3}",
+        (measured - started).as_secs_f64() * 1000.0,
+        (shown - measured).as_secs_f64() * 1000.0,
+        shown.elapsed().as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0);
     Ok((rect, content_h, view_h))
 }
 
@@ -2710,7 +2721,10 @@ fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
 
 /// Handles one Command and returns any feedback Event.
 fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Event> {
-    eprintln!("chibipop: {}", command_diagnostic(&cmd));
+    if !matches!(cmd, Command::SetScrollArmed(_) | Command::SetClickArmed(_)
+        | Command::SetAddArmed(_) | Command::SetBackArmed(_)) {
+        eprintln!("chibipop: {}", command_diagnostic(&cmd));
+    }
     match cmd {
         // Windows excludes its popup from its own captures at the OS level.
         // It uses WDA_EXCLUDEFROMCAPTURE or the hide-and-reshow Capture guard.
@@ -3187,6 +3201,26 @@ impl LiveSettings {
 
 /// Builds live settings from the config after each change.
 fn derive(cfg: &Config) -> LiveSettings {
+    let mut resolved = cfg.clone();
+    for (first, second) in cfg.hotkey_conflicts(crate::config::Platform::Windows) {
+        eprintln!("chibipop: {} conflicts with {}; disabled until corrected in Settings", second.name(), first.name());
+        match second {
+            crate::config::HotkeyAction::Trigger => resolved.trigger.trigger_key.clear(),
+            crate::config::HotkeyAction::AnkiAdd => resolved.anki.add_key.clear(),
+            crate::config::HotkeyAction::StaticRegion => resolved.anki.static_region_key.clear(),
+            crate::config::HotkeyAction::Screenshot => resolved.actions.screenshot.hotkey.clear(),
+            crate::config::HotkeyAction::OcrClipboard => {
+                if let Some(clipboard) = &mut resolved.actions.ocr_clipboard { clipboard.hotkey = None; }
+            }
+            crate::config::HotkeyAction::Back => {}
+        }
+    }
+    if !resolved.actions.enabled {
+        resolved.anki.static_region_key.clear();
+        resolved.actions.screenshot.hotkey.clear();
+        resolved.actions.ocr_clipboard = None;
+    }
+    let cfg = &resolved;
     LiveSettings {
         popup: cfg.popup.clone(),
         // The config has no Dictionary identities yet.
@@ -3361,15 +3395,10 @@ fn apply_live(
         crate::ui::console::hide();
     }
     Hooks::set_mode(live.trigger_mode);
-    if let Some(vk) = crate::config::parse_trigger_key(&live.trigger_key) {
-        Hooks::set_trigger_key(vk);
-    }
-    if let Some(vk) = crate::config::parse_trigger_key(&live.anki_add_key) {
-        Hooks::set_add_hotkey(vk);
-    }
-    if let Some((vk, mods)) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey) {
-        Hooks::set_action_hotkey(0, vk, mods);
-    }
+    Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
+    Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
+    let (vk, mods) = crate::config::parse_hotkey(&live.actions_screenshot_hotkey).unwrap_or((0, 0));
+    Hooks::set_action_hotkey(0, vk, mods);
     match crate::config::parse_trigger_key(&live.static_region_key) {
         Some(vk) => Hooks::set_action_hotkey(1, vk, 0),
         None => Hooks::set_action_hotkey(1, 0, 0),
@@ -3481,6 +3510,97 @@ fn startup_language(
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
+
+    #[test]
+    fn conflicting_loaded_shortcuts_disable_only_the_lower_priority_action() {
+        let mut cfg = Config::default();
+        cfg.trigger.trigger_key = "f2".into();
+        cfg.actions.screenshot.hotkey = "F2".into();
+        let live = derive(&cfg);
+        assert_eq!(live.trigger_key, "f2");
+        assert!(live.actions_screenshot_hotkey.is_empty());
+        assert_eq!(cfg.actions.screenshot.hotkey, "F2");
+    }
+
+    #[test]
+    fn disabled_actions_have_no_live_bindings() {
+        let mut cfg = Config::default();
+        cfg.actions.enabled = false;
+        cfg.anki.static_region_key = "f3".into();
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+            hotkey: Some("f4".into()), hotkey_linux: None,
+        });
+        let live = derive(&cfg);
+        assert!(live.static_region_key.is_empty());
+        assert!(live.actions_screenshot_hotkey.is_empty());
+        assert!(live.actions_ocr_clipboard_hotkey.is_none());
+    }
+
+    #[test]
+    #[ignore = "Captures a visible fixture and paints a real dictionary popup"]
+    fn live_fixture_reaches_popup_paint() -> Result<()> {
+        let install = PathBuf::from(std::env::var("CHIBIPOP_BENCH_INSTALL")?);
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(install.join("chibipop.toml"))?)?;
+        let mut live = derive(&cfg);
+        live.show_lookup_log = false;
+        let at: Vec<i32> = std::env::var("CHIBIPOP_BENCH_POINT")?.split(',')
+            .map(str::parse).collect::<std::result::Result<_, _>>()?;
+        anyhow::ensure!(at.len() == 2, "expected x,y");
+        let plugin = std::env::var_os("CHIBIPOP_BENCH_PLUGIN").map(PathBuf::from);
+        let db = install.join("data/chibipop.sqlite");
+        let worker_db = db.clone();
+        let rules = install.join("data/deconjugator.json");
+        let (worker, dicts) = Worker::spawn(worker_settings(&live, &[]), move || {
+            let ocr: Box<dyn chibipop::text::OcrEngine> = match plugin {
+                Some(dir) => {
+                    let manifest = crate::plugin::manifest::parse(&std::fs::read_to_string(dir.join("plugin.toml"))?)?;
+                    Box::new(PluginText::new(host::spawn(&manifest, &dir)?, &manifest))
+                }
+                None => Box::new(WinrtOcr::new("ja")?),
+            };
+            Ok(WorkerParts {
+                capture: Box::new(WinCapture::new(None)?), ocr,
+                dict: Box::new(SqliteDictionary::open(&worker_db)?),
+                engine: LookupEngine::new(Deconjugator::new(load_rules(&rules)?)),
+                reopen_dict: None, serve: None,
+            })
+        }, || {})?;
+        live.present_cfg = cfg.present_config(&dicts);
+        worker.trigger().send(Trigger {
+            kind: TriggerKind::Reload(Box::new(worker_settings(&live, &dicts))), id: RequestId(0),
+        })?;
+        let popup = Popup::create(false)?;
+        let mut renderer = Renderer::new(popup.hwnd(), &db)?;
+        let theme = theme_from_config(&live.popup);
+        for sample in 0..5 {
+            popup.hide()?;
+            let started = std::time::Instant::now();
+            worker.trigger().send(Trigger {
+                kind: TriggerKind::Hover(Hover { at: PhysPoint { x: at[0], y: at[1] }, mask: CaptureMask::NONE }),
+                id: RequestId(sample + 1),
+            })?;
+            let result = worker.results().recv_timeout(std::time::Duration::from_secs(10))?;
+            let LookupOutcome::Ready { presentation, anchor, .. } = result.outcome else {
+                anyhow::bail!("fixture did not resolve: {:?}", result.outcome);
+            };
+            let worker_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let (rect, _, _) = show_presentation(&popup, &mut renderer,
+                live.max_height_percent, live.max_width_percent,
+                SceneInputs { presentation: &presentation, theme: &theme, show_back: false,
+                    side_panel: live.side_panel, render: live.popup.render_settings(), selection: None },
+                anchor, 0)?;
+            assert!(popup.is_visible());
+            assert!(rect.w > 0 && rect.h > 0);
+            println!("BENCH live sample={sample} worker_ms={worker_ms:.3} visible_ms={:.3} rect={rect:?}",
+                started.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Ok(seconds) = std::env::var("CHIBIPOP_BENCH_HOLD") {
+            std::thread::sleep(std::time::Duration::from_secs(seconds.parse::<u64>()?.min(30)));
+        }
+        popup.hide()?;
+        Ok(())
+    }
+
     #[test]
     fn dupe_partition_uses_cached_results_and_deduplicates_refs() {
         let cache = HashMap::from([("宿舎".to_string(), true), ("駅".to_string(), false)]);

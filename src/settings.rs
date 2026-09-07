@@ -101,6 +101,9 @@ pub struct SettingsForm {
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     pub include_screenshot: bool,
+    pub screenshot_hotkey: String,
+    /// Only the Windows editor can change this platform field.
+    pub screenshot_hotkey_edited: bool,
     pub screenshot_capture_mode: crate::config::ScreenshotMode,
     pub screenshot_fixed_region: Option<[i32; 4]>,
     pub screenshot_fixed_window: Option<crate::config::ScreenshotWindow>,
@@ -464,6 +467,8 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
         include_screenshot: cfg.actions.screenshot.include_on_add,
+        screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        screenshot_hotkey_edited: false,
         screenshot_capture_mode: cfg.actions.screenshot.capture_mode,
         screenshot_fixed_region: cfg.actions.screenshot.fixed_region,
         screenshot_fixed_window: cfg.actions.screenshot.fixed_window.clone(),
@@ -557,6 +562,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
         }),
     };
     out.actions.screenshot.include_on_add = form.include_screenshot;
+    if form.screenshot_hotkey_edited {
+        out.actions.screenshot.hotkey = form.screenshot_hotkey.trim().to_string();
+    }
     out.actions.screenshot.capture_mode = form.screenshot_capture_mode;
     if form.screenshot_reset_targets {
         out.actions.screenshot.fixed_region = None;
@@ -1192,6 +1200,26 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         let out = apply_to(&form, &cfg);
         assert_eq!("f10", out.actions.screenshot.hotkey);
+    }
+
+    #[test]
+    fn an_unedited_screenshot_shortcut_preserves_the_latest_saved_value() {
+        let mut cfg = cfg_with(&[]);
+        let form = from_config(&cfg, &dicts());
+        cfg.actions.screenshot.hotkey = "f10".into();
+        assert_eq!(apply_to(&form, &cfg).actions.screenshot.hotkey, "f10");
+    }
+
+    #[test]
+    fn an_edited_screenshot_shortcut_replaces_the_saved_value_and_keeps_the_linux_key() {
+        let mut cfg = cfg_with(&[]);
+        cfg.actions.screenshot.hotkey_linux = Some("ALT+S".into());
+        let mut form = from_config(&cfg, &dicts());
+        form.screenshot_hotkey = " F5 ".into();
+        form.screenshot_hotkey_edited = true;
+        let pending = apply_to(&form, &cfg);
+        assert_eq!(pending.actions.screenshot.hotkey, "F5");
+        assert_eq!(pending.actions.screenshot.hotkey_linux.as_deref(), Some("ALT+S"));
     }
 
     #[test]
