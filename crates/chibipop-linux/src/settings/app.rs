@@ -1,11 +1,11 @@
-//! The Linux settings process owns this iced window.
-//! The window renders values from the core `SettingsForm` and `LinuxFields`.
-//! It sends changes to the settings process.
+//! The Linux settings process owns this iced window and its tab strip.
+//! The six tabs are General, Shortcuts, Popup, Dictionaries, OCR, and Anki.
+//! Shortcuts holds every chord because each Linux bind is a compositor line or portal key.
+//! This keeps binds together instead of separate blocks in each feature group.
 //!
-//! The surface matches the field groups in the Windows settings window
-//! (`crates/chibipop-windows/src/ui/settings_window.rs`).
-//! It uses iced controls and hides `ocr.language`.
-//! It exposes Linux fields and shows capture exclusion as a snippet.
+//! The window renders values from the core `SettingsForm` and `LinuxFields`.
+//! It sends changes to the settings process and hides `ocr.language`.
+//! The Popup tab shows capture exclusion as a snippet.
 //!
 //! Dictionary controls stage changes in `SettingsForm`.
 //! Only [`super::rebuild`] writes the library.
@@ -107,10 +107,19 @@ pub fn run(init: Init) -> anyhow::Result<()> {
 /// also lose the pointer during a drag. iced sends widget messages before
 /// subscription events for one frame. A drop that the lists received already
 /// changed the list, so this message has nothing to cancel.
+///
+/// The listener also carries tab keys because the strip buttons have no
+/// keyboard focus. Ctrl+Tab selects the next page, and Ctrl+Shift+Tab selects
+/// the previous page.
 fn subscription(_app: &App) -> iced::Subscription<Message> {
     iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
         | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DictReleased),
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+            modifiers,
+            ..
+        }) if modifiers.control() => Some(if modifiers.shift() { Message::TabPrev } else { Message::TabNext }),
         _ => None,
     })
 }
@@ -169,7 +178,55 @@ enum Drag {
     Dragging { role: Role, row: String, origin: f32 },
 }
 
+/// The page that the strip selects.
+///
+/// iced 0.14 has no tab widget, so a row of buttons uses this enum as its state.
+/// Windows has General, Dictionaries, OCR / Debug, Anki, and Plugins.
+/// Linux has no plugin host. Each Linux bind is a compositor line or portal key.
+/// One Shortcuts page holds all chords instead of separate blocks in each feature group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    General,
+    Shortcuts,
+    Popup,
+    Dictionaries,
+    Ocr,
+    Anki,
+}
+
+impl Tab {
+    /// One order serves the strip and both cycle directions instead of separate lists.
+    /// The first entry is the page that opens.
+    const EVERY: [Tab; 6] = [Tab::General, Tab::Shortcuts, Tab::Popup, Tab::Dictionaries, Tab::Ocr, Tab::Anki];
+
+    /// Keep captions with the page state instead of a second table in the strip.
+    fn label(self) -> &'static str {
+        match self {
+            Tab::General => "General",
+            Tab::Shortcuts => "Shortcuts",
+            Tab::Popup => "Popup",
+            Tab::Dictionaries => "Dictionaries",
+            Tab::Ocr => "OCR",
+            Tab::Anki => "Anki",
+        }
+    }
+
+    /// Wrap the last page to the first instead of stopping keyboard navigation.
+    fn next(self) -> Tab {
+        let index = Self::EVERY.iter().position(|tab| *tab == self).expect("every tab has a strip entry");
+        Self::EVERY[(index + 1) % Self::EVERY.len()]
+    }
+
+    /// Wrap the first page to the last instead of stopping reverse navigation.
+    fn prev(self) -> Tab {
+        let index = Self::EVERY.iter().position(|tab| *tab == self).expect("every tab has a strip entry");
+        Self::EVERY[(index + Self::EVERY.len() - 1) % Self::EVERY.len()]
+    }
+}
+
 struct App {
+    /// The page that the strip shows. Ctrl+Tab cycles it.
+    tab: Tab,
     form: SettingsForm,
     linux: LinuxFields,
     config_path: PathBuf,
@@ -224,6 +281,7 @@ impl App {
     fn new(init: Init) -> App {
         let fonts = font_items(&init.form.cfg.popup.font);
         App {
+            tab: Tab::General,
             capture_w: init.form.cfg.ocr.capture_width.to_string(),
             capture_h: init.form.cfg.ocr.capture_height.to_string(),
             form: init.form,
@@ -613,6 +671,12 @@ fn plural(n: usize) -> &'static str {
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// A strip button press.
+    TabPicked(Tab),
+    /// Ctrl+Tab. The strip has no keyboard focus, so [`subscription`] sends this.
+    TabNext,
+    /// Ctrl+Shift+Tab selects the previous page.
+    TabPrev,
     Mode(TriggerMode),
     TriggerChord(String),
     PerChar(bool),
@@ -750,6 +814,9 @@ enum Message {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
+        Message::TabPicked(tab) => app.tab = tab,
+        Message::TabNext => app.tab = app.tab.next(),
+        Message::TabPrev => app.tab = app.tab.prev(),
         Message::Mode(mode) => app.form.cfg.trigger.mode = mode,
         Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
         Message::PerChar(on) => app.form.cfg.trigger.per_character_lookup = on,
@@ -1136,40 +1203,90 @@ fn set_enabled(app: &mut App, role: Role, name: &str, on: bool) {
     }
 }
 
+/// Keep navigation and Apply outside the scroll area instead of below every setting.
 fn view(app: &App) -> Element<'_, Message> {
-    let content = column![
+    column![
         // `設定` tests the Japanese fallback. The first window line contains kanji,
         // and cosmic-text renders it.
         text("chibipop 設定 (settings)").size(24),
-        trigger_section(app),
-        popup_section(app),
-        content_section(app),
-        dictionaries_section(app),
-        ocr_section(app),
-        anki_section(app),
-        startup_section(app),
-        update_section(app),
-        debug_section(app),
-        status_row(app),
+        tab_strip(app),
+        rule::horizontal(1),
+        scrollable(
+            container(container(page(app, app.tab)).max_width(820))
+                .center_x(Length::Fill)
+                .padding(16)
+        )
+        .height(Length::Fill),
+        rule::horizontal(1),
+        footer(app),
     ]
-    .spacing(18)
+    .spacing(10)
     .padding(20)
-    .max_width(820);
-    scrollable(container(content).center_x(Length::Fill)).into()
+    .into()
 }
 
-fn section<'a>(
-    title: &'a str,
-    body: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    column![text(title).size(18), body.into()].spacing(8).into()
+/// The strip uses buttons because iced 0.14 has no tab widget.
+/// The selected page uses the primary style instead of the text style.
+fn tab_strip(app: &App) -> Element<'_, Message> {
+    row(Tab::EVERY.iter().map(|&tab| {
+        let style: fn(&Theme, button::Status) -> button::Style =
+            if tab == app.tab { button::primary } else { button::text };
+        button(text(tab.label()).size(15))
+            .style(style)
+            .padding([6, 14])
+            .on_press(Message::TabPicked(tab))
+            .into()
+    }))
+    .spacing(4)
+    .into()
+}
+
+/// Build only the selected page instead of hidden controls for all tabs.
+/// Tests use this same entry point to build every page.
+fn page(app: &App, tab: Tab) -> Element<'_, Message> {
+    match tab {
+        Tab::General => general_page(app),
+        Tab::Shortcuts => shortcuts_page(app),
+        Tab::Popup => popup_page(app),
+        Tab::Dictionaries => dictionaries_page(app),
+        Tab::Ocr => ocr_page(app),
+        Tab::Anki => anki_page(app),
+    }
+}
+
+/// One titled group on a page.
+///
+/// The border separates groups, and the title identifies each group.
+/// A bare heading in a long column did not show where one group ended.
+fn card<'a>(title: &'a str, body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(column![text(title).size(17), body.into()].spacing(12))
+        .padding(16)
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
+}
+
+/// Help text uses a smaller size and secondary color instead of the label style.
+/// This makes controls distinct from their notes.
+fn hint<'a>(line: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    text(line).size(13).style(text::secondary).into()
+}
+
+/// A rounded box marks a compositor line as code to copy instead of prose.
+fn snippet_box<'a>(snippet: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    container(text(snippet).font(Font::MONOSPACE).size(13))
+        .padding(10)
+        .width(Length::Fill)
+        .style(container::rounded_box)
+        .into()
 }
 
 fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     row![text(label).width(240), control.into()].spacing(10).align_y(iced::Center).into()
 }
 
-fn trigger_section(app: &App) -> Element<'_, Message> {
+/// Keep every chord beside its bind instead of separate blocks on feature pages.
+fn shortcuts_page(app: &App) -> Element<'_, Message> {
     let selected = if app.form.cfg.trigger.mode == TriggerMode::Live {
         TriggerMode::Live
     } else if app.form.cfg.trigger.mode == TriggerMode::Toggle {
@@ -1188,7 +1305,76 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     ]
     .spacing(20);
 
-    let hotkey: Element<'_, Message> = match app.channel.control(
+    column![
+        hint(
+            "Chords use portal syntax, for example ALT+F. Each row shows the bind for \
+             the channel that owns it: a compositor line to paste, or the portal key \
+             that your desktop's shortcut editor changes."
+        ),
+        card("Trigger", column![
+            mode,
+            checkbox(app.form.cfg.trigger.per_character_lookup)
+                .label("Look up each character as you hover (Live mode only)")
+                .on_toggle(Message::PerChar),
+            labeled(
+                "Trigger chord",
+                text_input("ALT+F", &app.linux.trigger_key_linux)
+                    .on_input(Message::TriggerChord)
+                    .width(200),
+            ),
+            trigger_bind(app),
+        ].spacing(10)),
+        card("Add card to Anki", column![
+            labeled(
+                "Add-card chord",
+                text_input("ALT+A", &app.linux.add_key_linux)
+                    .on_input(Message::AnkiAddKey)
+                    .width(200),
+            ),
+            add_card_bind(app),
+        ].spacing(10)),
+        card("Mining screenshot", column![
+            labeled(
+                "Screenshot chord",
+                text_input(
+                    "SUPER+S",
+                    app.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
+                )
+                .on_input(Message::ScreenshotKey)
+                .width(200),
+            ),
+            screenshot_bind(app),
+        ].spacing(10)),
+        card("Static sentence region", column![
+            labeled(
+                "Static-region chord",
+                text_input("ALT+R", &app.linux.static_region_key_linux)
+                    .on_input(Message::StaticRegionKey)
+                    .width(200),
+            ),
+            static_region_bind(app),
+        ].spacing(10)),
+        card("OCR to clipboard", column![
+            labeled(
+                "OCR-to-clipboard chord",
+                text_input(
+                    "ALT+C",
+                    app.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
+                )
+                .on_input(Message::OcrClipboardKey)
+                .width(200),
+            ),
+            ocr_clipboard_bind(app),
+        ].spacing(10)),
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// Show the owning channel instead of a rebind control that Linux cannot provide.
+fn trigger_bind(app: &App) -> Element<'_, Message> {
+
+    match app.channel.control(
         app.compositor,
         &app.linux.trigger_key_linux,
         &app.exe,
@@ -1196,7 +1382,7 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
     ) {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns the binding. Paste this into its config:"),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            snippet_box(snippet),
             button("Copy bind snippet").on_press(Message::CopyBind),
         ]
         .spacing(6)
@@ -1215,22 +1401,19 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
                         "Hyprland has no global-shortcut editor. Use this control-socket bind \
                          in hyprland.conf:"
                     ),
-                    container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+                    snippet_box(snippet),
                     button("Copy bind snippet").on_press(Message::CopyBind),
-                    text(
+                    hint(
                         "This route reaches the same trigger action and does not depend on \
                          the portal app ID."
-                    )
-                    .size(13),
+                    ),
                 ]
                 .spacing(6)
                 .into(),
                 None => {
-                    text(
+                    hint(
                         "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
                     )
-                    .size(13)
-                    .into()
                 }
             };
             column![
@@ -1245,29 +1428,14 @@ fn trigger_section(app: &App) -> Element<'_, Message> {
             .into()
         }
         HotkeyControl::NoChord => {
-            text("Type a chord above to get a bind you can paste or a key to ask the portal for.")
-                .size(13)
-                .into()
+            hint("Type a chord above to get a bind you can paste or a key to ask the portal for.")
         }
-    };
-
-    section(
-        "Trigger",
-        column![
-            mode,
-            labeled(
-                "Trigger chord (portal syntax)",
-                text_input("ALT+F", &app.linux.trigger_key_linux)
-                    .on_input(Message::TriggerChord)
-                    .width(200),
-            ),
-            hotkey,
-        ]
-        .spacing(10),
-    )
+    }
 }
 
-fn popup_section(app: &App) -> Element<'_, Message> {
+/// Separate appearance, size, behavior, and entry content instead of one long group.
+/// Each portable field remains in the form, so both platforms preserve its value.
+fn popup_page(app: &App) -> Element<'_, Message> {
     let themes = vec!["dark".to_string(), "light".to_string()];
     let layers = vec!["overlay".to_string(), "top".to_string()];
     let layer_now = match app.linux.layer {
@@ -1275,23 +1443,16 @@ fn popup_section(app: &App) -> Element<'_, Message> {
         PopupLayer::Top => "top".to_string(),
     };
     let (rule_caption, rule) = snippets::capture_rule(app.compositor);
-    let mut capture: Vec<Element<'_, Message>> = vec![text(rule_caption).size(14).into()];
+    let mut capture = column![hint(rule_caption)].spacing(6);
     if let Some(rule) = rule {
-        capture.push(
-            row![
-                container(text(rule).font(Font::MONOSPACE).size(13)).padding(8),
-                button("Copy rule").on_press(Message::CopyRule),
-            ]
-            .spacing(10)
-            .align_y(iced::Center)
-            .into(),
-        );
+        capture = capture
+            .push(snippet_box(rule))
+            .push(button("Copy rule").on_press(Message::CopyRule));
     }
     let font_now = selected_family(app);
 
-    section(
-        "Popup",
-        column![
+    column![
+        card("Appearance", column![
             labeled(
                 "Theme",
                 pick_list(themes, Some(app.form.cfg.popup.theme.clone()), Message::ThemePicked),
@@ -1303,6 +1464,12 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             // Kanji and kana use the selected family. This preview confirms that the family
             // renders Japanese.
             labeled("Preview", text("日本語プレビュー: 辞書・漢字・かな").font(preview_font(font_now))),
+            labeled(
+                "Layer (overlay clears fullscreen)",
+                pick_list(layers, Some(layer_now), Message::LayerPicked),
+            ),
+        ].spacing(10)),
+        card("Size", column![
             labeled(
                 "Max width (% of screen)",
                 row![
@@ -1327,6 +1494,8 @@ fn popup_section(app: &App) -> Element<'_, Message> {
                 ]
                 .spacing(10),
             ),
+        ].spacing(10)),
+        card("Behavior", column![
             checkbox(app.form.cfg.popup.highlight_match)
                 .label("Box the word being defined")
                 .on_toggle(Message::Highlight),
@@ -1339,14 +1508,36 @@ fn popup_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.cfg.popup.side_panel)
                 .label("Show related words beside the popup")
                 .on_toggle(Message::SidePanel),
+        ].spacing(10)),
+        card("Entry content", column![
             labeled(
-                "Layer (overlay clears fullscreen)",
-                pick_list(layers, Some(layer_now), Message::LayerPicked),
+                "Layout",
+                pick_list(
+                    labels(&LAYOUT_MODES),
+                    Some(label_of(&LAYOUT_MODES, app.form.cfg.popup.layout_mode).to_string()),
+                    Message::LayoutModePicked,
+                ),
             ),
-            column(capture).spacing(6),
-        ]
-        .spacing(10),
-    )
+            checkbox(app.form.cfg.popup.dictionary_styling)
+                .label("Use the dictionary's own fonts and colours")
+                .on_toggle(Message::DictStyling),
+            checkbox(app.form.cfg.popup.show_examples)
+                .label("Show example sentences")
+                .on_toggle(Message::ShowExamples),
+            checkbox(app.form.cfg.popup.show_attributions)
+                .label("Show attributions and footnotes")
+                .on_toggle(Message::ShowAttributions),
+            checkbox(app.form.cfg.popup.show_images)
+                .label("Show images")
+                .on_toggle(Message::ShowImages),
+            checkbox(app.form.cfg.popup.show_part_of_speech)
+                .label("Show part-of-speech labels inside the entry")
+                .on_toggle(Message::ShowPartOfSpeech),
+        ].spacing(10)),
+        card("Screen capture", capture),
+    ]
+    .spacing(16)
+    .into()
 }
 
 /// Return the labels in a choice table.
@@ -1395,45 +1586,6 @@ const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
     (TripleClick::Line, "Line"),
 ];
 
-/// The controls that decide entry content.
-///
-/// This group sits apart from Popup because these fields decide entry content,
-/// while the rows above decide panel size. The Windows window uses the same
-/// group.
-///
-/// Every field is a portable field. Each platform must preserve all of them,
-/// so one config file has the same meaning on Windows and Linux.
-fn content_section(app: &App) -> Element<'_, Message> {
-    section(
-        "Entry content",
-        column![
-            labeled(
-                "Layout",
-                pick_list(
-                    labels(&LAYOUT_MODES),
-                    Some(label_of(&LAYOUT_MODES, app.form.cfg.popup.layout_mode).to_string()),
-                    Message::LayoutModePicked,
-                ),
-            ),
-            checkbox(app.form.cfg.popup.dictionary_styling)
-                .label("Use the dictionary's own fonts and colours")
-                .on_toggle(Message::DictStyling),
-            checkbox(app.form.cfg.popup.show_examples)
-                .label("Show example sentences")
-                .on_toggle(Message::ShowExamples),
-            checkbox(app.form.cfg.popup.show_attributions)
-                .label("Show attributions and footnotes")
-                .on_toggle(Message::ShowAttributions),
-            checkbox(app.form.cfg.popup.show_images)
-                .label("Show images")
-                .on_toggle(Message::ShowImages),
-            checkbox(app.form.cfg.popup.show_part_of_speech)
-                .label("Show part-of-speech labels inside the entry")
-                .on_toggle(Message::ShowPartOfSpeech),
-        ]
-        .spacing(10),
-    )
-}
 
 /// The ranking strategy picker items, in display order.
 ///
@@ -1561,13 +1713,13 @@ fn ranking_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Render one role section with its caption, list, and move buttons.
+/// Render one role's list and move buttons. The outer card supplies its caption.
 ///
 /// The buttons carry the role, so each press reorders only this list. A row
 /// cannot move to a section without that role. The buttons provide keyboard
 /// moves and remain when the section gains more controls.
 ///
-/// `above` contains the control between the caption and list. Frequency passes
+/// `above` contains the control before the list. Frequency passes
 /// the ranking-strategy picker. Other roles pass nothing. This helper does not
 /// depend on the role that owns the picker.
 fn role_section<'a>(
@@ -1576,7 +1728,7 @@ fn role_section<'a>(
     above: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let selected = app.selected.as_ref().filter(|s| s.role == role).map(|s| s.name.as_str());
-    let mut list = column![text(role_caption(role)).size(14)].spacing(6);
+    let mut list = column![].spacing(6);
     if let Some(above) = above {
         list = list.push(above);
     }
@@ -1594,7 +1746,8 @@ fn role_section<'a>(
     .into()
 }
 
-fn dictionaries_section(app: &App) -> Element<'_, Message> {
+/// Keep role cards inside one release area instead of separate drag destinations.
+fn dictionaries_page(app: &App) -> Element<'_, Message> {
     // Browse appears first because it opens the picker. The adjacent entry supports
     // desktops without a portal. All three controls stay disabled during a rebuild,
     // and Browse also stays disabled while its dialog is open.
@@ -1619,28 +1772,29 @@ fn dictionaries_section(app: &App) -> Element<'_, Message> {
     // elsewhere or outside the window reaches [`subscription`] and cancels.
     let lists = mouse_area(
         column![
-            role_section(app, Role::Terms, None),
-            role_section(app, Role::Frequency, Some(ranking_row(app))),
-            role_section(app, Role::Pitch, None),
+            card(role_caption(Role::Terms), role_section(app, Role::Terms, None)),
+            card(role_caption(Role::Frequency), role_section(app, Role::Frequency, Some(ranking_row(app)))),
+            card(role_caption(Role::Pitch), role_section(app, Role::Pitch, None)),
         ]
-        .spacing(12),
+        .spacing(16),
     )
     .on_release(Message::DictDropped);
 
-    let body = column![
+    column![
         lists,
-        library,
-        text(
-            "Names match exactly and position is priority inside its own section. A \
-             checkbox turns a dictionary on for the section it sits in and leaves the \
-             others alone. Adds and removals are staged: Rebuild imports them and \
-             rebuilds the database."
-        )
-        .size(13),
-        rebuild_row(app),
+        card("Library", column![
+            library,
+            hint(
+                "Names match exactly and position is priority inside its own section. A \
+                 checkbox turns a dictionary on for the section it sits in and leaves the \
+                 others alone. Adds and removals are staged: Rebuild imports them and \
+                 rebuilds the database."
+            ),
+            rebuild_row(app),
+        ].spacing(10)),
     ]
-    .spacing(12);
-    section("Dictionaries", body)
+    .spacing(16)
+    .into()
 }
 
 /// The Rebuild button and the latest progress line.
@@ -1657,7 +1811,7 @@ fn rebuild_row(app: &App) -> Element<'_, Message> {
             .to_string(),
     };
     row![
-        text(note).size(13).width(Length::Fill),
+        container(hint(note)).width(Length::Fill),
         button("Rebuild").on_press_maybe((!app.busy()).then_some(Message::Rebuild)),
     ]
     .spacing(16)
@@ -1665,29 +1819,19 @@ fn rebuild_row(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn ocr_section(app: &App) -> Element<'_, Message> {
+/// Keep recognition, capture dimensions, and diagnostics distinct instead of mixing chords with OCR.
+fn ocr_page(app: &App) -> Element<'_, Message> {
     // Hide `ocr.language` on Linux
     // (ARCHITECTURE.md#settings-and-config). meikiocr supports Japanese only, so
     // whole-struct saves preserve the stored value.
     let passes: Vec<u8> = (PASSES_RANGE.0..=PASSES_RANGE.1).collect();
-    section(
-        "OCR",
-        column![
+    column![
+        card("Recognition", column![
             labeled(
                 "OCR passes per hover",
                 pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
             ),
-            text("1 = no tiling. Higher reads further ahead but can resolve the wrong character.")
-                .size(13),
-            labeled(
-                "Capture width (px)",
-                text_input("500", &app.capture_w).on_input(Message::CaptureW).width(120),
-            ),
-            labeled(
-                "Capture height (px)",
-                text_input("100", &app.capture_h).on_input(Message::CaptureH).width(120),
-            ),
-            text("Vertical mode swaps these two values.").size(13),
+            hint("1 = no tiling. Higher reads further ahead but can resolve the wrong character."),
             checkbox(app.form.cfg.ocr.prefer_vertical)
                 .label("Prefer vertical text (manga, VN)")
                 .on_toggle(Message::PreferVertical),
@@ -1697,27 +1841,30 @@ fn ocr_section(app: &App) -> Element<'_, Message> {
             checkbox(app.form.cfg.ocr.discard_furigana)
                 .label("Discard furigana from OCR text")
                 .on_toggle(Message::DiscardFurigana),
-            checkbox(app.form.cfg.trigger.per_character_lookup)
-                .label("Look up each character as you hover (Live mode only)")
-                .on_toggle(Message::PerChar),
+        ].spacing(10)),
+        card("Capture region", column![
+            labeled(
+                "Capture width (px)",
+                text_input("500", &app.capture_w).on_input(Message::CaptureW).width(120),
+            ),
+            labeled(
+                "Capture height (px)",
+                text_input("100", &app.capture_h).on_input(Message::CaptureH).width(120),
+            ),
+            hint("Vertical mode swaps these two values."),
+        ].spacing(10)),
+        card("Diagnostics", column![
             checkbox(app.form.cfg.debug.show_scan_region)
                 .label("Outline what each hover captured")
                 .on_toggle(Message::ShowScanRegion),
-            // OCR-to-clipboard stays here because it uses the same engine and settings
-            // as the controls above. It differs only in its text destination.
-            labeled(
-                "OCR-to-clipboard chord (portal syntax)",
-                text_input(
-                    "ALT+C",
-                    app.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
-                )
-                .on_input(Message::OcrClipboardKey)
-                .width(200),
-            ),
-            ocr_clipboard_bind(app),
-        ]
-        .spacing(10),
-    )
+            checkbox(app.linux.show_lookup_log)
+                .label("Write looked-up words to the log file")
+                .on_toggle(Message::ShowLookupLog),
+            hint(format!("Log: {}", app.log_path.display())),
+        ].spacing(10)),
+    ]
+    .spacing(16)
+    .into()
 }
 
 /// Render a native-only bind row or its no-chord message.
@@ -1733,12 +1880,12 @@ fn native_bind_row<'a>(
                 "Native channel only: this action has no portal shortcut, so a compositor \
                  bind is the only way to reach it. Paste this into your compositor's config:"
             ),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            snippet_box(snippet),
             button(copy_label).on_press(copy),
         ]
         .spacing(6)
         .into(),
-        None => text(no_chord).size(13).into(),
+        None => hint(no_chord),
     }
 }
 
@@ -1749,14 +1896,12 @@ fn native_bind_row<'a>(
 /// log a refusal cannot work, so this window does not provide it.
 fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
     if app.clipboard_rung.is_none() {
-        return text(
+        return hint(
             "This compositor has no clipboard protocol chibipop can use, so there is nothing \
              to bind: writing the selection without keyboard focus needs \
              ext_data_control_manager_v1 or zwlr_data_control_manager_v1, and this session \
              advertises neither. Every other feature is unaffected."
-        )
-        .size(13)
-        .into();
+        );
     }
     native_bind_row(
         app.ocr_clipboard_bind_snippet(),
@@ -1797,9 +1942,8 @@ fn static_region_bind(app: &App) -> Element<'_, Message> {
 /// The sentence-capture rows. They choose the Anki sentence field and, in
 /// Static mode, show the static region controls.
 ///
-/// Windows hides region rows outside Static, and Linux does the same. The chord
-/// row remains visible in every mode because the user must set it before the mode
-/// changes to Static.
+/// Windows hides region rows outside Static, and Linux does the same.
+/// The chord stays on Shortcuts instead of this page, so it remains available in every mode.
 fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = vec![labeled(
         "Anki sentence field",
@@ -1817,21 +1961,13 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
                 .into(),
         );
         rows.push(
-            text(
+            hint(
                 "The outline is a layer surface, so it needs zwlr_layer_shell_v1 like the \
                  popup; without it the region still serves lookups, unmarked."
-            )
-            .size(13)
-            .into(),
+            ),
         );
+        rows.push(hint("Draw the region with the static-region chord on the Shortcuts tab."));
     }
-    rows.push(labeled(
-        "Static region chord (portal syntax)",
-        text_input("ALT+R", &app.linux.static_region_key_linux)
-            .on_input(Message::StaticRegionKey)
-            .width(200),
-    ));
-    rows.push(static_region_bind(app));
     rows
 }
 
@@ -1845,7 +1981,7 @@ fn screenshot_bind(app: &App) -> Element<'_, Message> {
         Message::CopyScreenshotBind,
         "Copy screenshot bind",
         "No screenshot chord is set, so there is no bind to copy - type one above. \
-         Adding a card can still take a picture with the checkbox above.",
+         Adding a card can still take a picture with Include screenshot on the Anki tab.",
     )
 }
 
@@ -1857,11 +1993,11 @@ const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
     (ScreenshotMode::FixedWindow, "Fixed window"),
 ];
 
-/// The mining screenshot rows. They control inclusion on add, the save folder,
-/// the capture mode, saved fixed targets, and the standalone screenshot chord.
+/// The mining screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
+/// The standalone screenshot chord lives on Shortcuts instead of this card.
 ///
-/// Show every row in every state. The folder and chord also affect the
-/// standalone screenshot action, so `include_on_add` does not control them.
+/// Show every row in every state. The folder also affects the standalone action,
+/// so `include_on_add` does not control it.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
         Some([x, y, width, height]) => format!(
@@ -1881,12 +2017,10 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             .label("Include screenshot when adding")
             .on_toggle(Message::IncludeScreenshot)
             .into(),
-        text(
+        hint(
             "On add, the screenshot uses the selected mode. Region modes use a drag, and \
              window modes use a click. Esc skips the picture and files the card without one."
-        )
-        .size(13)
-        .into(),
+        ),
         labeled(
             "Screenshot capture mode",
             pick_list(
@@ -1895,15 +2029,13 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
                 Message::ScreenshotModePicked,
             ),
         ),
-        text(
+        hint(
             "Fixed modes select and save a target on first use, then reuse it for later \
              screenshots. Reset the saved targets to select them again. Linux window capture \
              needs slurp and Hyprland or Sway window queries."
-        )
-        .size(13)
-        .into(),
-        text(region_summary).size(13).into(),
-        text(window_summary).size(13).into(),
+        ),
+        hint(region_summary),
+        hint(window_summary),
         button("Reset saved screenshot targets")
             .on_press(Message::ResetScreenshotTargets)
             .into(),
@@ -1913,22 +2045,11 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
                 .on_input(Message::ScreenshotSaveDir)
                 .width(260),
         ),
-        text(
+        hint(
             "An absolute path is taken as typed. A relative one lands under your XDG data \
              directory, or beside the executable in portable mode."
-        )
-        .size(13)
-        .into(),
-        labeled(
-            "Mining screenshot chord",
-            text_input(
-                "SUPER+S",
-                app.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
-            )
-            .on_input(Message::ScreenshotKey)
-            .width(200),
         ),
-        screenshot_bind(app),
+        hint("The standalone screenshot chord is on the Shortcuts tab."),
     ]
 }
 
@@ -1970,7 +2091,7 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
                 text_input("Anki field", &mapping.anki_field)
                     .on_input(move |v| Message::FieldMapAnki(i, v))
                     .width(220),
-                text("<-").size(14),
+                text("←").size(14),
                 pick_list(FIELD_SOURCES, field_source_of(&mapping.source), move |source| {
                     Message::FieldMapSource(i, source.to_string())
                 })
@@ -1985,25 +2106,24 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
         .collect();
     rows.push(button("Add field mapping").on_press(Message::FieldMapAdd).into());
     rows.push(
-        text(format!(
+        hint(format!(
             "A new row arrives on \"{NEW_ROW_SOURCE}\", the one source the shipped \
              defaults leave out; type the Anki field it belongs in, or pick another \
              source. A row with no field name is dropped on Apply."
-        ))
-        .size(13)
-        .into(),
+        )),
     );
     rows
 }
 
-fn anki_section(app: &App) -> Element<'_, Message> {
+/// Show the add-card channel beside its chord instead of the Anki connection controls.
+fn add_card_bind(app: &App) -> Element<'_, Message> {
     // The add-card row uses the same hotkey control as the trigger row.
     // Native sessions call the control socket. XDPH sessions need a
     // compositor `global` bind because Hyprland has no shortcut editor.
-    let add_bind: Element<'_, Message> = match app.add_control() {
+    match app.add_control() {
         HotkeyControl::Snippet { text: snippet } => column![
             text("Native channel: your compositor owns this binding. Paste this into its config:"),
-            container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+            snippet_box(snippet),
             button("Copy add-card bind").on_press(Message::CopyAddBind),
         ]
         .spacing(6)
@@ -2018,22 +2138,19 @@ fn anki_section(app: &App) -> Element<'_, Message> {
                         "Hyprland has no global-shortcut editor. Use this control-socket bind \
                          in hyprland.conf:"
                     ),
-                    container(text(snippet).font(Font::MONOSPACE).size(13)).padding(8),
+                    snippet_box(snippet),
                     button("Copy add-card bind").on_press(Message::CopyAddBind),
-                    text(
+                    hint(
                         "This route reaches the same add action and does not depend on the \
                          portal app ID."
-                    )
-                    .size(13),
+                    ),
                 ]
                 .spacing(6)
                 .into(),
-                None => text(
+                None => hint(
                     "Use your desktop's global-shortcut settings to see or change the key. \
                      The chord above is the preferred add-card key for the next start."
-                )
-                .size(13)
-                .into(),
+                ),
             };
             column![
                 text("Portal channel: the GlobalShortcuts portal registered this action."),
@@ -2046,149 +2163,130 @@ fn anki_section(app: &App) -> Element<'_, Message> {
             .spacing(6)
             .into()
         }
-        HotkeyControl::NoChord => text(
+        HotkeyControl::NoChord => hint(
             "No add-card chord is set, so there is no bind to copy - type one above."
-        )
-        .size(13)
-        .into(),
-    };
-
-    let body = column![
-        checkbox(app.form.cfg.anki.enabled)
-            .label("Enable Anki integration")
-            .on_toggle(Message::AnkiEnabled),
-        labeled(
-            "AnkiConnect URL",
-            text_input("http://localhost:8765", &app.form.cfg.anki.url)
-                .on_input(Message::AnkiUrl)
-                .width(260),
         ),
-        labeled(
-            "Deck",
-            text_input("Default", &app.form.cfg.anki.deck).on_input(Message::AnkiDeck).width(260),
-        ),
-        labeled(
-            "Note type",
-            text_input("Lapis", &app.form.cfg.anki.model).on_input(Message::AnkiModel).width(260),
-        ),
-        labeled(
-            "Add-card chord (portal syntax)",
-            text_input("ALT+A", &app.linux.add_key_linux)
-                .on_input(Message::AnkiAddKey)
-                .width(200),
-        ),
-        add_bind,
-        checkbox(app.form.cfg.anki.include_dictionary_name)
-            .label("Include dictionary name")
-            .on_toggle(Message::IncludeDictionaryName),
-        // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
-        // The daemon reads `anki.first_dict_only`, so this row lets the user change it
-        // without a TOML edit.
-        checkbox(app.form.cfg.anki.first_dict_only)
-            .label("First dictionary only")
-            .on_toggle(Message::FirstDictOnly),
-        labeled(
-            "Selection buttons",
-            pick_list(
-                labels(&SELECTION_BUTTONS),
-                Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
-                Message::SelectionButtonsPicked,
-            ),
-        ),
-        labeled(
-            "Selection separator",
-            pick_list(
-                labels(&SELECTION_SEPARATORS),
-                Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
-                Message::SelectionSeparatorPicked,
-            ),
-        ),
-        labeled(
-            "Triple-click",
-            pick_list(
-                labels(&TRIPLE_CLICKS),
-                Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
-                Message::TripleClickPicked,
-            ),
-        ),
-        column(screenshot_rows(app)).spacing(10),
-        column(sentence_rows(app)).spacing(10),
-        text("Field mappings").size(14),
-        column(field_map_rows(app)).spacing(10),
-    ]
-    .spacing(10);
-    section("Anki", body)
+    }
 }
 
+/// Separate Anki connection and card content from capture options instead of one long group.
+fn anki_page(app: &App) -> Element<'_, Message> {
+
+    column![
+        card("Connection", column![
+            checkbox(app.form.cfg.anki.enabled)
+                .label("Enable Anki integration")
+                .on_toggle(Message::AnkiEnabled),
+            labeled(
+                "AnkiConnect URL",
+                text_input("http://localhost:8765", &app.form.cfg.anki.url)
+                    .on_input(Message::AnkiUrl)
+                    .width(260),
+            ),
+            labeled(
+                "Deck",
+                text_input("Default", &app.form.cfg.anki.deck).on_input(Message::AnkiDeck).width(260),
+            ),
+            labeled(
+                "Note type",
+                text_input("Lapis", &app.form.cfg.anki.model).on_input(Message::AnkiModel).width(260),
+            ),
+        ].spacing(10)),
+        card("Card content", column![
+            checkbox(app.form.cfg.anki.include_dictionary_name)
+                .label("Include dictionary name")
+                .on_toggle(Message::IncludeDictionaryName),
+            // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
+            // The daemon reads `anki.first_dict_only`, so this row lets the user change it
+            // without a TOML edit.
+            checkbox(app.form.cfg.anki.first_dict_only)
+                .label("First dictionary only")
+                .on_toggle(Message::FirstDictOnly),
+            labeled(
+                "Selection buttons",
+                pick_list(
+                    labels(&SELECTION_BUTTONS),
+                    Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
+                    Message::SelectionButtonsPicked,
+                ),
+            ),
+            labeled(
+                "Selection separator",
+                pick_list(
+                    labels(&SELECTION_SEPARATORS),
+                    Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
+                    Message::SelectionSeparatorPicked,
+                ),
+            ),
+            labeled(
+                "Triple-click",
+                pick_list(
+                    labels(&TRIPLE_CLICKS),
+                    Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
+                    Message::TripleClickPicked,
+                ),
+            ),
+        ].spacing(10)),
+        card("Screenshot", column(screenshot_rows(app)).spacing(10)),
+        card("Sentence", column(sentence_rows(app)).spacing(10)),
+        card("Field mappings", column(field_map_rows(app)).spacing(10)),
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// Keep process controls on General instead of mixing them with dictionary and popup settings.
+///
 /// The autostart row uses the XDG `.desktop` file as its state
 /// (ARCHITECTURE.md#settings-and-config). The checkbox changes the file
 /// immediately. No Apply action or TOML field stores this state.
-fn startup_section(app: &App) -> Element<'_, Message> {
-    let body: Element<'_, Message> = match &app.autostart {
+///
+/// Linux only reports an update (ARCHITECTURE.md#packaging-and-ci).
+/// It does not replace the binary, so the note identifies the current version.
+fn general_page(app: &App) -> Element<'_, Message> {
+    let startup: Element<'_, Message> = match &app.autostart {
         Some(target) => column![
             checkbox(app.autostart_on)
                 .label("Start chibipop at login")
                 .on_toggle(Message::Autostart),
-            text(format!(
+            hint(format!(
                 "Writes {} on toggle - GNOME, KDE, and uwsm sessions read it. \
                  Bare Hyprland/sway: see extras/ in the release.",
                 target.file().display()
-            ))
-            .size(13),
+            )),
         ]
-        .spacing(8)
+        .spacing(10)
         .into(),
-        None => text(
+        None => hint(
             "Autostart needs an XDG config directory (set XDG_CONFIG_HOME or HOME).",
-        )
-        .size(13)
-        .into(),
+        ),
     };
-    section("Startup", body)
-}
-
-/// The Updates row matches the Windows group and the Linux packaging rule
-/// (ARCHITECTURE.md#packaging-and-ci). Linux only reports an update. It does
-/// not replace the binary, so the row identifies the asset to fetch and the
-/// process that owns the binary.
-fn update_section(app: &App) -> Element<'_, Message> {
-    section(
-        "Updates",
-        column![
+    column![
+        card("Startup", startup),
+        card("Updates", column![
             button("Check for updates")
                 .on_press_maybe((!app.checking_update).then_some(Message::CheckUpdate)),
-            text(format!(
+            hint(format!(
                 "You are running {}. A check asks GitHub for the newest release \
                  and reports it; chibipop never replaces its own binary here.",
                 env!("CARGO_PKG_VERSION"),
-            ))
-            .size(13),
-        ]
-        .spacing(8),
-    )
+            )),
+        ].spacing(10)),
+    ]
+    .spacing(16)
+    .into()
 }
 
-fn debug_section(app: &App) -> Element<'_, Message> {
-    section(
-        "Debug",
-        column![
-            checkbox(app.linux.show_lookup_log)
-                .label("Write looked-up words to the log file")
-                .on_toggle(Message::ShowLookupLog),
-            text(format!("Log: {}", app.log_path.display())).size(13),
-        ]
-        .spacing(8),
-    )
-}
 
-fn status_row(app: &App) -> Element<'_, Message> {
-    let hint = if app.status.is_empty() {
+/// Keep status and Apply visible on every page instead of below the scrollable content.
+fn footer(app: &App) -> Element<'_, Message> {
+    let line = if app.status.is_empty() {
         "Apply saves the config file; a running daemon reloads it live.".to_string()
     } else {
         app.status.clone()
     };
     row![
-        text(hint).size(14).width(Length::Fill),
+        text(line).size(14).width(Length::Fill),
         button("Apply").on_press(Message::Apply),
     ]
     .spacing(16)
@@ -2273,6 +2371,13 @@ mod tests {
     use crate::paths::Env;
     use std::path::Path;
 
+    /// Build every page and the window instead of only the selected page.
+    /// A widget-tree check must build the page that holds the affected control.
+    fn every_page(app: &App) {
+        for tab in Tab::EVERY { let _ = page(app, tab); }
+        let _ = view(app);
+    }
+
     /// The field-map rows that the window edits. Linux always has an answer, while
     /// `None` represents the Windows-only state where AnkiConnect did not return
     /// field names (`chibipop::settings::SettingsForm::field_map`).
@@ -2329,6 +2434,7 @@ mod tests {
     fn app(dir: &Path) -> App {
         let cfg = chibipop::config::Config::default();
         App {
+            tab: Tab::General,
             form: chibipop::settings::from_config(&cfg, &[]),
             linux: LinuxFields::from_config(&cfg),
             config_path: dir.join("chibipop.toml"),
@@ -2389,7 +2495,7 @@ mod tests {
         );
         // The full window still builds both portal rows. The status block is a widget
         // tree, not only a control value.
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2423,7 +2529,7 @@ mod tests {
             Some("bind = ALT, F, exec, /usr/bin/chibipop ctl lookup".to_string()),
             app.portal_trigger_snippet(&None)
         );
-        let _ = view(&app);
+        every_page(&app);
 
         assert_eq!(None, app.portal_trigger_snippet(&Some("Meta+F".into())));
         app.compositor = Compositor::Kde;
@@ -2832,28 +2938,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Windows hides region rows outside Static, and Linux does the same. The chord
-    /// row remains visible because the user can set the region before the mode
-    /// changes. Row count is the observable because iced hides widget details.
+    /// The static-region bind stays available outside Static mode.
+    /// Check the copyable command after tab and mode changes instead of counting widget rows.
     #[test]
-    fn the_outline_checkbox_is_static_only_but_the_chord_row_always_shows() {
+    fn the_static_region_bind_remains_available_across_tabs_and_sentence_modes() {
         let dir = scratch("srrows");
         let mut app = app(&dir);
 
-        // The picker, chord, and bind text make three rows without the checkbox.
-        assert_eq!(3, sentence_rows(&app).len(), "not static: no region checkbox");
-
+        let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
+        let _ = update(&mut app, Message::StaticRegionKey("CTRL+R".to_string()));
+        let _ = update(&mut app, Message::TabPicked(Tab::Anki));
         let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
-        // Static mode adds the checkbox and its layer-shell caption.
-        assert_eq!(5, sentence_rows(&app).len(), "static: the checkbox joins");
-
-        // The chord row remains in a non-static mode. This differs from Windows.
         let _ = update(&mut app, Message::SentenceModePicked("All lines".to_string()));
-        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-        assert!(
-            app.static_region_bind_snippet().is_some(),
-            "the region can be set in any mode, so its bind is offered in any mode"
+        let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
+        assert_eq!(
+            Some("bind = CTRL, R, exec, /usr/bin/chibipop ctl static-region"),
+            app.static_region_bind_snippet().as_deref(),
+            "a non-static mode must not hide or reset the chord on Shortcuts"
         );
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3027,7 +3130,7 @@ mod tests {
         // The full window builds with a screenshot row. The picker is a widget, not
         // only a lookup.
         let _ = update(&mut app, Message::FieldMapAdd);
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3172,13 +3275,13 @@ mod tests {
         app.picking = true;
         // Both states of the Browse gate build a widget tree. A disabled button and an
         // enabled button use different iced paths.
-        let _ = view(&app);
+        every_page(&app);
         let _ = update(&mut app, Message::DictPicked(Ok(filechooser::Picked::Cancelled)));
 
         assert!(!app.picking);
         assert!(!app.form.has_staged());
         assert_eq!("No dictionary was chosen.", app.status);
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3358,12 +3461,12 @@ mod tests {
         for role in Role::EVERY {
             let name = listed(&app, role).remove(0);
             let _ = update(&mut app, Message::DictSelected(role, name));
-            let _ = view(&app);
+            every_page(&app);
         }
         for role in Role::EVERY {
             app.form.list_mut(role).clear();
         }
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3749,14 +3852,14 @@ mod tests {
         assert_eq!(Some(2), drop_line(&app, Role::Terms), "under the second row");
         assert_eq!(None, drop_line(&app, Role::Frequency));
         assert_eq!(None, drop_line(&app, Role::Pitch));
-        let _ = view(&app);
+        every_page(&app);
 
         // Outside its section, the line stays at the crossed end and remains in the
         // source section.
         hover(&mut app, Role::Frequency, 1, ROW_HEIGHT / 2.0);
         assert_eq!(Some(3), drop_line(&app, Role::Terms));
         assert_eq!(None, drop_line(&app, Role::Frequency), "the list it is over is not its list");
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3821,7 +3924,7 @@ mod tests {
         let cfg = saved(&app);
         assert_eq!(vec!["Jitendex".to_string()], cfg.dictionaries.terms);
         assert!(cfg.dictionaries.terms_disabled.is_empty(), "a listed file is not a Dictionary");
-        let _ = view(&app);
+        every_page(&app);
 
         let _ = update(&mut app, Message::DictSelected(Role::Terms, "broken.zip".to_string()));
         let _ = update(&mut app, Message::DictRemove);
@@ -3863,7 +3966,7 @@ mod tests {
 
         assert_eq!(RankingStrategy::Median, app.form.cfg.dictionaries.ranking_strategy);
         assert_eq!(RankingStrategy::Median, saved(&app).dictionaries.ranking_strategy);
-        let _ = view(&app);
+        every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

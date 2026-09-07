@@ -45,8 +45,20 @@ target.
 
 Every snippet in this document writes the bare command name `chibipop`, which
 assumes an installed binary on `PATH`. Running from `cargo run` or an
-extracted folder? Copy the snippet from the settings window instead — it
-names the running binary's real path, quoted.
+extracted folder? Copy the bind from the **Shortcuts** tab instead. It
+names the running binary's full path, quoted.
+
+## Settings window
+
+`chibipop settings` opens **General**. The six tabs are **General**,
+**Shortcuts**, **Popup**, **Dictionaries**, **OCR**, and **Anki**.
+The **Shortcuts** tab holds every chord and its compositor bind or portal key.
+Screen capture exclusion stays on **Popup**.
+
+**Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
+Both shortcuts wrap at the ends of the tab strip.
+The status line and **Apply** stay visible while a page scrolls.
+**Apply** saves the form regardless of the selected tab.
 
 ## Installing
 
