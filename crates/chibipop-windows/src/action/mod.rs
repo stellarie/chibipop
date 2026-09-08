@@ -2,6 +2,7 @@
 
 pub mod ocr_clipboard;
 pub mod screenshot;
+pub mod selected_text;
 pub mod selection;
 
 use crate::geom::PhysRect;

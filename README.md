@@ -15,12 +15,17 @@ Open **Dictionary search** from the tray or **Settings > Dictionaries**.
 Type a Japanese or Chinese word, then select a candidate to open its definition.
 Search and definitions use your pop-up theme.
 
+Select text in a supported browser or editor, then press **Look up selected text**
+to open its dictionary entry without OCR or a browser extension.
+Set the shortcut in **Settings > Configurations**. See the
+[selection support limits](docs/REFERENCE.md) for Windows and Linux.
+
 Open **Sentence search** from **Settings > Dictionaries** to work with a
 sentence. Paste the sentence, then click a word in the sentence view. The
 word is highlighted and its dictionary candidates appear below. Word boundaries
 come from your enabled dictionaries, including Chinese entries.
 
-In **Settings > Shortcuts**, press the desired key or key combination to
+In **Settings > Configurations**, press the desired key or key combination to
 set either search shortcut. Enable **Open copied screen text in sentence
 search** to send OCR-to-clipboard results directly into that flow.
 

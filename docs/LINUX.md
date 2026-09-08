@@ -45,14 +45,14 @@ target.
 
 Every snippet in this document writes the bare command name `chibipop`, which
 assumes an installed binary on `PATH`. Running from `cargo run` or an
-extracted folder? Copy the bind from the **Shortcuts** tab instead. It
+extracted folder? Copy the bind from the **Configurations** tab instead. It
 names the running binary's full path, quoted.
 
 ## Settings window
 
 `chibipop settings` opens **General**. The six tabs are **General**,
-**Shortcuts**, **Popup**, **Dictionaries**, **OCR**, and **Anki**.
-The **Shortcuts** tab holds every chord and its compositor bind or portal key.
+**Configurations**, **Popup**, **Dictionaries**, **OCR**, and **Anki**.
+The **Configurations** tab holds every chord and its compositor bind or portal key.
 Screen capture exclusion stays on **Popup**.
 
 **Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
@@ -607,3 +607,19 @@ native binds are unaffected.
 `~/.local/state/chibipop/chibipop.log` records every channel verdict and
 change. Both name the exact missing protocol or portal when a channel is
 down.
+
+## Selected application text
+
+Set **Look up selected text** in **Settings > Configurations**. The action uses
+application text directly and does not run OCR or change clipboard contents.
+Browser selections need no extension.
+
+On Linux, the action reads PRIMARY through ext-data-control or wlr-data-control
+version 2. A native compositor binding can run `chibipop ctl selected-text`.
+The source application controls PRIMARY's lifetime; it can outlive visible
+highlighting. Applications without PRIMARY export and unsupported compositors
+cannot supply a selection. The normal clipboard is never used as fallback.
+
+The checkbox below **Look up selected text** can open Sentence search with the
+selection. PRIMARY does not provide word bounds, so popup placement uses the
+cursor. Outside clicks dismiss selected-text popups in every trigger mode.

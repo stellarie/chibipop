@@ -1533,6 +1533,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
     sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
+    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
     Hooks::set_mode(live.trigger_mode);
     Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
     Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
@@ -1709,6 +1710,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
     // Drive one Event through the state machine and handle every Command.
     // Handle `ShowPopup` here so `PopupPlaced` or `PopupPlaceFailed` enters the queue at once.
+    let mut selected_text = crate::action::selected_text::Reader::new();
+    let mut pending_selected_sentence = None;
+
     macro_rules! drive {
         ($event:expr) => {
             drive(
@@ -1729,6 +1733,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     overlay: overlay.as_ref(),
                     anki_button: anki_button.as_ref(),
                     trigger_tx: worker.trigger(),
+                    selected_text: &mut selected_text,
+                    pending_selected_sentence: &mut pending_selected_sentence,
                     dicts: &dicts,
                     anki_tx: &anki_tx,
                     add_tx: &add_tx,
@@ -1863,6 +1869,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
+            if Hooks::take_action_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT) {
+                drive!(Event::SelectedTextRequested { pos: cursor_now() });
+            }
+            if let Some((id, selection)) = selected_text.poll() {
+                if selection.is_none() { eprintln!("chibipop: selected text unavailable, empty, or timed out"); }
+                let (text, bounds) = selection.map_or((None, None), |selection| (Some(selection.text), selection.bounds));
+                drive!(Event::SelectedTextReady { id, text, bounds });
+            }
+            if let Some(text) = pending_selected_sentence.take() {
+                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
+                    chibipop::search::SearchMode::Sentence, Some(&text));
+                search_focused = crate::ui::search_window::is_foreground();
+            }
             if Hooks::take_action_hotkey(3) {
                 capture_guard_prev_visible.set(false);
                 overlay_prev_visible.set(false);
@@ -1918,15 +1937,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
 
             Hooks::set_outside_watch(
-                matches!(live.trigger_mode, crate::config::TriggerMode::Press)
-                    && controller.popup().is_some(),
+                controller.watches_outside_clicks(),
             );
             if let Some(point) = Hooks::take_outside_click() {
-                if let Some(view) = controller.popup() {
-                    let popup = PhysRect { h: view.popup.h + button_h, ..view.popup };
-                    if !popup.contains(point) && controller.popup_at(point).is_none() {
-                        drive!(Event::PointerDownOutside);
-                    }
+                let in_button = controller.popup().is_some_and(|view| {
+                    PhysRect { h: view.popup.h + button_h, ..view.popup }.contains(point)
+                });
+                if !in_button && controller.popup_at(point).is_none() {
+                    drive!(Event::PointerDownOutside);
                 }
             }
 
@@ -1940,6 +1958,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             let mut pointer_move = Hooks::take_pointer_move();
             for edge in Hooks::take_pointer_events() {
+                if edge.down && controller.watches_outside_clicks()
+                    && controller.popup_at(edge.point).is_none()
+                    && !anki_button_hit(&controller, anki_button.as_ref(), edge.point) {
+                    drive!(Event::PointerDownOutside);
+                    continue;
+                }
                 if edge.down && pointer_buttons == 0 {
                     if let Some(depth) = controller.popup_at(edge.point) {
                         drive!(Event::PopupActivated { depth });
@@ -2712,8 +2736,7 @@ fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<Plu
 fn show_presentation(
     popup: &Popup,
     renderer: &mut Renderer,
-    max_height_percent: i32,
-    max_width_percent: i32,
+    (max_height_percent, max_width_percent, avoid_anchor, button_h): (i32, i32, bool, i32),
     inputs: SceneInputs<'_>,
     anchor: PhysRect,
     scroll: i32,
@@ -2721,7 +2744,11 @@ fn show_presentation(
     let started = std::time::Instant::now();
     let monitor = monitor_rect_for(anchor);
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
-    let max_h = ((monitor.h * max_height_percent) / 100).max(1);
+    let mut max_h = ((monitor.h * max_height_percent) / 100).max(1);
+    if avoid_anchor {
+        max_h = max_h.min(crate::geom::popup_height_outside(anchor, monitor, POPUP_GAP).saturating_sub(button_h));
+        anyhow::ensure!(max_h > 0, "No space above or below the selection. Use Sentence search.");
+    }
 
     // Use `view_h` below, not `content_h`.
     let (w, view_h, content_h) = renderer
@@ -2729,7 +2756,13 @@ fn show_presentation(
         .context("measuring popup content")?;
     let measured = std::time::Instant::now();
 
-    let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
+    let reserved_h = if avoid_anchor { button_h } else { 0 };
+    let placed = place_popup(anchor, (w, view_h.saturating_add(reserved_h)), monitor, POPUP_GAP);
+    let rect = PhysRect { h: view_h, ..placed };
+    if avoid_anchor {
+        anyhow::ensure!(placed.y + placed.h <= anchor.y || placed.y >= anchor.y + anchor.h,
+            "Popup cannot fit above or below the selection. Use Sentence search.");
+    }
     popup.show_at(rect).context("moving/showing the popup")?;
     let shown = std::time::Instant::now();
     renderer
@@ -2950,6 +2983,7 @@ fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme
 fn controller_config(live: &LiveSettings) -> ControllerConfig {
     ControllerConfig {
         sub_popups: live.popup.sub_popups,
+        selected_text_sentence_search: live.selected_text_sentence_search,
         trigger_mode: live.trigger_mode,
         per_character_lookup: live.per_character_lookup,
         scroll_popup: live.scroll_popup,
@@ -2999,6 +3033,8 @@ struct Exec<'a> {
     overlay: Option<&'a Overlay>,
     anki_button: Option<&'a AnkiButton>,
     trigger_tx: &'a mpsc::Sender<Trigger>,
+    selected_text: &'a mut crate::action::selected_text::Reader,
+    pending_selected_sentence: &'a mut Option<String>,
     dicts: &'a [DictInfo],
     anki_tx: &'a mpsc::Sender<AnkiDupeResult>,
     add_tx: &'a mpsc::Sender<AddNoteResult>,
@@ -3125,6 +3161,8 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 }),
             )
         }
+        Command::ReadSelectedText { id } => { x.selected_text.request(id); None }
+        Command::OpenSentenceSearch { text } => { *x.pending_selected_sentence = Some(text); None }
         Command::RequestDrillDown { id, text } => {
             let _ = x.trigger_tx.send(Trigger {
                 kind: TriggerKind::DrillDown(text),
@@ -3152,8 +3190,8 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             match show_presentation(
                 x.popup,
                 x.renderer,
-                x.live.max_height_percent,
-                x.live.max_width_percent,
+                (x.live.max_height_percent, x.live.max_width_percent, controller.selected_text_popup(),
+                    x.anki_button.map_or(0, AnkiButton::height_phys)),
                 SceneInputs {
                     presentation: &presentation,
                     theme: x.theme,
@@ -3403,6 +3441,8 @@ fn command_diagnostic(cmd: &Command) -> String {
             anchor.w,
             anchor.h
         ),
+        Command::ReadSelectedText { id } => format!("action=read_selected_text id={}", id.0),
+        Command::OpenSentenceSearch { text } => format!("action=open_sentence_search text_len={}", text.len()),
         Command::RequestDrillDown { id, text } => format!(
             "action=request_drill_down id={} text_len={}",
             id.0,
@@ -3545,6 +3585,8 @@ struct LiveSettings {
     actions_ocr_clipboard_hotkey: Option<String>,
     actions_search_hotkey: Option<String>,
     actions_sentence_search_hotkey: Option<String>,
+    actions_selected_text_hotkey: Option<String>,
+    selected_text_sentence_search: bool,
     include_dictionary_name: bool,
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
@@ -3583,6 +3625,7 @@ fn derive(cfg: &Config) -> LiveSettings {
             }
             crate::config::HotkeyAction::Search => resolved.actions.search.hotkey = None,
             crate::config::HotkeyAction::SentenceSearch => resolved.actions.search.sentence_hotkey = None,
+            crate::config::HotkeyAction::SelectedText => resolved.actions.search.selected_hotkey = None,
             crate::config::HotkeyAction::Back => {}
         }
     }
@@ -3592,6 +3635,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         resolved.actions.ocr_clipboard = None;
         resolved.actions.search.hotkey = None;
         resolved.actions.search.sentence_hotkey = None;
+        resolved.actions.search.selected_hotkey = None;
     }
     let cfg = &resolved;
     LiveSettings {
@@ -3646,6 +3690,8 @@ fn derive(cfg: &Config) -> LiveSettings {
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         actions_search_hotkey: cfg.actions.search.hotkey.clone(),
         actions_sentence_search_hotkey: cfg.actions.search.sentence_hotkey.clone(),
+        actions_selected_text_hotkey: cfg.actions.search.selected_hotkey.clone(),
+        selected_text_sentence_search: cfg.actions.search.selected_opens_sentence_search,
         actions_ocr_clipboard_hotkey: cfg
             .actions
             .ocr_clipboard
@@ -3798,6 +3844,7 @@ fn apply_live(
     }
     sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
     sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
+    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
 }
 
 /// Registers the action when a valid key exists.
@@ -3836,7 +3883,6 @@ fn open_search_window_mode(
     if let Some(window) = window {
         window.update_config(config);
         window.switch_mode(mode, text);
-        window.show();
     } else {
         match crate::ui::search_window::SearchWindow::open_mode(database, rules, config, mode, text) {
             Ok(opened) => *window = Some(opened),
@@ -3938,6 +3984,21 @@ mod tests {
     use crate::config::PopupConfig;
 
     #[test]
+    fn selected_text_shortcut_obeys_enablement_and_conflicts_without_changing_config() {
+        let mut cfg = Config::default();
+        cfg.actions.search.selected_hotkey = Some("Ctrl+F7".into());
+        assert_eq!(derive(&cfg).actions_selected_text_hotkey.as_deref(), Some("Ctrl+F7"));
+        cfg.actions.enabled = false;
+        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
+        assert_eq!(cfg.actions.search.selected_hotkey.as_deref(), Some("Ctrl+F7"));
+        cfg.actions.enabled = true;
+        cfg.actions.search.selected_hotkey = Some(cfg.trigger.trigger_key.clone());
+        let saved = cfg.clone();
+        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
+        assert_eq!(cfg, saved);
+    }
+
+    #[test]
     fn search_shortcut_tracks_live_enablement_without_rewriting_saved_keys() {
         let mut cfg = Config::default();
         cfg.actions.enabled = true;
@@ -4032,7 +4093,7 @@ mod tests {
             };
             let worker_ms = started.elapsed().as_secs_f64() * 1000.0;
             let (rect, _, _) = show_presentation(&popup, &mut renderer,
-                live.max_height_percent, live.max_width_percent,
+                (live.max_height_percent, live.max_width_percent, false, 0),
                 SceneInputs { presentation: &presentation, theme: &theme, show_back: false,
                     side_panel: live.side_panel, render: live.popup.render_settings(), selection: None },
                 anchor, 0)?;

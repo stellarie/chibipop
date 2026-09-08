@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Defines the movement threshold for the gate in physical pixels.
@@ -129,6 +129,8 @@ static PENDING_ADD: AtomicBool = AtomicBool::new(false);
 
 /// Defines the number of action hotkey slots.
 pub const MAX_ACTION_SLOTS: usize = 8;
+pub const SELECTED_TEXT_SLOT: usize = 5;
+static SELECTED_TEXT_SWALLOWED: AtomicU16 = AtomicU16::new(0);
 static ACTION_DOWN: [AtomicBool; MAX_ACTION_SLOTS] = [const { AtomicBool::new(false) }; MAX_ACTION_SLOTS];
 
 /// Stores virtual-key codes for action hotkeys.
@@ -320,6 +322,32 @@ fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
     hit
 }
 
+/// The selection action must consume its key before the source can replace
+/// the selection or open another window. Its matching release stays consumed
+/// even if configuration or focus changes while the key is held.
+fn selected_text_key(down: bool, vk: u16, mods: u8, eligible: bool) -> bool {
+    if vk != 0 && SELECTED_TEXT_SWALLOWED.load(Ordering::SeqCst) == vk {
+        if !down { SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst); }
+        return true;
+    }
+    if !down || !eligible || vk == 0 || ACTION_DOWN[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
+        || vk != ACTION_VK[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
+        || mods != ACTION_MODS[SELECTED_TEXT_SLOT].load(Ordering::SeqCst)
+    { return false; }
+    SELECTED_TEXT_SWALLOWED.store(vk, Ordering::SeqCst);
+    true
+}
+
+fn own_foreground() -> bool {
+    // SAFETY: These queries retain no window or process resource.
+    unsafe {
+        let window = GetForegroundWindow();
+        let mut process = 0;
+        GetWindowThreadProcessId(window, Some(&mut process));
+        window.0.is_null() || process == GetCurrentProcessId()
+    }
+}
+
 /// Returns whether the Region selector is active.
 fn selection_active() -> bool {
     SELECTION_ACTIVE.load(Ordering::SeqCst)
@@ -378,7 +406,7 @@ unsafe fn record_mouse_move(lparam: LPARAM) {
 /// Tracks the configured trigger key.
 ///
 /// It reads the event rather than current key state.
-unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
+unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) -> bool {
     // SAFETY: `keyboard_hook_proc` calls this only with `code >= 0`. Under
     // the `WH_KEYBOARD_LL` contract, `lparam` points to a live
     // `KBDLLHOOKSTRUCT` that the OS owns for the duration of this call.
@@ -389,15 +417,19 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     let selecting = selection_active();
     let held = KEY_DOWN.load(Ordering::SeqCst);
     record_trigger_state(down, vk);
-    action_hotkey_hit(down, vk, current_modifiers());
+    let mods = current_modifiers();
+    let own = own_foreground();
+    let swallow = selected_text_key(down, vk, mods, !selecting && !own);
+    action_hotkey_hit(down, vk, mods);
+    if own { PENDING_ACTION[SELECTED_TEXT_SLOT].store(false, Ordering::SeqCst); }
     if selecting {
         if down { KEY_DOWN.store(held, Ordering::SeqCst); }
         discard_keyboard_actions();
-        return;
+        return swallow;
     }
     if crate::ui::search_window::is_foreground() {
         cancel_keyboard_actions();
-        return;
+        return swallow;
     }
     if escape { PENDING_ESCAPE.store(true, Ordering::SeqCst); }
     if add_hotkey_hit(down, vk) {
@@ -406,6 +438,7 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     if escape && BACK_ARMED.load(Ordering::SeqCst) {
         PENDING_BACK.store(true, Ordering::SeqCst);
     }
+    swallow
 }
 
 fn record_trigger_state(down: bool, vk: u16) {
@@ -479,9 +512,9 @@ unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM
     queue_pointer_event(PointerEvent { button, down, point });
 }
 
-/// Records one unarmed button press in screen coordinates.
+/// The pump checks actual rectangles because arming can lag cursor motion.
 fn record_outside_click(point: PhysPoint) {
-    if !CLICK_ARMED.load(Ordering::SeqCst) && OUTSIDE_WATCH.load(Ordering::SeqCst) {
+    if OUTSIDE_WATCH.load(Ordering::SeqCst) {
         PENDING_OUTSIDE.store(pack(point), Ordering::SeqCst);
     }
 }
@@ -558,6 +591,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 });
                 return LRESULT(1);
             }
+            WM_MBUTTONDOWN | WM_XBUTTONDOWN if OUTSIDE_WATCH.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
+            }
             WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe { record_wheel(lparam) });
                 return LRESULT(1);
@@ -570,8 +606,8 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 
 /// Handles `WH_KEYBOARD_LL` events.
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let _ = catch_unwind(|| unsafe { record_key_state(wparam, lparam) });
+    if code >= 0 && catch_unwind(|| unsafe { record_key_state(wparam, lparam) }).unwrap_or(false) {
+        return LRESULT(1);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
@@ -879,6 +915,7 @@ impl Hooks {
     /// Sets one action hotkey slot.
     pub fn set_action_hotkey(slot: usize, vk: u16, modifiers: u8) {
         if slot < MAX_ACTION_SLOTS {
+            if slot == SELECTED_TEXT_SLOT { PENDING_ACTION[slot].store(false, Ordering::SeqCst); }
             ACTION_DOWN[slot].store(false, Ordering::SeqCst);
             ACTION_VK[slot].store(vk, Ordering::SeqCst);
             ACTION_MODS[slot].store(modifiers, Ordering::SeqCst);
@@ -1338,6 +1375,33 @@ mod tests {
 
         assert!(!Hooks::take_add_hotkey(), "a different key must not arm it");
         Hooks::set_add_armed(false);
+    }
+
+    #[test]
+    fn selected_text_shortcut_consumes_repeats_and_release_after_reconfiguration() {
+        let _guard = add_hotkey_guard();
+        SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst);
+        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0x47, crate::config::MOD_CTRL);
+        assert!(!selected_text_key(true, 0x47, 0, true));
+        assert!(!selected_text_key(true, 0x47, crate::config::MOD_CTRL, false));
+        assert!(selected_text_key(true, 0x47, crate::config::MOD_CTRL, true));
+        assert!(action_hotkey_hit(true, 0x47, crate::config::MOD_CTRL));
+        assert!(Hooks::take_action_hotkey(SELECTED_TEXT_SLOT));
+        assert!(selected_text_key(true, 0x47, 0, false));
+        assert!(!action_hotkey_hit(true, 0x47, 0));
+        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0, 0);
+        assert!(selected_text_key(false, 0x47, 0, false));
+        assert!(!selected_text_key(false, 0x47, 0, false));
+        assert!(!selected_text_key(true, 0x47, 0, true));
+    }
+
+    #[test]
+    fn selected_text_rebinding_discards_queued_capture() {
+        let _guard = add_hotkey_guard();
+        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0x47, 0);
+        assert!(action_hotkey_hit(true, 0x47, 0));
+        Hooks::set_action_hotkey(SELECTED_TEXT_SLOT, 0, 0);
+        assert!(!Hooks::take_action_hotkey(SELECTED_TEXT_SLOT));
     }
 
     #[test]

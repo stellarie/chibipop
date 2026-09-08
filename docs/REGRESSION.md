@@ -1091,9 +1091,9 @@ a bug in the overlay, not in the mask.
 ### 1.14 Per-character retrigger
 
 The per-character lookup checkbox is on **Text recognition**. The lookup mode controls are on
-**Shortcuts**. The checkbox is disabled unless lookup mode is Live.
+**Configurations**. The checkbox is disabled unless lookup mode is Live.
 
-With lookup mode **Live** (Shortcuts) and per-character lookup on (Text recognition),
+With lookup mode **Live** (Configurations) and per-character lookup on (Text recognition),
 hover the first character of a two-character word (経験) in **horizontal** text, then move one
 character right **without leaving the line**. The popup must change to 験's entry. Turn the setting
 off, press Apply, and repeat: the popup must now hold on 経験.
@@ -1101,7 +1101,7 @@ off, press Apply, and repeat: the popup must now hold on 経験.
 - In both states, moving onto the popup must hold it, and wheel-scroll and kanji drill-down must
   still work. That is the property the split freeze/reach rects exist to preserve.
 - In hold-key mode the setting is inert **and the checkbox greys out**, by design. Change lookup mode
-  to `Hold key` on Shortcuts and watch the checkbox disable on Text recognition; the grey-out uses the
+  to `Hold key` on Configurations and watch the checkbox disable on Text recognition; the grey-out uses the
   same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
 - **The PID must not change** across either Apply. This setting is consumed on the pump thread in
   the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
@@ -1809,7 +1809,7 @@ Case **1.26** and its interactive subcases require the visible window; audit suc
 Maximize the window, then restore it. The controls must adapt and keep their values.
 Dynamic field rows and screenshot-target text must respect the size selected by the user.
 
-1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Shortcuts,
+1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Configurations,
    Dictionaries, Text recognition, Anki, Extensions, and Debug. Repeat the visible check after resizing.
    The footer must remain reachable. `settings --audit` checks a separate, newly opened window.
 2. **Scrolling depends on page height.** The reserved scrollbar is disabled when the page fits. Tall pages scroll inside the viewport.
@@ -1869,7 +1869,7 @@ exists.
    list without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+2. `chibipop.exe settings` opens with seven tabs: Popup, Configurations, Dictionaries, Text recognition,
    Anki, Extensions, and Debug. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
 3. The **OCR engine** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
@@ -2403,3 +2403,38 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 in one run of `eprintln!` printing the actual return value and window style. The general shape:
 post the message by hand to isolate delivery from handling, log the Win32 return values, and only
 then reason.
+
+## Selected application text lookup
+
+Automated Windows desktop regression:
+
+```powershell
+cargo test -p chibipop-windows --test selected_text_live -- --ignored --nocapture --test-threads=1
+```
+
+This test creates an isolated dictionary and editor. It uses the real shortcut,
+checks popup placement and persistence in all four trigger modes, compares clipboard sequence
+numbers, and verifies empty selections, all outside mouse buttons, and Escape.
+A fifth mode verifies Sentence search prefill through the selected-text checkbox. It moves focus to its own
+editor. Run it on an interactive Windows desktop.
+Each mode uses a separate process. If Windows refuses foreground activation,
+activate the **Chibipop selection regression** window within one minute.
+
+Manual browser acceptance:
+
+1. Set **Look up selected text** in **Settings > Configurations**.
+2. Select a Japanese word in an ordinary browser document. Press the shortcut.
+3. Confirm the normal dictionary popup shows the selected word without OCR.
+4. Repeat in an editor and in a browser text field.
+5. Press Escape. Confirm the popup closes and stays closed.
+6. Clear the selection. Press the shortcut. Confirm no old clipboard text appears.
+7. Check **Open selected text in sentence search**. Select text and invoke the shortcut. Confirm Sentence search is prefilled.
+8. Uncheck the option. Confirm the popup appears above or below the visible word without covering it.
+9. Test left, right, middle, and extra mouse buttons outside the popup in every trigger mode.
+10. Verify the clipboard contents remain unchanged.
+11. Disable the shortcut. Confirm the previous binding no longer invokes lookup.
+
+Windows requires UI Automation selection support. Linux requires PRIMARY support
+through ext-data-control or wlr-data-control version 2. On Linux, the source
+application can retain PRIMARY after highlighting disappears. Test source-owned
+selection clearing separately from visual highlighting.

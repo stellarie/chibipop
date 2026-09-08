@@ -71,7 +71,7 @@ dictionary order. It accepts dictionary forms and conjugated Japanese text.
 Empty input and missing entries clear previous results.
 
 Open either search mode from **Settings > Dictionaries**. The tray also opens
-Dictionary search. In **Settings > Shortcuts**, select a search shortcut
+Dictionary search. In **Settings > Configurations**, select a search shortcut
 button, then press a key or key combination. Escape cancels capture; Clear
 removes the shortcut.
 
@@ -97,15 +97,53 @@ hotkey = "Ctrl+Shift+F"
 hotkey_linux = "CTRL+SHIFT+F"
 sentence_hotkey = "Ctrl+Shift+G"
 sentence_hotkey_linux = "CTRL+SHIFT+G"
+selected_hotkey = "Ctrl+Shift+D"
+selected_hotkey_linux = "CTRL+SHIFT+D"
+selected_opens_sentence_search = false
 ```
 
-All search shortcuts default to unset. Configure them in **Settings > Shortcuts**.
+All search shortcuts default to unset. Configure them in **Settings > Configurations**.
 Shortcut validation rejects conflicts before Apply. On Linux, native compositor
 bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
 Windows applies shortcut changes immediately. Linux offers portal chords at
 startup; restart after adding or changing one, then confirm it in the desktop's
 shortcut settings. Apply disables a cleared or changed old portal shortcut
 immediately. Native compositor bindings remain under the compositor's control.
+
+**Look up selected text** reads an application's selection and opens the usual
+dictionary popup. Select a word in an editor or browser, then press the configured
+shortcut. Browser selections need no extension. This action bypasses OCR and
+leaves clipboard contents unchanged. The shortcut defaults to unset.
+
+The checkbox below **Look up selected text** chooses the result. When unchecked,
+Windows places the popup above or below the visible selection and limits its
+height to avoid covering that selection. Clicking outside closes the popup in
+all trigger modes. When checked, **Open selected text in sentence search** opens
+Sentence search with the selected text. It does not read unselected surrounding
+text. Empty selections open no window.
+
+Windows shows captured function keys as `F7`, including previously saved `f7`
+values. **Open copied screen text in sentence search** sits directly below
+**Copy screen text** on the Configurations page.
+
+The popup uses the dictionary lookup engine, including conjugated forms and
+matching prefixes. It stays open without holding the OCR trigger. Escape closes
+it. Empty, oversized, or unsupported selections produce no lookup.
+
+Windows requires a control that exposes its selected text through UI Automation.
+Password controls are excluded. Chibipop does not send copy keys or use old
+clipboard text when an application lacks this support.
+
+Linux reads the native PRIMARY selection through ext-data-control or wlr-data-control
+version 2. Bind `chibipop ctl selected-text` when using compositor shortcuts.
+The source application controls PRIMARY's lifetime. It can retain that selection
+after visible highlighting disappears or focus changes. Applications that do not
+publish PRIMARY, and compositors without this capability, cannot supply text.
+PRIMARY does not expose word bounds. Linux popup placement falls back to the
+cursor and cannot guarantee avoiding the selected word. Its outside-click
+catcher consumes the dismissing click. Sentence search does not need word bounds.
+Chibipop never falls back to the regular clipboard. Reads have a two-second
+deadline and a limit of 65,536 UTF-8 bytes.
 
 `popup.sub_popups` defaults to `true`. **Open definitions when hovering over
 popup text** controls this option in **Settings > Popup**. Turning it off
@@ -134,8 +172,9 @@ settings process, control-socket verbs, and three diagnostics.
 **The `ctl` verb set is fixed**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
-`ocr-clipboard`, `static-region`. One verb per global action, never a
-scripting API. Compositor binds on the **Shortcuts** tab name the running
+`ocr-clipboard`, `static-region`, `search`, `sentence-search`, `selected-text`.
+One verb per global action, never a
+scripting API. Compositor binds on the **Configurations** tab name the running
 binary's full path. See [Linux settings](LINUX.md#settings-window) for tab navigation.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
@@ -245,8 +284,8 @@ be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
 
-Windows settings use seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
-Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
+Windows settings use seven tabs: Popup, Configurations, Dictionaries, Text recognition,
+Anki, Extensions, and Debug. All shortcut controls appear together on Configurations.
 Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
 
 Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.

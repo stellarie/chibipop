@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 64] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
@@ -19,6 +19,8 @@ pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
     SettingId::OcrClipboardKey,
     SettingId::SearchKey,
     SettingId::SentenceSearchKey,
+    SettingId::SelectedTextKey,
+    SettingId::SelectedTextSentenceSearch,
     SettingId::OpenDictionarySearch,
     SettingId::OpenSentenceSearch,
     SettingId::OcrSentenceSearch,
@@ -154,6 +156,8 @@ pub(super) enum SettingId {
     OcrClipboardKey,
     SearchKey,
     SentenceSearchKey,
+    SelectedTextKey,
+    SelectedTextSentenceSearch,
     OpenDictionarySearch,
     OpenSentenceSearch,
     OcrSentenceSearch,
@@ -340,7 +344,7 @@ mod tests {
             labels,
             [
                 "Popup",
-                "Shortcuts",
+                "Configurations",
                 "Dictionaries",
                 "Text recognition",
                 "Anki",
@@ -352,7 +356,12 @@ mod tests {
         assert_eq!(layout.field_map_tab(), Some(4));
         assert!(layout.tab_needs_anki_detection(4));
         assert!(!layout.tab_needs_anki_detection(0));
-        assert_eq!(layout.tab_label(1), Some("Shortcuts"));
+        assert_eq!(layout.tab_label(1), Some("Configurations"));
+        for (key, option) in [(SettingId::OcrClipboardKey, SettingId::OcrSentenceSearch),
+            (SettingId::SelectedTextKey, SettingId::SelectedTextSentenceSearch)] {
+            let (tab, section, row) = location(&layout, key);
+            assert_eq!(location(&layout, option), (tab, section, row + 1));
+        }
         assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 6);
         assert_eq!(location(&layout, SettingId::DebugEngine).0, 6);
         assert_eq!(location(&layout, SettingId::DebugAdapter).0, 6);

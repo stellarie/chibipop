@@ -151,6 +151,7 @@ pub(crate) struct App {
     search_focus_error: bool,
     registered_search_key: Option<String>,
     registered_sentence_search_key: Option<String>,
+    registered_selected_text_key: Option<String>,
     /// Channel health and the SNI tray that mirrors it
     /// (ARCHITECTURE.md#platform-integration).
     /// This field also stores the daemon view. It works when no tray exists.
@@ -279,6 +280,7 @@ pub(crate) struct App {
     dwell: Option<RegistrationToken>,
     /// Poll timer for a portal sentence frame after the hide sync.
     sentence_timer: Option<RegistrationToken>,
+    selected_text_timer: Option<SelectedTextTimer>,
     /// The temporary clock keeps core gesture deadlines active.
     gesture_tick: Option<RegistrationToken>,
     /// This value counts ticks until the temporary gesture clock stops.
@@ -631,6 +633,7 @@ impl App {
             Verb::Reload => self.reload_config(),
             Verb::Search => self.spawn_search(),
             Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
+            Verb::SelectedText => self.lookup_selected_text(),
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
@@ -664,6 +667,14 @@ impl App {
         self.feed(Event::TriggerPressed { pos: at });
     }
 
+    fn lookup_selected_text(&mut self) {
+        let Some(pos) = self.cursor_now() else {
+            self.log.diag("selected-text: no cursor sample yet - lookup skipped");
+            return;
+        };
+        self.feed(Event::SelectedTextRequested { pos });
+    }
+
     /// One Event from the GlobalShortcuts session thread.
     ///
     /// The Portal adds a source for socket presses. It does not replace the
@@ -683,6 +694,14 @@ impl App {
                 }
                 if id == shortcuts::ShortcutId::Search
                     && !search_shortcut_active(&self.config, self.registered_search_key.as_deref()) {
+                    return;
+                }
+                if id == shortcuts::ShortcutId::SelectedText
+                    && !selected_text_shortcut_active(
+                        &self.config,
+                        self.registered_selected_text_key.as_deref(),
+                    )
+                {
                     return;
                 }
                 self.log.diag(&format!(
@@ -1796,6 +1815,59 @@ impl App {
         }
     }
 
+    fn handle_selected_text(&mut self, result: clipboard::SelectedText) {
+        let Some(timer) = self.selected_text_timer.take() else { return };
+        if timer.id != result.id {
+            self.selected_text_timer = Some(timer);
+            return;
+        }
+        self.pump.remove(timer.token);
+        if !selected_text_on_time(timer.id, timer.deadline, result.id, Instant::now()) {
+            self.log.diag("selected-text: PRIMARY read exceeded two seconds");
+            self.feed(Event::SelectedTextReady { id: result.id, text: None, bounds: None });
+            return;
+        }
+        match result.text.as_ref() {
+            Some(text) => self.log.diag(&format!(
+                "selected-text: read {} character(s) from PRIMARY",
+                text.chars().count()
+            )),
+            None => self.log.diag("selected-text: PRIMARY read returned no usable text"),
+        }
+        self.feed(Event::SelectedTextReady { id: result.id, text: result.text, bounds: None });
+    }
+
+    fn arm_selected_text_timer(&mut self, id: RequestId) -> bool {
+        if let Some(old) = self.selected_text_timer.take() {
+            self.pump.remove(old.token);
+        }
+        let Some(deadline) = Instant::now().checked_add(clipboard::PRIMARY_TIMEOUT) else {
+            return false;
+        };
+        let timer = Timer::from_duration(clipboard::PRIMARY_TIMEOUT);
+        match self.pump.insert_source(timer, move |_, _, app: &mut App| {
+            app.selected_text_timeout(id)
+        }) {
+            Ok(token) => {
+                self.selected_text_timer = Some(SelectedTextTimer { id, deadline, token });
+                true
+            }
+            Err(error) => {
+                self.log.diag(&format!("selected-text: no timeout could be armed - {error}"));
+                false
+            }
+        }
+    }
+
+    fn selected_text_timeout(&mut self, id: RequestId) -> TimeoutAction {
+        if self.selected_text_timer.as_ref().is_some_and(|timer| timer.id == id) {
+            self.selected_text_timer = None;
+            self.log.diag("selected-text: PRIMARY read timed out after two seconds");
+            self.feed(Event::SelectedTextReady { id, text: None, bounds: None });
+        }
+        TimeoutAction::Drop
+    }
+
     /// The recognizer returned. Join lines and copy the selection.
     ///
     /// Core owns this rule for line joins (`chibipop::text::layout::join_lines`).
@@ -2591,6 +2663,27 @@ impl App {
             Command::RequestDrillDown { id, text } => {
                 self.send_trigger(TriggerKind::DrillDown(text), id);
             }
+            Command::OpenSentenceSearch { text } => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text)),
+            Command::ReadSelectedText { id } => {
+                if !self.arm_selected_text_timer(id) {
+                    self.feed(Event::SelectedTextReady { id, text: None, bounds: None });
+                    return;
+                }
+                let read = self.clipboard.as_ref().and_then(|board| {
+                    board.primary_supported().then(|| board.read_primary(id))
+                });
+                match read {
+                    Some(Ok(())) => {}
+                    Some(Err(error)) => {
+                        self.log.diag(&format!("selected-text: PRIMARY read failed - {error:#}"));
+                        self.handle_selected_text(clipboard::SelectedText { id, text: None });
+                    }
+                    None => {
+                        self.log.diag("selected-text: PRIMARY selection is unavailable");
+                        self.handle_selected_text(clipboard::SelectedText { id, text: None });
+                    }
+                }
+            }
             Command::RequestReload { id } => {
                 let settings = worker::settings(&self.config, &self.dicts);
                 self.send_trigger(TriggerKind::Reload(Box::new(settings)), id);
@@ -2755,6 +2848,10 @@ impl App {
                 id.0,
                 text.chars().count()
             ),
+            Command::ReadSelectedText { id } => {
+                format!("action=read_selected_text id={}", id.0)
+            }
+            Command::OpenSentenceSearch { text } => format!("action=open_sentence_search text_len={}", text.len()),
             Command::RequestReload { id } => format!("action=request_reload id={}", id.0),
             Command::ShowPopup { presentation, anchor, scroll, show_back } => format!(
                 "action=show_popup anchor=({}, {}, {}x{}) scroll={} show_back={} top={} cards={} collapsed={} sentence={} surface={}",
@@ -3056,7 +3153,7 @@ impl App {
             content_h: placed.content_h,
             view_h: placed.view_h,
         });
-        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+        if self.controller.watches_outside_clicks() {
             let screens = self.screens();
             let rects = self.controller.popup_rects();
             if let Some(catcher) = self.catcher.as_mut() {
@@ -3350,7 +3447,7 @@ impl App {
                     if let Some(layer) = layer {
                         catcher.set_layer(layer);
                     }
-                    if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+                    if self.controller.watches_outside_clicks() {
                         if let Some(rect) = shown {
                             catcher.show(&screens, &[rect]);
                         }
@@ -3576,8 +3673,37 @@ fn configured_sentence_search_key(config: &chibipop::config::Config) -> Option<S
         .map(shortcuts::normalize_trigger)
 }
 
+struct SelectedTextTimer {
+    id: RequestId,
+    deadline: Instant,
+    token: RegistrationToken,
+}
+
+fn selected_text_on_time(
+    pending: RequestId,
+    deadline: Instant,
+    arrived: RequestId,
+    now: Instant,
+) -> bool {
+    pending == arrived && now <= deadline
+}
+
+fn configured_selected_text_key(config: &chibipop::config::Config) -> Option<String> {
+    config.actions.search.selected_hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty())
+        .map(shortcuts::normalize_trigger)
+}
+
 fn search_shortcut_active(config: &chibipop::config::Config, registered: Option<&str>) -> bool {
     let configured = configured_search_key(config);
+    configured.is_some() && configured.as_deref() == registered
+}
+
+fn selected_text_shortcut_active(
+    config: &chibipop::config::Config,
+    registered: Option<&str>,
+) -> bool {
+    let configured = configured_selected_text_key(config);
     configured.is_some() && configured.as_deref() == registered
 }
 
@@ -3585,6 +3711,7 @@ fn search_blocks_event(event: &Event) -> bool {
     matches!(event, Event::Tick { .. } | Event::GestureTick | Event::Scrolled { .. }
         | Event::PointerDown { .. } | Event::PointerMoved { .. } | Event::PointerUp { .. }
         | Event::AddRequested | Event::BackRequested | Event::TriggerDown
+        | Event::SelectedTextRequested { .. }
         | Event::TriggerPressed { .. } | Event::CursorMoved { .. } | Event::DwellElapsed
         | Event::PopupHover { .. } | Event::PopupEntered { .. }
         | Event::PopupHoverAt { .. } | Event::PopupActivated { .. })
@@ -3593,6 +3720,7 @@ fn search_blocks_event(event: &Event) -> bool {
 fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
     ControllerConfig {
         sub_popups: config.popup.sub_popups,
+        selected_text_sentence_search: config.actions.search.selected_opens_sentence_search,
         trigger_mode: config.trigger.mode,
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
@@ -4111,6 +4239,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let anki_tx = channel(&pump, "AnkiConnect answer channel", App::handle_anki)?;
     let shot_tx = channel(&pump, "screenshot pixel channel", App::handle_shot)?;
     let ocr_tx = channel(&pump, "OCR text channel", App::handle_ocr_text)?;
+    let selected_tx = channel(&pump, "PRIMARY selection channel", App::handle_selected_text)?;
 
     // The writable selection uses its own connection and thread.
     // A compositor without the data-control protocol (stock GNOME) reports one
@@ -4120,11 +4249,12 @@ pub fn run(paths: Paths) -> Result<()> {
     // (ARCHITECTURE.md#capture-and-masking).
     // A bind failure is not fatal. Log it and keep the other channels.
     let notes = channel(&pump, "clipboard note channel", |app, line: String| app.log.diag(&line))?;
-    let clipboard = match clipboard::Clipboard::bind(&globals, notes) {
+    let clipboard = match clipboard::Clipboard::bind_with_selected(&globals, notes, selected_tx) {
         Ok(Some(board)) => {
             log.diag(&format!(
-                "clipboard: {} bound on its own connection - `ocr-clipboard` can copy here",
-                board.rung().global()
+                "clipboard: {} bound on its own connection - copy available; PRIMARY {}",
+                board.rung().global(),
+                if board.primary_supported() { "available" } else { "unavailable" }
             ));
             Some(board)
         }
@@ -4151,6 +4281,7 @@ pub fn run(paths: Paths) -> Result<()> {
         pump: event_loop.handle(),
         dwell: None,
         sentence_timer: None,
+        selected_text_timer: None,
         gesture_tick: None,
         gesture_ticks_left: 0,
         cursor: CursorState::default(),
@@ -4171,6 +4302,7 @@ pub fn run(paths: Paths) -> Result<()> {
         search_focus_error: false,
         registered_search_key: configured_search_key(&config),
         registered_sentence_search_key: configured_sentence_search_key(&config),
+        registered_selected_text_key: configured_selected_text_key(&config),
         tray: tray_handle,
         worker: None,
         analysis,
@@ -4413,6 +4545,28 @@ mod tests {
     }
 
     #[test]
+    fn selected_text_portal_events_require_the_registered_chord() {
+        let mut config = chibipop::config::Config::default();
+        config.actions.search.selected_hotkey_linux = Some("SUPER+H".into());
+        let registered = configured_selected_text_key(&config);
+        assert!(selected_text_shortcut_active(&config, registered.as_deref()));
+        config.actions.search.selected_hotkey_linux = Some("SUPER+J".into());
+        assert!(!selected_text_shortcut_active(&config, registered.as_deref()));
+        config.actions.enabled = false;
+        assert!(!selected_text_shortcut_active(&config, registered.as_deref()));
+    }
+
+    #[test]
+    fn selected_text_deadline_rejects_late_or_different_results() {
+        let id = RequestId(4);
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(selected_text_on_time(id, deadline, id, now));
+        assert!(!selected_text_on_time(id, deadline, RequestId(5), now));
+        assert!(!selected_text_on_time(id, deadline, id, deadline + Duration::from_millis(1)));
+    }
+
+    #[test]
     fn focused_search_blocks_input_but_allows_releases_and_worker_results() {
         let point = PhysPoint { x: 50, y: 60 };
         for event in [Event::CursorMoved { pos: point }, Event::TriggerDown,
@@ -4568,6 +4722,7 @@ mod tests {
             pump: event_loop.handle(),
             dwell: None,
             sentence_timer: None,
+            selected_text_timer: None,
             gesture_tick: None,
             gesture_ticks_left: 0,
             settings: SettingsChild::new(),
@@ -4578,6 +4733,7 @@ mod tests {
             search_focus_error: false,
             registered_search_key: None,
             registered_sentence_search_key: None,
+            registered_selected_text_key: None,
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
             trace: false,

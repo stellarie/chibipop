@@ -394,6 +394,8 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     let mut out = cfg.clone();
     out.actions.search.hotkey = form.cfg.actions.search.hotkey.clone();
     out.actions.search.sentence_hotkey = form.cfg.actions.search.sentence_hotkey.clone();
+    out.actions.search.selected_hotkey = form.cfg.actions.search.selected_hotkey.clone();
+    out.actions.search.selected_opens_sentence_search = form.cfg.actions.search.selected_opens_sentence_search;
     out.trigger = form.cfg.trigger.clone();
     out.popup = form.cfg.popup.clone();
     out.ocr = form.cfg.ocr.clone();
@@ -980,6 +982,22 @@ mod tests {
         let form = from_config(&cfg, &dicts());
         assert_eq!("f2", form.cfg.anki.add_key);
         assert_eq!("f2", apply_to(&form, &cfg).anki.add_key);
+    }
+
+    #[test]
+    fn selected_text_hotkey_applies_and_preserves_the_linux_twin() {
+        let mut saved = cfg_with(&["大辞林", "Jitendex"]);
+        saved.actions.search.selected_hotkey = Some("ctrl+shift+l".into());
+        saved.actions.search.selected_hotkey_linux = Some("SUPER+L".into());
+        let mut form = from_config(&saved, &dicts());
+        form.cfg.actions.search.selected_hotkey = Some("alt+l".into());
+        saved.actions.search.selected_hotkey_linux = Some("SUPER+K".into());
+        let applied = apply_to(&form, &saved);
+        assert_eq!(Some("alt+l"), applied.actions.search.selected_hotkey.as_deref());
+        assert_eq!(
+            Some("SUPER+K"),
+            applied.actions.search.selected_hotkey_linux.as_deref()
+        );
     }
 
     #[test]

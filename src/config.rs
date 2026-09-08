@@ -891,6 +891,9 @@ pub struct SearchConfig {
     pub hotkey_linux: Option<String>,
     pub sentence_hotkey: Option<String>,
     pub sentence_hotkey_linux: Option<String>,
+    pub selected_hotkey: Option<String>,
+    pub selected_opens_sentence_search: bool,
+    pub selected_hotkey_linux: Option<String>,
 }
 
 
@@ -1032,7 +1035,17 @@ impl Default for Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard, Search, SentenceSearch }
+pub enum HotkeyAction {
+    Back,
+    Trigger,
+    AnkiAdd,
+    StaticRegion,
+    Screenshot,
+    OcrClipboard,
+    Search,
+    SentenceSearch,
+    SelectedText,
+}
 
 impl HotkeyAction {
     pub fn name(self) -> &'static str {
@@ -1045,13 +1058,15 @@ impl HotkeyAction {
             Self::OcrClipboard => "OCR clipboard",
             Self::Search => "Dictionary search",
             Self::SentenceSearch => "Sentence search",
+            Self::SelectedText => "Look up selected text",
         }
     }
 }
 
 fn windows_hotkeys_overlap(a: HotkeyAction, first: &str, b: HotkeyAction, second: &str) -> bool {
     let parse = |action, key| match action {
-        HotkeyAction::Screenshot | HotkeyAction::Search | HotkeyAction::SentenceSearch =>
+        HotkeyAction::Screenshot | HotkeyAction::Search | HotkeyAction::SentenceSearch
+        | HotkeyAction::SelectedText =>
             parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
         HotkeyAction::Back | HotkeyAction::Trigger | HotkeyAction::AnkiAdd =>
             parse_trigger_key(key).map(|vk| (vk, None)),
@@ -1090,6 +1105,11 @@ impl Config {
             anyhow::bail!("Search shortcut is invalid. Use a key such as F5 or Ctrl+Shift+F.");
         }
         if platform == Platform::Windows && self.actions.enabled
+            && self.actions.search.selected_hotkey.as_deref().is_some_and(|key|
+                !key.trim().is_empty() && parse_hotkey(key).is_none()) {
+            anyhow::bail!("Selected text shortcut is invalid. Press a key or key combination.");
+        }
+        if platform == Platform::Windows && self.actions.enabled
             && !self.actions.screenshot.hotkey.trim().is_empty()
             && parse_hotkey(&self.actions.screenshot.hotkey).is_none() {
             anyhow::bail!("Screenshot shortcut is invalid. Use a key such as F5 or Ctrl+Shift+S.");
@@ -1121,6 +1141,8 @@ impl Config {
                 .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
             (SentenceSearch, self.actions.enabled.then_some(&self.actions.search)
                 .and_then(|c| if windows { c.sentence_hotkey.as_deref() } else { c.sentence_hotkey_linux.as_deref() })),
+            (SelectedText, self.actions.enabled.then_some(&self.actions.search)
+                .and_then(|c| if windows { c.selected_hotkey.as_deref() } else { c.selected_hotkey_linux.as_deref() })),
         ];
         let mut accepted = Vec::new();
         let mut conflicts = Vec::new();
@@ -1350,6 +1372,27 @@ mod tests {
         cfg.anki.static_region_key = "f3".into();
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("F3".into()), hotkey_linux: None });
         assert_eq!(vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)], cfg.hotkey_conflicts(Platform::Windows));
+    }
+
+    #[test]
+    fn selected_text_shortcuts_validate_and_conflict_on_each_platform() {
+        let mut cfg = Config::default();
+        cfg.actions.search.selected_hotkey = Some("not a key".into());
+        assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string()
+            .contains("Selected text shortcut is invalid"));
+        cfg.actions.search.selected_hotkey = Some("Ctrl+Shift+F".into());
+        cfg.actions.search.hotkey = Some("shift + control + f".into());
+        assert_eq!(
+            vec![(HotkeyAction::Search, HotkeyAction::SelectedText)],
+            cfg.hotkey_conflicts(Platform::Windows)
+        );
+        cfg.actions.search.hotkey = None;
+        cfg.actions.search.selected_hotkey_linux = Some("SUPER+J".into());
+        cfg.trigger.trigger_key_linux = "logo+j".into();
+        assert_eq!(
+            vec![(HotkeyAction::Trigger, HotkeyAction::SelectedText)],
+            cfg.hotkey_conflicts(Platform::Linux)
+        );
     }
 
     /// A path that is unique for each process and each test.
@@ -2917,6 +2960,17 @@ mod tests {
             }),
             loaded.actions.ocr_clipboard
         );
+    }
+
+    #[test]
+    fn selected_text_hotkeys_round_trip() {
+        let mut cfg = Config::default();
+        cfg.actions.search.selected_opens_sentence_search = true;
+        cfg.actions.search.selected_hotkey = Some("ctrl+shift+l".into());
+        cfg.actions.search.selected_hotkey_linux = Some("CTRL+SHIFT+L".into());
+        let text = toml::to_string(&cfg).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.actions.search, loaded.actions.search);
     }
 
     /// Confirms that a Windows-shaped section from before the Linux twin loads.

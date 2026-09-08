@@ -97,11 +97,11 @@ label = "Show part-of-speech labels"
 
 [[tabs]]
 id = "shortcuts"
-label = "Shortcuts"
+label = "Configurations"
 
 [[tabs.sections]]
 id = "shortcut-popup"
-label = "Popup shortcuts"
+label = "Popup configurations"
 
 [[tabs.sections.entries]]
 id = "close-popup"
@@ -118,7 +118,7 @@ label = "Lookup key"
 
 [[tabs.sections]]
 id = "shortcut-actions"
-label = "Action shortcuts"
+label = "Action configurations"
 
 [[tabs.sections.entries]]
 id = "anki-add-key"
@@ -137,6 +137,10 @@ id = "ocr-clipboard-key"
 label = "Copy screen text"
 
 [[tabs.sections.entries]]
+id = "ocr-sentence-search"
+label = "Open copied screen text in sentence search"
+
+[[tabs.sections.entries]]
 id = "search-key"
 label = "Open dictionary search"
 help = "Click the button, then press a key or key combination. Escape cancels."
@@ -147,8 +151,14 @@ label = "Open sentence search"
 help = "Click the button, then press a key or key combination. Escape cancels."
 
 [[tabs.sections.entries]]
-id = "ocr-sentence-search"
-label = "Open copied screen text in sentence search"
+id = "selected-text-key"
+label = "Look up selected text"
+help = "Select text in an application, then press this shortcut. Requires application accessibility support."
+
+[[tabs.sections.entries]]
+id = "selected-text-sentence-search"
+label = "Open selected text in sentence search"
+help = "When off, show the dictionary popup above or below the selection."
 
 [[tabs]]
 id = "dictionaries"

@@ -1,6 +1,6 @@
 //! The Linux settings process owns this iced window and its tab strip.
-//! The six tabs are General, Shortcuts, Popup, Dictionaries, OCR, and Anki.
-//! Shortcuts holds every chord because each Linux bind is a compositor line or portal key.
+//! The six tabs are General, Configurations, Popup, Dictionaries, OCR, and Anki.
+//! Configurations holds every chord because each Linux bind is a compositor line or portal key.
 //! This keeps binds together instead of separate blocks in each feature group.
 //!
 //! The window renders values from the core `SettingsForm` and `LinuxFields`.
@@ -192,7 +192,7 @@ enum Drag {
 /// iced 0.14 has no tab widget, so a row of buttons uses this enum as its state.
 /// Windows has General, Dictionaries, OCR / Debug, Anki, and Plugins.
 /// Linux has no plugin host. Each Linux bind is a compositor line or portal key.
-/// One Shortcuts page holds all chords instead of separate blocks in each feature group.
+/// One Configurations page holds all chords instead of separate blocks in each feature group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
@@ -201,6 +201,13 @@ enum Tab {
     Dictionaries,
     Ocr,
     Anki,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutKind {
+    Dictionary,
+    Sentence,
+    SelectedText,
 }
 
 impl Tab {
@@ -212,7 +219,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
-            Tab::Shortcuts => "Shortcuts",
+            Tab::Shortcuts => "Configurations",
             Tab::Popup => "Popup",
             Tab::Dictionaries => "Dictionaries",
             Tab::Ocr => "OCR",
@@ -236,7 +243,7 @@ impl Tab {
 struct App {
     /// The page that the strip shows. Ctrl+Tab cycles it.
     tab: Tab,
-    capture_search_key: Option<SearchMode>,
+    capture_search_key: Option<ShortcutKind>,
     form: SettingsForm,
     linux: LinuxFields,
     config_path: PathBuf,
@@ -787,13 +794,14 @@ enum Message {
     /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
     OcrClipboardKey(String),
-    CaptureSearchKey(SearchMode),
+    CaptureSearchKey(ShortcutKind),
     CapturedSearchKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     CancelSearchCapture,
-    ClearSearchKey(SearchMode),
+    ClearSearchKey(ShortcutKind),
     LaunchSearch(SearchMode),
     SearchClosed(Result<(), String>),
     OpenSentenceSearch(bool),
+    SelectedSentenceSearch(bool),
     SubPopups(bool),
     /// The sentence-capture picker label. [`SENTENCE_MODES`] maps it back, so the
     /// call site does not compare strings or indexes.
@@ -953,6 +961,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::LaunchSearch(mode) => return launch_search(app, mode),
         Message::SearchClosed(Err(error)) => app.status = error,
         Message::SearchClosed(Ok(())) => {}
+        Message::SelectedSentenceSearch(on) => {
+            app.form.cfg.actions.search.selected_opens_sentence_search = on;
+        }
         Message::OpenSentenceSearch(on) => {
             app.form.cfg.actions.ocr_clipboard.get_or_insert_with(Default::default).open_sentence_search = on;
         }
@@ -1328,10 +1339,11 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 /// Keep every chord beside its bind instead of separate blocks on feature pages.
-fn set_search_key(app: &mut App, mode: SearchMode, chord: Option<String>) {
-    match mode {
-        SearchMode::Dictionary => app.linux.search_key_linux = chord,
-        SearchMode::Sentence => app.linux.sentence_key_linux = chord,
+fn set_search_key(app: &mut App, kind: ShortcutKind, chord: Option<String>) {
+    match kind {
+        ShortcutKind::Dictionary => app.linux.search_key_linux = chord,
+        ShortcutKind::Sentence => app.linux.sentence_key_linux = chord,
+        ShortcutKind::SelectedText => app.linux.selected_key_linux = chord,
     }
 }
 
@@ -1366,21 +1378,28 @@ fn captured_search_chord(key: &iced::keyboard::Key, modifiers: iced::keyboard::M
     Some(parts.join("+"))
 }
 
-fn search_shortcut(app: &App, mode: SearchMode) -> Element<'_, Message> {
-    let (title, chord, verb) = match mode {
-        SearchMode::Dictionary => ("Dictionary search", &app.linux.search_key_linux, crate::control::Verb::Search),
-        SearchMode::Sentence => ("Sentence search", &app.linux.sentence_key_linux, crate::control::Verb::SentenceSearch),
+fn search_shortcut(app: &App, kind: ShortcutKind) -> Element<'_, Message> {
+    let (title, chord, fallback, verb) = match kind {
+        ShortcutKind::Dictionary => ("Dictionary search", &app.linux.search_key_linux, "SUPER+F", Verb::Search),
+        ShortcutKind::Sentence => ("Sentence search", &app.linux.sentence_key_linux, "SUPER+G", Verb::SentenceSearch),
+        ShortcutKind::SelectedText => ("Look up selected text", &app.linux.selected_key_linux, "SUPER+H", Verb::SelectedText),
     };
-    let label = if app.capture_search_key == Some(mode) { "Press a shortcut… (Esc cancels)" }
-        else { chord.as_deref().unwrap_or("Disabled: click to record") };
-    card(title, column![
-        row![button(text(label)).on_press(Message::CaptureSearchKey(mode)),
-            button("Clear").on_press(Message::ClearSearchKey(mode))].spacing(10),
-        hint("Click to record a key combination. Apply checks conflicts with all configured shortcuts."),
-        hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."),
-        snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(match mode { SearchMode::Dictionary => "SUPER+F", SearchMode::Sentence => "SUPER+G" }),
-            &app.exe, snippets::Bind::Press(verb))),
-    ].spacing(10))
+    let label = if app.capture_search_key == Some(kind) { "Press a shortcut… (Esc cancels)".to_string() }
+        else { chord.as_ref().map(|key| key.to_ascii_uppercase()).unwrap_or_else(|| "Disabled: click to record".into()) };
+    let mut rows = column![row![button(text(label)).on_press(Message::CaptureSearchKey(kind)),
+        button("Clear").on_press(Message::ClearSearchKey(kind))].spacing(10)].spacing(10);
+    if kind == ShortcutKind::SelectedText {
+        rows = rows.push(checkbox(app.form.cfg.actions.search.selected_opens_sentence_search)
+            .label("Open selected text in sentence search").on_toggle(Message::SelectedSentenceSearch));
+    }
+    rows = rows.push(hint("Click to record a key combination. Apply checks conflicts with all configured shortcuts."))
+        .push(hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."))
+        .push(snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(fallback),
+            &app.exe, snippets::Bind::Press(verb))));
+    if kind == ShortcutKind::SelectedText {
+        rows = rows.push(hint("Word bounds are unavailable here. Popup placement uses the cursor."));
+    }
+    card(title, rows)
 }
 
 fn launch_search(app: &mut App, mode: SearchMode) -> iced::Task<Message> {
@@ -1424,8 +1443,9 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
              the channel that owns it: a compositor line to paste, or the portal key \
              that your desktop's shortcut editor changes."
         ),
-        search_shortcut(app, SearchMode::Dictionary),
-        search_shortcut(app, SearchMode::Sentence),
+        search_shortcut(app, ShortcutKind::Dictionary),
+        search_shortcut(app, ShortcutKind::Sentence),
+        search_shortcut(app, ShortcutKind::SelectedText),
         card("Trigger", column![
             mode,
             checkbox(app.form.cfg.trigger.per_character_lookup)
@@ -1469,7 +1489,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
             ),
             static_region_bind(app),
         ].spacing(10)),
-        card("OCR to clipboard", column![
+        card("Copy screen text", column![
             labeled(
                 "OCR-to-clipboard chord",
                 text_input(
@@ -1479,6 +1499,9 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                 .on_input(Message::OcrClipboardKey)
                 .width(200),
             ),
+            checkbox(app.form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search))
+                .label("Open copied screen text in sentence search")
+                .on_toggle(Message::OpenSentenceSearch),
             ocr_clipboard_bind(app),
         ].spacing(10)),
     ]
@@ -1950,9 +1973,6 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
     let passes: Vec<u8> = (PASSES_RANGE.0..=PASSES_RANGE.1).collect();
     column![
         card("Recognition", column![
-            checkbox(app.form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search))
-                .label("Open copied screen text in sentence search")
-                .on_toggle(Message::OpenSentenceSearch),
             labeled(
                 "OCR passes per hover",
                 pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
@@ -2069,7 +2089,7 @@ fn static_region_bind(app: &App) -> Element<'_, Message> {
 /// Static mode, show the static region controls.
 ///
 /// Windows hides region rows outside Static, and Linux does the same.
-/// The chord stays on Shortcuts instead of this page, so it remains available in every mode.
+/// The chord stays on Configurations instead of this page, so it remains available in every mode.
 fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = vec![labeled(
         "Anki sentence field",
@@ -2092,7 +2112,7 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
                  popup; without it the region still serves lookups, unmarked."
             ),
         );
-        rows.push(hint("Draw the region with the static-region chord on the Shortcuts tab."));
+        rows.push(hint("Draw the region with the static-region chord on the Configurations tab."));
     }
     rows
 }
@@ -2120,7 +2140,7 @@ const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
 ];
 
 /// The mining screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
-/// The standalone screenshot chord lives on Shortcuts instead of this card.
+/// The standalone screenshot chord lives on Configurations instead of this card.
 ///
 /// Show every row in every state. The folder also affects the standalone action,
 /// so `include_on_add` does not control it.
@@ -2175,7 +2195,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             "An absolute path is taken as typed. A relative one lands under your XDG data \
              directory, or beside the executable in portable mode."
         ),
-        hint("The standalone screenshot chord is on the Shortcuts tab."),
+        hint("The standalone screenshot chord is on the Configurations tab."),
     ]
 }
 
@@ -3081,7 +3101,7 @@ mod tests {
         assert_eq!(
             Some("bind = CTRL, R, exec, /usr/bin/chibipop ctl static-region"),
             app.static_region_bind_snippet().as_deref(),
-            "a non-static mode must not hide or reset the chord on Shortcuts"
+            "a non-static mode must not hide or reset the chord on Configurations"
         );
         every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);
