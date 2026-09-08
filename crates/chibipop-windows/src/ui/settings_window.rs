@@ -359,10 +359,10 @@ struct ConditionalTabs {
 /// A Win32 combo box returns a selection index. The table defines the labels
 /// and output modes. The first item supplies the default.
 const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
-    (SentenceMode::Sentence, "Full sentence"),
-    (SentenceMode::Line, "Current line"),
-    (SentenceMode::All, "All lines"),
-    (SentenceMode::Static, "Static region"),
+    (SentenceMode::Sentence, "Detected sentence"),
+    (SentenceMode::Line, "Line under the pointer"),
+    (SentenceMode::All, "All captured lines"),
+    (SentenceMode::Static, "Fixed screen area"),
 ];
 
 /// The mode for a combo box selection.
@@ -417,7 +417,7 @@ fn screenshot_target_summary_values(
 /// either list gains an entry. That mismatch returns the wrong mode.
 /// The Linux window definition `LAYOUT_MODES` contains the same two labels.
 const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
-    (LayoutMode::Roomy, "Roomy \u{2014} one item per line"),
+    (LayoutMode::Roomy, "Spacious \u{2014} one item per line"),
     (LayoutMode::Compact, "Compact \u{2014} one line per dictionary"),
 ];
 
@@ -434,23 +434,23 @@ fn layout_mode_at(selection: isize) -> LayoutMode {
 
 /// The table lists selection button modes in combo box order.
 const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
-    (SelectionButtons::PrimaryAdditive, "Primary additive"),
-    (SelectionButtons::PrimaryReplacing, "Primary replacing"),
+    (SelectionButtons::PrimaryAdditive, "Add to selection"),
+    (SelectionButtons::PrimaryReplacing, "Replace selection"),
 ];
 
 /// The table lists selection separators in combo box order.
 const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
     (SelectionSeparator::Space, "Space"),
-    (SelectionSeparator::LineBreak, "Line break"),
-    (SelectionSeparator::ListItems, "List items"),
+    (SelectionSeparator::LineBreak, "New line"),
+    (SelectionSeparator::ListItems, "Separate list items"),
 ];
 
 /// The table lists triple-click modes in combo box order.
 const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
-    (TripleClick::Sense, "Sense"),
-    (TripleClick::SenseWithExamples, "Sense with examples"),
-    (TripleClick::Line, "Line"),
+    (TripleClick::Sense, "Meaning"),
+    (TripleClick::SenseWithExamples, "Meaning and examples"),
+    (TripleClick::Line, "Complete line"),
 ];
 
 fn selection_buttons_at(selection: isize) -> SelectionButtons {
@@ -483,9 +483,9 @@ fn triple_click_at(selection: isize) -> TripleClick {
 /// the same three labels. The kebab-case TOML values belong to
 /// [`RankingStrategy`], not to this table.
 const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
-    (RankingStrategy::BestRank, "Best rank \u{2014} the commonest claim wins"),
-    (RankingStrategy::Priority, "Priority \u{2014} the highest list that has the word"),
-    (RankingStrategy::Median, "Median \u{2014} the middle of what they claim"),
+    (RankingStrategy::BestRank, "Best rank from any list"),
+    (RankingStrategy::Priority, "First list with the word"),
+    (RankingStrategy::Median, "Middle rank across lists"),
 ];
 
 /// The ranking strategy for a combo box selection.
@@ -2858,8 +2858,8 @@ fn roles_text(roles: &[crate::plugin::manifest::Role]) -> String {
     roles
         .iter()
         .map(|r| match r {
-            crate::plugin::manifest::Role::TextProvider => "text-provider",
-            crate::plugin::manifest::Role::FieldContributor => "field-contributor",
+            crate::plugin::manifest::Role::TextProvider => "Reads screen text",
+            crate::plugin::manifest::Role::FieldContributor => "Adds Anki fields",
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -4786,10 +4786,10 @@ impl SettingsWindow {
                 let is_press = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Press);
                 let is_hold = !is_live && !is_toggle && !is_press;
                 for (index, (text, id, checked)) in [
-                    ("Live", ID_MODE_LIVE, is_live),
-                    ("Hold key", ID_MODE_HOLD, is_hold),
-                    ("Toggle", ID_MODE_TOGGLE, is_toggle),
-                    ("Press key", ID_MODE_PRESS, is_press),
+                    ("Follow pointer", ID_MODE_LIVE, is_live),
+                    ("While held", ID_MODE_HOLD, is_hold),
+                    ("Turn on / off", ID_MODE_TOGGLE, is_toggle),
+                    ("Once per press", ID_MODE_PRESS, is_press),
                 ]
                 .into_iter()
                 .enumerate()
@@ -6353,7 +6353,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(7, window.tab_count());
-        assert_eq!(Some("Configurations"), window.tab_label(0));
+        assert_eq!(Some("Shortcuts"), window.tab_label(0));
         assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
         assert_eq!(Some(0), window.field_map_tab());
         assert!(window.tab_needs_anki_detection(0));
@@ -7150,8 +7150,8 @@ mod tests {
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
 
         let error = window.validate_hotkeys(&config).unwrap_err().to_string();
-        assert!(error.contains("Screenshot (F2)"), "{error}");
-        assert!(error.contains("Lookup trigger (f2)"), "{error}");
+        assert!(error.contains("Save screenshot (F2)"), "{error}");
+        assert!(error.contains("Lookup (f2)"), "{error}");
     }
 
     #[test]
@@ -7474,7 +7474,7 @@ mod tests {
         assert!(window.handle_capture_key(0x72));
         let pending = crate::settings::apply_to(&window.read(&form), &cfg);
         assert!(pending.validate_hotkeys(crate::config::Platform::Windows).unwrap_err()
-            .to_string().contains("Screenshot conflicts with Lookup trigger"));
+            .to_string().contains("Save screenshot conflicts with Lookup"));
         assert_eq!(window.read(&form).cfg.trigger.trigger_key, "f3");
         assert_eq!(window.read(&form).cfg.actions.screenshot.hotkey, "f3");
     }
@@ -9143,13 +9143,13 @@ mod tests {
             crate::plugin::manifest::Role::TextProvider,
             crate::plugin::manifest::Role::FieldContributor,
         ];
-        assert_eq!("text-provider, field-contributor", roles_text(&roles));
+        assert_eq!("Reads screen text, Adds Anki fields", roles_text(&roles));
     }
 
     #[test]
     fn roles_text_handles_a_single_role() {
         assert_eq!(
-            "text-provider",
+            "Reads screen text",
             roles_text(&[crate::plugin::manifest::Role::TextProvider])
         );
     }

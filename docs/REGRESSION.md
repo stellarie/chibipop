@@ -953,7 +953,7 @@ Record the PID (`Get-Process chibipop`), open Settings, change **Capture height*
 
 ### 1.10 Alphanumeric scanning
 
-Uncheck **Scan alphanumeric text**, Apply.
+Uncheck **Read English letters and numbers**, Apply.
 
 - Hovering an English menu bar (`File`, `Edit`) produces **no popup**.
 - 「3人」 still resolves **with the 3 intact** — hover the 人.
@@ -970,21 +970,21 @@ effect without a restart. The design's audit of "what needs recreating" missed a
 
 In `chibipop run`, with the PID recorded:
 
-1. Switch **Trigger** from `Live` to `Hold key`, Apply. Hovering alone must now do nothing; holding
+1. Switch **When lookups run** from `Follow pointer` to `While held`, Apply. Hovering alone must now do nothing; holding
    the trigger key while moving must raise the popup.
-2. Switch **Trigger** to `Toggle`, Apply.
+2. Switch **When lookups run** to `Turn on / off`, Apply.
 3. Press the trigger key once. Release it. The popup must show and stay fixed while you move
    onto it. Press the trigger key again. The popup must hide.
-4. Switch **Trigger** to `Press`, Apply.
+4. Switch **When lookups run** to `Once per press`, Apply.
 5. Press the trigger key over fixture text. Release it. The popup must show and stay at its first
    position while you move the cursor. Move the cursor from outside the popup onto a gloss line
-   and click it. The click must select or drill down, as in Live mode. The log must show
+   and click it. The click must select or drill down, as in Follow pointer mode. The log must show
    `pointer: entered surface`. Press a button outside the popup. The popup must hide. Press
    over fixture text again. Press the trigger key with the cursor over the popup. The popup must
    hide. Press the trigger key over no text. The popup must remain hidden.
-6. Press the **Trigger key** button, press a different key, Apply. The new key works, the old one
+6. Press the **Lookup key** button, press a different key, Apply. The new key works, the old one
    does not.
-7. Change the Anki group's **Shortcut key**, Apply, and add a card with the new key.
+7. Change **Add current result to Anki**, Apply, and add a card with the new key.
 
 The observable in each case is that the new setting works **and the PID has not changed**.
 Before this branch Apply restarted the process, so these appeared to work while the thing making
@@ -1053,7 +1053,7 @@ a bug in the overlay, not in the mask.
 > promoted everything it forgot to mention.
 >
 > **Run on 2026-08-11, horizontal text, one machine (100% DPI, `ja` + `en-US` installed):**
-> - **1.14's retrigger, with the toggle ON — passes.** With the toggle on and mode Live, hovering
+> - **1.14's retrigger, with the toggle ON — passes.** With the toggle on and mode Follow pointer, hovering
 >   経 of 経験人数 showed 経 entries; moving one character right to 験 changed the popup to
 >   験〔げん〕, freq 42368, without leaving the line.
 > - **1.14's no-restart property — passes, for the enabling Apply only.** The Apply that turned the
@@ -1091,9 +1091,9 @@ a bug in the overlay, not in the mask.
 ### 1.14 Per-character retrigger
 
 The per-character lookup checkbox is on **Text recognition**. The lookup mode controls are on
-**Configurations**. The checkbox is disabled unless lookup mode is Live.
+**Shortcuts**. The checkbox is disabled unless lookup mode is **Follow pointer**.
 
-With lookup mode **Live** (Configurations) and per-character lookup on (Text recognition),
+With lookup mode **Follow pointer** (Shortcuts) and per-character lookup on (Text recognition),
 hover the first character of a two-character word (経験) in **horizontal** text, then move one
 character right **without leaving the line**. The popup must change to 験's entry. Turn the setting
 off, press Apply, and repeat: the popup must now hold on 経験.
@@ -1101,7 +1101,7 @@ off, press Apply, and repeat: the popup must now hold on 経験.
 - In both states, moving onto the popup must hold it, and wheel-scroll and kanji drill-down must
   still work. That is the property the split freeze/reach rects exist to preserve.
 - In hold-key mode the setting is inert **and the checkbox greys out**, by design. Change lookup mode
-  to `Hold key` on Configurations and watch the checkbox disable on Text recognition; the grey-out uses the
+  to `While held` on Shortcuts and watch the checkbox disable on Text recognition; the grey-out uses the
   same predicate as the back end, so a legacy `HoldShift` config greys correctly too.
 - **The PID must not change** across either Apply. This setting is consumed on the pump thread in
   the `WM_TIMER` freeze check, and it applies to an **already-visible** popup the moment Apply
@@ -1133,9 +1133,9 @@ construction, not by convention.)*
 
 ### 1.15 OCR language
 
-The **OCR language** dropdown appears on **Text recognition**.
+The **Text language** dropdown appears on **Text recognition**.
 
-Switch **OCR language**, press Apply, and confirm the **PID is unchanged** — that is the test of
+Switch **Text language**, press Apply, and confirm the **PID is unchanged** — that is the test of
 "no restart", not a proxy — then hover the **same Japanese text you were resolving a moment ago**
 and confirm it now resolves **nothing at all**. Switch back, Apply again, and confirm it resolves
 again. That pair — Japanese stopping, then returning — is what discriminates "the engine really
@@ -1266,7 +1266,7 @@ boundary. The single list split by a `──── not searched ────` ro
 shape; a divider row appearing anywhere is a failure, not a stale checklist.
 
 Set the first language's list to one dictionary and the second language's to the other, then switch
-**OCR language** and press Apply.
+**Text language** and press Apply.
 
 - The **PID is unchanged** (`Get-Process chibipop`) — that is the test of "no restart", not a proxy.
 - The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply: both
@@ -1326,7 +1326,7 @@ Set the first language's list to one dictionary and the second language's to the
    — and every one of them still answers hovers. The tab and the runtime must agree; the tab
    showing them all as excluded while all of them answered was a defect on this branch. **Then the
    second route, which is the one that was actually broken:** give the stale entry to the language
-   you are *not* on, start, and switch **OCR language** to it on **Text recognition** before opening
+   you are *not* on, start, and switch **Text language** to it on **Text recognition** before opening
    **Dictionaries**. Same expectation — a full *Searched* box and an empty *Not searched* one.
    The two routes run different code (`from_config` when the window opens, `scope_rows` on the
    switch) and only the first was guarded until 2026-08-12, so running the open route alone passes
@@ -1809,7 +1809,7 @@ Case **1.26** and its interactive subcases require the visible window; audit suc
 Maximize the window, then restore it. The controls must adapt and keep their values.
 Dynamic field rows and screenshot-target text must respect the size selected by the user.
 
-1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Configurations,
+1. **The Apply row stays fixed across tabs at a given window size.** Visit Popup, Shortcuts,
    Dictionaries, Text recognition, Anki, Extensions, and Debug. Repeat the visible check after resizing.
    The footer must remain reachable. `settings --audit` checks a separate, newly opened window.
 2. **Scrolling depends on page height.** The reserved scrollbar is disabled when the page fits. Tall pages scroll inside the viewport.
@@ -1869,9 +1869,9 @@ exists.
    list without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with seven tabs: Popup, Configurations, Dictionaries, Text recognition,
+2. `chibipop.exe settings` opens with seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
    Anki, Extensions, and Debug. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
-3. The **OCR engine** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
+3. The **Text reader** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
    `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
    includes every successfully parsed discovered text-provider.
@@ -1971,13 +1971,13 @@ Keep Anki disabled except for explicit scratch-card cases. Restore saved targets
 
 #### 1.30a Region and window selection
 
-1. **Drag a region.** Set **Screenshot capture mode** to **Region** and press
+1. **Drag a region.** Set **Screenshot source** to **Choose a region** and press
    **Apply**. Start the screenshot action and drag a region. Release the mouse
    button. The selector must show the chosen region and save a PNG.
 2. **Use the Region window choice.** On Windows, hold `Alt` before the gesture
    and click a visible window. On Linux, click a visible window when Hyprland
    or Sway metadata is available. Without that metadata, drag a region instead.
-3. **Click a window in Window mode.** Set the mode to **Window** and press
+3. **Click a window.** Set the mode to **Choose a window** and press
    **Apply**. Click a visible window. Windows uses the native selector. Linux
    uses `slurp -r`.
 4. **Check visible pixels.** Open the PNG and compare it with the visible
@@ -1988,12 +1988,12 @@ Keep Anki disabled except for explicit scratch-card cases. Restore saved targets
 
 #### 1.30b Fixed target persistence
 
-1. **Save a fixed region.** Reset the saved targets. Set **Fixed region**.
+1. **Save a fixed region.** Reset the saved targets. Set **Reuse one region**.
    Press **Apply**. Drag a region on first use. Check the saved summary and
    the global physical-pixel rectangle.
 2. **Reuse the fixed region.** Restart chibipop and take another picture. The
    action must bypass selection and use the saved rectangle.
-3. **Save a fixed window.** Reset the saved targets. Set **Fixed window**.
+3. **Save a fixed window.** Reset the saved targets. Set **Reuse one window**.
    Press **Apply**. Click one visible window on first use. Check its exact
    `app_id` and title in the saved summary. On Windows, `app_id` is the window
    class. On Linux, it is the compositor class or `app_id`.
@@ -2121,7 +2121,7 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 | 1.35.1 | Hover navigation preserves parent state | Windows/Linux: scroll and select text in a parent, enter a child, then return with Back or Escape. Preserve parent state, retire descendants, and prevent late replies from reviving them. |
 | 1.35.2 | Ruby lookup and sub-popup toggle | Windows/Linux: in Press mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration. |
 | 1.35.3 | Hover edges scrolling and hit regions | Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Keep children reachable and hit regions aligned. Dismiss the root; invisible windows must not capture input. |
-| 1.35.4 | Hover modes and bounded depth | Windows/Linux: repeat in Live, Hold key, Toggle, and Press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode. |
+| 1.35.4 | Hover modes and bounded depth | Windows/Linux: repeat in Follow pointer, While held, Turn on / off, and Once per press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode. |
 
 **Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
 
@@ -2133,9 +2133,9 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 | ID | Case | Steps and expected result |
 |---|---|---|
 | 1.36 | OCR clipboard output | Windows/Linux: copy a known multiline screen region. Clipboard text must contain the recognized lines in reading order. Record the OCR engine and supported language. |
-| 1.36.1 | Optional sentence handoff | Windows/Linux: toggle Open copied screen text in sentence search. Success always copies text; only the enabled option opens Sentence search with that same text. Restore configuration. |
+| 1.36.1 | Optional sentence handoff | Windows/Linux: toggle After copying, open sentence search. Success always copies text; only the enabled option opens Sentence search with that same text. Restore configuration. |
 | 1.36.2 | Empty capture and popup masking | Windows/Linux: capture an empty region, then capture while a prior popup is visible. Empty text must not open search. Popup text must not contaminate OCR or reappear over the new search flow. |
-| 1.36.3 | OCR clipboard key capture and Clear | Windows: capture the Copy screen text key, cancel capture, rebind, Apply, and Clear. Preserve cancelled values and disable old keys. Linux: verify the configured native binding and ctl ocr-clipboard. Restore configuration. |
+| 1.36.3 | OCR clipboard key capture and Clear | Windows: capture the Copy text from the screen key, cancel capture, rebind, Apply, and Clear. Preserve cancelled values and disable old keys. Linux: verify the configured native binding and ctl ocr-clipboard. Restore configuration. |
 | 1.36.4 | OCR cancellation preserves clipboard | Windows/Linux: cancel the region selector and require the sentinel to remain unchanged. On Windows, also cancel while OCR is pending; late text must neither replace the clipboard nor open Sentence search. |
 
 **Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
@@ -2172,8 +2172,8 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 
 | ID | Case | Steps and expected result |
 |---|---|---|
-| 1.39 | Remove furigana live option | Windows/Linux: compare the same ruby fixture with Remove furigana enabled and disabled. The saved ocr.discard_furigana setting must control removal of paired kana ruby while retaining kanji body text. Restore configuration. |
-| 1.39.1 | Furigana geometry guards | Windows/Linux: enable Remove furigana and compare horizontal and vertical ruby with unrelated kana-only lines. Preserve body text. Require recognized body and ruby first; otherwise record the missing prerequisite. Restore configuration. |
+| 1.39 | Ignore furigana live option | Windows/Linux: compare the same ruby fixture with Ignore furigana enabled and disabled. The saved ocr.discard_furigana setting must control removal of paired kana ruby while retaining kanji body text. Restore configuration. |
+| 1.39.1 | Furigana geometry guards | Windows/Linux: enable Ignore furigana and compare horizontal and vertical ruby with unrelated kana-only lines. Preserve body text. Require recognized body and ruby first; otherwise record the missing prerequisite. Restore configuration. |
 | 1.39.2 | Furigana clipboard and sentence source | Windows/Linux: capture the ruby fixture to the clipboard and Sentence search with filtering on and off. Compare OCR-derived text, not dictionary glosses. Paired ruby follows the setting; line order and body text remain intact. Restore state. |
 | 1.39.3 | Furigana in Anki sentence fields | Windows/Linux with scratch Anki: add a fresh eligible fixture word with filtering enabled, then another with it disabled. Verify the OCR-derived sentence field follows the setting. Restore config and clean up only scratch notes. |
 
@@ -2186,10 +2186,10 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 
 | ID | Case | Steps and expected result |
 |---|---|---|
-| 1.40 | Anki Full sentence mode | Windows/Linux: select Full sentence and add a word from a sentence spanning two fixture lines. Store the containing sentence up to its boundaries, not neighboring sentences. |
-| 1.40.1 | Anki Current line mode | Windows/Linux: select Current line and add a different word. Store the cursor's OCR line, cut to its containing sentence. Do not include other recognized lines. |
-| 1.40.2 | Anki All lines mode | Windows/Linux: select All lines and add a different word. Store every line recognized in the hover capture, in reading order; do not assume it covers the entire screen. |
-| 1.40.3 | Anki Static region mode | Windows/Linux: save a static region, select Static region, and add a different word. The sentence field must use that region's recognized text. Cancel a replacement region and preserve the previous saved region. |
+| 1.40 | Anki Detected sentence mode | Windows/Linux: select Detected sentence and add a word from a sentence spanning two fixture lines. Store the containing sentence up to its boundaries, not neighboring sentences. |
+| 1.40.1 | Anki Line under the pointer mode | Windows/Linux: select Line under the pointer and add a different word. Store the cursor's OCR line, cut to its containing sentence. Do not include other recognized lines. |
+| 1.40.2 | Anki All captured lines mode | Windows/Linux: select All captured lines and add a different word. Store every line recognized in the hover capture, in reading order; do not assume it covers the entire screen. |
+| 1.40.3 | Anki Fixed screen area mode | Windows/Linux: save a static region, select Fixed screen area, and add a different word. The sentence field must use that region's recognized text. Cancel a replacement region and preserve the previous saved region. |
 | 1.40.4 | Anki sentence mode changes are current | Windows/Linux: Apply a different sentence mode, perform a fresh lookup, and add a new eligible word. Its sentence must follow the newly applied mode rather than cached text from the prior lookup. |
 
 **Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
@@ -2422,7 +2422,7 @@ activate the **Chibipop selection regression** window within one minute.
 
 Manual browser acceptance:
 
-1. Set **Look up selected text** in **Settings > Configurations**.
+1. Set **Look up selected text** in **Settings > Shortcuts**.
 2. Select a Japanese word in an ordinary browser document. Press the shortcut.
 3. Confirm the normal dictionary popup shows the selected word without OCR.
 4. Repeat in an editor and in a browser text field.

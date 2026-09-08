@@ -916,10 +916,10 @@ impl ScreenshotMode {
 impl std::fmt::Display for ScreenshotMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Region => "Region",
-            Self::Window => "Window",
-            Self::FixedRegion => "Fixed region",
-            Self::FixedWindow => "Fixed window",
+            Self::Region => "Choose a region",
+            Self::Window => "Choose a window",
+            Self::FixedRegion => "Reuse one region",
+            Self::FixedWindow => "Reuse one window",
         })
     }
 }
@@ -1049,14 +1049,14 @@ pub enum HotkeyAction {
 impl HotkeyAction {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Back => "Back (Escape)",
-            Self::Trigger => "Lookup trigger",
-            Self::AnkiAdd => "Add to Anki",
-            Self::StaticRegion => "Static region",
-            Self::Screenshot => "Screenshot",
-            Self::OcrClipboard => "OCR clipboard",
-            Self::Search => "Dictionary search",
-            Self::SentenceSearch => "Sentence search",
+            Self::Back => "Close popup (Escape)",
+            Self::Trigger => "Lookup",
+            Self::AnkiAdd => "Add current result to Anki",
+            Self::StaticRegion => "Set sentence area",
+            Self::Screenshot => "Save screenshot",
+            Self::OcrClipboard => "Copy text from screen",
+            Self::Search => "Open dictionary search",
+            Self::SentenceSearch => "Open sentence search",
             Self::SelectedText => "Look up selected text",
         }
     }
@@ -1319,7 +1319,7 @@ mod tests {
         assert_eq!(vec![(HotkeyAction::Trigger, HotkeyAction::Screenshot)], cfg.hotkey_conflicts(Platform::Windows));
         cfg.trigger.trigger_key = "F2".into();
         cfg.anki.static_region_key = "0x71".into();
-        assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Static region conflicts with Lookup trigger"));
+        assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Set sentence area conflicts with Lookup"));
     }
 
     #[test]
@@ -3237,7 +3237,7 @@ mod search_config_tests {
         assert_eq!(toml::from_str::<Config>(&saved).unwrap().actions.search, config.actions.search);
         config.validate_hotkeys(Platform::Windows).unwrap();
         config.actions.search.hotkey = Some(config.actions.screenshot.hotkey.clone());
-        assert!(config.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Dictionary search conflicts"));
+        assert!(config.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Open dictionary search conflicts"));
         config.actions.search.hotkey = Some("not a key".into());
         assert!(config.validate_hotkeys(Platform::Windows).is_err());
         config.actions.search.hotkey = None;

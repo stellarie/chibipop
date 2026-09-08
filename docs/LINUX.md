@@ -45,14 +45,14 @@ target.
 
 Every snippet in this document writes the bare command name `chibipop`, which
 assumes an installed binary on `PATH`. Running from `cargo run` or an
-extracted folder? Copy the bind from the **Configurations** tab instead. It
+extracted folder? Copy the bind from the **Shortcuts** tab instead. It
 names the running binary's full path, quoted.
 
 ## Settings window
 
 `chibipop settings` opens **General**. The six tabs are **General**,
-**Configurations**, **Popup**, **Dictionaries**, **OCR**, and **Anki**.
-The **Configurations** tab holds every chord and its compositor bind or portal key.
+**Shortcuts**, **Popup**, **Dictionaries**, **Text recognition**, and **Anki**.
+The **Shortcuts** tab holds every chord and its compositor bind or portal key.
 
 Apply requests direct global shortcuts where the desktop supports them.
 For native bindings, each supported configured shortcut has a **Copy bind snippet** button.
@@ -65,7 +65,6 @@ Hold mode on those desktops needs a portal binding. Otherwise, select Toggle or 
 GNOME repeats a held custom shortcut, so tap the chord.
 Niri snippets go inside the existing `binds` block.
 Niri supports press bindings but has no key-release bind for Hold mode.
-
 Screen capture exclusion stays on **Popup**.
 
 **Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
@@ -252,24 +251,24 @@ bindsym --no-repeat Mod1+a exec chibipop ctl anki-add
 KDE and GNOME own the portal key through their desktop shortcut settings. The
 popup's Anki button uses the same add-card code path on every desktop.
 
-### Screenshot capture modes
+### Screenshot sources
 
-The *Anki* tab sets **Screenshot capture mode** for the mining screenshot and
-for **Include screenshot when adding**.
+The *Anki* tab sets **Screenshot source** for the mining screenshot and
+for **Attach a screenshot to cards**.
 
-- **Region** is the default. `slurp` lets you drag a region. On Hyprland or
+- **Choose a region** is the default. `slurp` lets you drag a region. On Hyprland or
   Sway, a window query also lets you click a visible window.
-- **Window** uses `slurp -r` and a click on a visible window.
-- **Fixed region** asks for a region drag on first use. It saves the rectangle
+- **Choose a window** uses `slurp -r` and a click on a visible window.
+- **Reuse one region** asks for a region drag on first use. It saves the rectangle
   as global physical pixels and reuses it on later pictures.
-- **Fixed window** asks for a visible window click on first use. It saves the
+- **Reuse one window** asks for a visible window click on first use. It saves the
   window `app_id` and title, then queries fresh geometry for every picture.
 
 Interactive selection needs the `slurp` command on `PATH` and a compositor that
 supports layer-shell. Install `slurp` with your distribution package manager.
-Region mode still supports a drag when no Hyprland or Sway window query exists.
-Window mode and first-use Fixed window selection need `hyprctl` on Hyprland or
-`swaymsg` on Sway. Fixed window reuse needs the same query for each picture.
+Choose a region still supports a drag when no Hyprland or Sway window query exists.
+**Choose a window** and the first **Reuse one window** selection need `hyprctl`
+on Hyprland or `swaymsg` on Sway. **Reuse one window** needs the same query later.
 
 Linux stores the compositor class or `app_id` as `app_id`. Hyprland supplies
 the compositor class. Sway supplies `app_id`, or its X11 window class when
@@ -278,7 +277,7 @@ window. A missing or ambiguous match reports an error and selects no other
 window. Window capture copies the visible screen rectangle, not hidden or
 occluded window contents.
 
-Fixed region keeps its rectangle after a restart. Fixed window follows a
+**Reuse one region** keeps its rectangle after a restart. **Reuse one window** follows a
 window move or resize because it gets fresh geometry. A title change breaks
 the match. Reset the saved target and select the window again.
 
@@ -473,8 +472,8 @@ your frequency lists there and Apply.
   meikiocr does not read (anything but `ja`) searches every dictionary, because
   that language's list was drawn up for a recogniser this build does not run.
   Clear the key, or set it to `ja`, to have your split apply.
-- **The Static region sentence mode has a global shortcut.**
-  Select *Static region* as the Anki sentence field. Then draw its box.
+- **The Fixed screen area sentence mode has a global shortcut.**
+  Select *Fixed screen area* as the Anki sentence field. Then draw its box.
   The `static-region` verb starts this selection in any sentence mode.
   Use `Esc` or right-click to cancel the selection.
   Its chord (`anki.static_region_key_linux`, unset by default) uses the portal
@@ -607,7 +606,7 @@ down.
 
 ## Selected application text
 
-Set **Look up selected text** in **Settings > Configurations**. The action uses
+Set **Look up selected text** in **Settings > Shortcuts**. The action uses
 application text directly and does not run OCR or change clipboard contents.
 Browser selections need no extension.
 

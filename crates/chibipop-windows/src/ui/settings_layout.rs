@@ -344,7 +344,7 @@ mod tests {
             labels,
             [
                 "Popup",
-                "Configurations",
+                "Shortcuts",
                 "Dictionaries",
                 "Text recognition",
                 "Anki",
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(layout.field_map_tab(), Some(4));
         assert!(layout.tab_needs_anki_detection(4));
         assert!(!layout.tab_needs_anki_detection(0));
-        assert_eq!(layout.tab_label(1), Some("Configurations"));
+        assert_eq!(layout.tab_label(1), Some("Shortcuts"));
         for (key, option) in [(SettingId::OcrClipboardKey, SettingId::OcrSentenceSearch),
             (SettingId::SelectedTextKey, SettingId::SelectedTextSentenceSearch)] {
             let (tab, section, row) = location(&layout, key);

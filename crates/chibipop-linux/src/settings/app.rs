@@ -1,6 +1,6 @@
 //! The Linux settings process owns this iced window and its tab strip.
-//! The six tabs are General, Configurations, Popup, Dictionaries, OCR, and Anki.
-//! Configurations holds every chord because each Linux bind is a compositor line or portal key.
+//! The six tabs are General, Shortcuts, Popup, Dictionaries, Text recognition, and Anki.
+//! Shortcuts holds every chord because each Linux bind is a compositor line or portal key.
 //! This keeps binds together instead of separate blocks in each feature group.
 //!
 //! The window renders values from the core `SettingsForm` and `LinuxFields`.
@@ -208,9 +208,9 @@ enum Drag {
 /// The page that the strip selects.
 ///
 /// iced 0.14 has no tab widget, so a row of buttons uses this enum as its state.
-/// Windows has General, Dictionaries, OCR / Debug, Anki, and Plugins.
+/// Windows uses a separate native seven-tab model.
 /// Linux has no plugin host. Each Linux bind is a compositor line or portal key.
-/// One Configurations page holds all chords instead of separate blocks in each feature group.
+/// One Shortcuts page holds all chords instead of separate blocks in each feature group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
@@ -237,10 +237,10 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
-            Tab::Shortcuts => "Configurations",
+            Tab::Shortcuts => "Shortcuts",
             Tab::Popup => "Popup",
             Tab::Dictionaries => "Dictionaries",
-            Tab::Ocr => "OCR",
+            Tab::Ocr => "Text recognition",
             Tab::Anki => "Anki",
         }
     }
@@ -1373,10 +1373,10 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
         TriggerMode::HoldKey
     };
     let mode = row![
-        radio("Live", TriggerMode::Live, Some(selected), Message::Mode),
-        radio("Hold key", TriggerMode::HoldKey, Some(selected), Message::Mode),
-        radio("Toggle", TriggerMode::Toggle, Some(selected), Message::Mode),
-        radio("Press key", TriggerMode::Press, Some(selected), Message::Mode),
+        radio("Follow pointer", TriggerMode::Live, Some(selected), Message::Mode),
+        radio("While held", TriggerMode::HoldKey, Some(selected), Message::Mode),
+        radio("Turn on / off", TriggerMode::Toggle, Some(selected), Message::Mode),
+        radio("Once per press", TriggerMode::Press, Some(selected), Message::Mode),
     ]
     .spacing(20);
 
@@ -1389,31 +1389,31 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
         search_shortcut(app, ShortcutKind::Dictionary),
         search_shortcut(app, ShortcutKind::Sentence),
         search_shortcut(app, ShortcutKind::SelectedText),
-        card("Trigger", column![
+        card("Popup shortcut", column![
             mode,
             checkbox(app.form.cfg.trigger.per_character_lookup)
-                .label("Look up each character as you hover (Live mode only)")
+                .label("Update for every character (Follow pointer only)")
                 .on_toggle(Message::PerChar),
             labeled(
-                "Trigger chord",
+                "Lookup shortcut",
                 text_input("ALT+F", &app.linux.trigger_key_linux)
                     .on_input(Message::TriggerChord)
                     .width(200),
             ),
             shortcut_bind(app, ShortcutId::Trigger),
         ].spacing(10)),
-        card("Add card to Anki", column![
+        card("Add current result to Anki", column![
             labeled(
-                "Add-card chord",
+                "Anki shortcut",
                 text_input("ALT+A", &app.linux.add_key_linux)
                     .on_input(Message::AnkiAddKey)
                     .width(200),
             ),
             shortcut_bind(app, ShortcutId::AnkiAdd),
         ].spacing(10)),
-        card("Mining screenshot", column![
+        card("Save a screenshot", column![
             labeled(
-                "Screenshot chord",
+                "Screenshot shortcut",
                 text_input(
                     "SUPER+S",
                     app.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
@@ -1423,18 +1423,18 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
             ),
             shortcut_bind(app, ShortcutId::Screenshot),
         ].spacing(10)),
-        card("Static sentence region", column![
+        card("Set sentence area", column![
             labeled(
-                "Static-region chord",
+                "Sentence-area shortcut",
                 text_input("ALT+R", &app.linux.static_region_key_linux)
                     .on_input(Message::StaticRegionKey)
                     .width(200),
             ),
             shortcut_bind(app, ShortcutId::StaticRegion),
         ].spacing(10)),
-        card("Copy screen text", column![
+        card("Copy text from the screen", column![
             labeled(
-                "OCR-to-clipboard chord",
+                "Copy-text shortcut",
                 text_input(
                     "ALT+C",
                     app.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
@@ -1443,7 +1443,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                 .width(200),
             ),
             checkbox(app.form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search))
-                .label("Open copied screen text in sentence search")
+                .label("After copying, open sentence search")
                 .on_toggle(Message::OpenSentenceSearch),
             ocr_clipboard_bind(app),
         ].spacing(10)),
@@ -1498,14 +1498,14 @@ fn popup_page(app: &App) -> Element<'_, Message> {
     column![
         card("Appearance", column![
             checkbox(app.form.cfg.popup.sub_popups)
-                .label("Open definitions when hovering over popup text")
+                .label("Look up words inside the popup")
                 .on_toggle(Message::SubPopups),
             labeled(
                 "Theme",
                 pick_list(themes, Some(app.form.cfg.popup.theme.clone()), Message::ThemePicked),
             ),
             labeled(
-                "Font",
+                "Popup font",
                 pick_list(app.fonts.as_slice(), font_now.cloned(), Message::FontPicked),
             ),
             // Kanji and kana use the selected family. This preview confirms that the family
@@ -1534,7 +1534,7 @@ fn popup_page(app: &App) -> Element<'_, Message> {
                 .spacing(10),
             ),
             labeled(
-                "Summary length (characters)",
+                "Definition preview length",
                 row![
                     slider(SUMMARY_RANGE.0 as u16..=SUMMARY_RANGE.1 as u16, app.form.cfg.popup.summary_chars as u16, Message::Summary).width(220),
                     text(app.form.cfg.popup.summary_chars.to_string()),
@@ -1544,19 +1544,19 @@ fn popup_page(app: &App) -> Element<'_, Message> {
         ].spacing(10)),
         card("Behavior", column![
             checkbox(app.form.cfg.popup.highlight_match)
-                .label("Box the word being defined")
+                .label("Outline the matched word")
                 .on_toggle(Message::Highlight),
             checkbox(app.form.cfg.popup.scroll_popup)
                 .label("Scroll long entries with the wheel")
                 .on_toggle(Message::Scroll),
             checkbox(app.form.cfg.popup.edge_autoscroll)
-                .label("Auto-scroll while dragging at the popup edge")
+                .label("Scroll while selecting text")
                 .on_toggle(Message::EdgeAutoscroll),
             checkbox(app.form.cfg.popup.side_panel)
-                .label("Show related words beside the popup")
+                .label("Show other matching entries")
                 .on_toggle(Message::SidePanel),
         ].spacing(10)),
-        card("Entry content", column![
+        card("Result content", column![
             labeled(
                 "Layout",
                 pick_list(
@@ -1566,7 +1566,7 @@ fn popup_page(app: &App) -> Element<'_, Message> {
                 ),
             ),
             checkbox(app.form.cfg.popup.dictionary_styling)
-                .label("Use the dictionary's own fonts and colours")
+                .label("Use each dictionary's formatting")
                 .on_toggle(Message::DictStyling),
             checkbox(app.form.cfg.popup.show_examples)
                 .label("Show example sentences")
@@ -1578,7 +1578,7 @@ fn popup_page(app: &App) -> Element<'_, Message> {
                 .label("Show images")
                 .on_toggle(Message::ShowImages),
             checkbox(app.form.cfg.popup.show_part_of_speech)
-                .label("Show part-of-speech labels inside the entry")
+                .label("Show word types")
                 .on_toggle(Message::ShowPartOfSpeech),
         ].spacing(10)),
         card("Screen capture", capture),
@@ -1608,29 +1608,29 @@ fn value_of<T: Copy>(table: &[(T, &'static str)], label: &str, default: T) -> T 
 /// [`SENTENCE_MODES`]. The table provides labels to the picker and receives the
 /// selected mode without a second map.
 const LAYOUT_MODES: [(LayoutMode, &str); 2] = [
-    (LayoutMode::Roomy, "Roomy (one item per line)"),
+    (LayoutMode::Roomy, "Spacious (one item per line)"),
     (LayoutMode::Compact, "Compact (one line per dictionary)"),
 ];
 
 /// This table lists selection button modes in display order.
 const SELECTION_BUTTONS: [(SelectionButtons, &str); 2] = [
-    (SelectionButtons::PrimaryAdditive, "Primary additive"),
-    (SelectionButtons::PrimaryReplacing, "Primary replacing"),
+    (SelectionButtons::PrimaryAdditive, "Add to selection"),
+    (SelectionButtons::PrimaryReplacing, "Replace selection"),
 ];
 
 /// This table lists selection separators in display order.
 const SELECTION_SEPARATORS: [(SelectionSeparator, &str); 4] = [
     (SelectionSeparator::Ellipsis, "Ellipsis (…)"),
     (SelectionSeparator::Space, "Space"),
-    (SelectionSeparator::LineBreak, "Line break"),
-    (SelectionSeparator::ListItems, "List items"),
+    (SelectionSeparator::LineBreak, "New line"),
+    (SelectionSeparator::ListItems, "Separate list items"),
 ];
 
 /// This table lists triple-click modes in display order.
 const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
-    (TripleClick::Sense, "Sense"),
-    (TripleClick::SenseWithExamples, "Sense with examples"),
-    (TripleClick::Line, "Line"),
+    (TripleClick::Sense, "Meaning"),
+    (TripleClick::SenseWithExamples, "Meaning and examples"),
+    (TripleClick::Line, "Complete line"),
 ];
 
 
@@ -1640,9 +1640,9 @@ const TRIPLE_CLICKS: [(TripleClick, &str); 3] = [
 /// [`SENTENCE_MODES`] and [`LAYOUT_MODES`]. The Windows window uses the same
 /// labels, so both settings windows show one value.
 const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
-    (RankingStrategy::BestRank, "Best rank (rank by highest frequency out of all freq dicts)"),
-    (RankingStrategy::Priority, "Priority (rank using highest prioritized freq dict available)"),
-    (RankingStrategy::Median, "Median (rank by median freq)"),
+    (RankingStrategy::BestRank, "Best rank from any list"),
+    (RankingStrategy::Priority, "First list with the word"),
+    (RankingStrategy::Median, "Middle rank across lists"),
 ];
 
 
@@ -1653,9 +1653,9 @@ const RANKING_STRATEGIES: [(RankingStrategy, &str); 3] = [
 /// (ARCHITECTURE.md#dictionary-and-lookup).
 fn role_caption(role: Role) -> &'static str {
     match role {
-        Role::Terms => "Term Dictionaries (priority order)",
-        Role::Frequency => "Frequency Dictionaries",
-        Role::Pitch => "Pitch Dictionaries",
+        Role::Terms => "Definition dictionaries (priority order)",
+        Role::Frequency => "Frequency lists",
+        Role::Pitch => "Pitch accent dictionaries",
     }
 }
 
@@ -1880,21 +1880,21 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
     column![
         card("Recognition", column![
             labeled(
-                "OCR passes per hover",
+                "Read-ahead passes",
                 pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
             ),
             hint("1 = no tiling. Higher reads further ahead but can resolve the wrong character."),
             checkbox(app.form.cfg.ocr.prefer_vertical)
-                .label("Prefer vertical text (manga, VN)")
+                .label("Read vertical text first")
                 .on_toggle(Message::PreferVertical),
             checkbox(app.form.cfg.ocr.scan_alphanumeric)
-                .label("Scan alphanumeric text")
+                .label("Read English letters and numbers")
                 .on_toggle(Message::ScanAlnum),
             checkbox(app.form.cfg.ocr.discard_furigana)
-                .label("Discard furigana from OCR text")
+                .label("Ignore furigana")
                 .on_toggle(Message::DiscardFurigana),
         ].spacing(10)),
-        card("Capture region", column![
+        card("Reading area", column![
             labeled(
                 "Capture width (px)",
                 text_input("500", &app.capture_w).on_input(Message::CaptureW).width(120),
@@ -1944,10 +1944,10 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
 /// Windows combo returns an index. Both windows use one table instead of a
 /// string match at the call site. The first item supplies the default.
 const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
-    (SentenceMode::Sentence, "Full sentence"),
-    (SentenceMode::Line, "Current line"),
-    (SentenceMode::All, "All lines"),
-    (SentenceMode::Static, "Static region"),
+    (SentenceMode::Sentence, "Detected sentence"),
+    (SentenceMode::Line, "Line under the pointer"),
+    (SentenceMode::All, "All captured lines"),
+    (SentenceMode::Static, "Fixed screen area"),
 ];
 
 
@@ -1956,10 +1956,10 @@ const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
 /// Static mode, show the static region controls.
 ///
 /// Windows hides region rows outside Static, and Linux does the same.
-/// The chord stays on Configurations instead of this page, so it remains available in every mode.
+/// The chord stays on Shortcuts instead of this page, so it remains available in every mode.
 fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = vec![labeled(
-        "Anki sentence field",
+        "Sentence source",
         pick_list(
             labels(&SENTENCE_MODES),
             Some(label_of(&SENTENCE_MODES, app.form.cfg.anki.sentence_mode).to_string()),
@@ -1979,7 +1979,7 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
                  popup; without it the region still serves lookups, unmarked."
             ),
         );
-        rows.push(hint("Draw the region with the static-region chord on the Configurations tab."));
+        rows.push(hint("Use the Set sentence area shortcut on the Shortcuts tab."));
     }
     rows
 }
@@ -1987,14 +1987,14 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
 
 /// The screenshot capture mode picker items, in display order.
 const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
-    (ScreenshotMode::Region, "Region"),
-    (ScreenshotMode::Window, "Window"),
-    (ScreenshotMode::FixedRegion, "Fixed region"),
-    (ScreenshotMode::FixedWindow, "Fixed window"),
+    (ScreenshotMode::Region, "Choose a region"),
+    (ScreenshotMode::Window, "Choose a window"),
+    (ScreenshotMode::FixedRegion, "Reuse one region"),
+    (ScreenshotMode::FixedWindow, "Reuse one window"),
 ];
 
 /// The mining screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
-/// The standalone screenshot chord lives on Configurations instead of this card.
+/// The standalone screenshot chord lives on Shortcuts instead of this card.
 ///
 /// Show every row in every state. The folder also affects the standalone action,
 /// so `include_on_add` does not control it.
@@ -2014,15 +2014,15 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     };
     vec![
         checkbox(app.form.cfg.actions.screenshot.include_on_add)
-            .label("Include screenshot when adding")
+            .label("Attach a screenshot to cards")
             .on_toggle(Message::IncludeScreenshot)
             .into(),
         hint(
-            "On add, the screenshot uses the selected mode. Region modes use a drag, and \
-             window modes use a click. Esc skips the picture and files the card without one."
+            "Choose a region uses a drag. Choose a window uses a click. Esc skips the \
+             picture and files the card without one."
         ),
         labeled(
-            "Screenshot capture mode",
+            "Screenshot source",
             pick_list(
                 labels(&SCREENSHOT_MODES),
                 Some(label_of(&SCREENSHOT_MODES, app.form.cfg.actions.screenshot.capture_mode).to_string()),
@@ -2030,9 +2030,8 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             ),
         ),
         hint(
-            "Fixed modes select and save a target on first use, then reuse it for later \
-             screenshots. Reset the saved targets to select them again. Linux window capture \
-             needs slurp and Hyprland or Sway window queries."
+            "Reuse options save a target on first use. Reset the saved targets to select \
+             them again. Linux window capture needs slurp and Hyprland or Sway queries."
         ),
         hint(region_summary),
         hint(window_summary),
@@ -2049,7 +2048,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             "An absolute path is taken as typed. A relative one lands under your XDG data \
              directory, or beside the executable in portable mode."
         ),
-        hint("The standalone screenshot chord is on the Configurations tab."),
+        hint("The Save a screenshot shortcut is on the Shortcuts tab."),
     ]
 }
 
@@ -2122,10 +2121,10 @@ fn anki_page(app: &App) -> Element<'_, Message> {
     column![
         card("Connection", column![
             checkbox(app.form.cfg.anki.enabled)
-                .label("Enable Anki integration")
+                .label("Send cards to Anki")
                 .on_toggle(Message::AnkiEnabled),
             labeled(
-                "AnkiConnect URL",
+                "Connection address",
                 text_input("http://localhost:8765", &app.form.cfg.anki.url)
                     .on_input(Message::AnkiUrl)
                     .width(260),
@@ -2141,16 +2140,16 @@ fn anki_page(app: &App) -> Element<'_, Message> {
         ].spacing(10)),
         card("Card content", column![
             checkbox(app.form.cfg.anki.include_dictionary_name)
-                .label("Include dictionary name")
+                .label("Include the dictionary name")
                 .on_toggle(Message::IncludeDictionaryName),
             // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
             // The daemon reads `anki.first_dict_only`, so this row lets the user change it
             // without a TOML edit.
             checkbox(app.form.cfg.anki.first_dict_only)
-                .label("First dictionary only")
+                .label("Use the first dictionary only")
                 .on_toggle(Message::FirstDictOnly),
             labeled(
-                "Selection buttons",
+                "Primary click behavior",
                 pick_list(
                     labels(&SELECTION_BUTTONS),
                     Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
@@ -2158,7 +2157,7 @@ fn anki_page(app: &App) -> Element<'_, Message> {
                 ),
             ),
             labeled(
-                "Selection separator",
+                "Join selected text with",
                 pick_list(
                     labels(&SELECTION_SEPARATORS),
                     Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
@@ -2166,7 +2165,7 @@ fn anki_page(app: &App) -> Element<'_, Message> {
                 ),
             ),
             labeled(
-                "Triple-click",
+                "Triple-click selects",
                 pick_list(
                     labels(&TRIPLE_CLICKS),
                     Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
@@ -2175,8 +2174,8 @@ fn anki_page(app: &App) -> Element<'_, Message> {
             ),
         ].spacing(10)),
         card("Screenshot", column(screenshot_rows(app)).spacing(10)),
-        card("Sentence", column(sentence_rows(app)).spacing(10)),
-        card("Field mappings", column(field_map_rows(app)).spacing(10)),
+        card("Sentence on the card", column(sentence_rows(app)).spacing(10)),
+        card("Card fields", column(field_map_rows(app)).spacing(10)),
     ]
     .spacing(16)
     .into()
@@ -2542,13 +2541,13 @@ mod tests {
         let cfg = chibipop::config::Config::default();
         let _ = update(
             &mut app,
-            Message::SelectionButtonsPicked("Primary replacing".to_string()),
+            Message::SelectionButtonsPicked("Replace selection".to_string()),
         );
         let _ = update(
             &mut app,
-            Message::SelectionSeparatorPicked("List items".to_string()),
+            Message::SelectionSeparatorPicked("Separate list items".to_string()),
         );
-        let _ = update(&mut app, Message::TripleClickPicked("Line".to_string()));
+        let _ = update(&mut app, Message::TripleClickPicked("Complete line".to_string()));
         let out = chibipop::settings::apply_to(&app.form, &cfg);
         assert_eq!(
             chibipop::config::SelectionButtons::PrimaryReplacing,
@@ -2777,7 +2776,7 @@ mod tests {
         assert_eq!(4, labels(&SENTENCE_MODES).len(), "the table is the whole list");
     }
 
-    /// A *Static region* choice stores the mode on the shared form. Apply writes it,
+    /// A *Fixed screen area* choice stores the mode on the shared form. Apply writes it,
     /// and the daemon reads it.
     #[test]
     fn picking_the_static_region_mode_stages_it_on_the_form() {
@@ -2785,7 +2784,7 @@ mod tests {
         let mut app = app(&dir);
         assert_eq!(SentenceMode::Sentence, app.form.cfg.anki.sentence_mode, "the shipped default");
 
-        let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
+        let _ = update(&mut app, Message::SentenceModePicked("Fixed screen area".to_string()));
         assert_eq!(SentenceMode::Static, app.form.cfg.anki.sentence_mode);
 
         let _ = update(&mut app, Message::ShowStaticOverlay(false));
@@ -2803,13 +2802,13 @@ mod tests {
         let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
         let _ = update(&mut app, Message::StaticRegionKey("CTRL+R".to_string()));
         let _ = update(&mut app, Message::TabPicked(Tab::Anki));
-        let _ = update(&mut app, Message::SentenceModePicked("Static region".to_string()));
-        let _ = update(&mut app, Message::SentenceModePicked("All lines".to_string()));
+        let _ = update(&mut app, Message::SentenceModePicked("Fixed screen area".to_string()));
+        let _ = update(&mut app, Message::SentenceModePicked("All captured lines".to_string()));
         let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
         assert_eq!(
             Some("bind = CTRL, R, exec, /usr/bin/chibipop ctl static-region"),
             app.shortcut_snippet(ShortcutId::StaticRegion).as_deref(),
-            "a non-static mode must not hide or reset the chord on Configurations"
+            "a non-static mode must not hide or reset the chord on Shortcuts"
         );
         every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);

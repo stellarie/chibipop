@@ -71,7 +71,7 @@ dictionary order. It accepts dictionary forms and conjugated Japanese text.
 Empty input and missing entries clear previous results.
 
 Open either search mode from **Settings > Dictionaries**. The tray also opens
-Dictionary search. In **Settings > Configurations**, select a search shortcut
+Dictionary search. In **Settings > Shortcuts**, select a search shortcut
 button, then press a key or key combination. Escape cancels capture; Clear
 removes the shortcut.
 
@@ -102,7 +102,7 @@ selected_hotkey_linux = "CTRL+SHIFT+D"
 selected_opens_sentence_search = false
 ```
 
-All search shortcuts default to unset. Configure them in **Settings > Configurations**.
+All search shortcuts default to unset. Configure them in **Settings > Shortcuts**.
 Shortcut validation rejects conflicts before Apply. On Linux, native compositor
 bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
 Windows applies shortcut changes immediately. Linux Apply requests changed portal
@@ -123,8 +123,8 @@ Sentence search with the selected text. It does not read unselected surrounding
 text. Empty selections open no window.
 
 Windows shows captured function keys as `F7`, including previously saved `f7`
-values. **Open copied screen text in sentence search** sits directly below
-**Copy screen text** on the Configurations page.
+values. **After copying, open sentence search** sits directly below
+**Copy text from the screen** on the Shortcuts page.
 
 The popup uses the dictionary lookup engine, including conjugated forms and
 matching prefixes. It stays open without holding the OCR trigger. Escape closes
@@ -174,7 +174,7 @@ settings process, control-socket verbs, and three diagnostics.
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
 `ocr-clipboard`, `static-region`, `search`, `sentence-search`, `selected-text`.
 One verb per global action, never a
-scripting API. Compositor binds on the **Configurations** tab name the running
+scripting API. Compositor binds on the **Shortcuts** tab name the running
 binary's full path. See [Linux settings](LINUX.md#settings-window) for tab navigation.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
@@ -284,8 +284,8 @@ be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
 
-Windows settings use seven tabs: Popup, Configurations, Dictionaries, Text recognition,
-Anki, Extensions, and Debug. All shortcut controls appear together on Configurations.
+Windows settings use seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
 Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
 
 Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.
@@ -816,7 +816,7 @@ behaviour and still the default. Entries are matched by name substring,
 exactly as `display_order` is.
 
 Set this in the settings window — the **Dictionaries** tab is scoped to the
-OCR language selected on **Text recognition**, and shows that language's list in a
+**Text language** selected on **Text recognition**, and shows that language's list in a
 **Searched** box with the rest in a **Not searched** box below it. Changing the
 language re-scopes the tab immediately, before Apply.
 
@@ -854,7 +854,7 @@ exactly as for a language with no entry. Otherwise the popup would filter the fa
 list written for a language that is not reading the screen, and come back empty
 with no error at all. This is the one state where the Dictionaries tab does not
 match the runtime, and deliberately: the tab keeps showing the list you
-configured, because that is what you are editing, and the OCR language dropdown
+configured, because that is what you are editing, and the **Text language** dropdown
 already labels the tag `(not installed)`.
 
 **A hand-written entry naming a not-yet-installed dictionary is replaced on

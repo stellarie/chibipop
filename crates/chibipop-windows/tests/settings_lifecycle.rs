@@ -221,7 +221,7 @@ fn audit_keeps_machine_readable_json_and_does_not_enable_capture() {
     let labels: Vec<_> = audit["dumps"].as_array().unwrap().iter()
         .filter(|dump| dump["field_map_expanded"] == false)
         .map(|dump| dump["tab_label"].as_str().unwrap()).collect();
-    assert_eq!(vec!["Popup", "Configurations", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
+    assert_eq!(vec!["Popup", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("live diagnostics enabled"));
 }
 
