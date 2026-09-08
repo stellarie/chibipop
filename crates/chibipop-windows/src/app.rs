@@ -2736,7 +2736,7 @@ fn resolve_plugin_engine(ocr_engine: &str, enabled: &[String]) -> Option<Box<Plu
 fn show_presentation(
     popup: &Popup,
     renderer: &mut Renderer,
-    (max_height_percent, max_width_percent, avoid_anchor): (i32, i32, bool),
+    (max_height_percent, max_width_percent, avoid_anchor, button_h): (i32, i32, bool, i32),
     inputs: SceneInputs<'_>,
     anchor: PhysRect,
     scroll: i32,
@@ -2746,7 +2746,7 @@ fn show_presentation(
     let max_w = ((monitor.w * max_width_percent) / 100).max(1);
     let mut max_h = ((monitor.h * max_height_percent) / 100).max(1);
     if avoid_anchor {
-        max_h = max_h.min(crate::geom::popup_height_outside(anchor, monitor, POPUP_GAP));
+        max_h = max_h.min(crate::geom::popup_height_outside(anchor, monitor, POPUP_GAP).saturating_sub(button_h));
         anyhow::ensure!(max_h > 0, "No space above or below the selection. Use Sentence search.");
     }
 
@@ -2756,9 +2756,11 @@ fn show_presentation(
         .context("measuring popup content")?;
     let measured = std::time::Instant::now();
 
-    let rect = place_popup(anchor, (w, view_h), monitor, POPUP_GAP);
+    let reserved_h = if avoid_anchor { button_h } else { 0 };
+    let placed = place_popup(anchor, (w, view_h.saturating_add(reserved_h)), monitor, POPUP_GAP);
+    let rect = PhysRect { h: view_h, ..placed };
     if avoid_anchor {
-        anyhow::ensure!(rect.y + rect.h <= anchor.y || rect.y >= anchor.y + anchor.h,
+        anyhow::ensure!(placed.y + placed.h <= anchor.y || placed.y >= anchor.y + anchor.h,
             "Popup cannot fit above or below the selection. Use Sentence search.");
     }
     popup.show_at(rect).context("moving/showing the popup")?;
@@ -3188,7 +3190,8 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             match show_presentation(
                 x.popup,
                 x.renderer,
-                (x.live.max_height_percent, x.live.max_width_percent, controller.selected_text_popup()),
+                (x.live.max_height_percent, x.live.max_width_percent, controller.selected_text_popup(),
+                    x.anki_button.map_or(0, AnkiButton::height_phys)),
                 SceneInputs {
                     presentation: &presentation,
                     theme: x.theme,
@@ -4091,7 +4094,7 @@ mod tests {
             };
             let worker_ms = started.elapsed().as_secs_f64() * 1000.0;
             let (rect, _, _) = show_presentation(&popup, &mut renderer,
-                (live.max_height_percent, live.max_width_percent, false),
+                (live.max_height_percent, live.max_width_percent, false, 0),
                 SceneInputs { presentation: &presentation, theme: &theme, show_back: false,
                     side_panel: live.side_panel, render: live.popup.render_settings(), selection: None },
                 anchor, 0)?;

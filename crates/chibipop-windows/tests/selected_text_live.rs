@@ -63,7 +63,7 @@ impl Fixture {
             assert!(!fixture.font.is_invalid());
             fixture.host = CreateWindowExW(WS_EX_TOPMOST, w!("STATIC"), w!("Chibipop selection regression"),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                800, 250, 840, 240, None, None, None, None).unwrap();
+                800, GetSystemMetrics(SM_CYSCREEN) - 160, 840, 240, None, None, None, None).unwrap();
             let initial_text = if config.actions.search.selected_opens_sentence_search { w!("猫がいる。") } else { w!("猫") };
             fixture.word = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), initial_text,
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0004),
@@ -278,8 +278,9 @@ fn run_selection(mode: TriggerMode) {
     let mut popup_rect = RECT::default();
     // SAFETY: The popup was discovered in this fixture's live daemon.
     unsafe { GetWindowRect(fixture.visible_popups()[0], &mut popup_rect).unwrap(); }
-    assert!(popup_rect.bottom <= bounds.y || popup_rect.top >= bounds.y + bounds.h,
-        "popup covered the selected text: {popup_rect:?} vs {bounds:?}");
+    let button = chibipop_windows::ui::window::AnkiButton::create(false).unwrap();
+    assert!(popup_rect.bottom + button.height_phys() <= bounds.y || popup_rect.top >= bounds.y + bounds.h,
+        "popup or reserved Anki button covered the selected text: {popup_rect:?} vs {bounds:?}");
     let logs = fixture.diagnostics();
     assert!(logs[before..].contains("mode=drill_down"), "must use dictionary-only worker: {logs}");
     assert!(!logs[before..].contains("stage=ocr"), "selection invoked OCR: {logs}");
