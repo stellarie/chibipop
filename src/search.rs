@@ -184,9 +184,9 @@ fn word_search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[Dict
     if word.trim().is_empty() { return Ok(SearchResult::Empty); }
     let enabled = enabled_dictionary(dictionary, dicts, config);
     let mut hits = Vec::new();
-    let inflected = word.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}'));
+    let has_kana = word.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}'));
     for (offset, _) in word.char_indices().take(crate::lookup::engine::MAX_LOOKUP_CHARS) {
-        if offset != 0 && inflected { break; }
+        if offset != 0 && has_kana { break; }
         for hit in engine.run(&enabled, &word[offset..])? {
             if !hits.iter().any(|existing: &crate::lookup::model::Hit|
                 existing.entry.entry_id == hit.entry.entry_id && existing.written == hit.written

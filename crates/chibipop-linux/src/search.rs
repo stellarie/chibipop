@@ -208,7 +208,7 @@ impl Search {
         self.tokens.clear();
         self.selected = None;
         self.result = SearchResult::Empty;
-        self.status = if self.query.trim().is_empty() { "Type or paste Japanese text." } else { "Searching…" }.into();
+        self.status = if self.query.trim().is_empty() { "Type or paste text." } else { "Searching…" }.into();
         let close = self.close_from(0);
         let query = self.enqueue(Job { target: Target::Input(self.generation), query: self.query.clone(),
             tokenize: self.mode == SearchMode::Sentence });
