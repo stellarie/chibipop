@@ -17,7 +17,7 @@ Search and definitions use your pop-up theme.
 
 Select text in a supported browser or editor, then press **Look up selected text**
 to open its dictionary entry without OCR or a browser extension.
-Set the shortcut in **Settings > Configurations**. See the
+Set the shortcut in **Settings > Shortcuts**. See the
 [selection support limits](docs/REFERENCE.md) for Windows and Linux.
 
 Open **Sentence search** from **Settings > Dictionaries** to work with a
@@ -25,9 +25,9 @@ sentence. Paste the sentence, then click a word in the sentence view. The
 word is highlighted and its dictionary candidates appear below. Word boundaries
 come from your enabled dictionaries, including Chinese entries.
 
-In **Settings > Configurations**, press the desired key or key combination to
-set either search shortcut. Enable **Open copied screen text in sentence
-search** to send OCR-to-clipboard results directly into that flow.
+In **Settings > Shortcuts**, press the desired key or key combination to
+set either search shortcut. Enable **After copying, open sentence search**
+to send copied screen text directly into that flow.
 
 <img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
@@ -169,14 +169,14 @@ covers everything in it. See
 
 ### The settings worth knowing
 
-- **Capture width / height** — how large an area chibipop reads around
+- **Screen area size** — how large an area chibipop reads around
   your cursor, in pixels. Vertical mode swaps the two numbers.
-- **Scan alphanumeric text** — on by default. Turn it off to ignore
+- **Read English letters and numbers** — on by default. Turn it off to ignore
   English words. Mixed text like 「3人」 still works either way.
-- **Per-character lookup** (*Text recognition* tab) — off by default. Turn it
+- **Update for every character** (*Text recognition* tab) — off by default. Turn it
   on to look up every character as you move the cursor, rather than whole
-  words. Live mode only.
-- **OCR language** (*Text recognition* tab) — **Windows only.** Which language
+  words. **Follow pointer** mode only.
+- **Text language** (*Text recognition* tab) — **Windows only.** Which language
   the recogniser reads. Add more languages in Windows Settings > Language
   & region. Linux always reads Japanese.
 - **Per-language dictionary list** (*Dictionaries* tab) — give each
@@ -248,12 +248,12 @@ HTML instead of square brackets, which Anki can interpret as furigana.
 Use **First dictionary only** to send only the top Dictionary's definitions.
 This setting keeps cards short when several Dictionaries match the same word.
 
-The *Anki* tab also sets how glossary selection works. The default makes the
-primary button additive and the secondary button replacing. It joins selected
-fragments with an ellipsis. Choose another button mode or separator when needed.
+The *Anki* tab also sets how glossary selection works. By default, the primary
+button adds text and the secondary button replaces it. Selected fragments use
+an ellipsis between them. Choose another click behavior or separator when needed.
 
-A small notification confirms each card. Turn it off with **Show
-notification when a card is added**.
+A small notification confirms each card. Turn it off with **Notify after
+adding a card**.
 
 ### Add a picture of what you were reading
 
@@ -262,13 +262,13 @@ the game where you found the word.
 
 #### Choose a screenshot mode
 
-Choose a mode in the *Anki* tab with **Screenshot capture mode**.
+Choose a mode in the *Anki* tab with **Screenshot source**.
 
-- **Region** is the default. Select a region for each picture.
-- **Window** selects one visible window for each picture.
-- **Fixed region** asks for one region on first use, then reuses its saved
+- **Choose a region** is the default. Select a region for each picture.
+- **Choose a window** selects one visible window for each picture.
+- **Reuse one region** asks for one region on first use, then reuses its saved
   global physical-pixel rectangle.
-- **Fixed window** asks for one visible window on first use, then finds that
+- **Reuse one window** asks for one visible window on first use, then finds that
   window for each picture.
 
 On Windows, the native selector uses a drag for a region and a click for a
@@ -340,23 +340,23 @@ looked a word up.
 chibipop can send the sentence around the word as well. Choose where it
 comes from on the *Anki* tab:
 
-- **Current line** — the line of text the word is on. The default, and the
-  right answer most of the time.
-- **All lines** — everything chibipop read around your cursor.
-- **Static region** — a fixed part of the screen that you mark once.
+- **Detected sentence** — the complete sentence containing the word. This is the default.
+- **Line under the pointer** — the captured line containing the word.
+- **All captured lines** — everything chibipop read around your cursor.
+- **Fixed screen area** — a fixed part of the screen that you mark once.
 
-#### Static region — for visual novels and games
+#### Fixed screen area — for visual novels and games
 
 Games and visual novels usually put their text in the same box every time.
 Mark that box once and chibipop reads from it, instead of from wherever
 your cursor happens to be.
 
-1. Set the sentence source to **Static region** in Settings.
-2. Press the **Region hotkey** you chose. The screen dims.
+1. Set the sentence source to **Fixed screen area** in Settings.
+2. Press the **Set sentence area** shortcut you chose. The screen dims.
 3. Drag a rectangle around the text box, and release.
 4. A teal outline marks it.
 
-The outline can be turned off with **Show capture region outline**. Your
+The outline can be turned off with **Outline the sentence area**. Your
 region is saved and survives a restart. Press the hotkey again to move it.
 
 ---
@@ -400,7 +400,7 @@ chibipop finds it on its own.
 1. **Install meikiocr.** Follow its own README. You need Python, with
    meikiocr, OpenCV and ONNX Runtime.
 2. **Tell chibipop where it is.** In Settings, on the *Text recognition* tab:
-   1. choose **meikiocr** in the **OCR engine** dropdown;
+   1. choose **meikiocr** in the **Text reader** dropdown;
    2. click **Configure...**;
    3. pick any file inside your meikiocr folder.
 3. **Restart chibipop.** This line confirms it worked:
@@ -413,7 +413,7 @@ prints the reason.
 
 ### Checking which engine is running
 
-Tick **Show the active OCR engine** on the *Debug* tab and
+Tick **Show the active text reader** on the *Debug* tab and
 press **Apply**. The status bar names it.
 
 To watch the engine's own messages, start chibipop from a terminal:

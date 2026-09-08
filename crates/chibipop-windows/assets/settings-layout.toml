@@ -14,11 +14,13 @@ label = "Color theme"
 
 [[tabs.sections.entries]]
 id = "popup-font"
-label = "Text style"
+label = "Popup font"
+help = "Changes the font used inside dictionary results."
 
 [[tabs.sections.entries]]
 id = "popup-custom-style"
-label = "Customize popup style"
+label = "Advanced popup style"
+help = "Opens the style editor for colors, spacing, and other details."
 
 [[tabs.sections]]
 id = "popup-size"
@@ -36,8 +38,8 @@ help = "Percentage of the screen height."
 
 [[tabs.sections.entries]]
 id = "popup-summary-length"
-label = "Summary length"
-help = "Maximum number of summary characters."
+label = "Definition preview length"
+help = "Maximum characters shown for each collapsed result."
 
 [[tabs.sections]]
 id = "popup-behavior"
@@ -45,39 +47,47 @@ label = "Behavior"
 
 [[tabs.sections.entries]]
 id = "popup-highlight"
-label = "Highlight the matched word"
+label = "Outline the matched word"
+help = "Shows which screen word the popup currently defines."
 
 [[tabs.sections.entries]]
 id = "popup-scroll"
 label = "Scroll long entries"
+help = "Uses the mouse wheel when a result is taller than the popup."
 
 [[tabs.sections.entries]]
 id = "popup-edge-autoscroll"
-label = "Auto-scroll at the popup edge"
+label = "Scroll while selecting text"
+help = "Scrolls when a selection reaches the top or bottom edge."
 
 [[tabs.sections.entries]]
 id = "popup-side-panel"
-label = "Show related words"
+label = "Show other matching entries"
+help = "Places additional dictionary results beside the main result."
 
 [[tabs.sections.entries]]
 id = "popup-sub-popups"
-label = "Open definitions when hovering over popup text"
+label = "Look up words inside the popup"
+help = "Hover over popup text to open another definition."
 
 [[tabs.sections.entries]]
 id = "popup-capture-exclusion"
-label = "Hide the popup from screen capture"
+label = "Hide the popup in screenshots"
+help = "Keeps the popup out of screenshots and screen recordings."
 
 [[tabs.sections]]
 id = "popup-content"
-label = "Entry content"
+label = "Result content"
 
 [[tabs.sections.entries]]
 id = "popup-layout"
-label = "Entry layout"
+label = "Result layout"
+help = "Chooses spacious or compact definition spacing."
 
 [[tabs.sections.entries]]
 id = "popup-dictionary-styling"
-label = "Use dictionary styling"
+label = "Use each dictionary's formatting"
+help = "Keeps colors and formatting supplied by the dictionary."
 
 [[tabs.sections.entries]]
 id = "popup-examples"
@@ -93,52 +103,59 @@ label = "Show images"
 
 [[tabs.sections.entries]]
 id = "popup-part-of-speech"
-label = "Show part-of-speech labels"
+label = "Show word types"
+help = "Shows labels such as noun, verb, and adjective."
 
 [[tabs]]
 id = "shortcuts"
-label = "Configurations"
+label = "Shortcuts"
 
 [[tabs.sections]]
 id = "shortcut-popup"
-label = "Popup configurations"
+label = "Popup shortcut"
 
 [[tabs.sections.entries]]
 id = "close-popup"
-label = "Close the popup"
-help = "Escape is always available."
+label = "Close popup"
+help = "Press Escape. This shortcut cannot be changed."
 
 [[tabs.sections.entries]]
 id = "lookup-mode"
-label = "Lookup behavior"
+label = "When lookups run"
 
 [[tabs.sections.entries]]
 id = "lookup-key"
 label = "Lookup key"
+help = "Used by While held, Turn on / off, and Once per press."
 
 [[tabs.sections]]
 id = "shortcut-actions"
-label = "Action configurations"
+label = "Other shortcuts"
 
 [[tabs.sections.entries]]
 id = "anki-add-key"
-label = "Add result to Anki"
+label = "Add current result to Anki"
+help = "Adds the first dictionary result to the selected Anki deck."
 
 [[tabs.sections.entries]]
 id = "static-region-key"
-label = "Sentence area"
+label = "Set sentence area"
+help = "Press this shortcut, then select the screen area used for Anki sentences."
 
 [[tabs.sections.entries]]
 id = "screenshot-key"
 label = "Save a screenshot"
+help = "Captures the configured region or window in the screenshots folder."
 
 [[tabs.sections.entries]]
 id = "ocr-clipboard-key"
-label = "Copy screen text"
+label = "Copy text from the screen"
+help = "Select a screen area. Chibipop reads and copies its text."
 
 [[tabs.sections.entries]]
 id = "ocr-sentence-search"
-label = "Open copied screen text in sentence search"
+label = "After copying, open sentence search"
+help = "Turn this off to copy the text only."
 
 [[tabs.sections.entries]]
 id = "search-key"
@@ -153,12 +170,12 @@ help = "Click the button, then press a key or key combination. Escape cancels."
 [[tabs.sections.entries]]
 id = "selected-text-key"
 label = "Look up selected text"
-help = "Select text in an application, then press this shortcut. Requires application accessibility support."
+help = "Select text in another app, then press this shortcut. Some apps do not allow Chibipop to read selections."
 
 [[tabs.sections.entries]]
 id = "selected-text-sentence-search"
-label = "Open selected text in sentence search"
-help = "When off, show the dictionary popup above or below the selection."
+label = "Send selected text to sentence search"
+help = "Turn this off to show the normal dictionary popup near the selection."
 
 [[tabs]]
 id = "dictionaries"
@@ -182,8 +199,8 @@ label = "Word definitions"
 
 [[tabs.sections.entries]]
 id = "dictionary-terms"
-label = "Term dictionaries"
-help = "Set the lookup order and enabled dictionaries."
+label = "Definition dictionaries"
+help = "Set lookup order. Clear a check box to disable a dictionary."
 
 [[tabs.sections]]
 id = "dictionary-frequency"
@@ -191,8 +208,8 @@ label = "Word frequency"
 
 [[tabs.sections.entries]]
 id = "dictionary-frequency"
-label = "Frequency dictionaries"
-help = "Set ranking behavior, order, and enabled dictionaries."
+label = "Frequency lists"
+help = "Set ranking rules and priority. Clear a check box to disable a list."
 
 [[tabs.sections]]
 id = "dictionary-pitch"
@@ -200,8 +217,8 @@ label = "Pitch accent"
 
 [[tabs.sections.entries]]
 id = "dictionary-pitch"
-label = "Pitch dictionaries"
-help = "Set the display order and enabled dictionaries."
+label = "Pitch accent dictionaries"
+help = "Set display order. Clear a check box to hide a dictionary's pitch accents."
 
 [[tabs]]
 id = "text-recognition"
@@ -209,47 +226,51 @@ label = "Text recognition"
 
 [[tabs.sections]]
 id = "recognition-engine"
-label = "Recognition engine"
+label = "Language and reader"
 
 [[tabs.sections.entries]]
 id = "ocr-engine"
-label = "OCR engine"
+label = "Text reader"
+help = "Built-in uses Windows OCR. Extensions can provide another reader."
 
 [[tabs.sections.entries]]
 id = "ocr-language"
-label = "OCR language"
-help = "The list includes installed and unavailable recognizers."
+label = "Text language"
+help = "For the built-in reader, unavailable languages require Windows language support."
 
 [[tabs.sections.entries]]
 id = "ocr-passes"
-label = "OCR passes"
-help = "More passes read farther ahead, but may choose the wrong character."
+label = "Read-ahead passes"
+help = "Higher values read farther ahead, but may choose the wrong character."
 
 [[tabs.sections]]
 id = "recognition-capture"
-label = "Capture area"
+label = "Reading area"
 
 [[tabs.sections.entries]]
 id = "ocr-capture-size"
-label = "Capture size"
-help = "Vertical mode swaps the width and height."
+label = "Screen area size"
+help = "Sets the area read around the pointer. Vertical mode swaps width and height."
 
 [[tabs.sections.entries]]
 id = "ocr-prefer-vertical"
-label = "Prefer vertical text"
+label = "Read vertical text first"
+help = "Use for manga and visual novels with vertical writing."
 
 [[tabs.sections.entries]]
 id = "ocr-scan-alphanumeric"
-label = "Scan letters and numbers"
+label = "Read English letters and numbers"
+help = "Allows English words, romaji, and numbers."
 
 [[tabs.sections.entries]]
 id = "ocr-discard-furigana"
-label = "Remove furigana"
+label = "Ignore furigana"
+help = "Prevents small pronunciation text from becoming separate lookup text."
 
 [[tabs.sections.entries]]
 id = "ocr-per-character"
-label = "Look up each character"
-help = "Available for live lookup only."
+label = "Update for every character"
+help = "Starts a new lookup as the pointer crosses each character. Follow pointer mode only."
 
 [[tabs]]
 id = "anki"
@@ -261,7 +282,8 @@ label = "Connection"
 
 [[tabs.sections.entries]]
 id = "anki-enabled"
-label = "Enable Anki"
+label = "Send cards to Anki"
+help = "Requires Anki and AnkiConnect to be running."
 
 [[tabs.sections.entries]]
 id = "anki-notify-on-add"
@@ -269,20 +291,23 @@ label = "Notify after adding a card"
 
 [[tabs.sections.entries]]
 id = "anki-url"
-label = "AnkiConnect address"
+label = "Connection address"
+help = "Leave unchanged unless AnkiConnect uses another address."
 
 [[tabs.sections.entries]]
 id = "anki-deck"
 label = "Deck"
+help = "New cards are added here."
 
 [[tabs.sections.entries]]
 id = "anki-model"
 label = "Note type"
+help = "Controls which card fields Chibipop fills."
 
 [[tabs.sections.entries]]
 id = "anki-refresh"
-label = "Refresh Anki choices"
-help = "Load decks, note types, and fields from Anki."
+label = "Reload decks and fields"
+help = "Loads the latest decks, note types, and fields from Anki."
 
 [[tabs.sections]]
 id = "anki-card"
@@ -290,12 +315,13 @@ label = "Card content"
 
 [[tabs.sections.entries]]
 id = "anki-include-screenshot"
-label = "Add a screenshot"
+label = "Attach a screenshot to cards"
+help = "Captures the configured area when adding an Anki card."
 
 [[tabs.sections.entries]]
 id = "screenshot-targets"
-label = "Screenshot capture"
-help = "Fixed modes remember the first region or window. Hold Alt to switch."
+label = "Screenshot source"
+help = "Choose options ask each time. Reuse options remember the first choice. Hold Alt to switch."
 
 [[tabs.sections.entries]]
 id = "anki-include-dictionary-name"
@@ -304,43 +330,48 @@ label = "Include the dictionary name"
 [[tabs.sections.entries]]
 id = "anki-first-dictionary-only"
 label = "Use the first dictionary only"
+help = "Ignores lower-priority dictionary entries when building the card."
 
 [[tabs.sections]]
 id = "anki-selection"
-label = "Selection"
+label = "Selecting card text"
 
 [[tabs.sections.entries]]
 id = "anki-selection-buttons"
-label = "Selection buttons"
+label = "Primary click behavior"
+help = "Choose whether the primary mouse button adds to or replaces the current selection."
 
 [[tabs.sections.entries]]
 id = "anki-selection-separator"
-label = "Selection separator"
+label = "Join selected text with"
+help = "Chooses the separator inserted between selected fragments."
 
 [[tabs.sections.entries]]
 id = "anki-triple-click"
-label = "Triple-click behavior"
+label = "Triple-click selects"
+help = "Choose a meaning, a meaning with examples, or a complete line."
 
 [[tabs.sections]]
 id = "anki-sentence"
-label = "Sentence capture"
+label = "Sentence on the card"
 
 [[tabs.sections.entries]]
 id = "anki-sentence-mode"
 label = "Sentence source"
+help = "Chooses which text Chibipop puts into the card's sentence field."
 
 [[tabs.sections.entries]]
 id = "anki-static-overlay"
-label = "Show the sentence area"
-help = "Available when sentence capture uses a fixed area."
+label = "Outline the sentence area"
+help = "Available when the sentence source uses a fixed screen area."
 
 [[tabs.sections]]
 id = "anki-field-map"
-label = "Field mapping"
+label = "Card fields"
 
 [[tabs.sections.entries]]
 id = "anki-field-map"
-label = "Map note fields"
+label = "Choose card fields"
 help = "Choose which result value fills each Anki field."
 
 [[tabs]]
@@ -349,11 +380,11 @@ label = "Extensions"
 
 [[tabs.sections]]
 id = "extension-plugins"
-label = "Plugins"
+label = "Installed extensions"
 
 [[tabs.sections.entries]]
 id = "plugin-list"
-label = "Installed plugins"
+label = "Extensions"
 
 [[tabs]]
 id = "debug"
@@ -366,15 +397,19 @@ label = "Diagnostics"
 [[tabs.sections.entries]]
 id = "debug-capture-outline"
 label = "Outline the captured area"
+help = "Shows the exact screen area used for each lookup."
 
 [[tabs.sections.entries]]
 id = "debug-engine"
-label = "Show the active OCR engine"
+label = "Show the active text reader"
+help = "Displays which reader handled the latest lookup."
 
 [[tabs.sections.entries]]
 id = "debug-adapter"
-label = "Show adapter messages"
+label = "Show extension messages"
+help = "Displays diagnostic messages from the selected text reader."
 
 [[tabs.sections.entries]]
 id = "show-live-logs"
 label = "Show live logs"
+help = "Shows recent Chibipop diagnostic messages in a separate window."
