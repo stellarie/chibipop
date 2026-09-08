@@ -159,7 +159,7 @@ unsafe fn rectangle_array(array: *mut SAFEARRAY) -> Option<PhysRect> {
 fn selection_bounds(values: &[f64]) -> Option<PhysRect> {
     if !values.len().is_multiple_of(4) { return None; }
     let mut bounds = None;
-    for rect in values.chunks_exact(4) {
+    for rect in values.as_chunks::<4>().0 {
         if rect.iter().any(|value| !value.is_finite()) { return None; }
         if rect[2] <= 0.0 || rect[3] <= 0.0 { continue; }
         let (left, top, right, bottom) = (rect[0].floor(), rect[1].floor(),
