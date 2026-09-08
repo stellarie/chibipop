@@ -789,9 +789,9 @@ pub struct AnkiConfig {
     pub static_region_key: String,
     /// The same static-region key on Linux, in portal syntax.
     ///
-    /// Leaves the key unbound, like its Windows twin.
-    /// The portal shortcut list holds only the trigger and Anki add.
-    /// No action binds this chord.
+    /// An empty value leaves the action unbound.
+    /// Linux requests a portal binding where the desktop assigns keys directly.
+    /// Otherwise, settings supplies a native `ctl static-region` bind.
     pub static_region_key_linux: String,
     /// The static region as [x, y, w, h], when the user sets one.
     pub static_region: Option<[i32; 4]>,
@@ -940,9 +940,8 @@ pub struct ScreenshotConfig {
     pub hotkey: String,
     /// The same action on Linux. No value leaves the action unbound.
     ///
-    /// This value is not portal syntax, unlike `anki.add_key_linux`.
-    /// The portal shortcut ID set stays fixed at two, so this action uses the control socket.
-    /// The Linux settings window gives this chord as a copyable compositor binding snippet.
+    /// Linux chords use portal syntax, like `anki.add_key_linux`.
+    /// Linux requests direct portal registration or supplies a native control-socket bind.
     /// The field uses `Option`, like the OCR-clipboard twin.
     /// Absence stays distinct from an empty string.
     pub hotkey_linux: Option<String>,

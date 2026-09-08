@@ -111,7 +111,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   platform is unsupported. A startup diagnostic names the missing capability.
 - Trigger rungs: the GlobalShortcuts portal, then a native compositor keybind into the
   control socket.
-- The portal shortcut identifiers are `trigger`, `anki-add`, and optional `search`, `sentence-search`, and `selected-text`.
+- The portal shortcut identifiers are `trigger`, `anki-add`, `search`, `sentence-search`,
+  `selected-text`, `screenshot`, `ocr-clipboard`, and `static-region`. Register only enabled actions with configured chords.
+- Hyprland uses native compositor bindings because its portal does not assign keys.
+- Apply replaces changed portal registrations without a daemon restart. Retired sessions cannot fire actions.
+- Each settings row reports its confirmed portal binding or copies a native bind with `chibipop ctl`.
 - The system rejects evdev completely, even as a setting.
 - `keyboard_interactivity: none` is a strict rule. The popup never takes focus.
 - The control-socket verb set has one verb for each global action. It has `lookup` for Press
@@ -294,7 +298,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   Users can swap keys in one Apply. An unedited Windows screenshot field remains untouched by a Linux Apply.
   Windows suppresses lower-priority legacy conflicts in memory and reports them without rewriting the file.
   Priority is Back/Escape, lookup, Anki add, static region, screenshot, then OCR clipboard.
-  Linux validates configured chords; compositor bindings remain external configuration.
+  Linux validates configured chords. Apply requests direct portal bindings where supported.
+  Native compositor bindings remain external configuration.
 - Linux settings run as a separate `chibipop settings` process with iced. The daemon
   contains no GUI toolkit.
 - The shared `Config` and `SettingsForm` model lives in core. Both platform bins render
@@ -329,7 +334,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The optional search shortcuts belong to shared `Config` and participate in platform shortcut validation.
 - The tray Search item and configured shortcut use the same platform entry point.
 - Linux Search holds a runtime focus lock while its input window has focus. The daemon suppresses lookup and actions during that interval.
-- Linux offers configured portal chords at startup. Apply rejects events from cleared, disabled, or changed Search registrations until restart.
+- Linux replaces portal shortcuts on reload. Only confirmed IDs from the current session can dispatch actions.
 
 - The system derives the roles of a Dictionary by inspecting its banks. It never derives
   roles from a filename, and a user never declares them.

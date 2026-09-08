@@ -105,10 +105,10 @@ selected_opens_sentence_search = false
 All search shortcuts default to unset. Configure them in **Settings > Configurations**.
 Shortcut validation rejects conflicts before Apply. On Linux, native compositor
 bindings can run `chibipop ctl search` when portal shortcuts are unavailable.
-Windows applies shortcut changes immediately. Linux offers portal chords at
-startup; restart after adding or changing one, then confirm it in the desktop's
-shortcut settings. Apply disables a cleared or changed old portal shortcut
-immediately. Native compositor bindings remain under the compositor's control.
+Windows applies shortcut changes immediately. Linux Apply requests changed portal
+bindings without a daemon restart. The desktop can ask for approval or keep its
+previous key. The **Current key** line shows the confirmed binding.
+Native compositor bindings remain under the compositor's control.
 
 **Look up selected text** reads an application's selection and opens the usual
 dictionary popup. Select a word in an editor or browser, then press the configured
@@ -484,7 +484,7 @@ add_key_linux = "ALT+A"     # Linux, portal syntax
 notify_on_add = true
 sentence_mode = "sentence"  # "sentence" | "line" | "all" | "static"
 static_region_key = ""      # Windows; empty leaves it unbound
-static_region_key_linux = ""    # Linux; a compositor bind, not portal syntax
+static_region_key_linux = ""    # Linux, portal syntax; empty leaves it unbound
 show_static_overlay = true
 include_dictionary_name = true
 first_dict_only = false

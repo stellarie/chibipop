@@ -27,33 +27,21 @@ use std::path::Path;
 /// the lookup-log gate. The window edits them directly on `Config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinuxFields {
-    /// Advisory on the native channel. The portal binding comes later (36).
+    /// Apply offers this chord to the portal or uses it to build a native bind.
     pub trigger_key_linux: String,
     pub add_key_linux: String,
-    /// The static-region chord. This chord works on the native channel
-    /// only (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum). No
-    /// code registers it with the portal, so it exists only as a
-    /// copyable `ctl static-region` bind. An empty value means no
-    /// chord, exactly as `add_key_linux` works.
+    /// An empty chord leaves static-region selection unbound.
+    /// Apply requests direct portal registration where the desktop supports it.
     pub static_region_key_linux: String,
-    /// The chord for the mining screenshot. It works on the native
-    /// channel only, for the same reason as the static-region chord
-    /// above. The type is `Option`, not a `String` with `""` for
-    /// unbound. The config field is `Option<String>`, so absence stays
-    /// typed. The Windows twin carries no such sentinel either. The map
-    /// from an empty text box therefore stays at the UI edge and
-    /// nowhere else.
+    /// Preserve the config's optional chord. Convert an empty text box to
+    /// absence here so portal registration and native snippets share one value.
     pub screenshot_key_linux: Option<String>,
     /// `actions.screenshot.save_dir` exactly as the user typed it. The
     /// daemon resolves the final path (`Paths::screenshots_dir`), not
     /// this window.
     pub screenshot_save_dir: String,
-    /// The OCR-to-clipboard chord. It works on the native channel only,
-    /// for the same reason as the two chords above. It is an `Option`
-    /// for the same reason as `screenshot_key_linux`. The field
-    /// `actions.ocr_clipboard.hotkey_linux` is `Option<String>`, so
-    /// absence stays typed, and the map from an empty text box stays at
-    /// the UI edge.
+    /// Preserve the optional OCR-to-clipboard chord, as for the screenshot chord.
+    /// Convert an empty text box to absence at this UI boundary.
     pub ocr_clipboard_key_linux: Option<String>,
     pub search_key_linux: Option<String>,
     pub sentence_key_linux: Option<String>,

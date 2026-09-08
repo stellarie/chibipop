@@ -47,6 +47,15 @@ impl Published {
         Published { portal: true, bindings }
     }
 
+    /// Return whether the portal reported this identifier at all.
+    ///
+    /// This is separate from [`description`]: a portal can confirm an id with
+    /// no trigger description, so `None` must not make the settings row fall
+    /// back to an unrelated binding.
+    pub fn contains(&self, id: ShortcutId) -> bool {
+        self.bindings.iter().any(|binding| binding.id == id)
+    }
+
     /// Return the key that the settings window shows for one action.
     /// Use the portal's description when it reports one.
     ///
@@ -156,6 +165,8 @@ mod tests {
 
         let read_back = read(&dir).expect("published");
         assert_eq!(published, read_back);
+        assert!(read_back.contains(ShortcutId::Trigger));
+        assert!(read_back.contains(ShortcutId::AnkiAdd));
         assert_eq!(Some("Alt+F".to_string()), read_back.description(ShortcutId::Trigger));
         let _ = std::fs::remove_dir_all(&dir);
     }
