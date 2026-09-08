@@ -45,6 +45,7 @@ impl Fixture {
         config.anki.enabled = false;
         config.actions.enabled = true;
         config.actions.search.selected_hotkey = Some("G".into());
+        config.actions.search.selected_opens_sentence_search = std::env::var("CHIBIPOP_SELECTED_TEST_MODE").as_deref() == Ok("Sentence");
         config.popup.sub_popups = true;
         config.ocr.language = "ja".into();
         config.save(&root.join("chibipop.toml")).unwrap();
@@ -63,7 +64,8 @@ impl Fixture {
             fixture.host = CreateWindowExW(WS_EX_TOPMOST, w!("STATIC"), w!("Chibipop selection regression"),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                 800, 250, 840, 240, None, None, None, None).unwrap();
-            fixture.word = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), w!("猫"),
+            let initial_text = if config.actions.search.selected_opens_sentence_search { w!("猫がいる。") } else { w!("猫") };
+            fixture.word = CreateWindowExW(WINDOW_EX_STYLE(0), w!("EDIT"), initial_text,
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0004),
                 0, 0, 800, 180, Some(fixture.host), None, None, None).unwrap();
             SendMessageW(fixture.word, WM_SETFONT, Some(WPARAM(fixture.font.0 as usize)), Some(LPARAM(1)));
@@ -156,12 +158,13 @@ fn selected_editor_text_opens_dictionary_without_ocr() {
             "Toggle" => TriggerMode::Toggle,
             "Press" => TriggerMode::Press,
             "Live" => TriggerMode::Live,
+            "Sentence" => TriggerMode::HoldKey,
             _ => panic!("unknown selected-text test mode"),
         };
         run_selection(mode);
         return;
     }
-    for mode in ["HoldKey", "Toggle", "Press", "Live"] {
+    for mode in ["HoldKey", "Toggle", "Press", "Live", "Sentence"] {
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "selected_editor_text_opens_dictionary_without_ocr", "--ignored", "--nocapture", "--test-threads=1"])
             .env("CHIBIPOP_SELECTED_TEST_MODE", mode)
@@ -213,6 +216,16 @@ fn run_selection(mode: TriggerMode) {
         SendMessageW(fixture.word, 0x00B1, Some(WPARAM(0)), Some(LPARAM(-1)));
         windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
     };
+    let mut bounds_reader = chibipop_windows::action::selected_text::Reader::new();
+    bounds_reader.request(chibipop::controller::RequestId(1000));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let selection = loop {
+        if let Some((_, selection)) = bounds_reader.poll() { break selection.expect("fixture selection"); }
+        assert!(Instant::now() < deadline, "fixture bounds read timed out");
+        pause(Duration::from_millis(10));
+    };
+    let bounds = selection.bounds.expect("fixture selection must expose screen bounds");
+    assert!(bounds.w > 1 && bounds.h > 1);
     let before = fixture.diagnostics().len();
     // SAFETY: These read-only queries verify the fixture is still the input target.
     unsafe {
@@ -220,6 +233,31 @@ fn run_selection(mode: TriggerMode) {
         assert_eq!(GetFocus(), fixture.word);
     }
     press(VIRTUAL_KEY(0x47));
+    if std::env::var("CHIBIPOP_SELECTED_TEST_MODE").as_deref() == Ok("Sentence") {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let search = loop {
+            if let Some(window) = fixture.owned_windows("ChibipopSearchWindow").first() { break *window; }
+            assert!(Instant::now() < deadline, "sentence search did not open: {}", fixture.logs());
+            pause(Duration::from_millis(30));
+        };
+        // SAFETY: The test discovered its own daemon's search window. WM_GETTEXT
+        // is system-marshalled and the output buffer outlives the bounded call.
+        unsafe {
+            let mut title = [0u16; 64];
+            let length = GetWindowTextW(search, &mut title);
+            assert_eq!(String::from_utf16_lossy(&title[..length as usize]), "Sentence search");
+            let input = GetDlgItem(Some(search), 100).unwrap();
+            let mut text = [0u16; 32];
+            let mut count = 0usize;
+            assert_ne!(SendMessageTimeoutW(input, WM_GETTEXT, WPARAM(text.len()), LPARAM(text.as_mut_ptr() as isize),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, Some(&mut count)).0, 0);
+            assert_eq!(String::from_utf16_lossy(&text[..count]), "猫がいる。");
+        }
+        assert!(fixture.visible_popups().is_empty());
+        assert!(!fixture.diagnostics()[before..].contains("action=request_drill_down"));
+        eprintln!("selected sentence search passed");
+        return;
+    }
     pause(Duration::from_millis(50));
     // SAFETY: The fixture owns this editor and the output buffer.
     unsafe {
@@ -237,6 +275,11 @@ fn run_selection(mode: TriggerMode) {
     }
     pause(Duration::from_millis(350));
     assert_eq!(fixture.visible_popups().len(), 1, "selection popup must persist in {mode:?}");
+    let mut popup_rect = RECT::default();
+    // SAFETY: The popup was discovered in this fixture's live daemon.
+    unsafe { GetWindowRect(fixture.visible_popups()[0], &mut popup_rect).unwrap(); }
+    assert!(popup_rect.bottom <= bounds.y || popup_rect.top >= bounds.y + bounds.h,
+        "popup covered the selected text: {popup_rect:?} vs {bounds:?}");
     let logs = fixture.diagnostics();
     assert!(logs[before..].contains("mode=drill_down"), "must use dictionary-only worker: {logs}");
     assert!(!logs[before..].contains("stage=ocr"), "selection invoked OCR: {logs}");
@@ -256,6 +299,35 @@ fn run_selection(mode: TriggerMode) {
     while fixture.visible_popups().is_empty() {
         assert!(Instant::now() < deadline, "repeat selection popup absent: {}", fixture.logs());
         pause(Duration::from_millis(30));
+    }
+    for (down, up, data) in [(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+        (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+        (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+        (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 1), (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 2)] {
+        let mouse = |flags| INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 {
+            mi: MOUSEINPUT { dwFlags: flags, mouseData: data, ..Default::default() } } };
+        // SAFETY: All input targets this fixture's selected word, outside the
+        // non-overlapping popup. The initialized events remain live during send.
+        unsafe {
+            SetCursorPos(bounds.x + bounds.w / 2, bounds.y + bounds.h / 2).unwrap();
+            assert_eq!(SendInput(&[mouse(down)], std::mem::size_of::<INPUT>() as i32), 1);
+        }
+        pause(Duration::from_millis(200));
+        assert!(fixture.visible_popups().is_empty(), "outside button did not close popup: {down:?}");
+        eprintln!("outside button passed: {down:?}");
+        // SAFETY: Release this test's button before queuing Escape. Both events
+        // precede message dispatch, so an Edit context menu cannot block the test.
+        unsafe { assert_eq!(SendInput(&[mouse(up)], std::mem::size_of::<INPUT>() as i32), 1); }
+        press(VK_ESCAPE);
+        pause(Duration::from_millis(80));
+        // SAFETY: Reset selection in the same owned editor after its outside click.
+        unsafe { let _ = SetFocus(Some(fixture.word)); SendMessageW(fixture.word, 0x00B1, Some(WPARAM(0)), Some(LPARAM(-1))); }
+        press(VIRTUAL_KEY(0x47));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while fixture.visible_popups().is_empty() {
+            assert!(Instant::now() < deadline, "lookup after outside click failed: {}", fixture.logs());
+            pause(Duration::from_millis(30));
+        }
     }
     press(VK_ESCAPE);
     pause(Duration::from_millis(250));

@@ -157,9 +157,9 @@ pub enum Event {
     /// Start a selection read.
     SelectedTextRequested { pos: PhysPoint },
     /// Complete a selection read.
-    SelectedTextReady { id: RequestId, text: Option<String> },
+    SelectedTextReady { id: RequestId, text: Option<String>, bounds: Option<PhysRect> },
     /// A button press outside the popup while it is shown. The platform bin
-    /// sends this only in `Press` mode. It carries no point because the
+    /// watches selected-text popups and `Press` mode. It carries no point because the
     /// Controller needs none. A hit inside the popup is `PointerDown`.
     PointerDownOutside,
     /// A cursor position that passed the movement gate.
@@ -215,6 +215,7 @@ pub enum Command {
     RequestDrillDown { id: RequestId, text: String },
     /// Read application selection.
     ReadSelectedText { id: RequestId },
+    OpenSentenceSearch { text: String },
     /// Send the current settings to the Worker.
     RequestReload { id: RequestId },
     /// Measure and place the popup. Show and paint it.
@@ -268,6 +269,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControllerConfig {
     pub sub_popups: bool,
+    pub selected_text_sentence_search: bool,
     pub trigger_mode: TriggerMode,
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
@@ -304,6 +306,7 @@ impl ControllerConfig {
     pub fn for_search(config: &crate::config::Config) -> Self {
         Self {
             sub_popups: config.popup.sub_popups,
+            selected_text_sentence_search: false,
             trigger_mode: TriggerMode::Press,
             per_character_lookup: false,
             scroll_popup: config.popup.scroll_popup,
@@ -492,7 +495,7 @@ enum RootSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SelectedTextState {
     Capturing { id: RequestId, pos: PhysPoint },
-    LookingUp { id: RequestId, pos: PhysPoint, text: String },
+    LookingUp { id: RequestId, anchor: PhysRect, text: String },
 }
 
 /// State for one shown popup.
@@ -639,6 +642,15 @@ impl Controller {
             show_back: !s.history.is_empty() || !self.parents.is_empty(),
             selection: &s.selection,
         })
+    }
+
+    pub fn selected_text_popup(&self) -> bool {
+        self.surface.as_ref().is_some_and(|surface| surface.source == RootSource::SelectedText)
+    }
+
+    pub fn watches_outside_clicks(&self) -> bool {
+        self.selected_text_active()
+            || (self.cfg.trigger_mode == TriggerMode::Press && self.surface.is_some())
     }
 
     pub fn popup_depth(&self) -> usize {
@@ -870,7 +882,7 @@ impl Controller {
             Event::TriggerUp => self.trigger_up(),
             Event::TriggerPressed { pos } => self.trigger_pressed(pos),
             Event::SelectedTextRequested { pos } => self.selected_text_requested(pos),
-            Event::SelectedTextReady { id, text } => self.selected_text_ready(id, text),
+            Event::SelectedTextReady { id, text, bounds } => self.selected_text_ready(id, text, bounds),
             Event::PointerDownOutside => self.pointer_down_outside(),
             Event::CursorMoved { pos } => self.cursor_moved(pos),
             Event::DwellElapsed => self.dwell(),
@@ -1362,6 +1374,7 @@ impl Controller {
         &mut self,
         id: RequestId,
         text: Option<String>,
+        bounds: Option<PhysRect>,
     ) -> Vec<Command> {
         let pos = match self.selected_text.as_ref() {
             Some(SelectedTextState::Capturing { id: pending, pos })
@@ -1376,9 +1389,17 @@ impl Controller {
             return self.selected_text_unavailable();
         }
         let text = text.to_string();
+        if self.cfg.selected_text_sentence_search {
+            self.next_lookup_request();
+            let mut commands = self.hide();
+            commands.push(Command::OpenSentenceSearch { text });
+            return commands;
+        }
+        let anchor = bounds.filter(|rect| rect.w > 0 && rect.h > 0)
+            .unwrap_or(PhysRect { x: pos.x, y: pos.y.saturating_sub(24), w: 1, h: 48 });
         self.selected_text = Some(SelectedTextState::LookingUp {
             id,
-            pos,
+            anchor,
             text: text.clone(),
         });
         vec![Command::RequestDrillDown { id, text }]
@@ -1398,7 +1419,7 @@ impl Controller {
     /// A click outside the popup dismisses it. A lookup still in flight
     /// must not show it again, so the request id moves on first.
     fn pointer_down_outside(&mut self) -> Vec<Command> {
-        if self.surface.is_none() {
+        if self.surface.is_none() && self.selected_text.is_none() {
             return Vec::new();
         }
         self.next_lookup_request();
@@ -1589,7 +1610,7 @@ impl Controller {
     }
 
     fn selected_text_lookup_result(&mut self, outcome: LookupOutcome) -> Vec<Command> {
-        let Some(SelectedTextState::LookingUp { pos, text, .. }) = self.selected_text.take()
+        let Some(SelectedTextState::LookingUp { anchor, text, .. }) = self.selected_text.take()
         else {
             return Vec::new();
         };
@@ -1608,7 +1629,7 @@ impl Controller {
                     .and_then(|top| OcrSurface::new(&text, top.match_len));
                 self.ready(
                     *presentation,
-                    PhysRect { x: pos.x, y: pos.y, w: 1, h: 1 },
+                    anchor,
                     Orientation::Horizontal,
                     None,
                     Vec::new(),
@@ -2045,7 +2066,7 @@ mod tests {
 
     fn shown_selected(c: &mut Controller, text: &str) {
         let id = selected_text_request(c, PhysPoint { x: 40, y: 50 });
-        c.handle(Event::SelectedTextReady { id, text: Some(text.into()) });
+        c.handle(Event::SelectedTextReady { id, text: Some(text.into()), bounds: None });
         c.handle(Event::LookupResult {
             id,
             outcome: LookupOutcome::DrillDown(Box::new(presentation_of(text))),
@@ -2321,6 +2342,46 @@ mod tests {
     }
 
     #[test]
+    fn selected_text_bounds_become_the_popup_anchor() {
+        let mut c = Controller::new(cfg());
+        let bounds = PhysRect { x: 300, y: 200, w: 80, h: 32 };
+        let id = selected_text_request(&mut c, PhysPoint { x: 900, y: 800 });
+        c.handle(Event::SelectedTextReady { id, text: Some("猫".into()), bounds: Some(bounds) });
+        let commands = c.handle(Event::LookupResult { id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))) });
+        assert!(commands.iter().any(|command| matches!(command, Command::ShowPopup { anchor, .. } if *anchor == bounds)));
+    }
+
+    #[test]
+    fn selected_sentence_search_bypasses_lookup_and_rejects_stale_capture() {
+        let mut config = cfg();
+        config.selected_text_sentence_search = true;
+        let mut c = Controller::new(config);
+        let old = selected_text_request(&mut c, PhysPoint { x: 0, y: 0 });
+        let id = selected_text_request(&mut c, PhysPoint { x: 0, y: 0 });
+        assert!(c.handle(Event::SelectedTextReady { id: old, text: Some("古い".into()), bounds: None }).is_empty());
+        let commands = c.handle(Event::SelectedTextReady { id, text: Some("猫がいる。".into()), bounds: None });
+        assert!(commands.contains(&Command::OpenSentenceSearch { text: "猫がいる。".into() }));
+        assert!(!commands.iter().any(|command| matches!(command, Command::RequestDrillDown { .. } | Command::RequestLookup { .. })));
+        assert!(!c.watches_outside_clicks());
+    }
+
+    #[test]
+    fn selected_popup_outside_click_dismisses_every_mode_and_pending_reply() {
+        for mode in [TriggerMode::Live, TriggerMode::HoldKey, TriggerMode::Toggle, TriggerMode::Press] {
+            let mut config = cfg(); config.trigger_mode = mode;
+            let mut c = Controller::new(config);
+            shown_selected(&mut c, "猫");
+            assert!(c.watches_outside_clicks());
+            assert!(c.handle(Event::PointerDownOutside).contains(&Command::HidePopup));
+            assert!(!c.is_shown());
+            let id = selected_text_request(&mut c, PhysPoint { x: 0, y: 0 });
+            c.handle(Event::PointerDownOutside);
+            assert!(c.handle(Event::SelectedTextReady { id, text: Some("遅い".into()), bounds: None }).is_empty());
+        }
+    }
+
+    #[test]
     fn selected_text_uses_dictionary_lookup_and_preserves_sentence_context() {
         let mut config = cfg();
         config.anki_enabled = true;
@@ -2332,8 +2393,7 @@ mod tests {
             vec![Command::RequestDrillDown { id, text: "日本語の文".into() }],
             c.handle(Event::SelectedTextReady {
                 id,
-                text: Some("  日本語の文  ".into()),
-            })
+                text: Some("  日本語の文  ".into()), bounds: None })
         );
         let out = c.handle(Event::LookupResult {
             id,
@@ -2371,19 +2431,16 @@ mod tests {
         let current = selected_text_request(&mut c, pos);
         assert!(c.handle(Event::SelectedTextReady {
             id: old,
-            text: Some("古い".into()),
-        }).is_empty());
+            text: Some("古い".into()), bounds: None }).is_empty());
         assert!(c.handle(Event::SelectedTextReady {
             id: current,
-            text: Some("  ".into()),
-        }).is_empty());
+            text: Some("  ".into()), bounds: None }).is_empty());
         let absent = selected_text_request(&mut c, pos);
-        assert!(c.handle(Event::SelectedTextReady { id: absent, text: None }).is_empty());
+        assert!(c.handle(Event::SelectedTextReady { id: absent, text: None, bounds: None }).is_empty());
         let oversized = selected_text_request(&mut c, pos);
         assert!(c.handle(Event::SelectedTextReady {
             id: oversized,
-            text: Some("a".repeat(MAX_SELECTED_TEXT_BYTES + 1)),
-        }).is_empty());
+            text: Some("a".repeat(MAX_SELECTED_TEXT_BYTES + 1)), bounds: None }).is_empty());
         assert!(!c.is_shown());
     }
 
@@ -2400,7 +2457,7 @@ mod tests {
             let mut c = Controller::new(config);
             c.handle(Event::TriggerDown);
             let id = selected_text_request(&mut c, PhysPoint { x: 40, y: 50 });
-            c.handle(Event::SelectedTextReady { id, text: Some("猫".into()) });
+            c.handle(Event::SelectedTextReady { id, text: Some("猫".into()), bounds: None });
             c.handle(Event::LookupResult {
                 id,
                 outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))),
@@ -2456,7 +2513,7 @@ mod tests {
             let mut c = Controller::new(cfg());
             shown_selected(&mut c, "猫");
             let id = selected_text_request(&mut c, PhysPoint { x: 60, y: 70 });
-            let commands = c.handle(Event::SelectedTextReady { id, text });
+            let commands = c.handle(Event::SelectedTextReady { id, text, bounds: None });
             assert!(commands.contains(&Command::HidePopup));
             assert!(!c.is_shown());
         }
@@ -2470,14 +2527,12 @@ mod tests {
         c.handle(Event::DismissRequested);
         assert!(c.handle(Event::SelectedTextReady {
             id: dismissed,
-            text: Some("古い".into()),
-        }).is_empty());
+            text: Some("古い".into()), bounds: None }).is_empty());
 
         let dismissed_lookup = selected_text_request(&mut c, pos);
         c.handle(Event::SelectedTextReady {
             id: dismissed_lookup,
-            text: Some("古い".into()),
-        });
+            text: Some("古い".into()), bounds: None });
         c.handle(Event::DismissRequested);
         assert!(c.handle(Event::LookupResult {
             id: dismissed_lookup,
@@ -2487,8 +2542,7 @@ mod tests {
         let stale_lookup = selected_text_request(&mut c, pos);
         c.handle(Event::SelectedTextReady {
             id: stale_lookup,
-            text: Some("古い".into()),
-        });
+            text: Some("古い".into()), bounds: None });
         selected_text_request(&mut c, pos);
         assert!(c.handle(Event::LookupResult {
             id: stale_lookup,
@@ -2498,8 +2552,7 @@ mod tests {
         let stale_after_reload = selected_text_request(&mut c, pos);
         c.handle(Event::SelectedTextReady {
             id: stale_after_reload,
-            text: Some("古い".into()),
-        });
+            text: Some("古い".into()), bounds: None });
         c.handle(Event::ConfigReloaded(Box::new(cfg())));
         assert!(c.handle(Event::LookupResult {
             id: stale_after_reload,
@@ -2511,6 +2564,7 @@ mod tests {
     fn cfg() -> ControllerConfig {
         ControllerConfig {
             sub_popups: true,
+            selected_text_sentence_search: false,
             sentence_probe: false,
             trigger_mode: TriggerMode::Live,
             per_character_lookup: false,

@@ -892,6 +892,7 @@ pub struct SearchConfig {
     pub sentence_hotkey: Option<String>,
     pub sentence_hotkey_linux: Option<String>,
     pub selected_hotkey: Option<String>,
+    pub selected_opens_sentence_search: bool,
     pub selected_hotkey_linux: Option<String>,
 }
 
@@ -2964,6 +2965,7 @@ mod tests {
     #[test]
     fn selected_text_hotkeys_round_trip() {
         let mut cfg = Config::default();
+        cfg.actions.search.selected_opens_sentence_search = true;
         cfg.actions.search.selected_hotkey = Some("ctrl+shift+l".into());
         cfg.actions.search.selected_hotkey_linux = Some("CTRL+SHIFT+L".into());
         let text = toml::to_string(&cfg).unwrap();

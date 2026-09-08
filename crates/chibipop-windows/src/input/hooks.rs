@@ -512,9 +512,9 @@ unsafe fn record_pointer_event(button: PointerButton, down: bool, lparam: LPARAM
     queue_pointer_event(PointerEvent { button, down, point });
 }
 
-/// Records one unarmed button press in screen coordinates.
+/// The pump checks actual rectangles because arming can lag cursor motion.
 fn record_outside_click(point: PhysPoint) {
-    if !CLICK_ARMED.load(Ordering::SeqCst) && OUTSIDE_WATCH.load(Ordering::SeqCst) {
+    if OUTSIDE_WATCH.load(Ordering::SeqCst) {
         PENDING_OUTSIDE.store(pack(point), Ordering::SeqCst);
     }
 }
@@ -590,6 +590,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     record_pointer_event(PointerButton::Right, false, lparam)
                 });
                 return LRESULT(1);
+            }
+            WM_MBUTTONDOWN | WM_XBUTTONDOWN if OUTSIDE_WATCH.load(Ordering::SeqCst) => {
+                let _ = catch_unwind(|| unsafe { record_outside_click_from_lparam(lparam) });
             }
             WM_MOUSEWHEEL if SCROLL_ARMED.load(Ordering::SeqCst) => {
                 let _ = catch_unwind(|| unsafe { record_wheel(lparam) });

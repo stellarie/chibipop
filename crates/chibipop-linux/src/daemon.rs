@@ -1824,7 +1824,7 @@ impl App {
         self.pump.remove(timer.token);
         if !selected_text_on_time(timer.id, timer.deadline, result.id, Instant::now()) {
             self.log.diag("selected-text: PRIMARY read exceeded two seconds");
-            self.feed(Event::SelectedTextReady { id: result.id, text: None });
+            self.feed(Event::SelectedTextReady { id: result.id, text: None, bounds: None });
             return;
         }
         match result.text.as_ref() {
@@ -1834,7 +1834,7 @@ impl App {
             )),
             None => self.log.diag("selected-text: PRIMARY read returned no usable text"),
         }
-        self.feed(Event::SelectedTextReady { id: result.id, text: result.text });
+        self.feed(Event::SelectedTextReady { id: result.id, text: result.text, bounds: None });
     }
 
     fn arm_selected_text_timer(&mut self, id: RequestId) -> bool {
@@ -1863,7 +1863,7 @@ impl App {
         if self.selected_text_timer.as_ref().is_some_and(|timer| timer.id == id) {
             self.selected_text_timer = None;
             self.log.diag("selected-text: PRIMARY read timed out after two seconds");
-            self.feed(Event::SelectedTextReady { id, text: None });
+            self.feed(Event::SelectedTextReady { id, text: None, bounds: None });
         }
         TimeoutAction::Drop
     }
@@ -2663,9 +2663,10 @@ impl App {
             Command::RequestDrillDown { id, text } => {
                 self.send_trigger(TriggerKind::DrillDown(text), id);
             }
+            Command::OpenSentenceSearch { text } => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text)),
             Command::ReadSelectedText { id } => {
                 if !self.arm_selected_text_timer(id) {
-                    self.feed(Event::SelectedTextReady { id, text: None });
+                    self.feed(Event::SelectedTextReady { id, text: None, bounds: None });
                     return;
                 }
                 let read = self.clipboard.as_ref().and_then(|board| {
@@ -2850,6 +2851,7 @@ impl App {
             Command::ReadSelectedText { id } => {
                 format!("action=read_selected_text id={}", id.0)
             }
+            Command::OpenSentenceSearch { text } => format!("action=open_sentence_search text_len={}", text.len()),
             Command::RequestReload { id } => format!("action=request_reload id={}", id.0),
             Command::ShowPopup { presentation, anchor, scroll, show_back } => format!(
                 "action=show_popup anchor=({}, {}, {}x{}) scroll={} show_back={} top={} cards={} collapsed={} sentence={} surface={}",
@@ -3151,7 +3153,7 @@ impl App {
             content_h: placed.content_h,
             view_h: placed.view_h,
         });
-        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+        if self.controller.watches_outside_clicks() {
             let screens = self.screens();
             let rects = self.controller.popup_rects();
             if let Some(catcher) = self.catcher.as_mut() {
@@ -3445,7 +3447,7 @@ impl App {
                     if let Some(layer) = layer {
                         catcher.set_layer(layer);
                     }
-                    if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
+                    if self.controller.watches_outside_clicks() {
                         if let Some(rect) = shown {
                             catcher.show(&screens, &[rect]);
                         }
@@ -3718,6 +3720,7 @@ fn search_blocks_event(event: &Event) -> bool {
 fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
     ControllerConfig {
         sub_popups: config.popup.sub_popups,
+        selected_text_sentence_search: config.actions.search.selected_opens_sentence_search,
         trigger_mode: config.trigger.mode,
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,

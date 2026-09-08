@@ -395,6 +395,7 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.actions.search.hotkey = form.cfg.actions.search.hotkey.clone();
     out.actions.search.sentence_hotkey = form.cfg.actions.search.sentence_hotkey.clone();
     out.actions.search.selected_hotkey = form.cfg.actions.search.selected_hotkey.clone();
+    out.actions.search.selected_opens_sentence_search = form.cfg.actions.search.selected_opens_sentence_search;
     out.trigger = form.cfg.trigger.clone();
     out.popup = form.cfg.popup.clone();
     out.ocr = form.cfg.ocr.clone();

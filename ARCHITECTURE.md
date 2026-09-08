@@ -129,6 +129,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Bins read selections. The Controller rejects stale completions and uses the existing dictionary-only Worker path.
 - A selected-text root stays open independently of OCR trigger state. It retains selection text for the sentence field without OCR probing.
 - Windows uses UI Automation on an MTA thread without clipboard reads or writes. Unsupported controls return no text.
+- Windows selection results include visible text bounds. Selected-text popup height is capped to fit above or below those bounds.
+- Selected-text popups use outside-click dismissal in every trigger mode. The Windows observer includes middle and extra buttons.
+- `actions.search.selected_opens_sentence_search` routes validated selected text to Sentence search instead of dictionary-only popup lookup.
+- Linux PRIMARY supplies no word geometry. Its cursor-based placement cannot guarantee avoidance of the selected word.
 - Linux reads PRIMARY through data control on explicit request. Clipboard selection offers are never read.
 - PRIMARY lifetime belongs to its source application. An unchanged offer can be read again; a changed in-flight offer invalidates completion.
 - Native selection reads are bounded to two seconds and 65,536 UTF-8 bytes. Readers do not cache decoded selections.
@@ -154,7 +158,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `Event::PopupPlaced { rect }`.
 - Comments in `crates/chibipop-linux/src/popup/surface.rs` and `popup/text.rs` describe
   the Wayland surface protocol rules.
-- A click catcher exists only in Press mode while a popup is placed. The daemon gives every
+- A click catcher exists in Press mode and for selected-text popups while a popup is placed. The daemon gives every
   output a transparent full-output layer surface at the popup layer. Its input region covers
   the output except the popup rectangle. The catcher is never unmapped. Hide clears its input
   region, and a button press on the catcher hides the popup. The catcher swallows that click

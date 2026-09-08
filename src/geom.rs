@@ -164,6 +164,16 @@ pub fn inset(rect: PhysRect, thickness: i32) -> Option<PhysRect> {
     Some(PhysRect { x: rect.x + thickness, y: rect.y + thickness, w, h })
 }
 
+/// Limit selected-text popups to one side of their source instead of clamping
+/// a tall panel over the selected word. Zero means no non-overlapping space.
+pub fn popup_height_outside(anchor: PhysRect, monitor: PhysRect, gap: i32) -> i32 {
+    let top = i64::from(monitor.y);
+    let bottom = top + i64::from(monitor.h.max(0));
+    let above = i64::from(anchor.y).min(bottom) - top - i64::from(gap.max(0));
+    let below = bottom - (i64::from(anchor.y) + i64::from(anchor.h)).max(top) - i64::from(gap.max(0));
+    above.max(below).clamp(0, i64::from(monitor.h.max(0))) as i32
+}
+
 /// Place the popup so it does not cover `anchor`.
 pub fn place_popup(anchor: PhysRect, size: (i32, i32), monitor: PhysRect, gap: i32) -> PhysRect {
     let (w, h) = size;
@@ -191,6 +201,19 @@ mod tests {
     fn p(x: i32, y: i32) -> PhysPoint { PhysPoint { x, y } }
     fn sr(x: i32, y: i32, w: i32, h: i32, kind: ScanKind) -> ScanRect {
         ScanRect { rect: PhysRect { x, y, w, h }, kind }
+    }
+
+    #[test]
+    fn selected_popup_height_preserves_the_source_at_every_vertical_position() {
+        let monitor = r(-1920, -100, 1920, 1080);
+        for y in -100..950 {
+            let anchor = r(-900, y, 80, 30);
+            let height = popup_height_outside(anchor, monitor, 12).min(900);
+            let placed = place_popup(anchor, (450, height), monitor, 12);
+            assert!(placed.y + placed.h <= anchor.y || placed.y >= anchor.y + anchor.h);
+            assert!(placed.y >= monitor.y && placed.y + placed.h <= monitor.y + monitor.h);
+        }
+        assert_eq!(popup_height_outside(monitor, monitor, 12), 0);
     }
 
     #[test]

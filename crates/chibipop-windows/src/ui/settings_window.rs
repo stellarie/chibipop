@@ -244,6 +244,7 @@ const ID_SEARCH_KEY: i32 = 195;
 const ID_SENTENCE_SEARCH_KEY: i32 = 196;
 const ID_SELECTED_TEXT_KEY: i32 = 94;
 const ID_SELECTED_TEXT_KEY_CLEAR: i32 = 95;
+const ID_SELECTED_TEXT_SENTENCE_SEARCH: i32 = 96;
 const ID_SEARCH_KEY_CLEAR: i32 = 197;
 const ID_SENTENCE_SEARCH_KEY_CLEAR: i32 = 198;
 const ID_OPEN_DICTIONARY_SEARCH: i32 = 199;
@@ -2916,15 +2917,33 @@ fn search_chord(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool) -> Strin
     }
     parts.push(match vk {
         0x30..=0x39 | 0x41..=0x5A => char::from_u32(u32::from(vk)).unwrap_or('?').to_string(),
+        0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
         _ => stored_trigger_key(vk),
     });
     parts.join("+")
 }
 
+fn display_search_key(key: &str) -> String {
+    key.split('+').map(|part| {
+        let part = part.trim();
+        let lower = part.to_ascii_lowercase();
+        if lower.strip_prefix('f').and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (1..=24).contains(&number)) {
+            return lower.to_ascii_uppercase();
+        }
+        match lower.as_str() {
+            "ctrl" | "control" => "Ctrl".into(), "shift" => "Shift".into(),
+            "alt" => "Alt".into(), "win" | "super" => "Win".into(),
+            _ if part.len() == 1 => part.to_ascii_uppercase(), _ => part.to_string(),
+        }
+    }).collect::<Vec<_>>().join("+")
+}
+
 fn set_search_key(hwnd: HWND, id: i32, key: String) {
     let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
         ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
-    let text = if key.is_empty() { "Not set" } else { &key };
+    let display = display_search_key(&key);
+    let text = if key.is_empty() { "Not set" } else { &display };
     // SAFETY: The target is a live capture button; the string is copied synchronously.
     unsafe {
         if let Ok(button) = dlg_item(hwnd, id) {
@@ -4872,7 +4891,8 @@ impl SettingsWindow {
                     SettingId::SelectedTextKey => (ID_SELECTED_TEXT_KEY, ID_SELECTED_TEXT_KEY_CLEAR, form.cfg.actions.search.selected_hotkey.as_deref()),
                     _ => (ID_SENTENCE_SEARCH_KEY, ID_SENTENCE_SEARCH_KEY_CLEAR, form.cfg.actions.search.sentence_hotkey.as_deref()),
                 };
-                let name = value.filter(|key| !key.is_empty()).unwrap_or("Not set");
+                let display = value.filter(|key| !key.is_empty()).map(display_search_key);
+                let name = display.as_deref().unwrap_or("Not set");
                 let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
                     ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
                 cell.with(|cell| *cell.borrow_mut() = None);
@@ -4892,6 +4912,9 @@ impl SettingsWindow {
                 controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
                     FIELD_W, ROW_H, id, f)?);
                 y += ROW_H + ROW_GAP;
+            }
+            SettingId::SelectedTextSentenceSearch => {
+                checkbox!(ID_SELECTED_TEXT_SENTENCE_SEARCH, form.cfg.actions.search.selected_opens_sentence_search);
             }
             SettingId::OcrSentenceSearch => {
                 checkbox!(ID_OCR_SENTENCE_SEARCH, form.cfg.actions.ocr_clipboard.as_ref()
@@ -5891,6 +5914,7 @@ impl SettingsWindow {
                 template.cfg.actions.search.sentence_hotkey.as_deref());
             form.cfg.actions.search.selected_hotkey = resolved_search_key(h, &SELECTED_TEXT_CAPTURED,
                 template.cfg.actions.search.selected_hotkey.as_deref());
+            form.cfg.actions.search.selected_opens_sentence_search = checked(ID_SELECTED_TEXT_SENTENCE_SEARCH);
             let open_sentence_search = checked(ID_OCR_SENTENCE_SEARCH);
             if let Some(action) = &mut form.cfg.actions.ocr_clipboard {
                 action.open_sentence_search = open_sentence_search;
@@ -6110,6 +6134,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_shortcut_display_and_sentence_checkbox_round_trip() {
+        assert_eq!(display_search_key("f7"), "F7");
+        assert_eq!(display_search_key("ctrl+f7"), "Ctrl+F7");
+        assert_eq!(search_chord(0x76, false, false, false, false), "F7");
+        let mut cfg = crate::config::Config::default();
+        cfg.actions.search.selected_hotkey = Some("f7".into());
+        cfg.actions.search.selected_opens_sentence_search = true;
+        let form = crate::settings::from_config(&cfg, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The dialog owns these controls for the test's lifetime.
+        unsafe { assert_eq!(window_text(dlg_item(window.hwnd(), ID_SELECTED_TEXT_KEY).unwrap()), "F7"); }
+        let edited = window.read(&form);
+        assert!(crate::settings::apply_to(&edited, &cfg).actions.search.selected_opens_sentence_search);
+    }
+
+    #[test]
     fn pure_search_chords_round_trip_and_preserve_unedited_values() {
         let chord = search_chord(0x46, true, true, false, false);
         assert_eq!(chord, "Ctrl+Shift+F");
@@ -6313,7 +6353,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(7, window.tab_count());
-        assert_eq!(Some("Shortcuts"), window.tab_label(0));
+        assert_eq!(Some("Configurations"), window.tab_label(0));
         assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
         assert_eq!(Some(0), window.field_map_tab());
         assert!(window.tab_needs_anki_detection(0));
