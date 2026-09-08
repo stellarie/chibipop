@@ -2545,9 +2545,9 @@ mod tests {
         );
         let _ = update(
             &mut app,
-            Message::SelectionSeparatorPicked("List items".to_string()),
+            Message::SelectionSeparatorPicked("Separate list items".to_string()),
         );
-        let _ = update(&mut app, Message::TripleClickPicked("Line".to_string()));
+        let _ = update(&mut app, Message::TripleClickPicked("Complete line".to_string()));
         let out = chibipop::settings::apply_to(&app.form, &cfg);
         assert_eq!(
             chibipop::config::SelectionButtons::PrimaryReplacing,
