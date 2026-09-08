@@ -263,7 +263,8 @@ impl SearchWindow {
         self.state.submit.set(true);
         // SAFETY: The HWNDs remain owned by this thread until Drop.
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
+            let command = if IsIconic(self.hwnd).as_bool() { SW_RESTORE } else { SW_SHOW };
+            let _ = ShowWindow(self.hwnd, command);
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.state.input.get()));
         }
@@ -1165,6 +1166,25 @@ mod tests {
         }
         assert_eq!((start, end), (0, 1)); assert!(!window.is_visible());
         window.show(); assert!(window.is_visible());
+        let hwnd = window.hwnd;
+        let mut before = RECT::default();
+        let mut after = RECT::default();
+        // SAFETY: This test owns the window and both rectangle output buffers.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            GetWindowRect(hwnd, &mut before).unwrap();
+        }
+        window.switch_mode(SearchMode::Sentence, Some("犬がいる。"));
+        wait(&mut window, "click a word");
+        assert_eq!(window.hwnd, hwnd);
+        assert_eq!(read_text(window.state.input.get()), "犬がいる。");
+        assert_eq!(read_text(window.state.sentence.get()), "犬がいる。");
+        // SAFETY: The same live window owns its unchanged maximized placement.
+        unsafe {
+            assert!(IsZoomed(hwnd).as_bool());
+            GetWindowRect(hwnd, &mut after).unwrap();
+        }
+        assert_eq!(before, after);
         drop(window);
     }
 

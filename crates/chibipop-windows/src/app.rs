@@ -3883,7 +3883,6 @@ fn open_search_window_mode(
     if let Some(window) = window {
         window.update_config(config);
         window.switch_mode(mode, text);
-        window.show();
     } else {
         match crate::ui::search_window::SearchWindow::open_mode(database, rules, config, mode, text) {
             Ok(opened) => *window = Some(opened),
