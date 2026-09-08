@@ -97,6 +97,8 @@ hotkey = "Ctrl+Shift+F"
 hotkey_linux = "CTRL+SHIFT+F"
 sentence_hotkey = "Ctrl+Shift+G"
 sentence_hotkey_linux = "CTRL+SHIFT+G"
+selected_hotkey = "Ctrl+Shift+D"
+selected_hotkey_linux = "CTRL+SHIFT+D"
 ```
 
 All search shortcuts default to unset. Configure them in **Settings > Shortcuts**.
@@ -106,6 +108,27 @@ Windows applies shortcut changes immediately. Linux offers portal chords at
 startup; restart after adding or changing one, then confirm it in the desktop's
 shortcut settings. Apply disables a cleared or changed old portal shortcut
 immediately. Native compositor bindings remain under the compositor's control.
+
+**Look up selected text** reads an application's selection and opens the usual
+dictionary popup. Select a word in an editor or browser, then press the configured
+shortcut. Browser selections need no extension. This action bypasses OCR and
+leaves clipboard contents unchanged. The shortcut defaults to unset.
+
+The popup uses the dictionary lookup engine, including conjugated forms and
+matching prefixes. It stays open without holding the OCR trigger. Escape closes
+it. Empty, oversized, or unsupported selections produce no lookup.
+
+Windows requires a control that exposes its selected text through UI Automation.
+Password controls are excluded. Chibipop does not send copy keys or use old
+clipboard text when an application lacks this support.
+
+Linux reads the native PRIMARY selection through ext-data-control or wlr-data-control
+version 2. Bind `chibipop ctl selected-text` when using compositor shortcuts.
+The source application controls PRIMARY's lifetime. It can retain that selection
+after visible highlighting disappears or focus changes. Applications that do not
+publish PRIMARY, and compositors without this capability, cannot supply text.
+Chibipop never falls back to the regular clipboard. Reads have a two-second
+deadline and a limit of 65,536 UTF-8 bytes.
 
 `popup.sub_popups` defaults to `true`. **Open definitions when hovering over
 popup text** controls this option in **Settings > Popup**. Turning it off
@@ -134,7 +157,8 @@ settings process, control-socket verbs, and three diagnostics.
 **The `ctl` verb set is fixed**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
-`ocr-clipboard`, `static-region`. One verb per global action, never a
+`ocr-clipboard`, `static-region`, `search`, `sentence-search`, `selected-text`.
+One verb per global action, never a
 scripting API. Compositor binds on the **Shortcuts** tab name the running
 binary's full path. See [Linux settings](LINUX.md#settings-window) for tab navigation.
 

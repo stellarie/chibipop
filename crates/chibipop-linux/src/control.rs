@@ -47,12 +47,12 @@ pub enum Verb {
     OcrClipboard,
     /// Draw the box that [`chibipop::config::SentenceMode::Static`] reads for
     /// the Anki sentence. This action uses only the native channel. The portal
-    /// identifier set has exactly two members, so this verb is the action's only
-    /// global channel.
+    /// identifier set excludes it, so this verb is the action's only global channel.
     StaticRegion,
+    SelectedText,
 }
 
-pub const VERBS: [Verb; 11] = [
+pub const VERBS: [Verb; 12] = [
     Verb::Reload,
     Verb::TriggerDown,
     Verb::TriggerUp,
@@ -64,6 +64,7 @@ pub const VERBS: [Verb; 11] = [
     Verb::StaticRegion,
     Verb::Search,
     Verb::SentenceSearch,
+    Verb::SelectedText,
 ];
 
 impl Verb {
@@ -80,6 +81,7 @@ impl Verb {
             Verb::Screenshot => "screenshot",
             Verb::OcrClipboard => "ocr-clipboard",
             Verb::StaticRegion => "static-region",
+            Verb::SelectedText => "selected-text",
         }
     }
 
@@ -146,6 +148,7 @@ impl StubState {
             // cancel, a drag below the threshold, or no layer shell can leave no region.
             // This line reports the request, not the result.
             Verb::StaticRegion => "picking the static sentence region".to_string(),
+            Verb::SelectedText => "reading selected text for lookup".to_string(),
         }
     }
 }
@@ -278,7 +281,7 @@ mod tests {
     fn the_wire_names_are_the_forever_contract() {
         assert_eq!(
             "reload, trigger-down, trigger-up, toggle, lookup, anki-add, screenshot, \
-             ocr-clipboard, static-region, search, sentence-search",
+             ocr-clipboard, static-region, search, sentence-search, selected-text",
             verb_list()
         );
     }
@@ -297,7 +300,7 @@ mod tests {
     #[test]
     fn the_static_region_verb_is_native_channel_only() {
         use crate::shortcuts::ShortcutId;
-        assert_eq!([ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search, ShortcutId::SentenceSearch], ShortcutId::ALL);
+        assert_eq!([ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search, ShortcutId::SentenceSearch, ShortcutId::SelectedText], ShortcutId::ALL);
         assert!(
             !crate::shortcuts::ShortcutId::ALL
                 .iter()
@@ -314,6 +317,14 @@ mod tests {
                 .iter()
                 .any(|id| id.as_str() == Verb::OcrClipboard.as_str()),
             "no portal id may name the OCR-to-clipboard action"
+        );
+    }
+
+    #[test]
+    fn selected_text_shares_its_portal_id() {
+        assert_eq!(
+            crate::shortcuts::ShortcutId::SelectedText.as_str(),
+            Verb::SelectedText.as_str()
         );
     }
 

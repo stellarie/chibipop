@@ -1533,6 +1533,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
     sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
     sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
+    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
     Hooks::set_mode(live.trigger_mode);
     Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
     Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
@@ -1709,6 +1710,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
     // Drive one Event through the state machine and handle every Command.
     // Handle `ShowPopup` here so `PopupPlaced` or `PopupPlaceFailed` enters the queue at once.
+    let mut selected_text = crate::action::selected_text::Reader::new();
+
     macro_rules! drive {
         ($event:expr) => {
             drive(
@@ -1729,6 +1732,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     overlay: overlay.as_ref(),
                     anki_button: anki_button.as_ref(),
                     trigger_tx: worker.trigger(),
+                    selected_text: &mut selected_text,
                     dicts: &dicts,
                     anki_tx: &anki_tx,
                     add_tx: &add_tx,
@@ -1863,6 +1867,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
+            if Hooks::take_action_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT) {
+                drive!(Event::SelectedTextRequested { pos: cursor_now() });
+            }
+            if let Some((id, text)) = selected_text.poll() {
+                if text.is_none() { eprintln!("chibipop: selected text unavailable, empty, or timed out"); }
+                drive!(Event::SelectedTextReady { id, text });
+            }
             if Hooks::take_action_hotkey(3) {
                 capture_guard_prev_visible.set(false);
                 overlay_prev_visible.set(false);
@@ -2999,6 +3010,7 @@ struct Exec<'a> {
     overlay: Option<&'a Overlay>,
     anki_button: Option<&'a AnkiButton>,
     trigger_tx: &'a mpsc::Sender<Trigger>,
+    selected_text: &'a mut crate::action::selected_text::Reader,
     dicts: &'a [DictInfo],
     anki_tx: &'a mpsc::Sender<AnkiDupeResult>,
     add_tx: &'a mpsc::Sender<AddNoteResult>,
@@ -3125,6 +3137,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 }),
             )
         }
+        Command::ReadSelectedText { id } => { x.selected_text.request(id); None }
         Command::RequestDrillDown { id, text } => {
             let _ = x.trigger_tx.send(Trigger {
                 kind: TriggerKind::DrillDown(text),
@@ -3403,6 +3416,7 @@ fn command_diagnostic(cmd: &Command) -> String {
             anchor.w,
             anchor.h
         ),
+        Command::ReadSelectedText { id } => format!("action=read_selected_text id={}", id.0),
         Command::RequestDrillDown { id, text } => format!(
             "action=request_drill_down id={} text_len={}",
             id.0,
@@ -3545,6 +3559,7 @@ struct LiveSettings {
     actions_ocr_clipboard_hotkey: Option<String>,
     actions_search_hotkey: Option<String>,
     actions_sentence_search_hotkey: Option<String>,
+    actions_selected_text_hotkey: Option<String>,
     include_dictionary_name: bool,
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
@@ -3583,6 +3598,7 @@ fn derive(cfg: &Config) -> LiveSettings {
             }
             crate::config::HotkeyAction::Search => resolved.actions.search.hotkey = None,
             crate::config::HotkeyAction::SentenceSearch => resolved.actions.search.sentence_hotkey = None,
+            crate::config::HotkeyAction::SelectedText => resolved.actions.search.selected_hotkey = None,
             crate::config::HotkeyAction::Back => {}
         }
     }
@@ -3592,6 +3608,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         resolved.actions.ocr_clipboard = None;
         resolved.actions.search.hotkey = None;
         resolved.actions.search.sentence_hotkey = None;
+        resolved.actions.search.selected_hotkey = None;
     }
     let cfg = &resolved;
     LiveSettings {
@@ -3646,6 +3663,7 @@ fn derive(cfg: &Config) -> LiveSettings {
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
         actions_search_hotkey: cfg.actions.search.hotkey.clone(),
         actions_sentence_search_hotkey: cfg.actions.search.sentence_hotkey.clone(),
+        actions_selected_text_hotkey: cfg.actions.search.selected_hotkey.clone(),
         actions_ocr_clipboard_hotkey: cfg
             .actions
             .ocr_clipboard
@@ -3798,6 +3816,7 @@ fn apply_live(
     }
     sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
     sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
+    sync_search_hotkey(crate::input::hooks::SELECTED_TEXT_SLOT, live.actions_selected_text_hotkey.as_deref());
 }
 
 /// Registers the action when a valid key exists.
@@ -3936,6 +3955,21 @@ fn startup_language(
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
+
+    #[test]
+    fn selected_text_shortcut_obeys_enablement_and_conflicts_without_changing_config() {
+        let mut cfg = Config::default();
+        cfg.actions.search.selected_hotkey = Some("Ctrl+F7".into());
+        assert_eq!(derive(&cfg).actions_selected_text_hotkey.as_deref(), Some("Ctrl+F7"));
+        cfg.actions.enabled = false;
+        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
+        assert_eq!(cfg.actions.search.selected_hotkey.as_deref(), Some("Ctrl+F7"));
+        cfg.actions.enabled = true;
+        cfg.actions.search.selected_hotkey = Some(cfg.trigger.trigger_key.clone());
+        let saved = cfg.clone();
+        assert!(derive(&cfg).actions_selected_text_hotkey.is_none());
+        assert_eq!(cfg, saved);
+    }
 
     #[test]
     fn search_shortcut_tracks_live_enablement_without_rewriting_saved_keys() {

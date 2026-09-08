@@ -607,3 +607,15 @@ native binds are unaffected.
 `~/.local/state/chibipop/chibipop.log` records every channel verdict and
 change. Both name the exact missing protocol or portal when a channel is
 down.
+
+## Selected application text
+
+Set **Look up selected text** in **Settings > Shortcuts**. The action uses
+application text directly and does not run OCR or change clipboard contents.
+Browser selections need no extension.
+
+On Linux, the action reads PRIMARY through ext-data-control or wlr-data-control
+version 2. A native compositor binding can run `chibipop ctl selected-text`.
+The source application controls PRIMARY's lifetime; it can outlive visible
+highlighting. Applications without PRIMARY export and unsupported compositors
+cannot supply a selection. The normal clipboard is never used as fallback.

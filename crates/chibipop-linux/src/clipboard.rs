@@ -31,19 +31,20 @@
 //! bargain. The pump never blocks
 //! (ARCHITECTURE.md#workspace-and-seams).
 //!
-//! **What this client receives and does not read.** Data control makes its holder a clipboard
-//! *manager*. The compositor announces every selection that any client sets, ours included.
-//! The protocol requires this behavior, and the client cannot disable it. This module destroys
-//! every announced offer on arrival and never sends `receive`. It never reads or logs another
-//! application's clipboard content. The lookup log uses the same rule for screen content
-//! (ARCHITECTURE.md#platform-integration).
+//! **What this client reads.** Data control announces both CLIPBOARD and PRIMARY selections.
+//! This module destroys every CLIPBOARD offer without reading it. It retains only the current
+//! PRIMARY offer and reads it after an explicit selected-text action. The source application
+//! controls that offer's lifetime. Wayland cannot prove that its highlight remains visible.
 
 use crate::wayland::Advertised;
 use anyhow::{Context, Result};
-use std::io::Write;
-use std::os::fd::OwnedFd;
+use chibipop::controller::RequestId;
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
@@ -76,6 +77,10 @@ pub const WLR_MANAGER: &str = "zwlr_data_control_manager_v1";
 /// so a paste behaves the same with either protocol.
 pub const TEXT_MIMES: [&str; 5] =
     ["text/plain;charset=utf-8", "text/plain", "TEXT", "STRING", "UTF8_STRING"];
+
+const PRIMARY_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+const PRIMARY_MAX_BYTES: usize = 65_536;
+pub const PRIMARY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The data-control protocol that serves this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,13 +154,40 @@ struct Take {
     settled: Option<mpsc::SyncSender<()>>,
 }
 
-/// The daemon's writable selection. It sends bytes to a thread that holds
-/// the offer open.
+enum ClipboardCommand {
+    Take(Take),
+    Read(ReadRequest),
+}
+
+struct ReadRequest {
+    id: RequestId,
+    deadline: Instant,
+}
+
+struct ReadDone {
+    id: RequestId,
+    generation: u64,
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveRead {
+    id: RequestId,
+    deadline: Instant,
+}
+
+pub struct SelectedText {
+    pub id: RequestId,
+    pub text: Option<String>,
+}
+
+/// The daemon's selection client.
 pub struct Clipboard {
     rung: Rung,
+    primary_supported: bool,
     /// The offer thread's inbox. Its receiver lives in that thread's loop, so
     /// each send also wakes the loop.
-    text: calloop::channel::Sender<Take>,
+    commands: calloop::channel::Sender<ClipboardCommand>,
 }
 
 impl Clipboard {
@@ -171,6 +203,16 @@ impl Clipboard {
     pub fn bind(
         globals: &[Advertised],
         notes: calloop::channel::Sender<String>,
+    ) -> Result<Option<Clipboard>> {
+        let (selected, _selected_rx) = calloop::channel::channel::<SelectedText>();
+        Self::bind_with_selected(globals, notes, selected)
+    }
+
+    /// Bind with PRIMARY results.
+    pub fn bind_with_selected(
+        globals: &[Advertised],
+        notes: calloop::channel::Sender<String>,
+        selected: calloop::channel::Sender<SelectedText>,
     ) -> Result<Option<Clipboard>> {
         let Some(rung) = rung(globals) else { return Ok(None) };
         let notes = Notes(notes);
@@ -201,10 +243,23 @@ impl Clipboard {
             .find(|g| g.interface == "wl_seat")
             .context("this session advertises no wl_seat to own a selection on")?;
         let seat = registry.bind::<WlSeat, _, Owner>(seat_global.name, 1, &qh, ());
-        let clip = Clip::bind(rung, &registry, manager_global.name, &seat, &qh);
+        let manager_version = manager_global.version;
+        let clip = Clip::bind(rung, manager_version, &registry, manager_global.name, &seat, &qh);
+        let primary_supported = supports_primary(rung, manager_version);
 
-        let mut owner =
-            Owner { conn: conn.clone(), clip, source: None, notes, finished: false };
+        let mut owner = Owner {
+            conn: conn.clone(),
+            clip,
+            source: None,
+            primary: None,
+            primary_generation: 0,
+            active_read: None,
+            ext_offers: Vec::new(),
+            wlr_offers: Vec::new(),
+            selected,
+            notes,
+            finished: false,
+        };
         // Use one roundtrip before the thread starts. A refused bind returns
         // `Err` here instead of a silent thread. The roundtrip also
         // delivers the device's first `selection` event. Its offer handler
@@ -213,18 +268,33 @@ impl Clipboard {
             .roundtrip(&mut owner)
             .with_context(|| format!("binding {} on its own connection", rung.global()))?;
 
-        let (text, inbox) = calloop::channel::channel::<Take>();
+        let (commands, inbox) = calloop::channel::channel::<ClipboardCommand>();
         std::thread::Builder::new()
             .name("chibipop-clipboard".to_string())
             .spawn(move || serve(conn, queue, owner, inbox))
             .context("spawning the clipboard thread")?;
 
-        Ok(Some(Clipboard { rung, text }))
+        Ok(Some(Clipboard { rung, primary_supported, commands }))
     }
 
     /// The rung that serves this session, for diagnostics.
     pub fn rung(&self) -> Rung {
         self.rung
+    }
+
+    /// PRIMARY availability.
+    pub fn primary_supported(&self) -> bool {
+        self.primary_supported
+    }
+
+    /// Read PRIMARY once.
+    pub fn read_primary(&self, id: RequestId) -> Result<()> {
+        let deadline = Instant::now()
+            .checked_add(PRIMARY_TIMEOUT)
+            .context("computing the PRIMARY deadline")?;
+        self.commands.send(ClipboardCommand::Read(ReadRequest { id, deadline })).map_err(|_| {
+            anyhow::anyhow!("the clipboard thread has ended; PRIMARY was not read")
+        })
     }
 
     /// Take the selection with `text`.
@@ -258,7 +328,7 @@ impl Clipboard {
 
     fn copy(&self, text: &str, settled: Option<mpsc::SyncSender<()>>) -> Result<()> {
         let payload: Arc<[u8]> = Arc::from(text.as_bytes());
-        self.text.send(Take { payload, settled }).map_err(|_| {
+        self.commands.send(ClipboardCommand::Take(Take { payload, settled })).map_err(|_| {
             anyhow::anyhow!("the clipboard thread has ended; the selection was not taken")
         })
     }
@@ -276,6 +346,12 @@ struct Owner {
     /// `None` before the first copy and after the compositor cancels ours.
     /// Another client owns the selection in that normal state.
     source: Option<Source>,
+    primary: Option<PrimaryOffer>,
+    primary_generation: u64,
+    active_read: Option<ActiveRead>,
+    ext_offers: Vec<ExtOffer>,
+    wlr_offers: Vec<WlrOffer>,
+    selected: calloop::channel::Sender<SelectedText>,
     notes: Notes,
     /// The compositor retired the device (`finished`). No copy can succeed,
     /// so the loop stops and the next `set` fails.
@@ -338,6 +414,124 @@ impl Owner {
         }
     }
 
+    fn read_primary(
+        &mut self,
+        request: ReadRequest,
+        finished: &calloop::channel::Sender<ReadDone>,
+    ) {
+        let ReadRequest { id, deadline } = request;
+        let active = ActiveRead { id, deadline };
+        if !start_read(&mut self.active_read, active) {
+            let _ = self.selected.send(SelectedText { id, text: None });
+            return;
+        }
+        if deadline <= Instant::now() {
+            self.complete(ReadDone { id, generation: self.primary_generation, text: None });
+            return;
+        }
+        let generation = self.primary_generation;
+        let Some(primary) = self.primary.as_ref() else {
+            self.complete(ReadDone { id, generation, text: None });
+            return;
+        };
+        let Some(mime) = primary_mime(primary.mimes()) else {
+            self.complete(ReadDone { id, generation, text: None });
+            return;
+        };
+        let Ok((reader, writer)) = UnixStream::pair() else {
+            self.complete(ReadDone { id, generation, text: None });
+            return;
+        };
+        primary.receive(mime, writer.as_fd());
+        if self.conn.flush().is_err() {
+            self.complete(ReadDone { id, generation, text: None });
+            return;
+        }
+        let finished = finished.clone();
+        let spawned = std::thread::Builder::new()
+            .name("chibipop-primary-read".to_string())
+            .spawn(move || {
+                let text = read_bounded(reader, deadline);
+                let _ = finished.send(ReadDone { id, generation, text });
+            });
+        if spawned.is_err() {
+            self.complete(ReadDone { id, generation, text: None });
+        }
+    }
+
+    fn complete(&mut self, result: ReadDone) {
+        let Some(active) = self.active_read.filter(|active| active.id == result.id) else {
+            return;
+        };
+        self.active_read = None;
+        let text = if Instant::now() <= active.deadline {
+            accept_generation(self.primary_generation, result.generation, result.text)
+        } else {
+            None
+        };
+        let _ = self.selected.send(SelectedText { id: result.id, text });
+    }
+
+    fn fail_active(&mut self) {
+        let Some(id) = retire_active(&mut self.active_read) else { return };
+        let _ = self.selected.send(SelectedText { id, text: None });
+    }
+
+    fn ext_announced(&mut self, offer: ExtDataControlOfferV1) {
+        self.ext_offers.push(ExtOffer { offer, mimes: Vec::new() });
+    }
+
+    fn wlr_announced(&mut self, offer: ZwlrDataControlOfferV1) {
+        self.wlr_offers.push(WlrOffer { offer, mimes: Vec::new() });
+    }
+
+    fn ext_mime(&mut self, offer: &ExtDataControlOfferV1, mime: String) {
+        if let Some(pending) = self.ext_offers.iter_mut().find(|item| item.offer.id() == offer.id()) {
+            pending.mimes.push(mime);
+        }
+    }
+
+    fn wlr_mime(&mut self, offer: &ZwlrDataControlOfferV1, mime: String) {
+        if let Some(pending) = self.wlr_offers.iter_mut().find(|item| item.offer.id() == offer.id()) {
+            pending.mimes.push(mime);
+        }
+    }
+
+    fn ext_primary(&mut self, offer: Option<ExtDataControlOfferV1>) {
+        let primary = offer.map(|offer| {
+            let pending = take_ext(&mut self.ext_offers, &offer)
+                .unwrap_or(ExtOffer { offer, mimes: Vec::new() });
+            PrimaryOffer::Ext(pending)
+        });
+        self.replace_primary(primary);
+    }
+
+    fn wlr_primary(&mut self, offer: Option<ZwlrDataControlOfferV1>) {
+        let primary = offer.map(|offer| {
+            let pending = take_wlr(&mut self.wlr_offers, &offer)
+                .unwrap_or(WlrOffer { offer, mimes: Vec::new() });
+            PrimaryOffer::Wlr(pending)
+        });
+        self.replace_primary(primary);
+    }
+
+    fn replace_primary(&mut self, primary: Option<PrimaryOffer>) {
+        self.primary_generation = self.primary_generation.wrapping_add(1);
+        if let Some(old) = std::mem::replace(&mut self.primary, primary) {
+            old.destroy();
+        }
+    }
+
+    fn discard_ext(&mut self, offer: ExtDataControlOfferV1) {
+        let _ = take_ext(&mut self.ext_offers, &offer);
+        offer.destroy();
+    }
+
+    fn discard_wlr(&mut self, offer: ZwlrDataControlOfferV1) {
+        let _ = take_wlr(&mut self.wlr_offers, &offer);
+        offer.destroy();
+    }
+
     /// The compositor cancelled one of this client's sources. Another client
     /// owns the selection now. This is a state, not a failure.
     fn cancelled(&mut self, source: &Source) {
@@ -352,6 +546,7 @@ impl Owner {
     /// Report this state once, then end the loop. A later `set` fails with the
     /// real reason instead of a send when no thread exists.
     fn retired(&mut self) {
+        self.fail_active();
         self.notes.note(
             "clipboard: the compositor retired this data-control device; copies will be \
              refused until the daemon restarts"
@@ -374,9 +569,48 @@ enum Source {
     Wlr(ZwlrDataControlSourceV1),
 }
 
+struct ExtOffer {
+    offer: ExtDataControlOfferV1,
+    mimes: Vec<String>,
+}
+
+struct WlrOffer {
+    offer: ZwlrDataControlOfferV1,
+    mimes: Vec<String>,
+}
+
+enum PrimaryOffer {
+    Ext(ExtOffer),
+    Wlr(WlrOffer),
+}
+
+impl PrimaryOffer {
+    fn mimes(&self) -> &[String] {
+        match self {
+            PrimaryOffer::Ext(offer) => &offer.mimes,
+            PrimaryOffer::Wlr(offer) => &offer.mimes,
+        }
+    }
+
+    fn receive(&self, mime: &str, fd: BorrowedFd<'_>) {
+        match self {
+            PrimaryOffer::Ext(offer) => offer.offer.receive(mime.to_string(), fd),
+            PrimaryOffer::Wlr(offer) => offer.offer.receive(mime.to_string(), fd),
+        }
+    }
+
+    fn destroy(self) {
+        match self {
+            PrimaryOffer::Ext(offer) => offer.offer.destroy(),
+            PrimaryOffer::Wlr(offer) => offer.offer.destroy(),
+        }
+    }
+}
+
 impl Clip {
     fn bind(
         rung: Rung,
+        advertised_version: u32,
         registry: &WlRegistry,
         name: u32,
         seat: &WlSeat,
@@ -390,8 +624,9 @@ impl Clip {
                 Clip::Ext { manager, device }
             }
             Rung::Wlr => {
+                let version = advertised_version.min(2);
                 let manager =
-                    registry.bind::<ZwlrDataControlManagerV1, _, Owner>(name, 1, qh, ());
+                    registry.bind::<ZwlrDataControlManagerV1, _, Owner>(name, version, qh, ());
                 let device = manager.get_data_device(seat, qh, ());
                 Clip::Wlr { manager, device }
             }
@@ -449,7 +684,7 @@ fn serve(
     conn: Connection,
     queue: EventQueue<Owner>,
     mut owner: Owner,
-    inbox: calloop::channel::Channel<Take>,
+    inbox: calloop::channel::Channel<ClipboardCommand>,
 ) {
     let events: calloop::EventLoop<'static, Owner> = match calloop::EventLoop::try_new() {
         Ok(events) => events,
@@ -464,13 +699,26 @@ fn serve(
         owner.notes.note(format!("clipboard: registering the offer connection failed - {e}"));
         return;
     }
+    let (finished, completions) = calloop::channel::channel::<ReadDone>();
+    let read_finished = finished.clone();
     let inserted = handle.insert_source(inbox, move |event, _, owner: &mut Owner| match event {
-        calloop::channel::Event::Msg(copy) => owner.take(copy, &qh),
+        calloop::channel::Event::Msg(ClipboardCommand::Take(copy)) => owner.take(copy, &qh),
+        calloop::channel::Event::Msg(ClipboardCommand::Read(request)) => {
+            owner.read_primary(request, &read_finished)
+        }
         // The daemon dropped its sender. The process will stop.
         calloop::channel::Event::Closed => owner.finished = true,
     });
     if let Err(e) = inserted {
         owner.notes.note(format!("clipboard: registering the offer inbox failed - {e}"));
+        return;
+    }
+    if let Err(e) = handle.insert_source(completions, |event, _, owner: &mut Owner| {
+        if let calloop::channel::Event::Msg(result) = event {
+            owner.complete(result);
+        }
+    }) {
+        owner.notes.note(format!("clipboard: registering the PRIMARY result failed - {e}"));
         return;
     }
 
@@ -483,6 +731,7 @@ fn serve(
             signal.stop();
         }
     });
+    owner.fail_active();
     if let Err(e) = ran {
         owner.notes.note(format!("clipboard: the offer thread stopped - {e}"));
     }
@@ -529,13 +778,11 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for Owner {
         _: &QueueHandle<Owner>,
     ) {
         match event {
-            // The device announces this offer, but this client never reads it. See the
-            // module documentation.
-            ext_device::Event::DataOffer { id } => id.destroy(),
-            // Destroy the offer even though this client never sends `receive`. `None`
-            // means that the compositor cleared the selection and provided no object.
-            ext_device::Event::Selection { id: Some(offer) }
-            | ext_device::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
+            // Await its selection kind.
+            ext_device::Event::DataOffer { id } => owner.ext_announced(id),
+            // Never read CLIPBOARD.
+            ext_device::Event::Selection { id: Some(offer) } => owner.discard_ext(offer),
+            ext_device::Event::PrimarySelection { id } => owner.ext_primary(id),
             ext_device::Event::Finished => owner.retired(),
             _ => {}
         }
@@ -556,20 +803,108 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for Owner {
         _: &QueueHandle<Owner>,
     ) {
         match event {
-            wlr_device::Event::DataOffer { id } => id.destroy(),
-            wlr_device::Event::Selection { id: Some(offer) }
-            | wlr_device::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
+            wlr_device::Event::DataOffer { id } => owner.wlr_announced(id),
+            wlr_device::Event::Selection { id: Some(offer) } => owner.discard_wlr(offer),
+            wlr_device::Event::PrimarySelection { id } => owner.wlr_primary(id),
             wlr_device::Event::Finished => owner.retired(),
             _ => {}
         }
     }
 }
 
-// An announced offer. Its `offer` MIME events arrive before the device's
-// `selection` event, and the device destroys the offer on arrival. This
-// client reads no offer, so it ignores them.
-wayland_client::delegate_noop!(Owner: ignore ExtDataControlOfferV1);
-wayland_client::delegate_noop!(Owner: ignore ZwlrDataControlOfferV1);
+// MIME events precede selection kind.
+impl Dispatch<ExtDataControlOfferV1, ()> for Owner {
+    fn event(
+        owner: &mut Owner,
+        offer: &ExtDataControlOfferV1,
+        event: wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Owner>,
+    ) {
+        if let wayland_protocols::ext::data_control::v1::client::ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+            owner.ext_mime(offer, mime_type);
+        }
+    }
+}
+
+fn take_ext(
+    offers: &mut Vec<ExtOffer>,
+    offer: &ExtDataControlOfferV1,
+) -> Option<ExtOffer> {
+    let index = offers.iter().position(|item| item.offer.id() == offer.id())?;
+    Some(offers.remove(index))
+}
+
+fn take_wlr(
+    offers: &mut Vec<WlrOffer>,
+    offer: &ZwlrDataControlOfferV1,
+) -> Option<WlrOffer> {
+    let index = offers.iter().position(|item| item.offer.id() == offer.id())?;
+    Some(offers.remove(index))
+}
+
+fn primary_mime(mimes: &[String]) -> Option<&str> {
+    PRIMARY_MIMES
+        .into_iter()
+        .find(|preferred| mimes.iter().any(|offered| offered == preferred))
+}
+
+fn supports_primary(rung: Rung, advertised_version: u32) -> bool {
+    rung == Rung::Ext || advertised_version >= 2
+}
+
+fn read_bounded(mut reader: UnixStream, deadline: Instant) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        reader.set_read_timeout(Some(remaining)).ok()?;
+        let mut chunk = [0u8; 8_192];
+        let limit = PRIMARY_MAX_BYTES.saturating_add(1).saturating_sub(bytes.len());
+        let amount = chunk.len().min(limit);
+        let read = reader.read(&mut chunk[..amount]).ok()?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() > PRIMARY_MAX_BYTES {
+            return None;
+        }
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn retire_active(active: &mut Option<ActiveRead>) -> Option<RequestId> {
+    active.take().map(|read| read.id)
+}
+
+fn start_read(active: &mut Option<ActiveRead>, read: ActiveRead) -> bool {
+    if active.is_some() {
+        return false;
+    }
+    *active = Some(read);
+    true
+}
+
+fn accept_generation(current: u64, requested: u64, text: Option<String>) -> Option<String> {
+    (current == requested).then_some(text).flatten()
+}
+
+impl Dispatch<ZwlrDataControlOfferV1, ()> for Owner {
+    fn event(
+        owner: &mut Owner,
+        offer: &ZwlrDataControlOfferV1,
+        event: wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Owner>,
+    ) {
+        if let wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
+            owner.wlr_mime(offer, mime_type);
+        }
+    }
+}
 
 /// The source that owns the selection. Its user data is the payload, so a
 /// `send` event answers with the bytes that created the source.
@@ -653,8 +988,11 @@ mod tests {
         let globals = advertised(&["wl_seat", "wl_shm", "zwlr_layer_shell_v1"]);
         assert_eq!(None, rung(&globals));
         let (tx, _rx) = calloop::channel::channel::<String>();
+        let (selected, _selected_rx) = calloop::channel::channel::<SelectedText>();
         assert!(
-            Clipboard::bind(&globals, tx).expect("an absent protocol is not an error").is_none(),
+            Clipboard::bind_with_selected(&globals, tx, selected)
+                .expect("an absent protocol is not an error")
+                .is_none(),
             "no rung must be a state, not a Clipboard"
         );
     }
@@ -677,5 +1015,91 @@ mod tests {
         for target in ["TEXT", "STRING", "UTF8_STRING"] {
             assert!(TEXT_MIMES.contains(&target), "{target} is what XWayland asks by");
         }
+    }
+
+    #[test]
+    fn primary_support_requires_ext_v1_or_wlr_v2() {
+        assert!(supports_primary(Rung::Ext, 1));
+        assert!(!supports_primary(Rung::Wlr, 1));
+        assert!(supports_primary(Rung::Wlr, 2));
+    }
+
+    #[test]
+    fn primary_mime_uses_utf8_priority() {
+        let mimes = vec!["text/plain".to_string(), "UTF8_STRING".to_string()];
+        assert_eq!(Some("UTF8_STRING"), primary_mime(&mimes));
+        let mimes = vec![
+            "text/plain".to_string(),
+            "UTF8_STRING".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ];
+        assert_eq!(Some("text/plain;charset=utf-8"), primary_mime(&mimes));
+        assert_eq!(None, primary_mime(&["image/png".to_string()]));
+    }
+
+    fn read_bytes(bytes: Vec<u8>) -> Option<String> {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let sending = std::thread::spawn(move || writer.write_all(&bytes));
+        let result = read_bounded(reader, Instant::now() + Duration::from_secs(1));
+        sending.join().unwrap().unwrap();
+        result
+    }
+
+    #[test]
+    fn primary_read_accepts_utf8_and_rejects_empty_invalid_or_oversized_bytes() {
+        assert_eq!(Some("日本語".to_string()), read_bytes("日本語".as_bytes().to_vec()));
+        assert_eq!(None, read_bytes(Vec::new()));
+        assert_eq!(None, read_bytes(vec![0xff]));
+        assert!(read_bytes(vec![b'a'; PRIMARY_MAX_BYTES]).is_some());
+        assert_eq!(None, read_bytes(vec![b'a'; PRIMARY_MAX_BYTES + 1]));
+    }
+
+    #[test]
+    fn primary_read_uses_one_overall_deadline() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let sending = std::thread::spawn(move || {
+            for _ in 0..6 {
+                if writer.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        });
+        assert_eq!(None, read_bounded(reader, Instant::now() + Duration::from_millis(70)));
+        sending.join().unwrap();
+    }
+
+    #[test]
+    fn an_expired_primary_deadline_reads_nothing() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"stale").unwrap();
+        drop(writer);
+        let deadline = Instant::now().checked_sub(Duration::from_millis(1)).unwrap();
+        assert_eq!(None, read_bounded(reader, deadline));
+    }
+
+    #[test]
+    fn changed_generation_rejects_text_and_unchanged_generation_can_repeat() {
+        assert_eq!(None, accept_generation(8, 7, Some("old".to_string())));
+        for _ in 0..2 {
+            assert_eq!(Some("same".to_string()), accept_generation(8, 8, Some("same".to_string())));
+        }
+    }
+
+    #[test]
+    fn retiring_the_device_fails_the_active_request_once() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut active = Some(ActiveRead { id: RequestId(9), deadline });
+        assert_eq!(Some(RequestId(9)), retire_active(&mut active));
+        assert_eq!(None, retire_active(&mut active));
+    }
+
+    #[test]
+    fn only_one_primary_read_can_wait() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut active = None;
+        assert!(start_read(&mut active, ActiveRead { id: RequestId(1), deadline }));
+        assert!(!start_read(&mut active, ActiveRead { id: RequestId(2), deadline }));
+        assert_eq!(Some(RequestId(1)), retire_active(&mut active));
     }
 }

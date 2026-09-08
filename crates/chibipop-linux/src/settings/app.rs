@@ -203,6 +203,13 @@ enum Tab {
     Anki,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutKind {
+    Dictionary,
+    Sentence,
+    SelectedText,
+}
+
 impl Tab {
     /// One order serves the strip and both cycle directions instead of separate lists.
     /// The first entry is the page that opens.
@@ -236,7 +243,7 @@ impl Tab {
 struct App {
     /// The page that the strip shows. Ctrl+Tab cycles it.
     tab: Tab,
-    capture_search_key: Option<SearchMode>,
+    capture_search_key: Option<ShortcutKind>,
     form: SettingsForm,
     linux: LinuxFields,
     config_path: PathBuf,
@@ -787,10 +794,10 @@ enum Message {
     /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
     OcrClipboardKey(String),
-    CaptureSearchKey(SearchMode),
+    CaptureSearchKey(ShortcutKind),
     CapturedSearchKey(iced::keyboard::Key, iced::keyboard::Modifiers),
     CancelSearchCapture,
-    ClearSearchKey(SearchMode),
+    ClearSearchKey(ShortcutKind),
     LaunchSearch(SearchMode),
     SearchClosed(Result<(), String>),
     OpenSentenceSearch(bool),
@@ -1328,10 +1335,11 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 /// Keep every chord beside its bind instead of separate blocks on feature pages.
-fn set_search_key(app: &mut App, mode: SearchMode, chord: Option<String>) {
-    match mode {
-        SearchMode::Dictionary => app.linux.search_key_linux = chord,
-        SearchMode::Sentence => app.linux.sentence_key_linux = chord,
+fn set_search_key(app: &mut App, kind: ShortcutKind, chord: Option<String>) {
+    match kind {
+        ShortcutKind::Dictionary => app.linux.search_key_linux = chord,
+        ShortcutKind::Sentence => app.linux.sentence_key_linux = chord,
+        ShortcutKind::SelectedText => app.linux.selected_key_linux = chord,
     }
 }
 
@@ -1366,20 +1374,26 @@ fn captured_search_chord(key: &iced::keyboard::Key, modifiers: iced::keyboard::M
     Some(parts.join("+"))
 }
 
-fn search_shortcut(app: &App, mode: SearchMode) -> Element<'_, Message> {
-    let (title, chord, verb) = match mode {
-        SearchMode::Dictionary => ("Dictionary search", &app.linux.search_key_linux, crate::control::Verb::Search),
-        SearchMode::Sentence => ("Sentence search", &app.linux.sentence_key_linux, crate::control::Verb::SentenceSearch),
+fn search_shortcut(app: &App, kind: ShortcutKind) -> Element<'_, Message> {
+    let (title, chord, fallback, verb) = match kind {
+        ShortcutKind::Dictionary => ("Dictionary search", &app.linux.search_key_linux, "SUPER+F", Verb::Search),
+        ShortcutKind::Sentence => ("Sentence search", &app.linux.sentence_key_linux, "SUPER+G", Verb::SentenceSearch),
+        ShortcutKind::SelectedText => ("Selected text lookup", &app.linux.selected_key_linux, "SUPER+H", Verb::SelectedText),
     };
-    let label = if app.capture_search_key == Some(mode) { "Press a shortcut… (Esc cancels)" }
+    let label = if app.capture_search_key == Some(kind) { "Press a shortcut… (Esc cancels)" }
         else { chord.as_deref().unwrap_or("Disabled: click to record") };
     card(title, column![
-        row![button(text(label)).on_press(Message::CaptureSearchKey(mode)),
-            button("Clear").on_press(Message::ClearSearchKey(mode))].spacing(10),
+        row![button(text(label)).on_press(Message::CaptureSearchKey(kind)),
+            button("Clear").on_press(Message::ClearSearchKey(kind))].spacing(10),
         hint("Click to record a key combination. Apply checks conflicts with all configured shortcuts."),
         hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."),
-        snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(match mode { SearchMode::Dictionary => "SUPER+F", SearchMode::Sentence => "SUPER+G" }),
+        snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(fallback),
             &app.exe, snippets::Bind::Press(verb))),
+        if kind == ShortcutKind::SelectedText {
+            hint("The source application owns PRIMARY. A visible highlight is not guaranteed.")
+        } else {
+            hint("")
+        },
     ].spacing(10))
 }
 
@@ -1424,8 +1438,9 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
              the channel that owns it: a compositor line to paste, or the portal key \
              that your desktop's shortcut editor changes."
         ),
-        search_shortcut(app, SearchMode::Dictionary),
-        search_shortcut(app, SearchMode::Sentence),
+        search_shortcut(app, ShortcutKind::Dictionary),
+        search_shortcut(app, ShortcutKind::Sentence),
+        search_shortcut(app, ShortcutKind::SelectedText),
         card("Trigger", column![
             mode,
             checkbox(app.form.cfg.trigger.per_character_lookup)

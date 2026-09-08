@@ -2403,3 +2403,34 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 in one run of `eprintln!` printing the actual return value and window style. The general shape:
 post the message by hand to isolate delivery from handling, log the Win32 return values, and only
 then reason.
+
+## Selected application text lookup
+
+Automated Windows desktop regression:
+
+```powershell
+cargo test -p chibipop-windows --test selected_text_live -- --ignored --nocapture --test-threads=1
+```
+
+This test creates an isolated dictionary and editor. It uses the real shortcut,
+checks popup persistence in all four trigger modes, compares clipboard sequence
+numbers, and verifies empty selections and Escape. It moves focus to its own
+editor. Run it on an interactive Windows desktop.
+Each mode uses a separate process. If Windows refuses foreground activation,
+activate the **Chibipop selection regression** window within one minute.
+
+Manual browser acceptance:
+
+1. Set **Look up selected text** in **Settings > Shortcuts**.
+2. Select a Japanese word in an ordinary browser document. Press the shortcut.
+3. Confirm the normal dictionary popup shows the selected word without OCR.
+4. Repeat in an editor and in a browser text field.
+5. Press Escape. Confirm the popup closes and stays closed.
+6. Clear the selection. Press the shortcut. Confirm no old clipboard text appears.
+7. Verify the clipboard contents remain unchanged.
+8. Disable the shortcut. Confirm the previous binding no longer invokes lookup.
+
+Windows requires UI Automation selection support. Linux requires PRIMARY support
+through ext-data-control or wlr-data-control version 2. On Linux, the source
+application can retain PRIMARY after highlighting disappears. Test source-owned
+selection clearing separately from visual highlighting.

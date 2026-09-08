@@ -147,6 +147,11 @@ label = "Open sentence search"
 help = "Click the button, then press a key or key combination. Escape cancels."
 
 [[tabs.sections.entries]]
+id = "selected-text-key"
+label = "Look up selected text"
+help = "Select text in an application, then press this shortcut. Requires application accessibility support."
+
+[[tabs.sections.entries]]
 id = "ocr-sentence-search"
 label = "Open copied screen text in sentence search"
 

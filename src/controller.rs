@@ -38,6 +38,8 @@ const SCROLL_STEP_PX: i32 = 48;
 /// The number of armed ticks before the Controller warns the user.
 const ARM_WARN_TICKS: u32 = 250;
 
+const MAX_SELECTED_TEXT_BYTES: usize = 64 * 1024;
+
 /// A non-sentence result becomes stale when a newer non-sentence
 /// `RequestId` exists. Sentence probes use unique IDs without replacing
 /// hover results that are already active.
@@ -152,6 +154,10 @@ pub enum Event {
     /// The press bypasses the movement gate and the sticky region, so a press
     /// over the popup runs a lookup that the mask turns into a miss.
     TriggerPressed { pos: PhysPoint },
+    /// Start a selection read.
+    SelectedTextRequested { pos: PhysPoint },
+    /// Complete a selection read.
+    SelectedTextReady { id: RequestId, text: Option<String> },
     /// A button press outside the popup while it is shown. The platform bin
     /// sends this only in `Press` mode. It carries no point because the
     /// Controller needs none. A hit inside the popup is `PointerDown`.
@@ -207,6 +213,8 @@ pub enum Command {
     },
     /// Request a lookup from the Dictionary data only.
     RequestDrillDown { id: RequestId, text: String },
+    /// Read application selection.
+    ReadSelectedText { id: RequestId },
     /// Send the current settings to the Worker.
     RequestReload { id: RequestId },
     /// Measure and place the popup. Show and paint it.
@@ -475,9 +483,22 @@ enum PlaceKind {
     Reshow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootSource {
+    Ocr,
+    SelectedText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectedTextState {
+    Capturing { id: RequestId, pos: PhysPoint },
+    LookingUp { id: RequestId, pos: PhysPoint, text: String },
+}
+
 /// State for one shown popup.
 #[derive(Debug, Clone, PartialEq)]
 struct Surface {
+    source: RootSource,
     hovered: Option<String>,
     /// The rectangle of the hovered glyph.
     anchor: PhysRect,
@@ -570,6 +591,7 @@ pub struct Controller {
     /// A sentence read uses `next_request` for a unique ID but leaves this
     /// marker unchanged.
     latest_lookup: RequestId,
+    selected_text: Option<SelectedTextState>,
     generation: u64,
     /// The monotonic dispatch tick that times pointer gestures.
     clock: u64,
@@ -596,6 +618,7 @@ impl Controller {
             next_id: 0,
             latest: RequestId(0),
             latest_lookup: RequestId(0),
+            selected_text: None,
             generation: 0,
             clock: 0,
         }
@@ -743,9 +766,14 @@ impl Controller {
         self.enter_parent(depth)
     }
 
-    fn push_hover(&mut self, presentation: Presentation, local: PhysPoint) -> Vec<Command> {
+    fn push_hover(&mut self, mut presentation: Presentation, local: PhysPoint) -> Vec<Command> {
         let Some(parent) = self.surface.as_ref() else { return Vec::new() };
         let Some(placed) = parent.placed else { return Vec::new() };
+        let source = parent.source;
+        if source == RootSource::SelectedText {
+            presentation.sentence = parent.presentation.sentence.clone();
+            presentation.surface = None;
+        }
         let same_word = presentation.top.as_ref().zip(parent.presentation.top.as_ref())
             .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
         if presentation.top.is_none() || same_word
@@ -762,7 +790,14 @@ impl Controller {
         parent.pressed_link = None;
         parent.last_drag_point = None;
         let parents = std::mem::take(&mut self.parents);
-        let mut out = self.ready(presentation, anchor, Orientation::Horizontal, None, Vec::new());
+        let mut out = self.ready(
+            presentation,
+            anchor,
+            Orientation::Horizontal,
+            None,
+            Vec::new(),
+            source,
+        );
         self.parents = parents;
         self.pointer_depth = Some(self.parents.len());
         self.parents.push(parent);
@@ -834,6 +869,8 @@ impl Controller {
             }
             Event::TriggerUp => self.trigger_up(),
             Event::TriggerPressed { pos } => self.trigger_pressed(pos),
+            Event::SelectedTextRequested { pos } => self.selected_text_requested(pos),
+            Event::SelectedTextReady { id, text } => self.selected_text_ready(id, text),
             Event::PointerDownOutside => self.pointer_down_outside(),
             Event::CursorMoved { pos } => self.cursor_moved(pos),
             Event::DwellElapsed => self.dwell(),
@@ -873,6 +910,7 @@ impl Controller {
     fn next_lookup_request(&mut self) -> RequestId {
         let id = self.next_request();
         self.latest_lookup = id;
+        self.selected_text = None;
         id
     }
 
@@ -1164,12 +1202,13 @@ impl Controller {
         if self.add_in_flight() {
             return Vec::new();
         }
+        let sentence_probe = self.cfg.sentence_probe && !self.selected_text_active();
         let (scroll, show_back, anchor, orientation, matched_surface) = {
             let Some(s) = self.surface.as_ref() else { return Vec::new() };
             if s.placed.is_none() || s.presentation.top.is_none() {
                 return Vec::new();
             }
-            let matched_surface = if self.cfg.sentence_probe {
+            let matched_surface = if sentence_probe {
                 s.presentation
                     .surface
                     .as_ref()
@@ -1184,7 +1223,7 @@ impl Controller {
         // Authorize the payload before the asynchronous sentence probe starts.
         let Some((expr, fields)) = self.add_note_payload() else { return Vec::new() };
 
-        if self.cfg.sentence_probe {
+        if sentence_probe {
             let id = self.next_request();
             // Only a frozen HoldKey grab predates the popup. Toggle reads a
             // live masked grab and must hide the popup before the probe.
@@ -1275,7 +1314,11 @@ impl Controller {
     }
 
     fn trigger_up(&mut self) -> Vec<Command> {
+        let was_trigger_held = self.trigger_held;
         self.trigger_held = false;
+        if self.selected_text_active() && !was_trigger_held {
+            return Vec::new();
+        }
         // Live mode ignores this key event. Press mode has no hold to end.
         if matches!(self.cfg.trigger_mode, TriggerMode::Live | TriggerMode::Press) {
             return Vec::new();
@@ -1307,6 +1350,51 @@ impl Controller {
         self.dispatch_lookup(pos)
     }
 
+    fn selected_text_requested(&mut self, pos: PhysPoint) -> Vec<Command> {
+        self.cancel_hover();
+        self.trigger_held = false;
+        let id = self.next_lookup_request();
+        self.selected_text = Some(SelectedTextState::Capturing { id, pos });
+        vec![Command::ReadSelectedText { id }]
+    }
+
+    fn selected_text_ready(
+        &mut self,
+        id: RequestId,
+        text: Option<String>,
+    ) -> Vec<Command> {
+        let pos = match self.selected_text.as_ref() {
+            Some(SelectedTextState::Capturing { id: pending, pos })
+                if *pending == id && id == self.latest_lookup => *pos,
+            _ => return Vec::new(),
+        };
+        let Some(text) = text else {
+            return self.selected_text_unavailable();
+        };
+        let text = text.trim();
+        if text.is_empty() || text.len() > MAX_SELECTED_TEXT_BYTES {
+            return self.selected_text_unavailable();
+        }
+        let text = text.to_string();
+        self.selected_text = Some(SelectedTextState::LookingUp {
+            id,
+            pos,
+            text: text.clone(),
+        });
+        vec![Command::RequestDrillDown { id, text }]
+    }
+
+    fn selected_text_unavailable(&mut self) -> Vec<Command> {
+        self.selected_text = None;
+        if self.surface.as_ref().is_some_and(|surface| {
+            surface.source == RootSource::SelectedText
+        }) {
+            self.hide()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// A click outside the popup dismisses it. A lookup still in flight
     /// must not show it again, so the request id moves on first.
     fn pointer_down_outside(&mut self) -> Vec<Command> {
@@ -1320,11 +1408,21 @@ impl Controller {
     /// Whether the current mode accepts a cursor move.
     /// Press mode never follows the cursor. Each press asks once.
     fn mode_eligible(&self) -> bool {
+        if self.selected_text_active() && !self.trigger_held {
+            return false;
+        }
         match self.cfg.trigger_mode {
             TriggerMode::Live => true,
             TriggerMode::Press => false,
             _ => self.trigger_held,
         }
+    }
+
+    fn selected_text_active(&self) -> bool {
+        self.selected_text.is_some()
+            || self.surface.as_ref().is_some_and(|surface| {
+                surface.source == RootSource::SelectedText
+            })
     }
 
     fn gate_open(&self, p: PhysPoint) -> bool {
@@ -1397,6 +1495,9 @@ impl Controller {
     /// A drill-down is not screen content. A dialogue behind it must not change
     /// the history stack that the user opened.
     pub fn dwell_armed(&self) -> bool {
+        if self.selected_text_active() {
+            return false;
+        }
         let live = match self.cfg.trigger_mode {
             TriggerMode::Live => true,
             TriggerMode::Toggle => self.trigger_held,
@@ -1447,6 +1548,16 @@ impl Controller {
             // This result is superseded, not an error.
             return Vec::new();
         }
+        if self.selected_text.as_ref().is_some_and(|state| {
+            matches!(state, SelectedTextState::Capturing { id: pending, .. } if *pending == id)
+        }) {
+            return Vec::new();
+        }
+        if self.selected_text.as_ref().is_some_and(|state| {
+            matches!(state, SelectedTextState::LookingUp { id: pending, .. } if *pending == id)
+        }) {
+            return self.selected_text_lookup_result(outcome);
+        }
         if self.hover_request.is_some_and(|(request, _)| request == id) {
             let (_, local) = self.hover_request.take().expect("matching request");
             return match outcome {
@@ -1464,9 +1575,47 @@ impl Controller {
             }
             LookupOutcome::DrillDown(presentation) => self.push_drilldown(*presentation),
             LookupOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
-                self.ready(*presentation, anchor, orientation, matched, scan)
+                self.ready(
+                    *presentation,
+                    anchor,
+                    orientation,
+                    matched,
+                    scan,
+                    RootSource::Ocr,
+                )
             }
             LookupOutcome::Sentence(_) => unreachable!("sentence outcomes return above"),
+        }
+    }
+
+    fn selected_text_lookup_result(&mut self, outcome: LookupOutcome) -> Vec<Command> {
+        let Some(SelectedTextState::LookingUp { pos, text, .. }) = self.selected_text.take()
+        else {
+            return Vec::new();
+        };
+        match outcome {
+            LookupOutcome::Hide => self.hide(),
+            LookupOutcome::Failed(message) => {
+                let mut out = vec![Command::WarnLookupFailed(message)];
+                out.extend(self.hide());
+                out
+            }
+            LookupOutcome::DrillDown(mut presentation) => {
+                presentation.sentence = Some(text.clone());
+                presentation.surface = presentation
+                    .top
+                    .as_ref()
+                    .and_then(|top| OcrSurface::new(&text, top.match_len));
+                self.ready(
+                    *presentation,
+                    PhysRect { x: pos.x, y: pos.y, w: 1, h: 1 },
+                    Orientation::Horizontal,
+                    None,
+                    Vec::new(),
+                    RootSource::SelectedText,
+                )
+            }
+            LookupOutcome::Ready { .. } | LookupOutcome::Sentence(_) => Vec::new(),
         }
     }
 
@@ -1538,11 +1687,15 @@ impl Controller {
         orientation: Orientation,
         matched: Option<PhysRect>,
         scan: Vec<ScanRect>,
+        source: RootSource,
     ) -> Vec<Command> {
         if self
             .surface
             .as_ref()
-            .is_some_and(|s| same_content(&s.presentation, s.anchor, &presentation, anchor))
+            .is_some_and(|s| {
+                s.source == source
+                    && same_content(&s.presentation, s.anchor, &presentation, anchor)
+            })
         {
             return Vec::new();
         }
@@ -1565,7 +1718,11 @@ impl Controller {
             self.parents.clear();
             out.push(Command::ClearPopupParents);
         }
+        if source == RootSource::SelectedText {
+            self.pending_cursor = None;
+        }
         self.surface = Some(Surface {
+            source,
             hovered: None,
             anchor,
             orientation,
@@ -1592,11 +1749,15 @@ impl Controller {
     }
 
     /// Save the current state, then replace it with the drill-down result.
-    fn push_drilldown(&mut self, presentation: Presentation) -> Vec<Command> {
+    fn push_drilldown(&mut self, mut presentation: Presentation) -> Vec<Command> {
         let anki_enabled = self.cfg.anki_enabled;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
             return Vec::new();
+        }
+        if s.source == RootSource::SelectedText {
+            presentation.sentence = s.presentation.sentence.clone();
+            presentation.surface = None;
         }
         let pending_sentence = s.pending_sentence.take();
         s.history.push(HistoryEntry {
@@ -1875,6 +2036,23 @@ mod tests {
         }).expect("hover must issue dictionary lookup")
     }
 
+    fn selected_text_request(c: &mut Controller, pos: PhysPoint) -> RequestId {
+        match c.handle(Event::SelectedTextRequested { pos }).as_slice() {
+            [Command::ReadSelectedText { id }] => *id,
+            commands => panic!("unexpected selection commands: {commands:?}"),
+        }
+    }
+
+    fn shown_selected(c: &mut Controller, text: &str) {
+        let id = selected_text_request(c, PhysPoint { x: 40, y: 50 });
+        c.handle(Event::SelectedTextReady { id, text: Some(text.into()) });
+        c.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of(text))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+    }
+
     fn hover_child(c: &mut Controller, word: &str) {
         let id = hover_request(c, word);
         let commands = c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of(word))) });
@@ -2117,7 +2295,12 @@ mod tests {
 
     #[test]
     fn dismiss_requested_works_in_every_trigger_mode_and_invalidates_root_reply() {
-        for mode in [TriggerMode::Live, TriggerMode::Press, TriggerMode::HoldKey, TriggerMode::Toggle] {
+        for mode in [
+            TriggerMode::Live,
+            TriggerMode::Press,
+            TriggerMode::HoldKey,
+            TriggerMode::Toggle,
+        ] {
             let mut config = cfg();
             config.trigger_mode = mode;
             let mut c = Controller::new(config);
@@ -2135,6 +2318,194 @@ mod tests {
             assert!(c.handle(ready_id(id, "古い", ANCHOR)).is_empty());
             assert!(c.popup().is_none());
         }
+    }
+
+    #[test]
+    fn selected_text_uses_dictionary_lookup_and_preserves_sentence_context() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        config.sentence_probe = true;
+        let mut c = Controller::new(config);
+        let pos = PhysPoint { x: 320, y: 240 };
+        let id = selected_text_request(&mut c, pos);
+        assert_eq!(
+            vec![Command::RequestDrillDown { id, text: "日本語の文".into() }],
+            c.handle(Event::SelectedTextReady {
+                id,
+                text: Some("  日本語の文  ".into()),
+            })
+        );
+        let out = c.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("日本語"))),
+        });
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+        let surface = c.surface.as_ref().expect("selected-text popup");
+        assert_eq!(RootSource::SelectedText, surface.source);
+        assert_eq!(Some("日本語の文"), surface.presentation.sentence.as_deref());
+        assert_eq!(
+            Some("日本語"),
+            surface.presentation.surface.as_ref().and_then(OcrSurface::as_str)
+        );
+        c.handle(placed(POPUP, 200, 200));
+        hover_child(&mut c, "語");
+        let child = c.surface.as_ref().expect("selected-text child");
+        assert_eq!(RootSource::SelectedText, child.source);
+        assert_eq!(Some("日本語の文"), child.presentation.sentence.as_deref());
+        c.push_drilldown(presentation_of("文"));
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(
+            Some("日本語の文"),
+            c.surface.as_ref().and_then(|surface| surface.presentation.sentence.as_deref())
+        );
+        let add = c.handle(Event::AddRequested);
+        assert!(add.iter().any(|command| matches!(command, Command::AddNote { .. })));
+        assert!(add.iter().all(|command| !matches!(command, Command::RequestSentence { .. })));
+    }
+
+    #[test]
+    fn selected_text_rejects_empty_oversized_and_stale_capture_results() {
+        let mut c = Controller::new(cfg());
+        let pos = PhysPoint { x: 20, y: 30 };
+        let old = selected_text_request(&mut c, pos);
+        let current = selected_text_request(&mut c, pos);
+        assert!(c.handle(Event::SelectedTextReady {
+            id: old,
+            text: Some("古い".into()),
+        }).is_empty());
+        assert!(c.handle(Event::SelectedTextReady {
+            id: current,
+            text: Some("  ".into()),
+        }).is_empty());
+        let absent = selected_text_request(&mut c, pos);
+        assert!(c.handle(Event::SelectedTextReady { id: absent, text: None }).is_empty());
+        let oversized = selected_text_request(&mut c, pos);
+        assert!(c.handle(Event::SelectedTextReady {
+            id: oversized,
+            text: Some("a".repeat(MAX_SELECTED_TEXT_BYTES + 1)),
+        }).is_empty());
+        assert!(!c.is_shown());
+    }
+
+    #[test]
+    fn selected_text_stays_open_and_never_follows_ocr_trigger_state() {
+        for mode in [
+            TriggerMode::Live,
+            TriggerMode::Press,
+            TriggerMode::HoldKey,
+            TriggerMode::Toggle,
+        ] {
+            let mut config = cfg();
+            config.trigger_mode = mode;
+            let mut c = Controller::new(config);
+            c.handle(Event::TriggerDown);
+            let id = selected_text_request(&mut c, PhysPoint { x: 40, y: 50 });
+            c.handle(Event::SelectedTextReady { id, text: Some("猫".into()) });
+            c.handle(Event::LookupResult {
+                id,
+                outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))),
+            });
+            c.handle(placed(POPUP, 200, 200));
+            assert!(c.handle(Event::TriggerUp).is_empty());
+            assert!(c.handle(Event::CursorMoved {
+                pos: PhysPoint { x: 800, y: 700 },
+            }).is_empty());
+            assert!(c.handle(Event::DwellElapsed).is_empty());
+            assert!(c.is_shown());
+        }
+    }
+
+    #[test]
+    fn explicit_ocr_triggers_replace_selected_text_roots() {
+        for mode in [TriggerMode::HoldKey, TriggerMode::Toggle] {
+            let mut config = cfg();
+            config.trigger_mode = mode;
+            let mut c = Controller::new(config);
+            shown_selected(&mut c, "猫");
+            c.handle(Event::TriggerDown);
+            let commands = c.handle(Event::CursorMoved {
+                pos: PhysPoint { x: 800, y: 700 },
+            });
+            let id = commands.iter().find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(*id),
+                _ => None,
+            }).expect("explicit trigger must request OCR");
+            c.handle(ready_id(id, "犬", ANCHOR));
+            assert_eq!(RootSource::Ocr, c.surface.as_ref().expect("OCR popup").source);
+            assert!(c.handle(Event::TriggerUp).contains(&Command::HidePopup));
+        }
+
+        let mut config = cfg();
+        config.trigger_mode = TriggerMode::Press;
+        let mut c = Controller::new(config);
+        shown_selected(&mut c, "猫");
+        let commands = c.handle(Event::TriggerPressed {
+            pos: PhysPoint { x: 800, y: 700 },
+        });
+        let id = commands.iter().find_map(|command| match command {
+            Command::RequestLookup { id, .. } => Some(*id),
+            _ => None,
+        }).expect("press must request OCR");
+        c.handle(ready_id(id, "犬", ANCHOR));
+        assert_eq!(RootSource::Ocr, c.surface.as_ref().expect("OCR popup").source);
+    }
+
+    #[test]
+    fn unavailable_selected_text_clears_the_prior_selected_root() {
+        for text in [None, Some("  ".to_string())] {
+            let mut c = Controller::new(cfg());
+            shown_selected(&mut c, "猫");
+            let id = selected_text_request(&mut c, PhysPoint { x: 60, y: 70 });
+            let commands = c.handle(Event::SelectedTextReady { id, text });
+            assert!(commands.contains(&Command::HidePopup));
+            assert!(!c.is_shown());
+        }
+    }
+
+    #[test]
+    fn dismiss_new_request_and_reload_reject_stale_selected_text_work() {
+        let pos = PhysPoint { x: 70, y: 80 };
+        let mut c = Controller::new(cfg());
+        let dismissed = selected_text_request(&mut c, pos);
+        c.handle(Event::DismissRequested);
+        assert!(c.handle(Event::SelectedTextReady {
+            id: dismissed,
+            text: Some("古い".into()),
+        }).is_empty());
+
+        let dismissed_lookup = selected_text_request(&mut c, pos);
+        c.handle(Event::SelectedTextReady {
+            id: dismissed_lookup,
+            text: Some("古い".into()),
+        });
+        c.handle(Event::DismissRequested);
+        assert!(c.handle(Event::LookupResult {
+            id: dismissed_lookup,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("古い"))),
+        }).is_empty());
+
+        let stale_lookup = selected_text_request(&mut c, pos);
+        c.handle(Event::SelectedTextReady {
+            id: stale_lookup,
+            text: Some("古い".into()),
+        });
+        selected_text_request(&mut c, pos);
+        assert!(c.handle(Event::LookupResult {
+            id: stale_lookup,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("古い"))),
+        }).is_empty());
+
+        let stale_after_reload = selected_text_request(&mut c, pos);
+        c.handle(Event::SelectedTextReady {
+            id: stale_after_reload,
+            text: Some("古い".into()),
+        });
+        c.handle(Event::ConfigReloaded(Box::new(cfg())));
+        assert!(c.handle(Event::LookupResult {
+            id: stale_after_reload,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("古い"))),
+        }).is_empty());
+        assert!(!c.is_shown());
     }
 
     fn cfg() -> ControllerConfig {

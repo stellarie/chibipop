@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 63] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
@@ -19,6 +19,7 @@ pub(super) const SETTING_INVENTORY: [SettingId; 62] = [
     SettingId::OcrClipboardKey,
     SettingId::SearchKey,
     SettingId::SentenceSearchKey,
+    SettingId::SelectedTextKey,
     SettingId::OpenDictionarySearch,
     SettingId::OpenSentenceSearch,
     SettingId::OcrSentenceSearch,
@@ -154,6 +155,7 @@ pub(super) enum SettingId {
     OcrClipboardKey,
     SearchKey,
     SentenceSearchKey,
+    SelectedTextKey,
     OpenDictionarySearch,
     OpenSentenceSearch,
     OcrSentenceSearch,

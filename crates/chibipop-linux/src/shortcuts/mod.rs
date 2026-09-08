@@ -62,12 +62,19 @@ pub enum ShortcutId {
     AnkiAdd,
     Search,
     SentenceSearch,
+    SelectedText,
 }
 
 impl ShortcutId {
     /// The complete set in the order that the daemon registers it. The
     /// fixed-size array makes the identifier set part of the application.
-    pub const ALL: [ShortcutId; 4] = [ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search, ShortcutId::SentenceSearch];
+    pub const ALL: [ShortcutId; 5] = [
+        ShortcutId::Trigger,
+        ShortcutId::AnkiAdd,
+        ShortcutId::Search,
+        ShortcutId::SentenceSearch,
+        ShortcutId::SelectedText,
+    ];
 
     /// This function returns the stable identifier on the wire. Hyprland prefixes
     /// this value with the portal app ID. The ID can depend on the process that
@@ -78,6 +85,7 @@ impl ShortcutId {
             ShortcutId::AnkiAdd => "anki-add",
             ShortcutId::Search => "search",
             ShortcutId::SentenceSearch => "sentence-search",
+            ShortcutId::SelectedText => "selected-text",
         }
     }
 
@@ -95,6 +103,7 @@ impl ShortcutId {
             ShortcutId::AnkiAdd => "Add the word shown in the popup to Anki",
             ShortcutId::Search => "Open dictionary search",
             ShortcutId::SentenceSearch => "Open sentence search",
+            ShortcutId::SelectedText => "Look up selected application text",
         }
     }
 }
@@ -222,10 +231,8 @@ impl Selection {
     pub fn startup_line(self, exe: &Path) -> String {
         match self {
             Selection::Portal => format!(
-                "trigger: {} portal (ladder rung 1) - registering {} and {}; the control socket keeps serving too",
-                portal::SHORTCUTS_INTERFACE,
-                ShortcutId::Trigger.as_str(),
-                ShortcutId::AnkiAdd.as_str()
+                "trigger: {} portal (ladder rung 1) - registering configured shortcuts; the control socket keeps serving too",
+                portal::SHORTCUTS_INTERFACE
             ),
             Selection::Native(NativeReason::NoPortal) => format!(
                 "trigger: control socket only (ladder rung 2) - no {} on the session bus; bind `{} ctl trigger-down|trigger-up` in your compositor",
@@ -270,6 +277,10 @@ pub fn preferred(config: &chibipop::config::Config) -> Vec<(ShortcutId, String)>
     if let Some(key) = config.actions.search.sentence_hotkey_linux.as_deref()
         .filter(|key| config.actions.enabled && !key.trim().is_empty()) {
         shortcuts.push((ShortcutId::SentenceSearch, normalize_trigger(key)));
+    }
+    if let Some(key) = config.actions.search.selected_hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty()) {
+        shortcuts.push((ShortcutId::SelectedText, normalize_trigger(key)));
     }
     shortcuts
 }
@@ -353,6 +364,8 @@ pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
         (ShortcutId::Search, false, _) => Action::Nothing,
         (ShortcutId::SentenceSearch, true, _) => Action::Verb(Verb::SentenceSearch),
         (ShortcutId::SentenceSearch, false, _) => Action::Nothing,
+        (ShortcutId::SelectedText, true, _) => Action::Verb(Verb::SelectedText),
+        (ShortcutId::SelectedText, false, _) => Action::Nothing,
     }
 }
 
@@ -403,8 +416,8 @@ mod tests {
     /// Stable identifiers preserve saved portal bindings.
     #[test]
     fn shortcut_ids_round_trip() {
-        assert_eq!(4, ShortcutId::ALL.len());
-        assert_eq!(["trigger", "anki-add", "search", "sentence-search"], ShortcutId::ALL.map(ShortcutId::as_str));
+        assert_eq!(5, ShortcutId::ALL.len());
+        assert_eq!(["trigger", "anki-add", "search", "sentence-search", "selected-text"], ShortcutId::ALL.map(ShortcutId::as_str));
         for id in ShortcutId::ALL {
             assert_eq!(Some(id), ShortcutId::parse(id.as_str()));
             assert!(!id.description().is_empty(), "{id:?} needs dialog text");
@@ -426,9 +439,14 @@ mod tests {
         assert!(preferred(&config).contains(&(ShortcutId::SentenceSearch, "LOGO+F6".into())));
         assert_eq!(action(ShortcutId::SentenceSearch, true, TriggerMode::HoldKey), Action::Verb(Verb::SentenceSearch));
         assert_eq!(action(ShortcutId::SentenceSearch, false, TriggerMode::HoldKey), Action::Nothing);
+        config.actions.search.selected_hotkey_linux = Some("SUPER+F7".into());
+        assert!(preferred(&config).contains(&(ShortcutId::SelectedText, "LOGO+F7".into())));
+        assert_eq!(action(ShortcutId::SelectedText, true, TriggerMode::HoldKey), Action::Verb(Verb::SelectedText));
+        assert_eq!(action(ShortcutId::SelectedText, false, TriggerMode::HoldKey), Action::Nothing);
         config.actions.enabled = false;
         assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::Search));
         assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::SentenceSearch));
+        assert!(!preferred(&config).iter().any(|(id, _)| *id == ShortcutId::SelectedText));
     }
 
     /// The configuration supplies both shortcut chords. The fixed result

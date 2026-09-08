@@ -242,6 +242,8 @@ const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
 const ID_SEARCH_KEY: i32 = 195;
 const ID_SENTENCE_SEARCH_KEY: i32 = 196;
+const ID_SELECTED_TEXT_KEY: i32 = 94;
+const ID_SELECTED_TEXT_KEY_CLEAR: i32 = 95;
 const ID_SEARCH_KEY_CLEAR: i32 = 197;
 const ID_SENTENCE_SEARCH_KEY_CLEAR: i32 = 198;
 const ID_OPEN_DICTIONARY_SEARCH: i32 = 199;
@@ -1043,6 +1045,7 @@ thread_local! {
     static OCR_CLIP_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
     static SCREENSHOT_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
     static SEARCH_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
+    static SELECTED_TEXT_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
     static SENTENCE_SEARCH_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
     static SEARCH_REQUEST: Cell<Option<(isize, chibipop::search::SearchMode)>> = const { Cell::new(None) };
 
@@ -1113,7 +1116,7 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
             | ID_TRIGGER_KEY | ID_ANKI_ADD_KEY | ID_STATIC_REGION_KEY
             | ID_OCR_CLIPBOARD_KEY | ID_SCREENSHOT_HOTKEY | ID_STATUS
             | ID_APPLY_STATE | ID_RUNTIME_STATUS
-            | ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY
+            | ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY
             | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
     ) {
         return false;
@@ -1278,7 +1281,7 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
         let prev = window_text(btn);
         CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
         CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
-        let prompt = if matches!(id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY) { w!("Press keys (Esc cancels)") }
+        let prompt = if matches!(id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY) { w!("Press keys (Esc cancels)") }
             else if id == ID_SCREENSHOT_HOTKEY { w!("Press one key (Esc cancels)") }
             else { w!("Press a key...") };
         let _ = SetWindowTextW(btn, prompt);
@@ -1390,9 +1393,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                 },
                 ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
-                ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY => unsafe { begin_capture(hwnd, id) },
-                ID_SEARCH_KEY_CLEAR | ID_SENTENCE_SEARCH_KEY_CLEAR => {
-                    let target = if id == ID_SEARCH_KEY_CLEAR { ID_SEARCH_KEY } else { ID_SENTENCE_SEARCH_KEY };
+                ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY => unsafe { begin_capture(hwnd, id) },
+                ID_SEARCH_KEY_CLEAR | ID_SENTENCE_SEARCH_KEY_CLEAR | ID_SELECTED_TEXT_KEY_CLEAR => {
+                    let target = match id { ID_SEARCH_KEY_CLEAR => ID_SEARCH_KEY,
+                        ID_SELECTED_TEXT_KEY_CLEAR => ID_SELECTED_TEXT_KEY, _ => ID_SENTENCE_SEARCH_KEY };
                     set_search_key(hwnd, target, String::new());
                 }
                 ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH => {
@@ -2475,6 +2479,7 @@ fn windows_hotkey_value(
         Screenshot => &config.actions.screenshot.hotkey,
         Search => config.actions.search.hotkey.as_deref().unwrap_or(""),
         SentenceSearch => config.actions.search.sentence_hotkey.as_deref().unwrap_or(""),
+        SelectedText => config.actions.search.selected_hotkey.as_deref().unwrap_or(""),
         OcrClipboard => config
             .actions
             .ocr_clipboard
@@ -2917,7 +2922,8 @@ fn search_chord(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool) -> Strin
 }
 
 fn set_search_key(hwnd: HWND, id: i32, key: String) {
-    let cell = if id == ID_SEARCH_KEY { &SEARCH_CAPTURED } else { &SENTENCE_SEARCH_CAPTURED };
+    let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
+        ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
     let text = if key.is_empty() { "Not set" } else { &key };
     // SAFETY: The target is a live capture button; the string is copied synchronously.
     unsafe {
@@ -4157,7 +4163,7 @@ impl SettingsWindow {
             return true;
         }
         let search = CAPTURING.with(|c| c.get()).filter(|(owner, id)|
-            *owner == self.hwnd.0 as isize && matches!(*id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY));
+            *owner == self.hwnd.0 as isize && matches!(*id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY));
         if let Some((_, id)) = search {
             if matches!(vk, 0x10..=0x12 | 0x5B..=0x5C | 0xA0..=0xA5) { return true; }
             // SAFETY: GetKeyState reads the current UI thread's modifier state.
@@ -4860,14 +4866,15 @@ impl SettingsWindow {
                     FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_OCR_CLIPBOARD_KEY_CLEAR, f)?);
                 y += label_h.max(ROW_H) + ROW_GAP;
             }
-            SettingId::SearchKey | SettingId::SentenceSearchKey => {
-                let dictionary = spec.id == SettingId::SearchKey;
-                let (id, clear, value) = if dictionary {
-                    (ID_SEARCH_KEY, ID_SEARCH_KEY_CLEAR, form.cfg.actions.search.hotkey.as_deref())
-                } else { (ID_SENTENCE_SEARCH_KEY, ID_SENTENCE_SEARCH_KEY_CLEAR,
-                    form.cfg.actions.search.sentence_hotkey.as_deref()) };
+            SettingId::SearchKey | SettingId::SentenceSearchKey | SettingId::SelectedTextKey => {
+                let (id, clear, value) = match spec.id {
+                    SettingId::SearchKey => (ID_SEARCH_KEY, ID_SEARCH_KEY_CLEAR, form.cfg.actions.search.hotkey.as_deref()),
+                    SettingId::SelectedTextKey => (ID_SELECTED_TEXT_KEY, ID_SELECTED_TEXT_KEY_CLEAR, form.cfg.actions.search.selected_hotkey.as_deref()),
+                    _ => (ID_SENTENCE_SEARCH_KEY, ID_SENTENCE_SEARCH_KEY_CLEAR, form.cfg.actions.search.sentence_hotkey.as_deref()),
+                };
                 let name = value.filter(|key| !key.is_empty()).unwrap_or("Not set");
-                let cell = if dictionary { &SEARCH_CAPTURED } else { &SENTENCE_SEARCH_CAPTURED };
+                let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
+                    ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
                 cell.with(|cell| *cell.borrow_mut() = None);
                 let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
                 controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
@@ -5882,6 +5889,8 @@ impl SettingsWindow {
                 template.cfg.actions.search.hotkey.as_deref());
             form.cfg.actions.search.sentence_hotkey = resolved_search_key(h, &SENTENCE_SEARCH_CAPTURED,
                 template.cfg.actions.search.sentence_hotkey.as_deref());
+            form.cfg.actions.search.selected_hotkey = resolved_search_key(h, &SELECTED_TEXT_CAPTURED,
+                template.cfg.actions.search.selected_hotkey.as_deref());
             let open_sentence_search = checked(ID_OCR_SENTENCE_SEARCH);
             if let Some(action) = &mut form.cfg.actions.ocr_clipboard {
                 action.open_sentence_search = open_sentence_search;
@@ -5981,7 +5990,7 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
-        for cell in [&SEARCH_CAPTURED, &SENTENCE_SEARCH_CAPTURED] {
+        for cell in [&SEARCH_CAPTURED, &SENTENCE_SEARCH_CAPTURED, &SELECTED_TEXT_CAPTURED] {
             cell.with(|cell| {
                 if cell.borrow().as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
                     *cell.borrow_mut() = None;
@@ -6121,6 +6130,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.actions.search.hotkey = Some("Ctrl+Shift+F".into());
         cfg.actions.search.sentence_hotkey = Some("Ctrl+Shift+G".into());
+        cfg.actions.search.selected_hotkey = Some("Ctrl+F7".into());
         cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
             hotkey: Some("F9".into()), hotkey_linux: None, open_sentence_search: true,
         });
@@ -6137,13 +6147,16 @@ mod tests {
         let pending = crate::settings::apply_to(&edited, &cfg);
         assert_eq!(pending.actions.search.hotkey, cfg.actions.search.hotkey);
         assert_eq!(pending.actions.search.sentence_hotkey, cfg.actions.search.sentence_hotkey);
+        assert_eq!(pending.actions.search.selected_hotkey, cfg.actions.search.selected_hotkey);
         assert!(pending.actions.ocr_clipboard.as_ref().unwrap().open_sentence_search);
         assert!(pending.actions.ocr_clipboard.as_ref().unwrap().hotkey.is_none());
         send_command(&window, ID_SEARCH_KEY_CLEAR);
         send_command(&window, ID_SENTENCE_SEARCH_KEY_CLEAR);
+        send_command(&window, ID_SELECTED_TEXT_KEY_CLEAR);
         let edited = window.read(&form);
         assert!(edited.cfg.actions.search.hotkey.is_none());
         assert!(edited.cfg.actions.search.sentence_hotkey.is_none());
+        assert!(edited.cfg.actions.search.selected_hotkey.is_none());
     }
 
     fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
