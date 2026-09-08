@@ -1,55 +1,40 @@
 # chibipop — regression checklist
 
-## Hover sub-popups and direct search (#71, #44)
+## Manual execution and computer use
 
-Run these checks in a disposable install with Japanese term dictionaries.
+**Manual regression can be performed through computer-use tools when the user requests it.**
+Manual describes the real application interaction; it does not require a human-only operator.
+Human and computer-use runs must meet the same expected results and evidence requirements.
+Updating this checklist or running `--list` does not authorize desktop interaction.
 
-- Open Dictionary search from the tray and from the Dictionaries settings tab.
-- Type a Japanese word. Confirm candidates appear without pressing Enter.
-- Select a candidate. Confirm its complete definition opens in popup layout and uses the configured theme.
-- Confirm the result uses the enabled dictionaries and their configured order.
-- Enter a conjugated word. Confirm the result includes its dictionary form.
-- Submit an empty query, then a missing word. Confirm each state clears old results.
-- Submit another valid word. Confirm the window still responds.
-- Enter Japanese through an IME. Confirm candidate selection does not submit unfinished composition.
-- Open Sentence search from Dictionaries settings and its shortcut. Paste a Japanese sentence.
-- Click a word in the sentence view. Confirm the complete word is highlighted and its candidates appear.
-- Select another sentence word. Confirm old definitions and hover requests cannot replace the new candidates.
-- Select a candidate and confirm the definition opens with normal popup styling.
-- Capture each search shortcut by pressing a key combination. Cancel one capture with Escape and clear another.
-- Configure the search shortcut, apply, close Search, and reopen it with that shortcut.
-- Change the shortcut. Confirm the old shortcut stops opening Search.
-- On Linux, restart after adding or changing a portal shortcut. Confirm the offered chord in the desktop's shortcut settings.
-- For native Linux shortcuts, update the compositor binding to `chibipop ctl search`.
-- Clear the shortcut. Confirm the tray entry still opens Search.
-- Try a conflicting shortcut. Confirm Apply explains the conflict without saving it.
-- Keep Search focused. Confirm typing does not trigger OCR, screenshots, or Anki actions.
-- Press Escape while search is pending. Confirm no late result reopens a window.
-- Select a candidate, focus its definition, and press Escape. Confirm the definition closes and no hover reply revives it.
-- Cancel region, window, and unsaved fixed-target screenshot selection with Escape. Confirm no screenshot or card is saved.
-- On Windows, cancel OCR while recognition is pending. Confirm the clipboard and Sentence search remain unchanged.
-- Check dark and light themes. Confirm input borders, bounded centered buttons, and bordered result cards remain clear.
-- Confirm candidate words are bold, summaries italic, and pasted sentence text larger than ordinary text.
-- Apply custom CSS colors, borders, font sizes, and styles. Confirm search controls and selected definitions use the changes.
-- Close and reopen Search. Confirm the daemon remains running and creates no duplicate search window.
-- Change dictionary selection, apply, and search again. Confirm the result uses the current configuration.
-- Open an OCR popup over known Japanese text. Hover Japanese text inside its definition.
-- Confirm a child popup appears and its parent remains visible.
-- Hover text inside the child. Confirm a further child opens without another OCR capture.
-- Move back to a parent. Confirm its scroll, selection, and click history remain intact.
-- Without entering the child, click or scroll its parent. Confirm the parent still accepts input.
-- Move across whitespace, hold over one word, and drag a selection. Confirm these actions do not repeatedly open children.
-- Press Back or Escape. Confirm navigation retires the appropriate descendants.
-- Dismiss the root popup. Confirm every child disappears and no invisible surface captures input.
-- Repeat near screen edges and with popup scrolling. Confirm children remain reachable and correctly hit-tested.
-- Hover a word that combines ruby base text and kana, such as ruby-backed 食 followed by べる. Confirm lookup uses 食べる.
-- Disable hover sub-popups. Confirm the root still works and hovering opens no child. Re-enable and repeat.
-- Enable the OCR-to-clipboard Sentence search option. Capture text and confirm both clipboard output and prefilled Sentence search.
-- Disable that option and repeat. Confirm capture copies text without opening Sentence search.
-- In Press mode, look up visible text between staggered popups. Confirm popup masking preserves that text.
-- Repeat on Windows and Linux. Record unavailable IME, portal, compositor, or display checks separately.
+- Record the tested revision, executable hash, platform, display scale, dictionaries, OCR engine, language, and trigger mode.
+- Use the requested install and case scope, resolved from the request and existing context. Prefer a disposable install or VM for mutation cases.
+- Follow the case's configuration, dictionary, screenshot, clipboard, display, and Anki permissions. Computer use does not bypass those boundaries.
+- Run desktop cases sequentially. A second window or test can steal focus or cover the OCR fixture.
+- Record the operator, exact steps, observed result, and evidence paths for each case ID.
+- Use `PASS` only after observing the required behavior. Audit output or accessibility text alone cannot prove visual layout.
+- Leave unexecuted cases `MANUAL`. Use `SKIP` with a reason for unavailable prerequisites, tools, or desktop access.
+- A declared `XFAIL` is not evidence that the known behavior was exercised. Record whether the case actually ran.
+- Stop desktop input when the user stops computer use. Record the remaining cases without claiming completion.
+- If Escape stops the computer-use tool, do not count that as proof that the application handled Escape.
 
-The Windows real-pointer regression requires an available desktop and Japanese OCR:
+`python scripts/manual_regression.py --interactive` records results entered by the operator.
+It does not launch a computer-use tool or automatically perform interactive cases.
+Use `--only <case-id>` to select cases and include evidence references in the result notes.
+The existing authorization flags still apply; `--interactive` does not enable mutation permissions.
+Historical pass statements below apply only to their recorded revisions and dates, not to newly added cases or the current build.
+`--list` includes case references and effect metadata. JSON reports include the selected case definitions and authorization flags.
+Platform prerequisites are stated in each new case's prompt and section. Use permission flags that match the authorized case effects.
+This runner's Tier 0 commands target Windows. Use `scripts/linux_container_regression.py` for Linux automated gates.
+
+## Recent feature case index
+
+Cases 1.31-1.41 cover the newer search, hover, clipboard, furigana, sentence-field, and audit-isolation behavior.
+Cases 1.30.11-1.30.16 cover screenshot modes and saved targets. Existing settings, plugin, and live-log cases retain their identifiers.
+Record the exact feature-bearing revision. Chinese sentence segmentation and search resize repaint require their implementation in the tested build.
+A feature branch may be tested before merge; a missing feature in an older build is not a successful regression result.
+
+No new case is pre-marked as passed. The following commands are optional native regressions and do not replace visible acceptance:
 
 ```bash
 cargo test -p chibipop-windows --test popup_hover_live -- --ignored --nocapture --test-threads=1
@@ -57,12 +42,12 @@ cargo test -p chibipop-windows --lib native_definition_hover_and_disable_toggle 
 cargo test -p chibipop-windows --lib native_escape_cancels_without_a_focused_selector_message -- --ignored --nocapture --test-threads=1
 ```
 
-Run desktop tests sequentially. Other visible tests can cover the OCR source or take pointer focus.
+Run desktop tests sequentially and only within the requested scope.
 
 Run this after any large change. It is ordered cheapest-first: **if a tier fails, stop and fix
 before running the next one.**
 
-Everything here was verified working on 2026-07-28, and tier 2 was re-confirmed on 2026-07-29. Numbers are what was actually measured on this
+The original checklist was verified working on 2026-07-28, and tier 2 was re-confirmed on 2026-07-29. Numbers are what was actually measured on this
 machine, not targets — a *different* number is not automatically a failure, but it is always worth
 explaining before dismissing.
 
@@ -114,6 +99,7 @@ exercises the v0.8.0 incremental path, which did not exist that day.
 
 ---
 
+<a id="tier-0"></a>
 ## Tier 0 — the automated gate (~2 min, no screen)
 
 **The `cargo` lines below are the CI contract.** `.github/workflows/ci.yml` is the authoritative
@@ -179,9 +165,9 @@ check-shaped clippy spans the whole workspace unexcluded.
 
 | Check | Expected |
 |---|---|
-| Rust tests | **all green except one golden**, **1339** total across **13** targets, **3** ignored (873 → 893 → 885 → 886 → 893 → 897 → 902 → 906 → 907 → 909 → 913 → 917 → 924 → 925 → 928 → 979 on 2026-08-20 v1.0.0-rc → 1010 on 2026-08-24 action-system → 1407 on 2026-08-26 → 1339 on 2026-08-29; see below) |
-| Clippy | **exactly 1** accepted error (was 2; see below) |
-| Bin-target clippy (below) | **0** |
+| Rust tests | Three sweeps meet the current platform floor in `ci.yml`. Record confirmed local baseline failures separately. Historical totals below are not current targets. |
+| Clippy accepted pass | **Exactly 1** warning, excluding cargo summaries; exit code **0**. |
+| Clippy suppressed pass | **0** error or warning diagnostics; exit code **0**. |
 | Release build | Finished, no errors |
 | Apply handler | under **50 ms** (`LowLevelHooksTimeout` is 300 ms) |
 
@@ -916,6 +902,12 @@ find out what before celebrating.
 
 ### 1.8 Resources
 
+Case **1.8** requires observed runtime measurements. The executable-size-only result is separate:
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.8.1 | Executable size only | Measure the selected executable against the documented size bound. This does not verify CPU, memory, startup, or sustained hover. |
+
 ```bash
 ls -l target/release/chibipop.exe          # ~3.4 MB, limit 100 MB
 ```
@@ -1203,6 +1195,7 @@ silently kept the old engine also leaves the PID alone.
   that guard fails the suite; what is still unwitnessed by any test is the wiring around it — that
   `apply_settings` is handed the language the user picked, and that a swap really rebuilds.
 
+<a id="116-the-startup-language-fallback"></a>
 ### 1.16 The startup language fallback — **added 2026-08-11, not run**
 
 **Nothing witnesses this path today.** `startup_language` is unit-tested as a pure function, and
@@ -1256,6 +1249,7 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
 
+<a id="117-per-language-dictionary-lists"></a>
 ### 1.17 Per-language dictionary lists — **added 2026-08-12, rewritten 2026-08-13 for the two boxes, not run**
 
 **Nothing witnesses any of this today.** `resolve_dict_filter`, the box-to-box move
@@ -1370,6 +1364,7 @@ warnings show.
 > the list was written for. See §1.16 and `per_language` in [`REFERENCE.md`](REFERENCE.md). This is
 > the one state where the tab deliberately does not match the runtime.
 
+<a id="118-a-dictionary-change-lands-in-seconds-without-a-restart"></a>
 ### 1.18 A dictionary change lands in seconds, without a restart — **rewritten 2026-08-16 for v0.8.0, not run**
 
 **This is the acceptance for v0.8.0 and it has never been run in this form.** The entry it replaces
@@ -1513,6 +1508,7 @@ step 8 is the case that most reliably breaks it.
 > **A popup left on screen from before the change still shows the old answer** until the next
 > hover. Nothing repaints it in place.
 
+<a id="119-the-database-can-now-drift-from-the-library-and-says-so"></a>
 ### 1.19 The database can now drift from the library, and says so — **added 2026-08-16, not run**
 
 **Editing in place permanently breaks an invariant the app relied on since M2:** that
@@ -1549,6 +1545,7 @@ The comparison is unit-tested against both encoders. The notice reaching a real 
 > `data/chibipop.sqlite` with an empty `target/debug/library/`. Run the check against a shipped
 > layout, or an installed copy, not `cargo run`.
 
+<a id="120-chibipop-settings-still-rebuilds-and-now-fails-generically"></a>
 ### 1.20 `chibipop settings` still rebuilds, and now fails generically — **added 2026-08-16, not run**
 
 The standalone settings window (`chibipop settings`, and the path `run` falls into when there is no
@@ -1568,6 +1565,7 @@ the staged archive is back in `library/`, `library/.removed/` is empty or gone, 
 
 ---
 
+<a id="121-all-three-ocr-languages-resolve"></a>
 ### 1.21 All three OCR languages resolve — **added 2026-08-17, run**
 
 `probe` cannot do this (it hardcodes `"ja"`). Drive the real app: set `ocr.language`, start `run`,
@@ -1593,6 +1591,7 @@ powershell -NoProfile -Command "\$env:PSModulePath='C:\Windows\system32\WindowsP
 This box has `en-US`, `ja`, `zh-Hans-CN`, `zh-Hant-TW`. **PowerShell 7 cannot load the WinRT type**
 — it must be Windows PowerShell 5.1, with `PSModulePath` reset or the PS7 paths leak in.
 
+<a id="122-the-anki-card-carries-html-if-the-field-map-asks-for-it"></a>
 ### 1.22 The Anki card carries HTML, if the field map asks for it — **added 2026-08-17, run**
 
 The `[[anki.field_map]]` `source` values are `expression`, `reading`, `glossary`, `glossary_html`,
@@ -1649,6 +1648,7 @@ the duplicate guard, not a broken hotkey. Hover a different word to re-test.
 > One probe came back reading `xué・Xi` off the popup covering the line. Dismiss it before you probe
 > underneath.
 
+<a id="123-real-text-inside-the-png-encode-bracket"></a>
 ### 1.23 Real text inside the PNG-encode bracket — **added 2026-08-17, not run**
 
 **Why this exists.** The plugin system sends captures to a plugin as base64 PNG. `tests/png_cost.rs`
@@ -1680,6 +1680,7 @@ The work proceeded on the ruling that the encode is paid only by plugin users, w
 **Fail** — meaning over 10 ms — is not a defect in this checklist. It is the signal to reopen the
 PNG transport and consider the length-prefixed binary frame instead.
 
+<a id="124-provider-trait-no-behaviour-change"></a>
 ### 1.24 Provider trait, no behaviour change — **added 2026-08-17, not run**
 
 **Provider trait, no behaviour change.** Hover a word on `docs/fixtures/ocr-corpus.html` line J1.
@@ -1687,6 +1688,7 @@ The popup text, the resolved word and the highlight rect must match what the sam
 before this branch. Record the rect. `union_chars` on 宿舎 measured `x=176 y=123 w=56 h=30` on
 2026-08-17.
 
+<a id="125-chibipop-plugin-cli-exit-codes"></a>
 ### 1.25 `chibipop plugin` CLI exit codes — **added 2026-08-18, run**
 
 **Why this exists.** The design spec's section 11 asks for a tier 1 item that runs
@@ -1800,6 +1802,9 @@ mismatch (BACKLOG item 35) alike. The code alone never says which one regressed.
 
 ### 1.26 The scrollable settings window
 
+Registry case **1.26.1** checks only the separate audit window's Apply coordinates.
+Case **1.26** and its interactive subcases require the visible window; audit success cannot pass them.
+
 **Setup.** Open Windows settings. Drag the window borders to make it narrower, wider, shorter, and taller.
 Maximize the window, then restore it. The controls must adapt and keep their values.
 Dynamic field rows and screenshot-target text must respect the size selected by the user.
@@ -1838,6 +1843,7 @@ Changing the configured engine requires a restart. A separate plugin-test proces
 
 The crash-provider integration test verifies the concrete strike-to-status path without changing the user's Anki or plugin configuration.
 
+<a id="128-fresh-install-with-discovered-meikiocr"></a>
 ### 1.28 Fresh install with discovered meikiocr — added 2026-08-19, not run
 
 **Why this exists.** A fresh install seeds the whole `plugins/` tree, so
@@ -1888,6 +1894,7 @@ exists.
 provider is visible in the dropdown, its checkbox is checked, the built-in
 engine still runs until selected, and no adapter starts prematurely.
 
+<a id="129-per-engine-live-regression"></a>
 ### 1.29 Per-engine live regression — added 2026-08-19, not run
 
 **Why this exists.** 1.28 proves discovery surfaces the plugin while the
@@ -1954,11 +1961,13 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
 `[meikiocr-adapter]` lines appear only while meikiocr is the engine, and the fallback case starts
 clean on Windows OCR with the exact warning quoted above.
 
+<a id="130-screenshot-action"></a>
 ### 1.30 Screenshot action — added 2026-08-24, not run
 
 Start `chibipop run` with a popup visible. Hover a Japanese word before each
 standalone or include-on-add screenshot check. Use the configured screenshots
 folder when you check files.
+Keep Anki disabled except for explicit scratch-card cases. Restore saved targets, hotkeys, configuration, and scratch screenshots afterward.
 
 #### 1.30a Region and window selection
 
@@ -2006,7 +2015,8 @@ folder when you check files.
    without an image. A standalone mining screenshot must save no file.
 4. **Check the popup state.** Take a successful picture. The popup must show
    the word as added. A second regular Anki add must use `allowDuplicate: false`.
-5. **Reload the hotkey.** On Windows, change `actions.screenshot.hotkey`. On
+5. **Reload the hotkey.** On Windows, use key capture with a modifier chord, cancel a capture with Escape, and test Clear.
+   Confirm cancellation preserves the previous chord and Clear disables it. Rebind `actions.screenshot.hotkey`. On
    Linux, change `actions.screenshot.hotkey_linux` and its compositor bind.
    Press **Apply**. The new key must work, the old key must fail, and the
    process ID must stay unchanged.
@@ -2014,34 +2024,199 @@ folder when you check files.
 **Pass** when every applicable subsection meets its checks. Do not treat a
 selector test as proof of the live screen, compositor, or Anki path.
 
+The following registered cases cover the saved-target behavior independently:
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.30.11 | Region and Window modes | Compare both modes and visible pixels. Test Windows Alt selection and the documented Linux metadata or region fallback. |
+| 1.30.12 | Fixed region restart | Save a region, restart, and capture without selecting again. Require the saved physical rectangle. |
+| 1.30.13 | Fixed window current bounds | Save a window, restart, move or resize it, and capture its current visible bounds. |
+| 1.30.14 | Invalid window identity | Close the saved window or create an ambiguous fixture identity. Refuse a different target. |
+| 1.30.15 | Reset targets | Reset and Apply. Clear summaries and require selection on the next fixed-mode capture. Preserve the save directory. |
+| 1.30.16 | Optional screenshot cancellation | Cancel include-on-add capture; save the requested scratch card without an image. Cancelled standalone screenshots save no file or card. |
+
 ---
 
+<a id="case-1-31"></a>
+### 1.31 Direct dictionary search
+
+**Prerequisites.** Windows and Linux. Start the daemon with known Japanese term entries. Record the search and daemon processes separately.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.31 | Live dictionary candidates | Windows/Linux: type a known word without Enter. Candidates must appear; selecting one opens that entry's complete definition. |
+| 1.31.1 | Dictionary search entry points | Windows/Linux: open search from the tray, Dictionaries settings, and CLI. Linux also supports ctl search. Each route must accept input. |
+| 1.31.2 | Dictionary order and inflections | Windows/Linux: configure two known dictionaries and their order. Search 食べました; require 食べる. Disabled dictionaries must contribute no entries. Restore configuration. |
+| 1.31.3 | Empty miss and rapid-query recovery | Windows/Linux: enter whitespace, a known miss, and two rapid valid queries. Old candidates must clear; only the latest query may populate results. |
+| 1.31.4 | IME composition in search | Windows/Linux with an available IME: compose Japanese text. Enter must commit composition before submitting; Escape must cancel composition before dismissing search. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-32"></a>
+### 1.32 Sentence search and definition selection
+
+**Prerequisites.** Windows and Linux. Use known Japanese entries and a multiline sentence. Record visible selection and exact sentence text.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.32 | Sentence entry and word selection | Windows/Linux: open Sentence search from Dictionaries settings and its configured shortcut. Paste 猫は食べました。 Click the verb; highlight the complete word and show 食べる among candidates. |
+| 1.32.1 | Sentence Unicode and punctuation | Windows/Linux: paste multiline text with spaces, punctuation, and a supplementary-plane character. Preserve all text and line breaks. Punctuation and whitespace must not become lookup words. |
+| 1.32.2 | Sentence changes retire stale definitions | Windows/Linux: open a definition, then select a different sentence word or edit the sentence rapidly. Old definitions and late hover replies must not replace the new candidates. |
+| 1.32.3 | Chosen sentence definition | Windows/Linux: select a non-first candidate. Its written form, reading, dictionary attribution, and full definition must match that row, using popup styling. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-33"></a>
+### 1.33 Search shortcuts focus and cancellation
+
+**Prerequisites.** Windows and Linux. Seed non-conflicting search shortcuts. Use scratch configuration for rebind checks; Linux portal changes require restart.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.33 | Search shortcut capture cancellation | Windows/Linux: start key capture for each search shortcut, then press Escape. The previous chord must remain unchanged; modifier-only presses must not complete capture. |
+| 1.33.1 | Search shortcut rebind clear and conflict | Windows/Linux: capture both search chords, Apply, and reopen search. Rebind, clear, and try a conflict. Reject conflicts without saving; disable old bindings at the documented platform boundary. Restore configuration. |
+| 1.33.2 | Linux portal and native search bindings | Linux: verify ctl search and ctl sentence-search. After clearing or changing a portal chord, reject its stale events. Restart and verify the new portal chord. Restore config and compositor bindings. |
+| 1.33.3 | Search focus suppresses other actions | Windows/Linux: focus search input and type keys also used by lookup or actions. Do not trigger OCR, screenshots, or Anki. Switch focus away and verify normal input resumes. |
+| 1.33.4 | Escape hierarchy and restored input | Windows/Linux: open a definition and descendant, then press Escape per level. Close descendants and restore parent focus; typing must work without an extra click. Escape in main search cancels pending replies and closes its flow. |
+| 1.33.5 | Windows Escape and held-key suppression | Windows: hold Escape after closing a child; one press must not consume another level. Cancel a selector while its action key remains held; repeats must not restart it until release. Root Escape must dismiss root history and pending lookup. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-34"></a>
+### 1.34 Search themes lifecycle and dictionary selection
+
+**Prerequisites.** Windows and Linux. Back up scratch configuration and popup.css, including whether the CSS file was absent. Begin built-in-theme checks without overrides.
+
+Use this CSS sample for 1.34.1, then reduce opacity separately and compare the result:
+
+```css
+.popup { background-color: #18344a; border-color: #e5b567; border-width: 3px; padding: 20px; opacity: 1; }
+.headword { color: #ffd28a; font-size: 28px; font-weight: bold; }
+.body { color: #eef6ff; font-size: 20px; }
+.collapsed { color: #d0e4f1; font-size: 18px; font-style: italic; }
+```
+
+Windows reads CSS beside its executable. Linux search reads it beside the active configuration file.
+Linux OCR popups still lack CSS support; that separate gap must not fail the implemented search-CSS case.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.34 | Built-in search themes | Windows/Linux: compare dark and light search windows and definitions. Inputs, centered button labels, and candidate cards need clear boundaries. Candidate words are bold, summaries italic, and sentence text larger. Restore theme state. |
+| 1.34.1 | Search CSS and live definition sizing | Windows/Linux: apply the CSS sample in this section with a definition open. Verify colors, font roles, borders, padding, and opacity. Windows Save & Apply updates search; Linux updates on the next lookup. Larger fonts must reflow definitions. Restore CSS. |
+| 1.34.2 | Search close reopen and launch identity | Windows/Linux: repeat a daemon tray or settings launch, close search, and reopen it. Keep the daemon alive and avoid duplicate empty sessions for that route. Explicit prefilled CLI sessions may be independent. |
+| 1.34.3 | Dictionary selection refreshes search | Windows/Linux: disable a known dictionary, Apply, and repeat the lookup. Its candidates must disappear. Restore it and require the candidates to return without stale definitions. |
+| 1.34.4 | Search display scaling | Windows/Linux where supported: inspect search and definitions at 100%, 125%, and 150% scaling. Keep labels, hit targets, borders, and highlighted words aligned. Change scaling only when authorized; restore the original scale. |
+| 1.34.5 | Windows search input caret and spacing | Windows: focus both search inputs and type. Require a visible insertion caret and an I-beam over editable text. Keep the upper border below the title and label, with enough input height for readable text. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-35"></a>
+### 1.35 Hover sub-popups
+
+**Prerequisites.** Windows and Linux. Use Japanese entries whose definitions reference other entries. Use Press mode and stage logs for the no-extra-OCR check.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.35 | Hover creates dictionary children | Windows/Linux: open an OCR popup, then hover Japanese text in its definition and in the resulting child. Open dictionary children while retaining their parents. |
+| 1.35.1 | Hover navigation preserves parent state | Windows/Linux: scroll and select text in a parent, enter a child, then return with Back or Escape. Preserve parent state, retire descendants, and prevent late replies from reviving them. |
+| 1.35.2 | Ruby lookup and sub-popup toggle | Windows/Linux: in Press mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration. |
+| 1.35.3 | Hover edges scrolling and hit regions | Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Keep children reachable and hit regions aligned. Dismiss the root; invisible windows must not capture input. |
+| 1.35.4 | Hover modes and bounded depth | Windows/Linux: repeat in Live, Hold key, Toggle, and Press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-36"></a>
+### 1.36 OCR-to-clipboard sentence handoff
+
+**Prerequisites.** Windows and Linux where capture and clipboard channels are available. Use synthetic text and a known clipboard sentinel. Restore clipboard contents and configuration.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.36 | OCR clipboard output | Windows/Linux: copy a known multiline screen region. Clipboard text must contain the recognized lines in reading order. Record the OCR engine and supported language. |
+| 1.36.1 | Optional sentence handoff | Windows/Linux: toggle Open copied screen text in sentence search. Success always copies text; only the enabled option opens Sentence search with that same text. Restore configuration. |
+| 1.36.2 | Empty capture and popup masking | Windows/Linux: capture an empty region, then capture while a prior popup is visible. Empty text must not open search. Popup text must not contaminate OCR or reappear over the new search flow. |
+| 1.36.3 | OCR clipboard key capture and Clear | Windows: capture the Copy screen text key, cancel capture, rebind, Apply, and Clear. Preserve cancelled values and disable old keys. Linux: verify the configured native binding and ctl ocr-clipboard. Restore configuration. |
+| 1.36.4 | OCR cancellation preserves clipboard | Windows/Linux: cancel the region selector and require the sentinel to remain unchanged. On Windows, also cancel while OCR is pending; late text must neither replace the clipboard nor open Sentence search. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-37"></a>
+### 1.37 Chinese dictionary sentence segmentation
+
+**Prerequisites.** Windows and Linux on a build containing dictionary-driven Chinese sentence lookup. Verify fixture entries 我, 在, 学习, 学, 习, and 中文 first. Feature-branch builds are valid test targets.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.37 | Chinese sentence word boundaries | Windows/Linux with the required feature: paste 我在学习中文. Require 我, 在, 学习, and 中文 as word groups. Click either character of 学习 and 中文; highlight the complete selected group. The label must be Sentence. |
+| 1.37.1 | Chinese compound and shorter candidates | Windows/Linux: select 学习. With the fixture entries enabled, require 学习, 学, and 习 as candidates. Repeat with supported Traditional Chinese entries, punctuation, and line breaks; preserve text and language-neutral prompts. |
+| 1.37.2 | Chinese dictionary filtering and Japanese compatibility | Windows/Linux: disable the fixture dictionary and repeat; do not invent its missing candidates. Restore it, then check 食べました still offers 食べる through normal deconjugation. Restore configuration. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-38"></a>
+### 1.38 Windows search resize repaint
+
+**Prerequisites.** Windows on a build containing the search resize repaint fix. Ordinary window resizing does not require changing display scaling.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.38 | Dictionary search resize borders | Windows: populate candidates, then repeatedly shrink, expand, maximize, and restore Dictionary search. Erase old border positions; redraw input, buttons, status, and cards without ghost lines. Keep the current query and results. |
+| 1.38.1 | Sentence search resize borders | Windows: repeat resizing with multiline sentence text, a highlighted word, candidates, and an open definition. Keep borders clean and selection aligned; minimize and restore without blank or stale sections. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-39"></a>
+### 1.39 OCR furigana filtering
+
+**Prerequisites.** Windows and Linux with an OCR engine that recognizes the fixture's body and ruby. Include horizontal and vertical ruby plus unrelated kana-only body text. A recognition failure cannot prove filtering behavior.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.39 | Remove furigana live option | Windows/Linux: compare the same ruby fixture with Remove furigana enabled and disabled. The saved ocr.discard_furigana setting must control removal of paired kana ruby while retaining kanji body text. Restore configuration. |
+| 1.39.1 | Furigana geometry guards | Windows/Linux: enable Remove furigana and compare horizontal and vertical ruby with unrelated kana-only lines. Preserve body text. Require recognized body and ruby first; otherwise record the missing prerequisite. Restore configuration. |
+| 1.39.2 | Furigana clipboard and sentence source | Windows/Linux: capture the ruby fixture to the clipboard and Sentence search with filtering on and off. Compare OCR-derived text, not dictionary glosses. Paired ruby follows the setting; line order and body text remain intact. Restore state. |
+| 1.39.3 | Furigana in Anki sentence fields | Windows/Linux with scratch Anki: add a fresh eligible fixture word with filtering enabled, then another with it disabled. Verify the OCR-derived sentence field follows the setting. Restore config and clean up only scratch notes. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-40"></a>
+### 1.40 Anki sentence field modes
+
+**Prerequisites.** Windows and Linux with AnkiConnect, a scratch deck/model, and a sentence field mapping. Use a fresh eligible word per case so duplicate protection does not mask results. Restore configuration and remove only scratch notes.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.40 | Anki Full sentence mode | Windows/Linux: select Full sentence and add a word from a sentence spanning two fixture lines. Store the containing sentence up to its boundaries, not neighboring sentences. |
+| 1.40.1 | Anki Current line mode | Windows/Linux: select Current line and add a different word. Store the cursor's OCR line, cut to its containing sentence. Do not include other recognized lines. |
+| 1.40.2 | Anki All lines mode | Windows/Linux: select All lines and add a different word. Store every line recognized in the hover capture, in reading order; do not assume it covers the entire screen. |
+| 1.40.3 | Anki Static region mode | Windows/Linux: save a static region, select Static region, and add a different word. The sentence field must use that region's recognized text. Cancel a replacement region and preserve the previous saved region. |
+| 1.40.4 | Anki sentence mode changes are current | Windows/Linux: Apply a different sentence mode, perform a fresh lookup, and add a new eligible word. Its sentence must follow the newly applied mode rather than cached text from the prior lookup. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+<a id="case-1-41"></a>
+### 1.41 Windows audit output isolation
+
+**Prerequisites.** Windows. Keep normal run and its Debug live-log viewer open in a disposable install. Save CLI stdout and stderr separately as test evidence.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.41 | Machine-readable audit stays isolated | Windows: run settings --audit from the same install. Stdout must parse as JSON; stderr must not announce live capture. Audit JSON must not enter the daemon's viewer, while normal daemon output continues. |
+
+**Evidence and cleanup.** Record observed results per ID, screenshots or logs, and the tested build. Restore case-specific changes.
+
+---
+
+<a id="tier-2"></a>
 ## Tier 2 — mostly automatable (~5 min)
 
-> [!important] Corrected 2026-07-31 — this tier is **not** human-only
-> It said "none of this can be automated", because `SendInput` returned **0** and the call was
-> rejected. That is true only **until the user grants input control**. Once they have, `SendInput`
-> returns **1** and `WH_MOUSE_LL`/`WH_KEYBOARD_LL` fire normally — hold-shift mode was driven end
-> to end on 2026-07-31 this way: Shift down + mouse move raised the popup, Shift up retracted it,
-> reproducibly over two cycles.
->
-> **Print `SendInput`'s return value first.** 0 = not permitted, ask the user. 1 = drive it.
->
-> **And read the cursor back before believing anything.** `MOUSEEVENTF_ABSOLUTE` targets the
-> **primary monitor** unless you also pass `MOUSEEVENTF_VIRTUALDESK` (`0x4000`) and normalise over
-> the whole virtual desktop (`x * 65535 / (vw - 1)`). ~~this box is 3640x1920~~ — **stale as of
-> 2026-08-17: the box is 2560×1080, one display.** Asking for `2696,491` without the flag once put
-> the cursor at `1355,246` and looked exactly like a dead hook; with one monitor that coordinate no
-> longer exists at all.
->
-> **Simpler, and it worked on 2026-08-17:** plain `SetCursorPos` from a PowerShell tool call drives
-> the hover end to end — pointer onto the word, popup up, `SendKeys 'a'` fires the Anki hotkey and
-> the card lands. No `SendInput` normalisation, no virtual-desktop arithmetic. Nudge the cursor
-> twice (`191,136` then `192,137`); a single `SetCursorPos` onto a stationary point may not raise
-> the popup on its own.
->
-> Detecting the popup needs no screenshot: `EnumWindows` filtered by pid, then `GetClassName` —
-> `ChibipopPopupClass` and `ChibipopOverlayClass` appear and disappear with it.
+> [!important] Tier 2 supports requested computer-use execution
+> Use the manual-execution policy at the start of this checklist and the configured computer-use workflow.
+> Measure the current display geometry and scale before choosing fixture coordinates.
+> Historical machine coordinates do not describe every test environment.
+> A failed input or capture operation leaves that observation unverified; it does not prove a product defect.
+> Window enumeration can support lifecycle checks, but it cannot prove border, text, or highlight geometry.
+> Stop desktop input when the user stops computer use, and record remaining cases explicitly.
 
 1. **Hover** Japanese text → popup appears beside it.
 2. **Reach into it** — move the cursor from the word into the popup. It must not change or vanish.
