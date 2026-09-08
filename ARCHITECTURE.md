@@ -305,7 +305,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 
 - Direct search uses the existing lookup engine and presentation rules without capture or OCR.
 - Search displays candidates before a selected definition. Definitions reuse `PopupScene` and the existing native painters.
-- Sentence search uses the pinned Japanese analyzer. Clicks select complete UTF-8 word ranges and request dictionary candidates.
+- Sentence search derives UTF-8 word ranges from enabled dictionary matches through the normal lookup engine, including Japanese inflections and Chinese text.
+- Clicks request candidates for the selected word and its shorter internal matches, within the normal result cap.
 - OCR-to-clipboard optionally opens Sentence search with the captured text. Linux transfers that text through bounded child stdin, not process arguments.
 - Search windows accept native text input. Windows uses native controls; Linux runs a separate iced process.
 - Search controls and definitions use the existing CSS parser and theme roles. Candidate summaries use the collapsed text role.

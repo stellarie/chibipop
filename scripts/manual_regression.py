@@ -3,6 +3,8 @@
 
 This runner mirrors docs/REGRESSION.md. It automates the checks that are safe
 from a command line and records an explicit result for every manual item.
+Manual cases may be performed with computer-use tools when the user requests
+that execution. This script records outcomes; it does not automate the desktop.
 
 No machine-specific paths are embedded here. Pass installs, archives, browser
 commands, Anki data, and output locations as arguments.
@@ -53,7 +55,7 @@ class Check:
     destructive: bool = False
     known_gap: bool = False
     auto: str | None = None
-    effects: tuple[str, ...] = ()
+    effects: tuple[str, ...] = ()  # State-changing effects.
 
 
 @dataclass
@@ -89,12 +91,13 @@ def build_checks() -> list[Check]:
         Check("1.1", "1", "Pipeline resolves and looks up", "auto-or-interactive", "docs/REGRESSION.md#11-the-pipeline-resolves-and-looks-up", "Run probe at a known corpus point and require orient, line, at, anchor, ranked hits, and match.", auto="probe_pipeline"),
         Check("1.2", "1", "Match highlight geometry", "interactive", "docs/REGRESSION.md#12-the-match-highlight-is-where-it-claims", "Predict the glyph union, then verify the match rectangle equals it plus padding."),
         Check("1.3", "1", "Deconjugation highlight", "interactive", "docs/REGRESSION.md#13-the-deconjugation-case", "Hover the conjugated phrase. Confirm the match box covers the full matched phrase. Confirm the Card shows `(te form)` under 風邪をひく."),
-        Check("1.4", "1", "Probe region drawing", "auto-or-interactive", "docs/REGRESSION.md#14-draw-it-and-look", "Run probe with --show-region and inspect the capture and match boxes.", auto="probe_show_region"),
+        Check("1.4", "1", "Probe region drawing", "interactive", "docs/REGRESSION.md#14-draw-it-and-look", "Windows: run probe with --show-region and visually inspect capture and match boxes. Text output alone cannot pass this case."),
         Check("1.5", "1", "Same glyph stability", "auto-or-interactive", "docs/REGRESSION.md#15-same-glyph-stability-the-anti-flicker-precondition", "Probe 4 to 5 points inside one glyph and diff the hit lists.", auto="probe_stability"),
         Check("1.6", "1", "Vertical text known ceiling", "expected", "docs/REGRESSION.md#16-vertical-text-is-still-broken-in-the-known-way", "Confirm the wide region still fails or fabricates text, while the tall region reads the column.", known_gap=True, auto="probe_vertical"),
         Check("1.7", "1", "Wheel not swallowed at rest", "interactive", "docs/REGRESSION.md#17-the-wheel-is-not-swallowed-at-rest", "With run live and no popup, park over a scrollable window and wheel. The page must scroll."),
         Check("1.7a", "1", "Outlined glyph ceiling", "auto-or-interactive", "docs/REGRESSION.md#17a-outlined-glyphs-still-read-at-about-half", "Score outlined text from ocr line 0 and compare with solid text in the same run.", auto="probe_outlined"),
-        Check("1.8", "1", "Resources", "auto-or-interactive", "docs/REGRESSION.md#18-resources", "Measure exe size, idle resources, watch plateau, startup time, and sustained hover memory.", auto="resources"),
+        Check("1.8", "1", "Runtime resources", "interactive", "docs/REGRESSION.md#18-resources", "Measure idle CPU and memory, watch plateau, startup time, and sustained-hover memory on the supported target. Record durations and measurements; executable size alone cannot pass."),
+        Check("1.8.1", "1", "Executable size only", "auto", "docs/REGRESSION.md#18-resources", "Measure executable bytes only. Runtime resources remain a separate manual case.", auto="resources"),
         Check("1.9", "1", "Settings apply without restarting", "interactive", "docs/REGRESSION.md#19-settings-apply-without-restarting", "Change capture height, Apply, verify PID unchanged, window remains, clamp message, and probe height."),
         Check("1.10", "1", "Alphanumeric scanning", "interactive", "docs/REGRESSION.md#110-alphanumeric-scanning", "Disable alphanumeric scan live and check English, mixed numeric Japanese, and numeric hover behavior."),
         Check("1.11", "1", "Trigger and hotkeys apply live", "interactive", "docs/REGRESSION.md#111-trigger-mode-and-both-hotkeys-apply-live", "Change trigger mode, trigger key, and Anki key. Each must work with the same PID."),
@@ -128,7 +131,7 @@ def build_checks() -> list[Check]:
         Check("1.17.2", "1", "Dictionary list acting box", "interactive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Select in Not searched and ensure Move and Remove act on that box."),
         Check("1.17.3", "1", "Last searched dictionary guard", "destructive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Try to move or remove the last readable searched dictionary. It must remain scoped.", destructive=True),
         Check("1.17.4", "1", "Dictionary Add appends to Searched", "destructive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Import a dictionary and confirm it lands at the bottom of Searched.", destructive=True),
-        Check("1.17.5", "1", "Stale dictionary list fallback", "destructive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Hand-edit stale per-language entries and confirm both routes search everything.", destructive=True),
+        Check("1.17.5", "1", "Stale dictionary list fallback", "destructive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Hand-edit stale per-language entries and confirm both routes search everything.", destructive=True, effects=("config",)),
         Check("1.17.6", "1", "Dictionary tab two-box shape", "interactive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Confirm the tab has Searched and Not searched listboxes, four buttons, and no divider row."),
         Check("1.17.7", "1", "Per-language Apply stays in-process", "interactive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Confirm the PID does not change across Apply."),
         Check("1.17.8", "1", "Language dropdown rescopes lists", "interactive", "docs/REGRESSION.md#117-per-language-dictionary-lists", "Switch OCR language and confirm the dictionary boxes rescope before Apply."),
@@ -146,7 +149,7 @@ def build_checks() -> list[Check]:
         Check("1.18.6", "1", "Popup stays live during Apply", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Hover repeatedly during the import and confirm old rows still answer.", destructive=True),
         Check("1.18.7", "1", "Removed dictionary stops immediately", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Remove the dictionary and confirm it stops answering without restart.", destructive=True),
         Check("1.18.8", "1", "Remove and add in one Apply", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Replace one dictionary with another in one Apply and verify both effects.", destructive=True),
-        Check("1.18.9", "1", "Dictionary plus settings Apply", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Stage a dictionary import and a non-dictionary setting. Both must land.", destructive=True),
+        Check("1.18.9", "1", "Dictionary plus settings Apply", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Stage a dictionary import and a non-dictionary setting. Both must land.", destructive=True, effects=("config", "dictionary")),
         Check("1.18.10", "1", "Post-Apply filesystem state", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Confirm .removed is gone, archive locations are correct, DB mtime changed, and no .new exists.", destructive=True),
         Check("1.18.11", "1", "Apply latency report", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Report the Apply took line if present, or record that no line appeared.", destructive=True),
         Check("1.18.12", "1", "Tray quit after Apply", "destructive", "docs/REGRESSION.md#118-a-dictionary-change-lands-in-seconds-without-a-restart", "Quit from tray after Apply and confirm exit within about one second.", destructive=True),
@@ -160,7 +163,7 @@ def build_checks() -> list[Check]:
         Check("1.19.4", "1", "Drift notice missing library archive", "destructive", "docs/REGRESSION.md#119-the-database-can-now-drift-from-the-library-and-says-so", "Move the archive back out and confirm Settings names it as in the database but absent from library.", destructive=True),
         Check("1.19.5", "1", "Drift checked from both settings routes", "destructive", "docs/REGRESSION.md#119-the-database-can-now-drift-from-the-library-and-says-so", "Open Settings from startup and from the tray and confirm both routes check drift.", destructive=True),
         Check("1.19.6", "1", "Drift false alarms stay silent", "destructive", "docs/REGRESSION.md#119-the-database-can-now-drift-from-the-library-and-says-so", "Confirm no notice for no term archive, corrupt archive, or absent/unparseable source_hashes.", destructive=True),
-        Check("1.20", "1", "Standalone settings rebuild failure", "destructive", "docs/REGRESSION.md#120-chibipop-settings-still-rebuilds-and-now-fails-generically", "Apply a dictionary change from settings while run holds the DB and confirm rollback.", destructive=True),
+        Check("1.20", "1", "Standalone settings rebuild failure", "destructive", "docs/REGRESSION.md#120-chibipop-settings-still-rebuilds-and-now-fails-generically", "Apply a dictionary change from settings while run holds the DB and confirm rollback.", destructive=True, effects=("config", "dictionary")),
         Check("1.20.1", "1", "Standalone settings rollback evidence", "destructive", "docs/REGRESSION.md#120-chibipop-settings-still-rebuilds-and-now-fails-generically", "Confirm generic rebuild failure text, restored archives, empty or missing .removed, old database mtime, and live hovers.", destructive=True),
         Check("1.20.2", "1", "Standalone settings live hover proof", "destructive", "docs/REGRESSION.md#120-chibipop-settings-still-rebuilds-and-now-fails-generically", "After rollback, confirm hovers in the live instance still answer from the unchanged database.", destructive=True),
         Check("1.21", "1", "All OCR languages resolve", "interactive", "docs/REGRESSION.md#121-all-three-ocr-languages-resolve", "Test ja, zh-Hans-CN, and zh-Hant-TW through real run with matching dictionaries and recognizers."),
@@ -187,17 +190,17 @@ def build_checks() -> list[Check]:
         Check("1.25.3", "1", "Plugin broken test exit code", "auto-or-interactive", "docs/REGRESSION.md#125-chibipop-plugin-cli-exit-codes", "Run plugin test broken with the sample PNG and confirm exit code 1."),
         Check("1.25.4", "1", "Plugin unknown-name exit code", "auto-or-interactive", "docs/REGRESSION.md#125-chibipop-plugin-cli-exit-codes", "Run plugin test nosuchplugin with the sample PNG and confirm exit code 2."),
         Check("1.25.5", "1", "Plugin missing-image exit code", "auto-or-interactive", "docs/REGRESSION.md#125-chibipop-plugin-cli-exit-codes", "Run plugin test echo with a missing image and confirm exit code 2."),
-        Check("1.26", "1", "Scrollable settings window", "auto-or-interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Run settings --audit and the seven visible scroll checks.", auto="settings_audit"),
-        Check("1.26.1", "1", "Settings Apply row same y", "auto-or-interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Use settings --audit and a shrunk live window to confirm Apply has the same y on every tab.", auto="settings_audit"),
+        Check("1.26", "1", "Scrollable settings window", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Windows: run the seven visible scroll, resize, focus, and reflow checks. A separate audit window cannot pass the live visual checks."),
+        Check("1.26.1", "1", "Settings audit Apply geometry only", "auto", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Windows: parse settings --audit and require equal Apply y coordinates across tabs. This checks the newly opened audit window only.", auto="settings_audit"),
         Check("1.26.2", "1", "Settings scrollbar activates when needed", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Confirm the reserved scrollbar is disabled for fitting pages and activates when content exceeds the viewport."),
         Check("1.26.3", "1", "Settings wheel clamp", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Wheel a tall tab to both ends and confirm it clamps without drift."),
         Check("1.26.4", "1", "Settings tab switch resets scroll", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Scroll a tab, switch away and back, and confirm it returns to the top."),
-        Check("1.26.5", "1", "Settings controls still respond", "auto-or-interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Operate visible controls on each tab and compare settings --audit tab rings when useful."),
+        Check("1.26.5", "1", "Settings controls still respond", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Windows: operate visible controls on each tab after reflow. Audit tab rings may support the observation but cannot replace it."),
         Check("1.26.6", "1", "Settings scrollbar thumb drag", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "Drag the scrollbar thumb by hand and confirm content tracks smoothly and stays where released."),
         Check("1.26.7", "1", "Settings 150 percent scaling", "interactive", "docs/REGRESSION.md#126-the-scrollable-settings-window", "At 150 percent display scaling, restart and confirm Apply is visible or reachable on every tab."),
         Check("1.27", "1", "Live Apply engine switching", "expected", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Record implemented parts and expected blocked hot-swap and notice parts.", known_gap=True),
         Check("1.27.1", "1", "Plugin enable transition", "interactive", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Enable an installed provider on Extensions and confirm its configured enabled state."),
-        Check("1.27.2", "1", "Plugin engine selection transition", "expected", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Select the provider and Apply. Verify the footer retains the active backend until restart; then verify the provider and language.", known_gap=True),
+        Check("1.27.2", "1", "Plugin engine selection transition", "interactive", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Windows: select the provider and Apply. Keep the active backend in the footer until restart; then verify the provider, language, and a real lookup."),
         Check("1.27.3", "1", "Built-in engine reselect transition", "interactive", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Select Built-in, Apply, restart, and confirm the footer and lookup use Windows OCR."),
         Check("1.27.4", "1", "Plugin failure auto-disable transition", "expected", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Reach three failures in the daemon's provider. Confirm unavailable status retains engine and language; auto-fallback and popup notice remain absent.", known_gap=True),
         Check("1.27.5", "1", "Plugin recovery boundaries", "expected", "docs/REGRESSION.md#127-live-apply-engine-switching-transitions", "Confirm success resets the pre-disable streak and ordinary Apply does not restart a disabled provider. Restart after correcting its failure.", known_gap=True),
@@ -216,15 +219,67 @@ def build_checks() -> list[Check]:
         Check("1.29.4", "1", "Unknown engine fallback", "interactive", "docs/REGRESSION.md#129-per-engine-live-regression", "Restart with an unknown engine name and confirm the exact fallback warning, windows-ocr startup, and normal hover."),
         Check("1.30", "1", "Screenshot action", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Run all screenshot selection, cancel, Anki image, no-popup, and hot-reload checks.", destructive=True),
         Check("1.30.1", "1", "Screenshot overlay starts", "interactive", "docs/REGRESSION.md#130-screenshot-action", "With a popup visible, press the screenshot hotkey and confirm the dim overlay plus crosshair appears."),
-        Check("1.30.2", "1", "Screenshot selection visuals", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Drag a region and confirm the selected area is undimmed with a white border."),
-        Check("1.30.3", "1", "Screenshot PNG saved", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Release selection and confirm a valid screenshot PNG is saved beside the target executable.", destructive=True),
+        Check("1.30.2", "1", "Screenshot selection visuals", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Hold a region drag and inspect its undimmed area and border. Cancel with Escape before releasing the button; no PNG should be saved."),
+        Check("1.30.3", "1", "Screenshot PNG saved", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Release selection and verify a valid PNG in the configured screenshot directory. Compare it with the visible captured rectangle.", destructive=True, effects=("screenshot",)),
         Check("1.30.4", "1", "Screenshot Anki image card", "destructive", "docs/REGRESSION.md#130-screenshot-action", "If Anki is connected, verify the scratch card contains an image tag and the media file exists.", destructive=True),
         Check("1.30.5", "1", "Screenshot Esc cancel", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Press Esc during selection and confirm the overlay closes, popup returns, and no file is saved."),
-        Check("1.30.6", "1", "Screenshot right-click cancel", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Right-click during selection and confirm the same cancel behavior as Esc."),
-        Check("1.30.7", "1", "Screenshot tiny-drag cancel", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Click or drag less than five pixels and confirm it is treated as cancel."),
+        Check("1.30.6", "1", "Screenshot right-click cancel", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Windows: right-click during selection and confirm the same cancellation behavior as Escape."),
+        Check("1.30.7", "1", "Screenshot tiny-drag cancel", "interactive", "docs/REGRESSION.md#130-screenshot-action", "In Region mode, click without a drag or drag less than five physical pixels on both axes. Expect cancellation, not a saved screenshot."),
         Check("1.30.8", "1", "Screenshot no-popup inert", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Trigger the screenshot hotkey with no popup visible and confirm it is silently ignored."),
         Check("1.30.9", "1", "Screenshot added-state duplicate", "destructive", "docs/REGRESSION.md#130-screenshot-action", "After a screenshot card, confirm the popup shows added and regular Anki add hits allowDuplicate=false.", destructive=True),
-        Check("1.30.10", "1", "Screenshot hot reload", "interactive", "docs/REGRESSION.md#130-screenshot-action", "Change actions.screenshot.hotkey, Apply, and confirm the new hotkey works with the same PID."),
+        Check("1.30.10", "1", "Screenshot hot reload", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Windows: capture a modifier chord, cancel capture, rebind, and Clear. Apply each change; preserve cancelled values and reject old keys. Linux: update its chord and compositor binding. Restore config.", destructive=True, effects=("config",)),
+        Check("1.30.11", "1", "Region and window screenshot modes", "destructive", "docs/REGRESSION.md#130-screenshot-action", "With Anki disabled, compare Region and Window modes. Windows Alt changes target selection. Linux uses available compositor metadata or its documented region fallback. Save only the visible selected pixels.", destructive=True, effects=("config", "screenshot")),
+        Check("1.30.12", "1", "Fixed region survives restart", "destructive", "docs/REGRESSION.md#130-screenshot-action", "With Anki disabled, select an unsaved Fixed region and capture it. Restart, capture again without a selector, and verify the same saved physical rectangle. Restore config and scratch files.", destructive=True, effects=("config", "screenshot")),
+        Check("1.30.13", "1", "Fixed window resolves current bounds", "destructive", "docs/REGRESSION.md#130-screenshot-action", "With Anki disabled, save a Fixed window. Restart, move or resize that window, and capture again. Use its current visible bounds and saved identity, not the old rectangle.", destructive=True, effects=("config", "screenshot")),
+        Check("1.30.14", "1", "Missing or ambiguous fixed window", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Save a Fixed window, then close it or supply two fixture windows with the same saved identity. Report absence or ambiguity without capturing a different window. Restore config.", destructive=True, effects=("config",)),
+        Check("1.30.15", "1", "Reset saved screenshot targets", "destructive", "docs/REGRESSION.md#130-screenshot-action", "Reset saved targets and Apply. Clear their summaries; the next fixed-mode capture must request a new target. Preserve unrelated settings and the configured save directory.", destructive=True, effects=("config", "screenshot")),
+        Check("1.30.16", "1", "Include-on-add screenshot cancellation", "destructive", "docs/REGRESSION.md#130-screenshot-action", "With scratch Anki and include-on-add enabled, cancel its optional screenshot. Save the requested card without an image. A cancelled standalone mining screenshot must save neither a PNG nor a card.", destructive=True, effects=("config", "anki")),
+        Check("1.31", "1", "Live dictionary candidates", "interactive", "docs/REGRESSION.md#case-1-31", "Windows/Linux: type a known word without Enter. Candidates must appear; selecting one opens that entry's complete definition."),
+        Check("1.31.1", "1", "Dictionary search entry points", "interactive", "docs/REGRESSION.md#case-1-31", "Windows/Linux: open search from the tray, Dictionaries settings, and CLI. Linux also supports ctl search. Each route must accept input."),
+        Check("1.31.2", "1", "Dictionary order and inflections", "destructive", "docs/REGRESSION.md#case-1-31", "Windows/Linux: configure two known dictionaries and their order. Search 食べました; require 食べる. Disabled dictionaries must contribute no entries. Restore configuration.", destructive=True, effects=('config',)),
+        Check("1.31.3", "1", "Empty miss and rapid-query recovery", "interactive", "docs/REGRESSION.md#case-1-31", "Windows/Linux: enter whitespace, a known miss, and two rapid valid queries. Old candidates must clear; only the latest query may populate results."),
+        Check("1.31.4", "1", "IME composition in search", "interactive", "docs/REGRESSION.md#case-1-31", "Windows/Linux with an available IME: compose Japanese text. Enter must commit composition before submitting; Escape must cancel composition before dismissing search."),
+        Check("1.32", "1", "Sentence entry and word selection", "interactive", "docs/REGRESSION.md#case-1-32", "Windows/Linux: open Sentence search from Dictionaries settings and its configured shortcut. Paste 猫は食べました。 Click the verb; highlight the complete word and show 食べる among candidates."),
+        Check("1.32.1", "1", "Sentence Unicode and punctuation", "interactive", "docs/REGRESSION.md#case-1-32", "Windows/Linux: paste multiline text with spaces, punctuation, and a supplementary-plane character. Preserve all text and line breaks. Punctuation and whitespace must not become lookup words."),
+        Check("1.32.2", "1", "Sentence changes retire stale definitions", "interactive", "docs/REGRESSION.md#case-1-32", "Windows/Linux: open a definition, then select a different sentence word or edit the sentence rapidly. Old definitions and late hover replies must not replace the new candidates."),
+        Check("1.32.3", "1", "Chosen sentence definition", "interactive", "docs/REGRESSION.md#case-1-32", "Windows/Linux: select a non-first candidate. Its written form, reading, dictionary attribution, and full definition must match that row, using popup styling."),
+        Check("1.33", "1", "Search shortcut capture cancellation", "interactive", "docs/REGRESSION.md#case-1-33", "Windows/Linux: start key capture for each search shortcut, then press Escape. The previous chord must remain unchanged; modifier-only presses must not complete capture."),
+        Check("1.33.1", "1", "Search shortcut rebind clear and conflict", "destructive", "docs/REGRESSION.md#case-1-33", "Windows/Linux: capture both search chords, Apply, and reopen search. Rebind, clear, and try a conflict. Reject conflicts without saving; disable old bindings at the documented platform boundary. Restore configuration.", destructive=True, effects=('config',)),
+        Check("1.33.2", "1", "Linux portal and native search bindings", "destructive", "docs/REGRESSION.md#case-1-33", "Linux: verify ctl search and ctl sentence-search. After clearing or changing a portal chord, reject its stale events. Restart and verify the new portal chord. Restore config and compositor bindings.", destructive=True, effects=('config',)),
+        Check("1.33.3", "1", "Search focus suppresses other actions", "interactive", "docs/REGRESSION.md#case-1-33", "Windows/Linux: focus search input and type keys also used by lookup or actions. Do not trigger OCR, screenshots, or Anki. Switch focus away and verify normal input resumes."),
+        Check("1.33.4", "1", "Escape hierarchy and restored input", "interactive", "docs/REGRESSION.md#case-1-33", "Windows/Linux: open a definition and descendant, then press Escape per level. Close descendants and restore parent focus; typing must work without an extra click. Escape in main search cancels pending replies and closes its flow."),
+        Check("1.33.5", "1", "Windows Escape and held-key suppression", "interactive", "docs/REGRESSION.md#case-1-33", "Windows: hold Escape after closing a child; one press must not consume another level. Cancel a selector while its action key remains held; repeats must not restart it until release. Root Escape must dismiss root history and pending lookup."),
+        Check("1.34", "1", "Built-in search themes", "destructive", "docs/REGRESSION.md#case-1-34", "Windows/Linux: compare dark and light search windows and definitions. Inputs, centered button labels, and candidate cards need clear boundaries. Candidate words are bold, summaries italic, and sentence text larger. Restore theme state.", destructive=True, effects=('config',)),
+        Check("1.34.1", "1", "Search CSS and live definition sizing", "destructive", "docs/REGRESSION.md#case-1-34", "Windows/Linux: apply the CSS sample in this section with a definition open. Verify colors, font roles, borders, padding, and opacity. Windows Save & Apply updates search; Linux updates on the next lookup. Larger fonts must reflow definitions. Restore CSS.", destructive=True, effects=('config',)),
+        Check("1.34.2", "1", "Search close reopen and launch identity", "interactive", "docs/REGRESSION.md#case-1-34", "Windows/Linux: repeat a daemon tray or settings launch, close search, and reopen it. Keep the daemon alive and avoid duplicate empty sessions for that route. Explicit prefilled CLI sessions may be independent."),
+        Check("1.34.3", "1", "Dictionary selection refreshes search", "destructive", "docs/REGRESSION.md#case-1-34", "Windows/Linux: disable a known dictionary, Apply, and repeat the lookup. Its candidates must disappear. Restore it and require the candidates to return without stale definitions.", destructive=True, effects=('config',)),
+        Check("1.34.4", "1", "Search display scaling", "destructive", "docs/REGRESSION.md#case-1-34", "Windows/Linux where supported: inspect search and definitions at 100%, 125%, and 150% scaling. Keep labels, hit targets, borders, and highlighted words aligned. Change scaling only when authorized; restore the original scale.", destructive=True, effects=('display',)),
+        Check("1.34.5", "1", "Windows search input caret and spacing", "interactive", "docs/REGRESSION.md#case-1-34", "Windows: focus both search inputs and type. Require a visible insertion caret and an I-beam over editable text. Keep the upper border below the title and label, with enough input height for readable text."),
+        Check("1.35", "1", "Hover creates dictionary children", "interactive", "docs/REGRESSION.md#case-1-35", "Windows/Linux: open an OCR popup, then hover Japanese text in its definition and in the resulting child. Open dictionary children while retaining their parents."),
+        Check("1.35.1", "1", "Hover navigation preserves parent state", "interactive", "docs/REGRESSION.md#case-1-35", "Windows/Linux: scroll and select text in a parent, enter a child, then return with Back or Escape. Preserve parent state, retire descendants, and prevent late replies from reviving them."),
+        Check("1.35.2", "1", "Ruby lookup and sub-popup toggle", "destructive", "docs/REGRESSION.md#case-1-35", "Windows/Linux: in Press mode, hover a ruby-backed 食べる definition. Require the complete word and no new OCR stage for child lookup. Disable sub-popups and repeat; retain the root with no child. Restore configuration.", destructive=True, effects=('config',)),
+        Check("1.35.3", "1", "Hover edges scrolling and hit regions", "interactive", "docs/REGRESSION.md#case-1-35", "Windows/Linux: repeat near screen edges, across whitespace, while scrolling, and during text selection. Keep children reachable and hit regions aligned. Dismiss the root; invisible windows must not capture input."),
+        Check("1.35.4", "1", "Hover modes and bounded depth", "destructive", "docs/REGRESSION.md#case-1-35", "Windows/Linux: repeat in Live, Hold key, Toggle, and Press modes. With a linked fixture, enforce current hover bounds: 17 normal popup levels, 16 Windows search definitions, and 8 Linux search definitions. Navigation must remain responsive. Restore mode.", destructive=True, effects=('config',)),
+        Check("1.36", "1", "OCR clipboard output", "destructive", "docs/REGRESSION.md#case-1-36", "Windows/Linux: copy a known multiline screen region. Clipboard text must contain the recognized lines in reading order. Record the OCR engine and supported language.", destructive=True, effects=('clipboard',)),
+        Check("1.36.1", "1", "Optional sentence handoff", "destructive", "docs/REGRESSION.md#case-1-36", "Windows/Linux: toggle Open copied screen text in sentence search. Success always copies text; only the enabled option opens Sentence search with that same text. Restore configuration.", destructive=True, effects=('config', 'clipboard')),
+        Check("1.36.2", "1", "Empty capture and popup masking", "destructive", "docs/REGRESSION.md#case-1-36", "Windows/Linux: capture an empty region, then capture while a prior popup is visible. Empty text must not open search. Popup text must not contaminate OCR or reappear over the new search flow.", destructive=True, effects=('clipboard',)),
+        Check("1.36.3", "1", "OCR clipboard key capture and Clear", "destructive", "docs/REGRESSION.md#case-1-36", "Windows: capture the Copy screen text key, cancel capture, rebind, Apply, and Clear. Preserve cancelled values and disable old keys. Linux: verify the configured native binding and ctl ocr-clipboard. Restore configuration.", destructive=True, effects=('config', 'clipboard')),
+        Check("1.36.4", "1", "OCR cancellation preserves clipboard", "destructive", "docs/REGRESSION.md#case-1-36", "Windows/Linux: cancel the region selector and require the sentinel to remain unchanged. On Windows, also cancel while OCR is pending; late text must neither replace the clipboard nor open Sentence search.", destructive=True, effects=('clipboard',)),
+        Check("1.37", "1", "Chinese sentence word boundaries", "interactive", "docs/REGRESSION.md#case-1-37", "Windows/Linux with the required feature: paste 我在学习中文. Require 我, 在, 学习, and 中文 as word groups. Click either character of 学习 and 中文; highlight the complete selected group. The label must be Sentence."),
+        Check("1.37.1", "1", "Chinese compound and shorter candidates", "interactive", "docs/REGRESSION.md#case-1-37", "Windows/Linux: select 学习. With the fixture entries enabled, require 学习, 学, and 习 as candidates. Repeat with supported Traditional Chinese entries, punctuation, and line breaks; preserve text and language-neutral prompts."),
+        Check("1.37.2", "1", "Chinese dictionary filtering and Japanese compatibility", "destructive", "docs/REGRESSION.md#case-1-37", "Windows/Linux: disable the fixture dictionary and repeat; do not invent its missing candidates. Restore it, then check 食べました still offers 食べる through normal deconjugation. Restore configuration.", destructive=True, effects=('config',)),
+        Check("1.38", "1", "Dictionary search resize borders", "interactive", "docs/REGRESSION.md#case-1-38", "Windows: populate candidates, then repeatedly shrink, expand, maximize, and restore Dictionary search. Erase old border positions; redraw input, buttons, status, and cards without ghost lines. Keep the current query and results."),
+        Check("1.38.1", "1", "Sentence search resize borders", "interactive", "docs/REGRESSION.md#case-1-38", "Windows: repeat resizing with multiline sentence text, a highlighted word, candidates, and an open definition. Keep borders clean and selection aligned; minimize and restore without blank or stale sections."),
+        Check("1.39", "1", "Remove furigana live option", "destructive", "docs/REGRESSION.md#case-1-39", "Windows/Linux: compare the same ruby fixture with Remove furigana enabled and disabled. The saved ocr.discard_furigana setting must control removal of paired kana ruby while retaining kanji body text. Restore configuration.", destructive=True, effects=('config',)),
+        Check("1.39.1", "1", "Furigana geometry guards", "destructive", "docs/REGRESSION.md#case-1-39", "Windows/Linux: enable Remove furigana and repeat horizontal and vertical layouts, including unrelated kana-only lines. Preserve legitimate body text. Require recognized body and ruby before evaluating filtering; otherwise record the missing prerequisite. Restore config.", destructive=True, effects=("config",)),
+        Check("1.39.2", "1", "Furigana clipboard and sentence source", "destructive", "docs/REGRESSION.md#case-1-39", "Windows/Linux: capture the ruby fixture to the clipboard and Sentence search with filtering on and off. Compare OCR-derived text, not dictionary glosses. Paired ruby follows the setting; line order and body text remain intact. Restore state.", destructive=True, effects=('config', 'clipboard')),
+        Check("1.39.3", "1", "Furigana in Anki sentence fields", "destructive", "docs/REGRESSION.md#case-1-39", "Windows/Linux with scratch Anki: add a fresh eligible fixture word with filtering enabled, then another with it disabled. Verify the OCR-derived sentence field follows the setting. Restore config and clean up only scratch notes.", destructive=True, effects=('config', 'anki')),
+        Check("1.40", "1", "Anki Full sentence mode", "destructive", "docs/REGRESSION.md#case-1-40", "Windows/Linux: select Full sentence and add a word from a sentence spanning two fixture lines. Store the containing sentence up to its boundaries, not neighboring sentences.", destructive=True, effects=('config', 'anki')),
+        Check("1.40.1", "1", "Anki Current line mode", "destructive", "docs/REGRESSION.md#case-1-40", "Windows/Linux: select Current line and add a different word. Store the cursor's OCR line, cut to its containing sentence. Do not include other recognized lines.", destructive=True, effects=('config', 'anki')),
+        Check("1.40.2", "1", "Anki All lines mode", "destructive", "docs/REGRESSION.md#case-1-40", "Windows/Linux: select All lines and add a different word. Store every line recognized in the hover capture, in reading order; do not assume it covers the entire screen.", destructive=True, effects=('config', 'anki')),
+        Check("1.40.3", "1", "Anki Static region mode", "destructive", "docs/REGRESSION.md#case-1-40", "Windows/Linux: save a static region, select Static region, and add a different word. The sentence field must use that region's recognized text. Cancel a replacement region and preserve the previous saved region.", destructive=True, effects=('config', 'anki')),
+        Check("1.40.4", "1", "Anki sentence mode changes are current", "destructive", "docs/REGRESSION.md#case-1-40", "Windows/Linux: Apply a different sentence mode, perform a fresh lookup, and add a new eligible word. Its sentence must follow the newly applied mode rather than cached text from the prior lookup.", destructive=True, effects=('config', 'anki')),
+        Check("1.41", "1", "Machine-readable audit stays isolated", "interactive", "docs/REGRESSION.md#case-1-41", "Windows: run settings --audit from the same install. Stdout must parse as JSON; stderr must not announce live capture. Audit JSON must not enter the daemon's viewer, while normal daemon output continues."),
         Check("2.1", "2", "Hover popup appears", "interactive", "docs/REGRESSION.md#tier-2", "Hover Japanese text and confirm the popup appears beside it."),
         Check("2.2", "2", "Reach into popup", "interactive", "docs/REGRESSION.md#tier-2", "Move from word into popup. It must not change or vanish."),
         Check("2.3", "2", "Leave popup", "interactive", "docs/REGRESSION.md#tier-2", "Leave the popup and confirm normal hover resumes with no dead patch."),
@@ -242,7 +297,7 @@ def build_checks() -> list[Check]:
         Check("2.11d", "2", "Double-click console hidden", "interactive", "docs/REGRESSION.md#tier-2", "Launch without inheriting a console and confirm ConsoleWindowClass is hidden."),
         Check("2.11e", "2", "WM_CLOSE behavior", "interactive", "docs/REGRESSION.md#tier-2", "Close settings via X in standalone and normal run. Confirm process exit, including a close requested during an active write."),
         Check("2.11f", "2", "Live log viewer", "interactive", "docs/REGRESSION.md#tier-2", "Open live logs on Debug, inspect new output, select and scroll history, close the viewer, and reopen while chibipop continues."),
-        Check("2.12", "2", "Reorder dictionaries", "destructive", "docs/REGRESSION.md#tier-2", "Reorder dictionaries, Apply, and verify TOML substrings were reordered only.", destructive=True),
+        Check("2.12", "2", "Reorder dictionaries", "destructive", "docs/REGRESSION.md#tier-2", "Reorder dictionaries, Apply, and verify TOML substrings were reordered only.", destructive=True, effects=("config", "dictionary")),
         Check("2.13", "2", "No-op Apply", "interactive", "docs/REGRESSION.md#tier-2", "Open Settings, touch nothing, Apply. TOML only formats and returns quickly."),
         Check("2.14", "2", "Settings Add archives", "destructive", "docs/REGRESSION.md#tier-2", "Import two term archives and one frequency archive, Apply, verify lookup changes, remove one, verify removal.", destructive=True),
         Check("2.14a", "2", "Settings Remove one", "destructive", "docs/REGRESSION.md#tier-2", "Remove one archive and Apply. Confirm list, status, DB dict table, and cleanup.", destructive=True),
@@ -281,7 +336,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifacts-dir", type=Path, default=Path("regression-artifacts"))
     parser.add_argument("--report", type=Path, help="JSON report path. Defaults inside --artifacts-dir.")
     parser.add_argument("--logs-dir", type=Path, help="Command log directory. Defaults inside --artifacts-dir.")
-    parser.add_argument("--interactive", dest="interactive", action="store_true", default=sys.stdin.isatty())
+    parser.add_argument("--interactive", dest="interactive", action="store_true", default=sys.stdin.isatty(),
+                        help="Record observed manual or requested computer-use results; does not automate the desktop or grant mutation permissions.")
     parser.add_argument("--no-interactive", dest="interactive", action="store_false")
     parser.add_argument("--non-interactive", dest="interactive", action="store_false")
     parser.add_argument("--strict", action="store_true", help="Fail when any check is skipped or left manual.")
@@ -585,14 +641,11 @@ def auto_clippy_accepted(check: Check, args: argparse.Namespace, logs_dir: Path)
         "never",
         "--all-targets",
         "--all-features",
-        "--",
-        "-D",
-        "warnings",
     ]
     code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, "tier0-clippy-accepted")
-    count = grep_count(out, r"^error", r"could not compile")
-    status = STATUS_PASS if count == args.expected_clippy_warnings else STATUS_FAIL
-    detail = f"accepted clippy error count {count}; expected {args.expected_clippy_warnings}"
+    count = grep_count(out, r"^warning", r"generated \d+ warning")
+    status = STATUS_PASS if code == 0 and count == args.expected_clippy_warnings else STATUS_FAIL
+    detail = f"accepted clippy warning count {count}; expected {args.expected_clippy_warnings}; exit {code}"
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, {"exit_code": code, "count": count, "log": rel(log, args.repo_root)})
 
 
@@ -622,8 +675,8 @@ def auto_clippy_suppressed(check: Check, args: argparse.Namespace, logs_dir: Pat
         "clippy::type_complexity",
     ]
     code, out, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, "tier0-clippy-suppressed")
-    count = grep_count(out, r"^error", r"could not compile")
-    status = STATUS_PASS if count == args.expected_other_clippy else STATUS_FAIL
+    count = grep_count(out, r"^(error|warning)")
+    status = STATUS_PASS if code == 0 and count == args.expected_other_clippy else STATUS_FAIL
     detail = f"other clippy finding count {count}; expected {args.expected_other_clippy}"
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, elapsed, {"exit_code": code, "count": count, "log": rel(log, args.repo_root)})
 
@@ -922,7 +975,7 @@ def requires_anki_write(check: Check) -> bool:
 
 
 def requires_display_change(check: Check) -> bool:
-    return check.ident == "1.26.7"
+    return "display" in check.effects or check.ident == "1.26.7"
 
 
 def matches_any_prefix(ident: str, prefixes: tuple[str, ...]) -> bool:
@@ -1026,12 +1079,19 @@ def write_report(args: argparse.Namespace, targets: list[Target], results: list[
             "strict": args.strict,
             "allow_destructive": args.allow_destructive,
             "allow_plugin_fixtures": args.allow_plugin_fixtures,
+            "allow_config_write": args.allow_config_write,
+            "allow_dictionary_mutation": args.allow_dictionary_mutation,
+            "allow_anki_write": args.allow_anki_write,
+            "allow_display_change": args.allow_display_change,
+            "keep_mutated_state": args.keep_mutated_state,
+            "interactive": args.interactive,
             "repeat_tests": args.repeat_tests,
             "min_test_total": args.min_test_total,
         },
         "targets": [{"name": target.name, "exe": rel(target.exe, args.repo_root), "root": rel(target.root, args.repo_root)} for target in targets],
         "target_state": snapshots,
         "results": [result.__dict__ for result in results],
+        "checks": [check.__dict__ for check in build_checks() if should_run(check, args)],
         "summary": summarize(results),
     }
     out = args.report
@@ -1063,6 +1123,8 @@ def main() -> int:
     if args.list:
         for check in selected:
             print(f"{check.ident:8} tier {check.tier}  {check.mode:20} {check.title}")
+            print(f"         ref={check.doc_ref} destructive={str(check.destructive).lower()} "
+                  f"known_gap={str(check.known_gap).lower()} effects={','.join(check.effects) or 'none'}")
         return 0
 
     logs_dir = args.logs_dir
