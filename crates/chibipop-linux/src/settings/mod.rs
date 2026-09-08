@@ -13,7 +13,7 @@ mod autostart;
 pub mod child;
 mod filechooser;
 mod rebuild;
-mod snippets;
+pub(crate) mod snippets;
 mod update;
 
 mod channel;
@@ -78,7 +78,7 @@ pub fn run(paths: Paths) -> Result<()> {
     };
 
     let env = paths::Env::from_process();
-    // Read the state once for both rows. See `hotkey_channel`.
+    // One published result supplies the owner and key for every shortcut row.
     let published = shortcuts::state::read(&paths.state_dir);
     let init = app::Init {
         form,
@@ -87,8 +87,8 @@ pub fn run(paths: Paths) -> Result<()> {
         socket_path: runtime_dir.join(control::file_name(&display)),
         log_path: paths.log_file(),
         compositor: snippets::Compositor::detect(),
-        channel: hotkey_channel(published.as_ref(), shortcuts::ShortcutId::Trigger),
-        add_channel: hotkey_channel(published.as_ref(), shortcuts::ShortcutId::AnkiAdd),
+        shortcuts: published,
+        state_dir: paths.state_dir.clone(),
         library_dir,
         db_path,
         dicts,
@@ -127,27 +127,14 @@ fn clipboard_rung() -> Option<clipboard::Rung> {
     clipboard::rung(&wayland::collect_globals(&conn).ok()?)
 }
 
-/// Return the owner of one action bind from the daemon state.
-///
-/// Resolve each portal ID separately. The daemon requests both IDs in one session.
-/// Its published state names each ID, so each row can render its own key.
-/// The caller reads `published` once, so both rows use the same file state.
-///
-/// Render the portal control only after the daemon acquires the
-/// `GlobalShortcuts` session and completes the bind.
-/// Do not use a bus probe as proof.
-/// The hotkey section must show the actual bind owner.
-/// A portal on the machine does not prove that the portal owns this bind.
-/// The frontend refuses a shortcut session when a launch has no app ID.
-/// A probe would therefore show a portal bind for a daemon that has none.
-/// If no file exists, or the file says native, treat the compositor bind as truth.
-/// The snippet then helps the user create the compositor bind.
+/// A session can accept only some requested shortcuts. Each row must use its
+/// own result, because another action's registration does not bind this key.
 fn hotkey_channel(
     published: Option<&shortcuts::state::Published>,
     id: shortcuts::ShortcutId,
 ) -> channel::HotkeyChannel {
     match published {
-        Some(published) if published.portal => {
+        Some(published) if published.portal && published.contains(id) => {
             channel::HotkeyChannel::Portal { current_binding: published.description(id) }
         }
         _ => channel::HotkeyChannel::Native,
@@ -212,9 +199,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every Hyprland session can report a portal bind without a key.
-    /// Keep the portal bind and show that state in the control.
-    /// Do not claim that a compositor snippet can help.
+    /// A confirmed binding can omit its description. Missing key text differs
+    /// from a missing identifier, which needs a native bind.
     #[test]
     fn a_portal_that_reports_no_key_is_still_the_portal_channel() {
         let dir = scratch("nokey");
@@ -281,11 +267,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A portal can bind the trigger without an answer for `anki-add`.
-    /// Keep the add row on the portal rung because the session owns it.
-    /// Show no key instead of the trigger key.
+    /// A partial portal response must not hide the unregistered action's
+    /// native bind behind another action's successful registration.
     #[test]
-    fn an_unanswered_add_id_is_still_the_portal_rung_with_no_key() {
+    fn an_unanswered_add_id_offers_a_native_bind() {
         let dir = scratch("addsilent");
         shortcuts::state::publish(
             &dir,
@@ -296,7 +281,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            HotkeyChannel::Portal { current_binding: None },
+            HotkeyChannel::Native,
             channel_for(&dir, ShortcutId::AnkiAdd)
         );
         let _ = std::fs::remove_dir_all(&dir);

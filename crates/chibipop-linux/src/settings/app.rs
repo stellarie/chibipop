@@ -14,14 +14,14 @@
 use super::apply::{self, LinuxFields};
 use super::autostart;
 use chibipop::search::SearchMode;
-use super::channel::{HotkeyChannel, HotkeyControl};
+use super::channel::HotkeyControl;
 use super::filechooser;
 use super::rebuild;
 use super::snippets::{self, Compositor};
 use crate::clipboard;
-use crate::control::Verb;
 use crate::lock::{self, LockError};
 use crate::popup;
+use crate::shortcuts::{self, ShortcutId};
 use anyhow::Context;
 use chibipop::config::{
     FieldMapping, LayoutMode, PopupLayer, ScreenshotMode, SelectionButtons, SelectionSeparator,
@@ -51,12 +51,10 @@ pub struct Init {
     pub socket_path: PathBuf,
     pub log_path: PathBuf,
     pub compositor: Compositor,
-    /// The channel that owns the trigger bind.
-    pub channel: HotkeyChannel,
-    /// `add_channel` identifies the owner of the add-card bind.
-    /// The portal reports one bind per id, so each row needs its own channel
-    /// (`super::hotkey_channel`).
-    pub add_channel: HotkeyChannel,
+    /// The daemon reports each action separately because a portal can accept
+    /// only part of the requested set.
+    pub shortcuts: Option<shortcuts::state::Published>,
+    pub state_dir: PathBuf,
     /// The directory that holds dictionary archives. A rebuild edits this directory.
     pub library_dir: PathBuf,
     /// The database path. A rebuild renames the new database over this file.
@@ -121,7 +119,7 @@ fn subscription(app: &App) -> iced::Subscription<Message> {
             _ => None,
         });
     }
-    iced::event::listen_with(|event, _status, _window| match event {
+    let events = iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
         | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DictReleased),
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
@@ -130,7 +128,27 @@ fn subscription(app: &App) -> iced::Subscription<Message> {
             ..
         }) if modifiers.control() => Some(if modifiers.shift() { Message::TabPrev } else { Message::TabNext }),
         _ => None,
-    })
+    });
+    if app.tab == Tab::Shortcuts {
+        iced::Subscription::batch([events, iced::Subscription::run(shortcut_updates)])
+    } else {
+        events
+    }
+}
+
+fn shortcut_updates() -> impl iced::futures::Stream<Item = Message> {
+    let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+    if let Err(error) = std::thread::Builder::new().name("chibipop-shortcut-state".into()).spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Err(error) = sender.try_send(Message::RefreshShortcuts) {
+                if error.is_disconnected() { break; }
+            }
+        }
+    }) {
+        eprintln!("Cannot refresh shortcut status: {error}");
+    }
+    receiver
 }
 
 /// The selected row and the Role list that contains it.
@@ -250,8 +268,9 @@ struct App {
     socket_path: PathBuf,
     log_path: PathBuf,
     compositor: Compositor,
-    channel: HotkeyChannel,
-    add_channel: HotkeyChannel,
+    snippet_compositor: Compositor,
+    shortcuts: Option<shortcuts::state::Published>,
+    state_dir: PathBuf,
     library_dir: PathBuf,
     db_path: PathBuf,
     dicts: Vec<DictInfo>,
@@ -308,8 +327,9 @@ impl App {
             socket_path: init.socket_path,
             log_path: init.log_path,
             compositor: init.compositor,
-            channel: init.channel,
-            add_channel: init.add_channel,
+            snippet_compositor: init.compositor,
+            shortcuts: init.shortcuts,
+            state_dir: init.state_dir,
             library_dir: init.library_dir,
             db_path: init.db_path,
             dicts: init.dicts,
@@ -331,95 +351,46 @@ impl App {
         }
     }
 
-    /// `bind_snippet` returns the trigger row's copyable bind for the selected mode.
-    fn bind_snippet(&self) -> String {
-        snippets::bind_snippet(
-            self.compositor,
-            &self.linux.trigger_key_linux,
-            &self.exe,
-            snippets::trigger_bind(self.form.cfg.trigger.mode),
-        )
-    }
-
-    /// Return the trigger row's socket bind when the portal owns the trigger
-    /// but reports no key on Hyprland. XDPH stores the key in hyprland.conf
-    /// under a `global` namespace that depends on the process that starts the
-    /// daemon. The control socket has one stable path and reaches the same
-    /// `App::apply_verb` target. Return `None` when the desktop reports
-    /// the key, because its shortcut editor then owns the change.
-    fn portal_trigger_snippet(&self, current: &Option<String>) -> Option<String> {
-        (current.is_none() && self.compositor == Compositor::Hyprland)
-            .then(|| self.bind_snippet())
-    }
-
-    /// Return the add-card row's copyable bind.
-    /// Return `None` when desktop settings own the key.
-    /// Hyprland always gets a control socket bind. A portal namespace depends on
-    /// the process that starts the daemon. The control socket has one stable path.
-    fn add_bind_snippet(&self) -> Option<String> {
-        match self.add_control() {
-            HotkeyControl::Snippet { text } => Some(text),
-            HotkeyControl::Rebind { current: None } if self.compositor == Compositor::Hyprland => {
-                Some(snippets::bind_snippet(
-                    self.compositor,
-                    &self.linux.add_key_linux,
-                    &self.exe,
-                    snippets::Bind::Press(Verb::AnkiAdd),
-                ))
-            }
-            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord => None,
+    fn shortcut_chord(&self, id: ShortcutId) -> &str {
+        match id {
+            ShortcutId::Trigger => &self.linux.trigger_key_linux,
+            ShortcutId::AnkiAdd => &self.linux.add_key_linux,
+            ShortcutId::StaticRegion => &self.linux.static_region_key_linux,
+            ShortcutId::Screenshot => self.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
+            ShortcutId::OcrClipboard => self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
+            ShortcutId::Search => self.linux.search_key_linux.as_deref().unwrap_or_default(),
+            ShortcutId::SentenceSearch => self.linux.sentence_key_linux.as_deref().unwrap_or_default(),
+            ShortcutId::SelectedText => self.linux.selected_key_linux.as_deref().unwrap_or_default(),
         }
     }
 
-    /// The add-card chord row's control. The add action uses a control-socket
-    /// verb, so the native rung binds it like the trigger
-    /// (ARCHITECTURE.md#input-ladders, 2026-08-26 addendum).
-    fn add_control(&self) -> HotkeyControl {
-        self.add_channel.control(
-            self.compositor,
-            &self.linux.add_key_linux,
-            &self.exe,
-            snippets::Bind::Press(Verb::AnkiAdd),
+    fn shortcut_control(&self, id: ShortcutId) -> HotkeyControl {
+        if id == ShortcutId::OcrClipboard && self.clipboard_rung.is_none() {
+            return HotkeyControl::NoChord;
+        }
+        let bind = if id == ShortcutId::Trigger {
+            snippets::trigger_bind(self.form.cfg.trigger.mode)
+        } else {
+            let shortcuts::Action::Verb(verb) = shortcuts::action(id, true, self.form.cfg.trigger.mode) else {
+                unreachable!("an activated action has a control verb");
+            };
+            snippets::Bind::Press(verb)
+        };
+        let channel = if self.compositor == Compositor::Hyprland {
+            super::channel::HotkeyChannel::Native
+        } else {
+            super::hotkey_channel(self.shortcuts.as_ref(), id)
+        };
+        channel.control(
+            self.snippet_compositor, self.shortcut_chord(id), &self.exe, bind,
         )
     }
 
-    /// Build the copyable bind for an action that always uses the native
-    /// channel, or `None` for a blank chord. The button exists only for
-    /// `Some`, so a cleared chord cannot copy an old bind.
-    ///
-    /// Decision D1 keeps these actions out of the two GlobalShortcuts ids, so
-    /// the compositor bind is their only global channel. A method that read
-    /// `self.channel` would show the trigger's portal key under a chord that
-    /// no one assigned to it.
-    fn native_snippet(&self, chord: &str, verb: Verb) -> Option<String> {
-        match HotkeyChannel::Native.control(
-            self.compositor,
-            chord,
-            &self.exe,
-            snippets::Bind::Press(verb),
-        ) {
+    fn shortcut_snippet(&self, id: ShortcutId) -> Option<String> {
+        match self.shortcut_control(id) {
             HotkeyControl::Snippet { text } => Some(text),
-            HotkeyControl::NoChord => None,
-            HotkeyControl::Rebind { .. } => unreachable!("Native never rebinds"),
+            HotkeyControl::Rebind { .. } | HotkeyControl::NoChord | HotkeyControl::Unsupported { .. } => None,
         }
-    }
-
-    fn static_region_bind_snippet(&self) -> Option<String> {
-        self.native_snippet(&self.linux.static_region_key_linux, Verb::StaticRegion)
-    }
-
-    fn screenshot_bind_snippet(&self) -> Option<String> {
-        let chord = self.linux.screenshot_key_linux.as_deref().unwrap_or_default();
-        self.native_snippet(chord, Verb::Screenshot)
-    }
-
-    /// `None` also means that this compositor has no clipboard protocol. A
-    /// bind that only logs a refusal is invalid, so this window never gives
-    /// the user that bind. The `?` enforces that guard.
-    fn ocr_clipboard_bind_snippet(&self) -> Option<String> {
-        self.clipboard_rung?;
-        let chord = self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default();
-        self.native_snippet(chord, Verb::OcrClipboard)
     }
 
     fn apply(&mut self) {
@@ -822,16 +793,9 @@ enum Message {
     FieldMapAdd,
     /// Remove the field-map row at this index.
     FieldMapRemove(usize),
-    /// Copy the trigger chord's press and release bind.
-    CopyBind,
-    /// Copy the add-card chord's one-press bind.
-    CopyAddBind,
-    /// Copy the static-region chord's one-press bind.
-    CopyStaticRegionBind,
-    /// Copy the mining screenshot's one-press bind.
-    CopyScreenshotBind,
-    /// Copy the OCR-to-clipboard chord's one-press bind.
-    CopyOcrClipboardBind,
+    CopyBind(ShortcutId),
+    RefreshShortcuts,
+    CompositorPicked(Compositor),
     CopyRule,
     Autostart(bool),
     CheckUpdate,
@@ -841,6 +805,8 @@ enum Message {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
+        Message::RefreshShortcuts => app.shortcuts = shortcuts::state::read(&app.state_dir),
+        Message::CompositorPicked(compositor) => app.snippet_compositor = compositor,
         Message::TabPicked(tab) => { app.capture_search_key = None; app.tab = tab; }
         Message::TabNext => { app.capture_search_key = None; app.tab = app.tab.next(); }
         Message::TabPrev => { app.capture_search_key = None; app.tab = app.tab.prev(); }
@@ -1008,29 +974,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::CopyBind => return iced::clipboard::write(app.bind_snippet()),
-        // The button exists only when a snippet exists, so `None` cannot come from
-        // the UI. This arm remains a no-op for other callers and does not copy an
-        // old bind.
-        Message::CopyAddBind => {
-            if let Some(snippet) = app.add_bind_snippet() {
-                return iced::clipboard::write(snippet);
-            }
-        }
-        Message::CopyStaticRegionBind => {
-            if let Some(snippet) =
-                app.static_region_bind_snippet()
-            {
-                return iced::clipboard::write(snippet);
-            }
-        }
-        Message::CopyScreenshotBind => {
-            if let Some(snippet) = app.screenshot_bind_snippet() {
-                return iced::clipboard::write(snippet);
-            }
-        }
-        Message::CopyOcrClipboardBind => {
-            if let Some(snippet) = app.ocr_clipboard_bind_snippet() {
+        Message::CopyBind(id) => {
+            if let Some(snippet) = app.shortcut_snippet(id) {
                 return iced::clipboard::write(snippet);
             }
         }
@@ -1379,10 +1324,10 @@ fn captured_search_chord(key: &iced::keyboard::Key, modifiers: iced::keyboard::M
 }
 
 fn search_shortcut(app: &App, kind: ShortcutKind) -> Element<'_, Message> {
-    let (title, chord, fallback, verb) = match kind {
-        ShortcutKind::Dictionary => ("Dictionary search", &app.linux.search_key_linux, "SUPER+F", Verb::Search),
-        ShortcutKind::Sentence => ("Sentence search", &app.linux.sentence_key_linux, "SUPER+G", Verb::SentenceSearch),
-        ShortcutKind::SelectedText => ("Look up selected text", &app.linux.selected_key_linux, "SUPER+H", Verb::SelectedText),
+    let (title, chord, id) = match kind {
+        ShortcutKind::Dictionary => ("Dictionary search", &app.linux.search_key_linux, ShortcutId::Search),
+        ShortcutKind::Sentence => ("Sentence search", &app.linux.sentence_key_linux, ShortcutId::SentenceSearch),
+        ShortcutKind::SelectedText => ("Look up selected text", &app.linux.selected_key_linux, ShortcutId::SelectedText),
     };
     let label = if app.capture_search_key == Some(kind) { "Press a shortcut… (Esc cancels)".to_string() }
         else { chord.as_ref().map(|key| key.to_ascii_uppercase()).unwrap_or_else(|| "Disabled: click to record".into()) };
@@ -1393,9 +1338,7 @@ fn search_shortcut(app: &App, kind: ShortcutKind) -> Element<'_, Message> {
             .label("Open selected text in sentence search").on_toggle(Message::SelectedSentenceSearch));
     }
     rows = rows.push(hint("Click to record a key combination. Apply checks conflicts with all configured shortcuts."))
-        .push(hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."))
-        .push(snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(fallback),
-            &app.exe, snippets::Bind::Press(verb))));
+        .push(shortcut_bind(app, id));
     if kind == ShortcutKind::SelectedText {
         rows = rows.push(hint("Word bounds are unavailable here. Popup placement uses the cursor."));
     }
@@ -1439,10 +1382,10 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
 
     column![
         hint(
-            "Chords use portal syntax, for example ALT+F. Each row shows the bind for \
-             the channel that owns it: a compositor line to paste, or the portal key \
-             that your desktop's shortcut editor changes."
+            "Apply requests global shortcuts when your desktop can assign keys directly. \
+             Otherwise, copy each bind into your compositor's config. Chords use syntax such as ALT+F."
         ),
+        labeled("Compositor syntax", pick_list(Compositor::ALL, Some(app.snippet_compositor), Message::CompositorPicked)),
         search_shortcut(app, ShortcutKind::Dictionary),
         search_shortcut(app, ShortcutKind::Sentence),
         search_shortcut(app, ShortcutKind::SelectedText),
@@ -1457,7 +1400,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                     .on_input(Message::TriggerChord)
                     .width(200),
             ),
-            trigger_bind(app),
+            shortcut_bind(app, ShortcutId::Trigger),
         ].spacing(10)),
         card("Add card to Anki", column![
             labeled(
@@ -1466,7 +1409,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                     .on_input(Message::AnkiAddKey)
                     .width(200),
             ),
-            add_card_bind(app),
+            shortcut_bind(app, ShortcutId::AnkiAdd),
         ].spacing(10)),
         card("Mining screenshot", column![
             labeled(
@@ -1478,7 +1421,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                 .on_input(Message::ScreenshotKey)
                 .width(200),
             ),
-            screenshot_bind(app),
+            shortcut_bind(app, ShortcutId::Screenshot),
         ].spacing(10)),
         card("Static sentence region", column![
             labeled(
@@ -1487,7 +1430,7 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
                     .on_input(Message::StaticRegionKey)
                     .width(200),
             ),
-            static_region_bind(app),
+            shortcut_bind(app, ShortcutId::StaticRegion),
         ].spacing(10)),
         card("Copy screen text", column![
             labeled(
@@ -1509,65 +1452,28 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Show the owning channel instead of a rebind control that Linux cannot provide.
-fn trigger_bind(app: &App) -> Element<'_, Message> {
-
-    match app.channel.control(
-        app.compositor,
-        &app.linux.trigger_key_linux,
-        &app.exe,
-        snippets::trigger_bind(app.form.cfg.trigger.mode),
-    ) {
+/// Every row uses its own confirmed binding. Native rows copy the same
+/// daemon verbs that portal activations execute.
+fn shortcut_bind(app: &App, id: ShortcutId) -> Element<'_, Message> {
+    match app.shortcut_control(id) {
         HotkeyControl::Snippet { text: snippet } => column![
-            text("Native channel: your compositor owns the binding. Paste this into its config:"),
+            hint(app.snippet_compositor.bind_help()),
             snippet_box(snippet),
-            button("Copy bind snippet").on_press(Message::CopyBind),
-        ]
-        .spacing(6)
-        .into(),
-        // This is the portal rung. The window cannot offer an in-app rebind because
-        // the portal owns the bind. The portal dialog and the desktop shortcut editor
-        // change the key. The chord above is the value this window gives the portal at
-        // the next start.
-        // XDPH reports no key and Hyprland has no shortcut editor. Its `global`
-        // namespace depends on the process that starts the daemon. Give Hyprland
-        // the stable control-socket bind, as the add-card row does.
-        HotkeyControl::Rebind { current } => {
-            let rebind: Element<'_, Message> = match app.portal_trigger_snippet(&current) {
-                Some(snippet) => column![
-                    text(
-                        "Hyprland has no global-shortcut editor. Use this control-socket bind \
-                         in hyprland.conf:"
-                    ),
-                    snippet_box(snippet),
-                    button("Copy bind snippet").on_press(Message::CopyBind),
-                    hint(
-                        "This route reaches the same trigger action and does not depend on \
-                         the portal app ID."
-                    ),
-                ]
-                .spacing(6)
-                .into(),
-                None => {
-                    hint(
-                        "The chord above is the preferred trigger, offered to the portal at the next start; your desktop's shortcut editor has the last word."
-                    )
-                }
-            };
-            column![
-                text("Portal channel: the GlobalShortcuts portal owns this binding."),
-                text(match &current {
-                    Some(key) => format!("Current key: {key}"),
-                    None => "Current key: the portal does not report one.".to_string(),
-                }),
-                rebind,
-            ]
-            .spacing(6)
-            .into()
-        }
-        HotkeyControl::NoChord => {
-            hint("Type a chord above to get a bind you can paste or a key to ask the portal for.")
-        }
+            button(if matches!(app.snippet_compositor, Compositor::Kde | Compositor::Gnome | Compositor::Other) {
+                "Copy daemon command"
+            } else { "Copy bind snippet" }).on_press(Message::CopyBind(id)),
+        ].spacing(6).into(),
+        HotkeyControl::Rebind { current } => column![
+            text("Global shortcut: your desktop registered this action."),
+            text(match current {
+                Some(key) => format!("Current key: {key}"),
+                None => "The desktop did not report the current key.".to_string(),
+            }),
+            hint("Apply requests the preferred chord above. Your desktop can ask for approval or keep its existing key."),
+            hint("Use your desktop's global-shortcut settings to change an existing key."),
+        ].spacing(6).into(),
+        HotkeyControl::NoChord => hint("No chord is set. Set a chord to register this action or copy its bind."),
+        HotkeyControl::Unsupported { reason } => hint(reason),
     }
 }
 
@@ -2013,27 +1919,6 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Render a native-only bind row or its no-chord message.
-fn native_bind_row<'a>(
-    snippet: Option<String>,
-    copy: Message,
-    copy_label: &'static str,
-    no_chord: &'static str,
-) -> Element<'a, Message> {
-    match snippet {
-        Some(snippet) => column![
-            text(
-                "Native channel only: this action has no portal shortcut, so a compositor \
-                 bind is the only way to reach it. Paste this into your compositor's config:"
-            ),
-            snippet_box(snippet),
-            button(copy_label).on_press(copy),
-        ]
-        .spacing(6)
-        .into(),
-        None => hint(no_chord),
-    }
-}
 
 /// The OCR-to-clipboard bind, or the reason that no bind exists.
 ///
@@ -2049,12 +1934,7 @@ fn ocr_clipboard_bind(app: &App) -> Element<'_, Message> {
              advertises neither. Every other feature is unaffected."
         );
     }
-    native_bind_row(
-        app.ocr_clipboard_bind_snippet(),
-        Message::CopyOcrClipboardBind,
-        "Copy OCR-to-clipboard bind",
-        "No OCR-to-clipboard chord is set, so there is no bind to copy - type one above.",
-    )
+    shortcut_bind(app, ShortcutId::OcrClipboard)
 }
 
 /// The sentence-capture picker items, in display order.
@@ -2071,19 +1951,6 @@ const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
 ];
 
 
-/// The static-region row's copyable bind, or the reason that no bind exists.
-///
-/// The caption always says "native channel" because this action has no portal
-/// id. A compositor bind is the only path. The row must not suggest a portal
-/// consent dialog for this action.
-fn static_region_bind(app: &App) -> Element<'_, Message> {
-    native_bind_row(
-        app.static_region_bind_snippet(),
-        Message::CopyStaticRegionBind,
-        "Copy static-region bind",
-        "No static-region chord is set, so there is no bind to copy - type one above.",
-    )
-}
 
 /// The sentence-capture rows. They choose the Anki sentence field and, in
 /// Static mode, show the static region controls.
@@ -2117,19 +1984,6 @@ fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
     rows
 }
 
-/// The mining screenshot row's copyable bind, or the reason that no bind exists.
-///
-/// This action has no portal id, so the compositor bind is its only path. The
-/// row uses "Native channel" text for the same reason as `static_region_bind`.
-fn screenshot_bind(app: &App) -> Element<'_, Message> {
-    native_bind_row(
-        app.screenshot_bind_snippet(),
-        Message::CopyScreenshotBind,
-        "Copy screenshot bind",
-        "No screenshot chord is set, so there is no bind to copy - type one above. \
-         Adding a card can still take a picture with Include screenshot on the Anki tab.",
-    )
-}
 
 /// The screenshot capture mode picker items, in display order.
 const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
@@ -2261,59 +2115,6 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
     rows
 }
 
-/// Show the add-card channel beside its chord instead of the Anki connection controls.
-fn add_card_bind(app: &App) -> Element<'_, Message> {
-    // The add-card row uses the same hotkey control as the trigger row.
-    // Native sessions call the control socket. XDPH sessions need a
-    // compositor `global` bind because Hyprland has no shortcut editor.
-    match app.add_control() {
-        HotkeyControl::Snippet { text: snippet } => column![
-            text("Native channel: your compositor owns this binding. Paste this into its config:"),
-            snippet_box(snippet),
-            button("Copy add-card bind").on_press(Message::CopyAddBind),
-        ]
-        .spacing(6)
-        .into(),
-        // XDPH cannot assign a key. Its namespace depends on the process
-        // that starts the daemon. Give Hyprland the stable control socket path.
-        // KDE and GNOME keep the desktop rebind path.
-        HotkeyControl::Rebind { current } => {
-            let rebind: Element<'_, Message> = match app.add_bind_snippet() {
-                Some(snippet) => column![
-                    text(
-                        "Hyprland has no global-shortcut editor. Use this control-socket bind \
-                         in hyprland.conf:"
-                    ),
-                    snippet_box(snippet),
-                    button("Copy add-card bind").on_press(Message::CopyAddBind),
-                    hint(
-                        "This route reaches the same add action and does not depend on the \
-                         portal app ID."
-                    ),
-                ]
-                .spacing(6)
-                .into(),
-                None => hint(
-                    "Use your desktop's global-shortcut settings to see or change the key. \
-                     The chord above is the preferred add-card key for the next start."
-                ),
-            };
-            column![
-                text("Portal channel: the GlobalShortcuts portal registered this action."),
-                text(match &current {
-                    Some(key) => format!("Current key: {key}"),
-                    None => "Current key: the portal does not report one.".to_string(),
-                }),
-                rebind,
-            ]
-            .spacing(6)
-            .into()
-        }
-        HotkeyControl::NoChord => hint(
-            "No add-card chord is set, so there is no bind to copy - type one above."
-        ),
-    }
-}
 
 /// Separate Anki connection and card content from capture options instead of one long group.
 fn anki_page(app: &App) -> Element<'_, Message> {
@@ -2588,8 +2389,9 @@ mod tests {
             socket_path: dir.join("run/absent.sock"),
             log_path: dir.join("chibipop.log"),
             compositor: Compositor::Hyprland,
-            channel: HotkeyChannel::Native,
-            add_channel: HotkeyChannel::Native,
+            snippet_compositor: Compositor::Hyprland,
+            shortcuts: None,
+            state_dir: dir.join("state"),
             library_dir: dir.join("library"),
             db_path: dir.join("chibipop.sqlite"),
             dicts: Vec::new(),
@@ -2615,72 +2417,70 @@ mod tests {
         }
     }
 
-    /// A development launch can use its terminal's portal app ID.
-    /// The Hyprland row must use the control socket, which has no portal
-    /// namespace and reaches the same add-card path.
+    /// Hyprland needs config lines even when its portal returns action names.
+    /// Direct portals must give each row its own confirmed key instead.
     #[test]
-    fn the_hyprland_portal_add_row_offers_its_native_bind() {
-        let dir = scratch("addportalrow");
+    fn every_shortcut_uses_its_own_portal_key_or_daemon_bind() {
+        let dir = scratch("all-shortcut-rows");
         let mut app = app(&dir);
-        app.add_channel = HotkeyChannel::Portal { current_binding: None };
-
-        assert_eq!(HotkeyControl::Rebind { current: None }, app.add_control());
-        assert_eq!(
-            Some("bind = ALT, A, exec, /usr/bin/chibipop ctl anki-add".to_string()),
-            app.add_bind_snippet()
-        );
-
-        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
-        assert_eq!(
-            HotkeyControl::Rebind { current: Some("Meta+F".into()) },
-            app.channel.control(
-                app.compositor,
-                &app.linux.trigger_key_linux,
-                &app.exe,
-                snippets::trigger_bind(app.form.cfg.trigger.mode),
-            )
-        );
-        // The full window still builds both portal rows. The status block is a widget
-        // tree, not only a control value.
-        every_page(&app);
+        app.linux.search_key_linux = Some("SUPER+F".into());
+        app.linux.sentence_key_linux = Some("SUPER+G".into());
+        app.linux.selected_key_linux = Some("SUPER+H".into());
+        app.linux.static_region_key_linux = "ALT+R".into();
+        app.linux.screenshot_key_linux = Some("SUPER+S".into());
+        app.linux.ocr_clipboard_key_linux = Some("ALT+C".into());
+        app.form.cfg.trigger.mode = TriggerMode::Press;
+        let actions = [
+            (ShortcutId::Trigger, "lookup"),
+            (ShortcutId::AnkiAdd, "anki-add"),
+            (ShortcutId::Search, "search"),
+            (ShortcutId::SentenceSearch, "sentence-search"),
+            (ShortcutId::SelectedText, "selected-text"),
+            (ShortcutId::StaticRegion, "static-region"),
+            (ShortcutId::Screenshot, "screenshot"),
+            (ShortcutId::OcrClipboard, "ocr-clipboard"),
+        ];
+        app.shortcuts = Some(shortcuts::state::Published::portal(actions.iter().map(|(id, _)| {
+            shortcuts::Binding { id: *id, trigger: Some(app.shortcut_chord(*id).into()) }
+        }).collect()));
+        for (id, verb) in actions {
+            let snippet = app.shortcut_snippet(id).expect("Hyprland needs a native bind");
+            assert!(snippet.ends_with(&format!("/usr/bin/chibipop ctl {verb}")), "{snippet}");
+            assert!(!snippet.contains(", global,"), "{snippet}");
+        }
+        app.compositor = Compositor::Kde;
+        for (id, _) in actions {
+            assert_eq!(
+                HotkeyControl::Rebind { current: Some(app.shortcut_chord(id).into()) },
+                app.shortcut_control(id),
+            );
+            assert_eq!(None, app.shortcut_snippet(id));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// XDPH reports no key for the trigger and Hyprland has no shortcut editor.
-    /// The trigger row must give the same control-socket way out as the add row,
-    /// and the bind must follow the selected mode. A desktop that reports the
-    /// key keeps its own editor.
+    /// A cleared search chord must not copy the old chord or an invented
+    /// default, even while the daemon still reports the old binding.
     #[test]
-    fn the_hyprland_portal_trigger_row_offers_its_native_bind() {
-        let dir = scratch("triggerportalrow");
+    fn clearing_search_shortcuts_removes_copyable_binds() {
+        let dir = scratch("clear-search-binds");
         let mut app = app(&dir);
-        app.channel = HotkeyChannel::Portal { current_binding: None };
-
-        assert_eq!(
-            Some(
-                "bind = ALT, F, exec, /usr/bin/chibipop ctl trigger-down\n\
-                 bindr = ALT, F, exec, /usr/bin/chibipop ctl trigger-up\n\
-                 # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-                 # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead."
-                    .to_string()
-            ),
-            app.portal_trigger_snippet(&None)
-        );
-        let _ = update(&mut app, Message::Mode(TriggerMode::Toggle));
-        assert_eq!(
-            Some("bind = ALT, F, exec, /usr/bin/chibipop ctl toggle".to_string()),
-            app.portal_trigger_snippet(&None)
-        );
-        let _ = update(&mut app, Message::Mode(TriggerMode::Press));
-        assert_eq!(
-            Some("bind = ALT, F, exec, /usr/bin/chibipop ctl lookup".to_string()),
-            app.portal_trigger_snippet(&None)
-        );
-        every_page(&app);
-
-        assert_eq!(None, app.portal_trigger_snippet(&Some("Meta+F".into())));
-        app.compositor = Compositor::Kde;
-        assert_eq!(None, app.portal_trigger_snippet(&None));
+        for (kind, id) in [
+            (ShortcutKind::Dictionary, ShortcutId::Search),
+            (ShortcutKind::Sentence, ShortcutId::SentenceSearch),
+            (ShortcutKind::SelectedText, ShortcutId::SelectedText),
+        ] {
+            let _ = update(&mut app, Message::CaptureSearchKey(kind));
+            let _ = update(&mut app, Message::CapturedSearchKey(
+                iced::keyboard::Key::Character("k".into()), iced::keyboard::Modifiers::CTRL,
+            ));
+            assert!(app.shortcut_snippet(id).unwrap().contains("bind = CTRL, K, exec,"));
+            app.shortcuts = Some(shortcuts::state::Published::portal(vec![
+                shortcuts::Binding { id, trigger: Some("Ctrl+K".into()) },
+            ]));
+            let _ = update(&mut app, Message::ClearSearchKey(kind));
+            assert_eq!(None, app.shortcut_snippet(id));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2690,31 +2490,18 @@ mod tests {
         let mut app = app(&dir);
         let _ = update(&mut app, Message::Mode(TriggerMode::Toggle));
 
-        let snippet = app.bind_snippet();
+        let snippet = app.shortcut_snippet(ShortcutId::Trigger).expect("the trigger has a native bind");
         assert!(snippet.contains("ctl toggle"), "{snippet}");
         assert!(!snippet.contains("trigger-down"), "{snippet}");
         assert!(!snippet.contains("trigger-up"), "{snippet}");
         let _ = update(&mut app, Message::Mode(TriggerMode::Press));
-        let snippet = app.bind_snippet();
+        let snippet = app.shortcut_snippet(ShortcutId::Trigger).expect("the trigger has a native bind");
         assert!(snippet.contains("ctl lookup"), "{snippet}");
         assert!(!snippet.contains("trigger-down"), "{snippet}");
         assert!(!snippet.contains("trigger-up"), "{snippet}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// When the daemon publishes no key, the add row offers a pasteable bind.
-    #[test]
-    fn a_silent_daemon_leaves_the_add_card_row_offering_a_snippet() {
-        let dir = scratch("addsnippetrow");
-        let app = app(&dir);
-        assert!(
-            matches!(app.add_control(), HotkeyControl::Snippet { .. }),
-            "got {:?}",
-            app.add_control()
-        );
-        assert!(app.add_bind_snippet().is_some());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn the_dictionary_name_checkbox_round_trips_into_the_config() {
@@ -2788,17 +2575,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// On the native rung, this row turns the typed chord into a bind for the
-    /// binary in use and the `ocr-clipboard` verb. It never uses a portal key
-    /// because this action has no portal id.
+    /// The OCR-to-clipboard row must use its own command, not the trigger key.
     #[test]
     fn the_ocr_clipboard_chord_offers_a_pasteable_native_bind() {
         let dir = scratch("ocrclipbind");
         let mut app = app(&dir);
-        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
+        app.shortcuts = Some(shortcuts::state::Published::portal(vec![shortcuts::Binding { id: ShortcutId::Trigger, trigger: Some("Meta+F".into()) }]));
 
         let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
-        let snippet = app.ocr_clipboard_bind_snippet()
+        let snippet = app.shortcut_snippet(ShortcutId::OcrClipboard)
             .expect("a typed chord has a bind");
 
         assert_eq!("bind = ALT, C, exec, /usr/bin/chibipop ctl ocr-clipboard", snippet);
@@ -2823,13 +2608,13 @@ mod tests {
         assert_eq!(None, app.linux.ocr_clipboard_key_linux, "whitespace is not a chord");
         assert_eq!(
             None,
-            app.ocr_clipboard_bind_snippet()
+            app.shortcut_snippet(ShortcutId::OcrClipboard)
         );
         // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyOcrClipboardBind);
+        let _ = update(&mut app, Message::CopyBind(ShortcutId::OcrClipboard));
         assert_eq!(
             None,
-            app.ocr_clipboard_bind_snippet()
+            app.shortcut_snippet(ShortcutId::OcrClipboard)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2843,7 +2628,7 @@ mod tests {
         let mut app = app(&dir);
         let _ = update(&mut app, Message::OcrClipboardKey("ALT+C".to_string()));
         assert!(
-            app.ocr_clipboard_bind_snippet()
+            app.shortcut_snippet(ShortcutId::OcrClipboard)
                 .is_some(),
             "a session that can copy offers one"
         );
@@ -2852,7 +2637,7 @@ mod tests {
 
         assert_eq!(
             None,
-            app.ocr_clipboard_bind_snippet()
+            app.shortcut_snippet(ShortcutId::OcrClipboard)
         );
         // The chord remains in the form. A user who later moves to a compositor with
         // data control keeps the value they typed.
@@ -2860,17 +2645,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// On the native rung, this row turns the typed chord into a pasteable bind
-    /// for the binary in use and the `anki-add` verb. The action has no portal
-    /// id, and rung 2 is the only rung for a sway session
-    /// (ARCHITECTURE.md#input-ladders).
+    /// Native bind text must use the pending chord and the running executable.
     #[test]
     fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("addbind");
         let mut app = app(&dir);
 
         let _ = update(&mut app, Message::AnkiAddKey("CTRL+SHIFT+A".to_string()));
-        let snippet = app.add_bind_snippet().expect("a chord has a bind");
+        let snippet = app.shortcut_snippet(ShortcutId::AnkiAdd).expect("a chord has a bind");
 
         assert_eq!("bind = CTRL SHIFT, A, exec, /usr/bin/chibipop ctl anki-add", snippet);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2884,86 +2666,30 @@ mod tests {
 
         let _ = update(&mut app, Message::AnkiAddKey(String::new()));
 
-        assert_eq!(HotkeyControl::NoChord, app.add_control());
-        assert_eq!(None, app.add_bind_snippet());
+        assert_eq!(HotkeyControl::NoChord, app.shortcut_control(ShortcutId::AnkiAdd));
+        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
         // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyAddBind);
-        assert_eq!(None, app.add_bind_snippet());
+        let _ = update(&mut app, Message::CopyBind(ShortcutId::AnkiAdd));
+        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The trigger row still produces the default press and release pair.
-    #[test]
-    fn the_trigger_row_still_hands_out_the_hold_pair() {
-        let dir = scratch("holdpair");
-        let app = app(&dir);
-        assert_eq!(
-            "bind = ALT, F, exec, /usr/bin/chibipop ctl trigger-down\n\
-             bindr = ALT, F, exec, /usr/bin/chibipop ctl trigger-up\n\
-             # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-             # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead.",
-            app.bind_snippet()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    /// On the native rung, this row turns the typed chord into a bind for the
-    /// binary in use and the `static-region` verb. The action has no portal rung,
-    /// so the chord has no other bind path.
+    /// The static-region row must use the pending chord and its daemon verb.
     #[test]
     fn the_static_region_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("srbind");
         let mut app = app(&dir);
 
         let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-        let snippet = app.static_region_bind_snippet()
+        let snippet = app.shortcut_snippet(ShortcutId::StaticRegion)
             .expect("a chord has a bind");
 
         assert_eq!("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region", snippet);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Decision D1 covers the user-visible case. This action never registers with
-    /// the portal, so the row uses `HotkeyChannel::Native` regardless of the
-    /// trigger channel. If it read `app.channel`, it would show the trigger's
-    /// portal key under the static-region chord.
-    #[test]
-    fn the_static_region_row_never_borrows_the_portals_trigger_key() {
-        let dir = scratch("srnative");
-        let mut app = app(&dir);
-        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
-        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
 
-        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
-
-        assert_eq!(
-            Some("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region".to_string()),
-            app.static_region_bind_snippet(),
-            "a portal session must not change what this row offers"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The default `anki.static_region_key_linux` value is empty. The row therefore
-    /// offers no bind instead of `bind = , R, …`.
-    #[test]
-    fn an_unset_static_region_chord_offers_no_bind_at_all() {
-        let dir = scratch("srnobind");
-        let mut app = app(&dir);
-
-        assert_eq!("", app.linux.static_region_key_linux, "the shipped default is unset");
-        assert_eq!(
-            None,
-            app.static_region_bind_snippet()
-        );
-        // The copy action does nothing, so it cannot copy an old bind.
-        let _ = update(&mut app, Message::CopyStaticRegionBind);
-        assert_eq!(
-            None,
-            app.static_region_bind_snippet()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// The screenshot row uses an `Option` chord. Only the text box maps `""` to
     /// `None`, so a typed chord is `Some` and a cleared chord is absent, never an
@@ -2976,14 +2702,14 @@ mod tests {
         assert_eq!(None, app.linux.screenshot_key_linux, "the shipped default is unset");
         assert_eq!(
             None,
-            app.screenshot_bind_snippet()
+            app.shortcut_snippet(ShortcutId::Screenshot)
         );
 
         let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
         assert_eq!(Some("SUPER+S".to_string()), app.linux.screenshot_key_linux);
         assert_eq!(
             "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot",
-            app.screenshot_bind_snippet()
+            app.shortcut_snippet(ShortcutId::Screenshot)
             .expect("a chord has a bind")
         );
 
@@ -2991,35 +2717,17 @@ mod tests {
         assert_eq!(None, app.linux.screenshot_key_linux, "blank is absence, not an empty chord");
         assert_eq!(
             None,
-            app.screenshot_bind_snippet()
+            app.shortcut_snippet(ShortcutId::Screenshot)
         );
         // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyScreenshotBind);
+        let _ = update(&mut app, Message::CopyBind(ShortcutId::Screenshot));
         assert_eq!(
             None,
-            app.screenshot_bind_snippet()
+            app.shortcut_snippet(ShortcutId::Screenshot)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Decision D1 also covers this row. It never registers with the portal, so
-    /// it uses `HotkeyChannel::Native` regardless of the trigger channel.
-    #[test]
-    fn the_screenshot_row_never_borrows_the_portals_trigger_key() {
-        let dir = scratch("shotnative");
-        let mut app = app(&dir);
-        app.channel = HotkeyChannel::Portal { current_binding: Some("Meta+F".into()) };
-        app.add_channel = HotkeyChannel::Portal { current_binding: Some("Meta+A".into()) };
-
-        let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
-
-        assert_eq!(
-            Some("bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot".to_string()),
-            app.screenshot_bind_snippet(),
-            "a portal session must not change what this row offers"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// These rows apply the inclusion flag and folder. An empty folder uses the
     /// default folder instead of the data directory itself. A relative `save_dir`
@@ -3100,7 +2808,7 @@ mod tests {
         let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
         assert_eq!(
             Some("bind = CTRL, R, exec, /usr/bin/chibipop ctl static-region"),
-            app.static_region_bind_snippet().as_deref(),
+            app.shortcut_snippet(ShortcutId::StaticRegion).as_deref(),
             "a non-static mode must not hide or reset the chord on Configurations"
         );
         every_page(&app);
@@ -4303,8 +4011,8 @@ mod tests {
             socket_path: config_home.join("sock"),
             log_path: config_home.join("log"),
             compositor: Compositor::Hyprland,
-            channel: HotkeyChannel::Native,
-            add_channel: HotkeyChannel::Native,
+            shortcuts: None,
+            state_dir: config_home.join("state"),
             library_dir: config_home.join("library"),
             db_path: config_home.join("chibipop.sqlite"),
             dicts: Vec::new(),

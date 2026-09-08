@@ -53,6 +53,19 @@ names the running binary's full path, quoted.
 `chibipop settings` opens **General**. The six tabs are **General**,
 **Configurations**, **Popup**, **Dictionaries**, **OCR**, and **Anki**.
 The **Configurations** tab holds every chord and its compositor bind or portal key.
+
+Apply requests direct global shortcuts where the desktop supports them.
+For native bindings, each supported configured shortcut has a **Copy bind snippet** button.
+Every snippet runs `chibipop ctl`. chibipop does not edit compositor configuration files.
+The compositor selector changes snippet syntax, not shortcut ownership.
+
+KDE and GNOME show **Copy daemon command** for a press action when no portal binding exists.
+Their shortcut editors accept this command, but they cannot send a key release.
+Hold mode on those desktops needs a portal binding. Otherwise, select Toggle or Press mode.
+GNOME repeats a held custom shortcut, so tap the chord.
+Niri snippets go inside the existing `binds` block.
+Niri supports press bindings but has no key-release bind for Hold mode.
+
 Screen capture exclusion stays on **Popup**.
 
 **Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
@@ -114,10 +127,9 @@ and templated in [`packaging/aur/`](../packaging/aur/). Both are described in
 
 ## The trigger key
 
-Wayland has no global key observation, so on wlroots compositors the
-**compositor's own keybind is the trigger**: it runs `chibipop ctl`, which
-speaks to the daemon over a UNIX socket. Two lines, and the default `ALT+F`
-chord (held while reading) looks like this on Hyprland:
+Wayland has no global key observation. If the desktop cannot assign global shortcuts
+directly, its compositor keybind runs `chibipop ctl`. This command sends a verb to
+the daemon over a UNIX socket. The default `ALT+F` hold chord needs two Hyprland lines:
 
 ```
 bind  = ALT, F, exec, chibipop ctl trigger-down
@@ -158,7 +170,7 @@ bind = ALT, F, exec, chibipop ctl lookup
 On sway, use:
 
 ```
-bindsym --no-repeat ALT+F exec chibipop ctl lookup
+bindsym --no-repeat Mod1+f exec chibipop ctl lookup
 ```
 The settings window prints these lines for the selected Press mode.
 
@@ -205,25 +217,19 @@ that release too, sticking the hold until the next clean Shift tap. And it is
 impossible on the portal shortcuts channel (KDE, GNOME 48+), whose spec
 requires modifier-plus-key — which is why `ALT+F` is the default everywhere.
 
-**The portal route** is the alternative that cannot lose a release. Launched
-with an app id — the desktop entry, the systemd user unit, or a uwsm session —
-chibipop registers its trigger on the GlobalShortcuts portal. On KDE and
-GNOME that is the whole story. The desktop shows a consent dialog and owns the
-binding.
+**The portal route** requests each configured shortcut when the desktop can assign
+keys without compositor configuration edits. Start chibipop with an app ID through
+its desktop entry, systemd user unit, or a uwsm session. KDE and GNOME can show a
+consent dialog before they register the shortcuts.
 
-On Hyprland, XDPH registers the shortcut but does not assign its key. Run
-`hyprctl globalshortcuts` to get the active namespace. An installed desktop
-launch normally registers `chibipop:trigger`, but a development launch can
-inherit another app ID. For example, a launch from VS Code can register
-`code:trigger`. Bind the exact name that `hyprctl` reports.
+**Apply** requests changed portal bindings without a daemon restart.
+The desktop can keep a previously approved key. Each **Current key** line shows
+the confirmed binding, not an assumption from the requested chord.
+For version 2 portals, Apply also requests the desktop's shortcut configuration window.
 
-Hyprland delivers the portal release keyed to the pressed shortcut itself,
-independent of the modifier state. Hold-key mode uses this release, so either release order
-retracts the popup. Toggle and Press modes ignore the release.
-The socket keeps serving as a namespace-free fallback. The settings window
-does not guess the namespace. When XDPH owns the trigger, the Trigger row
-shows the control-socket bind for the selected mode instead, as the add-card
-row does.
+Hyprland's portal registers action names but does not assign their keys.
+chibipop therefore selects native bindings on Hyprland.
+Every configured row copies a `chibipop ctl` bind. No snippet depends on a portal namespace.
 
 **The add-card chord is a one-shot action.** The popup never takes focus, so
 the key must be global. On Hyprland, use the control socket even when XDPH is
@@ -282,12 +288,10 @@ fixed-mode picture asks for a new target. Press **Esc** to cancel a selection.
 The selection times out after 20 seconds. Include-on-add
 still files the card without a picture.
 
-**The mining screenshot's key is the same story again.** `chibipop ctl
-screenshot` uses the selected mode for the popup on screen and files the
-picture as that card's context image. Its chord
-(`actions.screenshot.hotkey_linux`, unset by default) is **native-channel
-only** — no portal id, so the consent dialog stays at two entries — and one
-press, one verb:
+**The mining screenshot shortcut** uses `chibipop ctl screenshot`.
+It files a picture as context for the popup's card.
+Its chord (`actions.screenshot.hotkey_linux`, unset by default) uses the portal
+where direct registration works. Otherwise, copy its native bind:
 
 ```
 bind = SUPER, S, exec, chibipop ctl screenshot
@@ -306,16 +310,15 @@ See **Include screenshot when adding** in the README.
 
 ## How support is decided
 
-The daemon splits its platform needs into four channels — **Capture**,
-**Cursor**, **Trigger**, **Popup** — and each picks its backend at startup by
-what the compositor actually advertises, never by compositor identity (one
-documented exception below):
+The daemon splits its platform needs into four channels: **Capture**, **Cursor**,
+**Trigger**, and **Popup**. Each channel selects an advertised backend at startup.
+Hyprland also has a cursor polling fallback and selects native trigger bindings.
 
 | Channel | First choice | Fallback |
 |---|---|---|
 | Capture | `zwlr_screencopy_manager_v1` — promptless region capture | ScreenCast portal + PipeWire — one consent dialog, then a restore token keeps later launches silent |
 | Cursor | `ext-image-copy-capture` cursor sessions — event-driven, zero idle wakeups | portal cursor metadata on the capture stream; on Hyprland only, `hyprctl cursorpos` polling as a last rung |
-| Trigger | GlobalShortcuts portal (needs an app id) | the control socket — always bound, so the trigger never goes fully down |
+| Trigger | GlobalShortcuts portal where the desktop assigns keys directly | the control socket, including Hyprland; always available for native bindings |
 | Popup | `zwlr_layer_shell_v1` — required, no fallback | — |
 
 A channel that cannot serve does not crash the daemon: it reports itself,
@@ -434,18 +437,18 @@ compositor session, and a second launch exits with a clear message. If
 daemon and `ctl` say so and stop.
 
 The config file format is shared with Windows — see
-[`docs/REFERENCE.md`](REFERENCE.md) for the full reference. Every chord has its
-own Linux key, in portal syntax: `trigger_key_linux` (default `ALT+F`),
-`add_key_linux` (default `ALT+A`), `static_region_key_linux` and
-`actions.ocr_clipboard.hotkey_linux` (both unset — native-channel only, so
-nothing is bound until you paste the snippet).
+[`docs/REFERENCE.md`](REFERENCE.md) for the full reference. Linux chords use portal
+syntax such as `ALT+F`. The trigger defaults to `ALT+F`, and Anki add defaults to
+`ALT+A`. Optional action chords start unset.
+Apply requests portal bindings for configured, enabled actions where supported.
+Otherwise, each configured row supplies its native bind.
 
 ## Command line
 
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup` (run one Press-mode lookup), `anki-add` (add the word in the popup to Anki), `screenshot` (use the selected screenshot mode and file the popup's mining picture), `ocr-clipboard` (drag a region and copy its text to the clipboard), `static-region` (drag the box the Static sentence mode reads), or `reload` (re-read the config). Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `screenshot`, `ocr-clipboard`, `static-region`, or `reload`. Answers `OK` or `ERR` on one line. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
@@ -470,18 +473,12 @@ your frequency lists there and Apply.
   meikiocr does not read (anything but `ja`) searches every dictionary, because
   that language's list was drawn up for a recogniser this build does not run.
   Clear the key, or set it to `ja`, to have your split apply.
-- **The Static region sentence mode needs a compositor bind for its key.**
-  The mode itself works: pick *Static region* as the Anki sentence field, draw
-  a box, and every card's sentence comes from that box instead of the hovered
-  line. Drawing it is the `static-region` verb — a drag on the dimmed screen,
-  `Esc` or right-click to cancel — and it works in **any** sentence mode,
-  because drawing the box is how you decide to switch to Static. The chord
-  (`anki.static_region_key_linux`, unset by default) is **native-channel only**:
-  it gets no GlobalShortcuts portal id. The portal exposes lookup and Anki add,
-  plus Dictionary search and Sentence search when their shortcuts are configured.
-  The static-region key still
-  needs a native compositor binding. The settings window renders the
-  bind for whatever chord you type, e.g.
+- **The Static region sentence mode has a global shortcut.**
+  Select *Static region* as the Anki sentence field. Then draw its box.
+  The `static-region` verb starts this selection in any sentence mode.
+  Use `Esc` or right-click to cancel the selection.
+  Its chord (`anki.static_region_key_linux`, unset by default) uses the portal
+  where direct registration works. Otherwise, copy its native bind from settings:
 
   ```
   bind = ALT, R, exec, chibipop ctl static-region
@@ -503,12 +500,12 @@ your frequency lists there and Apply.
   binary on Linux — update with your package manager or by download.
 - **Capture exclusion is a compositor rule**, not the `exclude_from_capture`
   setting — see [Hiding the popup from screen sharing](#hiding-the-popup-from-screen-sharing).
-- **Anki works the same** (AnkiConnect, same field map). The add key (default
-  `ALT+A`) registers on the GlobalShortcuts portal alongside the trigger; the
-  popup's own Anki button works on every compositor.
-- **The mining screenshot works the same, with its own key on the native
-  channel.** *Include screenshot when adding* uses the selected mode described
-  above. The PNG lands in
+- **Anki works the same** (AnkiConnect, same field map). Its add key defaults to `ALT+A`.
+  The key uses direct portal registration where supported or a native daemon bind.
+  The popup's own Anki button works on every compositor.
+- **The mining screenshot has its own global shortcut.**
+  *Include screenshot when adding* uses the selected mode described above.
+  The PNG lands in
   `$XDG_DATA_HOME/chibipop/screenshots` by default —
   `~/.local/share/chibipop/screenshots` when that is unset, or beside the
   executable in portable mode. The *Anki* tab's **Screenshots folder** box
@@ -516,9 +513,9 @@ your frequency lists there and Apply.
 
   Interactive modes need `slurp` and layer-shell support. The Capture channel
   supplies the pixels. A saved fixed region bypasses the selector. A saved
-  fixed window still needs fresh Hyprland or Sway window metadata. Taking a
-  screenshot without asking for a card uses the `screenshot` verb, a
-  compositor bind. See [the trigger key](#the-trigger-key).
+  fixed window still needs fresh Hyprland or Sway window metadata.
+  A global shortcut or a native `chibipop ctl screenshot` bind starts the same action.
+  See [the trigger key](#the-trigger-key).
 - **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard` verb
   dims the screen, reads the region you drag with the same engine and the same
   OCR settings hovering uses, and puts the text on the clipboard — one line per
@@ -526,8 +523,8 @@ your frequency lists there and Apply.
   is an artefact and a space between them would be text the screen never had.
   Nothing is upscaled: meikiocr reads native-resolution crops better than 2x
   ones, which is where the Windows twin differs. Its chord
-  (`actions.ocr_clipboard.hotkey_linux`, unset by default) is native-channel
-  only for the same reason `static-region`'s is:
+  (`actions.ocr_clipboard.hotkey_linux`, unset by default) uses a global shortcut where the desktop can assign keys directly.
+  Otherwise, copy the compositor bind from settings:
 
   ```
   bind = ALT, C, exec, chibipop ctl ocr-clipboard
@@ -568,7 +565,7 @@ mechanism, not several.
 **The popup sticks after releasing the chord (Hyprland).** You released the
 modifier before the key, and Hyprland lost the release bind — see
 [the trigger key](#the-trigger-key). Tap the chord again releasing `F` first,
-or switch to the toggle or portal bind.
+or switch to the toggle bind.
 
 **The trigger chord does nothing.** First check the socket directly:
 `chibipop ctl trigger-down` from a terminal should answer `OK`. If it does,

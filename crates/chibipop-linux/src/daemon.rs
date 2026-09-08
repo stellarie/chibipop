@@ -149,9 +149,24 @@ pub(crate) struct App {
     prefilled_searches: Vec<std::process::Child>,
     search_focused: bool,
     search_focus_error: bool,
-    registered_search_key: Option<String>,
-    registered_sentence_search_key: Option<String>,
-    registered_selected_text_key: Option<String>,
+    /// The trigger transport selected at startup. Automatic Hyprland always
+    /// selects native binds. An explicit portal override selects this rung.
+    shortcut_selection: shortcuts::Selection,
+    /// Sender retained for replacement portal sessions.
+    shortcut_tx: calloop::channel::SyncSender<shortcuts::Event>,
+    /// The active portal session, if this transport owns the configured keys.
+    shortcut_session: Option<shortcuts::SessionHandle>,
+    /// Identifier for the active session. This stays separate from the handle
+    /// so the event loop can reject stale queued events after retirement.
+    shortcut_session_id: Option<shortcuts::SessionId>,
+    /// Configuration snapshot used to decide when Apply must recreate a portal
+    /// session. Unrelated config reloads do not prompt the portal again.
+    shortcut_config: Option<ShortcutConfig>,
+    /// IDs confirmed by the active portal session. This list is per-ID state,
+    /// not a claim that the portal bus exists.
+    confirmed_shortcuts: Vec<shortcuts::ShortcutId>,
+    /// Monotonic generation for stale portal events.
+    next_shortcut_session: u64,
     /// Channel health and the SNI tray that mirrors it
     /// (ARCHITECTURE.md#platform-integration).
     /// This field also stores the daemon view. It works when no tray exists.
@@ -557,6 +572,19 @@ impl AnkiCall {
     }
 }
 
+/// The portal session inputs that can change shortcut ownership.
+/// The preferred list includes the enablement gates and normalized chords.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortcutConfig {
+    preferred: Vec<(shortcuts::ShortcutId, String)>,
+}
+
+impl ShortcutConfig {
+    fn from_config(config: &chibipop::config::Config) -> Self {
+        Self { preferred: shortcuts::preferred(config) }
+    }
+}
+
 /// Values that a second consent request needs. Retry uses the startup path.
 struct PortalRetry {
     state_dir: PathBuf,
@@ -631,26 +659,22 @@ impl App {
         }
         match verb {
             Verb::Reload => self.reload_config(),
-            Verb::Search => self.spawn_search(),
-            Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
-            Verb::SelectedText => self.lookup_selected_text(),
-            // The canned popup replaces a lookup, so a machine without a
-            // Dictionary can inspect the surface.
+            // The demo replaces lookup data so a missing Dictionary does not
+            // prevent a surface check.
             Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
             Verb::TriggerUp if self.demo.armed => self.demo_hide(),
             Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
             Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
             Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
             Verb::Lookup => self.lookup_at_cursor(),
+            Verb::Search => self.spawn_search(),
+            Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
+            Verb::SelectedText => self.lookup_selected_text(),
             // The in-panel Anki slot raises the same Event, so every card path
             // uses one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
-            // Native channel only, like `static-region` below.
             Verb::Screenshot => self.mining_screenshot(),
-            // Native channel only.
             Verb::OcrClipboard => self.ocr_to_clipboard(),
-            // Native channel only. No portal id exists for this action, so the
-            // socket provides the complete global channel.
             Verb::StaticRegion => self.pick_static_region(),
         }
     }
@@ -677,30 +701,23 @@ impl App {
 
     /// One Event from the GlobalShortcuts session thread.
     ///
-    /// The Portal adds a source for socket presses. It does not replace the
-    /// socket.
-    /// Every press therefore uses [`App::apply_verb`].
-    /// This method records the binding owner, reported key, and settings state.
+    /// Session generations reject queued events from a retired portal session.
+    /// A fired id also needs confirmation from the current binding result.
     fn handle_shortcut(&mut self, event: shortcuts::Event) {
         match event {
-            shortcuts::Event::Bound(bindings) => self.trigger_bound("bound", bindings),
-            shortcuts::Event::Changed(bindings) => self.trigger_bound("re-bound", bindings),
-            shortcuts::Event::Fired { id, activated } => {
-                if id == shortcuts::ShortcutId::SentenceSearch {
-                    let configured = configured_sentence_search_key(&self.config);
-                    if configured.is_none() || configured.as_deref() != self.registered_sentence_search_key.as_deref() {
-                        return;
-                    }
+            shortcuts::Event::Bound { session, bindings } => {
+                if self.current_shortcut_session(session) {
+                    self.trigger_bound(session, "bound", bindings);
                 }
-                if id == shortcuts::ShortcutId::Search
-                    && !search_shortcut_active(&self.config, self.registered_search_key.as_deref()) {
-                    return;
+            }
+            shortcuts::Event::Changed { session, bindings } => {
+                if self.current_shortcut_session(session) {
+                    self.trigger_bound(session, "re-bound", bindings);
                 }
-                if id == shortcuts::ShortcutId::SelectedText
-                    && !selected_text_shortcut_active(
-                        &self.config,
-                        self.registered_selected_text_key.as_deref(),
-                    )
+            }
+            shortcuts::Event::Fired { session, id, activated } => {
+                if !self.current_shortcut_session(session)
+                    || !self.confirmed_shortcuts.contains(&id)
                 {
                     return;
                 }
@@ -714,31 +731,113 @@ impl App {
                     shortcuts::Action::Nothing => {}
                 }
             }
-            // This rung does not serve requests. The socket does.
-            // This state has a reason and never ends the daemon.
-            shortcuts::Event::Unavailable { reason, advice } => {
+            shortcuts::Event::Unavailable { session, reason, advice } => {
+                if !self.current_shortcut_session(session) {
+                    return;
+                }
                 self.log.diag(&format!("trigger: portal rung unavailable - {reason}"));
-                // The row gets one short clause
-                // (ARCHITECTURE.md#platform-integration: one line).
-                // The log stores advice, where it has room.
                 if let Some(advice) = advice {
                     self.log.diag(&format!("trigger: {advice}"));
                 }
+                self.retire_shortcut_session();
                 self.note_channel(
                     ChannelId::Trigger,
                     ChannelState::up(shortcuts::native_detail(&reason)),
                 );
                 self.publish_trigger(&shortcuts::state::Published::native());
             }
-            shortcuts::Event::Note(line) => self.log.diag(&line),
+            shortcuts::Event::Note { session, line } => {
+                if self.current_shortcut_session(session) {
+                    self.log.diag(&line);
+                }
+            }
+        }
+    }
+
+    fn current_shortcut_session(&self, session: shortcuts::SessionId) -> bool {
+        self.shortcut_selection == shortcuts::Selection::Portal
+            && self.shortcut_session_id == Some(session)
+    }
+
+    /// Retire the current session before a replacement starts.
+    fn retire_shortcut_session(&mut self) {
+        if let Some(mut session) = self.shortcut_session.take() {
+            session.stop();
+        }
+        self.shortcut_session_id = None;
+        self.confirmed_shortcuts.clear();
+    }
+
+    /// Apply one changed shortcut configuration.
+    ///
+    /// `BindShortcuts` accepts only one request per portal session. A changed
+    /// chord therefore gets a new session, and version 2 opens its explicit
+    /// configuration UI after binding.
+    fn sync_shortcuts(&mut self) {
+        if self.shortcut_selection != shortcuts::Selection::Portal {
+            self.shortcut_config = None;
+            self.retire_shortcut_session();
+            return;
+        }
+        let desired = ShortcutConfig::from_config(&self.config);
+        if self.shortcut_config.as_ref() == Some(&desired) {
+            return;
+        }
+        if self.hold.is_some() {
+            self.trigger(trigger::toggle(self.hold));
+        }
+        self.retire_shortcut_session();
+        self.shortcut_config = Some(desired.clone());
+        self.publish_trigger(&shortcuts::state::Published::native());
+        if desired.preferred.is_empty() {
+            self.note_channel(
+                ChannelId::Trigger,
+                ChannelState::up("control socket only - no configured global shortcuts"),
+            );
+            return;
+        }
+        let raw = if self.next_shortcut_session == 0 {
+            1
+        } else {
+            self.next_shortcut_session
+        };
+        self.next_shortcut_session = raw.wrapping_add(1).max(1);
+        let session = shortcuts::SessionId::new(raw);
+        match shortcuts::portal::spawn(
+            session,
+            desired.preferred,
+            true,
+            self.shortcut_tx.clone(),
+        ) {
+            Ok(handle) => {
+                self.shortcut_session_id = Some(session);
+                self.shortcut_session = Some(handle);
+                self.note_channel(ChannelId::Trigger, ChannelState::up(shortcuts::pending_detail()));
+            }
+            Err(error) => {
+                let why = format!("no thread for the portal session: {error}");
+                self.log.diag(&format!("trigger: {why}"));
+                self.note_channel(ChannelId::Trigger, ChannelState::up(shortcuts::native_detail(&why)));
+                self.publish_trigger(&shortcuts::state::Published::native());
+            }
         }
     }
 
     /// The portal answered `BindShortcuts`, or the user changed a key in the
     /// desktop UI (`ShortcutsChanged`).
-    /// Both cases log a line, update the trigger row, and update the file that
-    /// the settings window reads.
-    fn trigger_bound(&mut self, what: &str, bindings: Vec<shortcuts::Binding>) {
+    fn trigger_bound(
+        &mut self,
+        session: shortcuts::SessionId,
+        what: &str,
+        mut bindings: Vec<shortcuts::Binding>,
+    ) {
+        if !self.current_shortcut_session(session) {
+            return;
+        }
+        if let Some(config) = &self.shortcut_config {
+            bindings.retain(|binding| config.preferred.iter().any(|(id, _)| *id == binding.id));
+        }
+        self.confirmed_shortcuts = bindings.iter().map(|binding| binding.id).collect();
         let detail = shortcuts::portal_detail(&bindings);
         self.log.diag(&format!("trigger: portal {what} - {detail}"));
         self.note_channel(ChannelId::Trigger, ChannelState::up(detail));
@@ -3438,6 +3537,7 @@ impl App {
                 // This sends new settings to the Worker and reopens the
                 // dictionary after a rebuild rename.
                 self.config = config;
+                self.sync_shortcuts();
                 let cfg = controller_config(&self.config);
                 self.feed(Event::ConfigReloaded(Box::new(cfg)));
                 let layer = self.popup.as_ref().map(Popup::layer);
@@ -3660,18 +3760,6 @@ delegate_dispatch!(App: [ExtImageCaptureSourceV1: ()] => CursorState);
 delegate_dispatch!(App: [ExtImageCopyCaptureManagerV1: ()] => CursorState);
 delegate_dispatch!(App: [ExtImageCopyCaptureCursorSessionV1: u32] => CursorState);
 
-/// What the Controller reads (mirrors the Windows bin's builder).
-fn configured_search_key(config: &chibipop::config::Config) -> Option<String> {
-    config.actions.search.hotkey_linux.as_deref()
-        .filter(|key| config.actions.enabled && !key.trim().is_empty())
-        .map(shortcuts::normalize_trigger)
-}
-
-fn configured_sentence_search_key(config: &chibipop::config::Config) -> Option<String> {
-    config.actions.search.sentence_hotkey_linux.as_deref()
-        .filter(|key| config.actions.enabled && !key.trim().is_empty())
-        .map(shortcuts::normalize_trigger)
-}
 
 struct SelectedTextTimer {
     id: RequestId,
@@ -3688,24 +3776,6 @@ fn selected_text_on_time(
     pending == arrived && now <= deadline
 }
 
-fn configured_selected_text_key(config: &chibipop::config::Config) -> Option<String> {
-    config.actions.search.selected_hotkey_linux.as_deref()
-        .filter(|key| config.actions.enabled && !key.trim().is_empty())
-        .map(shortcuts::normalize_trigger)
-}
-
-fn search_shortcut_active(config: &chibipop::config::Config, registered: Option<&str>) -> bool {
-    let configured = configured_search_key(config);
-    configured.is_some() && configured.as_deref() == registered
-}
-
-fn selected_text_shortcut_active(
-    config: &chibipop::config::Config,
-    registered: Option<&str>,
-) -> bool {
-    let configured = configured_selected_text_key(config);
-    configured.is_some() && configured.as_deref() == registered
-}
 
 fn search_blocks_event(event: &Event) -> bool {
     matches!(event, Event::Tick { .. } | Event::GestureTick | Event::Scrolled { .. }
@@ -4080,14 +4150,19 @@ pub fn run(paths: Paths) -> Result<()> {
 
     // Trigger channel ladder (ARCHITECTURE.md#input-ladders).
     // The socket listens as rung 2, so decide only whether to ask the
-    // GlobalShortcuts portal to carry the two shortcuts too.
+    // GlobalShortcuts portal to carry the configured actions too.
     // Its session uses its own thread. Events arrive here, so the pump stays
     // synchronous (ARCHITECTURE.md#workspace-and-seams).
     let (trigger_override, trigger_warning) = shortcuts::ChannelOverride::from_env();
     if let Some(w) = &trigger_warning {
         log.diag(w);
     }
-    let trigger_selection = shortcuts::select(shortcuts::portal::probe(), trigger_override);
+    let trigger_selection = shortcuts::select(
+        shortcuts::portal::probe(),
+        trigger_override,
+        crate::settings::snippets::Compositor::detect()
+            == crate::settings::snippets::Compositor::Hyprland,
+    );
     // The advice text gives a bind command for the user.
     // Name this binary because PATH can lack bare `chibipop`.
     log.diag(&trigger_selection.startup_line(&crate::paths::exec_name()));
@@ -4100,21 +4175,47 @@ pub fn run(paths: Paths) -> Result<()> {
         log.diag(&format!("trigger: could not publish the channel state - {e}"));
     }
     let (shortcut_tx, shortcut_rx) = calloop::channel::sync_channel::<shortcuts::Event>(32);
-    let trigger_state = match trigger_selection {
+    let (trigger_state, shortcut_session, shortcut_config) = match trigger_selection {
         shortcuts::Selection::Portal => {
-            match shortcuts::portal::spawn(shortcuts::preferred(&config), shortcut_tx) {
-                Ok(()) => ChannelState::up(shortcuts::pending_detail()),
-                Err(e) => {
-                    let why = format!("no thread for the portal session: {e}");
-                    log.diag(&format!("trigger: {why}"));
-                    ChannelState::up(shortcuts::native_detail(&why))
+            let desired = ShortcutConfig::from_config(&config);
+            if desired.preferred.is_empty() {
+                (
+                    ChannelState::up("control socket only - no configured global shortcuts"),
+                    None,
+                    Some(desired),
+                )
+            } else {
+                let session = shortcuts::SessionId::new(1);
+                match shortcuts::portal::spawn(
+                    session,
+                    desired.preferred.clone(),
+                    false,
+                    shortcut_tx.clone(),
+                ) {
+                    Ok(handle) => (
+                        ChannelState::up(shortcuts::pending_detail()),
+                        Some(handle),
+                        Some(desired),
+                    ),
+                    Err(e) => {
+                        let why = format!("no thread for the portal session: {e}");
+                        log.diag(&format!("trigger: {why}"));
+                        (
+                            ChannelState::up(shortcuts::native_detail(&why)),
+                            None,
+                            Some(desired),
+                        )
+                    }
                 }
             }
         }
-        shortcuts::Selection::Native(reason) => {
-            ChannelState::up(shortcuts::native_detail(&shortcuts::native_reason(reason)))
-        }
+        shortcuts::Selection::Native(reason) => (
+            ChannelState::up(shortcuts::native_detail(&shortcuts::native_reason(reason))),
+            None,
+            None,
+        ),
     };
+    let shortcut_session_id = shortcut_session.as_ref().map(shortcuts::SessionHandle::id);
 
     // The SNI tray (ARCHITECTURE.md#platform-integration) uses its own
     // D-Bus thread. Its activations arrive here as `TrayRequest`s, so the
@@ -4300,9 +4401,13 @@ pub fn run(paths: Paths) -> Result<()> {
         prefilled_searches: Vec::new(),
         search_focused: false,
         search_focus_error: false,
-        registered_search_key: configured_search_key(&config),
-        registered_sentence_search_key: configured_sentence_search_key(&config),
-        registered_selected_text_key: configured_selected_text_key(&config),
+        shortcut_selection: trigger_selection,
+        shortcut_tx,
+        shortcut_session_id,
+        shortcut_session,
+        shortcut_config,
+        confirmed_shortcuts: Vec::new(),
+        next_shortcut_session: 2,
         tray: tray_handle,
         worker: None,
         analysis,
@@ -4499,7 +4604,9 @@ pub fn run(paths: Paths) -> Result<()> {
         if app.worker.is_some() { "ready" } else { "unavailable" },
     ));
 
-    event_loop.run(None, &mut app, |_| {}).context("running the event loop")?;
+    let event_loop_result = event_loop.run(None, &mut app, |_| {});
+    app.retire_shortcut_session();
+    app.publish_trigger(&shortcuts::state::Published::native());
 
     // When the loop drops, the control source drops and unlinks the socket
     // file.
@@ -4508,6 +4615,7 @@ pub fn run(paths: Paths) -> Result<()> {
     drop(event_loop);
     app.log.diag("shutdown: control socket unlinked, instance lock released");
     drop(lock);
+    event_loop_result.context("running the event loop")?;
 
     // A protocol error stops the pump like a signal.
     // The shutdown above remains orderly, but a compositor-killed session
@@ -4528,32 +4636,39 @@ mod tests {
     use wayland_client::backend::ObjectId;
 
     #[test]
-    fn search_portal_events_follow_current_enablement_and_registered_chord() {
+    fn shortcut_configuration_tracks_each_enabled_chord() {
         let mut config = chibipop::config::Config::default();
         config.actions.enabled = true;
         config.actions.search.hotkey_linux = Some("CTRL+SHIFT+F".into());
-        let registered = configured_search_key(&config);
-        assert!(search_shortcut_active(&config, registered.as_deref()));
-        assert!(!search_shortcut_active(&config, None));
+        let current = ShortcutConfig::from_config(&config);
+        assert!(current.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+f".into())));
         config.actions.search.hotkey_linux = Some("CTRL+SHIFT+G".into());
-        assert!(!search_shortcut_active(&config, registered.as_deref()));
-        config.actions.search.hotkey_linux = None;
-        assert!(!search_shortcut_active(&config, registered.as_deref()));
-        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+F".into());
+        let changed = ShortcutConfig::from_config(&config);
+        assert!(!changed.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+f".into())));
+        assert!(changed.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+g".into())));
         config.actions.enabled = false;
-        assert!(!search_shortcut_active(&config, registered.as_deref()));
+        assert!(!ShortcutConfig::from_config(&config)
+            .preferred
+            .iter()
+            .any(|(id, _)| *id == ShortcutId::Search));
     }
 
     #[test]
-    fn selected_text_portal_events_require_the_registered_chord() {
+    fn selected_text_shortcut_configuration_requires_actions() {
         let mut config = chibipop::config::Config::default();
         config.actions.search.selected_hotkey_linux = Some("SUPER+H".into());
-        let registered = configured_selected_text_key(&config);
-        assert!(selected_text_shortcut_active(&config, registered.as_deref()));
+        assert!(ShortcutConfig::from_config(&config)
+            .preferred
+            .iter()
+            .any(|(id, _)| *id == ShortcutId::SelectedText));
         config.actions.search.selected_hotkey_linux = Some("SUPER+J".into());
-        assert!(!selected_text_shortcut_active(&config, registered.as_deref()));
+        let changed = ShortcutConfig::from_config(&config);
+        assert!(changed.preferred.contains(&(ShortcutId::SelectedText, "LOGO+j".into())));
         config.actions.enabled = false;
-        assert!(!selected_text_shortcut_active(&config, registered.as_deref()));
+        assert!(!ShortcutConfig::from_config(&config)
+            .preferred
+            .iter()
+            .any(|(id, _)| *id == ShortcutId::SelectedText));
     }
 
     #[test]
@@ -4697,6 +4812,9 @@ mod tests {
             dir.join("missing-analysis-model"),
             || {},
         );
+        let config = chibipop::config::Config::default();
+        let (shortcut_tx, _shortcut_rx) =
+            calloop::channel::sync_channel::<shortcuts::Event>(32);
         App {
             log: Log::open(log_file, false),
             stub: StubState::default(),
@@ -4712,7 +4830,7 @@ mod tests {
                 cache_dir: dir.to_path_buf(),
                 runtime_dir: Some(dir.to_path_buf()),
             },
-            config: chibipop::config::Config::default(),
+            config: config.clone(),
             signal: event_loop.get_signal(),
             fatal: None,
             display: None,
@@ -4731,9 +4849,13 @@ mod tests {
             prefilled_searches: Vec::new(),
             search_focused: false,
             search_focus_error: false,
-            registered_search_key: None,
-            registered_sentence_search_key: None,
-            registered_selected_text_key: None,
+            shortcut_selection: shortcuts::Selection::Portal,
+            shortcut_tx,
+            shortcut_session: None,
+            shortcut_session_id: Some(shortcuts::SessionId::new(1)),
+            shortcut_config: Some(ShortcutConfig::from_config(&config)),
+            confirmed_shortcuts: shortcuts::ShortcutId::ALL.to_vec(),
+            next_shortcut_session: 2,
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
             trace: false,
@@ -5389,6 +5511,14 @@ mod tests {
         shortcuts::Binding { id, trigger: trigger.map(str::to_string) }
     }
 
+    fn enable_anki_shortcut(app: &mut App) {
+        app.config.anki.enabled = true;
+        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
+    }
+    fn portal_session() -> shortcuts::SessionId {
+        shortcuts::SessionId::new(1)
+    }
+
     /// Portal press and release use the same trigger semantics as
     /// `ctl trigger-down` and `trigger-up`.
     /// Two sources feed one trigger.
@@ -5400,18 +5530,12 @@ mod tests {
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
 
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::Trigger,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::Trigger, activated: true });
         let hold = app.hold.expect("a portal press holds");
         assert!(!hold.latched, "a key press is not a latch");
         assert!(hold.output.contains(PhysPoint { x: 400, y: 300 }), "{:?}", hold.output);
 
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::Trigger,
-            activated: false,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::Trigger, activated: false });
         assert_eq!(None, app.hold, "a portal release ends the hold");
 
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
@@ -5427,15 +5551,18 @@ mod tests {
         let dir = scratch("portaladd");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        enable_anki_shortcut(&mut app);
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
 
         app.handle_shortcut(shortcuts::Event::Fired {
+            session: portal_session(),
             id: shortcuts::ShortcutId::AnkiAdd,
             activated: true,
         });
         assert_eq!(None, app.hold, "anki-add is not the trigger");
         app.handle_shortcut(shortcuts::Event::Fired {
+            session: portal_session(),
             id: shortcuts::ShortcutId::AnkiAdd,
             activated: false,
         });
@@ -5454,11 +5581,12 @@ mod tests {
         let dir = scratch("portalbound");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        enable_anki_shortcut(&mut app);
 
-        app.handle_shortcut(shortcuts::Event::Bound(vec![
+        app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![
             binding(shortcuts::ShortcutId::Trigger, Some("Alt+F")),
             binding(shortcuts::ShortcutId::AnkiAdd, None),
-        ]));
+        ] });
 
         let row = app.tray.statuses().row(ChannelId::Trigger);
         assert!(row.contains("GlobalShortcuts portal"), "{row}");
@@ -5482,14 +5610,14 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
 
-        app.handle_shortcut(shortcuts::Event::Bound(vec![binding(
+        app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![binding(
             shortcuts::ShortcutId::Trigger,
             Some("Alt+F"),
-        )]));
-        app.handle_shortcut(shortcuts::Event::Changed(vec![binding(
+        )] });
+        app.handle_shortcut(shortcuts::Event::Changed { session: portal_session(), bindings: vec![binding(
             shortcuts::ShortcutId::Trigger,
             Some("Meta+Shift+R"),
-        )]));
+        )] });
 
         let row = app.tray.statuses().row(ChannelId::Trigger);
         assert!(row.contains("Meta+Shift+R"), "{row}");
@@ -5513,14 +5641,11 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
 
-        app.handle_shortcut(shortcuts::Event::Bound(vec![binding(
+        app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![binding(
             shortcuts::ShortcutId::Trigger,
             Some("Alt+F"),
-        )]));
-        app.handle_shortcut(shortcuts::Event::Unavailable {
-            reason: "CreateSession: the portal requires an app id".to_string(),
-            advice: Some("launch chibipop from its desktop entry".to_string()),
-        });
+        )] });
+        app.handle_shortcut(shortcuts::Event::Unavailable { session: portal_session(), reason: "CreateSession: the portal requires an app id".to_string(), advice: Some("launch chibipop from its desktop entry".to_string()) });
 
         let row = app.tray.statuses().row(ChannelId::Trigger);
         assert!(row.contains("control socket"), "{row}");
@@ -5546,9 +5671,28 @@ mod tests {
         let dir = scratch("portalnote");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-        app.handle_shortcut(shortcuts::Event::Note("trigger: v2 session /foo".to_string()));
+        app.handle_shortcut(shortcuts::Event::Note { session: portal_session(), line: "trigger: v2 session /foo".to_string() });
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("trigger: v2 session /foo"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn retired_portal_session_events_are_ignored() {
+        let dir = scratch("portalstale");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        app.handle_shortcut(shortcuts::Event::Bound {
+            session: portal_session(),
+            bindings: vec![binding(shortcuts::ShortcutId::Trigger, Some("Alt+F"))],
+        });
+        app.retire_shortcut_session();
+        let before = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
+        app.handle_shortcut(shortcuts::Event::Fired {
+            session: portal_session(),
+            id: shortcuts::ShortcutId::Trigger,
+            activated: true,
+        });
+        assert_eq!(before, std::fs::read_to_string(dir.join("chibipop.log")).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6597,6 +6741,7 @@ mod tests {
         app.config.anki.deck = "Mining".to_string();
         app.config.anki.model = "Lapis".to_string();
         app.controller = Controller::new(controller_config(&app.config));
+        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
     }
 
     /// Run the pump until `wanted` appears or `budget` passes pass.
@@ -6730,10 +6875,7 @@ mod tests {
         let anki = FakeAnki::start(1);
         anki_at(&mut app, &anki.url);
 
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
         app.pointer_interactions(vec![popup::Interaction::Anki {
             local: PhysPoint { x: 10, y: 10 },
         }]);
@@ -6828,10 +6970,7 @@ mod tests {
         anki_at(&mut app, &anki.url);
         place_a_popup(&mut app);
 
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
 
         let seen = anki.seen();
@@ -6846,14 +6985,8 @@ mod tests {
 
         // Release does not add again (`Action::Nothing`).
         // The Controller rejects a repeat after the first add.
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: false,
-        });
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: false });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
         pump_until(&mut event_loop, &mut app, &log_file, "never logged", 4);
         assert_eq!(1, anki.seen().len(), "one card, however often it is asked for");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6896,10 +7029,7 @@ mod tests {
         // Both rungs use one path, not two.
         // A Portal press after the socket add creates nothing because the
         // Controller knows that the lookup was added.
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
         pump_until(&mut event_loop, &mut app, &log_file, "never logged", 4);
         assert_eq!(1, anki.seen().len(), "one card, whichever rung asks");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6918,12 +7048,12 @@ mod tests {
         anki_at(&mut app, &anki.url);
         app.config.anki.enabled = false;
         app.controller = Controller::new(controller_config(&app.config));
+        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
+        app.confirmed_shortcuts =
+            shortcuts::preferred(&app.config).into_iter().map(|(id, _)| id).collect();
         place_a_popup(&mut app);
 
-        app.handle_shortcut(shortcuts::Event::Fired {
-            id: shortcuts::ShortcutId::AnkiAdd,
-            activated: true,
-        });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
 
         assert!(anki.seen().is_empty(), "anki off, nothing on the wire: {:?}", anki.seen());

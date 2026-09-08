@@ -4,6 +4,8 @@
 //! On the wlr-native channel, the compositor bind is authoritative.
 //! The settings window does not claim the trigger.
 //! It shows bind lines that call `chibipop ctl` and provides a copy button.
+//! KDE, GNOME, and unknown desktops receive the same command for a press
+//! shortcut. Their shortcut editors ask for a command, not a text-config bind.
 //! Capture exclusion uses the same approach.
 //! No Wayland client can hide its surface from third-party capture.
 //! The window offers the compositor rule when one exists.
@@ -12,52 +14,229 @@
 use crate::control::Verb;
 use crate::paths;
 use chibipop::config::TriggerMode;
+use std::fmt;
 use std::path::Path;
 
 /// Identify the compositor family that the snippets target.
-/// Detection uses environment values and can choose the wrong family.
-/// A wrong choice still produces a valid snippet for *some* compositor.
-/// Some generated snippets include a comment that names the syntax.
+///
+/// The first three families have a native text configuration syntax.
+/// KDE and GNOME manage shortcuts in a desktop settings editor.
+/// `Other` means that no family-specific syntax is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compositor {
     Hyprland,
     Sway,
+    Niri,
     Kde,
+    Gnome,
     Other,
 }
 
 impl Compositor {
+    /// Every family that the settings syntax selector can show.
+    pub const ALL: [Compositor; 6] = [
+        Compositor::Hyprland,
+        Compositor::Sway,
+        Compositor::Niri,
+        Compositor::Kde,
+        Compositor::Gnome,
+        Compositor::Other,
+    ];
+
     pub fn detect() -> Compositor {
-        classify(
-            std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-            std::env::var_os("SWAYSOCK").is_some(),
-            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-        )
+        let hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+        let sway = std::env::var_os("SWAYSOCK").is_some();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        if !hyprland && !sway && std::env::var_os("NIRI_SOCKET").is_some() {
+            return Compositor::Niri;
+        }
+        classify(hyprland, sway, desktop.as_deref())
+    }
+
+    /// Name the file or editor that accepts the generated bind.
+    ///
+    /// The row shows this text above the snippet. A bind line without its
+    /// destination is not actionable. The GNOME text also states the repeat
+    /// caveat, because a command shortcut cannot ask GNOME to ignore key
+    /// repeat.
+    pub fn bind_help(self) -> &'static str {
+        match self {
+            Compositor::Hyprland => {
+                "Add this line to ~/.config/hypr/hyprland.conf or an included Hyprland file."
+            }
+            Compositor::Sway => "Add this line to ~/.config/sway/config.",
+            Compositor::Niri => "Add this line inside the existing binds block in ~/.config/niri/config.kdl.",
+            Compositor::Kde => {
+                "Set this shortcut in KDE System Settings with `systemsettings kcm_keys`."
+            }
+            // gnome-settings-daemon registers a custom shortcut with
+            // META_KEY_BINDING_NONE (plugins/media-keys/gsd-media-keys-manager.c),
+            // and Mutter drops repeats only for IGNORE_AUTOREPEAT
+            // (src/core/keybindings.c). A command shortcut cannot ask for that
+            // flag, so a held chord runs the verb at the repeat rate. Hyprland,
+            // Sway, and niri binds suppress repeat in the snippet instead.
+            Compositor::Gnome => {
+                "Set this shortcut in GNOME Settings with `gnome-control-center keyboard`. GNOME repeats a held custom shortcut, so tap the chord."
+            }
+            Compositor::Other => {
+                "Use the desktop's shortcut editor. No known native text bind syntax exists."
+            }
+        }
+    }
+
+    /// The copy button must not expose a bind that the compositor rejects.
+    ///
+    /// Niri has no release-bind syntax. Desktop shortcut editors accept a
+    /// press command but cannot represent the two events in a hold bind.
+    pub fn supports_bind(self, chord: &str, bind: Bind) -> bool {
+        match self {
+            Compositor::Hyprland | Compositor::Sway => true,
+            Compositor::Niri => matches!(bind, Bind::Press(_))
+                && chord.rsplit('+').map(str::trim).filter(|part| !part.is_empty()).skip(1).all(|name| {
+                    ["SUPER", "META", "MOD4", "LOGO", "WIN", "CONTROL", "CTRL",
+                     "ALT", "MOD1", "SHIFT", "ALTGR", "ISO_LEVEL3_SHIFT", "MOD5",
+                     "MOD", "ISO_LEVEL5_SHIFT", "MOD3"]
+                        .iter().any(|modifier| name.eq_ignore_ascii_case(modifier))
+                }),
+            Compositor::Kde | Compositor::Gnome | Compositor::Other => matches!(bind, Bind::Press(_)),
+        }
+    }
+}
+
+impl fmt::Display for Compositor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Compositor::Hyprland => "Hyprland",
+            Compositor::Sway => "Sway",
+            Compositor::Niri => "niri",
+            Compositor::Kde => "KDE",
+            Compositor::Gnome => "GNOME",
+            Compositor::Other => "Unknown",
+        };
+        f.write_str(name)
     }
 }
 
 /// Classify the compositor from supplied signals.
 /// The function stays pure so tests can supply those signals.
 pub fn classify(hyprland: bool, sway: bool, desktop: Option<&str>) -> Compositor {
-    if hyprland {
+    let family = desktop.map(desktop_family);
+    if hyprland || family == Some(Compositor::Hyprland) {
         Compositor::Hyprland
-    } else if sway {
+    } else if sway || family == Some(Compositor::Sway) {
         Compositor::Sway
-    } else if desktop.is_some_and(|d| d.to_ascii_lowercase().contains("kde")) {
+    } else {
+        family.unwrap_or(Compositor::Other)
+    }
+}
+
+fn desktop_family(desktop: &str) -> Compositor {
+    let mut tokens = desktop
+        .split([':', ';', ',', ' ', '-', '_'])
+        .map(|part| part.to_ascii_lowercase());
+    if tokens.clone().any(|part| part == "hyprland" || part == "hypr") {
+        Compositor::Hyprland
+    } else if tokens.clone().any(|part| part == "sway") {
+        Compositor::Sway
+    } else if tokens.clone().any(|part| part == "niri") {
+        Compositor::Niri
+    } else if tokens.clone().any(|part| part == "kde" || part == "plasma") {
         Compositor::Kde
+    } else if tokens.any(|part| part == "gnome") {
+        Compositor::Gnome
     } else {
         Compositor::Other
     }
 }
 
-/// Split a chord into the Hyprland and Sway forms.
+/// Split a chord into modifiers and its key.
 ///
 /// `trigger_key_linux` holds the XDG GlobalShortcuts preferred-binding
-/// syntax (`ALT+F`). The native snippet spells it for each compositor.
+/// syntax (`ALT+F`). The native snippet spells each modifier for its
+/// compositor.
 fn split_chord(chord: &str) -> (Vec<&str>, &str) {
-    let mut parts: Vec<&str> = chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let mut parts: Vec<&str> =
+        chord.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
     let key = parts.pop().unwrap_or("F");
     (parts, key)
+}
+
+fn modifier(compositor: Compositor, name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    let value = match compositor {
+        Compositor::Hyprland => match upper.as_str() {
+            "SUPER" | "META" | "MOD4" | "LOGO" | "WIN" => "SUPER",
+            "CONTROL" | "CTRL" => "CTRL",
+            "ALT" | "MOD1" => "ALT",
+            "SHIFT" => "SHIFT",
+            "CAPS" => "CAPS",
+            "NUM" | "NUMLOCK" | "MOD2" => "MOD2",
+            "MOD3" => "MOD3",
+            "ALTGR" | "MOD5" => "MOD5",
+            _ => return name.trim().to_string(),
+        },
+        Compositor::Sway => match upper.as_str() {
+            "SUPER" | "META" | "MOD4" | "LOGO" | "WIN" => "Mod4",
+            "CONTROL" | "CTRL" => "Control",
+            "ALT" | "MOD1" => "Mod1",
+            "SHIFT" => "Shift",
+            "CAPS" | "LOCK" => "Lock",
+            "NUM" | "NUMLOCK" | "MOD2" => "Mod2",
+            "MOD3" => "Mod3",
+            "ALTGR" | "MOD5" => "Mod5",
+            _ => return name.trim().to_string(),
+        },
+        Compositor::Niri => match upper.as_str() {
+            "SUPER" | "META" | "MOD4" | "LOGO" | "WIN" => "Super",
+            "CONTROL" | "CTRL" => "Ctrl",
+            "ALT" | "MOD1" => "Alt",
+            "SHIFT" => "Shift",
+            "ALTGR" | "ISO_LEVEL3_SHIFT" | "MOD5" => "Mod5",
+            "MOD" => "Mod",
+            _ => return name.trim().to_string(),
+        },
+        Compositor::Kde | Compositor::Gnome | Compositor::Other => {
+            return name.trim().to_string()
+        }
+    };
+    value.to_string()
+}
+
+fn native_chord(compositor: Compositor, chord: &str, separator: &str) -> String {
+    let (mods, key) = split_chord(chord);
+    let key = match compositor {
+        Compositor::Sway | Compositor::Niri
+            if key.chars().count() == 1 && key.chars().all(|ch| ch.is_ascii_alphabetic()) =>
+        {
+            key.to_ascii_lowercase()
+        }
+        _ => key.to_string(),
+    };
+    mods.iter()
+        .map(|name| modifier(compositor, name))
+        .chain(std::iter::once(key))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn kdl_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for ch in text.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            ch if ch.is_control() => {
+                quoted.push_str(&format!("\\u{{{:x}}}", ch as u32));
+            }
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Select the bind shape that a chord needs.
@@ -89,6 +268,7 @@ pub fn trigger_bind(mode: TriggerMode) -> Bind {
 }
 
 /// Build the native-bind snippet for one chord.
+///
 /// The snippet contains exactly the verbs that the control socket accepts.
 ///
 /// The caller resolves `exe` with `paths::exec_name`.
@@ -97,13 +277,16 @@ pub fn trigger_bind(mode: TriggerMode) -> Bind {
 /// Under `cargo run`, that daemon is `target/debug/chibipop` and is not on PATH.
 /// The external lookup keeps this function pure.
 pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind) -> String {
-    let (mods, key) = split_chord(chord);
-    let exe = paths::shell_quote(exe);
     match compositor {
         Compositor::Hyprland => {
-            let mask = mods.join(" ");
+            let (mods, key) = split_chord(chord);
+            let mask = mods
+                .iter()
+                .map(|name| modifier(Compositor::Hyprland, name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let exe = paths::shell_quote(exe);
             match bind {
-                // Keep these caveat lines in the snippet.
                 // Hyprland (≤ 0.55.4, verified in source and live) can fire no release bind
                 // when a chord modifier goes up before its key.
                 // Release checks require the bind's mod mask to remain active at release.
@@ -116,9 +299,6 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                 // The code ships the pair unchanged.
                 // The snippet states one habit and one recovery:
                 // release the key before the modifier, then repeat the chord if needed.
-                // The GlobalShortcuts `global` dispatcher is immune by design.
-                // This supports the portal rung as rung 1
-                // (ARCHITECTURE.md#input-ladders).
                 Bind::Hold => format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {down}\n\
                      bindr = {mask}, {key}, exec, {exe} ctl {up}\n\
@@ -127,38 +307,70 @@ pub fn bind_snippet(compositor: Compositor, chord: &str, exe: &Path, bind: Bind)
                     down = Verb::TriggerDown.as_str(),
                     up = Verb::TriggerUp.as_str(),
                 ),
-                // This bind has no release line.
-                // A lost release cannot wedge a press-only bind.
                 Bind::Press(verb) => format!(
                     "bind = {mask}, {key}, exec, {exe} ctl {verb}",
                     verb = verb.as_str(),
                 ),
             }
         }
-        _ => {
-            // Use Sway syntax.
-            // Every other wlr compositor documents equivalent syntax.
-            // The generated comment names this dialect.
-            let chord = mods
-                .iter()
-                .chain(std::iter::once(&key))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("+");
+        Compositor::Sway => {
+            let chord = native_chord(Compositor::Sway, chord, "+");
+            let exe = paths::shell_quote(exe);
             match bind {
                 Bind::Hold => format!(
-                    "# sway syntax - adapt to your compositor\n\
-                     bindsym --no-repeat {chord} exec {exe} ctl {down}\n\
+                    "bindsym --no-repeat {chord} exec {exe} ctl {down}\n\
                      bindsym --release {chord} exec {exe} ctl {up}",
                     down = Verb::TriggerDown.as_str(),
                     up = Verb::TriggerUp.as_str(),
                 ),
                 Bind::Press(verb) => format!(
-                    "# sway syntax - adapt to your compositor\n\
-                     bindsym --no-repeat {chord} exec {exe} ctl {verb}",
+                    "bindsym --no-repeat {chord} exec {exe} ctl {verb}",
                     verb = verb.as_str(),
                 ),
             }
+        }
+        Compositor::Niri => {
+            if !compositor.supports_bind(chord, bind) {
+                return unsupported_bind(compositor, bind);
+            }
+            let chord = kdl_quote(&native_chord(Compositor::Niri, chord, "+"));
+            let exe = kdl_quote(&exe.to_string_lossy());
+            let Bind::Press(verb) = bind else {
+                unreachable!("unsupported niri hold bind returned above");
+            };
+            format!(
+                "{chord} repeat=false {{ spawn {exe} \"ctl\" \"{verb}\"; }};",
+                verb = verb.as_str(),
+            )
+        }
+        Compositor::Kde | Compositor::Gnome | Compositor::Other => match bind {
+            Bind::Press(verb) => {
+                format!("{} ctl {}", paths::shell_quote(exe), verb.as_str())
+            }
+            Bind::Hold => unsupported_bind(compositor, bind),
+        },
+    }
+}
+
+fn unsupported_bind(compositor: Compositor, bind: Bind) -> String {
+    match compositor {
+        Compositor::Niri => match bind {
+            Bind::Hold => "Niri has no key-release bind. Select Press or Toggle mode for a native trigger bind.".to_string(),
+            Bind::Press(_) => {
+                "For Niri, use Ctrl, Alt, Shift, Super, Mod, Mod3, or Mod5. Niri does not support the requested modifiers.".to_string()
+            }
+        },
+        Compositor::Kde | Compositor::Gnome | Compositor::Other => {
+            assert!(matches!(bind, Bind::Hold));
+            format!(
+                "# {compositor} has no native text bind syntax for a hold action.\n\
+                 # {help}\n\
+                 # A desktop shortcut editor can run a press command, but it cannot send key release.",
+                help = compositor.bind_help(),
+            )
+        }
+        Compositor::Hyprland | Compositor::Sway => {
+            unreachable!("native compositor supports every bind shape")
         }
     }
 }
@@ -182,7 +394,7 @@ pub fn capture_rule(compositor: Compositor) -> (String, Option<String>) {
                 .to_string(),
             None,
         ),
-        Compositor::Sway | Compositor::Other => (
+        Compositor::Sway | Compositor::Niri | Compositor::Gnome | Compositor::Other => (
             "Hiding the popup from screen sharing is not available on this \
              compositor."
                 .to_string(),
@@ -203,26 +415,24 @@ mod tests {
     fn hyprland_bind_for_the_default_chord() {
         let snippet = bind_snippet(Compositor::Hyprland, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
         assert_eq!(
-            snippet,
-            "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down\n\
-             bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up\n\
-             # Release F before ALT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-             # If the popup sticks, tap the chord again (release F first), or bind `ctl toggle` instead."
+            snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
+            [
+                "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-down",
+                "bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl trigger-up",
+            ]
         );
     }
 
-    /// The wedge caveat names the user's chord, not the default chord.
-    /// A CTRL+SHIFT+K user must release K first.
     #[test]
     fn hyprland_bind_for_a_two_modifier_chord() {
         let snippet =
             bind_snippet(Compositor::Hyprland, "CTRL+SHIFT+K", Path::new("chibipop"), Bind::Hold);
         assert_eq!(
-            snippet,
-            "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down\n\
-             bindr = CTRL SHIFT, K, exec, chibipop ctl trigger-up\n\
-             # Release K before CTRL SHIFT - Hyprland drops modifier-first releases (hyprwm/Hyprland#5032).\n\
-             # If the popup sticks, tap the chord again (release K first), or bind `ctl toggle` instead."
+            snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
+            [
+                "bind = CTRL SHIFT, K, exec, chibipop ctl trigger-down",
+                "bindr = CTRL SHIFT, K, exec, chibipop ctl trigger-up",
+            ]
         );
     }
 
@@ -265,33 +475,31 @@ mod tests {
     }
 
     #[test]
-    fn sway_bind_keeps_the_chord_spelling() {
-        let snippet = bind_snippet(Compositor::Sway, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
+    fn sway_bind_normalizes_portal_modifiers() {
+        let snippet = bind_snippet(Compositor::Sway, "ALT+SUPER+CTRL+SHIFT+F", Path::new(DEV_EXE), Bind::Hold);
         assert!(snippet.contains(&format!(
-            "bindsym --no-repeat ALT+F exec {DEV_EXE} ctl trigger-down"
+            "bindsym --no-repeat Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl trigger-down"
         )));
-        assert!(
-            snippet.contains(&format!("bindsym --release ALT+F exec {DEV_EXE} ctl trigger-up"))
-        );
+        assert!(snippet.contains(&format!(
+            "bindsym --release Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl trigger-up"
+        )));
     }
 
     #[test]
-    fn sway_press_bind_is_the_labelled_dialect_with_no_release_line() {
+    fn sway_press_bind_has_no_release_line() {
         let snippet = bind_snippet(
             Compositor::Sway,
-            "ALT+A",
+            "SUPER+A",
             Path::new(DEV_EXE),
             Bind::Press(Verb::AnkiAdd),
         );
         assert_eq!(
             snippet,
-            format!(
-                "# sway syntax - adapt to your compositor\n\
-                 bindsym --no-repeat ALT+A exec {DEV_EXE} ctl anki-add"
-            )
+            format!("bindsym --no-repeat Mod4+a exec {DEV_EXE} ctl anki-add")
         );
         assert!(!snippet.contains("--release"), "a press bind has no release line: {snippet}");
     }
+
 
     /// The snippet must name a verb that the socket accepts.
     /// It must not use a string that the caller builds.
@@ -314,16 +522,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_compositor_gets_the_labelled_sway_dialect() {
-        assert!(bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE), Bind::Hold)
-            .starts_with("# sway syntax"));
-        assert!(bind_snippet(
-            Compositor::Other,
-            "ALT+A",
-            Path::new(DEV_EXE),
-            Bind::Press(Verb::AnkiAdd)
-        )
-        .starts_with("# sway syntax"));
+    fn unknown_compositor_gets_explicit_guidance_instead_of_sway_syntax() {
+        let hold = bind_snippet(Compositor::Other, "ALT+F", Path::new(DEV_EXE), Bind::Hold);
+        assert!(!hold.contains("bindsym"), "{hold}");
+        assert!(Compositor::Other.supports_bind("ALT+A", Bind::Press(Verb::AnkiAdd)));
+        assert_eq!(
+            bind_snippet(
+                Compositor::Other,
+                "ALT+A",
+                Path::new(DEV_EXE),
+                Bind::Press(Verb::AnkiAdd),
+            ),
+            format!("{DEV_EXE} ctl anki-add")
+        );
     }
 
     /// Paths can contain spaces, for example `~/My Builds/...` or a user-named
@@ -345,13 +556,13 @@ mod tests {
         let sway = bind_snippet(Compositor::Sway, "ALT+F", exe, Bind::Hold);
         assert!(
             sway.contains(
-                "bindsym --no-repeat ALT+F exec '/home/u/my builds/chibipop' ctl trigger-down"
+                "bindsym --no-repeat Mod1+f exec '/home/u/my builds/chibipop' ctl trigger-down"
             ),
             "{sway}"
         );
         assert!(
             sway.contains(
-                "bindsym --release ALT+F exec '/home/u/my builds/chibipop' ctl trigger-up"
+                "bindsym --release Mod1+f exec '/home/u/my builds/chibipop' ctl trigger-up"
             ),
             "{sway}"
         );
@@ -371,11 +582,78 @@ mod tests {
     }
 
     #[test]
+    fn niri_emits_a_real_press_bind_and_rejects_hold() {
+        let press = bind_snippet(
+            Compositor::Niri,
+            "SUPER+CTRL+A",
+            Path::new("/home/u/my builds/chibipop"),
+            Bind::Press(Verb::AnkiAdd),
+        );
+        assert_eq!(
+            press,
+            "\"Super+Ctrl+a\" repeat=false { spawn \"/home/u/my builds/chibipop\" \"ctl\" \"anki-add\"; };"
+        );
+        assert!(!Compositor::Niri.supports_bind("ALT+F", Bind::Hold));
+    }
+
+    #[test]
+    fn niri_quotes_a_digit_key_as_a_node_name() {
+        let snippet = bind_snippet(Compositor::Niri, "1", Path::new("chibipop"), Bind::Press(Verb::Search));
+        assert_eq!(snippet, "\"1\" repeat=false { spawn \"chibipop\" \"ctl\" \"search\"; };");
+    }
+
+    #[test]
+    fn detects_compositor_from_desktop_names() {
+        assert_eq!(classify(false, false, Some("GNOME")), Compositor::Gnome);
+        assert_eq!(classify(false, false, Some("KDE;Plasma")), Compositor::Kde);
+        assert_eq!(classify(false, false, Some("niri")), Compositor::Niri);
+        assert_eq!(classify(false, false, Some("Hyprland")), Compositor::Hyprland);
+        assert_eq!(classify(false, false, Some("Sway")), Compositor::Sway);
+    }
+
+    /// KDE and GNOME editors take one command for a press action. A hold
+    /// needs a key release that no editor can send. GNOME cannot suppress
+    /// key repeat for a command, so its help states the caveat.
+    #[test]
+    fn desktop_editors_get_commands_for_press_and_guidance_for_hold() {
+        let add = Bind::Press(Verb::AnkiAdd);
+        let press = bind_snippet(Compositor::Kde, "ALT+A", Path::new(DEV_EXE), add);
+        assert_eq!(format!("{DEV_EXE} ctl anki-add"), press);
+        assert_eq!(press, bind_snippet(Compositor::Gnome, "ALT+A", Path::new(DEV_EXE), add));
+        assert!(Compositor::Kde.supports_bind("ALT+A", add));
+
+        let gnome_help = Compositor::Gnome.bind_help();
+        assert!(gnome_help.contains("repeats a held custom shortcut"), "{gnome_help}");
+        assert!(!Compositor::Kde.bind_help().contains("repeats"));
+
+        assert!(!Compositor::Kde.supports_bind("ALT+A", Bind::Hold));
+        assert!(!Compositor::Gnome.supports_bind("ALT+A", Bind::Hold));
+        let hold = bind_snippet(Compositor::Other, "ALT+A", Path::new(DEV_EXE), Bind::Hold);
+        assert!(hold.contains("cannot send key release"), "{hold}");
+        assert!(!hold.contains("ctl trigger-down"), "{hold}");
+    }
+
+    #[test]
+    fn hyprland_normalizes_aliases_without_a_portal_dispatcher() {
+        let snippet = bind_snippet(
+            Compositor::Hyprland,
+            "meta+control+alt+shift+F",
+            Path::new(DEV_EXE),
+            Bind::Press(Verb::Lookup),
+        );
+        assert_eq!(
+            snippet,
+            format!(
+                "bind = SUPER CTRL ALT SHIFT, F, exec, {DEV_EXE} ctl lookup"
+            )
+        );
+    }
+
+    #[test]
     fn detection_prefers_the_specific_signals() {
         assert_eq!(classify(true, true, Some("KDE")), Compositor::Hyprland);
-        assert_eq!(classify(false, true, None), Compositor::Sway);
+        assert_eq!(classify(false, true, Some("niri")), Compositor::Sway);
         assert_eq!(classify(false, false, Some("KDE")), Compositor::Kde);
-        assert_eq!(classify(false, false, Some("GNOME")), Compositor::Other);
         assert_eq!(classify(false, false, None), Compositor::Other);
     }
 }

@@ -327,8 +327,9 @@ _Avoid_: dismiss layer, shield
 **Control socket**:
 The UNIX socket where verbs arrive from outside the daemon. Keybinds from the compositor
 send `chibipop ctl`, and the settings process sends `reload`. One verb exists for each
-global action. The portal registers only `trigger` and `anki-add`, so the system binds
-each other action natively. The socket is a transport mechanism, not a scripting API.
+global action. The portal can register every configured global action. Native bindings
+use the same verbs when the desktop cannot assign keys directly. The socket is a transport
+mechanism, not a scripting API.
 _Avoid_: IPC server, command socket
 
 **Settings process**:

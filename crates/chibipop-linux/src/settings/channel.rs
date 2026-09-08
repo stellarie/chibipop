@@ -41,6 +41,8 @@ pub enum HotkeyControl {
     /// The chord field is empty, so no binding exists.
     /// A snippet for an empty chord is invalid syntax. The row displays this state.
     NoChord,
+    /// The compositor cannot load this bind or preserve its trigger mode.
+    Unsupported { reason: String },
 }
 
 impl HotkeyChannel {
@@ -60,16 +62,14 @@ impl HotkeyChannel {
         if chord.trim().is_empty() {
             return HotkeyControl::NoChord;
         }
-        match self {
-            HotkeyChannel::Native => HotkeyControl::Snippet {
-                text: snippets::bind_snippet(compositor, chord, exe, bind),
-            },
-            // `current_binding` is the published key for this action.
-            // The channel resolves for each portal identifier (`hotkey_channel`).
-            // The row shows only its assigned key.
-            HotkeyChannel::Portal { current_binding } => {
-                HotkeyControl::Rebind { current: current_binding.clone() }
-            }
+        if let HotkeyChannel::Portal { current_binding } = self {
+            return HotkeyControl::Rebind { current: current_binding.clone() };
+        }
+        let text = snippets::bind_snippet(compositor, chord, exe, bind);
+        if compositor.supports_bind(chord, bind) {
+            HotkeyControl::Snippet { text }
+        } else {
+            HotkeyControl::Unsupported { reason: text }
         }
     }
 }
@@ -104,15 +104,26 @@ mod tests {
         let HotkeyControl::Snippet { text } = control else {
             panic!("native must render a snippet, got {control:?}");
         };
-        assert!(text.contains("bindsym --no-repeat ALT+A exec /opt/cp/chibipop ctl anki-add"), "{text}");
+        assert!(text.contains("bindsym --no-repeat Mod1+a exec /opt/cp/chibipop ctl anki-add"), "{text}");
         assert!(!text.contains("--release"), "one press, one verb: {text}");
+    }
+
+    #[test]
+    fn niri_does_not_offer_a_copy_button_for_unsupported_modifiers() {
+        let control = HotkeyChannel::Native.control(
+            Compositor::Niri,
+            "CAPS+F2",
+            Path::new("chibipop"),
+            Bind::Press(crate::control::Verb::AnkiAdd),
+        );
+        assert!(matches!(control, HotkeyControl::Unsupported { .. }), "{control:?}");
     }
 
     #[test]
     fn portal_channel_renders_the_rebind_flow() {
         let channel = HotkeyChannel::Portal { current_binding: Some("ALT+F".into()) };
         assert_eq!(
-            channel.control(Compositor::Hyprland, "ALT+F", Path::new("chibipop"), Bind::Hold),
+            channel.control(Compositor::Kde, "ALT+F", Path::new("chibipop"), Bind::Hold),
             HotkeyControl::Rebind { current: Some("ALT+F".into()) }
         );
     }
@@ -126,12 +137,12 @@ mod tests {
         let bound = HotkeyChannel::Portal { current_binding: Some("ALT+A".into()) };
         assert_eq!(
             HotkeyControl::Rebind { current: Some("ALT+A".into()) },
-            bound.control(Compositor::Hyprland, "ALT+A", Path::new("chibipop"), add),
+            bound.control(Compositor::Kde, "ALT+A", Path::new("chibipop"), add),
         );
         let unnamed = HotkeyChannel::Portal { current_binding: None };
         assert_eq!(
             HotkeyControl::Rebind { current: None },
-            unnamed.control(Compositor::Hyprland, "ALT+A", Path::new("chibipop"), add),
+            unnamed.control(Compositor::Kde, "ALT+A", Path::new("chibipop"), add),
         );
     }
 

@@ -38,16 +38,13 @@ pub enum Verb {
     /// portal `anki-add` shortcut performs. Both channels use this wire name.
     AnkiAdd,
     /// Grab a region and save it as the mining context for the lookup on screen
-    /// (`actions.screenshot`). This action uses only the native channel for the
-    /// same reason as `static-region`.
+    /// (`actions.screenshot`). Portal and native shortcuts use this same verb.
     Screenshot,
     /// Pick a region, run OCR, and place the text on the clipboard
-    /// (`actions.ocr_clipboard`). This action uses only the native channel for
-    /// the same reason as `static-region`.
+    /// (`actions.ocr_clipboard`). Portal and native shortcuts use this verb.
     OcrClipboard,
     /// Draw the box that [`chibipop::config::SentenceMode::Static`] reads for
-    /// the Anki sentence. This action uses only the native channel. The portal
-    /// identifier set excludes it, so this verb is the action's only global channel.
+    /// the Anki sentence. Portal and native shortcuts use this verb.
     StaticRegion,
     SelectedText,
 }
@@ -293,31 +290,24 @@ mod tests {
         assert_eq!(crate::shortcuts::ShortcutId::AnkiAdd.as_str(), Verb::AnkiAdd.as_str());
     }
 
-    /// D1 is a property, not a review habit. The `static-region` action has a
-    /// verb but no portal ID. The consent dialog therefore does not include this
-    /// action. A native bind is its only global channel, as the settings row
-    /// caption states.
+    /// Every global action has one portal identifier and one control verb.
+    /// Keeping these names equal makes both channel rungs share the same
+    /// daemon dispatch path.
     #[test]
-    fn the_static_region_verb_is_native_channel_only() {
+    fn every_global_action_shares_its_portal_id_and_wire_name() {
         use crate::shortcuts::ShortcutId;
-        assert_eq!([ShortcutId::Trigger, ShortcutId::AnkiAdd, ShortcutId::Search, ShortcutId::SentenceSearch, ShortcutId::SelectedText], ShortcutId::ALL);
-        assert!(
-            !crate::shortcuts::ShortcutId::ALL
-                .iter()
-                .any(|id| id.as_str() == Verb::StaticRegion.as_str()),
-            "no portal id may name the static-region action"
-        );
-    }
-
-    /// OCR-to-clipboard has the same property: it has a verb but no portal ID.
-    #[test]
-    fn the_ocr_clipboard_verb_is_native_channel_only() {
-        assert!(
-            !crate::shortcuts::ShortcutId::ALL
-                .iter()
-                .any(|id| id.as_str() == Verb::OcrClipboard.as_str()),
-            "no portal id may name the OCR-to-clipboard action"
-        );
+        for (id, verb) in [
+            (ShortcutId::AnkiAdd, Verb::AnkiAdd),
+            (ShortcutId::Search, Verb::Search),
+            (ShortcutId::SentenceSearch, Verb::SentenceSearch),
+            (ShortcutId::SelectedText, Verb::SelectedText),
+            (ShortcutId::Screenshot, Verb::Screenshot),
+            (ShortcutId::OcrClipboard, Verb::OcrClipboard),
+            (ShortcutId::StaticRegion, Verb::StaticRegion),
+        ] {
+            assert_eq!(id.as_str(), verb.as_str());
+            assert!(ShortcutId::ALL.contains(&id));
+        }
     }
 
     #[test]
