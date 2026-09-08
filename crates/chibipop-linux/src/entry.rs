@@ -8,8 +8,11 @@ use crate::paths::{self, Paths};
 use crate::{capture, clipboard, daemon, settings, wayland};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+const SEARCH_STDIN_LIMIT: u64 = 64 * 1024;
 
 #[derive(Parser)]
 #[command(name = "chibipop", version, about = "Japanese lookup engine (Wayland)")]
@@ -43,6 +46,22 @@ enum Command {
     /// (ARCHITECTURE.md#settings-and-config). A settings crash must not stop
     /// live hover.
     Settings,
+    Search {
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long, visible_alias = "stdin", conflicts_with = "text")]
+        read_stdin: bool,
+        #[arg(long, hide = true)]
+        data_dir: Option<PathBuf>,
+    },
+    SentenceSearch {
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long, visible_alias = "stdin", conflicts_with = "text")]
+        read_stdin: bool,
+        #[arg(long, hide = true)]
+        data_dir: Option<PathBuf>,
+    },
     /// Connect to the Wayland display, print the capability report, and exit.
     Probe,
     /// Grab screen regions with the capture backend and write PNG files.
@@ -88,6 +107,25 @@ enum Command {
     },
 }
 
+fn read_search_stdin(reader: impl Read) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take(SEARCH_STDIN_LIMIT + 1);
+    limited.read_to_end(&mut bytes)
+        .context("reading search text from stdin")?;
+    if bytes.len() as u64 > SEARCH_STDIN_LIMIT {
+        bail!("search stdin exceeds {SEARCH_STDIN_LIMIT} bytes");
+    }
+    String::from_utf8(bytes).context("search stdin is not UTF-8")
+}
+
+fn run_search(mut paths: Paths, mode: chibipop::search::SearchMode, text: Option<String>,
+    read_stdin: bool, data_dir: Option<PathBuf>) -> Result<()> {
+    if let Some(data_dir) = data_dir { paths.data_dir = data_dir; }
+    let initial = if read_stdin { read_search_stdin(std::io::stdin().lock())? }
+        else { text.unwrap_or_default() };
+    crate::search::run(paths, mode, initial)
+}
+
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let env = paths::Env::from_process();
@@ -96,6 +134,12 @@ pub fn run() -> ExitCode {
         Command::Run => daemon::run(paths),
         Command::Ctl { verb } => ctl(&paths, &verb),
         Command::Settings => settings::run(paths),
+        Command::Search { text, read_stdin, data_dir } => run_search(
+            paths, chibipop::search::SearchMode::Dictionary, text, read_stdin, data_dir,
+        ),
+        Command::SentenceSearch { text, read_stdin, data_dir } => run_search(
+            paths, chibipop::search::SearchMode::Sentence, text, read_stdin, data_dir,
+        ),
         Command::Probe => probe(),
         Command::CaptureDump { region, out, dwell, full } => {
             capture_dump(&paths, region.as_deref(), out, dwell, full)
@@ -203,4 +247,32 @@ fn capture_dump(
         full,
         state_dir: paths.state_dir.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn search_stdin_preserves_unicode_and_line_breaks() {
+        let text = "猫。\n犬を見た。";
+        assert_eq!(read_search_stdin(Cursor::new(text.as_bytes())).unwrap(), text);
+    }
+
+    #[test]
+    fn search_stdin_rejects_oversized_input() {
+        let bytes = vec![b'a'; SEARCH_STDIN_LIMIT as usize + 1];
+        let error = read_search_stdin(Cursor::new(bytes)).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn stdin_alias_parses_and_conflicts_with_explicit_text() {
+        let cli = Cli::try_parse_from(["chibipop", "sentence-search", "--stdin"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::SentenceSearch { read_stdin: true, .. })));
+        assert!(Cli::try_parse_from([
+            "chibipop", "sentence-search", "--text", "猫", "--read-stdin",
+        ]).is_err());
+    }
 }

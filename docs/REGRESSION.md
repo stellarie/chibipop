@@ -1,5 +1,64 @@
 # chibipop — regression checklist
 
+## Hover sub-popups and direct search (#71, #44)
+
+Run these checks in a disposable install with Japanese term dictionaries.
+
+- Open Dictionary search from the tray and from the Dictionaries settings tab.
+- Type a Japanese word. Confirm candidates appear without pressing Enter.
+- Select a candidate. Confirm its complete definition opens in popup layout and uses the configured theme.
+- Confirm the result uses the enabled dictionaries and their configured order.
+- Enter a conjugated word. Confirm the result includes its dictionary form.
+- Submit an empty query, then a missing word. Confirm each state clears old results.
+- Submit another valid word. Confirm the window still responds.
+- Enter Japanese through an IME. Confirm candidate selection does not submit unfinished composition.
+- Open Sentence search from Dictionaries settings and its shortcut. Paste a Japanese sentence.
+- Click a word in the sentence view. Confirm the complete word is highlighted and its candidates appear.
+- Select another sentence word. Confirm old definitions and hover requests cannot replace the new candidates.
+- Select a candidate and confirm the definition opens with normal popup styling.
+- Capture each search shortcut by pressing a key combination. Cancel one capture with Escape and clear another.
+- Configure the search shortcut, apply, close Search, and reopen it with that shortcut.
+- Change the shortcut. Confirm the old shortcut stops opening Search.
+- On Linux, restart after adding or changing a portal shortcut. Confirm the offered chord in the desktop's shortcut settings.
+- For native Linux shortcuts, update the compositor binding to `chibipop ctl search`.
+- Clear the shortcut. Confirm the tray entry still opens Search.
+- Try a conflicting shortcut. Confirm Apply explains the conflict without saving it.
+- Keep Search focused. Confirm typing does not trigger OCR, screenshots, or Anki actions.
+- Press Escape while search is pending. Confirm no late result reopens a window.
+- Select a candidate, focus its definition, and press Escape. Confirm the definition closes and no hover reply revives it.
+- Cancel region, window, and unsaved fixed-target screenshot selection with Escape. Confirm no screenshot or card is saved.
+- On Windows, cancel OCR while recognition is pending. Confirm the clipboard and Sentence search remain unchanged.
+- Check dark and light themes. Confirm input borders, bounded centered buttons, and bordered result cards remain clear.
+- Confirm candidate words are bold, summaries italic, and pasted sentence text larger than ordinary text.
+- Apply custom CSS colors, borders, font sizes, and styles. Confirm search controls and selected definitions use the changes.
+- Close and reopen Search. Confirm the daemon remains running and creates no duplicate search window.
+- Change dictionary selection, apply, and search again. Confirm the result uses the current configuration.
+- Open an OCR popup over known Japanese text. Hover Japanese text inside its definition.
+- Confirm a child popup appears and its parent remains visible.
+- Hover text inside the child. Confirm a further child opens without another OCR capture.
+- Move back to a parent. Confirm its scroll, selection, and click history remain intact.
+- Without entering the child, click or scroll its parent. Confirm the parent still accepts input.
+- Move across whitespace, hold over one word, and drag a selection. Confirm these actions do not repeatedly open children.
+- Press Back or Escape. Confirm navigation retires the appropriate descendants.
+- Dismiss the root popup. Confirm every child disappears and no invisible surface captures input.
+- Repeat near screen edges and with popup scrolling. Confirm children remain reachable and correctly hit-tested.
+- Hover a word that combines ruby base text and kana, such as ruby-backed 食 followed by べる. Confirm lookup uses 食べる.
+- Disable hover sub-popups. Confirm the root still works and hovering opens no child. Re-enable and repeat.
+- Enable the OCR-to-clipboard Sentence search option. Capture text and confirm both clipboard output and prefilled Sentence search.
+- Disable that option and repeat. Confirm capture copies text without opening Sentence search.
+- In Press mode, look up visible text between staggered popups. Confirm popup masking preserves that text.
+- Repeat on Windows and Linux. Record unavailable IME, portal, compositor, or display checks separately.
+
+The Windows real-pointer regression requires an available desktop and Japanese OCR:
+
+```bash
+cargo test -p chibipop-windows --test popup_hover_live -- --ignored --nocapture --test-threads=1
+cargo test -p chibipop-windows --lib native_definition_hover_and_disable_toggle -- --ignored --nocapture --test-threads=1
+cargo test -p chibipop-windows --lib native_escape_cancels_without_a_focused_selector_message -- --ignored --nocapture --test-threads=1
+```
+
+Run desktop tests sequentially. Other visible tests can cover the OCR source or take pointer focus.
+
 Run this after any large change. It is ordered cheapest-first: **if a tier fails, stop and fix
 before running the next one.**
 

@@ -18,11 +18,11 @@
 //! Nothing stores the scale for later use.
 
 mod demo;
-mod paint;
+pub(crate) mod paint;
 mod place;
 mod pointer;
 mod surface;
-mod text;
+pub(crate) mod text;
 // `media.rs` is the seventh file in this module.
 // `popup/mod.rs` does not declare it.
 // The library entry point owns it (`crate::lib.rs`, `#[path]`), so its tests can

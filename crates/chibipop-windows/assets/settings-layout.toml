@@ -60,6 +60,10 @@ id = "popup-side-panel"
 label = "Show related words"
 
 [[tabs.sections.entries]]
+id = "popup-sub-popups"
+label = "Open definitions when hovering over popup text"
+
+[[tabs.sections.entries]]
 id = "popup-capture-exclusion"
 label = "Hide the popup from screen capture"
 
@@ -132,9 +136,35 @@ label = "Save a screenshot"
 id = "ocr-clipboard-key"
 label = "Copy screen text"
 
+[[tabs.sections.entries]]
+id = "search-key"
+label = "Open dictionary search"
+help = "Click the button, then press a key or key combination. Escape cancels."
+
+[[tabs.sections.entries]]
+id = "sentence-search-key"
+label = "Open sentence search"
+help = "Click the button, then press a key or key combination. Escape cancels."
+
+[[tabs.sections.entries]]
+id = "ocr-sentence-search"
+label = "Open copied screen text in sentence search"
+
 [[tabs]]
 id = "dictionaries"
 label = "Dictionaries"
+
+[[tabs.sections]]
+id = "dictionary-search"
+label = "Search"
+
+[[tabs.sections.entries]]
+id = "open-dictionary-search"
+label = "Open dictionary search"
+
+[[tabs.sections.entries]]
+id = "open-sentence-search"
+label = "Open sentence search"
 
 [[tabs.sections]]
 id = "dictionary-terms"

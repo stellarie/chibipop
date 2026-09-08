@@ -55,6 +55,8 @@ pub struct LinuxFields {
     /// absence stays typed, and the map from an empty text box stays at
     /// the UI edge.
     pub ocr_clipboard_key_linux: Option<String>,
+    pub search_key_linux: Option<String>,
+    pub sentence_key_linux: Option<String>,
     pub layer: PopupLayer,
     pub show_lookup_log: bool,
 }
@@ -63,6 +65,8 @@ impl LinuxFields {
     pub fn from_config(cfg: &Config) -> LinuxFields {
         LinuxFields {
             trigger_key_linux: cfg.trigger.trigger_key_linux.clone(),
+            search_key_linux: cfg.actions.search.hotkey_linux.clone(),
+            sentence_key_linux: cfg.actions.search.sentence_hotkey_linux.clone(),
             add_key_linux: cfg.anki.add_key_linux.clone(),
             static_region_key_linux: cfg.anki.static_region_key_linux.clone(),
             screenshot_key_linux: cfg.actions.screenshot.hotkey_linux.clone(),
@@ -78,6 +82,8 @@ impl LinuxFields {
     }
 
     pub fn apply_over(&self, cfg: &mut Config) {
+        cfg.actions.search.hotkey_linux = self.search_key_linux.clone();
+        cfg.actions.search.sentence_hotkey_linux = self.sentence_key_linux.clone();
         cfg.trigger.trigger_key_linux = self.trigger_key_linux.clone();
         cfg.anki.add_key_linux = self.add_key_linux.clone();
         cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
@@ -90,9 +96,10 @@ impl LinuxFields {
         // reads the config that the same call wrote. A cleared box must
         // not remove the Windows key with it.
         let windows_chord = cfg.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey.clone());
+        let open_sentence_search = cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search);
         cfg.actions.ocr_clipboard = match (windows_chord, self.ocr_clipboard_key_linux.clone()) {
-            (None, None) => None,
-            (hotkey, hotkey_linux) => Some(OcrClipboardConfig { hotkey, hotkey_linux }),
+            (None, None) if !open_sentence_search => None,
+            (hotkey, hotkey_linux) => Some(OcrClipboardConfig { hotkey, hotkey_linux, open_sentence_search }),
         };
         // A cleared box means the default folder, never the data
         // directory. The code joins a relative `save_dir` onto that
@@ -320,7 +327,7 @@ mod tests {
         let dir = scratch("ocrclip_twin");
         let config_path = dir.join("chibipop.toml");
         let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".to_string()),
             hotkey_linux: Some("ALT+C".to_string()),
         });
@@ -336,7 +343,7 @@ mod tests {
         saving(&form(&cfg), &linux, &config_path, &dir.join("absent.sock")).unwrap();
 
         assert_eq!(
-            Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
+            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("f9".to_string()), hotkey_linux: None }),
             chibipop::config::load_or_create(&config_path).unwrap().actions.ocr_clipboard,
             "the Windows chord survives a Linux Apply that cleared the Linux one"
         );
@@ -351,7 +358,7 @@ mod tests {
         let config_path = dir.join("chibipop.toml");
         let mut cfg = chibipop::config::load_or_create(&config_path).unwrap();
         cfg.actions.ocr_clipboard =
-            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("ALT+C".to_string()) });
+            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("ALT+C".to_string()) });
         cfg.save(&config_path).unwrap();
 
         let cfg = chibipop::config::load_or_create(&config_path).unwrap();
@@ -381,7 +388,7 @@ mod tests {
 
         let saved = chibipop::config::load_or_create(&config_path).unwrap();
         assert_eq!(
-            Some(OcrClipboardConfig { hotkey: None, hotkey_linux: Some("ALT+C".to_string()) }),
+            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: None, hotkey_linux: Some("ALT+C".to_string()) }),
             saved.actions.ocr_clipboard
         );
         assert_eq!(
@@ -429,6 +436,8 @@ mod tests {
             screenshot_key_linux: Some("SUPER+S".into()),
             screenshot_save_dir: "shots".into(),
             ocr_clipboard_key_linux: Some("SUPER+C".into()),
+            search_key_linux: Some("SUPER+F".into()),
+            sentence_key_linux: Some("SUPER+G".into()),
             layer: PopupLayer::Top,
             show_lookup_log: true,
         };
@@ -596,5 +605,42 @@ mod tests {
             "the setting still reaches the file"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod search_routing_tests {
+    use super::*;
+
+    #[test]
+    fn clearing_ocr_hotkeys_keeps_enabled_sentence_routing() {
+        let mut config = Config::default();
+        config.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            open_sentence_search: true, hotkey: None, hotkey_linux: Some("SUPER+C".into()),
+        });
+        let mut fields = LinuxFields::from_config(&config);
+        fields.ocr_clipboard_key_linux = None;
+        fields.sentence_key_linux = Some("SUPER+F6".into());
+        fields.apply_over(&mut config);
+        assert_eq!(config.actions.ocr_clipboard, Some(OcrClipboardConfig {
+            open_sentence_search: true, hotkey: None, hotkey_linux: None,
+        }));
+        assert_eq!(config.actions.search.sentence_hotkey_linux.as_deref(), Some("SUPER+F6"));
+        config.actions.ocr_clipboard.as_mut().unwrap().open_sentence_search = false;
+        fields.apply_over(&mut config);
+        assert!(config.actions.ocr_clipboard.is_none());
+    }
+
+    #[test]
+    fn sentence_and_dictionary_shortcuts_share_complete_conflict_validation() {
+        let mut config = Config::default();
+        config.actions.search.hotkey_linux = Some("SUPER+F6".into());
+        let mut fields = LinuxFields::from_config(&config);
+        fields.sentence_key_linux = Some("LOGO+F6".into());
+        fields.apply_over(&mut config);
+        assert!(config.validate_hotkeys(chibipop::config::Platform::Linux).is_err());
+        fields.sentence_key_linux = Some("SUPER+F7".into());
+        fields.apply_over(&mut config);
+        config.validate_hotkeys(chibipop::config::Platform::Linux).unwrap();
     }
 }

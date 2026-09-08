@@ -107,6 +107,13 @@ pub struct Popup {
     capture_exclusion: Cell<CaptureExclusion>,
 }
 
+impl Drop for Popup {
+    fn drop(&mut self) {
+        // SAFETY: This thread created and exclusively owns this window.
+        unsafe { let _ = DestroyWindow(self.hwnd); }
+    }
+}
+
 impl Popup {
     /// Create the hidden popup window.
     pub fn create(exclude: bool) -> Result<Popup> {

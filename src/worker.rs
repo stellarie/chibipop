@@ -252,7 +252,7 @@ enum Pre {
 
 /// The newest lookup that a drained batch runs after its state changes.
 enum Lookup {
-    Hover(Hover),
+    Hover(Box<Hover>),
     DrillDown(String),
 }
 
@@ -331,7 +331,7 @@ fn drain(
         TriggerKind::Freeze(at) => pre.push(Pre::Freeze(t.id, at)),
         TriggerKind::Thaw => pre.push(Pre::Thaw(t.id)),
         TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
-        TriggerKind::Hover(h) => lookup = Some((t.id, Lookup::Hover(h))),
+        TriggerKind::Hover(h) => lookup = Some((t.id, Lookup::Hover(Box::new(h)))),
         TriggerKind::DrillDown(text) => lookup = Some((t.id, Lookup::DrillDown(text))),
         // The wake already arrived.
         TriggerKind::Serve => {}
@@ -509,7 +509,7 @@ fn worker_main(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match lookup {
                 Lookup::Hover(h) => {
-                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, h)
+                    resolve_trigger(id, &mut source, dict.as_ref(), &engine, &state, *h)
                 }
                 Lookup::DrillDown(text) => resolve_drilldown(
                     id,
@@ -834,6 +834,16 @@ fn resolve_drilldown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popup_hover_uses_dictionary_prefixes_without_screen_text() {
+        let state = state_with(vec![di(1, "FakeDict")]);
+        let outcome = resolve_drilldown(RequestId(1), &eating_dict(), &engine(), &state.dicts, &state.present_cfg, "食べる");
+        let LookupOutcome::DrillDown(presentation) = outcome else { panic!("dictionary prefix must resolve") };
+        assert_eq!(presentation.top.as_ref().and_then(|card| card.written.as_deref()), Some("食"));
+        assert!(presentation.sentence.is_none());
+        assert!(presentation.surface.is_none());
+    }
     use crate::config::Config;
     use crate::lookup::deconj::Deconjugator;
     use crate::lookup::model::FakeDictionary;

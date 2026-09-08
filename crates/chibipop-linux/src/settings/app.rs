@@ -13,6 +13,7 @@
 
 use super::apply::{self, LinuxFields};
 use super::autostart;
+use chibipop::search::SearchMode;
 use super::channel::{HotkeyChannel, HotkeyControl};
 use super::filechooser;
 use super::rebuild;
@@ -111,7 +112,15 @@ pub fn run(init: Init) -> anyhow::Result<()> {
 /// The listener also carries tab keys because the strip buttons have no
 /// keyboard focus. Ctrl+Tab selects the next page, and Ctrl+Shift+Tab selects
 /// the previous page.
-fn subscription(_app: &App) -> iced::Subscription<Message> {
+fn subscription(app: &App) -> iced::Subscription<Message> {
+    if app.capture_search_key.is_some() {
+        return iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) =>
+                Some(Message::CapturedSearchKey(key, modifiers)),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::CancelSearchCapture),
+            _ => None,
+        });
+    }
     iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
         | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DictReleased),
@@ -227,6 +236,7 @@ impl Tab {
 struct App {
     /// The page that the strip shows. Ctrl+Tab cycles it.
     tab: Tab,
+    capture_search_key: Option<SearchMode>,
     form: SettingsForm,
     linux: LinuxFields,
     config_path: PathBuf,
@@ -282,6 +292,7 @@ impl App {
         let fonts = font_items(&init.form.cfg.popup.font);
         App {
             tab: Tab::General,
+            capture_search_key: None,
             capture_w: init.form.cfg.ocr.capture_width.to_string(),
             capture_h: init.form.cfg.ocr.capture_height.to_string(),
             form: init.form,
@@ -776,6 +787,14 @@ enum Message {
     /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
     OcrClipboardKey(String),
+    CaptureSearchKey(SearchMode),
+    CapturedSearchKey(iced::keyboard::Key, iced::keyboard::Modifiers),
+    CancelSearchCapture,
+    ClearSearchKey(SearchMode),
+    LaunchSearch(SearchMode),
+    SearchClosed(Result<(), String>),
+    OpenSentenceSearch(bool),
+    SubPopups(bool),
     /// The sentence-capture picker label. [`SENTENCE_MODES`] maps it back, so the
     /// call site does not compare strings or indexes.
     SentenceModePicked(String),
@@ -814,9 +833,9 @@ enum Message {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::TabPicked(tab) => app.tab = tab,
-        Message::TabNext => app.tab = app.tab.next(),
-        Message::TabPrev => app.tab = app.tab.prev(),
+        Message::TabPicked(tab) => { app.capture_search_key = None; app.tab = tab; }
+        Message::TabNext => { app.capture_search_key = None; app.tab = app.tab.next(); }
+        Message::TabPrev => { app.capture_search_key = None; app.tab = app.tab.prev(); }
         Message::Mode(mode) => app.form.cfg.trigger.mode = mode,
         Message::TriggerChord(chord) => app.linux.trigger_key_linux = chord,
         Message::PerChar(on) => app.form.cfg.trigger.per_character_lookup = on,
@@ -915,6 +934,29 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OcrClipboardKey(v) => {
             app.linux.ocr_clipboard_key_linux = (!v.trim().is_empty()).then_some(v);
         }
+        Message::CaptureSearchKey(mode) => app.capture_search_key = Some(mode),
+        Message::CancelSearchCapture => app.capture_search_key = None,
+        Message::ClearSearchKey(mode) => {
+            set_search_key(app, mode, None);
+            app.capture_search_key = None;
+        }
+        Message::CapturedSearchKey(key, modifiers) => {
+            if let Some(mode) = app.capture_search_key {
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                    app.capture_search_key = None;
+                } else if let Some(chord) = captured_search_chord(&key, modifiers) {
+                    set_search_key(app, mode, Some(chord));
+                    app.capture_search_key = None;
+                }
+            }
+        }
+        Message::LaunchSearch(mode) => return launch_search(app, mode),
+        Message::SearchClosed(Err(error)) => app.status = error,
+        Message::SearchClosed(Ok(())) => {}
+        Message::OpenSentenceSearch(on) => {
+            app.form.cfg.actions.ocr_clipboard.get_or_insert_with(Default::default).open_sentence_search = on;
+        }
+        Message::SubPopups(on) => app.form.cfg.popup.sub_popups = on,
         Message::SentenceModePicked(label) => {
             app.form.cfg.anki.sentence_mode = value_of(&SENTENCE_MODES, &label, SentenceMode::Sentence);
         }
@@ -1286,6 +1328,77 @@ fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elem
 }
 
 /// Keep every chord beside its bind instead of separate blocks on feature pages.
+fn set_search_key(app: &mut App, mode: SearchMode, chord: Option<String>) {
+    match mode {
+        SearchMode::Dictionary => app.linux.search_key_linux = chord,
+        SearchMode::Sentence => app.linux.sentence_key_linux = chord,
+    }
+}
+
+fn captured_search_chord(key: &iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Option<String> {
+    use iced::keyboard::{key::Named, Key};
+    let key = match key {
+        Key::Character(value) if value.len() == 1 && value.chars().all(|ch| ch.is_ascii_alphanumeric()) =>
+            value.to_ascii_uppercase(),
+        Key::Named(Named::Space) => "space".into(),
+        Key::Named(Named::Enter) => "Return".into(),
+        Key::Named(Named::Backspace) => "BackSpace".into(),
+        Key::Named(Named::Delete) => "Delete".into(),
+        Key::Named(Named::Tab) => "Tab".into(),
+        Key::Named(Named::ArrowUp) => "Up".into(),
+        Key::Named(Named::ArrowDown) => "Down".into(),
+        Key::Named(Named::ArrowLeft) => "Left".into(),
+        Key::Named(Named::ArrowRight) => "Right".into(),
+        Key::Named(named) => {
+            let name = format!("{named:?}");
+            if name.strip_prefix('F').and_then(|number| number.parse::<u8>().ok()).is_some_and(|number| (1..=24).contains(&number)) {
+                name
+            } else { return None; }
+        }
+        _ => return None,
+    };
+    let mut parts = Vec::new();
+    if modifiers.control() { parts.push("CTRL"); }
+    if modifiers.alt() { parts.push("ALT"); }
+    if modifiers.shift() { parts.push("SHIFT"); }
+    if modifiers.logo() { parts.push("SUPER"); }
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
+fn search_shortcut(app: &App, mode: SearchMode) -> Element<'_, Message> {
+    let (title, chord, verb) = match mode {
+        SearchMode::Dictionary => ("Dictionary search", &app.linux.search_key_linux, crate::control::Verb::Search),
+        SearchMode::Sentence => ("Sentence search", &app.linux.sentence_key_linux, crate::control::Verb::SentenceSearch),
+    };
+    let label = if app.capture_search_key == Some(mode) { "Press a shortcut… (Esc cancels)" }
+        else { chord.as_deref().unwrap_or("Disabled: click to record") };
+    card(title, column![
+        row![button(text(label)).on_press(Message::CaptureSearchKey(mode)),
+            button("Clear").on_press(Message::ClearSearchKey(mode))].spacing(10),
+        hint("Click to record a key combination. Apply checks conflicts with all configured shortcuts."),
+        hint("Restart chibipop after adding or changing a portal shortcut to activate the new key."),
+        snippet_box(snippets::bind_snippet(app.compositor, chord.as_deref().unwrap_or(match mode { SearchMode::Dictionary => "SUPER+F", SearchMode::Sentence => "SUPER+G" }),
+            &app.exe, snippets::Bind::Press(verb))),
+    ].spacing(10))
+}
+
+fn launch_search(app: &mut App, mode: SearchMode) -> iced::Task<Message> {
+    let mut paths = crate::paths::resolve(&crate::paths::Env::from_process(), Some(app.config_path.clone()));
+    if let Some(directory) = app.db_path.parent() { paths.data_dir = directory.to_path_buf(); }
+    let command = crate::search::search_command_mode(&paths, mode, None);
+    let (sender, receiver) = iced::futures::channel::oneshot::channel();
+    match command.and_then(|mut command| std::thread::Builder::new().name("settings-search".into()).spawn(move || {
+        let result = command.status().map_err(|error| format!("Cannot open search: {error}"))
+            .and_then(|status| if status.success() { Ok(()) } else { Err(format!("Search exited with {status}")) });
+        let _ = sender.send(result);
+    })) {
+        Ok(_) => iced::Task::perform(receiver, |result| Message::SearchClosed(result.unwrap_or_else(|_|
+            Err("Search launch stopped unexpectedly.".into())))),
+        Err(error) => { app.status = format!("Cannot start search: {error}"); iced::Task::none() }
+    }
+}
+
 fn shortcuts_page(app: &App) -> Element<'_, Message> {
     let selected = if app.form.cfg.trigger.mode == TriggerMode::Live {
         TriggerMode::Live
@@ -1311,6 +1424,8 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
              the channel that owns it: a compositor line to paste, or the portal key \
              that your desktop's shortcut editor changes."
         ),
+        search_shortcut(app, SearchMode::Dictionary),
+        search_shortcut(app, SearchMode::Sentence),
         card("Trigger", column![
             mode,
             checkbox(app.form.cfg.trigger.per_character_lookup)
@@ -1453,6 +1568,9 @@ fn popup_page(app: &App) -> Element<'_, Message> {
 
     column![
         card("Appearance", column![
+            checkbox(app.form.cfg.popup.sub_popups)
+                .label("Open definitions when hovering over popup text")
+                .on_toggle(Message::SubPopups),
             labeled(
                 "Theme",
                 pick_list(themes, Some(app.form.cfg.popup.theme.clone()), Message::ThemePicked),
@@ -1781,6 +1899,11 @@ fn dictionaries_page(app: &App) -> Element<'_, Message> {
     .on_release(Message::DictDropped);
 
     column![
+        card("Search", column![
+            row![button("Open dictionary search").on_press(Message::LaunchSearch(SearchMode::Dictionary)),
+                button("Open sentence search").on_press(Message::LaunchSearch(SearchMode::Sentence))].spacing(10),
+            hint("Search uses saved settings and the built dictionaries. Apply pending changes before searching."),
+        ].spacing(10)),
         lists,
         card("Library", column![
             library,
@@ -1827,6 +1950,9 @@ fn ocr_page(app: &App) -> Element<'_, Message> {
     let passes: Vec<u8> = (PASSES_RANGE.0..=PASSES_RANGE.1).collect();
     column![
         card("Recognition", column![
+            checkbox(app.form.cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search))
+                .label("Open copied screen text in sentence search")
+                .on_toggle(Message::OpenSentenceSearch),
             labeled(
                 "OCR passes per hover",
                 pick_list(passes, Some(app.form.cfg.ocr.max_ocr_passes), Message::Passes),
@@ -2435,6 +2561,7 @@ mod tests {
         let cfg = chibipop::config::Config::default();
         App {
             tab: Tab::General,
+            capture_search_key: None,
             form: chibipop::settings::from_config(&cfg, &[]),
             linux: LinuxFields::from_config(&cfg),
             config_path: dir.join("chibipop.toml"),
@@ -4237,5 +4364,20 @@ mod tests {
         assert!(!app.checking_update, "a finished check reopens the button");
         assert_eq!("v9.9.9 is available.", app.status);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod search_key_tests {
+    use super::*;
+    use iced::keyboard::{key::Named, Key, Modifiers};
+
+    #[test]
+    fn capture_ignores_modifiers_and_converts_native_keys_to_portal_chords() {
+        assert_eq!(captured_search_chord(&Key::Named(Named::Shift), Modifiers::SHIFT), None);
+        assert_eq!(captured_search_chord(&Key::Named(Named::F6), Modifiers::CTRL | Modifiers::SHIFT),
+            Some("CTRL+SHIFT+F6".into()));
+        assert_eq!(captured_search_chord(&Key::Character("f".into()), Modifiers::LOGO), Some("SUPER+F".into()));
+        assert_eq!(captured_search_chord(&Key::Character("猫".into()), Modifiers::CTRL), None);
     }
 }

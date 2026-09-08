@@ -90,7 +90,8 @@ pub enum TriggerMode {
     /// Runs one lookup at the cursor for each key press, like Yomitan. The
     /// popup stays until the next press finds no text or the user clicks
     /// outside it. The lookup reads a live grab with the popup masked, so a
-    /// press over the popup is a miss and hides it. Hover never follows.
+    /// press over the popup is a miss and hides it. Screen OCR hover never follows.
+    /// Hovering existing popup text can still open child popups.
     Press,
     /// Accepts a legacy name and maps it to `HoldKey`.
     #[serde(rename = "hold-shift")]
@@ -164,6 +165,7 @@ pub fn trigger_key_name(vk: u16) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PopupConfig {
+    pub sub_popups: bool,
     /// The theme name. Use `"dark"` or `"light"`.
     pub theme: String,
     /// Hides the popup from screen capture.
@@ -237,6 +239,7 @@ pub struct PopupConfig {
 impl Default for PopupConfig {
     fn default() -> Self {
         Self {
+            sub_popups: true,
             theme: "dark".to_string(),
             exclude_from_capture: false,
             max_width_percent: 25,
@@ -878,7 +881,18 @@ pub struct ActionsConfig {
     pub enabled: bool,
     pub screenshot: ScreenshotConfig,
     pub ocr_clipboard: Option<OcrClipboardConfig>,
+    pub search: SearchConfig,
 }
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    pub hotkey: Option<String>,
+    pub hotkey_linux: Option<String>,
+    pub sentence_hotkey: Option<String>,
+    pub sentence_hotkey_linux: Option<String>,
+}
+
 
 /// Fixed modes keep a target instead of asking for one on every add.
 /// Window identity stays separate from geometry so a moved window remains the target.
@@ -943,6 +957,8 @@ pub struct ScreenshotConfig {
 /// The `[actions.ocr_clipboard]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OcrClipboardConfig {
+    #[serde(default)]
+    pub open_sentence_search: bool,
     /// An empty value or no value disables the action.
     #[serde(default)]
     pub hotkey: Option<String>,
@@ -959,6 +975,7 @@ impl Default for ActionsConfig {
             enabled: true,
             screenshot: ScreenshotConfig::default(),
             ocr_clipboard: None,
+            search: SearchConfig::default(),
         }
     }
 }
@@ -1015,7 +1032,7 @@ impl Default for Config {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard }
+pub enum HotkeyAction { Back, Trigger, AnkiAdd, StaticRegion, Screenshot, OcrClipboard, Search, SentenceSearch }
 
 impl HotkeyAction {
     pub fn name(self) -> &'static str {
@@ -1026,13 +1043,16 @@ impl HotkeyAction {
             Self::StaticRegion => "Static region",
             Self::Screenshot => "Screenshot",
             Self::OcrClipboard => "OCR clipboard",
+            Self::Search => "Dictionary search",
+            Self::SentenceSearch => "Sentence search",
         }
     }
 }
 
 fn windows_hotkeys_overlap(a: HotkeyAction, first: &str, b: HotkeyAction, second: &str) -> bool {
     let parse = |action, key| match action {
-        HotkeyAction::Screenshot => parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
+        HotkeyAction::Screenshot | HotkeyAction::Search | HotkeyAction::SentenceSearch =>
+            parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
         HotkeyAction::Back | HotkeyAction::Trigger | HotkeyAction::AnkiAdd =>
             parse_trigger_key(key).map(|vk| (vk, None)),
         _ => parse_trigger_key(key).map(|vk| (vk, Some(0))),
@@ -1059,6 +1079,16 @@ fn linux_hotkey(key: &str) -> String {
 impl Config {
     /// Reject bindings that can fire two actions on the same keypress.
     pub fn validate_hotkeys(&self, platform: Platform) -> Result<()> {
+        if platform == Platform::Windows && self.actions.enabled
+            && self.actions.search.sentence_hotkey.as_deref().is_some_and(|key|
+                !key.trim().is_empty() && parse_hotkey(key).is_none()) {
+            anyhow::bail!("Sentence search shortcut is invalid. Press a key or key combination.");
+        }
+        if platform == Platform::Windows && self.actions.enabled
+            && self.actions.search.hotkey.as_deref().is_some_and(|key|
+                !key.trim().is_empty() && parse_hotkey(key).is_none()) {
+            anyhow::bail!("Search shortcut is invalid. Use a key such as F5 or Ctrl+Shift+F.");
+        }
         if platform == Platform::Windows && self.actions.enabled
             && !self.actions.screenshot.hotkey.trim().is_empty()
             && parse_hotkey(&self.actions.screenshot.hotkey).is_none() {
@@ -1087,6 +1117,10 @@ impl Config {
             } else { self.actions.screenshot.hotkey_linux.as_deref().unwrap_or("") })),
             (OcrClipboard, self.actions.ocr_clipboard.as_ref().filter(|_| self.actions.enabled)
                 .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
+            (Search, self.actions.enabled.then_some(&self.actions.search)
+                .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
+            (SentenceSearch, self.actions.enabled.then_some(&self.actions.search)
+                .and_then(|c| if windows { c.sentence_hotkey.as_deref() } else { c.sentence_hotkey_linux.as_deref() })),
         ];
         let mut accepted = Vec::new();
         let mut conflicts = Vec::new();
@@ -1314,7 +1348,7 @@ mod tests {
     fn clipboard_cannot_share_the_static_region_key() {
         let mut cfg = Config::default();
         cfg.anki.static_region_key = "f3".into();
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { hotkey: Some("F3".into()), hotkey_linux: None });
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("F3".into()), hotkey_linux: None });
         assert_eq!(vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)], cfg.hotkey_conflicts(Platform::Windows));
     }
 
@@ -2471,7 +2505,7 @@ mod tests {
         c.anki.static_region_key = "0x52".to_string();
         c.anki.static_region_key_linux = "ALT+R".to_string();
         c.actions.screenshot.hotkey_linux = Some("ALT+S".to_string());
-        c.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        c.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".to_string()),
             hotkey_linux: Some("ALT+C".to_string()),
         });
@@ -2870,14 +2904,14 @@ mod tests {
     #[test]
     fn ocr_clipboard_hotkey_round_trips() {
         let mut cfg = Config::default();
-        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("ctrl+shift+o".into()),
             hotkey_linux: Some("CTRL+SHIFT+O".into()),
         });
         let text = toml::to_string(&cfg).unwrap();
         let loaded: Config = toml::from_str(&text).unwrap();
         assert_eq!(
-            Some(OcrClipboardConfig {
+            Some(OcrClipboardConfig { open_sentence_search: false,
                 hotkey: Some("ctrl+shift+o".to_string()),
                 hotkey_linux: Some("CTRL+SHIFT+O".to_string()),
             }),
@@ -2897,7 +2931,7 @@ mod tests {
         );
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(
-            Some(OcrClipboardConfig { hotkey: Some("f9".to_string()), hotkey_linux: None }),
+            Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("f9".to_string()), hotkey_linux: None }),
             cfg.actions.ocr_clipboard
         );
     }
@@ -3133,5 +3167,30 @@ mod tests {
                 "{text}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod search_config_tests {
+    use super::*;
+
+    #[test]
+    fn search_shortcuts_round_trip_and_validate() {
+        let mut config = Config::default();
+        assert_eq!(config.actions.search, SearchConfig::default());
+        config.actions.search.hotkey = Some("Ctrl+F5".into());
+        config.actions.search.hotkey_linux = Some("SUPER+F5".into());
+        let saved = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap().actions.search, config.actions.search);
+        config.validate_hotkeys(Platform::Windows).unwrap();
+        config.actions.search.hotkey = Some(config.actions.screenshot.hotkey.clone());
+        assert!(config.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Dictionary search conflicts"));
+        config.actions.search.hotkey = Some("not a key".into());
+        assert!(config.validate_hotkeys(Platform::Windows).is_err());
+        config.actions.search.hotkey = None;
+        config.actions.search.hotkey_linux = Some(config.trigger.trigger_key_linux.clone());
+        assert!(config.validate_hotkeys(Platform::Linux).is_err());
+        config.actions.enabled = false;
+        config.validate_hotkeys(Platform::Linux).unwrap();
     }
 }

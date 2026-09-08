@@ -50,7 +50,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use smithay_client_toolkit::seat::pointer::PointerEvent;
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind};
 use smithay_client_toolkit::shell::wlr_layer::LayerSurface;
 use wayland_client::backend::protocol::ProtocolError;
 use wayland_client::backend::WaylandError;
@@ -144,6 +144,13 @@ pub(crate) struct App {
     /// The tray Settings item starts it. The settings-scoped flock guards
     /// cross-process use. This field guards the daemon.
     settings: SettingsChild,
+    search: SettingsChild,
+    sentence_search: SettingsChild,
+    prefilled_searches: Vec<std::process::Child>,
+    search_focused: bool,
+    search_focus_error: bool,
+    registered_search_key: Option<String>,
+    registered_sentence_search_key: Option<String>,
     /// Channel health and the SNI tray that mirrors it
     /// (ARCHITECTURE.md#platform-integration).
     /// This field also stores the daemon view. It works when no tray exists.
@@ -617,8 +624,13 @@ impl App {
     /// `Verb::AnkiAdd` is the only keyboard path to AnkiConnect.
     /// The socket `anki-add` and Portal `anki-add` shortcut therefore match.
     fn apply_verb(&mut self, verb: Verb) {
+        if self.refresh_search_focus() && !matches!(verb, Verb::Search | Verb::SentenceSearch | Verb::Reload | Verb::TriggerUp) {
+            return;
+        }
         match verb {
             Verb::Reload => self.reload_config(),
+            Verb::Search => self.spawn_search(),
+            Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
             // The canned popup replaces a lookup, so a machine without a
             // Dictionary can inspect the surface.
             Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
@@ -663,6 +675,16 @@ impl App {
             shortcuts::Event::Bound(bindings) => self.trigger_bound("bound", bindings),
             shortcuts::Event::Changed(bindings) => self.trigger_bound("re-bound", bindings),
             shortcuts::Event::Fired { id, activated } => {
+                if id == shortcuts::ShortcutId::SentenceSearch {
+                    let configured = configured_sentence_search_key(&self.config);
+                    if configured.is_none() || configured.as_deref() != self.registered_sentence_search_key.as_deref() {
+                        return;
+                    }
+                }
+                if id == shortcuts::ShortcutId::Search
+                    && !search_shortcut_active(&self.config, self.registered_search_key.as_deref()) {
+                    return;
+                }
                 self.log.diag(&format!(
                     "trigger: portal {} {}",
                     if activated { "activated" } else { "deactivated" },
@@ -828,6 +850,10 @@ impl App {
     /// Tests use `Option` to build App without compositor state.
     pub(crate) fn popup_mut(&mut self) -> &mut Popup {
         self.popup.as_mut().expect("a popup dispatch arrived with no popup bound")
+    }
+
+    pub(crate) fn dismiss_popup_tree(&mut self) {
+        self.feed(Event::DismissRequested);
     }
 
     /// Return true when a popup can put a panel on screen.
@@ -1005,6 +1031,7 @@ impl App {
     }
 
     fn begin_capture_hide(&mut self, owner: HideOwner) {
+        self.feed(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
         if self.hide_owners.is_empty() {
             self.hidden_popup = if self.controller_hidden { None } else { self.popup_snapshot() };
         }
@@ -1797,6 +1824,9 @@ impl App {
         // Log counts, not text. The text is screen content, and diagnostics do
         // not use lookup opt-in (ARCHITECTURE.md#platform-integration).
         let chars = text.chars().count();
+        if self.config.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search) {
+            self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text));
+        }
         let Some(board) = self.clipboard.as_ref() else {
             self.log.diag(&clipboard::unavailable_line());
             return;
@@ -1962,6 +1992,7 @@ impl App {
             return;
         }
         if self.popup.is_some() {
+            self.dismiss_popup_tree();
             self.popup_mut().drop_layer(layer);
             self.flush_popup_notes();
         }
@@ -2002,14 +2033,23 @@ impl App {
         if pressed_outside {
             self.feed(Event::PointerDownOutside);
         }
-        let Some(popup) = self.popup.as_mut() else { return };
-        let catcher = self.catcher.as_ref();
-        let interactions = popup::pointer_frame(
-            popup,
-            events.iter().filter(|event| !catcher.is_some_and(|c| c.owns_surface(&event.surface))),
-        );
-        self.flush_popup_notes();
-        self.pointer_interactions(interactions);
+        for event in events {
+            if self.catcher.as_ref().is_some_and(|c| c.owns_surface(&event.surface)) { continue; }
+            if matches!(event.kind, PointerEventKind::Enter { .. }) {
+                if let Some(depth) = self.popup.as_ref().and_then(|p| p.depth_of(&event.surface)) {
+                    self.feed(Event::PopupEntered { depth });
+                }
+            }
+            if matches!(event.kind, PointerEventKind::Press { .. } | PointerEventKind::Axis { .. }) {
+                if let Some(depth) = self.popup.as_ref().and_then(|popup| popup.depth_of(&event.surface)) {
+                    self.feed(Event::PopupActivated { depth });
+                }
+            }
+            let Some(popup) = self.popup.as_mut() else { return };
+            let interactions = popup::pointer_frame(popup, std::iter::once(event));
+            self.flush_popup_notes();
+            self.pointer_interactions(interactions);
+        }
     }
 
     /// A `preferred_scale` Event arrived. The daemon does not latch scale.
@@ -2021,6 +2061,9 @@ impl App {
         self.flush_popup_notes();
         if !moved {
             return;
+        }
+        if self.controller.popup_depth() > 0 {
+            self.dismiss_popup_tree();
         }
         self.log.diag(&format!(
             "popup: surface {idx} preferred scale {:.3} - re-rendering",
@@ -2045,6 +2088,15 @@ impl App {
     pub(crate) fn pointer_interactions(&mut self, interactions: Vec<popup::Interaction>) {
         for interaction in interactions {
             match interaction {
+                popup::Interaction::Exit => { self.feed(Event::PopupEntered { depth: usize::MAX }); }
+                popup::Interaction::Hover { local, query } => {
+                    self.feed(Event::PopupHover { local, query });
+                    self.arm_gesture_clock();
+                }
+                popup::Interaction::HoverAt { depth, local, query } => {
+                    self.feed(Event::PopupHoverAt { depth, local, query });
+                    self.arm_gesture_clock();
+                }
                 popup::Interaction::Scroll { notches } => {
                     self.log.diag(&format!("pointer: wheel {notches:+} notch(es) over the panel"));
                     self.feed(Event::Scrolled { notches });
@@ -2175,10 +2227,36 @@ impl App {
     /// Then sync the dwell watch with the current screen
     /// (ARCHITECTURE.md#hover-cadence).
     fn feed(&mut self, event: Event) {
+        let focused = self.refresh_search_focus();
+        if focused && search_blocks_event(&event) { return; }
         for cmd in self.controller.handle(event) {
             self.execute(cmd);
         }
         self.sync_dwell();
+    }
+
+    fn refresh_search_focus(&mut self) -> bool {
+        let focused = match crate::search::is_focused(&self.paths) {
+            Ok(focused) => { self.search_focus_error = false; focused }
+            Err(_) if self.display.is_none() => false,
+            Err(error) => {
+                if !self.search_focus_error {
+                    self.log.diag(&format!("search: cannot read focus state; input paused: {error:#}"));
+                    self.search_focus_error = true;
+                }
+                true
+            }
+        };
+        if focused && !self.search_focused {
+            self.search_focused = true;
+            if self.hold.take().is_some() { self.thaw(); }
+            for event in [Event::TriggerUp, Event::DismissRequested] {
+                for command in self.controller.handle(event) { self.execute(command); }
+            }
+            self.sync_dwell();
+        }
+        self.search_focused = focused;
+        focused
     }
 
     /// Keep the gesture clock active only around pointer input.
@@ -2465,6 +2543,16 @@ impl App {
         }
         match cmd {
             // OCR must not read our popup while a live grab runs.
+            Command::PushPopup => {
+                if let Some(popup) = self.popup.as_mut() { popup.push_parent(); }
+            }
+            Command::RestorePopup { depth } => {
+                if let Some(popup) = self.popup.as_mut() { popup.restore_parent(depth); }
+                self.popup_generation = self.popup_generation.wrapping_add(1);
+            }
+            Command::ClearPopupParents => {
+                if let Some(popup) = self.popup.as_mut() { popup.clear_parents(); }
+            }
             // A frozen hold predates the popup (ARCHITECTURE.md#capture-and-masking).
             // Wayland lacks surface exclusion, so this mask is the complete
             // mechanism.
@@ -2489,8 +2577,16 @@ impl App {
                 self.request_sentence(id, anchor, orientation, hide_popup);
             }
             Command::RequestLookup { id, point, popup } => {
-                let mask = CaptureMask::for_mode(self.capture_mode(), popup);
-                self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id);
+                let mut rectangles = self.controller.popup_rects();
+                if let Some(rect) = popup.filter(|rect| !rectangles.contains(rect)) {
+                    rectangles.push(rect);
+                }
+                match CaptureMask::for_rects(self.capture_mode(), &rectangles) {
+                    Ok(mask) => { self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id); }
+                    Err(error) => self.feed(Event::LookupResult {
+                        id, outcome: LookupOutcome::Failed(error.to_string()),
+                    }),
+                }
             }
             Command::RequestDrillDown { id, text } => {
                 self.send_trigger(TriggerKind::DrillDown(text), id);
@@ -2580,7 +2676,10 @@ impl App {
             // The daemon blocks SIGINT/SIGTERM in its threads. A mask would
             // outlive `exec`.
             Command::OpenUrl(url) => self.open_url(&url),
-            Command::HidePopup => self.hide_popup(),
+            Command::HidePopup => {
+                if let Some(popup) = self.popup.as_mut() { popup.clear_parents(); }
+                self.hide_popup();
+            }
             // Two settings use this path:
             // `debug.show_scan_region` shows capture boxes.
             // `popup.highlight_match` shows the matched word.
@@ -2633,6 +2732,9 @@ impl App {
 
     fn command_diagnostic(cmd: &Command) -> String {
         match cmd {
+            Command::PushPopup => "action=push_popup".to_string(),
+            Command::RestorePopup { depth } => format!("action=restore_popup depth={depth}"),
+            Command::ClearPopupParents => "action=clear_popup_parents".to_string(),
             Command::RequestLookup { id, point, popup } => format!(
                 "action=request_lookup id={} point=({}, {}) popup={}",
                 id.0,
@@ -2956,8 +3058,9 @@ impl App {
         });
         if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
             let screens = self.screens();
+            let rects = self.controller.popup_rects();
             if let Some(catcher) = self.catcher.as_mut() {
-                catcher.show(&screens, placed.rect);
+                catcher.show(&screens, &rects);
             }
             self.flush_surface_notes();
         }
@@ -3061,6 +3164,8 @@ impl App {
     /// (ARCHITECTURE.md#platform-integration).
     fn handle_tray(&mut self, request: TrayRequest) {
         match request {
+            TrayRequest::OpenSearch => self.spawn_search(),
+            TrayRequest::OpenSentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
             TrayRequest::OpenSettings => self.spawn_settings(),
             TrayRequest::Quit => {
                 self.log.diag("tray: quit requested - shutting down");
@@ -3130,6 +3235,56 @@ impl App {
         }
     }
 
+    fn spawn_search(&mut self) {
+        self.spawn_search_mode(chibipop::search::SearchMode::Dictionary, None);
+    }
+
+    fn spawn_search_mode(&mut self, mode: chibipop::search::SearchMode, text: Option<&str>) {
+        self.dismiss_popup_tree();
+        self.prefilled_searches.retain_mut(|child| child.try_wait().ok().flatten().is_none());
+        let prefill = text.filter(|text| !text.trim().is_empty());
+        let outcome = if let Some(text) = prefill {
+            self.spawn_prefilled_search(mode, text)
+        } else {
+            crate::search::search_command_mode(&self.paths, mode, None).and_then(|mut command| {
+                if mode == chibipop::search::SearchMode::Sentence {
+                    self.sentence_search.spawn_if_absent(&mut command)
+                } else { self.search.spawn_if_absent(&mut command) }
+            })
+        };
+        match outcome {
+            Ok(SpawnOutcome::Spawned(pid)) => self.log.diag(&format!("search: spawned pid {pid}")),
+            Ok(SpawnOutcome::AlreadyRunning(pid)) => {
+                self.log.diag(&format!("search: already running as pid {pid}"));
+            }
+            Err(error) => self.log.diag(&format!("search: spawn failed: {error}")),
+        }
+    }
+
+    fn spawn_prefilled_search(&mut self, mode: chibipop::search::SearchMode,
+        text: &str) -> std::io::Result<SpawnOutcome> {
+        let mut command = crate::search::search_stdin_command_mode(&self.paths, mode)?;
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let Some(mut input) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other("search child has no stdin pipe"));
+        };
+        let text = text.to_owned();
+        if let Err(error) = std::thread::Builder::new().name("search-stdin".into()).spawn(move || {
+            if let Err(error) = std::io::Write::write_all(&mut input, text.as_bytes()) {
+                eprintln!("chibipop: sending search text through stdin failed: {error}");
+            }
+        }) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        self.prefilled_searches.push(child);
+        Ok(SpawnOutcome::Spawned(pid))
+    }
+
     /// Give a glossary citation to the desktop browser.
     ///
     /// Do not wait for `xdg-open`.
@@ -3197,7 +3352,7 @@ impl App {
                     }
                     if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
                         if let Some(rect) = shown {
-                            catcher.show(&screens, rect);
+                            catcher.show(&screens, &[rect]);
                         }
                     } else {
                         catcher.hide();
@@ -3375,6 +3530,7 @@ impl CursorHandler for App {
             self.log.diag(&format!("cursor: ({}, {})", pos.x, pos.y));
         }
         self.last_cursor = Some(pos);
+        if self.refresh_search_focus() { return; }
         // An unlatched hold crosses outputs with a fresh full frozen grab
         // (ARCHITECTURE.md#hover-cadence).
         // A latched hold reads live pixels and needs no cross-output regrab.
@@ -3408,8 +3564,35 @@ delegate_dispatch!(App: [ExtImageCopyCaptureManagerV1: ()] => CursorState);
 delegate_dispatch!(App: [ExtImageCopyCaptureCursorSessionV1: u32] => CursorState);
 
 /// What the Controller reads (mirrors the Windows bin's builder).
+fn configured_search_key(config: &chibipop::config::Config) -> Option<String> {
+    config.actions.search.hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty())
+        .map(shortcuts::normalize_trigger)
+}
+
+fn configured_sentence_search_key(config: &chibipop::config::Config) -> Option<String> {
+    config.actions.search.sentence_hotkey_linux.as_deref()
+        .filter(|key| config.actions.enabled && !key.trim().is_empty())
+        .map(shortcuts::normalize_trigger)
+}
+
+fn search_shortcut_active(config: &chibipop::config::Config, registered: Option<&str>) -> bool {
+    let configured = configured_search_key(config);
+    configured.is_some() && configured.as_deref() == registered
+}
+
+fn search_blocks_event(event: &Event) -> bool {
+    matches!(event, Event::Tick { .. } | Event::GestureTick | Event::Scrolled { .. }
+        | Event::PointerDown { .. } | Event::PointerMoved { .. } | Event::PointerUp { .. }
+        | Event::AddRequested | Event::BackRequested | Event::TriggerDown
+        | Event::TriggerPressed { .. } | Event::CursorMoved { .. } | Event::DwellElapsed
+        | Event::PopupHover { .. } | Event::PopupEntered { .. }
+        | Event::PopupHoverAt { .. } | Event::PopupActivated { .. })
+}
+
 fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
     ControllerConfig {
+        sub_popups: config.popup.sub_popups,
         trigger_mode: config.trigger.mode,
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
@@ -3981,6 +4164,13 @@ pub fn run(paths: Paths) -> Result<()> {
         },
         last_move: Instant::now(),
         settings: SettingsChild::new(),
+        search: SettingsChild::new(),
+        sentence_search: SettingsChild::new(),
+        prefilled_searches: Vec::new(),
+        search_focused: false,
+        search_focus_error: false,
+        registered_search_key: configured_search_key(&config),
+        registered_sentence_search_key: configured_sentence_search_key(&config),
         tray: tray_handle,
         worker: None,
         analysis,
@@ -4205,6 +4395,37 @@ mod tests {
     use crate::shortcuts::ShortcutId;
     use wayland_client::backend::ObjectId;
 
+    #[test]
+    fn search_portal_events_follow_current_enablement_and_registered_chord() {
+        let mut config = chibipop::config::Config::default();
+        config.actions.enabled = true;
+        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+F".into());
+        let registered = configured_search_key(&config);
+        assert!(search_shortcut_active(&config, registered.as_deref()));
+        assert!(!search_shortcut_active(&config, None));
+        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+G".into());
+        assert!(!search_shortcut_active(&config, registered.as_deref()));
+        config.actions.search.hotkey_linux = None;
+        assert!(!search_shortcut_active(&config, registered.as_deref()));
+        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+F".into());
+        config.actions.enabled = false;
+        assert!(!search_shortcut_active(&config, registered.as_deref()));
+    }
+
+    #[test]
+    fn focused_search_blocks_input_but_allows_releases_and_worker_results() {
+        let point = PhysPoint { x: 50, y: 60 };
+        for event in [Event::CursorMoved { pos: point }, Event::TriggerDown,
+            Event::TriggerPressed { pos: point }, Event::AddRequested,
+            Event::DwellElapsed, Event::Tick { cursor: point, button_h: 0 }] {
+            assert!(search_blocks_event(&event), "{event:?}");
+        }
+        for event in [Event::TriggerUp, Event::DismissRequested,
+            Event::LookupResult { id: RequestId(1), outcome: LookupOutcome::Hide }] {
+            assert!(!search_blocks_event(&event), "{event:?}");
+        }
+    }
+
     /// Test hot reload. `reload` reads the file again, so the lookup-log gate
     /// follows the config without a restart.
     #[test]
@@ -4350,6 +4571,13 @@ mod tests {
             gesture_tick: None,
             gesture_ticks_left: 0,
             settings: SettingsChild::new(),
+            search: SettingsChild::new(),
+            sentence_search: SettingsChild::new(),
+            prefilled_searches: Vec::new(),
+            search_focused: false,
+            search_focus_error: false,
+            registered_search_key: None,
+            registered_sentence_search_key: None,
             cursor: CursorState::default(),
             controller: Controller::new(controller_config(&chibipop::config::Config::default())),
             trace: false,

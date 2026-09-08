@@ -17,6 +17,41 @@ use crate::present::{Card, CollapsedRow, GlossBlock, GlossEntry};
 
 mod sweep;
 
+#[test]
+fn hover_queries_use_painted_glyphs_and_respect_scroll_and_padding() {
+    let p = card_with(vec![block("Test", &["食べる。猫"]) ]);
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|e| e.text == "食べる。猫").unwrap();
+    let advance = elem.font_size * ADVANCE;
+    let point = (elem.pen.0 + advance * 0.25, elem.pen.1 + 1.0);
+    let query = |point, scroll| scene.hover_query(point, scroll, "Fake", &mut FakeMeasure::default()).unwrap();
+    assert_eq!(query(point, 0.0), Some("食べる".into()));
+    assert_eq!(query((point.0, point.1 - 10.0), 10.0), Some("食べる".into()));
+    assert_eq!(query((elem.pen.0 - 1.0, point.1), 0.0), None);
+    assert_eq!(query((elem.pen.0 + advance * 3.25, point.1), 0.0), None);
+    assert_eq!(query((elem.pen.0 + advance * 7.0, point.1), 0.0), None);
+    assert_eq!(query((point.0, scene.view_h), 0.0), None);
+}
+
+#[test]
+fn hover_queries_cover_glossary_with_selection_disabled_and_unicode_offsets() {
+    let p = card_with(vec![block("Test", &["𠮷野家 食べる"]) ]);
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    assert!(scene.highlights.is_empty());
+    let elem = scene.elems.iter().find(|e| e.text == "𠮷野家 食べる").unwrap();
+    let point = (elem.pen.0 + elem.font_size * ADVANCE * 2.25, elem.pen.1 + 1.0);
+    assert_eq!(scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(), Some("野家".into()));
+}
+
+#[test]
+fn hover_queries_join_ruby_base_with_following_kana() {
+    let p = rich(&sc(r#"[{"tag":"ruby","content":["食",{"tag":"rt","content":"た"}]},"べる"]"#));
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text.contains('食')).unwrap();
+    let point = (elem.pen.0 + elem.font_size * ADVANCE * 0.25, elem.pen.1 + 1.0);
+    assert_eq!(scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(), Some("食べる".into()));
+}
+
 /// This constant sets the advance per UTF-16 unit as a fraction of the font size.
 const ADVANCE: f32 = 0.5;
 /// This constant sets the line height as a multiple of the font size.

@@ -10,7 +10,7 @@ use crate::geom::PhysPoint;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::panic::catch_unwind;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{LazyLock, Mutex};
 use std::thread;
@@ -129,6 +129,7 @@ static PENDING_ADD: AtomicBool = AtomicBool::new(false);
 
 /// Defines the number of action hotkey slots.
 pub const MAX_ACTION_SLOTS: usize = 8;
+static ACTION_DOWN: [AtomicBool; MAX_ACTION_SLOTS] = [const { AtomicBool::new(false) }; MAX_ACTION_SLOTS];
 
 /// Stores virtual-key codes for action hotkeys.
 static ACTION_VK: [AtomicU16; MAX_ACTION_SLOTS] = [
@@ -174,9 +175,20 @@ static BACK_ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Stores one Escape press.
 static PENDING_BACK: AtomicBool = AtomicBool::new(false);
+static PENDING_ESCAPE: AtomicBool = AtomicBool::new(false);
 
 /// Defines the virtual-key code for Escape.
 const VK_ESCAPE: u16 = 0x1B;
+
+static ESCAPE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ESCAPE_DOWN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct EscapeCancellation(u64);
+
+impl EscapeCancellation {
+    pub(crate) fn new() -> Self { Self(ESCAPE_GENERATION.load(Ordering::SeqCst)) }
+    pub(crate) fn cancelled(&self) -> bool { self.0 != ESCAPE_GENERATION.load(Ordering::SeqCst) }
+}
 
 /// Packs one point into one word so readers never see a torn value.
 fn pack(p: PhysPoint) -> i64 {
@@ -291,20 +303,21 @@ fn current_modifiers() -> u8 {
 
 /// Returns true and stores an action when the virtual-key code and modifiers match.
 fn action_hotkey_hit(down: bool, vk: u16, mods: u8) -> bool {
-    if !down {
-        return false;
-    }
+    let mut hit = false;
     for i in 0..MAX_ACTION_SLOTS {
         let want_vk = ACTION_VK[i].load(Ordering::SeqCst);
         if want_vk == 0 {
             continue;
         }
-        if vk == want_vk && mods == ACTION_MODS[i].load(Ordering::SeqCst) {
-            PENDING_ACTION[i].store(true, Ordering::SeqCst);
-            return true;
+        if vk == want_vk {
+            let repeated = ACTION_DOWN[i].swap(down, Ordering::SeqCst);
+            if down && !repeated && !hit && mods == ACTION_MODS[i].load(Ordering::SeqCst) {
+                PENDING_ACTION[i].store(true, Ordering::SeqCst);
+                hit = true;
+            }
         }
     }
-    false
+    hit
 }
 
 /// Returns whether the Region selector is active.
@@ -371,14 +384,31 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
     // `KBDLLHOOKSTRUCT` that the OS owns for the duration of this call.
     let vk = unsafe { (*(lparam.0 as *const KBDLLHOOKSTRUCT)).vkCode } as u16;
     let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    let escape = vk == VK_ESCAPE && !ESCAPE_DOWN.swap(down, Ordering::SeqCst) && down;
+    if escape { ESCAPE_GENERATION.fetch_add(1, Ordering::SeqCst); }
+    let selecting = selection_active();
+    let held = KEY_DOWN.load(Ordering::SeqCst);
+    record_trigger_state(down, vk);
+    action_hotkey_hit(down, vk, current_modifiers());
+    if selecting {
+        if down { KEY_DOWN.store(held, Ordering::SeqCst); }
+        discard_keyboard_actions();
+        return;
+    }
+    if crate::ui::search_window::is_foreground() {
+        cancel_keyboard_actions();
+        return;
+    }
+    if escape { PENDING_ESCAPE.store(true, Ordering::SeqCst); }
     if add_hotkey_hit(down, vk) {
         PENDING_ADD.store(true, Ordering::SeqCst);
     }
-    action_hotkey_hit(down, vk, current_modifiers());
-    if down && vk == VK_ESCAPE && BACK_ARMED.load(Ordering::SeqCst) {
+    if escape && BACK_ARMED.load(Ordering::SeqCst) {
         PENDING_BACK.store(true, Ordering::SeqCst);
     }
+}
 
+fn record_trigger_state(down: bool, vk: u16) {
     let target = TRIGGER_VK.load(Ordering::SeqCst);
     if !matches_trigger(vk, target) {
         return;
@@ -407,6 +437,30 @@ unsafe fn record_key_state(wparam: WPARAM, lparam: LPARAM) {
         let mode = u8_to_mode(MODE.load(Ordering::SeqCst));
         transition_trigger_state(false, still_held, mode);
     }
+}
+
+pub fn clear_keyboard_actions() {
+    TRIGGER_PHYSICAL.store(false, Ordering::SeqCst);
+    cancel_keyboard_actions();
+}
+
+pub fn cancel_keyboard_actions() {
+    KEY_DOWN.store(false, Ordering::SeqCst);
+    discard_keyboard_actions();
+}
+
+pub fn discard_keyboard_actions() {
+    PENDING.store(NO_POINT, Ordering::SeqCst);
+    PENDING_PRESS.store(false, Ordering::SeqCst);
+    PENDING_ADD.store(false, Ordering::SeqCst);
+    PENDING_BACK.store(false, Ordering::SeqCst);
+    PENDING_ESCAPE.store(false, Ordering::SeqCst);
+    for pending in &PENDING_ACTION { pending.store(false, Ordering::SeqCst); }
+}
+
+#[cfg(test)]
+pub(crate) fn search_keyboard_test_guard() -> impl Sized {
+    (tests::trigger_guard(), tests::add_hotkey_guard(), tests::back_guard())
 }
 
 /// This function stores one popup button edge in screen coordinates.
@@ -800,6 +854,10 @@ impl Hooks {
         PENDING_BACK.swap(false, Ordering::SeqCst)
     }
 
+    pub fn take_escape() -> bool {
+        PENDING_ESCAPE.swap(false, Ordering::SeqCst)
+    }
+
     /// Uses a polled fallback for the movement gate.
     pub fn poll_gate(p: PhysPoint) -> bool {
         if !mode_currently_eligible() {
@@ -821,6 +879,7 @@ impl Hooks {
     /// Sets one action hotkey slot.
     pub fn set_action_hotkey(slot: usize, vk: u16, modifiers: u8) {
         if slot < MAX_ACTION_SLOTS {
+            ACTION_DOWN[slot].store(false, Ordering::SeqCst);
             ACTION_VK[slot].store(vk, Ordering::SeqCst);
             ACTION_MODS[slot].store(modifiers, Ordering::SeqCst);
         }
@@ -917,7 +976,7 @@ mod tests {
     /// The tests share trigger transition state.
     static TRIGGER_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn trigger_guard() -> std::sync::MutexGuard<'static, ()> {
         TRIGGER_STATE.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1182,8 +1241,26 @@ mod tests {
     /// The tests share the hotkey state.
     static ADD_HOTKEY_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn add_hotkey_guard() -> std::sync::MutexGuard<'static, ()> {
         ADD_HOTKEY_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn search_focus_clears_held_trigger_and_pending_actions() {
+        let _trigger = trigger_guard();
+        let _actions = add_hotkey_guard();
+        let _back = back_guard();
+        KEY_DOWN.store(true, Ordering::SeqCst);
+        TRIGGER_PHYSICAL.store(true, Ordering::SeqCst);
+        PENDING_PRESS.store(true, Ordering::SeqCst);
+        PENDING_ADD.store(true, Ordering::SeqCst);
+        PENDING_BACK.store(true, Ordering::SeqCst);
+        for pending in &PENDING_ACTION { pending.store(true, Ordering::SeqCst); }
+        clear_keyboard_actions();
+        for state in [&KEY_DOWN, &TRIGGER_PHYSICAL, &PENDING_PRESS, &PENDING_ADD, &PENDING_BACK] {
+            assert!(!state.load(Ordering::SeqCst));
+        }
+        assert!(PENDING_ACTION.iter().all(|pending| !pending.load(Ordering::SeqCst)));
     }
 
     #[test]
@@ -1307,6 +1384,7 @@ mod tests {
 
     #[test]
     fn selection_active_suppresses_mouse_moves() {
+        let _guard = search_keyboard_test_guard();
         Hooks::set_selection_active(true);
         assert!(selection_active());
         Hooks::set_selection_active(false);
@@ -1317,8 +1395,10 @@ mod tests {
 
     static BACK_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn back_guard() -> std::sync::MutexGuard<'static, ()> {
-        BACK_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    pub(super) fn back_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = BACK_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        ESCAPE_DOWN.store(false, Ordering::SeqCst);
+        guard
     }
 
     #[test]
@@ -1327,6 +1407,8 @@ mod tests {
         Hooks::set_back_armed(false);
         let _ = Hooks::take_back();
 
+        let cancel = EscapeCancellation::new();
+        assert!(!cancel.cancelled());
         let data = KBDLLHOOKSTRUCT {
             vkCode: VK_ESCAPE as u32,
             ..Default::default()
@@ -1336,6 +1418,66 @@ mod tests {
         unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam) };
 
         assert!(!Hooks::take_back());
+        assert!(cancel.cancelled(), "operations cancel even when no popup arms Back");
+        assert!(Hooks::take_escape());
+        assert!(!Hooks::take_escape());
+        // SAFETY: The hook payload remains alive for the repeated keydown.
+        unsafe { record_key_state(WPARAM(WM_KEYDOWN as usize), lparam); }
+        assert!(!Hooks::take_escape(), "holding Escape must not cancel another level");
+    }
+
+    #[test]
+    fn cancellation_blocks_held_trigger_repeats_until_release() {
+        let _guard = search_keyboard_test_guard();
+        clear_keyboard_actions();
+        transition_trigger_state(true, false, TriggerMode::HoldKey);
+        assert!(KEY_DOWN.load(Ordering::SeqCst));
+        cancel_keyboard_actions();
+        transition_trigger_state(true, false, TriggerMode::HoldKey);
+        assert!(!KEY_DOWN.load(Ordering::SeqCst));
+        transition_trigger_state(false, false, TriggerMode::HoldKey);
+        transition_trigger_state(true, false, TriggerMode::HoldKey);
+        assert!(KEY_DOWN.load(Ordering::SeqCst));
+        clear_keyboard_actions();
+    }
+
+    #[test]
+    fn cancellation_blocks_action_repeats_until_release() {
+        let _guard = search_keyboard_test_guard();
+        for slot in 0..MAX_ACTION_SLOTS { Hooks::set_action_hotkey(slot, 0, 0); }
+        Hooks::set_action_hotkey(7, 0x79, 0);
+        assert!(action_hotkey_hit(true, 0x79, 0));
+        assert!(Hooks::take_action_hotkey(7));
+        cancel_keyboard_actions();
+        assert!(!action_hotkey_hit(true, 0x79, 0));
+        assert!(!Hooks::take_action_hotkey(7));
+        assert!(!action_hotkey_hit(false, 0x79, 0));
+        assert!(action_hotkey_hit(true, 0x79, 0));
+        Hooks::set_action_hotkey(7, 0, 0);
+        clear_keyboard_actions();
+    }
+
+    #[test]
+    fn selection_cancellation_preserves_held_lookup_and_observes_release() {
+        let _guard = search_keyboard_test_guard();
+        Hooks::set_mode(TriggerMode::HoldKey);
+        Hooks::set_trigger_key(0x77);
+        clear_keyboard_actions();
+        transition_trigger_state(true, false, TriggerMode::HoldKey);
+        Hooks::set_selection_active(true);
+        let escape = KBDLLHOOKSTRUCT { vkCode: u32::from(VK_ESCAPE), ..Default::default() };
+        let trigger = KBDLLHOOKSTRUCT { vkCode: 0x77, ..Default::default() };
+        // SAFETY: Both hook payloads remain alive for these synchronous calls.
+        unsafe {
+            record_key_state(WPARAM(WM_KEYDOWN as usize), LPARAM(&escape as *const _ as isize));
+            assert!(KEY_DOWN.load(Ordering::SeqCst));
+            assert!(!Hooks::take_escape());
+            record_key_state(WPARAM(WM_KEYUP as usize), LPARAM(&trigger as *const _ as isize));
+        }
+        Hooks::set_selection_active(false);
+        assert!(!KEY_DOWN.load(Ordering::SeqCst));
+        assert!(!TRIGGER_PHYSICAL.load(Ordering::SeqCst));
+        clear_keyboard_actions();
     }
 
     #[test]

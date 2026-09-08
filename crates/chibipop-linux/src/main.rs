@@ -43,6 +43,10 @@ mod select;
 #[cfg(target_os = "linux")]
 mod settings;
 #[cfg(target_os = "linux")]
+mod search;
+#[cfg(target_os = "linux")]
+mod search_popup;
+#[cfg(target_os = "linux")]
 mod shortcuts;
 #[cfg(target_os = "linux")]
 mod signals;

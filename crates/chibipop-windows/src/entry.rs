@@ -71,6 +71,19 @@ enum Command {
         #[arg(long)]
         keep_furigana: bool,
     },
+    /// Open dictionary search.
+    Search {
+        #[arg(long)]
+        sentence: bool,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        dict: Option<PathBuf>,
+        #[arg(long)]
+        rules: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Open the settings window.
     Settings {
         #[arg(long)]
@@ -453,6 +466,34 @@ pub fn run() -> Result<()> {
                 }
                 println!();
             }
+        }
+        Command::Search { dict, rules, config, sentence, text } => {
+            let dict = dict_path(dict);
+            let rules = rules_path(rules);
+            let config_path = config.unwrap_or_else(default_config_path);
+            let cfg = chibipop::config::load_or_create(&config_path)?;
+            chibipop_windows::text::capture::init_dpi_awareness()?;
+            let mode = if sentence { chibipop::search::SearchMode::Sentence }
+                else { chibipop::search::SearchMode::Dictionary };
+            let mut search = chibipop_windows::ui::search_window::SearchWindow::open_mode(
+                &dict, &rules, &cfg, mode, text.as_deref())?;
+            search.set_config_path(&config_path);
+            while search.is_visible() {
+                use windows::Win32::UI::WindowsAndMessaging::{MSG, PeekMessageW, TranslateMessage, DispatchMessageW, PM_REMOVE};
+                let mut message = MSG::default();
+                // SAFETY: Messages belong to this thread. Search handles only its own control messages.
+                unsafe {
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        if !search.handle_message(&message) {
+                            let _ = TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                }
+                search.poll();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(())
         }
         Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);

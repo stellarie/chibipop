@@ -104,7 +104,7 @@ cosmic-text = "0.19.0"
 # The settings window's toolkit (ARCHITECTURE.md#settings-and-config):
 # a separate `chibipop settings` process, so none of this is resident
 # in the daemon.
-iced = "0.14.0"
+iced = { version = "0.14.0", features = ["image-without-codecs"] }
 # Font-family enumeration for the settings font combo; the same fontdb
 # iced already carries via cosmic-text, so no second font stack.
 fontdb = "0.23"

@@ -2,7 +2,7 @@
 
 use crate::config::{ScreenshotMode, ScreenshotWindow};
 use crate::geom::{PhysPoint, PhysRect};
-use crate::input::hooks::Hooks;
+use crate::input::hooks::{EscapeCancellation, Hooks};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -602,7 +602,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let _ = catch_unwind(on_cancel);
             LRESULT(0)
         }
-        WM_KEYDOWN if wp.0 == VK_ESCAPE => {
+        WM_KEYDOWN | WM_SYSKEYDOWN if wp.0 == VK_ESCAPE => {
             let _ = catch_unwind(on_cancel);
             LRESULT(0)
         }
@@ -705,6 +705,7 @@ impl RegionSelection {
         mode: ScreenshotMode,
         allow_target_switch: bool,
     ) -> Option<SelectionTarget> {
+        let cancellation = EscapeCancellation::new();
         ANCHOR.set(None);
         TARGET.with(|cell| *cell.borrow_mut() = None);
         MODE.set(mode);
@@ -731,12 +732,31 @@ impl RegionSelection {
         }
 
         let mut msg = MSG::default();
+        let mut deferred: Vec<MSG> = Vec::new();
+        let mut quit = None;
+        // SAFETY: The timer belongs to the selector and is removed before it hides.
+        let timer = unsafe { SetTimer(Some(self.hwnd), 1, 20, None) };
+        if timer == 0 { on_cancel(); }
         while !DONE.get() {
             // SAFETY: `msg` is writable stack storage owned by this loop.
             let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
             if got.0 <= 0 {
+                on_cancel();
+                if got.0 == 0 { quit = Some(msg.wParam.0 as i32); }
                 break; // `0` means `WM_QUIT`. `-1` means an error.
             }
+            let escape = matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN) && msg.wParam.0 == VK_ESCAPE;
+            if msg.hwnd.is_invalid() && !escape
+                && !deferred.iter().any(|pending| pending.message == msg.message
+                    && pending.wParam == msg.wParam && pending.lParam == msg.lParam) {
+                deferred.push(msg);
+            }
+            if cancellation.cancelled()
+                || escape {
+                on_cancel();
+                break;
+            }
+            if msg.hwnd.is_invalid() { continue; }
             // SAFETY: `GetMessageW` just filled `msg` before this block.
             unsafe {
                 let _ = TranslateMessage(&msg);
@@ -747,12 +767,22 @@ impl RegionSelection {
         // SAFETY: `ReleaseCapture` has no preconditions. This also releases
         // the capture used to swallow a window-selection button-up message.
         unsafe {
+            if timer != 0 { let _ = KillTimer(Some(self.hwnd), timer); }
             let _ = ReleaseCapture();
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         Hooks::set_selection_active(false);
+        crate::input::hooks::discard_keyboard_actions();
         PAINT_CTX.with(|cell| *cell.borrow_mut() = None);
         ALLOW_TARGET_SWITCH.with(|cell| cell.set(false));
+        // SAFETY: These wakes return to their original owner thread after the nested pump exits.
+        unsafe {
+            let thread = windows::Win32::System::Threading::GetCurrentThreadId();
+            for message in deferred {
+                let _ = PostThreadMessageW(thread, message.message, message.wParam, message.lParam);
+            }
+            if let Some(code) = quit { PostQuitMessage(code); }
+        }
         TARGET.with(|cell| cell.borrow_mut().take())
     }
 
@@ -783,6 +813,43 @@ impl Drop for RegionSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Shows the native full-screen selector; run alone on an available desktop"]
+    fn native_escape_cancels_without_a_focused_selector_message() {
+        let _guard = crate::input::hooks::search_keyboard_test_guard();
+        for mode in [ScreenshotMode::Region, ScreenshotMode::Window,
+            ScreenshotMode::FixedRegion, ScreenshotMode::FixedWindow] {
+            let mut selector = RegionSelection::new().unwrap();
+            // SAFETY: This test owns the current thread and its selector message queue.
+            let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            let (finished, done) = std::sync::mpsc::channel();
+            let sender = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                // SAFETY: The owner keeps its message queue alive until this thread joins.
+                unsafe {
+                    PostThreadMessageW(thread, WM_APP + 123, WPARAM(42), LPARAM(0)).unwrap();
+                    PostThreadMessageW(thread, WM_KEYDOWN, WPARAM(VK_ESCAPE), LPARAM(0)).unwrap();
+                }
+                if done.recv_timeout(std::time::Duration::from_secs(3)).is_err() {
+                    // SAFETY: The deadline releases only this test's blocked message loop.
+                    unsafe { let _ = PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)); }
+                    return false;
+                }
+                true
+            });
+            let result = selector.run_target(mode);
+            let _ = finished.send(());
+            assert!(sender.join().unwrap(), "Escape did not cancel the selector");
+            assert!(result.is_none());
+            assert!(!Hooks::take_escape());
+            let mut wake = MSG::default();
+            // SAFETY: Read only this test's deferred wake from its own queue.
+            assert!(unsafe { PeekMessageW(&mut wake, None, WM_APP + 123, WM_APP + 123, PM_REMOVE) }.as_bool());
+            assert_eq!(wake.wParam.0, 42);
+        }
+    }
+
     struct NativeWindowGuard(HWND);
 
     impl Drop for NativeWindowGuard {

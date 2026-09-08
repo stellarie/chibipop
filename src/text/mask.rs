@@ -3,7 +3,8 @@
 //!
 //! Wayland has no portable protocol to exclude one surface from another surface's capture.
 //! Therefore, the Worker applies the mask in Core.
-//! Before OCR, the code fills the overlap between the captured frame and the popup rect with flat white.
+//! Before OCR, the code fills each captured popup rectangle with flat white.
+//! Gaps between retained popup surfaces stay readable.
 //! The fill has a hard edge.
 //!
 //! Benchmarks define this method. Each candidate OCR engine produced the same result for each fill color.
@@ -36,28 +37,69 @@ pub enum CaptureMode {
 
 /// A `CaptureMask` identifies the screen area that OCR must not read.
 ///
-/// The area is the popup when a popup exists.
+/// Each rectangle belongs to one visible popup surface.
 /// All rects below the seams use physical pixels.
 /// The platform bin decides whether the code needs a mask.
 /// Windows uses its capture guard and WDA exclusion, so it supplies [`CaptureMask::NONE`].
-/// Wayland supplies the Controller's `PopupPlaced` rect.
+/// Wayland supplies every visible Controller popup rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureMask {
-    popup: Option<PhysRect>,
+    rects: [PhysRect; Self::MAX_RECTS],
+    len: usize,
 }
 
 impl CaptureMask {
+    /// One root and at most sixteen retained parents need no heap allocation.
+    pub const MAX_RECTS: usize = 17;
+
     /// This value represents a capture with no popup mask.
-    pub const NONE: CaptureMask = CaptureMask { popup: None };
+    pub const NONE: CaptureMask = CaptureMask {
+        rects: [PhysRect { x: 0, y: 0, w: 0, h: 0 }; Self::MAX_RECTS],
+        len: 0,
+    };
 
     /// This function uses `popup` as the mask for a live grab.
     /// A frozen grab precedes the popup, so the returned mask is empty.
     /// (ARCHITECTURE.md#capture-and-masking).
     pub fn for_mode(mode: CaptureMode, popup: Option<PhysRect>) -> CaptureMask {
-        match mode {
-            CaptureMode::Live => CaptureMask { popup },
-            CaptureMode::Frozen => CaptureMask::NONE,
+        let mut mask = Self::NONE;
+        if mode == CaptureMode::Live {
+            if let Some(rect) = popup.filter(|rect| rect.w > 0 && rect.h > 0) {
+                mask.rects[0] = rect;
+                mask.len = 1;
+            }
         }
+        mask
+    }
+
+    /// Reject excess input instead of letting an unmasked popup enter OCR.
+    /// Frozen captures remain maskless. Capacity applies to both capture modes.
+    pub fn for_rects(mode: CaptureMode, rects: &[PhysRect]) -> anyhow::Result<CaptureMask> {
+        anyhow::ensure!(rects.len() <= Self::MAX_RECTS,
+            "capture mask has {} rectangles; maximum is {}", rects.len(), Self::MAX_RECTS);
+        let mut mask = Self::NONE;
+        if mode == CaptureMode::Live {
+            for &rect in rects.iter().filter(|rect| rect.w > 0 && rect.h > 0) {
+                mask.rects[mask.len] = rect;
+                mask.len += 1;
+            }
+            mask.normalize();
+        }
+        Ok(mask)
+    }
+
+    fn normalize(&mut self) {
+        self.rects[..self.len].sort_unstable_by_key(|rect| (rect.x, rect.y, rect.w, rect.h));
+        let mut kept = 0;
+        for index in 0..self.len {
+            let rect = self.rects[index];
+            if kept == 0 || self.rects[kept - 1] != rect {
+                self.rects[kept] = rect;
+                kept += 1;
+            }
+        }
+        self.rects[kept..].fill(PhysRect { x: 0, y: 0, w: 0, h: 0 });
+        self.len = kept;
     }
 
     /// Return the part of the mask that overlaps `region`.
@@ -69,16 +111,26 @@ impl CaptureMask {
     /// Two grabs of the same region ask the same question when their clipped masks are equal.
     /// A popup outside the region does not change the clipped mask or the OCR result.
     pub fn clipped_to(&self, region: PhysRect) -> CaptureMask {
-        CaptureMask { popup: self.popup.and_then(|p| p.intersection(region)) }
+        let mut mask = Self::NONE;
+        for rect in &self.rects[..self.len] {
+            if let Some(hit) = rect.intersection(region) {
+                mask.rects[mask.len] = hit;
+                mask.len += 1;
+            }
+        }
+        mask.normalize();
+        mask
     }
 
-    /// Return the popup overlap in coordinates relative to `region`.
+    /// Return each popup overlap in coordinates relative to `region`.
     ///
-    /// Return `None` when no popup or overlap exists.
+    /// No overlap yields an empty iterator, never a bounding rectangle.
     /// A shared edge does not overlap because `PhysRect::intersection` uses half-open bounds.
-    pub fn overlap_in(&self, region: PhysRect) -> Option<PhysRect> {
-        let hit = self.popup?.intersection(region)?;
-        Some(hit.translated(-region.x, -region.y))
+    pub fn overlap_in(&self, region: PhysRect) -> impl Iterator<Item = PhysRect> + '_ {
+        self.rects[..self.len].iter().filter_map(move |rect| {
+            let hit = rect.intersection(region)?;
+            Some(PhysRect { x: hit.x - region.x, y: hit.y - region.y, ..hit })
+        })
     }
 
     /// Report whether a recognized word rect overlaps the mask.
@@ -88,7 +140,7 @@ impl CaptureMask {
     /// Both `rect` and the mask use physical pixels.
     /// (ARCHITECTURE.md#capture-and-masking).
     pub fn hides(&self, rect: PhysRect) -> bool {
-        self.popup.is_some_and(|p| p.intersection(rect).is_some())
+        self.rects[..self.len].iter().any(|popup| popup.intersection(rect).is_some())
     }
 
     /// Fill the popup overlap with flat white in a captured frame.
@@ -98,8 +150,9 @@ impl CaptureMask {
     /// The fill has a hard edge.
     /// Benchmarks found this fill safe for all candidate OCR engines.
     pub fn apply(&self, buf: &mut [u8], w: i32, h: i32, region: PhysRect) {
-        let Some(local) = self.overlap_in(region) else { return };
-        fill_white(buf, w, h, local);
+        for local in self.overlap_in(region) {
+            fill_white(buf, w, h, local);
+        }
     }
 }
 
@@ -140,7 +193,7 @@ mod tests {
     #[test]
     fn no_popup_masks_nothing() {
         let m = CaptureMask::NONE;
-        assert_eq!(None, m.overlap_in(r(0, 0, 100, 100)));
+        assert_eq!(None, m.overlap_in(r(0, 0, 100, 100)).next());
         assert!(!m.hides(r(10, 10, 20, 20)));
     }
 
@@ -148,38 +201,38 @@ mod tests {
     fn frozen_grabs_are_maskless_even_with_a_popup() {
         let m = CaptureMask::for_mode(CaptureMode::Frozen, Some(r(0, 0, 500, 500)));
         assert_eq!(CaptureMask::NONE, m);
-        assert_eq!(None, m.overlap_in(r(0, 0, 100, 100)));
+        assert_eq!(None, m.overlap_in(r(0, 0, 100, 100)).next());
         assert!(!m.hides(r(10, 10, 20, 20)));
     }
 
     #[test]
     fn disjoint_popup_and_region_do_not_overlap() {
-        assert_eq!(None, mask(r(500, 500, 100, 100)).overlap_in(r(0, 0, 100, 100)));
+        assert_eq!(None, mask(r(500, 500, 100, 100)).overlap_in(r(0, 0, 100, 100)).next());
     }
 
     #[test]
     fn partial_overlap_is_clipped_and_region_local() {
         // The popup extends beyond the region's bottom-right corner.
-        let got = mask(r(150, 180, 100, 100)).overlap_in(r(100, 100, 100, 100));
+        let got = mask(r(150, 180, 100, 100)).overlap_in(r(100, 100, 100, 100)).next();
         assert_eq!(Some(r(50, 80, 50, 20)), got);
     }
 
     #[test]
     fn popup_containing_the_region_masks_all_of_it() {
-        let got = mask(r(0, 0, 1000, 1000)).overlap_in(r(300, 300, 100, 50));
+        let got = mask(r(0, 0, 1000, 1000)).overlap_in(r(300, 300, 100, 50)).next();
         assert_eq!(Some(r(0, 0, 100, 50)), got);
     }
 
     #[test]
     fn popup_inside_the_region_masks_its_own_box() {
-        let got = mask(r(320, 310, 40, 20)).overlap_in(r(300, 300, 100, 50));
+        let got = mask(r(320, 310, 40, 20)).overlap_in(r(300, 300, 100, 50)).next();
         assert_eq!(Some(r(20, 10, 40, 20)), got);
     }
 
     #[test]
     fn a_shared_edge_is_no_overlap() {
         // The popup starts at the exact end of the region.
-        assert_eq!(None, mask(r(200, 100, 50, 50)).overlap_in(r(100, 100, 100, 100)));
+        assert_eq!(None, mask(r(200, 100, 50, 50)).overlap_in(r(100, 100, 100, 100)).next());
         assert!(!mask(r(200, 100, 50, 50)).hides(r(150, 100, 50, 50)));
     }
 
@@ -261,5 +314,108 @@ mod tests {
         let mut buf = Vec::new();
         mask(r(0, 0, 10, 10)).apply(&mut buf, 0, 10, r(0, 0, 0, 10));
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn disjoint_masks_preserve_every_uncovered_gap_and_corner() {
+        let region = r(-10, 20, 12, 10);
+        let rects = [r(-11, 21, 4, 4), r(-5, 25, 5, 7), r(0, 20, 2, 2)];
+        let mask = CaptureMask::for_rects(CaptureMode::Live, &rects).unwrap();
+        let before: Vec<u8> = (0..480).map(|index| (index % 251) as u8).collect();
+        let mut pixels = before.clone();
+        mask.apply(&mut pixels, region.w, region.h, region);
+        for y in 0..region.h {
+            for x in 0..region.w {
+                let point = crate::geom::PhysPoint { x: region.x + x, y: region.y + y };
+                let covered = rects.iter().any(|rect| rect.contains(point));
+                let offset = ((y * region.w + x) * 4) as usize;
+                let expected = if covered { &[255; 4] } else { &before[offset..offset + 4] };
+                assert_eq!(&pixels[offset..offset + 4], expected, "pixel {x},{y}");
+                assert_eq!(mask.hides(r(point.x, point.y, 1, 1)), covered, "word {x},{y}");
+            }
+        }
+        assert!(!mask.hides(r(-7, 22, 2, 2)));
+        assert!(mask.hides(r(-8, 22, 2, 2)));
+    }
+
+    #[test]
+    fn overlaps_are_separate_clipped_and_region_local() {
+        let mask = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(150, 180, 100, 100), r(90, 90, 30, 30), r(500, 500, 30, 30)]).unwrap();
+        assert_eq!(mask.overlap_in(r(100, 100, 100, 100)).collect::<Vec<_>>(),
+            vec![r(0, 0, 20, 20), r(50, 80, 50, 20)]);
+        assert_eq!(mask.overlap_in(r(1000, 1000, 10, 10)).count(), 0);
+    }
+
+    #[test]
+    fn clipped_cache_keys_ignore_order_duplicates_and_outside_surfaces() {
+        let region = r(100, 100, 100, 100);
+        let first = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(90, 90, 30, 30), r(110, 180, 10, 40), r(500, 500, 50, 50)]).unwrap();
+        let second = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(110, 180, 10, 40), r(100, 100, 20, 20), r(90, 90, 30, 30)]).unwrap();
+        let expected = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(100, 100, 20, 20), r(110, 180, 10, 20)]).unwrap();
+        assert_eq!(first.clipped_to(region), expected);
+        assert_eq!(second.clipped_to(region), expected);
+        assert_eq!(expected.clipped_to(region), expected);
+        assert_eq!(first.clipped_to(r(1000, 1000, 10, 10)), CaptureMask::NONE);
+        assert_ne!(expected, mask(r(100, 100, 20, 100)));
+        let third = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(100, 100, 20, 20), r(110, 181, 10, 19)]).unwrap();
+        assert_ne!(expected, third.clipped_to(region));
+    }
+
+    #[test]
+    fn masks_keep_copy_and_accept_the_whole_chain_but_reject_over_capacity() {
+        fn copied<T: Copy>(value: T) -> (T, T) { (value, value) }
+        assert_eq!(CaptureMask::MAX_RECTS, 17);
+        let rects: Vec<_> = (0..18).map(|x| r(x * 2, 0, 1, 1)).collect();
+        let mask = CaptureMask::for_rects(CaptureMode::Live, &rects[..17]).unwrap();
+        assert_eq!(copied(mask), (mask, mask));
+        assert_eq!(mask.overlap_in(r(0, 0, 40, 1)).count(), 17);
+        assert!(mask.hides(rects[16]));
+        for mode in [CaptureMode::Live, CaptureMode::Frozen] {
+            let error = CaptureMask::for_rects(mode, &rects).unwrap_err();
+            assert!(error.to_string().contains("18 rectangles; maximum is 17"));
+        }
+    }
+
+    #[test]
+    fn frozen_empty_and_invalid_rectangles_are_maskless() {
+        let rects = [r(0, 0, 100, 100), r(120, 120, 100, 100)];
+        let mask = CaptureMask::for_rects(CaptureMode::Frozen, &rects).unwrap();
+        assert_eq!(mask, CaptureMask::NONE);
+        let mut pixels = vec![42; 400];
+        mask.apply(&mut pixels, 10, 10, r(0, 0, 10, 10));
+        assert_eq!(pixels, vec![42; 400]);
+        assert_eq!(CaptureMask::for_rects(CaptureMode::Live, &[]).unwrap(), CaptureMask::NONE);
+        assert_eq!(CaptureMask::for_rects(CaptureMode::Live,
+            &[r(0, 0, 0, 10), r(0, 0, 10, -1)]).unwrap(), CaptureMask::NONE);
+        assert_eq!(CaptureMask::for_rects(CaptureMode::Live, &rects[..1]).unwrap(),
+            CaptureMask::for_mode(CaptureMode::Live, Some(rects[0])));
+    }
+
+    #[test]
+    fn overlapping_masks_and_short_buffers_only_fill_available_pixels() {
+        let mask = CaptureMask::for_rects(CaptureMode::Live,
+            &[r(0, 0, 2, 3), r(1, 1, 2, 3), r(2, 2, 2, 3)]).unwrap();
+        let mut pixels = vec![0; 35];
+        mask.apply(&mut pixels, 4, 8, r(0, 0, 4, 8));
+        for y in 0..2 {
+            for x in 0..4 {
+                let offset = (y * 4 + x) * 4;
+                let expected = if x < 2 || (y == 1 && x == 2) { [255; 4] } else { [0; 4] };
+                assert_eq!(pixels[offset..offset + 4], expected);
+            }
+        }
+        assert_eq!(&pixels[32..], &[0; 3]);
+    }
+
+    #[test]
+    fn overlap_coordinates_do_not_negate_the_minimum_screen_origin() {
+        let region = r(i32::MIN, i32::MIN, 10, 10);
+        let mask = mask(r(i32::MIN + 2, i32::MIN + 3, 4, 5));
+        assert_eq!(mask.overlap_in(region).collect::<Vec<_>>(), vec![r(2, 3, 4, 5)]);
     }
 }

@@ -95,11 +95,14 @@ impl Action for MiningContextScreenshot {
     }
 
     fn execute(&mut self, ctx: &mut ActionContext) -> Result<ActionOutcome> {
+        let cancellation = crate::input::hooks::EscapeCancellation::new();
         let selected = select_target(&mut *ctx.selection, &ctx.config.screenshot)?;
         let Some(selected) = selected else {
             return Ok(ActionOutcome::Cancelled);
         };
+        if cancellation.cancelled() { return Ok(ActionOutcome::Cancelled); }
         let cap = capture::capture_upscaled_by(selected.rect(), 1)?;
+        if cancellation.cancelled() { return Ok(ActionOutcome::Cancelled); }
 
         Ok(ActionOutcome::ScreenshotCaptured {
             bgra_buf: cap.buf,

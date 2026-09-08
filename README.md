@@ -7,6 +7,22 @@ It reads the pixels, so it works on anything — a game, a video, a PDF, a
 picture. Nothing needs to cooperate with it. It runs on Windows and on
 Linux.
 
+Hover Japanese text inside a pop-up to open a child pop-up. The parent stays
+visible, so you can follow a definition without losing your place.
+Turn this behavior on or off in **Settings > Popup**.
+
+Open **Dictionary search** from the tray or **Settings > Dictionaries**.
+Type a Japanese word, then select a candidate to open its definition.
+Search and definitions use your pop-up theme.
+
+Open **Sentence search** from **Settings > Dictionaries** to work with a
+sentence. Paste the sentence, then click a word in the sentence view. The
+word is highlighted and its dictionary candidates appear below.
+
+In **Settings > Shortcuts**, press the desired key or key combination to
+set either search shortcut. Enable **Open copied screen text in sentence
+search** to send OCR-to-clipboard results directly into that flow.
+
 <img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
 ---

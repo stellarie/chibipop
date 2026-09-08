@@ -90,13 +90,13 @@ pub fn version() -> Option<u32> {
     shortcuts_proxy(&conn).ok()?.get_property::<u32>("version").ok()
 }
 
-/// Register the two ids and pump their signals until the process ends.
+/// Register the configured ids and pump their signals until the process ends.
 ///
 /// The session sends the bound set, every press and release, every
 /// diagnostic, and its own failure to `tx` as an [`Event`]. The thread is
 /// never joined because it owns nothing that the daemon needs. Process exit
 /// closes the connection and tells the portal that the session ended.
-pub fn spawn(preferred: [(ShortcutId, String); 2], tx: SyncSender<Event>) -> std::io::Result<()> {
+pub fn spawn(preferred: Vec<(ShortcutId, String)>, tx: SyncSender<Event>) -> std::io::Result<()> {
     std::thread::Builder::new().name("chibipop-shortcuts".to_string()).spawn(move || {
         if let Err(why) = run(&preferred, &tx) {
             let _ = tx.send(Event::Unavailable { reason: why.reason, advice: why.advice });
@@ -126,7 +126,7 @@ impl From<String> for Why {
 
 /// The session from setup to bus disconnect: subscribe, CreateSession,
 /// BindShortcuts, ListShortcuts, then pump.
-fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<(), Why> {
+fn run(preferred: &[(ShortcutId, String)], tx: &SyncSender<Event>) -> Result<(), Why> {
     let conn = Connection::session().map_err(|err| format!("no session bus: {err}"))?;
     let sender = conn
         .unique_name()
@@ -161,7 +161,7 @@ fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<
         "trigger: {SHORTCUTS_INTERFACE} v{version} session {session_path}"
     )));
 
-    // BindShortcuts runs once per session for exactly two ids.
+    // Bind once per session.
     let bound = request(&conn, &sender, "BindShortcuts", BIND, |token| {
         let mut options: HashMap<&str, Value<'_>> = HashMap::new();
         options.insert("handle_token", Value::from(token));
@@ -206,11 +206,9 @@ fn run(preferred: &[(ShortcutId, String); 2], tx: &SyncSender<Event>) -> Result<
     Ok(())
 }
 
-/// The two shortcuts as `a(sa{sv})`: id, description, preferred trigger.
-///
-/// The fixed-size input prevents a third id without a type change.
+/// Encode each shortcut's id, description, and preferred trigger.
 fn payload(
-    preferred: &[(ShortcutId, String); 2],
+    preferred: &[(ShortcutId, String)],
 ) -> Vec<(String, HashMap<&'static str, Value<'static>>)> {
     preferred
         .iter()

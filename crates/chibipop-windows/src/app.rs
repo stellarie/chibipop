@@ -301,6 +301,7 @@ pub fn settings_only(
     let mut quit_requested = false;
     let mut tick = 0usize;
     let mut css_editor_so: Option<crate::ui::editor::CssEditor> = None;
+    let mut search_window: Option<crate::ui::search_window::SearchWindow> = None;
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let (detect_tx, detect_rx) = mpsc::channel::<AnkiDetect>();
     let mut detect_gen = 0u64;
@@ -311,12 +312,24 @@ pub fn settings_only(
     // SAFETY: `msg` is this loop's stack storage, and `window` stays alive for
     // the whole loop. It drops only after this function returns.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        if let Some(editor) = &css_editor_so {
+            if matches!(editor.take_outcome(), Some(crate::ui::editor::EditorOutcome::Applied)) {
+                if let Some(search) = &mut search_window { search.update_config(&cfg); }
+            }
+            if !editor.is_visible() { css_editor_so = None; }
+        }
+        if let Some(search) = &mut search_window {
+            search.poll();
+            if search.handle_message(&msg) { continue; }
+        }
         // The settings window has no hooks, so there is nothing to disarm.
         window.pump(|| {});
+
 
         if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
             && window.handle_capture_key(msg.wParam.0 as u16)
         {
+            crate::input::hooks::clear_keyboard_actions();
             continue;
         }
 
@@ -349,6 +362,11 @@ pub fn settings_only(
             tid,
             &mut css_editor_so,
         );
+        if let Some(mode) = window.take_search_request() {
+            let config = crate::config::load_or_create(config_path)?;
+            open_search_window_mode(&mut search_window, dict_path,
+                &crate::paths::data_file("data/deconjugator.json"), &config, mode, None);
+        }
 
         // A tab switch starts deck, model, and field detection.
         if let Some(tab) = window.take_tab_change() {
@@ -1513,6 +1531,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     }
 
     let mut hooks = Some(Hooks::install().context("installing the low-level input hooks")?);
+    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
     Hooks::set_mode(live.trigger_mode);
     Hooks::set_trigger_key(crate::config::parse_trigger_key(&live.trigger_key).unwrap_or(0));
     Hooks::set_add_hotkey(crate::config::parse_trigger_key(&live.anki_add_key).unwrap_or(0));
@@ -1556,6 +1576,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut controller = Controller::new(controller_config(&live));
     // Defer OpenSettings to the message loop.
     let mut want_settings = false;
+    let mut search_window: Option<crate::ui::search_window::SearchWindow> = None;
+    let mut search_config = cfg.clone();
+    let mut search_was_focused = false;
     // An authorized add that waits for a region.
     // See `PendingShot`.
     let mut pending_shot: Option<PendingShot> = None;
@@ -1565,6 +1588,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut pointer_buttons = 0u8;
     let mut last_pointer: Option<PhysPoint> = None;
     let mut last_pointer_text = None;
+    let parent_popups = std::cell::RefCell::new(Vec::<(Popup, Renderer)>::new());
     // Visibility of the static overlay.
     let sr_prev_visible = std::cell::Cell::new(false);
     let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
@@ -1620,11 +1644,14 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
 
     // I4: keep all capture-guard code in one place.
+    let cancel_hidden_hover = std::cell::Cell::new(false);
     let drain_capture_guard = || {
         while let Ok(req) = capture_guard_rx.try_recv() {
             match req {
                 CaptureGuardMsg::Hide { ack } => {
+                    cancel_hidden_hover.set(true);
                     capture_guard_prev_visible.set(popup.is_visible());
+                    set_parent_visibility(&parent_popups, false);
                     let _ = popup.hide();
                     btn_prev_visible.set(anki_button.as_ref().is_some_and(|b| b.is_visible()));
                     if let Some(b) = &anki_button {
@@ -1651,6 +1678,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 }
                 CaptureGuardMsg::Restore => {
                     if capture_guard_prev_visible.get() {
+                        set_parent_visibility(&parent_popups, true);
                         let _ = popup.show_without_activating();
                     }
                     if btn_prev_visible.get() {
@@ -1688,6 +1716,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 $event,
                 &mut Exec {
                     popup: &popup,
+                    parent_popups: &parent_popups,
+                    capture_guard_active: &capture_guard_active,
+                    cancel_hidden_hover: &cancel_hidden_hover,
+                    capture_restore: [&capture_guard_prev_visible, &overlay_prev_visible, &btn_prev_visible],
+                    db_path: &db_path,
                     renderer: &mut renderer,
                     theme: &theme,
                     cfg: &cfg,
@@ -1740,6 +1773,30 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             break; // 0 means WM_QUIT. -1 means an error. Stop the message loop in either case.
         }
 
+        let mut search_focused = crate::ui::search_window::is_foreground();
+        if search_focused && !search_was_focused {
+            capture_guard_prev_visible.set(false);
+            overlay_prev_visible.set(false);
+            btn_prev_visible.set(false);
+            drive!(Event::DismissRequested);
+        }
+        search_was_focused = search_focused;
+
+        let _ = Hooks::take_back();
+        if Hooks::take_escape() && !search_focused {
+            if controller.popup_depth() > 0 {
+                crate::input::hooks::discard_keyboard_actions();
+                drive!(Event::BackRequested);
+            } else {
+                crate::input::hooks::cancel_keyboard_actions();
+                drive!(Event::DismissRequested);
+            }
+        }
+
+        if search_window.as_mut().is_some_and(|window| window.handle_message(&msg)) {
+            continue;
+        }
+
         sync_runtime_status(settings.as_ref(), &ocr_monitor, cfg.anki.enabled, &mut shown_runtime);
         // Route messages for the modeless settings window.
         if let Some(w) = &settings {
@@ -1753,6 +1810,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
                 && w.handle_capture_key(msg.wParam.0 as u16)
             {
+                crate::input::hooks::clear_keyboard_actions();
                 continue;
             }
 
@@ -1767,6 +1825,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 main_tid,
                 &mut css_editor,
             );
+            if let Some(mode) = w.take_search_request() {
+                drive!(Event::DismissRequested);
+                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg, mode, None);
+                search_focused = crate::ui::search_window::is_foreground();
+            }
 
             // Start deck, model, and field detection after a tab switch.
             if let Some(tab) = w.take_tab_change() {
@@ -1800,16 +1863,59 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
+            if Hooks::take_action_hotkey(3) {
+                capture_guard_prev_visible.set(false);
+                overlay_prev_visible.set(false);
+                btn_prev_visible.set(false);
+                drive!(Event::DismissRequested);
+                open_search_window(&mut search_window, &db_path, &rules_path, &cfg);
+                search_focused = crate::ui::search_window::is_foreground();
+            }
+            if Hooks::take_action_hotkey(4) {
+                drive!(Event::DismissRequested);
+                open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
+                    chibipop::search::SearchMode::Sentence, None);
+                search_focused = crate::ui::search_window::is_foreground();
+            }
+            if let Some(window) = &mut search_window {
+                if search_config != cfg {
+                    window.update_config(&cfg);
+                    search_config = cfg.clone();
+                }
+                window.poll();
+            }
             // Read the popup's current rect.
             let cursor_pos = cursor_now();
+            if pointer_buttons == 0 && popup.is_visible() {
+                if let Some(depth) = controller.popup_at(cursor_pos) {
+                    drive!(Event::PopupEntered { depth });
+                } else {
+                    drive!(Event::PopupEntered { depth: usize::MAX });
+                }
+                if let Some(depth) = controller.popup_at(cursor_pos) {
+                    let view = if depth == controller.popup_depth() { controller.popup() }
+                        else { controller.parent_popup(depth) };
+                    if let Some(view) = view {
+                        let local = PhysPoint { x: cursor_pos.x - view.popup.x, y: cursor_pos.y - view.popup.y };
+                        let query = if depth == controller.popup_depth() {
+                            renderer.hover_query(local, view.scroll)
+                        } else {
+                            parent_popups.borrow_mut().get_mut(depth)
+                                .and_then(|(_, renderer)| renderer.hover_query(local, view.scroll))
+                        };
+                        drive!(Event::PopupHoverAt { depth, local, query });
+                    }
+                } else {
+                    drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+                }
+            }
             let button_h = anki_button
                 .as_ref()
                 .filter(|b| b.is_visible())
                 .map_or(0, |b| b.height_phys());
-            drive!(Event::Tick {
-                cursor: cursor_pos,
-                button_h
-            });
+            if !search_focused {
+                drive!(Event::Tick { cursor: cursor_pos, button_h });
+            }
 
             Hooks::set_outside_watch(
                 matches!(live.trigger_mode, crate::config::TriggerMode::Press)
@@ -1818,7 +1924,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             if let Some(point) = Hooks::take_outside_click() {
                 if let Some(view) = controller.popup() {
                     let popup = PhysRect { h: view.popup.h + button_h, ..view.popup };
-                    if !popup.contains(point) {
+                    if !popup.contains(point) && controller.popup_at(point).is_none() {
                         drive!(Event::PointerDownOutside);
                     }
                 }
@@ -1826,11 +1932,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             let notches = Hooks::take_whole_notches();
             if notches != 0 {
+                if let Some(depth) = controller.popup_at(cursor_pos) {
+                    drive!(Event::PopupActivated { depth });
+                }
                 drive!(Event::Scrolled { notches });
             }
 
             let mut pointer_move = Hooks::take_pointer_move();
             for edge in Hooks::take_pointer_events() {
+                if edge.down && pointer_buttons == 0 {
+                    if let Some(depth) = controller.popup_at(edge.point) {
+                        drive!(Event::PopupActivated { depth });
+                    }
+                }
                 let (button, bit) = match edge.button {
                     crate::input::hooks::PointerButton::Left => (Button::Primary, 1u8),
                     crate::input::hooks::PointerButton::Right => (Button::Secondary, 2u8),
@@ -1893,14 +2007,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             // Every add path sends one Event. The state machine chooses the result,
             // and `AddNote` handles any screenshot.
-            if Hooks::take_add_hotkey() {
+            if Hooks::take_add_hotkey() && !search_focused {
                 drive!(Event::AddRequested);
             }
 
             // Handle the static-region hotkey in slot 1.
             // This hotkey works in every sentence mode.
-            if Hooks::take_action_hotkey(1) {
+            if Hooks::take_action_hotkey(1) && !search_focused {
+                drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
                 let had_popup = controller.popup().is_some();
+                set_parent_visibility(&parent_popups, false);
                 let _ = popup.hide();
                 if let Some(b) = &anki_button {
                     b.hide();
@@ -1934,6 +2050,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     );
                 }
                 if had_popup {
+                    set_parent_visibility(&parent_popups, true);
                     let _ = popup.show_without_activating();
                     if let Some(b) = &anki_button {
                         b.show_without_activating();
@@ -1943,14 +2060,16 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             // Dispatch action hotkeys.
             for slot in 0..crate::input::hooks::MAX_ACTION_SLOTS {
-                if slot == 1 {
-                    continue; // Slot 1 was handled above.
-                }
-                if !Hooks::take_action_hotkey(slot) {
+                if slot == 1 || slot == 3 || slot == 4 {
                     continue;
                 }
+                if !Hooks::take_action_hotkey(slot) || search_focused {
+                    continue;
+                }
+                drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
                 let had_popup = controller.popup().is_some();
                 if had_popup {
+                    set_parent_visibility(&parent_popups, false);
                     let _ = popup.hide();
                     if let Some(b) = &anki_button {
                         b.hide();
@@ -2013,6 +2132,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             let _ = screenshot_tx.send(cmd);
                         }
                     }
+                    Some(crate::action::ActionOutcome::Cancelled) => {
+                        crate::input::hooks::discard_keyboard_actions();
+                    }
                     Some(crate::action::ActionOutcome::Failed(msg)) => {
                         eprintln!("chibipop: action failed: {msg}");
                     }
@@ -2020,12 +2142,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         if let Err(e) = crate::clipboard::set_text(&text) {
                             eprintln!("chibipop: copying OCR text failed: {e:#}");
                         }
+                        if cfg.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search)
+                            && !text.trim().is_empty() {
+                            drive!(Event::DismissRequested);
+                            open_search_window_mode(&mut search_window, &db_path, &rules_path, &cfg,
+                                chibipop::search::SearchMode::Sentence, Some(&text));
+                        }
                     }
                     _ => {}
                 }
 
                 // Restore the windows after capture.
-                if had_popup {
+                if had_popup && controller.popup().is_some() {
+                    set_parent_visibility(&parent_popups, true);
                     let _ = popup.show_without_activating();
                     if let Some(b) = &anki_button {
                         b.show_without_activating();
@@ -2034,13 +2163,10 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 sync_anki_button(anki_button.as_ref(), controller.popup(), &theme);
             }
 
-            if Hooks::take_back() {
-                drive!(Event::BackRequested);
-            }
-
             if let Some(ed) = &css_editor {
                 if let Some(crate::ui::editor::EditorOutcome::Applied) = ed.take_outcome() {
                     theme = theme_from_config(&live.popup);
+                    if let Some(window) = &mut search_window { window.update_config(&cfg); }
                     if let Some(v) = controller.popup() {
                         let selection = controller.selection();
                         let scroll = v.scroll;
@@ -2271,7 +2397,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             // A trigger-key release retracts the popup.
             let held = Hooks::trigger_held();
-            if held != trigger_was_held {
+            if held != trigger_was_held && !search_focused {
                 trigger_was_held = held;
                 if held {
                     drive!(Event::TriggerDown);
@@ -2305,7 +2431,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             .into_iter()
             .flatten()
             {
-                drive!(event);
+                if !search_focused { drive!(event); }
             }
 
         } else if msg.message == WM_APP_RESULT {
@@ -2409,6 +2535,13 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             drain_capture_guard();
         }) {
             match cmd {
+                TrayCommand::OpenSearch => {
+                    capture_guard_prev_visible.set(false);
+                    overlay_prev_visible.set(false);
+                    btn_prev_visible.set(false);
+                    drive!(Event::DismissRequested);
+                    open_search_window(&mut search_window, &db_path, &rules_path, &cfg);
+                }
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
                 TrayCommand::Quit => {
                     if quit_when_idle(Some(SettingsOutcome::Quit), edit.is_some(), &mut quit_requested) {
@@ -2441,6 +2574,8 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
         // Handle the OS half of screenshot-on-add outside every Command batch.
         if let Some(pending) = pending_shot.take() {
+            drive!(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+            set_parent_visibility(&parent_popups, false);
             let _ = popup.hide();
             if let Some(b) = &anki_button {
                 b.hide();
@@ -2479,6 +2614,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             };
             let view = screenshot_restore_view(&controller);
             if view.is_some() {
+                set_parent_visibility(&parent_popups, true);
                 let _ = popup.show_without_activating();
             }
             sync_anki_button(anki_button.as_ref(), view, &theme);
@@ -2698,6 +2834,13 @@ fn cursor_now() -> PhysPoint {
     }
     PhysPoint { x: pt.x, y: pt.y }
 }
+fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, visible: bool) {
+    for (popup, _) in parents.borrow().iter() {
+        if visible { let _ = popup.show_without_activating(); }
+        else { let _ = popup.hide(); }
+    }
+}
+
 /// Convert a screen point into popup-local physical coordinates.
 fn popup_local(controller: &Controller, screen: PhysPoint) -> Option<(PhysPoint, i32)> {
     let view = controller.popup()?;
@@ -2806,6 +2949,7 @@ fn sync_anki_button(btn: Option<&AnkiButton>, view: Option<PopupView<'_>>, theme
 /// Builds the Controller configuration from live settings.
 fn controller_config(live: &LiveSettings) -> ControllerConfig {
     ControllerConfig {
+        sub_popups: live.popup.sub_popups,
         trigger_mode: live.trigger_mode,
         per_character_lookup: live.per_character_lookup,
         scroll_popup: live.scroll_popup,
@@ -2840,6 +2984,11 @@ struct PendingShot {
 /// Provides the values that Command handling needs.
 struct Exec<'a> {
     popup: &'a Popup,
+    parent_popups: &'a std::cell::RefCell<Vec<(Popup, Renderer)>>,
+    capture_guard_active: &'a AtomicBool,
+    cancel_hidden_hover: &'a std::cell::Cell<bool>,
+    capture_restore: [&'a std::cell::Cell<bool>; 3],
+    db_path: &'a Path,
     renderer: &'a mut Renderer,
     theme: &'a Theme,
     /// `AddNote` passes the full config to `chibipop::shot`.
@@ -2874,6 +3023,9 @@ struct Exec<'a> {
 /// `PopupPlaceFailed` enters the queue at once.
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
     let mut queue = std::collections::VecDeque::new();
+    if x.cancel_hidden_hover.replace(false) {
+        queue.push_back(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
+    }
     queue.push_back(event);
     while let Some(ev) = queue.pop_front() {
         for cmd in controller.handle(ev) {
@@ -2892,6 +3044,50 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
     }
     match cmd {
         // Windows excludes its popup from its own captures at the OS level.
+        Command::PushPopup => {
+            let depth = controller.popup_depth().saturating_sub(1);
+            let view = controller.parent_popup(depth)?;
+            let saved = (|| -> Result<(Popup, Renderer)> {
+                let popup = Popup::create(x.live.exclude_from_capture)?;
+                popup.set_alpha((x.theme.opacity * 255.0).round().clamp(0.0, 255.0) as u8);
+                let mut renderer = Renderer::new(popup.hwnd(), x.db_path)?;
+                popup.show_at(view.popup)?;
+                renderer.paint(SceneInputs {
+                    presentation: view.presentation, theme: x.theme, show_back: view.show_back,
+                    side_panel: x.live.side_panel, render: x.live.popup.render_settings(),
+                    selection: x.cfg.anki.enabled.then_some(view.selection),
+                }, view.scroll)?;
+                Ok((popup, renderer))
+            })();
+            match saved {
+                Ok(saved) => {
+                    if saved.0.capture_exclusion().needs_capture_guard() {
+                        x.capture_guard_active.store(true, Ordering::SeqCst);
+                    }
+                    x.parent_popups.borrow_mut().push(saved);
+                    None
+                }
+                Err(error) => {
+                    eprintln!("chibipop: retaining parent popup failed: {error:#}");
+                    Some(Event::PopupPlaceFailed)
+                }
+            }
+        }
+        Command::RestorePopup { depth } => {
+            x.parent_popups.borrow_mut().truncate(depth);
+            sync_popup_capture_guard(x);
+            if let Some(view) = controller.popup() {
+                if let Err(error) = x.popup.show_at(view.popup) {
+                    eprintln!("chibipop: restoring parent popup failed: {error:#}");
+                }
+            }
+            None
+        }
+        Command::ClearPopupParents => {
+            x.parent_popups.borrow_mut().clear();
+            sync_popup_capture_guard(x);
+            None
+        }
         // It uses WDA_EXCLUDEFROMCAPTURE or the hide-and-reshow Capture guard.
         // It therefore sends no mask rectangles, and `popup` is unread here.
         // (ARCHITECTURE.md#capture-and-masking).
@@ -3014,6 +3210,9 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             feedback
         }
         Command::HidePopup => {
+            for visible in x.capture_restore { visible.set(false); }
+            x.parent_popups.borrow_mut().clear();
+            sync_popup_capture_guard(x);
             let _ = x.popup.hide();
             if let Some(b) = x.anki_button {
                 b.hide();
@@ -3186,6 +3385,9 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
 
 fn command_diagnostic(cmd: &Command) -> String {
     match cmd {
+        Command::PushPopup => "action=push_popup".to_string(),
+        Command::RestorePopup { depth } => format!("action=restore_popup depth={depth}"),
+        Command::ClearPopupParents => "action=clear_popup_parents".to_string(),
         Command::RequestLookup { id, point, popup } => format!(
             "action=request_lookup id={} point=({}, {}) popup={}",
             id.0,
@@ -3341,6 +3543,8 @@ struct LiveSettings {
     per_character_lookup: bool,
     actions_screenshot_hotkey: String,
     actions_ocr_clipboard_hotkey: Option<String>,
+    actions_search_hotkey: Option<String>,
+    actions_sentence_search_hotkey: Option<String>,
     include_dictionary_name: bool,
     first_dict_only: bool,
     selection_buttons: SelectionButtons,
@@ -3377,6 +3581,8 @@ fn derive(cfg: &Config) -> LiveSettings {
             crate::config::HotkeyAction::OcrClipboard => {
                 if let Some(clipboard) = &mut resolved.actions.ocr_clipboard { clipboard.hotkey = None; }
             }
+            crate::config::HotkeyAction::Search => resolved.actions.search.hotkey = None,
+            crate::config::HotkeyAction::SentenceSearch => resolved.actions.search.sentence_hotkey = None,
             crate::config::HotkeyAction::Back => {}
         }
     }
@@ -3384,6 +3590,8 @@ fn derive(cfg: &Config) -> LiveSettings {
         resolved.anki.static_region_key.clear();
         resolved.actions.screenshot.hotkey.clear();
         resolved.actions.ocr_clipboard = None;
+        resolved.actions.search.hotkey = None;
+        resolved.actions.search.sentence_hotkey = None;
     }
     let cfg = &resolved;
     LiveSettings {
@@ -3436,6 +3644,8 @@ fn derive(cfg: &Config) -> LiveSettings {
         notify_on_add: cfg.anki.notify_on_add,
         per_character_lookup: cfg.trigger.per_character_lookup,
         actions_screenshot_hotkey: cfg.actions.screenshot.hotkey.clone(),
+        actions_search_hotkey: cfg.actions.search.hotkey.clone(),
+        actions_sentence_search_hotkey: cfg.actions.search.sentence_hotkey.clone(),
         actions_ocr_clipboard_hotkey: cfg
             .actions
             .ocr_clipboard
@@ -3496,6 +3706,16 @@ fn rescope_lookups(
         kind: TriggerKind::Reload(Box::new(worker_settings(live, dicts))),
         id: RequestId(0),
     });
+}
+
+fn sync_popup_capture_guard(x: &Exec<'_>) {
+    let needed = capture_guard_needed(
+        x.popup.capture_exclusion(),
+        x.overlay.map(Overlay::capture_exclusion),
+        x.anki_button.map(AnkiButton::capture_exclusion),
+    ) || x.parent_popups.borrow().iter()
+        .any(|(popup, _)| popup.capture_exclusion().needs_capture_guard());
+    x.capture_guard_active.store(needed, Ordering::SeqCst);
 }
 
 /// Returns true when at least one window needs the Capture guard.
@@ -3576,6 +3796,8 @@ fn apply_live(
         Some(vk) => Hooks::set_action_hotkey(2, vk, 0),
         None => Hooks::set_action_hotkey(2, 0, 0),
     }
+    sync_search_hotkey(3, live.actions_search_hotkey.as_deref());
+    sync_search_hotkey(4, live.actions_sentence_search_hotkey.as_deref());
 }
 
 /// Registers the action when a valid key exists.
@@ -3585,6 +3807,41 @@ fn sync_ocr_clipboard_action(registry: &mut crate::action::ActionRegistry, hotke
             2,
             Box::new(crate::action::ocr_clipboard::OcrClipboardAction),
         );
+    }
+}
+
+fn sync_search_hotkey(slot: usize, hotkey: Option<&str>) {
+    let (vk, modifiers) = hotkey.and_then(crate::config::parse_hotkey).unwrap_or((0, 0));
+    Hooks::set_action_hotkey(slot, vk, modifiers);
+    let _ = Hooks::take_action_hotkey(slot);
+}
+
+fn open_search_window(
+    window: &mut Option<crate::ui::search_window::SearchWindow>,
+    database: &Path,
+    rules: &Path,
+    config: &Config,
+) {
+    open_search_window_mode(window, database, rules, config, chibipop::search::SearchMode::Dictionary, None);
+}
+
+fn open_search_window_mode(
+    window: &mut Option<crate::ui::search_window::SearchWindow>,
+    database: &Path,
+    rules: &Path,
+    config: &Config,
+    mode: chibipop::search::SearchMode,
+    text: Option<&str>,
+) {
+    if let Some(window) = window {
+        window.update_config(config);
+        window.switch_mode(mode, text);
+        window.show();
+    } else {
+        match crate::ui::search_window::SearchWindow::open_mode(database, rules, config, mode, text) {
+            Ok(opened) => *window = Some(opened),
+            Err(error) => eprintln!("chibipop: opening search failed: {error:#}"),
+        }
     }
 }
 
@@ -3681,6 +3938,27 @@ mod tests {
     use crate::config::PopupConfig;
 
     #[test]
+    fn search_shortcut_tracks_live_enablement_without_rewriting_saved_keys() {
+        let mut cfg = Config::default();
+        cfg.actions.enabled = true;
+        cfg.actions.search.hotkey = Some("Ctrl+Shift+F".into());
+        assert_eq!(derive(&cfg).actions_search_hotkey.as_deref(), Some("Ctrl+Shift+F"));
+        cfg.actions.enabled = false;
+        assert!(derive(&cfg).actions_search_hotkey.is_none());
+        assert_eq!(cfg.actions.search.hotkey.as_deref(), Some("Ctrl+Shift+F"));
+    }
+
+    #[test]
+    fn loaded_search_shortcut_conflicts_disable_search_in_memory() {
+        let mut cfg = Config::default();
+        cfg.actions.enabled = true;
+        cfg.actions.search.hotkey = Some(cfg.trigger.trigger_key.clone());
+        let saved = cfg.clone();
+        assert!(derive(&cfg).actions_search_hotkey.is_none());
+        assert_eq!(cfg, saved);
+    }
+
+    #[test]
     fn conflicting_loaded_shortcuts_disable_only_the_lower_priority_action() {
         let mut cfg = Config::default();
         cfg.trigger.trigger_key = "f2".into();
@@ -3696,7 +3974,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.actions.enabled = false;
         cfg.anki.static_region_key = "f3".into();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f4".into()), hotkey_linux: None,
         });
         let live = derive(&cfg);
@@ -3990,7 +4268,7 @@ mod tests {
     #[test]
     fn derive_carries_the_ocr_clipboard_key() {
         let mut cfg = Config::default();
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".to_string()),
             hotkey_linux: None,
         });
