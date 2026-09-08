@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chibipop::config::Config;
 use chibipop::geom::PhysPoint;
 use chibipop::search::{candidates, selected_presentation, SearchMode, SearchResult,
-    SearchService, SentenceAnalyzer, SentenceToken};
+    SearchService, SentenceToken};
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -215,10 +215,9 @@ impl SearchWindow {
         let db = database.to_path_buf();
         let rules = rules.to_path_buf();
         if let Err(error) = std::thread::Builder::new().name("dictionary-search".into()).spawn(move || {
-            let mut analyzer = SentenceAnalyzer::new(crate::paths::data_file(chibipop::analysis::MODEL_FILE));
             while let Ok(mut query) = inbox.recv() {
                 while let Ok(newer) = inbox.try_recv() { query = newer; }
-                let reply = search(&db, &rules, &query, &mut analyzer);
+                let reply = search(&db, &rules, &query);
                 if outbox.send(reply).is_err() { break; }
             }
         }) {
@@ -241,7 +240,7 @@ impl SearchWindow {
         self.state.clicked.set(None);
         let title = if mode == SearchMode::Dictionary { "Dictionary search" } else { "Sentence search" };
         let button = if mode == SearchMode::Dictionary { "Sentence search" } else { "Dictionary search" };
-        let input_label = if mode == SearchMode::Dictionary { "Search term" } else { "Japanese sentence" };
+        let input_label = if mode == SearchMode::Dictionary { "Search term" } else { "Sentence" };
         let submit = if mode == SearchMode::Dictionary { "Search dictionary" } else { "Analyze sentence" };
         let results_label = if mode == SearchMode::Dictionary { "Dictionary candidates" }
             else { "Candidates for selected word" };
@@ -542,7 +541,7 @@ impl SearchWindow {
         }
         let status = match &self.result {
             SearchResult::Empty if self.state.mode.get() == SearchMode::Sentence => "Paste a sentence, then click a word to see its candidates.".into(),
-            SearchResult::Empty => "Type a Japanese word or expression.".into(),
+            SearchResult::Empty => "Type a word or expression.".into(),
             SearchResult::Miss => "No matching entries in the enabled dictionaries.".into(),
             SearchResult::Found(_) => format!("{} {}. Select a word to view its definition.",
                 rows.len(), if rows.len() == 1 { "candidate" } else { "candidates" }),
@@ -564,15 +563,25 @@ impl Drop for SearchWindow {
     }
 }
 
-fn search(database: &Path, rules: &Path, query: &Query, analyzer: &mut SentenceAnalyzer) -> Reply {
-    let tokens = if query.mode == SearchMode::Sentence { analyzer.tokenize(&query.text) } else { Vec::new() };
+fn search(database: &Path, rules: &Path, query: &Query) -> Reply {
+    let run = || -> Result<_> {
+    let service = SearchService::open(database, rules, &query.config)?;
+    let tokens = if query.mode == SearchMode::Sentence { service.sentence_tokens(&query.text)? } else { Vec::new() };
     let selected = query.clicked.and_then(|offset| tokens.iter()
         .find(|token| token.selectable && token.range.contains(&offset)).map(|token| token.range.clone()));
     let text = if query.mode == SearchMode::Dictionary { query.text.as_str() }
         else { selected.as_ref().and_then(|range| query.text.get(range.clone())).unwrap_or("") };
-    let result = SearchService::open(database, rules, &query.config)
-        .and_then(|service| service.search(text)).map_err(|error| format!("{error:#}"));
-    Reply { generation: query.generation, result, tokens, selected, definition: query.definition }
+    let result = if query.mode == SearchMode::Sentence {
+        service.search_word(text)
+    } else { service.search(text) }?;
+    Ok((tokens, selected, result))
+    };
+    match run() {
+        Ok((tokens, selected, result)) => Reply { generation: query.generation, result: Ok(result),
+            tokens, selected, definition: query.definition },
+        Err(error) => Reply { generation: query.generation, result: Err(format!("{error:#}")),
+            tokens: Vec::new(), selected: None, definition: query.definition },
+    }
 }
 
 fn utf16_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -852,7 +861,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 if !SetWindowSubclass(results, Some(input_proc), 1, pointer as usize).as_bool() { return LRESULT(-1); }
                 LRESULT(0)
             }
-            WM_SIZE => { layout(hwnd, state); LRESULT(0) }
+            WM_SIZE => {
+                layout(hwnd, state);
+                let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                LRESULT(0)
+            }
             WM_TIMER => LRESULT(0),
             WM_DPICHANGED => {
                 let rect = &*(lp.0 as *const RECT);
@@ -1176,7 +1189,7 @@ mod tests {
         window.update_config(&Config::default()); wait(&mut window, "candidate");
         // SAFETY: These are synchronous native text changes.
         replace_input(&window, "　 ");
-        wait(&mut window, "Type a Japanese word");
+        wait(&mut window, "Type a word");
         // SAFETY: These are synchronous native text changes.
         replace_input(&window, "絶対にない検索");
         wait(&mut window, "No matching entries");

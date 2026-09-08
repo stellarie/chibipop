@@ -140,6 +140,63 @@ impl SearchService {
     pub fn search(&self, query: &str) -> Result<SearchResult> {
         search(&self.dictionary, &self.engine, &self.dicts, &self.config, query)
     }
+
+    pub fn sentence_tokens(&self, text: &str) -> Result<Vec<SentenceToken>> {
+        dictionary_tokens(&enabled_dictionary(&self.dictionary, &self.dicts, &self.config), &self.engine, text)
+    }
+
+    pub fn search_word(&self, word: &str) -> Result<SearchResult> {
+        word_search(&self.dictionary, &self.engine, &self.dicts, &self.config, word)
+    }
+}
+
+fn enabled_dictionary<'a>(dictionary: &'a dyn Dictionary, dicts: &[DictInfo],
+    config: &PresentConfig) -> EnabledDictionary<'a> {
+    EnabledDictionary { dictionary, ids: dicts.iter().filter(|dict| config.terms.contains(&dict.name))
+        .map(|dict| dict.dict_id).collect() }
+}
+
+fn dictionary_tokens(dictionary: &dyn Dictionary, engine: &LookupEngine, text: &str) -> Result<Vec<SentenceToken>> {
+    let mut boundaries: Vec<_> = text.char_indices().map(|(byte, _)| byte).collect();
+    boundaries.push(text.len());
+    let mut index = 0;
+    let mut tokens = Vec::new();
+    while index + 1 < boundaries.len() {
+        let start = boundaries[index];
+        let selectable = text[start..].chars().next().is_some_and(char::is_alphanumeric);
+        let mut length = 1;
+        if selectable {
+            let available = text[start..].chars().take(crate::lookup::engine::MAX_LOOKUP_CHARS)
+                .take_while(|ch| ch.is_alphanumeric()).count();
+            let end = boundaries[index + available];
+            length = engine.run(dictionary, &text[start..end])?.iter()
+                .map(|hit| hit.match_len).max().unwrap_or(1).clamp(1, available);
+        }
+        let range = start..boundaries[index + length];
+        tokens.push(SentenceToken { text: text[range.clone()].to_string(), range, selectable });
+        index += length;
+    }
+    Ok(tokens)
+}
+
+fn word_search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[DictInfo],
+    config: &PresentConfig, word: &str) -> Result<SearchResult> {
+    if word.trim().is_empty() { return Ok(SearchResult::Empty); }
+    let enabled = enabled_dictionary(dictionary, dicts, config);
+    let mut hits = Vec::new();
+    let inflected = word.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30ff}'));
+    for (offset, _) in word.char_indices().take(crate::lookup::engine::MAX_LOOKUP_CHARS) {
+        if offset != 0 && inflected { break; }
+        for hit in engine.run(&enabled, &word[offset..])? {
+            if !hits.iter().any(|existing: &crate::lookup::model::Hit|
+                existing.entry.entry_id == hit.entry.entry_id && existing.written == hit.written
+                    && existing.reading == hit.reading) { hits.push(hit); }
+        }
+        if hits.len() >= crate::lookup::engine::MAX_RESULTS { break; }
+    }
+    hits.truncate(crate::lookup::engine::MAX_RESULTS);
+    let presentation = present::build(&hits, dicts, config, dictionary);
+    Ok(if presentation.top.is_some() { SearchResult::Found(Box::new(presentation)) } else { SearchResult::Miss })
 }
 
 struct EnabledDictionary<'a> {
@@ -177,7 +234,7 @@ fn search(dictionary: &dyn Dictionary, engine: &LookupEngine, dicts: &[DictInfo]
 pub fn result_text(result: &SearchResult) -> String {
     let SearchResult::Found(presentation) = result else {
         return match result {
-            SearchResult::Empty => "Type a Japanese word or expression, then press Enter.".into(),
+            SearchResult::Empty => "Type a word or expression, then press Enter.".into(),
             _ => "No matching entries in the enabled dictionaries.".into(),
         };
     };
@@ -215,6 +272,34 @@ pub fn result_text(result: &SearchResult) -> String {
 mod tests {
     use super::*;
     use crate::lookup::model::FakeDictionary;
+
+    #[test]
+    fn chinese_sentence_uses_enabled_dictionary_words_and_subword_candidates() {
+        let mut dictionary = FakeDictionary::new();
+        for (index, word) in ["我", "在", "学习", "学", "习", "中文"].iter().enumerate() {
+            let id = index as i64 + 1;
+            dictionary.add_term(word, Some(word), None, "", None, id, 1);
+            dictionary.add_entry(id, 1, "[\"definition\"]");
+        }
+        let engine = LookupEngine::new(Deconjugator::new(vec![]));
+        let dicts = vec![DictInfo { dict_id: 1, name: "Chinese".into() }];
+        let config = PresentConfig { terms: vec!["Chinese".into()], pitch: vec![], summary_chars: 80 };
+        let text = "我在学习中文";
+        let tokens = dictionary_tokens(&enabled_dictionary(&dictionary, &dicts, &config), &engine, text).unwrap();
+        assert_eq!(tokens.iter().map(|token| token.text.as_str()).collect::<Vec<_>>(), ["我", "在", "学习", "中文"]);
+        for (byte, word) in [(0, "我"), (3, "在"), (6, "学习"), (9, "学习"), (12, "中文"), (15, "中文")] {
+            assert_eq!(sentence_token_at(&tokens, byte).unwrap().text, word);
+        }
+        let result = word_search(&dictionary, &engine, &dicts, &config, "学习").unwrap();
+        assert_eq!(candidates(&result).iter().map(|row| row.headword.as_str()).collect::<Vec<_>>(), ["学习", "学", "习"]);
+        let disabled = PresentConfig { terms: vec![], ..config };
+        assert_eq!(word_search(&dictionary, &engine, &dicts, &disabled, "学习").unwrap(), SearchResult::Miss);
+        let text = "𠮷\n 我，中文。";
+        let tokens = dictionary_tokens(&dictionary, &engine, text).unwrap();
+        assert_eq!(tokens.iter().map(|token| token.text.as_str()).collect::<String>(), text);
+        assert!(sentence_token_at(&tokens, 0).is_some());
+        assert!(sentence_token_at(&tokens, 4).is_none());
+    }
 
     #[test]
     fn sentence_tokens_preserve_text_and_select_full_words_at_byte_offsets() {
@@ -296,9 +381,12 @@ mod tests {
         let mut config = Config::default();
         {
             let service = SearchService::open(&database, &rules, &config).unwrap();
+            let tokens = service.sentence_tokens("猫は食べました。").unwrap();
+            assert_eq!(sentence_token_at(&tokens, 9).unwrap().text, "食べました");
             assert_eq!(service.search("　").unwrap(), SearchResult::Empty);
             assert_eq!(service.search("絶対にない検索").unwrap(), SearchResult::Miss);
             let first = service.search("食べました").unwrap();
+            assert_eq!(service.search_word("食べました").unwrap(), first);
             let choices = candidates(&first);
             assert!(!choices.is_empty());
             let index = choices.iter().find(|candidate| candidate.headword == "食べる").unwrap().index;

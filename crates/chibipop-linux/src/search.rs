@@ -4,7 +4,7 @@ use crate::search_popup::Definition;
 use anyhow::{Context, Result};
 use chibipop::config::Config;
 use chibipop::search::{candidates, selected_presentation, SearchMode, SearchResult,
-    SearchService, SentenceAnalyzer, SentenceToken};
+    SearchService, SentenceToken};
 use chibipop::ui::theme::Theme;
 use chibipop_linux::media::MediaSurfaces;
 use iced::widget::{button, column, container, image, mouse_area, rich_text, row,
@@ -166,14 +166,15 @@ impl Worker {
     fn new(paths: Paths) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel::<(Job, WorkerReply)>();
         std::thread::Builder::new().name("search-worker".into()).spawn(move || {
-            let mut analyzer = SentenceAnalyzer::new(data_file("data/ipadic/system.dic"));
             for (job, reply) in receiver {
-                let mut run = || -> Result<Reply> {
+                let run = || -> Result<Reply> {
                     let config = chibipop::config::load_or_create(&paths.config_file)?;
                     let database = paths.data_dir.join("chibipop.sqlite");
-                    let tokens = if job.tokenize { analyzer.tokenize(&job.query) } else { Vec::new() };
+                    let service = SearchService::open(&database, &data_file("data/deconjugator.json"), &config)?;
+                    let tokens = if job.tokenize { service.sentence_tokens(&job.query)? } else { Vec::new() };
                     let result = if job.tokenize || job.query.trim().is_empty() { SearchResult::Empty }
-                        else { SearchService::open(&database, &data_file("data/deconjugator.json"), &config)?.search(&job.query)? };
+                        else if matches!(job.target, Target::Word(_)) { service.search_word(&job.query)? }
+                        else { service.search(&job.query)? };
                     Ok(Reply { result, tokens, config, database })
                 };
                 let _ = reply.send(run().map(Box::new).map_err(|error| format!("Search failed: {error:#}")));
@@ -359,7 +360,7 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                                 SearchResult::Found(_) => "Choose a candidate to open its definition.",
                                 SearchResult::Miss => "No matching entries in the enabled dictionaries.",
                                 SearchResult::Empty if search.mode == SearchMode::Sentence => "Paste a sentence, then click a word to see its candidates.",
-                                SearchResult::Empty => "Type or paste a Japanese word or expression.",
+                                SearchResult::Empty => "Type or paste a word or expression.",
                             }.into();
                         }
                         Target::Hover(id, _) => {
@@ -544,7 +545,7 @@ fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
     let collapsed_font = themed_font(search.font, theme.collapsed_weight, theme.collapsed_italic);
     let dimmed_font = themed_font(search.font, theme.dimmed_weight, theme.dimmed_italic);
     let input: Element<'_, Message> = match search.mode {
-        SearchMode::Dictionary => text_input("Japanese word or expression", &search.query)
+        SearchMode::Dictionary => text_input("Word or expression", &search.query)
             .id("search-query").on_input(Message::Input).on_submit(Message::Submit)
             .font(body_font).size(theme.body_size).padding(pad).style(move |_, _| text_input::Style {
                 background: panel_color(theme.background, theme.opacity).into(), border: border(theme),
@@ -558,7 +559,7 @@ fn view(search: &Search, id: window::Id) -> Element<'_, Message> {
             }).into(),
     };
     let label = |value| text(value).font(dimmed_font).size(theme.dimmed_size).color(color(theme.dimmed_text));
-    let input_label = if search.mode == SearchMode::Sentence { "Sentence to search" } else { "Word or expression" };
+    let input_label = if search.mode == SearchMode::Sentence { "Sentence" } else { "Word or expression" };
     let submit_label = if search.mode == SearchMode::Sentence { "Update sentence" } else { "Search" };
     let action = |value| button(text(value).font(body_font).size(theme.body_size)
         .width(Length::Fill).align_x(iced::Center)).padding(pad).width(Length::Fill)

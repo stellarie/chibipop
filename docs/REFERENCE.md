@@ -78,8 +78,11 @@ removes the shortcut.
 Sentence search opens with `chibipop search --sentence` on Windows or
 `chibipop sentence-search` on Linux. Paste text, then click a word in the
 sentence view. The selected word is highlighted and its candidates appear.
-Select a candidate to open its definition. Word grouping uses the committed
-Japanese analysis model; unavailable analysis uses the existing basic fallback.
+Select a candidate to open its definition. Word grouping uses enabled dictionary
+matches and the normal lookup engine, including Japanese inflections and Chinese words.
+Shorter entries inside the selected word can also appear as candidates.
+For example, `我在学习中文` can group as `我`, `在`, `学习`, and `中文`.
+Selecting `学习` can show `学习`, `学`, and `习` when those entries exist.
 
 Linux accepts `chibipop ctl search` and `chibipop ctl sentence-search` for
 compositor bindings. Both search commands accept explicit `--text` input.

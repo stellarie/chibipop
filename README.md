@@ -12,12 +12,13 @@ visible, so you can follow a definition without losing your place.
 Turn this behavior on or off in **Settings > Popup**.
 
 Open **Dictionary search** from the tray or **Settings > Dictionaries**.
-Type a Japanese word, then select a candidate to open its definition.
+Type a Japanese or Chinese word, then select a candidate to open its definition.
 Search and definitions use your pop-up theme.
 
 Open **Sentence search** from **Settings > Dictionaries** to work with a
 sentence. Paste the sentence, then click a word in the sentence view. The
-word is highlighted and its dictionary candidates appear below.
+word is highlighted and its dictionary candidates appear below. Word boundaries
+come from your enabled dictionaries, including Chinese entries.
 
 In **Settings > Shortcuts**, press the desired key or key combination to
 set either search shortcut. Enable **Open copied screen text in sentence
