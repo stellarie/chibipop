@@ -715,8 +715,10 @@ struct Screen {
     id: String,
     size: i64,
     hover: PhysPoint,
-    /// The text from the hovered glyph to the line end.
+    /// The text from the hovered glyph to the line end, or to the box edge when
+    /// `prefix` is set.
     expect: String,
+    prefix: bool,
     /// Ink boxes in screen pixels.
     chars: Vec<GtChar>,
     pixels: Vec<u8>,
@@ -742,6 +744,7 @@ fn load_large_text() -> Vec<Screen> {
                     y: e["hover"]["y"].as_i64().expect("hover.y") as i32,
                 },
                 expect: e["expect"].as_str().expect("expect").to_string(),
+                prefix: e["prefix"].as_bool().unwrap_or(false),
                 chars: e["chars"]
                     .as_array()
                     .expect("chars")
@@ -800,6 +803,7 @@ struct LargeRead {
     id: String,
     size: i64,
     expect: String,
+    prefix: bool,
     hovered: GtChar,
     resolved: Option<Resolved>,
     scan: Vec<ScanRect>,
@@ -840,7 +844,15 @@ fn read_large_text() -> Vec<LargeRead> {
             if let Some(r) = &resolved {
                 println!("large text {}: text {:?} at {} anchor {:?}", screen.id, r.span.text, r.span.cursor_byte_offset, r.span.anchor);
             }
-            LargeRead { id: screen.id, size: screen.size, expect: screen.expect, hovered, resolved, scan }
+            LargeRead {
+                id: screen.id,
+                size: screen.size,
+                expect: screen.expect,
+                prefix: screen.prefix,
+                hovered,
+                resolved,
+                scan,
+            }
         })
         .collect()
 }
@@ -849,14 +861,21 @@ fn large(id: &str) -> &'static LargeRead {
     LARGE.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("large-text screen {id}"))
 }
 
-/// The hovered glyph and the rest of its line must come back verbatim.
+/// The hovered glyph and the rest of its line must come back verbatim. A long line
+/// must come back at least to the box edge: the forward tiles read the rest, and
+/// their reach at large sizes is the engine's, not this gate's.
 fn read_whole(read: &LargeRead) {
     let resolved = read
         .resolved
         .as_ref()
         .unwrap_or_else(|| panic!("{} ({} px): no hit; scan {:?}", read.id, read.size, read.scan));
     let tail = &resolved.span.text[resolved.span.cursor_byte_offset..];
-    assert_eq!(tail, read.expect, "{} ({} px): scan {:?}", read.id, read.size, read.scan);
+    let context = format!("{} ({} px): scan {:?}", read.id, read.size, read.scan);
+    if read.prefix {
+        assert!(tail.starts_with(&read.expect), "{context}: got {tail:?}, want a prefix {:?}", read.expect);
+    } else {
+        assert_eq!(tail, read.expect, "{context}");
+    }
 }
 
 #[test]
@@ -873,6 +892,22 @@ fn large_text_taller_than_the_box_is_read_whole() {
 #[test]
 fn low_stroke_kanji_taller_than_the_box_are_read_whole() {
     read_whole(large("nihongo_130"));
+}
+
+/// The issue #92 follow-up screenshot: a news line in BIZ UDPGothic, white on black.
+/// The engine returns no words for it at 100 px in the 100 px box. It reads the
+/// line in a 400 px box, where it scales the crop down.
+#[test]
+fn light_on_dark_large_text_is_read_whole() {
+    read_whole(large("katsu_biz_100"));
+    read_whole(large("katsu_noto_100"));
+}
+
+/// Bold BIZ UDPGothic at 125 px: the 100 px box reads a cut `活` as `沽`. A cut
+/// read is not an answer. The 200 px box reads the glyph whole.
+#[test]
+fn a_cut_glyph_is_not_the_answer_when_a_grown_box_reads_it_whole() {
+    read_whole(large("katsu_biz_bold_125"));
 }
 
 /// The scan rects stay on the hovered line, and the anchor outlines the glyph.

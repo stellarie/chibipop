@@ -60,11 +60,17 @@ struct Page {
     /// The orientation of each line index, for the orientation invariant.
     lines: Vec<Orientation>,
     bounds: PhysRect,
+    /// Short sides of a capture box at which the engine returns no words at all.
+    ///
+    /// The Linux engine scales a crop to its detector size. A large glyph in a small
+    /// box comes out too large to detect, and a taller box scales it down. The real
+    /// engine read a 100 px `活` in a 400 px box and nothing in a 100 or 200 px box.
+    blind: &'static [i32],
 }
 
 impl Page {
     fn new(name: &'static str, glyph: i32) -> Self {
-        Page { name, glyph, glyphs: Vec::new(), lines: Vec::new(), bounds: BOUNDS }
+        Page { name, glyph, glyphs: Vec::new(), lines: Vec::new(), bounds: BOUNDS, blind: &[] }
     }
 
     fn push(&mut self, ch: char, rect: PhysRect, line: usize) {
@@ -113,6 +119,21 @@ fn area(r: PhysRect) -> i64 {
 
 type Grabs = Rc<RefCell<Vec<PhysRect>>>;
 
+/// Return the pixels that a grab of `region` shows: every glyph painted white on
+/// black, so the ink rule can measure what the engine saw.
+fn page_frame(page: &Page, region: PhysRect) -> Frame {
+    let mut buf = vec![0u8; (region.w * region.h * 4) as usize];
+    for glyph in &page.glyphs {
+        let Some(part) = glyph.rect.intersection(region) else { continue };
+        for y in part.y..part.y + part.h {
+            let row = ((y - region.y) * region.w) as usize * 4;
+            let start = row + (part.x - region.x) as usize * 4;
+            buf[start..start + part.w as usize * 4].fill(0xFF);
+        }
+    }
+    Frame { buf, w: region.w, h: region.h, source: "page", fallback: None, unchanged: false }
+}
+
 /// `PageCapture` records every requested region in order. It never fails, also for a
 /// region that lies partly outside the output. `region_around` does not clamp, and the
 /// test checks that shape, not the backend.
@@ -126,14 +147,7 @@ impl RegionCapture for PageCapture {
     fn grab(&mut self, region: PhysRect) -> Result<Frame> {
         self.grabs.borrow_mut().push(region);
         self.last.set(region);
-        Ok(Frame {
-            buf: vec![0; (region.w * region.h * 4) as usize],
-            w: region.w,
-            h: region.h,
-            source: "page",
-            fallback: None,
-            unchanged: false,
-        })
+        Ok(page_frame(&self.page, region))
     }
 
     fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
@@ -154,6 +168,9 @@ struct PageOcr {
 
 /// Return what the engine sees of `page` inside `seen`, in desktop pixels.
 fn page_lines(page: &Page, seen: PhysRect) -> Vec<OcrLine> {
+    if page.blind.contains(&seen.w.min(seen.h)) {
+        return Vec::new();
+    }
     let visible = |rect: PhysRect| -> Option<PhysRect> {
         let part = rect.intersection(seen)?;
         (2 * area(part) > area(rect)).then_some(part)
@@ -651,6 +668,53 @@ fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
             r(1280, 480, 70, 120),
         ]
     );
+}
+
+/// Issue #92 follow-up: a 100 px line in a 100 px box, and an engine that returns
+/// no words at 100 and 200 px. Nothing spans the box, because nothing was read. The
+/// ink under the cursor spans the box's short side, so the box grows. The empty read
+/// at 200 px grows it again. At 400 px the engine reads the line.
+#[test]
+fn a_glyph_the_engine_cannot_read_in_a_small_box_grows_the_box_on_ink() {
+    let mut page = Page::new("blind_small", LARGE);
+    page.row("日本語を話す。", 800, 480);
+    page.blind = &[100, 200];
+    let page = Rc::new(page);
+    let settings = Settings { max_passes: 1, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(1050, 530));
+
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(800, 480, 500, 100)),
+            (ScanKind::Pass1, r(800, 430, 500, 200)),
+            (ScanKind::Pass1, r(800, 330, 500, 400)),
+            (ScanKind::Anchor, r(1000, 480, 100, 100)),
+        ]
+    );
+    assert_eq!(*grabs.borrow(), [r(800, 480, 500, 100), r(800, 430, 500, 200), r(800, 330, 500, 400)]);
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.span.text, "日本語を話");
+    assert_eq!(resolved.span.cursor_byte_offset, 6);
+}
+
+/// The follow-up screenshot answered `古` for `活`: the 100 px box read a cut glyph,
+/// the grown boxes read nothing, and the cut read stood. A cut read is not an
+/// answer. When no grown box reads the glyph, the hover answers nothing.
+#[test]
+fn a_cut_read_is_not_the_answer_when_no_grown_box_reads_the_glyph() {
+    let mut page = Page::new("blind_large", 120);
+    page.row("日本語を話す。", 800, 480);
+    page.blind = &[200, 400];
+    let page = Rc::new(page);
+    let settings = Settings { max_passes: 1, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(1100, 540));
+
+    assert!(resolved.is_none(), "{:?}", kinds(&scan));
+    assert!(scan.is_empty());
+    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(850, 440, 500, 200), r(850, 340, 500, 400)]);
 }
 
 #[test]
