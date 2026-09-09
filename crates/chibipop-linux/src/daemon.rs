@@ -4988,7 +4988,11 @@ mod tests {
         app.on_cursor_position(AT);
         match answer(&app).outcome {
             chibipop::controller::LookupOutcome::Ready { anchor, matched, scan, .. } => {
-                assert_eq!(region, anchor, "the pipeline read the drawn box, not a tile");
+                assert_eq!(
+                    echo_word(region.w, region.h).translated(region.x, region.y),
+                    anchor,
+                    "the pipeline read the drawn box, not a tile"
+                );
                 // `popup.highlight_match` is on by default, so line mode
                 // would have put a `ScanKind::Match` rect in `scan`. The
                 // static path passes `outline_match: false` and draws
@@ -5783,6 +5787,18 @@ mod tests {
         }
     }
 
+    /// Return the one word that `FakeOcr` echoes for a `w x h` frame.
+    ///
+    /// The word sits at the frame centre, where every hover points. It runs to the
+    /// frame's trailing edge, so the clipped-line gate stops a wrap probe. It is
+    /// half the short side tall: a word that fills the frame reads as text taller
+    /// than the box, and the box then grows. A test that must prove which frame
+    /// reached the engine compares against this echo.
+    fn echo_word(w: i32, h: i32) -> PhysRect {
+        let side = w.min(h) / 2;
+        PhysRect { x: (w - side) / 2, y: (h - side) / 2, w: w - (w - side) / 2, h: side }
+    }
+
     /// Fake OCR reports one word and whether its input had a mask.
     /// Capture pixels are black. A mask fills white
     /// (ARCHITECTURE.md#capture-and-masking).
@@ -5800,12 +5816,7 @@ mod tests {
                 .iter()
                 .any(|px| px[0] == 0xFF && px[1] == 0xFF && px[2] == 0xFF);
             note(&self.log, &format!("ocr masked={masked}"));
-            Ok(vec![OcrLine {
-                words: vec![OcrWord {
-                    text: WORD.to_string(),
-                    rect: PhysRect { x: 0, y: 0, w, h },
-                }],
-            }])
+            Ok(vec![OcrLine { words: vec![OcrWord { text: WORD.to_string(), rect: echo_word(w, h) }] }])
         }
 
         fn set_language(&mut self, _tag: &str) {}
@@ -5926,7 +5937,7 @@ mod tests {
             "the job went through the OCR facade and touched no capture backend"
         );
         assert_eq!(
-            PhysRect { x: 0, y: 0, w: 8, h: 4 },
+            echo_word(8, 4),
             lines[0].words[0].rect,
             "the job's own dimensions reached the engine"
         );

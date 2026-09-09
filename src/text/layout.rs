@@ -258,6 +258,64 @@ pub fn box_orientation(region: PhysRect) -> Orientation {
     if region.h > region.w { Orientation::Vertical } else { Orientation::Horizontal }
 }
 
+/// A capture box grows on its short side this many times at most.
+///
+/// Each step doubles the short side: 100 px becomes 200, then 400. Issue #92 hovered
+/// text at about the box height. On Linux, a 130 px glyph in a 100 px box came back
+/// as garbage, and a 200 px box read it whole. Low-stroke glyphs at 130 px needed 400
+/// px, where the engine scales the crop down. A glyph above 400 px is not popup text.
+pub const GROWTH_STEPS: usize = 2;
+
+/// Return true when a line spans the short side of `region`.
+///
+/// A glyph at least as tall as the box touches both of its long edges, within
+/// [`EDGE_MARGIN`]. The engine then sees a cut glyph and returns a fragment, a
+/// misread, or nothing. The union of a line covers a stack of fragments as well as
+/// one cut word. The check uses every line: the cursor sits inside the box, and a
+/// line that spans the box passes through the cursor's row.
+pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
+    let orientation = box_orientation(region);
+    let start = orientation.cross(PhysPoint { x: region.x, y: region.y });
+    let end = start + orientation.thick(region);
+    lines.iter().filter_map(line_rect).any(|line| {
+        let lead = orientation.cross(PhysPoint { x: line.x, y: line.y });
+        lead <= start + EDGE_MARGIN && lead + orientation.thick(line) >= end - EDGE_MARGIN
+    })
+}
+
+/// Return `region` with its short side doubled around the same center, clamped to
+/// `bounds`. Return `None` when the clamp leaves the box as it was.
+pub fn grow_short_side(region: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
+    let grown = match box_orientation(region) {
+        Orientation::Horizontal => region.inflated(0, region.h / 2),
+        Orientation::Vertical => region.inflated(region.w / 2, 0),
+    };
+    clamp_tile(grown, bounds).filter(|clamped| *clamped != region)
+}
+
+/// A word box thinner than this fraction of its thickness on the reading axis is a
+/// sliver, not a glyph.
+///
+/// The Linux engine returned a `」` in a 4 x 92 box at the right edge of a 100 px `規`.
+/// No glyph is that thin: a `l` or a vertical `ー` is about one fifth of its height.
+/// A word box can be long, so the rule reads only the reading axis.
+pub const SLIVER_RATIO: i32 = 16;
+
+/// Drop sliver words and the lines that then have no words. `orientation` is the
+/// capture box's.
+pub fn drop_slivers(lines: Vec<OcrLine>, orientation: Orientation) -> Vec<OcrLine> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.words.retain(|word| {
+                orientation.len(word.rect) * SLIVER_RATIO >= orientation.thick(word.rect)
+            });
+            line
+        })
+        .filter(|line| !line.words.is_empty())
+        .collect()
+}
+
 fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
 }

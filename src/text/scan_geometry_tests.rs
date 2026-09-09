@@ -18,7 +18,8 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::present::{match_highlight, Card, HIGHLIGHT_PAD};
 use crate::text::layout::{
-    hit_scan, CaptureSize, OcrLine, OcrWord, Orientation, Resolved, OVERRIDE_WORDS,
+    grow_short_side, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
+    Resolved, GROWTH_STEPS, OVERRIDE_WORDS,
 };
 use crate::text::{CaptureMask, Frame, OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::Result;
@@ -151,39 +152,49 @@ struct PageOcr {
     last: Rc<Cell<PhysRect>>,
 }
 
+/// Return what the engine sees of `page` inside `seen`, in desktop pixels.
+fn page_lines(page: &Page, seen: PhysRect) -> Vec<OcrLine> {
+    let visible = |rect: PhysRect| -> Option<PhysRect> {
+        let part = rect.intersection(seen)?;
+        (2 * area(part) > area(rect)).then_some(part)
+    };
+    let mut lines: Vec<OcrLine> = page.lines.iter().map(|_| OcrLine { words: Vec::new() }).collect();
+    for glyph in &page.glyphs {
+        let Some(parts) = glyph.split else {
+            if let Some(rect) = visible(glyph.rect) {
+                lines[glyph.line].words.push(OcrWord { text: glyph.ch.to_string(), rect });
+            }
+            continue;
+        };
+        let quarter = page.glyph / 4;
+        let words = parts
+            .iter()
+            .filter_map(|part| {
+                let rect = PhysRect {
+                    x: glyph.rect.x + part.x * quarter,
+                    y: glyph.rect.y + part.y * quarter,
+                    w: part.w * quarter,
+                    h: part.h * quarter,
+                };
+                visible(rect).map(|rect| OcrWord { text: part.text.to_string(), rect })
+            })
+            .collect();
+        lines.push(OcrLine { words });
+    }
+    lines.retain(|line| !line.words.is_empty());
+    lines
+}
+
 impl OcrEngine for PageOcr {
     fn recognise(&self, _bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         let seen = self.last.get();
         assert_eq!((w, h), (seen.w, seen.h), "the fixture runs at upscale 1");
-        let visible = |rect: PhysRect| -> Option<PhysRect> {
-            let part = rect.intersection(seen)?;
-            (2 * area(part) > area(rect)).then(|| part.translated(-seen.x, -seen.y))
-        };
-        let mut lines: Vec<OcrLine> =
-            self.page.lines.iter().map(|_| OcrLine { words: Vec::new() }).collect();
-        for glyph in &self.page.glyphs {
-            let Some(parts) = glyph.split else {
-                if let Some(rect) = visible(glyph.rect) {
-                    lines[glyph.line].words.push(OcrWord { text: glyph.ch.to_string(), rect });
-                }
-                continue;
-            };
-            let quarter = self.page.glyph / 4;
-            let words = parts
-                .iter()
-                .filter_map(|part| {
-                    let rect = PhysRect {
-                        x: glyph.rect.x + part.x * quarter,
-                        y: glyph.rect.y + part.y * quarter,
-                        w: part.w * quarter,
-                        h: part.h * quarter,
-                    };
-                    visible(rect).map(|rect| OcrWord { text: part.text.to_string(), rect })
-                })
-                .collect();
-            lines.push(OcrLine { words });
+        let mut lines = page_lines(&self.page, seen);
+        for line in &mut lines {
+            for word in &mut line.words {
+                word.rect = word.rect.translated(-seen.x, -seen.y);
+            }
         }
-        lines.retain(|line| !line.words.is_empty());
         Ok(lines)
     }
 
@@ -605,11 +616,11 @@ fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
     assert_eq!(resolved.span.cursor_byte_offset, 6);
 }
 
-/// Issue #92 at 120 px. The 100 px box shows 本, 語, and を cut to 100 px tall. The
-/// line spans the box's short side, so the box grows once to 200 tall, where the
-/// glyphs fit. The read then proceeds from the grown box: 日 and 話 stay outside its
-/// reading axis, the tail `語を` runs out, and two probes of a 120 thick band (90
-/// above, 720 below y 540, clamped to the output) find no continuation.
+/// Issue #92 at 120 px. The 100 px box shows 本, 語, and を cut to 100 px tall, and
+/// drops 日 and 話, which it cuts to 70 px wide and 100 tall. The line spans the
+/// box's short side, so the box grows once to 200 tall. There the three glyphs fit,
+/// and 日 and 話 come back as 70 px wide cut boxes. The line now ends at the box
+/// edge, so no probe runs. The anchor is the whole glyph.
 #[test]
 fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
     let page = short_stop(120);
@@ -622,20 +633,24 @@ fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
         [
             (ScanKind::Pass1, r(850, 490, 500, 100)),
             (ScanKind::Pass1, r(850, 440, 500, 200)),
-            (ScanKind::Tile, r(0, 450, 1000, 630)),
-            (ScanKind::Tile, r(500, 450, 840, 630)),
             (ScanKind::Anchor, r(1040, 480, 120, 120)),
         ]
     );
-    assert_eq!(
-        *grabs.borrow(),
-        [r(850, 490, 500, 100), r(850, 440, 500, 200), r(0, 450, 1000, 630), r(500, 450, 840, 630)]
-    );
+    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(850, 440, 500, 200)]);
     let resolved = resolved.expect("hit");
-    assert_eq!(resolved.span.text, "本語を");
-    assert_eq!(resolved.span.cursor_byte_offset, 3);
-    assert_eq!(resolved.span.geom.len(), 3);
-    assert!(resolved.span.geom.iter().all(|g| (g.rect.w, g.rect.h) == (120, 120)));
+    assert_eq!(resolved.span.text, "日本語を話");
+    assert_eq!(resolved.span.cursor_byte_offset, 6);
+    let rects: Vec<PhysRect> = resolved.span.geom.iter().map(|g| g.rect).collect();
+    assert_eq!(
+        rects,
+        [
+            r(850, 480, 70, 120),
+            r(920, 480, 120, 120),
+            r(1040, 480, 120, 120),
+            r(1160, 480, 120, 120),
+            r(1280, 480, 70, 120),
+        ]
+    );
 }
 
 #[test]
@@ -846,10 +861,32 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
     out
 }
 
+/// Check that pass 1's boxes follow the growth rule.
+///
+/// The first box is the configured one. Each next box exists only because a line
+/// spanned the short side of the previous box, or because a grown box read nothing.
+/// It is the previous box grown on its short side. The last box is not cut, or the
+/// step cap or the output edge stopped the growth.
+fn check_growth(page: &Page, boxes: &[PhysRect], context: &str) {
+    assert!(!boxes.is_empty() && boxes.len() <= 1 + GROWTH_STEPS, "{context}");
+    let cut = |i: usize, rect: PhysRect| {
+        let lines = page_lines(page, rect);
+        (i > 0 && lines.is_empty()) || spans_short_side(&lines, rect)
+    };
+    for (i, pair) in boxes.windows(2).enumerate() {
+        assert!(cut(i, pair[0]), "{context}: box {i} grew without a spanning line");
+        assert_eq!(Some(pair[1]), grow_short_side(pair[0], page.bounds), "{context}");
+    }
+    let last = boxes.len() - 1;
+    let stopped = boxes.len() == 1 + GROWTH_STEPS || grow_short_side(boxes[last], page.bounds).is_none();
+    assert!(!cut(last, boxes[last]) || stopped, "{context}: the last box is still cut");
+}
+
 /// Check the shape invariants for one placement.
 ///
-/// - A miss draws nothing, and pass 1 still grabs once.
-/// - The scan vector is `Pass1`, zero or more `Tile`s, then one `Anchor`.
+/// - A miss draws nothing. Pass 1 still grabs its boxes.
+/// - The scan vector is one to three `Pass1` boxes, zero or more `Tile`s, then one
+///   `Anchor`. The boxes follow the growth rule.
 /// - The outline draws exactly what the pipeline grabbed, in order.
 /// - Every tile lies inside the output, is at most a probe long, and faces the
 ///   anchor on the cross axis. No tile repeats.
@@ -859,33 +896,38 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
 /// - The match highlight covers the matched glyphs and no other glyph beyond the pad.
 ///   A match across two lines covers the paragraph width by design (`union_chars`),
 ///   so the overlap check skips it.
-/// - A line of two or more words keeps the page line's orientation. One word reads
-///   as a row.
+/// - The box is the orientation prior. A line of `OVERRIDE_WORDS` words keeps the
+///   page line's orientation.
 fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
     let (mut source, grabs) = fixture(page, settings);
     let (resolved, scan, lines) = read(&mut source, cursor);
     let context = format!(
-        "{} passes={} vertical={} cursor={cursor:?} scan={:?}",
+        "{} {}px passes={} vertical={} cursor={cursor:?} scan={:?}",
         page.name,
+        page.glyph,
         settings.max_passes,
         settings.prefer_vertical,
         kinds(&scan)
     );
     let grabs = grabs.borrow();
+    let pass1 = expected_pass1(cursor, settings.prefer_vertical);
 
     let Some(resolved) = resolved else {
         assert!(scan.is_empty(), "{context}");
-        assert_eq!(grabs.len(), 1, "{context}");
+        assert_eq!(grabs.first(), Some(&pass1), "{context}");
+        check_growth(page, &grabs, &context);
         return;
     };
 
     assert!(scan.len() >= 2, "{context}");
-    let pass1 = expected_pass1(cursor, settings.prefer_vertical);
-    assert_eq!(scan[0], ScanRect { rect: pass1, kind: ScanKind::Pass1 }, "{context}");
+    let boxes: Vec<PhysRect> =
+        scan.iter().take_while(|s| s.kind == ScanKind::Pass1).map(|s| s.rect).collect();
+    assert_eq!(boxes.first(), Some(&pass1), "{context}");
+    check_growth(page, &boxes, &context);
     let last = scan[scan.len() - 1];
     assert_eq!(last.kind, ScanKind::Anchor, "{context}");
     let anchor = last.rect;
-    let tiles: Vec<PhysRect> = scan[1..scan.len() - 1]
+    let tiles: Vec<PhysRect> = scan[boxes.len()..scan.len() - 1]
         .iter()
         .map(|s| {
             assert_eq!(s.kind, ScanKind::Tile, "{context}");
@@ -893,7 +935,7 @@ fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
         })
         .collect();
 
-    let mut expected_grabs = vec![pass1];
+    let mut expected_grabs = boxes.clone();
     expected_grabs.extend(&tiles);
     assert_eq!(*grabs, expected_grabs, "{context}");
 

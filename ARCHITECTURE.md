@@ -107,6 +107,14 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   one large glyph as words of their own (issue #92: `新` as `立` over `木`). Two stacked
   words read as a column under a spread-only rule. The wrap probe then starts at the
   top edge of the output, and the forward tile runs below the text.
+- The capture box grows on its short side while a recognized line spans that side,
+  at most twice, doubling each time around the cursor and clamped to the output. A
+  glyph taller than the box comes back as a fragment, a misread, or nothing. A grown
+  box that reads nothing still holds that glyph and grows again. The answer is the
+  last read with a hit. Every grabbed box appears in the outline as a pass-1 box.
+- A word box thinner than one sixteenth of its thickness on the reading axis is a
+  sliver, not a glyph. The capture seam drops it. The Linux engine returned a `」` in
+  a 4 x 92 box at the right edge of a 100 px `規`.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders
@@ -266,6 +274,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - CI box-fit floor: a hit's box must also outline its glyph. Horizontal box fit >= 90 %,
   vertical box fit >= 75 %, and the three large `smoke_2x` glyphs must fit whole. A
   fragment box that contains the glyph centre passes hit-scan but fails fit (issue #92).
+- CI large-text floor: the screens under `tests/fixtures/large-text/` go through
+  `TextSource` with the real engine. `新規` at 100, 130, and 160 px and
+  `日本語を話す` at 130 px must come back whole from the hovered glyph to the line
+  end, with every scan rect on the hovered line and an anchor that fits the glyph.
+  `scripts/render-large-text.py` renders the screens.
 - The repository commits models under `crates/chibipop-linux/models/meiki/`. It pins
   their hashes against `SHA256SUMS.txt`. Two steps verify them: `scripts/package-linux.sh`
   when it stages the tarball, and `models::verify` when the engine starts.

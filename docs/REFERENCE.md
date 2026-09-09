@@ -674,6 +674,15 @@ tile text found past the box replaces the joined wrap, so a hidden wrap is most 
 at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
 `show_scan_region` overlay draws each region as a tile.
 
+The capture box grows when text is taller than it. A glyph at least as tall as
+the box touches both of its long edges, and an engine then returns a fragment, a
+misread, or nothing. When a recognized line spans the short side of the box, the
+box doubles on that side around the cursor, at most twice: 100 px becomes 200,
+then 400. A grown box that reads nothing still holds that glyph, so it grows again.
+The first box, and every grown box, appears in the `show_scan_region` overlay.
+Set `capture_height` to your usual line height. Growth covers the large heading
+or the manga panel, and it costs one extra capture and OCR pass per step.
+
 ### `discard_furigana`
 
 Removes small kana-only ruby lines beside larger overlapping kanji lines.
@@ -883,7 +892,8 @@ bottom of the box, and does not recover its former priority; carry on pressing
 ### `show_scan_region`
 
 The *debug* view: a faint outline around every region a hover captured —
-pass 1's box, each forward tile, and the word it resolved. Turn it on when
+pass 1's box, each box it grew into when the text was taller than it, each
+wrap probe and forward tile, and the word it resolved. Turn it on when
 OCR is behaving oddly and you want to see what it actually looked at rather
 than infer it.
 

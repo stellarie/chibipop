@@ -7,9 +7,10 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
-    band_of, discard_furigana, head_and_tail, map_from_upscaled, nearest_line, normalise,
-    region_around, resolve, resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize,
-    OcrLine, OcrWord, Orientation, Resolved,
+    band_of, box_orientation, discard_furigana, drop_slivers, grow_short_side, head_and_tail,
+    map_from_upscaled, nearest_line, normalise, region_around, resolve, resolve_wrap,
+    spans_short_side, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
+    Orientation, Resolved, GROWTH_STEPS,
 };
 use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
@@ -75,6 +76,17 @@ pub struct RegionRead {
     pub fallback: Option<String>,
     /// This flag reports that the backend returned the previous grab's pixels.
     pub unchanged: bool,
+}
+
+/// `PassOne` stores the read that answers pass 1 and every box that pass 1 grabbed.
+struct PassOne {
+    lines: Vec<OcrLine>,
+    resolved: Option<Resolved>,
+    /// The box whose `lines` answered. The probes and tiles start from it.
+    region: PhysRect,
+    /// Every box in grab order. The first is the configured box. Each next box is
+    /// the previous one grown on its short side.
+    boxes: Vec<PhysRect>,
 }
 
 /// `Recognised` stores the words from one region read for unchanged re-grabs.
@@ -301,18 +313,48 @@ impl TextSource {
         }
     }
 
-    /// Return the lines and outcome for one read.
-    fn resolve_at_verbose(
-        &mut self,
-        cursor: PhysPoint,
-        mask: CaptureMask,
-    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let read = self.resolve_in_region(
-            cursor,
-            region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
-            mask,
-        )?;
-        Ok((read.lines, read.resolved))
+    /// Return pass 1: its lines and outcome, the box that answered, and every box it
+    /// grabbed, in order.
+    ///
+    /// The box grows on its short side while a line spans that side, at most
+    /// [`GROWTH_STEPS`] times. A glyph taller than the box comes back cut, as a
+    /// fragment, a misread, or nothing (issue #92). A grown box that reads nothing
+    /// still holds that glyph, so an empty read counts as cut and the box grows
+    /// again. The answer is the last read with a hit. A failed growth grab keeps the
+    /// earlier answer, as a failed tile does. The outline draws every box that was
+    /// grabbed, also a grown box that answered nothing.
+    fn resolve_at_verbose(&mut self, cursor: PhysPoint, mask: CaptureMask) -> Result<PassOne> {
+        let mut region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
+        let mut boxes = vec![region];
+        let mut read = self.resolve_in_region(cursor, region, mask)?;
+        let mut best: Option<(RegionRead, PhysRect)> = None;
+        let mut cut = spans_short_side(&read.lines, region);
+        for _ in 0..GROWTH_STEPS {
+            if !cut {
+                break;
+            }
+            let bounds = self.capture.bounds_containing(cursor);
+            let Some(grown) = grow_short_side(region, bounds) else { break };
+            let next = match self.resolve_in_region(cursor, grown, mask) {
+                Ok(next) => next,
+                Err(e) => {
+                    eprintln!("chibipop: capture growth failed, using the smaller box: {e:#}");
+                    break;
+                }
+            };
+            if read.resolved.is_some() {
+                best = Some((read, region));
+            }
+            read = next;
+            region = grown;
+            boxes.push(region);
+            cut = read.lines.is_empty() || spans_short_side(&read.lines, region);
+        }
+        let (read, region) = match best {
+            Some(best) if read.resolved.is_none() => best,
+            _ => (read, region),
+        };
+        Ok(PassOne { lines: read.lines, resolved: read.resolved, region, boxes })
     }
 
     /// Resolve a caller-supplied box.
@@ -461,7 +503,7 @@ impl TextSource {
         };
         let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines = to_desktop(raw, origin, factor, mask);
+        let lines = drop_slivers(to_desktop(raw, origin, factor, mask), box_orientation(region));
         let lines = if self.settings.discard_furigana {
             discard_furigana(lines)
         } else {
@@ -648,12 +690,11 @@ impl TextSource {
         collect: bool,
         mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
-        let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
+        let PassOne { lines, resolved, region, boxes } = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
         let Some(pass_one) = resolved else { return Ok((None, scan, lines)) };
-        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         if collect {
-            scan.push(ScanRect { rect: region, kind: ScanKind::Pass1 });
+            scan.extend(boxes.into_iter().map(|rect| ScanRect { rect, kind: ScanKind::Pass1 }));
         }
         let wrapped = if let Some((probes, wrapped)) =
             self.probe_wrap(&lines, cursor, region, pass_one.orientation, mask)
