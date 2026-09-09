@@ -69,11 +69,11 @@ impl RegionCapture for FakeCapture {
     }
 }
 
-/// Return one word at the frame centre for each call, or no words. The hover point
-/// is the centre of every capture box, so the word contains it. The word runs to
-/// the frame's trailing edge, so the clipped-line gate stops a wrap probe. It is half
-/// the short side tall: a word that fills the frame reads as text taller than the
-/// box, and the box then grows (ARCHITECTURE.md#capture-and-masking).
+/// Return one word at the frame center for each call, or no words. The hover point
+/// is the center of every capture box, so the word contains it. The word extends to
+/// the frame's trailing edge, so the clipped-line gate stops a wrap probe. Its height is
+/// half the short side. A word that fills the frame reads as text taller than the box,
+/// and the box then grows (ARCHITECTURE.md#capture-and-masking).
 struct FakeOcr {
     log: mpsc::Sender<String>,
     text: Option<String>,

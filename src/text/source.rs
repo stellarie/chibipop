@@ -329,19 +329,19 @@ impl TextSource {
     /// Return pass 1: its lines and outcome, the box that answered, and every box it
     /// grabbed, in order.
     ///
-    /// The box grows on its short side, at most [`GROWTH_STEPS`] times, while the
+    /// The box grows on its short side, at most [`GROWTH_STEPS`] times, when the
     /// box is too small for the text under the cursor (issue #92):
     ///
     /// - A recognized line spans the short side. The glyph is at least as tall as the
     ///   box, and the engine returned a fragment or a misread.
-    /// - No hit, and ink under the cursor spans the configured short side
+    /// - No hit exists, and ink under the cursor spans the configured short side
     ///   ([`ink::spans_short_side`]). The engine returned nothing for a large glyph.
-    /// - A grown box read nothing. It still holds the glyph.
+    /// - A grown box returns no text. It still contains the glyph.
     ///
-    /// A cut read is not an answer: its hit line spans the box, and the engine read a
+    /// A cut read is not an answer. Its hit line spans the box, and the engine read a
     /// cut glyph. The answer is the last read whose hit line does not span its box.
-    /// When no read qualifies, the last read stands, with or without a hit. A failed
-    /// growth grab stops the growth. The outline draws every box that was grabbed.
+    /// When no read qualifies, the last read remains, with or without a hit. A failed
+    /// growth grab stops the growth. The outline shows every box that this method grabs.
     fn resolve_at_verbose(&mut self, cursor: PhysPoint, mask: CaptureMask) -> Result<PassOne> {
         let reference = self.settings.capture.short();
         let factor = self.settings.upscale;
@@ -374,7 +374,7 @@ impl TextSource {
             let next = match self.resolve_in_region(cursor, grown, mask) {
                 Ok(next) => next,
                 Err(e) => {
-                    eprintln!("chibipop: capture growth failed, using the smaller box: {e:#}");
+                    eprintln!("chibipop: capture growth failed. Use the smaller box: {e:#}");
                     break;
                 }
             };

@@ -5789,11 +5789,11 @@ mod tests {
 
     /// Return the one word that `FakeOcr` echoes for a `w x h` frame.
     ///
-    /// The word sits at the frame centre, where every hover points. It runs to the
-    /// frame's trailing edge, so the clipped-line gate stops a wrap probe. It is
-    /// half the short side tall: a word that fills the frame reads as text taller
-    /// than the box, and the box then grows. A test that must prove which frame
-    /// reached the engine compares against this echo.
+    /// The word sits at the frame center, where every hover points. It extends to the
+    /// frame's trailing edge, so the clipped-line gate stops a wrap probe. Its height is
+    /// half the short side. A word that fills the frame reads as text taller than the
+    /// box, and the box then grows. A test that must identify the frame that reached the
+    /// engine compares against this echo.
     fn echo_word(w: i32, h: i32) -> PhysRect {
         let side = w.min(h) / 2;
         PhysRect { x: (w - side) / 2, y: (h - side) / 2, w: w - (w - side) / 2, h: side }

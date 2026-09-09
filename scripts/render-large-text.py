@@ -3,11 +3,11 @@
 
 The OCR gate reads these screens through `TextSource` with the real engine. They
 model issue #92: text at or above the height of the 500x100 capture box, dark on
-light and light on dark. The corpus under tests/fixtures/ocr-corpus/ stays the
-benchmark's, unchanged.
+light and light on dark. The corpus under tests/fixtures/ocr-corpus/ remains the
+benchmark corpus and does not change.
 
-The output is committed. Run this script only to change a screen. It needs Pillow
-and two fonts:
+Commit the output. Run this script only when you change a screen. It needs
+Pillow and two fonts:
 
 - Noto Sans CJK JP at NOTO. Most distributions package it.
 - BIZ UDPGothic, the font of the issue #92 follow-up screenshot. It is OFL, from
@@ -15,7 +15,7 @@ and two fonts:
   BIZ_UDPGOTHIC_DIR at a directory that holds BIZUDPGothic-Regular.ttf and
   BIZUDPGothic-Bold.ttf.
 
-A different font or version changes the ink boxes in manifest.json, so commit the
+A different font or version changes the ink boxes in manifest.json. Commit the
 PNGs and the manifest together.
 """
 import json

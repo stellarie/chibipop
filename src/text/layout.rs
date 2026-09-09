@@ -210,16 +210,16 @@ pub struct Resolved {
     pub orientation: Orientation,
 }
 
-/// A line overrides the capture box only with this many words.
+/// A line can override the capture box only when it has at least this many words.
 ///
 /// Issue #92: an engine boxed the components of one large `新` as `立` over `木`, two
-/// words stacked inside a horizontal box. Their center spread called the line
-/// vertical. The wrap probe then started at the top edge of the output, and the
-/// forward tile ran from below the text to the bottom edge. Two words cannot outvote
-/// the box. Three words that fill the short side of the box are a real line.
+/// words stacked inside a horizontal box. Their center spread made the line vertical.
+/// The wrap probe then started at the output top edge, and the forward tile ran below
+/// the text. Two words cannot override the box. Three words that fill the short side
+/// of the box form a real line.
 pub const OVERRIDE_WORDS: usize = 3;
 
-/// Return the orientation of the line. `prior` is the orientation of the capture box.
+/// Return the line orientation. `prior` is the orientation of the capture box.
 ///
 /// The user chose the box shape with `prefer_vertical`, so the box is the prior. A
 /// line overrides it only with strong evidence: at least [`OVERRIDE_WORDS`] words
@@ -258,23 +258,23 @@ pub fn box_orientation(region: PhysRect) -> Orientation {
     if region.h > region.w { Orientation::Vertical } else { Orientation::Horizontal }
 }
 
-/// A capture box grows this many times at most.
+/// The capture box can grow at most this many times.
 ///
 /// Each step doubles both sides: 500 x 100 becomes 1000 x 200, then 2000 x 400. Issue
 /// #92 hovered text at about the box height. The Linux engine scales a crop to its
 /// detector size, and a 500 px wide crop is always scaled up by 1.92. A 120 px glyph
 /// in that crop is too large to detect, and no taller 500 px wide box changed that.
-/// A 1000 px wide box is scaled by 0.96, and every measured case read there. A
-/// glyph above 400 px is not popup text.
+/// The engine scales a 1000 px wide box by 0.96. Every measured case returned text from
+/// that box. A glyph above 400 px is not popup text.
 pub const GROWTH_STEPS: usize = 2;
 
 /// Return true when a line spans the short side of `region`.
 ///
 /// A glyph at least as tall as the box touches both of its long edges, within
-/// [`EDGE_MARGIN`]. The engine then sees a cut glyph and returns a fragment, a
-/// misread, or nothing. The union of a line covers a stack of fragments as well as
-/// one cut word. The check uses every line: the cursor sits inside the box, and a
-/// line that spans the box passes through the cursor's row.
+/// [`EDGE_MARGIN`]. The engine then sees a cut glyph and returns a fragment, an
+/// incorrect result, or no text. The union of a line covers a stack of fragments
+/// and one cut word. The check uses every line. The cursor sits inside the box, and
+/// a line that spans the box passes through the cursor's row.
 pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
     let orientation = box_orientation(region);
     let start = orientation.cross(PhysPoint { x: region.x, y: region.y });
@@ -288,9 +288,9 @@ pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
 /// Return true when the word under the cursor is cut by one edge of `region`.
 ///
 /// A cursor near the top or the bottom of a large glyph puts one box edge through
-/// the row. The visible part fits the box, so nothing spans it, and the engine
-/// returns garbage in boxes that touch that edge (issue #92: `サ千子ペナ` for the top
-/// half of `活発な`). The word is cut when it touches an edge within
+/// the row. The visible part fits the box, so no line spans it, and the engine
+/// returns incorrect text in boxes that touch that edge (issue #92: `サ千子ペナ`
+/// for the top half of `活発な`). The word is cut when it touches an edge within
 /// [`EDGE_MARGIN`] and is at least half the box thick. A body line under a cursor
 /// just below it touches the top edge too, but at 40 px in a 100 px box it is not a
 /// large glyph, and the engine reads it.
@@ -308,13 +308,13 @@ pub fn hit_cut_by_edge(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, r
 
 /// Return `region` doubled on both sides around the same center, inside `bounds`.
 ///
-/// Both sides double because the engine's scale depends on both. A box that grew
-/// on its short side alone kept the reading axis at 500 px and the scale at 1.92.
-/// The grown box slides inside the output when it can, and it shrinks to the output
+/// Both sides double because the engine's scale depends on both. A box that grows
+/// on its short side alone keeps the reading axis at 500 px and the scale at 1.92.
+/// The grown box moves inside the output when it can, and it shrinks to the output
 /// only when it is larger. A box that starts outside its monitor fails the Windows
 /// DXGI grab and costs a one second BitBlt fallback. A box that shrinks on the
-/// reading axis raises the scale: a bold 125 px line read in a 500 px wide box and
-/// not in a 432 px wide one.
+/// reading axis raises the scale: the engine reads a bold 125 px line in a 500 px wide
+/// box, but not in a 432 px wide one.
 pub fn grow(region: PhysRect, bounds: PhysRect) -> PhysRect {
     let grown = region.inflated(region.w / 2, region.h / 2);
     let fit = |start: i32, len: i32, bound_start: i32, bound_len: i32| {
@@ -337,8 +337,8 @@ pub fn grow(region: PhysRect, bounds: PhysRect) -> PhysRect {
 /// A word box can be long, so the rule reads only the reading axis.
 pub const SLIVER_RATIO: i32 = 16;
 
-/// Drop sliver words and the lines that then have no words. `orientation` is the
-/// capture box's.
+/// Drop sliver words and lines that then have no words. `orientation` is the capture
+/// box orientation.
 pub fn drop_slivers(lines: Vec<OcrLine>, orientation: Orientation) -> Vec<OcrLine> {
     lines
         .into_iter()

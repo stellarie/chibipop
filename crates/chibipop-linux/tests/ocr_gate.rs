@@ -12,9 +12,9 @@
 //!   overlap threshold, or an ONNX Runtime upgrade can cause silent drift. The
 //!   gate catches that drift even when the absolute floors still pass.
 //! - **Box fit**: a hit's box must outline its glyph. Hit-scan asks only whether
-//!   the smallest box under the glyph centre carries the character. Issue #92
+//!   the smallest box under the glyph center contains the character. Issue #92
 //!   hovered a 100 px `新` and got `木` in a fragment box that passes that
-//!   question. The fit metric has no harness reference. It scores unmasked crops
+//!   question. The harness has no fit metric. The gate scores unmasked crops
 //!   at both scales.
 //!
 //! Each metric uses the method from `bench/common.py`. It selects the *smallest*
@@ -78,7 +78,7 @@ const VERTICAL_HIT_FLOOR: f64 = 0.75;
 /// A hit's box must also outline its glyph. Issue #92 hovered `新規` at about 100 px
 /// and got `木`, a fragment of `新`, in a box that covered part of one glyph. The
 /// hit-scan floors cannot see that failure because the fragment's box still contains
-/// the glyph centre. The fit floors match the hit-scan floors.
+/// the glyph center. The fit floors match the hit-scan floors.
 const HORIZONTAL_FIT_FLOOR: f64 = 0.90;
 const VERTICAL_FIT_FLOOR: f64 = 0.75;
 /// Set a generous limit. This catches a severe regression, not a slow runner.
@@ -127,11 +127,11 @@ fn corpus_dir() -> PathBuf {
 /// Convert a PNG to the capture layer's input: tightly packed, top-down BGRA
 /// with unused alpha. Every corpus crop uses 8-bit RGB.
 fn load_bgra(path: &Path) -> (Vec<u8>, i32, i32) {
-    let file = std::io::BufReader::new(std::fs::File::open(path).expect("opening a corpus crop"));
+    let file = std::io::BufReader::new(std::fs::File::open(path).expect("open a corpus crop"));
     let decoder = png::Decoder::new(file);
-    let mut reader = decoder.read_info().expect("reading the PNG header");
+    let mut reader = decoder.read_info().expect("read the PNG header");
     let mut rgb = vec![0u8; reader.output_buffer_size().expect("PNG buffer size")];
-    let info = reader.next_frame(&mut rgb).expect("decoding the PNG");
+    let info = reader.next_frame(&mut rgb).expect("decode the PNG");
     assert_eq!(png::ColorType::Rgb, info.color_type, "{}", path.display());
     assert_eq!(png::BitDepth::Eight, info.bit_depth, "{}", path.display());
 
@@ -146,8 +146,8 @@ fn load_bgra(path: &Path) -> (Vec<u8>, i32, i32) {
 
 fn load_corpus() -> Vec<Crop> {
     let dir = corpus_dir();
-    let raw = std::fs::read_to_string(dir.join("manifest.json")).expect("reading the corpus manifest");
-    let manifest: serde_json::Value = serde_json::from_str(&raw).expect("parsing the corpus manifest");
+    let raw = std::fs::read_to_string(dir.join("manifest.json")).expect("read the corpus manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&raw).expect("parse the corpus manifest");
     let entries = manifest["crops"].as_array().expect("manifest.crops");
 
     entries
@@ -330,7 +330,7 @@ const FIT_CORE: f64 = 0.25;
 const FIT_CROSS_MAX: f64 = 1.6;
 const FIT_READ_MAX: f64 = 2.0;
 
-/// Count the hits whose box fits its glyph, over the hits. Use the hit rule from
+/// Count boxes that fit their glyphs among hit boxes. Use the hit rule from
 /// `hit_scan`. Each misfit names the character and its box for the report.
 fn box_fit(chars: &[GtChar], boxes: &[PredBox], vertical: bool) -> (u32, u32, Vec<String>) {
     let (mut fit, mut hits) = (0, 0);
@@ -422,9 +422,9 @@ static REPORT: LazyLock<Report> = LazyLock::new(run);
 
 fn run() -> Report {
     let engine =
-        MeikiOcr::open(&Path::new(env!("CARGO_MANIFEST_DIR")).join("models/meiki")).expect("opening the bundled models");
+        MeikiOcr::open(&Path::new(env!("CARGO_MANIFEST_DIR")).join("models/meiki")).expect("open the bundled models");
     let corpus = load_corpus();
-    assert_eq!(152, corpus.len(), "the committed corpus is the benchmark's, unchanged");
+    assert_eq!(152, corpus.len(), "the committed corpus must match the benchmark");
 
     let mut by_slice: BTreeMap<(i64, String), Tally> = BTreeMap::new();
     let mut horizontal = Tally::default();
@@ -434,14 +434,14 @@ fn run() -> Report {
     let mut misfits: Vec<(String, String)> = Vec::new();
 
     for crop in &corpus {
-        let lines = engine.recognise(&crop.pixels, crop.pw, crop.ph).expect("recognising a corpus crop");
+        let lines = engine.recognise(&crop.pixels, crop.pw, crop.ph).expect("recognise a corpus crop");
         let (pred, boxes) = flatten(&lines);
         let gt = normalise(&crop.text);
         let pred = normalise(&pred);
         let crop_cer = cer(&gt, &pred);
         let (hits, total) = hit_scan(&crop.chars, &boxes);
-        // The fit rule is scale-free, so both scales count. A masked crop stays out:
-        // the mask cuts boxes by design.
+        // The fit rule has no scale term, so both scales count. Exclude masked crops
+        // because the mask cuts boxes by design.
         let (fit, fit_hits, crop_misfits) = if crop.mask.is_none() {
             box_fit(&crop.chars, &boxes, crop.slice == "vertical")
         } else {
@@ -516,7 +516,7 @@ fn run() -> Report {
     samples.sort_by(f64::total_cmp);
     let latency_p50_ms = samples[samples.len() / 2];
 
-    let mut table = String::from("\nOCR gate - measured vs the Python harness 1x reference\n");
+    let mut table = String::from("\nOCR gate - measured against the Python harness 1x reference\n");
     table.push_str("  slice                 crops    CER%    hit%    fit%\n");
     for ((scale, name), t) in &by_slice {
         table.push_str(&format!(
@@ -627,7 +627,7 @@ fn vertical_boxes_fit_their_glyphs() {
 
 /// Check the issue-92 shape on real pixels. `smoke_2x` holds three 78-86 px glyphs.
 /// One box must hit each glyph and cover it. A fragment box (`木` inside `新`) hits
-/// the centre but fails the fit rule.
+/// the center but fails the fit rule.
 #[test]
 fn large_glyphs_are_boxed_whole() {
     let smoke = REPORT.by_slice.get(&(2, "smoke".to_string())).expect("smoke_2x slice");
@@ -640,7 +640,7 @@ fn large_glyphs_are_boxed_whole() {
     assert_eq!(
         (smoke.fit, smoke.fit_hits, smoke.total),
         (3, 3, 3),
-        "every smoke_2x glyph must be hit by a box that covers it; misfits {misfits:?}{}",
+        "every smoke_2x glyph must have a box that covers it. Misfits: {misfits:?}{}",
         REPORT.table
     );
 }
@@ -662,7 +662,7 @@ fn vertical_accuracy_matches_the_python_harness() {
 /// boundary words.
 #[test]
 fn masked_crops_match_the_python_harness() {
-    near(REPORT.masked.cer_dropped(), REF_MASKED_CER_DROPPED, "masked CER after dropping clipped words");
+    near(REPORT.masked.cer_dropped(), REF_MASKED_CER_DROPPED, "masked CER after the layout drops clipped words");
     near(REPORT.masked.hit(), REF_MASKED_HIT, "masked hit-scan");
 }
 
@@ -670,7 +670,7 @@ fn masked_crops_match_the_python_harness() {
 /// PP-OCRv5. The frame contains only three glyphs.
 #[test]
 fn the_sparse_fixture_is_read_exactly() {
-    assert_eq!(REPORT.smoke_gt, REPORT.smoke_pred, "the three-glyph smoke crop must come back verbatim{}", REPORT.table);
+    assert_eq!(REPORT.smoke_gt, REPORT.smoke_pred, "the three-glyph smoke crop must return its text verbatim{}", REPORT.table);
     let smoke = REPORT.by_slice.get(&(1, "smoke".to_string())).expect("smoke slice");
     assert_eq!(smoke.hits, smoke.total, "every smoke glyph must be hoverable{}", REPORT.table);
 }
@@ -728,8 +728,8 @@ struct Screen {
 
 fn load_large_text() -> Vec<Screen> {
     let dir = large_text_dir();
-    let raw = std::fs::read_to_string(dir.join("manifest.json")).expect("reading the large-text manifest");
-    let manifest: serde_json::Value = serde_json::from_str(&raw).expect("parsing the large-text manifest");
+    let raw = std::fs::read_to_string(dir.join("manifest.json")).expect("read the large-text manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&raw).expect("parse the large-text manifest");
     manifest["screens"]
         .as_array()
         .expect("manifest.screens")
@@ -826,12 +826,12 @@ fn read_large_text() -> Vec<LargeRead> {
     load_large_text()
         .into_iter()
         .map(|screen| {
-            let engine = MeikiOcr::open(&models).expect("opening the bundled models");
+            let engine = MeikiOcr::open(&models).expect("open the bundled models");
             let capture = ScreenCapture { pixels: screen.pixels, w: screen.w, h: screen.h };
             let mut source = TextSource::new(Box::new(capture), Box::new(engine), settings);
             let (resolved, scan, _) = source
                 .resolve_at_tiled_scanned(screen.hover, true, CaptureMask::NONE)
-                .expect("reading a large-text screen");
+                .expect("read a large-text screen");
             let hovered = screen
                 .chars
                 .into_iter()
@@ -861,18 +861,18 @@ fn large(id: &str) -> &'static LargeRead {
     LARGE.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("large-text screen {id}"))
 }
 
-/// The hovered glyph and the rest of its line must come back verbatim. A long line
-/// must come back at least to the box edge: the forward tiles read the rest, and
-/// their reach at large sizes is the engine's, not this gate's.
+/// The returned text must include the hovered glyph and the rest of its line verbatim.
+/// A long line must extend at least to the box edge. Forward tiles read the rest, and their
+/// reach at large sizes is the engine's, not this gate's.
 fn read_whole(read: &LargeRead) {
     let resolved = read
         .resolved
         .as_ref()
-        .unwrap_or_else(|| panic!("{} ({} px): no hit; scan {:?}", read.id, read.size, read.scan));
+        .unwrap_or_else(|| panic!("{} ({} px): no hit. Scan {:?}", read.id, read.size, read.scan));
     let tail = &resolved.span.text[resolved.span.cursor_byte_offset..];
     let context = format!("{} ({} px): scan {:?}", read.id, read.size, read.scan);
     if read.prefix {
-        assert!(tail.starts_with(&read.expect), "{context}: got {tail:?}, want a prefix {:?}", read.expect);
+        assert!(tail.starts_with(&read.expect), "{context}: got {tail:?}, expected prefix {:?}", read.expect);
     } else {
         assert_eq!(tail, read.expect, "{context}");
     }
@@ -895,8 +895,8 @@ fn low_stroke_kanji_taller_than_the_box_are_read_whole() {
 }
 
 /// The issue #92 follow-up screenshot: a news line in BIZ UDPGothic, white on black.
-/// The engine returns no words for it at 100 px in the 100 px box. It reads the
-/// line in a 400 px box, where it scales the crop down.
+/// The engine returns no words at 100 px in the 100 px box. The 400 px box reads the
+/// line after it scales the crop down.
 #[test]
 fn light_on_dark_large_text_is_read_whole() {
     read_whole(large("katsu_biz_100"));
@@ -911,9 +911,9 @@ fn a_cut_glyph_is_not_the_answer_when_a_grown_box_reads_it_whole() {
 }
 
 /// Cursor placement. A cursor near the top or the bottom of a large glyph puts the
-/// box edge through the glyph. The engine then returns garbage that fits the box,
-/// such as `サ千子ペナ` for the top half of `活発な`. A hit word that touches one
-/// edge of the box and is at least half the box thick is a cut read, not an answer.
+/// box edge through the glyph. The engine then returns incorrect text that fits the
+/// box, such as `サ千子ペナ` for the top half of `活発な`. A hit word that touches
+/// one edge of the box and is at least half the box thick is a cut read, not an answer.
 #[test]
 fn a_cursor_near_the_top_or_bottom_of_a_large_glyph_still_reads_it_whole() {
     read_whole(large("katsu_biz_110_top"));
@@ -941,6 +941,6 @@ fn large_text_scan_rects_face_the_hovered_line() {
             h: f64::from(anchor.h),
         };
         let (fit, hits, misfits) = box_fit(std::slice::from_ref(&read.hovered), &[boxed], false);
-        assert_eq!((fit, hits), (1, 1), "{context}; misfits {misfits:?}");
+        assert_eq!((fit, hits), (1, 1), "{context}. Misfits: {misfits:?}");
     }
 }

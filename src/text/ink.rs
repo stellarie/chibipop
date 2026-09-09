@@ -1,14 +1,14 @@
 //! This module measures ink in a captured frame.
 //!
-//! It exists for one question: when the engine returns no hit, is there text-sized
-//! ink under the cursor that the capture box is too small for? The Linux engine
-//! scales a crop to its detector size. A 100 px glyph in a 500x100 box comes out too
-//! large to detect, and the engine returns no words at all. A word-based rule cannot
-//! see that. The pixels can. (ARCHITECTURE.md#capture-and-masking)
+//! It answers one question: when the engine returns no hit, does text-sized ink
+//! exist under the cursor because the capture box is too small? The Linux engine
+//! scales a crop to its detector size. A 100 px glyph in a 500x100 box is too
+//! large to detect, so the engine returns no words. A word-based rule cannot detect
+//! this case. Pixel data can answer this question. (ARCHITECTURE.md#capture-and-masking)
 //!
-//! The module rejects a stroke-level analysis. It measures one thing: the cross-axis
-//! extent of the ink near the cursor. A glyph fills its cell on the cross axis. A
-//! rule, an underline, or a small icon does not.
+//! This module does not use stroke-level analysis. It measures one thing: the
+//! cross-axis extent of ink near the cursor. A glyph fills its cell on the cross
+//! axis. A rule, an underline, and a small icon do not.
 
 use crate::geom::{PhysPoint, PhysRect};
 use crate::text::layout::box_orientation;
@@ -16,8 +16,8 @@ use crate::text::Frame;
 
 /// A pixel is ink when one channel differs from the background by this much.
 ///
-/// Anti-aliased edges fall below it. Text in any color on any flat background
-/// clears it, including yellow on white, which differs in blue alone.
+/// Anti-aliased edges fall below this threshold. Text in any color on a flat
+/// background passes this threshold, including yellow on white, which differs in blue alone.
 const INK_CONTRAST: u8 = 48;
 
 /// A cross-axis line holds ink when at least this many pixels in the window are ink.
@@ -27,18 +27,18 @@ const INK_PIXELS: usize = 2;
 /// The ink extent must reach this share of the reference short side.
 ///
 /// Issue #92: a white 80 px `活` on black filled 76 px of a 100 px box, and the
-/// engine read nothing. A 40 px body line reaches 40 %, and the engine reads it
-/// without a bigger box.
+/// engine returned no words. A 40 px body line reaches 40 %, and the engine reads
+/// it without a larger box.
 const SPAN_PERCENT: i32 = 60;
 
 /// Return true when ink near `cursor` spans at least [`SPAN_PERCENT`] of `reference`
 /// on the short side of `region`.
 ///
-/// `frame` holds `region` scaled by `factor`. `masked` lists the popup rects in
-/// frame pixels: the mask fills them with flat white, which is not ink. The window
-/// along the reading axis is one short side to each side of the cursor. The
-/// background is the most common color of the frame, quantized to 16 levels per
-/// channel.
+/// `frame` contains `region` at scale `factor`. `masked` lists popup rects in frame
+/// pixels. The mask fills those rects with flat white, so the rects do not count as
+/// ink. The window on the reading axis extends one short side to each side of the
+/// cursor. The background is the most common frame color, with each channel grouped
+/// into 16 levels.
 pub fn spans_short_side(
     frame: &Frame,
     region: PhysRect,

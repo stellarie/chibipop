@@ -1,6 +1,6 @@
 //! Shape contracts for the scan rects that `TextSource` reads and the overlay draws.
 //!
-//! Issue #92 showed boxes "all over the place" over one short line. The `Scripted`
+//! Issue #92 showed scan boxes in many positions over one short line. The `Scripted`
 //! fixture in `source.rs` answers a grab by its frame shape. It cannot place a cursor at
 //! many positions on lines of many lengths. This module builds a virtual screen of glyph
 //! boxes instead. `PageCapture` records every grab. `PageOcr` returns the glyphs inside
@@ -62,11 +62,11 @@ struct Page {
     /// The orientation of each line index, for the orientation invariant.
     lines: Vec<Orientation>,
     bounds: PhysRect,
-    /// Short sides of a capture box at which the engine returns no words at all.
+    /// Short sides of a capture box at which the engine returns no words.
     ///
     /// The Linux engine scales a crop to its detector size. A large glyph in a small
-    /// box comes out too large to detect, and a taller box scales it down. The real
-    /// engine read a 100 px `活` in a 400 px box and nothing in a 100 or 200 px box.
+    /// box is too large to detect, and a taller box scales it down. The real engine
+    /// read a 100 px `活` in a 400 px box and returned no words in a 100 or 200 px box.
     blind: &'static [i32],
 }
 
@@ -147,9 +147,9 @@ fn page_frame(page: &Page, region: PhysRect) -> Frame {
     Frame { buf, w: region.w, h: region.h, source: "page", fallback: None, unchanged: false }
 }
 
-/// `PageCapture` records every requested region in order. It never fails, also for a
-/// region that lies partly outside the output. `region_around` does not clamp, and the
-/// test checks that shape, not the backend.
+/// `PageCapture` records every requested region in order. It never fails, even when a
+/// region lies partly outside the output. `region_around` does not clamp, and the test
+/// checks that shape, not the backend.
 struct PageCapture {
     page: Rc<Page>,
     grabs: Grabs,
@@ -170,8 +170,8 @@ impl RegionCapture for PageCapture {
 
 /// `PageOcr` answers with the glyphs that the last grab shows.
 ///
-/// A glyph that the grab edge cuts by less than half comes back with its cut box. A
-/// glyph that the edge cuts by more than half vanishes. Each page line index gives one
+/// A glyph that the grab edge cuts by less than half returns with its cut box. A
+/// glyph that the edge cuts by more than half does not appear. Each page line index gives one
 /// OCR line, in page order. A split glyph gives its parts as one more line, after the
 /// page lines, under the same cut rule.
 struct PageOcr {
@@ -318,13 +318,13 @@ fn pt(x: i32, y: i32) -> PhysPoint {
     PhysPoint { x, y }
 }
 
-// Pages. Every row sits at y 480 unless stated. The text has no separator unless
-// stated, so `runs_out` is true and a probe or a tile can follow. A page takes its
-// glyph size. A line that must fill a width takes as many glyphs as fit that width,
-// so the same page keeps its purpose at 40, 100, and 120 px. The line pitch is
+// Page definitions. Every row sits at y 480 unless stated. The text has no separator
+// unless stated, so `runs_out` is true and a probe or tile can follow. A page takes
+// its glyph size. A line that must fill a width takes as many glyphs as fit that
+// width, so the same page keeps its purpose at 40, 100, and 120 px. The line pitch is
 // 1.75 glyphs, 70 px at 40 px.
 
-/// The first `n` of the fifty kana, for lines that fill a width.
+/// The first `n` kana characters, for lines that fill a width.
 fn kana(n: usize) -> String {
     "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"
         .chars()
@@ -343,7 +343,7 @@ fn short_stop(size: i32) -> Rc<Page> {
     Rc::new(page)
 }
 
-/// A short line inside the box. The lookup runs out at the end.
+/// A short line inside the box. The lookup reaches the end.
 fn short_open(size: i32) -> Rc<Page> {
     let mut page = Page::new("short_open", size);
     page.row("日本語を話す", 800, 480);
@@ -523,7 +523,7 @@ fn a_short_line_without_punctuation_pays_two_probes_from_the_margin() {
         *grabs.borrow(),
         [r(650, 450, 500, 100), r(0, 470, 1000, 270), r(500, 470, 560, 270)]
     );
-    // The probes find no continuation. Pass 1 stands.
+    // The probes find no continuation. Pass 1 remains.
     let resolved = resolved.expect("hit");
     assert_eq!(resolved.span.text, "日本語を話す");
     assert_eq!(resolved.span.geom.len(), 6);
@@ -558,7 +558,7 @@ fn a_wrap_at_the_line_end_is_read_by_one_probe_from_the_margin() {
 
 /// け is cut to 30 px at x 720 and ends at the box edge, so no wrap probe runs. The
 /// tile restarts at け's own edge. The band is `max(3 * 40, 100) = 120` tall and
-/// centered on the anchor. The second tile reads nothing and stops the read.
+/// centered on the anchor. The second tile returns no text and stops the read.
 /// The stitched text has no geometry. The Anchor is the only per-glyph box that the
 /// overlay keeps.
 #[test]
@@ -616,9 +616,9 @@ fn a_column_with_prefer_vertical_pays_one_probe_from_the_top_edge() {
 }
 
 /// The first box shows 本 and を cut to 30 px around 語. The column spans the box's
-/// short side, so the box zooms out to 1000 x 200 and then to the output width and
-/// 400 tall, where the whole column fits. Six words override the horizontal box.
-/// The column probe then runs from the top edge, as for a vertical box.
+/// short side, so the box grows to 1000 x 200 and then to the output width and 400
+/// tall, where the whole column fits. Six words override the horizontal box. The
+/// column probe then runs from the top edge, as for a vertical box.
 #[test]
 fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
     let page = column(S);
@@ -648,9 +648,9 @@ fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
 
 /// Issue #92 at 120 px. The 100 px box shows 本, 語, and を cut to 100 px tall, and
 /// drops 日 and 話, which it cuts to 70 px wide and 100 tall. The line spans the
-/// box's short side, so the box zooms out once to 1000 x 200. There the line fits
-/// whole, and 。 comes back cut to 80 px at the box edge. The separator stops the
-/// lookup, so no probe runs. The anchor is the whole glyph.
+/// box's short side, so the box grows once to 1000 x 200. There the line fits whole,
+/// and 。 returns cut to 80 px at the box edge. The separator stops the lookup, so no
+/// probe runs. The anchor is the whole glyph.
 #[test]
 fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
     let page = short_stop(120);
@@ -687,9 +687,9 @@ fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
 
 /// Issue #92 follow-up: a 100 px line in a 100 px box, and an engine that returns
 /// no words at 100 and 200 px. Nothing spans the box, because nothing was read. The
-/// ink under the cursor spans the box's short side, so the box zooms out. The empty
-/// read at 200 px zooms it out again, to the output width. At 400 px the engine
-/// reads the whole line, and its separator stops the lookup.
+/// ink under the cursor spans the box's short side, so the box grows. The empty read
+/// at 200 px grows it again, to the output width. At 400 px the engine returns the
+/// whole line, and its separator stops the lookup.
 #[test]
 fn a_glyph_the_engine_cannot_read_in_a_small_box_grows_the_box_on_ink() {
     let mut page = Page::new("blind_small", LARGE);
@@ -715,9 +715,9 @@ fn a_glyph_the_engine_cannot_read_in_a_small_box_grows_the_box_on_ink() {
     assert_eq!(resolved.span.cursor_byte_offset, 6);
 }
 
-/// The follow-up screenshot answered `古` for `活`: the 100 px box read a cut glyph,
-/// the grown boxes read nothing, and the cut read stood. A cut read is not an
-/// answer. When no grown box reads the glyph, the hover answers nothing.
+/// The follow-up screenshot returned `古` for `活`: the 100 px box returned a cut
+/// glyph, the grown boxes returned no text, and the cut read remained. A cut read is
+/// not an answer. When no grown box reads the glyph, the hover returns no result.
 #[test]
 fn a_cut_read_is_not_the_answer_when_no_grown_box_reads_the_glyph() {
     let mut page = Page::new("blind_large", 120);
@@ -734,9 +734,9 @@ fn a_cut_read_is_not_the_answer_when_no_grown_box_reads_the_glyph() {
 }
 
 /// Cursor placement. A cursor 10 px below the top of a 100 px glyph puts the box's
-/// bottom edge through the row. Every glyph comes back cut to 60 px, and the cut
+/// bottom edge through the row. Every glyph returns with a 60 px cut, and the cut
 /// hit touches that edge with more than half the box's thickness. That is a cut
-/// read. The box zooms out once, and the whole row fits.
+/// read. The box grows once, and the whole row fits.
 #[test]
 fn a_cursor_near_the_top_of_a_large_glyph_grows_the_box() {
     let page = short_stop(LARGE);
@@ -812,7 +812,7 @@ fn a_line_ending_at_the_screen_edge_pays_three_overlapping_probes() {
         ]
     );
     // Pass 1 shows ね cut to 30 px plus six full glyphs. No continuation exists, so
-    // pass 1 stands.
+    // pass 1 remains.
     let resolved = resolved.expect("hit");
     assert_eq!(resolved.span.text, "ねのはひふへほ");
     assert_eq!(resolved.span.cursor_byte_offset, 18);
@@ -847,10 +847,10 @@ fn a_cursor_past_half_a_glyph_below_the_row_hits_nothing_and_draws_nothing() {
     assert_eq!(*grabs.borrow(), [r(650, 495, 500, 100)]);
 }
 
-// Issue #92. An engine boxed the components of one large glyph as words of their
-// own. Two words stacked in a horizontal box read as a column. The wrap probe then
-// started at the top edge of the output and the forward tile ran below the text.
-// The capture box is the prior: two words cannot outvote it.
+// Issue #92. An engine boxed the components of one large glyph as separate words.
+// Two words stacked in a horizontal box read as a column. The wrap probe then
+// started at the top edge of the output, and the forward tile ran below the text.
+// The capture box is the prior: two words cannot override it.
 
 /// Pass 1 shows `立` cut to 45 px over `木`, and `規` cut to 95 px on its own line.
 /// The read stays horizontal. The probe band is 47 thick (the mean of 45 and 50):
@@ -883,8 +883,8 @@ fn a_large_glyph_split_in_two_stacked_parts_keeps_the_scan_on_its_row() {
 }
 
 /// Three stacked parts outnumber two, but their union is one square glyph cell,
-/// not a column. That union spans the box's short side, so the box zooms out once
-/// to 1000 x 200. The probe band is 33 thick: 24 above and 198 below y 539.
+/// not a column. That union spans the box's short side, so the box grows once to
+/// 1000 x 200. The probe band is 33 thick: 24 above and 198 below y 539.
 #[test]
 fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
     let page = three_part_line();
@@ -971,8 +971,8 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
 /// The first box is the configured one. Each next box exists only because a line
 /// spanned the short side of the previous box, because one edge cut the hit word,
 /// because ink under the cursor spanned it with no hit, or because a grown box read
-/// nothing. It is the previous box grown
-/// on its short side. The last box is not cut, or the step cap stopped the growth.
+/// nothing. It is the previous box grown on its short side. The last box is not cut,
+/// or the step cap stopped the growth.
 fn check_growth(page: &Page, cursor: PhysPoint, boxes: &[PhysRect], context: &str) {
     assert!(!boxes.is_empty() && boxes.len() <= 1 + GROWTH_STEPS, "{context}");
     let cut = |i: usize, rect: PhysRect| {
