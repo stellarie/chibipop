@@ -2433,6 +2433,7 @@ Manual browser acceptance:
 9. Test left, right, middle, and extra mouse buttons outside the popup in every trigger mode.
 10. Verify the clipboard contents remain unchanged.
 11. Disable the shortcut. Confirm the previous binding no longer invokes lookup.
+12. In VS Code, enable Screen Reader Accessibility Mode. Confirm selected text opens.
 
 Windows requires UI Automation selection support. Linux requires PRIMARY support
 through ext-data-control or wlr-data-control version 2. On Linux, the source
