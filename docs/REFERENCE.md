@@ -678,6 +678,20 @@ tile text found past the box replaces the joined wrap, so a hidden wrap is most 
 at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
 `show_scan_region` overlay draws each region as a tile.
 
+The capture box grows when it is too small for the text under the cursor. A glyph
+taller than the box, or a cursor near the top or bottom of a large glyph, puts a
+box edge through the glyph. The engine then returns a fragment, an incorrect
+result, or no text. The box doubles both sides around the cursor, at most twice:
+500 x 100 becomes 1000 x 200, then 2000 x 400, and the box stays inside the
+screen. It grows when a recognized line spans the short side, when the word under
+the cursor touches a box edge with at least half the box's height, when the lookup
+returns no text and ink under the cursor spans most of the short side, or when a
+grown box returns no text. The hover never uses a cut glyph as its answer. The
+answer comes from a box that holds the glyph whole, or the hover shows nothing.
+The first box and every grown box appear in the `show_scan_region` overlay. Set `capture_height`
+to your usual line height. Growth covers the large heading or the manga panel.
+Each step adds one capture and OCR pass.
+
 ### `discard_furigana`
 
 Removes small kana-only ruby lines beside larger overlapping kanji lines.
@@ -886,10 +900,10 @@ bottom of the box, and does not recover its former priority; carry on pressing
 
 ### `show_scan_region`
 
-The *debug* view: a faint outline around every region a hover captured —
-pass 1's box, each forward tile, and the word it resolved. Turn it on when
-OCR is behaving oddly and you want to see what it actually looked at rather
-than infer it.
+The *debug* view shows a faint outline around every region that a hover captured —
+pass 1's box, each box used for growth when the text was too tall, each wrap
+probe and forward tile, and the word it resolved. Turn it on when OCR behaves
+oddly to see what it read instead of guessing from the outline.
 
 **Off by default**, and independent of `highlight_match`: with only the
 highlight on you get one box, not four.

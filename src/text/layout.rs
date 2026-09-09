@@ -210,10 +210,26 @@ pub struct Resolved {
     pub orientation: Orientation,
 }
 
-/// Return the orientation of the line.
-pub fn orientation_of(line: &OcrLine) -> Orientation {
-    if line.words.len() < 2 {
-        return Orientation::Horizontal;
+/// A line can override the capture box only when it has at least this many words.
+///
+/// Issue #92: an engine boxed the components of one large `新` as `立` over `木`, two
+/// words stacked inside a horizontal box. Their center spread made the line vertical.
+/// The wrap probe then started at the output top edge, and the forward tile ran below
+/// the text. Two words cannot override the box. Three words that fill the short side
+/// of the box form a real line.
+pub const OVERRIDE_WORDS: usize = 3;
+
+/// Return the line orientation. `prior` is the orientation of the capture box.
+///
+/// The user chose the box shape with `prefer_vertical`, so the box is the prior. A
+/// line overrides it only with strong evidence: at least [`OVERRIDE_WORDS`] words
+/// whose centers spread more along the other axis, and a union at least twice as long
+/// as it is thick on that axis. Three stacked components of one glyph (`意` as `立`,
+/// `日`, `心`) form a square union, not a column. A column of three 40 px glyphs in a
+/// 100 px box forms a union 100 tall and 40 wide, which passes.
+pub fn orientation_of(line: &OcrLine, prior: Orientation) -> Orientation {
+    if line.words.len() < OVERRIDE_WORDS {
+        return prior;
     }
     let centres: Vec<PhysPoint> = line.words.iter().map(|w| w.rect.center()).collect();
     let (x_min, x_max) = centres.iter().fold((i32::MAX, i32::MIN), |(min, max), c| {
@@ -224,7 +240,116 @@ pub fn orientation_of(line: &OcrLine) -> Orientation {
     });
     let x_spread = x_max - x_min;
     let y_spread = y_max - y_min;
-    if y_spread > x_spread { Orientation::Vertical } else { Orientation::Horizontal }
+    let by_spread = match y_spread.cmp(&x_spread) {
+        std::cmp::Ordering::Greater => Orientation::Vertical,
+        std::cmp::Ordering::Less => Orientation::Horizontal,
+        std::cmp::Ordering::Equal => return prior,
+    };
+    if by_spread == prior {
+        return prior;
+    }
+    let Some(union) = line_rect(line) else { return prior };
+    if by_spread.len(union) >= 2 * by_spread.thick(union) { by_spread } else { prior }
+}
+
+/// Return the orientation that a capture box implies: a box taller than it is wide
+/// captures a column.
+pub fn box_orientation(region: PhysRect) -> Orientation {
+    if region.h > region.w { Orientation::Vertical } else { Orientation::Horizontal }
+}
+
+/// The capture box can grow at most this many times.
+///
+/// Each step doubles both sides: 500 x 100 becomes 1000 x 200, then 2000 x 400. Issue
+/// #92 hovered text at about the box height. The Linux engine scales a crop to its
+/// detector size, and a 500 px wide crop is always scaled up by 1.92. A 120 px glyph
+/// in that crop is too large to detect, and no taller 500 px wide box changed that.
+/// The engine scales a 1000 px wide box by 0.96. Every measured case returned text from
+/// that box. A glyph above 400 px is not popup text.
+pub const GROWTH_STEPS: usize = 2;
+
+/// Return true when a line spans the short side of `region`.
+///
+/// A glyph at least as tall as the box touches both of its long edges, within
+/// [`EDGE_MARGIN`]. The engine then sees a cut glyph and returns a fragment, an
+/// incorrect result, or no text. The union of a line covers a stack of fragments
+/// and one cut word. The check uses every line. The cursor sits inside the box, and
+/// a line that spans the box passes through the cursor's row.
+pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
+    let orientation = box_orientation(region);
+    let start = orientation.cross(PhysPoint { x: region.x, y: region.y });
+    let end = start + orientation.thick(region);
+    lines.iter().filter_map(line_rect).any(|line| {
+        let lead = orientation.cross(PhysPoint { x: line.x, y: line.y });
+        lead <= start + EDGE_MARGIN && lead + orientation.thick(line) >= end - EDGE_MARGIN
+    })
+}
+
+/// Return true when the word under the cursor is cut by one edge of `region`.
+///
+/// A cursor near the top or the bottom of a large glyph puts one box edge through
+/// the row. The visible part fits the box, so no line spans it, and the engine
+/// returns incorrect text in boxes that touch that edge (issue #92: `サ千子ペナ`
+/// for the top half of `活発な`). The word is cut when it touches an edge within
+/// [`EDGE_MARGIN`] and is at least half the box thick. A body line under a cursor
+/// just below it touches the top edge too, but at 40 px in a 100 px box it is not a
+/// large glyph, and the engine reads it.
+pub fn hit_cut_by_edge(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
+    let Some((li, wi)) = hit_scan(lines, cursor, scan_alnum) else { return false };
+    let word = lines[li].words[wi].rect;
+    let orientation = box_orientation(region);
+    let start = orientation.cross(PhysPoint { x: region.x, y: region.y });
+    let end = start + orientation.thick(region);
+    let lead = orientation.cross(PhysPoint { x: word.x, y: word.y });
+    let thick = orientation.thick(word);
+    thick * 2 >= orientation.thick(region)
+        && (lead <= start + EDGE_MARGIN || lead + thick >= end - EDGE_MARGIN)
+}
+
+/// Return `region` doubled on both sides around the same center, inside `bounds`.
+///
+/// Both sides double because the engine's scale depends on both. A box that grows
+/// on its short side alone keeps the reading axis at 500 px and the scale at 1.92.
+/// The grown box moves inside the output when it can, and it shrinks to the output
+/// only when it is larger. A box that starts outside its monitor fails the Windows
+/// DXGI grab and costs a one second BitBlt fallback. A box that shrinks on the
+/// reading axis raises the scale: the engine reads a bold 125 px line in a 500 px wide
+/// box, but not in a 432 px wide one.
+pub fn grow(region: PhysRect, bounds: PhysRect) -> PhysRect {
+    let grown = region.inflated(region.w / 2, region.h / 2);
+    let fit = |start: i32, len: i32, bound_start: i32, bound_len: i32| {
+        if len >= bound_len {
+            (bound_start, bound_len)
+        } else {
+            (start.max(bound_start).min(bound_start + bound_len - len), len)
+        }
+    };
+    let (x, w) = fit(grown.x, grown.w, bounds.x, bounds.w);
+    let (y, h) = fit(grown.y, grown.h, bounds.y, bounds.h);
+    PhysRect { x, y, w, h }
+}
+
+/// A word box thinner than this fraction of its thickness on the reading axis is a
+/// sliver, not a glyph.
+///
+/// The Linux engine returned a `」` in a 4 x 92 box at the right edge of a 100 px `規`.
+/// No glyph is that thin: a `l` or a vertical `ー` is about one fifth of its height.
+/// A word box can be long, so the rule reads only the reading axis.
+pub const SLIVER_RATIO: i32 = 16;
+
+/// Drop sliver words and lines that then have no words. `orientation` is the capture
+/// box orientation.
+pub fn drop_slivers(lines: Vec<OcrLine>, orientation: Orientation) -> Vec<OcrLine> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.words.retain(|word| {
+                orientation.len(word.rect) * SLIVER_RATIO >= orientation.thick(word.rect)
+            });
+            line
+        })
+        .filter(|line| !line.words.is_empty())
+        .collect()
 }
 
 fn is_kana(c: char) -> bool {
@@ -660,7 +785,7 @@ pub fn head_and_tail(
 ) -> Option<(String, i32, Orientation)> {
     let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
-    let orientation = orientation_of(line);
+    let orientation = orientation_of(line, box_orientation(region));
 
     let mut ordered: Vec<&OcrWord> = line.words.iter().collect();
     ordered.sort_by_key(|w| orientation.lead(w.rect));
@@ -677,10 +802,16 @@ pub fn head_and_tail(
     Some((text, next, orientation))
 }
 
-/// Resolve the text under the hover.
-pub fn resolve(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool) -> Option<Resolved> {
+/// Resolve the text under the hover. `region` is the capture box that `lines` came
+/// from. Its shape is the orientation prior.
+pub fn resolve(
+    lines: &[OcrLine],
+    cursor: PhysPoint,
+    region: PhysRect,
+    scan_alnum: bool,
+) -> Option<Resolved> {
     let (li, _) = hit_scan(lines, cursor, scan_alnum)?;
-    let orientation = orientation_of(&lines[li]);
+    let orientation = orientation_of(&lines[li], box_orientation(region));
     resolve_wrapped(lines, cursor, scan_alnum, orientation).map(|(resolved, _)| resolved)
 }
 
@@ -791,7 +922,7 @@ pub fn wrap_probe(
 ) -> Option<Vec<PhysRect>> {
     let (li, wi) = hit_scan(lines, cursor, scan_alnum)?;
     let line = &lines[li];
-    let orientation = orientation_of(line);
+    let orientation = orientation_of(line, box_orientation(region));
     let hit = line.words[wi].rect;
     let region_lead = orientation.lead(region);
     let region_end = orientation.trail(region);
@@ -990,6 +1121,10 @@ mod tests {
         OcrWord { text: text.to_string(), rect: PhysRect { x, y, w: ww, h } }
     }
     fn p(x: i32, y: i32) -> PhysPoint { PhysPoint { x, y } }
+    /// A horizontal capture box that holds every fixture below.
+    fn wide_box() -> PhysRect { PhysRect { x: 0, y: 0, w: 1000, h: 400 } }
+    /// A vertical capture box that holds every fixture below.
+    fn tall_box() -> PhysRect { PhysRect { x: 0, y: 0, w: 400, h: 1000 } }
 
     /// This fixture contains three 20x20 characters in one row.
     fn horizontal_line() -> Vec<OcrLine> {
@@ -1093,24 +1228,50 @@ mod tests {
     }
 
     #[test]
-    fn orientation_detects_horizontal() {
-        assert_eq!(Orientation::Horizontal, orientation_of(&horizontal_line()[0]));
+    fn three_words_in_a_row_override_a_vertical_box() {
+        assert_eq!(Orientation::Horizontal, orientation_of(&horizontal_line()[0], Orientation::Vertical));
     }
 
     #[test]
-    fn orientation_detects_vertical() {
-        assert_eq!(Orientation::Vertical, orientation_of(&vertical_line()[0]));
+    fn three_words_in_a_column_override_a_horizontal_box() {
+        assert_eq!(Orientation::Vertical, orientation_of(&vertical_line()[0], Orientation::Horizontal));
+    }
+
+    /// Issue #92: an engine boxed `新` as `立` over `木`. Two words are the box's.
+    #[test]
+    fn two_stacked_words_take_the_box_orientation() {
+        let line = OcrLine { words: vec![w("立", 100, 100, 50, 50), w("木", 100, 150, 50, 50)] };
+        assert_eq!(Orientation::Horizontal, orientation_of(&line, Orientation::Horizontal));
+        assert_eq!(Orientation::Vertical, orientation_of(&line, Orientation::Vertical));
+    }
+
+    /// `意` as `立`, `日`, `心`: three words whose union is one square cell.
+    #[test]
+    fn three_stacked_parts_of_one_glyph_take_the_box_orientation() {
+        let line = OcrLine {
+            words: vec![w("立", 100, 100, 100, 25), w("日", 100, 125, 100, 50), w("心", 100, 175, 100, 25)],
+        };
+        assert_eq!(Orientation::Horizontal, orientation_of(&line, Orientation::Horizontal));
     }
 
     #[test]
-    fn single_word_line_is_horizontal_by_convention() {
+    fn a_single_word_takes_the_box_orientation() {
         let line = OcrLine { words: vec![w("食", 100, 100, 20, 20)] };
-        assert_eq!(Orientation::Horizontal, orientation_of(&line));
+        assert_eq!(Orientation::Horizontal, orientation_of(&line, Orientation::Horizontal));
+        assert_eq!(Orientation::Vertical, orientation_of(&line, Orientation::Vertical));
     }
 
     #[test]
-    fn empty_line_is_horizontal_by_convention() {
-        assert_eq!(Orientation::Horizontal, orientation_of(&OcrLine { words: vec![] }));
+    fn an_empty_line_takes_the_box_orientation() {
+        let line = OcrLine { words: vec![] };
+        assert_eq!(Orientation::Vertical, orientation_of(&line, Orientation::Vertical));
+    }
+
+    #[test]
+    fn a_box_taller_than_wide_is_a_column_prior() {
+        assert_eq!(Orientation::Vertical, box_orientation(tall_box()));
+        assert_eq!(Orientation::Horizontal, box_orientation(wide_box()));
+        assert_eq!(Orientation::Horizontal, box_orientation(PhysRect { x: 0, y: 0, w: 300, h: 300 }));
     }
 
     #[test]
@@ -1122,14 +1283,14 @@ mod tests {
                 w("日", 130, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(105, 105), true).unwrap();
+        let got = resolve(&[line], p(105, 105), wide_box(), true).unwrap();
         assert_eq!("昨日は", got.span.text);
         assert_eq!(0, got.span.cursor_byte_offset);
     }
 
     #[test]
     fn assembly_orders_vertically_top_to_bottom() {
-        let got = resolve(&vertical_line(), p(105, 165), true).unwrap();
+        let got = resolve(&vertical_line(), p(105, 165), wide_box(), true).unwrap();
         assert_eq!("昨日は", got.span.text);
         assert_eq!(Orientation::Vertical, got.orientation);
         // 昨 and 日 use 3 bytes each.
@@ -1138,20 +1299,20 @@ mod tests {
 
     #[test]
     fn cursor_byte_offset_lands_on_a_char_boundary() {
-        let got = resolve(&horizontal_line(), p(165, 105), true).unwrap();
+        let got = resolve(&horizontal_line(), p(165, 105), wide_box(), true).unwrap();
         // The offset must never split a character.
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('は'));
     }
 
     #[test]
     fn anchor_is_the_hit_characters_own_rect() {
-        let got = resolve(&horizontal_line(), p(135, 105), true).unwrap();
+        let got = resolve(&horizontal_line(), p(135, 105), wide_box(), true).unwrap();
         assert_eq!(PhysRect { x: 130, y: 100, w: 20, h: 20 }, got.span.anchor);
     }
 
     #[test]
     fn resolve_returns_none_when_nothing_is_near() {
-        assert_eq!(None, resolve(&horizontal_line(), p(500, 500), true).map(|r| r.span.text));
+        assert_eq!(None, resolve(&horizontal_line(), p(500, 500), wide_box(), true).map(|r| r.span.text));
     }
 
     #[test]
@@ -1217,7 +1378,7 @@ mod tests {
                 w("箱", 190, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(195, 105), true).unwrap();
+        let got = resolve(&[line], p(195, 105), wide_box(), true).unwrap();
         assert_eq!("ツール箱", got.span.text);
         assert!(got.span.text[got.span.cursor_byte_offset..].starts_with('箱'));
         // Three characters use 3 bytes each, for 9 bytes.
@@ -1235,7 +1396,7 @@ mod tests {
                 w("々", 190, 100, 20, 20), // This final repeat follows the hit repeat.
             ],
         };
-        let got = resolve(&[line], p(170, 110), true).unwrap();
+        let got = resolve(&[line], p(170, 110), wide_box(), true).unwrap();
         assert_eq!("々人々々", got.span.text);
         // 2 chars x 3 bytes = 6.
         assert_eq!(6, got.span.cursor_byte_offset);
@@ -1780,7 +1941,7 @@ mod tests {
             words: vec![w("可", 100, 100, 30, 40), w("哀", 130, 100, 30, 40),
                         w("想", 160, 100, 30, 40)],
         };
-        let r = resolve(&[line], p(145, 120), true).unwrap();
+        let r = resolve(&[line], p(145, 120), wide_box(), true).unwrap();
         assert_eq!(3, r.span.geom.len());
         assert_eq!(r.span.text.chars().count(),
                    r.span.geom.iter().map(|g| g.char_count).sum::<usize>());
@@ -1794,7 +1955,7 @@ mod tests {
                         w("可", 160, 100, 30, 40), w("哀", 190, 100, 30, 40),
                         w("想", 220, 100, 30, 40)],
         };
-        let r = resolve(&[line], p(175, 120), true).unwrap();
+        let r = resolve(&[line], p(175, 120), wide_box(), true).unwrap();
         assert_ne!(0, r.span.cursor_byte_offset, "the fixture must exercise a non-zero offset");
 
         let from = r.span.text[..r.span.cursor_byte_offset].chars().count();
@@ -1816,7 +1977,7 @@ mod tests {
                         w("は", 152, 100, 23, 24), w("宿", 178, 100, 23, 24),
                         w("舎", 204, 100, 23, 24)],
         };
-        let r = resolve(&[line], p(185, 112), true).unwrap();
+        let r = resolve(&[line], p(185, 112), wide_box(), true).unwrap();
         assert_eq!(5, r.span.geom.len(), "gaps must not fold the run into one entry");
 
         let from = r.span.text[..r.span.cursor_byte_offset].chars().count();
@@ -1831,7 +1992,7 @@ mod tests {
             words: vec![w("学", 100, 100, 23, 24), w("生", 126, 100, 23, 24),
                         w("は", 152, 100, 23, 24)],
         };
-        let r = resolve(&[line], p(110, 112), true).unwrap();
+        let r = resolve(&[line], p(110, 112), wide_box(), true).unwrap();
         let boxed = union_chars(&r.span.geom, 0, 3, 0).unwrap();
         assert_eq!(PhysRect { x: 100, y: 100, w: 75, h: 24 }, boxed);
     }
@@ -1848,7 +2009,7 @@ mod tests {
                 w("物", 200, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(155, 105), true).unwrap();
+        let got = resolve(&[line], p(155, 105), wide_box(), true).unwrap();
         assert_eq!("食べ物", got.span.text);
         assert_eq!(3, got.span.geom.len());
         assert!(got.span.geom.iter().all(|g| g.char_count == 1));
@@ -1875,7 +2036,7 @@ mod tests {
                 w("物", 200, 100, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(205, 105), true).unwrap();
+        let got = resolve(&[line], p(205, 105), wide_box(), true).unwrap();
         assert_eq!(6, got.span.cursor_byte_offset);
         assert!(got.span.text[6..].starts_with('物'));
     }
@@ -1890,7 +2051,7 @@ mod tests {
                 w("物", 100, 200, 20, 20),
             ],
         };
-        let got = resolve(&[line], p(105, 155), true).unwrap();
+        let got = resolve(&[line], p(105, 155), wide_box(), true).unwrap();
         assert_eq!(Orientation::Vertical, got.orientation);
         assert_eq!(3, got.span.geom.len());
         assert_eq!(
@@ -1909,7 +2070,7 @@ mod tests {
                 w("想", 160, 100, 30, 40),
             ],
         };
-        let got = resolve(&[line], p(145, 120), true).unwrap();
+        let got = resolve(&[line], p(145, 120), wide_box(), true).unwrap();
         assert_eq!(3, got.span.geom.len());
     }
 
@@ -2082,21 +2243,21 @@ mod tests {
 
     #[test]
     fn resolve_appends_the_wrapped_next_line() {
-        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), wide_box(), true).unwrap();
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
     /// The hover reaches the third character after two earlier characters.
     #[test]
     fn resolve_wrap_keeps_the_hit_words_own_cursor_offset() {
-        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), wide_box(), true).unwrap();
         assert_eq!(6, got.span.cursor_byte_offset);
         assert!(got.span.text[6..].starts_with('い'));
     }
 
     #[test]
     fn resolve_geom_spans_both_lines_of_a_wrap() {
-        let got = resolve(&wrapped_lines(), p(190, 110), true).unwrap();
+        let got = resolve(&wrapped_lines(), p(190, 110), wide_box(), true).unwrap();
         assert_eq!(9, got.span.geom.len(), "one entry per touching char");
         let chars: usize = got.span.geom.iter().map(|g| g.char_count).sum();
         assert_eq!(got.span.text.chars().count(), chars);
@@ -2108,13 +2269,13 @@ mod tests {
             OcrLine { words: vec![w("上", 100, 100, 40, 40)] },
             OcrLine { words: vec![w("下", 100, 400, 40, 40)] },
         ];
-        let got = resolve(&lines, p(110, 110), true).unwrap();
+        let got = resolve(&lines, p(110, 110), wide_box(), true).unwrap();
         assert_eq!("上", got.span.text);
     }
 
     #[test]
     fn resolve_only_looks_forward_not_backward_for_a_wrap() {
-        let got = resolve(&wrapped_lines(), p(110, 166), true).unwrap();
+        let got = resolve(&wrapped_lines(), p(110, 166), wide_box(), true).unwrap();
         assert_eq!("始まる", got.span.text);
     }
 
@@ -2122,7 +2283,7 @@ mod tests {
     fn resolve_does_not_recursively_merge_a_third_line() {
         let mut lines = wrapped_lines();
         lines.push(OcrLine { words: vec![w("末", 100, 212, 40, 40)] });
-        let got = resolve(&lines, p(190, 110), true).unwrap();
+        let got = resolve(&lines, p(190, 110), wide_box(), true).unwrap();
         assert_eq!("新しい冒険が始まる", got.span.text);
     }
 
@@ -2530,7 +2691,7 @@ mod tests {
             // True wrap: This line has a gap of 60 and appears second.
             OcrLine { words: vec![w("始", 100, 160, 40, 80)] },
         ];
-        let got = resolve(&lines, p(110, 130), true).unwrap();
+        let got = resolve(&lines, p(110, 130), wide_box(), true).unwrap();
         assert_eq!(
             "新始", got.span.text,
             "the nearer line must win regardless of Vec order"
@@ -2547,7 +2708,7 @@ mod tests {
                 words: vec![w("左", 144, 100, 40, 40), w("右", 144, 140, 40, 40)],
             },
         ];
-        let got = resolve(&lines, p(210, 110), true).unwrap();
+        let got = resolve(&lines, p(210, 110), tall_box(), true).unwrap();
         assert_eq!(Orientation::Vertical, got.orientation);
         assert_eq!("上下左右", got.span.text);
     }
@@ -2670,7 +2831,7 @@ mod tests {
         let lines = vec![OcrLine {
             words: vec![w("PC", 100, 100, 40, 30), w("語", 150, 100, 40, 30)],
         }];
-        let got = resolve(&lines, p(160, 110), false).unwrap();
+        let got = resolve(&lines, p(160, 110), wide_box(), false).unwrap();
         assert_eq!("PC語", got.span.text, "PC stays in the text");
     }
 }

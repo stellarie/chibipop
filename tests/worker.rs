@@ -69,7 +69,11 @@ impl RegionCapture for FakeCapture {
     }
 }
 
-/// Return one whole-image word for each call, or no words.
+/// Return one word at the frame center for each call, or no words. The hover point
+/// is the center of every capture box, so the word contains it. The word extends to
+/// the frame's trailing edge, so the clipped-line gate stops a wrap probe. Its height is
+/// half the short side. A word that fills the frame reads as text taller than the box,
+/// and the box then grows (ARCHITECTURE.md#capture-and-masking).
 struct FakeOcr {
     log: mpsc::Sender<String>,
     text: Option<String>,
@@ -82,12 +86,13 @@ impl OcrEngine for FakeOcr {
         if self.panics {
             panic!("a deliberate OCR panic");
         }
+        let side = w.min(h) / 2;
         Ok(match &self.text {
             None => Vec::new(),
             Some(t) => vec![OcrLine {
                 words: vec![OcrWord {
                     text: t.clone(),
-                    rect: PhysRect { x: 0, y: 0, w, h },
+                    rect: PhysRect { x: (w - side) / 2, y: (h - side) / 2, w: w - (w - side) / 2, h: side },
                 }],
             }],
         })

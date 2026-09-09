@@ -57,9 +57,10 @@ fn real_engine_reads_the_fixture_and_boxes_every_character() {
     }
 
     // The center of the first recognized word must resolve to
-    // that same word.
+    // that same word. The fixture frame is the capture box.
     let first = &lines[0].words[0];
-    let hit = resolve(&lines, first.rect.center(), true).expect("centre of a word must resolve");
+    let frame = chibipop::geom::PhysRect { x: 0, y: 0, w: FIX_W, h: FIX_H };
+    let hit = resolve(&lines, first.rect.center(), frame, true).expect("the word center must resolve");
     assert!(
         hit.span.text[hit.span.cursor_byte_offset..].starts_with(&first.text),
         "expected the span to start at {:?}, got {:?}",

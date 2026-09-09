@@ -9,7 +9,10 @@ pub mod layout;
 pub mod sentence;
 pub mod mask;
 mod frozen;
+pub mod ink;
 pub mod source;
+#[cfg(test)]
+mod scan_geometry_tests;
 
 pub use mask::{CaptureMask, CaptureMode};
 pub use source::{RegionRead, SettingsSnapshot, TextSource};

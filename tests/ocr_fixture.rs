@@ -20,7 +20,8 @@ fn mapping_and_resolution_compose_correctly() {
             ),
         }],
     };
-    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }, true).expect("must resolve");
+    let region = PhysRect { x: 1000, y: 500, w: 500, h: 100 };
+    let got = resolve(&[mapped], PhysPoint { x: 1110, y: 560 }, region, true).expect("must resolve");
     assert_eq!("食", got.span.text);
     assert_eq!(0, got.span.cursor_byte_offset);
     assert_eq!(1100, got.span.anchor.x);

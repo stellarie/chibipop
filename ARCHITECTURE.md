@@ -100,6 +100,25 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   be up to half a thickness after the hovered line start. The rules use geometry,
   not ruby or heading labels. The reach is fixed. A pitch measured from neighbors
   fails on a two-line paragraph because the pair under test has no pitch beside it.
+- The capture box provides the orientation prior. `prefer_vertical` shapes the box, and
+  the box shape decides the reading axis of pass 1. A line overrides the box only with at
+  least three words whose centers spread along the other axis and whose union is at
+  least twice as long as it is thick on that axis. An engine can box the components of
+  one large glyph as separate words (issue #92: `新` as `立` over `木`). Two stacked
+  words form a column under a spread-only rule. The wrap probe starts at the output
+  top edge, and the forward tile runs below the text.
+- The capture box grows at most twice around the cursor when it is too small for the
+  text under the cursor: a recognized line spans the short side, or the hit word
+  touches one edge with at least half the box's thickness, or the engine returns no hit
+  and ink under the cursor spans 60 % of the configured short side (`text::ink`), or a
+  grown box returns no text. Both sides double because the Linux engine scales a crop to
+  detector size from both: a 500 px wide crop is always scaled up 1.92 times, and a
+  1000 px wide one 0.96 times. A grown box moves inside the output and shrinks to it
+  only when it is larger. A cut read is not an answer. The answer is the last read
+  whose hit is not cut. Every grabbed box appears in the outline as a pass-1 box.
+- A word box thinner than one sixteenth of its thickness on the reading axis is a
+  sliver, not a glyph. The capture seam drops it. The Linux engine returned a `」` in
+  a 4 x 92 box at the right edge of a 100 px `規`.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders
@@ -256,6 +275,16 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - CI quality floor: horizontal CER <= 5 %, horizontal hit-scan >= 90 %, vertical CER
   <= 20 %, vertical hit-scan >= 75 %. It requires parity with the Python reference
   within 3 percentage points.
+- CI box-fit floor: a hit's box must also outline its glyph. Horizontal box fit >= 90 %,
+  vertical box fit >= 75 %, and the three large `smoke_2x` glyphs must fit completely. A
+  fragment box that contains the glyph center passes hit-scan but fails fit (issue #92).
+- CI large-text floor: the screens under `tests/fixtures/large-text/` use `TextSource`
+  with the real engine. `新規` at 100, 130, and 160 px and `日本語を話す` at 130 px
+  must return the full text from the hovered glyph to the line end. A white-on-black
+  news line in BIZ UDPGothic and Noto Sans CJK must return at least to the box edge at
+  100 px and at 125 px bold. The tests hover near the top and bottom of a 110 px glyph.
+  Every scan rect stays on the hovered line, and the anchor fits the glyph.
+  `scripts/render-large-text.py` renders the screens.
 - The repository commits models under `crates/chibipop-linux/models/meiki/`. It pins
   their hashes against `SHA256SUMS.txt`. Two steps verify them: `scripts/package-linux.sh`
   when it stages the tarball, and `models::verify` when the engine starts.

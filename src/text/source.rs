@@ -7,10 +7,12 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
-    band_of, discard_furigana, head_and_tail, map_from_upscaled, nearest_line, normalise,
-    region_around, resolve, resolve_wrap, tile_forward, trim_probe_edges, wrap_probe, CaptureSize,
-    OcrLine, OcrWord, Orientation, Resolved,
+    band_of, box_orientation, discard_furigana, drop_slivers, grow, head_and_tail, hit_cut_by_edge,
+    hit_scan, map_from_upscaled, nearest_line, normalise, region_around, resolve, resolve_wrap,
+    spans_short_side, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
+    Orientation, Resolved, GROWTH_STEPS,
 };
+use crate::text::ink;
 use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
@@ -75,6 +77,29 @@ pub struct RegionRead {
     pub fallback: Option<String>,
     /// This flag reports that the backend returned the previous grab's pixels.
     pub unchanged: bool,
+    /// The pixels that OCR saw, after the mask and the upscale. The growth rule
+    /// measures ink in them when the engine returns no hit.
+    pub frame: Frame,
+}
+
+/// Return true when the read that answers the hover saw a cut glyph. Its hit line
+/// spans the short side of `region`, or its hit word touches one edge with at least
+/// half the box's thickness. Such a read is not an answer.
+fn hit_is_cut(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
+    hit_scan(lines, cursor, scan_alnum)
+        .is_some_and(|(li, _)| spans_short_side(std::slice::from_ref(&lines[li]), region))
+        || hit_cut_by_edge(lines, cursor, scan_alnum, region)
+}
+
+/// `PassOne` stores the read that answers pass 1 and every box that pass 1 grabbed.
+struct PassOne {
+    lines: Vec<OcrLine>,
+    resolved: Option<Resolved>,
+    /// The box whose `lines` answered. The probes and tiles start from it.
+    region: PhysRect,
+    /// Every box in grab order. The first is the configured box. Each next box is
+    /// the previous one grown on its short side.
+    boxes: Vec<PhysRect>,
 }
 
 /// `Recognised` stores the words from one region read for unchanged re-grabs.
@@ -301,18 +326,70 @@ impl TextSource {
         }
     }
 
-    /// Return the lines and outcome for one read.
-    fn resolve_at_verbose(
-        &mut self,
-        cursor: PhysPoint,
-        mask: CaptureMask,
-    ) -> Result<(Vec<OcrLine>, Option<Resolved>)> {
-        let read = self.resolve_in_region(
-            cursor,
-            region_around(cursor, self.settings.prefer_vertical, self.settings.capture),
-            mask,
-        )?;
-        Ok((read.lines, read.resolved))
+    /// Return pass 1: its lines and outcome, the box that answered, and every box it
+    /// grabbed, in order.
+    ///
+    /// The box grows on its short side, at most [`GROWTH_STEPS`] times, when the
+    /// box is too small for the text under the cursor (issue #92):
+    ///
+    /// - A recognized line spans the short side. The glyph is at least as tall as the
+    ///   box, and the engine returned a fragment or a misread.
+    /// - No hit exists, and ink under the cursor spans the configured short side
+    ///   ([`ink::spans_short_side`]). The engine returned nothing for a large glyph.
+    /// - A grown box returns no text. It still contains the glyph.
+    ///
+    /// A cut read is not an answer. Its hit line spans the box, and the engine read a
+    /// cut glyph. The answer is the last read whose hit line does not span its box.
+    /// When no read qualifies, the last read remains, with or without a hit. A failed
+    /// growth grab stops the growth. The outline shows every box that this method grabs.
+    fn resolve_at_verbose(&mut self, cursor: PhysPoint, mask: CaptureMask) -> Result<PassOne> {
+        let reference = self.settings.capture.short();
+        let factor = self.settings.upscale;
+        let alnum = self.settings.scan_alphanumeric;
+        let uncut_hit = |read: &RegionRead, region: PhysRect| {
+            read.resolved.is_some() && !hit_is_cut(&read.lines, cursor, alnum, region)
+        };
+        let mut region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
+        let mut boxes = vec![region];
+        let mut read = self.resolve_in_region(cursor, region, mask)?;
+        let mut best: Option<(RegionRead, PhysRect)> = None;
+        // A frozen hold reads without a mask, as `recognise_at_capture` does.
+        let masked = if self.frozen.is_some() { CaptureMask::NONE } else { mask };
+        for step in 0..GROWTH_STEPS {
+            let ink_spans = || {
+                let popup: Vec<PhysRect> = masked
+                    .overlap_in(region)
+                    .map(|r| PhysRect { x: r.x * factor, y: r.y * factor, w: r.w * factor, h: r.h * factor })
+                    .collect();
+                ink::spans_short_side(&read.frame, region, cursor, factor, reference, &popup)
+            };
+            let cut = spans_short_side(&read.lines, region)
+                || hit_cut_by_edge(&read.lines, cursor, alnum, region)
+                || (step > 0 && read.lines.is_empty())
+                || (read.resolved.is_none() && ink_spans());
+            if !cut {
+                break;
+            }
+            let grown = grow(region, self.capture.bounds_containing(cursor));
+            let next = match self.resolve_in_region(cursor, grown, mask) {
+                Ok(next) => next,
+                Err(e) => {
+                    eprintln!("chibipop: capture growth failed. Use the smaller box: {e:#}");
+                    break;
+                }
+            };
+            if uncut_hit(&read, region) {
+                best = Some((read, region));
+            }
+            read = next;
+            region = grown;
+            boxes.push(region);
+        }
+        let (read, region) = match best {
+            Some(best) if !uncut_hit(&read, region) => best,
+            _ => (read, region),
+        };
+        Ok(PassOne { lines: read.lines, resolved: read.resolved, region, boxes })
     }
 
     /// Resolve a caller-supplied box.
@@ -323,13 +400,14 @@ impl TextSource {
         mask: CaptureMask,
     ) -> Result<RegionRead> {
         let (lines, frame) = self.recognise_at_capture(region, self.settings.upscale, mask)?;
-        let resolved = resolve(&lines, cursor, self.settings.scan_alphanumeric);
+        let resolved = resolve(&lines, cursor, region, self.settings.scan_alphanumeric);
         Ok(RegionRead {
             lines,
             resolved,
             source: frame.source,
-            fallback: frame.fallback,
+            fallback: frame.fallback.clone(),
             unchanged: frame.unchanged,
+            frame,
         })
     }
 
@@ -461,7 +539,7 @@ impl TextSource {
         };
         let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
         let origin = PhysPoint { x: region.x, y: region.y };
-        let lines = to_desktop(raw, origin, factor, mask);
+        let lines = drop_slivers(to_desktop(raw, origin, factor, mask), box_orientation(region));
         let lines = if self.settings.discard_furigana {
             discard_furigana(lines)
         } else {
@@ -648,12 +726,11 @@ impl TextSource {
         collect: bool,
         mask: CaptureMask,
     ) -> Result<(Option<Resolved>, Vec<ScanRect>, Vec<OcrLine>)> {
-        let (lines, resolved) = self.resolve_at_verbose(cursor, mask)?;
+        let PassOne { lines, resolved, region, boxes } = self.resolve_at_verbose(cursor, mask)?;
         let mut scan = Vec::new();
         let Some(pass_one) = resolved else { return Ok((None, scan, lines)) };
-        let region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         if collect {
-            scan.push(ScanRect { rect: region, kind: ScanKind::Pass1 });
+            scan.extend(boxes.into_iter().map(|rect| ScanRect { rect, kind: ScanKind::Pass1 }));
         }
         let wrapped = if let Some((probes, wrapped)) =
             self.probe_wrap(&lines, cursor, region, pass_one.orientation, mask)
