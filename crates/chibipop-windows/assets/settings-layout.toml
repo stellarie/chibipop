@@ -282,7 +282,7 @@ label = "Connection"
 
 [[tabs.sections.entries]]
 id = "anki-enabled"
-label = "Send cards to Anki"
+label = "Enable Anki"
 help = "Requires Anki and AnkiConnect to be running."
 
 [[tabs.sections.entries]]

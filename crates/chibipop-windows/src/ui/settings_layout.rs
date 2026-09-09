@@ -357,6 +357,8 @@ mod tests {
         assert!(layout.tab_needs_anki_detection(4));
         assert!(!layout.tab_needs_anki_detection(0));
         assert_eq!(layout.tab_label(1), Some("Shortcuts"));
+        let (tab, section, entry) = location(&layout, SettingId::AnkiEnabled);
+        assert_eq!(layout.tabs[tab].sections[section].entries[entry].label, "Enable Anki");
         for (key, option) in [(SettingId::OcrClipboardKey, SettingId::OcrSentenceSearch),
             (SettingId::SelectedTextKey, SettingId::SelectedTextSentenceSearch)] {
             let (tab, section, row) = location(&layout, key);
