@@ -5,14 +5,16 @@
 
 use crate::controller::RequestId;
 use crate::geom::PhysRect;
-use windows::Win32::System::Variant::VT_R8;
+use windows::Win32::System::Variant::{VARIANT, VT_R8};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
-use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation2, IUIAutomationTextPattern, UIA_TextPatternId};
+use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation2, IUIAutomationElement,
+    IUIAutomationTextPattern, TreeScope_Descendants, UIA_HasKeyboardFocusPropertyId,
+    UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 const LIMIT: usize = 65_536;
@@ -101,33 +103,109 @@ fn read(request: &Request) -> windows::core::Result<Option<Selection>> {
             if request.started.elapsed() >= TIMEOUT || GetForegroundWindow() != window { return Ok(None); }
             if element.CurrentIsPassword()?.as_bool() { return Ok(None); }
             if let Ok(pattern) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) {
-                let ranges = pattern.GetSelection()?;
-                let count = ranges.Length()?;
-                if !(1..=32).contains(&count) { return Ok(None); }
-                let mut text = String::new();
-                let mut bounds = None;
-                for index in 0..count {
-                    if request.started.elapsed() >= TIMEOUT { return Ok(None); }
-                    let range = ranges.GetElement(index)?;
-                    let part = range.GetText((LIMIT + 1) as i32)?.to_string();
-                    if !part.is_empty() {
-                        if let Ok(array) = range.GetBoundingRectangles() {
-                            bounds = merge_bounds(bounds, rectangle_array(array));
-                        }
-                    }
-                    if !append_range(&mut text, &part) { return Ok(None); }
-                }
-                if GetForegroundWindow() != window || request.started.elapsed() >= TIMEOUT
-                    || !automation.CompareElements(&focused, &automation.GetFocusedElement()?)?.as_bool()
-                { return Ok(None); }
-                return Ok((!text.trim().is_empty()).then_some(Selection { text, bounds }));
+                let selection = read_pattern(&pattern, request.started)?;
+                return validate_selection(&automation, &focused, window, request.started, selection);
             }
             if element.CurrentNativeWindowHandle()? == window { break; }
             let Ok(parent) = walker.GetParentElement(&element) else { break; };
             element = parent;
         }
+        let Some(provider) = focused_text_descendant(&automation, &focused)? else {
+            return Ok(None);
+        };
+        if provider.CurrentIsPassword()?.as_bool() { return Ok(None); }
+        let pattern = provider.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)?;
+        let selection = read_pattern(&pattern, request.started)?;
+        validate_descendant_selection(
+            &automation,
+            &focused,
+            &provider,
+            window,
+            request.started,
+            selection,
+        )
     }
-    Ok(None)
+}
+
+unsafe fn focused_text_descendant(
+    automation: &IUIAutomation2,
+    focused: &IUIAutomationElement,
+) -> windows::core::Result<Option<IUIAutomationElement>> {
+    // SAFETY: Both UIA interfaces remain live for this synchronous query.
+    unsafe {
+        let yes = VARIANT::from(true);
+        let has_focus = automation.CreatePropertyCondition(UIA_HasKeyboardFocusPropertyId, &yes)?;
+        let has_text = automation.CreatePropertyCondition(UIA_IsTextPatternAvailablePropertyId, &yes)?;
+        let condition = automation.CreateAndCondition(&has_focus, &has_text)?;
+        Ok(focused.FindFirst(TreeScope_Descendants, &condition).ok())
+    }
+}
+
+unsafe fn read_pattern(
+    pattern: &IUIAutomationTextPattern,
+    started: Instant,
+) -> windows::core::Result<Option<Selection>> {
+    // SAFETY: The pattern owns every returned range during this read.
+    unsafe {
+        let ranges = pattern.GetSelection()?;
+        let count = ranges.Length()?;
+        if !(1..=32).contains(&count) { return Ok(None); }
+        let mut text = String::new();
+        let mut bounds = None;
+        for index in 0..count {
+            if started.elapsed() >= TIMEOUT { return Ok(None); }
+            let range = ranges.GetElement(index)?;
+            let part = range.GetText((LIMIT + 1) as i32)?.to_string();
+            if !part.is_empty() {
+                if let Ok(array) = range.GetBoundingRectangles() {
+                    bounds = merge_bounds(bounds, rectangle_array(array));
+                }
+            }
+            if !append_range(&mut text, &part) { return Ok(None); }
+        }
+        Ok((!text.trim().is_empty()).then_some(Selection { text, bounds }))
+    }
+}
+
+unsafe fn validate_selection(
+    automation: &IUIAutomation2,
+    focused: &IUIAutomationElement,
+    window: HWND,
+    started: Instant,
+    selection: Option<Selection>,
+) -> windows::core::Result<Option<Selection>> {
+    // SAFETY: The UIA interfaces remain live for each synchronous comparison.
+    unsafe {
+        if GetForegroundWindow() != window || started.elapsed() >= TIMEOUT
+            || !automation.CompareElements(focused, &automation.GetFocusedElement()?)?.as_bool()
+        { return Ok(None); }
+    }
+    Ok(selection)
+}
+
+unsafe fn validate_descendant_selection(
+    automation: &IUIAutomation2,
+    focused: &IUIAutomationElement,
+    provider: &IUIAutomationElement,
+    window: HWND,
+    started: Instant,
+    selection: Option<Selection>,
+) -> windows::core::Result<Option<Selection>> {
+    let Some(selection) = (unsafe {
+        validate_selection(automation, focused, window, started, selection)?
+    }) else {
+        return Ok(None);
+    };
+    let Some(current) = (unsafe { focused_text_descendant(automation, focused)? }) else {
+        return Ok(None);
+    };
+    // SAFETY: Both UIA elements remain live during the synchronous comparison.
+    unsafe {
+        if started.elapsed() >= TIMEOUT || GetForegroundWindow() != window
+            || !automation.CompareElements(provider, &current)?.as_bool()
+        { return Ok(None); }
+    }
+    Ok(Some(selection))
 }
 
 /// UIA allocates the SAFEARRAY. Always release it, including malformed results.
@@ -196,6 +274,90 @@ fn append_range(text: &mut String, part: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ComApartment;
+
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            // SAFETY: The test created this COM apartment on the same thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    struct FocusFixture {
+        host: HWND,
+        attached: Option<(u32, u32)>,
+    }
+
+    impl Drop for FocusFixture {
+        fn drop(&mut self) {
+            // SAFETY: The test owns the attachment and window recorded here.
+            unsafe {
+                if let Some((current, foreground)) = self.attached.take() {
+                    let _ = windows::Win32::System::Threading::AttachThreadInput(
+                        current,
+                        foreground,
+                        false,
+                    );
+                }
+                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.host);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires an interactive Windows desktop and changes foreground focus"]
+    fn focused_descendant_query_finds_the_active_editor() {
+        use windows::core::w;
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW,
+            GetWindowThreadProcessId, SendMessageW, SetForegroundWindow, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE};
+
+        // SAFETY: This test owns its COM apartment and every created window.
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
+            let _com = ComApartment;
+            let host = CreateWindowExW(
+                WINDOW_EX_STYLE(0), w!("STATIC"), w!("UIA descendant test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE, 800, 400, 640, 180,
+                None, None, None, None,
+            ).unwrap();
+            let mut fixture = FocusFixture { host, attached: None };
+            let edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0), w!("EDIT"), w!("選択した猫"),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0004), 0, 0, 600, 100,
+                Some(host), None, None, None,
+            ).unwrap();
+            SendMessageW(edit, 0x00B1, Some(windows::Win32::Foundation::WPARAM(0)),
+                Some(windows::Win32::Foundation::LPARAM(-1)));
+            let current = GetCurrentThreadId();
+            let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            let attached = foreground != 0 && foreground != current
+                && AttachThreadInput(current, foreground, true).as_bool();
+            fixture.attached = attached.then_some((current, foreground));
+            SetForegroundWindow(host).unwrap();
+            let _ = SetFocus(Some(edit));
+            if attached {
+                let _ = AttachThreadInput(current, foreground, false);
+                fixture.attached = None;
+            }
+
+            let automation: IUIAutomation2 =
+                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER).unwrap();
+            let root = automation.ElementFromHandle(host).unwrap();
+            let provider = focused_text_descendant(&automation, &root).unwrap().unwrap();
+            assert!(automation.CompareElements(&provider, &automation.GetFocusedElement().unwrap())
+                .unwrap().as_bool());
+            let pattern = provider
+                .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                .unwrap();
+            assert_eq!(read_pattern(&pattern, Instant::now()).unwrap().unwrap().text,
+                "選択した猫");
+
+        }
+    }
 
     #[test]
     fn selection_rectangles_round_outward_and_union_visible_lines() {

@@ -134,6 +134,10 @@ Windows requires a control that exposes its selected text through UI Automation.
 Password controls are excluded. Chibipop does not send copy keys or use old
 clipboard text when an application lacks this support.
 
+VS Code must enable **Screen Reader Accessibility Mode** before it exposes editor
+selections. Press `Shift+Alt+F1` when its editor reports that accessibility is
+disabled. Chibipop can then read the selection without changing the clipboard.
+
 Linux reads the native PRIMARY selection through ext-data-control or wlr-data-control
 version 2. Bind `chibipop ctl selected-text` when using compositor shortcuts.
 The source application controls PRIMARY's lifetime. It can retain that selection
