@@ -27,8 +27,9 @@
 //! on developer hardware.
 #![cfg(target_os = "linux")]
 
-use chibipop::text::layout::OcrLine;
-use chibipop::text::OcrEngine;
+use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
+use chibipop::text::layout::{CaptureSize, OcrLine, Orientation, Resolved};
+use chibipop::text::{CaptureMask, Frame, OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use chibipop_linux::ocr::MeikiOcr;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -696,5 +697,205 @@ fn the_gate_covers_every_slice_of_the_committed_corpus() {
             REPORT.by_slice.contains_key(&(scale, (*slice).to_string())),
             "the corpus lost its {slice} slice"
         );
+    }
+}
+
+// -------------------------------------------------------------- large text
+//
+// Issue #92: text at or above the height of the 500x100 capture box. The screens
+// under `tests/fixtures/large-text/` come from `scripts/render-large-text.py`. The
+// engine reads them through `TextSource`, the daemon's own hover path, so the
+// capture box, every pass, and the scan rects are the ones a user gets.
+
+fn large_text_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/large-text")
+}
+
+struct Screen {
+    id: String,
+    size: i64,
+    hover: PhysPoint,
+    /// The text from the hovered glyph to the line end.
+    expect: String,
+    /// Ink boxes in screen pixels.
+    chars: Vec<GtChar>,
+    pixels: Vec<u8>,
+    w: i32,
+    h: i32,
+}
+
+fn load_large_text() -> Vec<Screen> {
+    let dir = large_text_dir();
+    let raw = std::fs::read_to_string(dir.join("manifest.json")).expect("reading the large-text manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&raw).expect("parsing the large-text manifest");
+    manifest["screens"]
+        .as_array()
+        .expect("manifest.screens")
+        .iter()
+        .map(|e| {
+            let (pixels, w, h) = load_bgra(&dir.join(e["file"].as_str().expect("file")));
+            Screen {
+                id: e["id"].as_str().expect("id").to_string(),
+                size: e["size"].as_i64().expect("size"),
+                hover: PhysPoint {
+                    x: e["hover"]["x"].as_i64().expect("hover.x") as i32,
+                    y: e["hover"]["y"].as_i64().expect("hover.y") as i32,
+                },
+                expect: e["expect"].as_str().expect("expect").to_string(),
+                chars: e["chars"]
+                    .as_array()
+                    .expect("chars")
+                    .iter()
+                    .map(|c| GtChar {
+                        c: c["c"].as_str().expect("c").to_string(),
+                        x: c["x"].as_f64().expect("x"),
+                        y: c["y"].as_f64().expect("y"),
+                        w: c["w"].as_f64().expect("w"),
+                        h: c["h"].as_f64().expect("h"),
+                    })
+                    .collect(),
+                pixels,
+                w,
+                h,
+            }
+        })
+        .collect()
+}
+
+/// A `RegionCapture` over one screen. Pixels outside the screen are black, as the
+/// wlr-screencopy backend leaves them. The screen is the one output.
+struct ScreenCapture {
+    pixels: Vec<u8>,
+    w: i32,
+    h: i32,
+}
+
+impl RegionCapture for ScreenCapture {
+    fn grab(&mut self, region: PhysRect) -> anyhow::Result<Frame> {
+        let mut buf = vec![0u8; (region.w * region.h * 4) as usize];
+        for row in 0..region.h {
+            let y = region.y + row;
+            if y < 0 || y >= self.h {
+                continue;
+            }
+            let x0 = region.x.max(0);
+            let x1 = (region.x + region.w).min(self.w);
+            if x1 <= x0 {
+                continue;
+            }
+            let src = ((y * self.w + x0) * 4) as usize;
+            let dst = ((row * region.w) + (x0 - region.x)) as usize * 4;
+            let len = ((x1 - x0) * 4) as usize;
+            buf[dst..dst + len].copy_from_slice(&self.pixels[src..src + len]);
+        }
+        Ok(Frame { buf, w: region.w, h: region.h, source: "screen", fallback: None, unchanged: false })
+    }
+
+    fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+        PhysRect { x: 0, y: 0, w: self.w, h: self.h }
+    }
+}
+
+struct LargeRead {
+    id: String,
+    size: i64,
+    expect: String,
+    hovered: GtChar,
+    resolved: Option<Resolved>,
+    scan: Vec<ScanRect>,
+}
+
+static LARGE: LazyLock<Vec<LargeRead>> = LazyLock::new(read_large_text);
+
+/// Hover every screen with the daemon's default OCR settings and three passes, so
+/// forward tiles finish a line that the box clips on the reading axis.
+fn read_large_text() -> Vec<LargeRead> {
+    let models = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/meiki");
+    let settings = SettingsSnapshot {
+        max_passes: 3,
+        upscale: 1,
+        prefer_vertical: false,
+        capture: CaptureSize::default(),
+        scan_alphanumeric: true,
+        discard_furigana: true,
+    };
+    load_large_text()
+        .into_iter()
+        .map(|screen| {
+            let engine = MeikiOcr::open(&models).expect("opening the bundled models");
+            let capture = ScreenCapture { pixels: screen.pixels, w: screen.w, h: screen.h };
+            let mut source = TextSource::new(Box::new(capture), Box::new(engine), settings);
+            let (resolved, scan, _) = source
+                .resolve_at_tiled_scanned(screen.hover, true, CaptureMask::NONE)
+                .expect("reading a large-text screen");
+            let hovered = screen
+                .chars
+                .into_iter()
+                .find(|c| screen.expect.starts_with(c.c.as_str()) && {
+                    let (px, py) = (f64::from(screen.hover.x), f64::from(screen.hover.y));
+                    c.x <= px && px < c.x + c.w && c.y <= py && py < c.y + c.h
+                })
+                .expect("the hovered glyph's ink box");
+            println!("large text {}: {} px, scan {:?}", screen.id, screen.size, scan);
+            if let Some(r) = &resolved {
+                println!("large text {}: text {:?} at {} anchor {:?}", screen.id, r.span.text, r.span.cursor_byte_offset, r.span.anchor);
+            }
+            LargeRead { id: screen.id, size: screen.size, expect: screen.expect, hovered, resolved, scan }
+        })
+        .collect()
+}
+
+fn large(id: &str) -> &'static LargeRead {
+    LARGE.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("large-text screen {id}"))
+}
+
+/// The hovered glyph and the rest of its line must come back verbatim.
+fn read_whole(read: &LargeRead) {
+    let resolved = read
+        .resolved
+        .as_ref()
+        .unwrap_or_else(|| panic!("{} ({} px): no hit; scan {:?}", read.id, read.size, read.scan));
+    let tail = &resolved.span.text[resolved.span.cursor_byte_offset..];
+    assert_eq!(tail, read.expect, "{} ({} px): scan {:?}", read.id, read.size, read.scan);
+}
+
+#[test]
+fn large_text_that_fits_the_box_is_read_whole() {
+    read_whole(large("shinki_100"));
+}
+
+#[test]
+fn large_text_taller_than_the_box_is_read_whole() {
+    read_whole(large("shinki_130"));
+    read_whole(large("shinki_160"));
+}
+
+#[test]
+fn low_stroke_kanji_taller_than_the_box_are_read_whole() {
+    read_whole(large("nihongo_130"));
+}
+
+/// The scan rects stay on the hovered line, and the anchor outlines the glyph.
+#[test]
+fn large_text_scan_rects_face_the_hovered_line() {
+    for read in LARGE.iter() {
+        let context = format!("{} ({} px): scan {:?}", read.id, read.size, read.scan);
+        let Some(resolved) = &read.resolved else { panic!("{context}") };
+        assert_eq!(resolved.orientation, Orientation::Horizontal, "{context}");
+        let anchor = resolved.span.anchor;
+        let centre = anchor.center();
+        for tile in read.scan.iter().filter(|s| s.kind == ScanKind::Tile) {
+            let t = tile.rect;
+            assert!(t.y <= centre.y && centre.y < t.y + t.h, "{context}");
+        }
+        let boxed = PredBox {
+            text: read.expect.chars().next().expect("a hovered glyph").to_string(),
+            x: f64::from(anchor.x),
+            y: f64::from(anchor.y),
+            w: f64::from(anchor.w),
+            h: f64::from(anchor.h),
+        };
+        let (fit, hits, misfits) = box_fit(std::slice::from_ref(&read.hovered), &[boxed], false);
+        assert_eq!((fit, hits), (1, 1), "{context}; misfits {misfits:?}");
     }
 }

@@ -278,76 +278,97 @@ fn pt(x: i32, y: i32) -> PhysPoint {
 }
 
 // Pages. Every row sits at y 480 unless stated. The text has no separator unless
-// stated, so `runs_out` is true and a probe or a tile can follow.
+// stated, so `runs_out` is true and a probe or a tile can follow. A page takes its
+// glyph size. A line that must fill a width takes as many glyphs as fit that width,
+// so the same page keeps its purpose at 40, 100, and 120 px. The line pitch is
+// 1.75 glyphs, 70 px at 40 px.
+
+/// The first `n` of the fifty kana, for lines that fill a width.
+fn kana(n: usize) -> String {
+    "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"
+        .chars()
+        .take(n)
+        .collect()
+}
+
+fn pitch(size: i32) -> i32 {
+    size * 7 / 4
+}
 
 /// A short line inside the box. The separator stops the lookup.
-fn short_stop() -> Rc<Page> {
-    let mut page = Page::new("short_stop", S);
+fn short_stop(size: i32) -> Rc<Page> {
+    let mut page = Page::new("short_stop", size);
     page.row("日本語を話す。", 800, 480);
     Rc::new(page)
 }
 
 /// A short line inside the box. The lookup runs out at the end.
-fn short_open() -> Rc<Page> {
-    let mut page = Page::new("short_open", S);
+fn short_open(size: i32) -> Rc<Page> {
+    let mut page = Page::new("short_open", size);
     page.row("日本語を話す", 800, 480);
     Rc::new(page)
 }
 
-/// A wrap at the margin with pitch 70.
-fn wrap() -> Rc<Page> {
-    let mut page = Page::new("wrap", S);
+/// A wrap at the margin.
+fn wrap(size: i32) -> Rc<Page> {
+    let mut page = Page::new("wrap", size);
     page.row("今日は日本語を勉強", 200, 480);
-    page.row("しました", 200, 550);
+    page.row("しました", 200, 480 + pitch(size));
     Rc::new(page)
 }
 
 /// Three wrapped rows of 12.
-fn paragraph() -> Rc<Page> {
-    let mut page = Page::new("paragraph", S);
+fn paragraph(size: i32) -> Rc<Page> {
+    let mut page = Page::new("paragraph", size);
     page.paragraph(
         "きょうはにほんごをべんきょうしましたあしたもがんばりたいとおもいますよね",
         200,
-        400,
+        300,
         12,
-        70,
+        pitch(size),
     );
     Rc::new(page)
 }
 
-/// A line wider than the box. It ends at x 1300 with a separator.
-fn long_stop() -> Rc<Page> {
-    let mut page = Page::new("long_stop", S);
-    page.row("あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへ。", 100, 480);
+/// A line wider than the box. It fills 1200 px from x 100 and ends with a separator.
+fn long_stop(size: i32) -> Rc<Page> {
+    let mut page = Page::new("long_stop", size);
+    let n = (1200 / size) as usize;
+    page.row(&format!("{}。", kana(n - 1)), 100, 480);
     Rc::new(page)
 }
 
-/// A line that ends at x 1900, near the output edge.
-fn long_edge() -> Rc<Page> {
-    let mut page = Page::new("long_edge", S);
-    page.row("あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ", 700, 480);
+/// A line that fills 1200 px and ends at x 1900, near the output edge.
+fn long_edge(size: i32) -> Rc<Page> {
+    let mut page = Page::new("long_edge", size);
+    let n = (1200 / size) as usize;
+    page.row(&kana(n), 1900 - size * n as i32, 480);
     Rc::new(page)
 }
 
-/// A line that the box clips. It ends at x 1200.
-fn clipped() -> Rc<Page> {
-    let mut page = Page::new("clipped", S);
-    page.row("あいうえおかきくけこさしすせそたちつてと", 400, 480);
+/// A line that the box clips. It fills 800 px from x 400.
+fn clipped(size: i32) -> Rc<Page> {
+    let mut page = Page::new("clipped", size);
+    page.row(&kana((800 / size) as usize), 400, 480);
     Rc::new(page)
 }
 
-/// One column that ends at y 540.
-fn column() -> Rc<Page> {
-    let mut page = Page::new("column", S);
+/// One column from y 300.
+fn column(size: i32) -> Rc<Page> {
+    let mut page = Page::new("column", size);
     page.column("日本語を話す", 900, 300);
     Rc::new(page)
 }
 
-/// A vertical wrap to the column on the left.
-fn two_columns() -> Rc<Page> {
-    let mut page = Page::new("two_columns", S);
-    page.column("今日は日本語を勉強", 900, 200);
-    page.column("しました", 830, 200);
+/// A vertical wrap to the column on the left. The first column takes the glyphs
+/// that fit 880 px, at most nine.
+fn two_columns(size: i32) -> Rc<Page> {
+    let mut page = Page::new("two_columns", size);
+    let text: Vec<char> = "今日は日本語を勉強しました".chars().collect();
+    let n = ((880 / size) as usize).min(9);
+    let (first, rest) = text.split_at(n);
+    page.column(&first.iter().collect::<String>(), 900, 200);
+    page.column(&rest.iter().collect::<String>(), 900 - pitch(size), 200);
     Rc::new(page)
 }
 
@@ -397,17 +418,17 @@ fn side_by_side_column() -> Rc<Page> {
     Rc::new(page)
 }
 
-fn pages() -> Vec<Rc<Page>> {
+fn pages(size: i32) -> Vec<Rc<Page>> {
     vec![
-        short_stop(),
-        short_open(),
-        wrap(),
-        paragraph(),
-        long_stop(),
-        long_edge(),
-        clipped(),
-        column(),
-        two_columns(),
+        short_stop(size),
+        short_open(size),
+        wrap(size),
+        paragraph(size),
+        long_stop(size),
+        long_edge(size),
+        clipped(size),
+        column(size),
+        two_columns(size),
     ]
 }
 
@@ -415,7 +436,7 @@ fn pages() -> Vec<Rc<Page>> {
 
 #[test]
 fn a_line_with_a_full_stop_shows_only_the_box_and_the_anchor() {
-    let page = short_stop();
+    let page = short_stop(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(900, 500));
@@ -443,7 +464,7 @@ fn a_line_with_a_full_stop_shows_only_the_box_and_the_anchor() {
 /// The first probe is 1000 long. The second starts 500 later and takes the rest.
 #[test]
 fn a_short_line_without_punctuation_pays_two_probes_from_the_margin() {
-    let page = short_open();
+    let page = short_open(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(900, 500));
@@ -471,7 +492,7 @@ fn a_short_line_without_punctuation_pays_two_probes_from_the_margin() {
 /// whole span with full boxes.
 #[test]
 fn a_wrap_at_the_line_end_is_read_by_one_probe_from_the_margin() {
-    let page = wrap();
+    let page = wrap(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(540, 500));
@@ -501,7 +522,7 @@ fn a_wrap_at_the_line_end_is_read_by_one_probe_from_the_margin() {
 /// overlay keeps.
 #[test]
 fn a_line_the_box_clips_reads_forward_tiles_on_the_same_row() {
-    let page = clipped();
+    let page = clipped(S);
     let settings = Settings { max_passes: 3, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(500, 500));
@@ -532,7 +553,7 @@ fn a_line_the_box_clips_reads_forward_tiles_on_the_same_row() {
 /// real column.
 #[test]
 fn a_column_with_prefer_vertical_pays_one_probe_from_the_top_edge() {
-    let page = column();
+    let page = column(S);
     let settings = Settings { max_passes: 1, prefer_vertical: true };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(920, 400));
@@ -553,27 +574,73 @@ fn a_column_with_prefer_vertical_pays_one_probe_from_the_top_edge() {
     assert_eq!(resolved.span.geom.len(), 6);
 }
 
-/// Three glyphs are visible. The box cuts 本 and を to 30 px. Their cut boxes keep
-/// their text, so the line reads as a column. The line ends at the box edge, so no
-/// probe runs. The sweep's invariants cover the cut boxes.
+/// The first box shows 本 and を cut to 30 px around 語. The column spans the box's
+/// short side, so the box grows to 200 and then 400 tall, where the whole column
+/// fits. Six words override the horizontal box. The column probe then runs from
+/// the top edge, as for a vertical box.
 #[test]
-fn a_column_in_a_horizontal_box_shows_only_the_box_and_the_anchor() {
-    let page = column();
+fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
+    let page = column(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(920, 400));
 
     assert_eq!(
         kinds(&scan),
-        [(ScanKind::Pass1, r(670, 350, 500, 100)), (ScanKind::Anchor, r(900, 380, 40, 40))]
+        [
+            (ScanKind::Pass1, r(670, 350, 500, 100)),
+            (ScanKind::Pass1, r(670, 300, 500, 200)),
+            (ScanKind::Pass1, r(670, 200, 500, 400)),
+            (ScanKind::Tile, r(680, 0, 270, 560)),
+            (ScanKind::Anchor, r(900, 380, 40, 40)),
+        ]
     );
-    assert_eq!(*grabs.borrow(), [r(670, 350, 500, 100)]);
-    assert_eq!(resolved.expect("hit").orientation, Orientation::Vertical);
+    assert_eq!(
+        *grabs.borrow(),
+        [r(670, 350, 500, 100), r(670, 300, 500, 200), r(670, 200, 500, 400), r(680, 0, 270, 560)]
+    );
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.orientation, Orientation::Vertical);
+    assert_eq!(resolved.span.text, "日本語を話す");
+    assert_eq!(resolved.span.cursor_byte_offset, 6);
+}
+
+/// Issue #92 at 120 px. The 100 px box shows 本, 語, and を cut to 100 px tall. The
+/// line spans the box's short side, so the box grows once to 200 tall, where the
+/// glyphs fit. The read then proceeds from the grown box: 日 and 話 stay outside its
+/// reading axis, the tail `語を` runs out, and two probes of a 120 thick band (90
+/// above, 720 below y 540, clamped to the output) find no continuation.
+#[test]
+fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
+    let page = short_stop(120);
+    let settings = Settings { max_passes: 1, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(1100, 540));
+
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(850, 490, 500, 100)),
+            (ScanKind::Pass1, r(850, 440, 500, 200)),
+            (ScanKind::Tile, r(0, 450, 1000, 630)),
+            (ScanKind::Tile, r(500, 450, 840, 630)),
+            (ScanKind::Anchor, r(1040, 480, 120, 120)),
+        ]
+    );
+    assert_eq!(
+        *grabs.borrow(),
+        [r(850, 490, 500, 100), r(850, 440, 500, 200), r(0, 450, 1000, 630), r(500, 450, 840, 630)]
+    );
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.span.text, "本語を");
+    assert_eq!(resolved.span.cursor_byte_offset, 3);
+    assert_eq!(resolved.span.geom.len(), 3);
+    assert!(resolved.span.geom.iter().all(|g| (g.rect.w, g.rect.h) == (120, 120)));
 }
 
 #[test]
 fn a_vertical_wrap_joins_the_column_to_the_left() {
-    let page = two_columns();
+    let page = two_columns(S);
     let settings = Settings { max_passes: 1, prefer_vertical: true };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(920, 540));
@@ -600,7 +667,7 @@ fn a_vertical_wrap_joins_the_column_to_the_left() {
 /// `min(remaining, 1000)` each.
 #[test]
 fn a_line_ending_at_the_screen_edge_pays_three_overlapping_probes() {
-    let page = long_edge();
+    let page = long_edge(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(1880, 500));
@@ -636,7 +703,7 @@ fn a_line_ending_at_the_screen_edge_pays_three_overlapping_probes() {
 /// `35 / 2`.
 #[test]
 fn a_cursor_just_below_the_row_anchors_on_the_glyph_the_box_shows() {
-    let page = short_stop();
+    let page = short_stop(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, _) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(900, 535));
@@ -650,7 +717,7 @@ fn a_cursor_just_below_the_row_anchors_on_the_glyph_the_box_shows() {
 
 #[test]
 fn a_cursor_past_half_a_glyph_below_the_row_hits_nothing_and_draws_nothing() {
-    let page = short_stop();
+    let page = short_stop(S);
     let settings = Settings { max_passes: 1, prefer_vertical: false };
     let (mut source, grabs) = fixture(&page, settings);
     let (resolved, scan, _) = read(&mut source, pt(900, 545));
@@ -696,7 +763,8 @@ fn a_large_glyph_split_in_two_stacked_parts_keeps_the_scan_on_its_row() {
 }
 
 /// Three stacked parts outnumber two, but their union is one square glyph cell,
-/// not a column. The probe band is 33 thick: 24 above and 198 below y 539.
+/// not a column. That union spans the box's short side, so the box grows once to
+/// 200 tall. The probe band is 33 thick: 24 above and 198 below y 539.
 #[test]
 fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
     let page = three_part_line();
@@ -710,6 +778,7 @@ fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
         kinds(&scan),
         [
             (ScanKind::Pass1, r(700, 490, 500, 100)),
+            (ScanKind::Pass1, r(700, 440, 500, 200)),
             (ScanKind::Tile, r(0, 515, 1000, 222)),
             (ScanKind::Tile, r(500, 515, 516, 222)),
             (ScanKind::Anchor, r(900, 515, 100, 50)),
@@ -717,7 +786,7 @@ fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
     );
     assert_eq!(
         *grabs.borrow(),
-        [r(700, 490, 500, 100), r(0, 515, 1000, 222), r(500, 515, 516, 222)]
+        [r(700, 490, 500, 100), r(700, 440, 500, 200), r(0, 515, 1000, 222), r(500, 515, 516, 222)]
     );
     assert_eq!(resolved.span.text, "立日心");
 }
@@ -904,12 +973,17 @@ fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
     assert_eq!(orientation, expected, "{context}");
 }
 
+/// Body text, the issue-92 size, and a glyph taller than the 100 px box.
+const SIZES: [i32; 3] = [S, LARGE, 120];
+
 #[test]
-fn every_cursor_placement_keeps_every_box_on_the_hovered_line() {
-    for page in pages() {
-        for settings in matrix() {
-            for cursor in placements(&page) {
-                check_placement(&page, settings, cursor);
+fn every_cursor_placement_keeps_every_box_on_the_hovered_line_at_every_size() {
+    for size in SIZES {
+        for page in pages(size) {
+            for settings in matrix() {
+                for cursor in placements(&page) {
+                    check_placement(&page, settings, cursor);
+                }
             }
         }
     }
