@@ -1,33 +1,40 @@
 # chibipop
 
-A Japanese pop-up dictionary for your whole screen. Point at a Japanese
-word and chibipop tells you what it means.
+A Japanese popup dictionary for the whole screen. Put the cursor on a
+Japanese word, and chibipop shows what the word means.
 
-It reads the pixels, so it works on anything — a game, a video, a PDF, a
-picture. Nothing needs to cooperate with it. It runs on Windows and on
-Linux.
+chibipop reads the pixels of the screen. Thus, it works with a game, a
+video, a PDF, or a picture. The other program does not need to cooperate.
+chibipop runs on Windows and on Linux.
 
-Hover Japanese text inside a pop-up to open a child pop-up. The parent stays
-visible, so you can follow a definition without losing your place.
-Turn this behavior on or off in **Settings > Popup**.
+Hover Japanese text inside a popup to open a child popup. The parent popup
+stays visible, so you can read a definition and keep your place.
+**Look up words inside the popup** on the **Popup** tab enables or disables
+this behavior.
 
-Open **Dictionary search** from the tray or **Settings > Dictionaries**.
-Type a Japanese or Chinese word, then select a candidate to open its definition.
-Search and definitions use your pop-up theme.
+**Dictionary search** opens from the tray menu or from **Open dictionary
+search** on the **Dictionaries** tab. Type a Japanese or Chinese word, then
+select a candidate to open its definition. The search windows use the popup
+theme.
 
-Select text in a supported browser or editor, then press **Look up selected text**
-to open its dictionary entry without OCR or a browser extension.
-Set the shortcut in **Settings > Shortcuts**. See the
-[selection support limits](docs/REFERENCE.md) for Windows and Linux.
+**Look up selected text** reads the text that you selected in another
+application. Select text in a supported browser or editor, then press the
+shortcut. This action does not use OCR or a browser extension. Set the
+shortcut on the **Shortcuts** tab. A checkbox below the shortcut sends the
+selected text to Sentence search instead of a popup. See the
+[supported applications and limits](docs/REFERENCE.md#direct-search) for
+Windows and Linux.
 
-Open **Sentence search** from **Settings > Dictionaries** to work with a
-sentence. Paste the sentence, then click a word in the sentence view. The
-word is highlighted and its dictionary candidates appear below. Word boundaries
-come from your enabled dictionaries, including Chinese entries.
+**Sentence search** opens from **Open sentence search** on the
+**Dictionaries** tab. Paste a sentence, then click a word in the sentence
+view. chibipop highlights the word and shows its dictionary candidates
+below. The word boundaries come from your enabled dictionaries, including
+Chinese entries.
 
-In **Settings > Shortcuts**, press the desired key or key combination to
-set either search shortcut. Enable **After copying, open sentence search**
-to send copied screen text directly into that flow.
+The **Shortcuts** tab sets the key for each search. **Copy text from the
+screen** reads a screen area that you drag and copies the text. Enable
+**After copying, open sentence search** to send that text to Sentence
+search.
 
 <img width="2560" height="1080" alt="image" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
@@ -42,61 +49,62 @@ to send copied screen text directly into that flow.
 5. [Settings](#5-settings)
 6. [Managing your dictionaries](#6-managing-your-dictionaries)
 7. [Sending words to Anki](#7-sending-words-to-anki)
-8. [Changing how the pop-up looks](#8-changing-how-the-pop-up-looks)
+8. [Changing how the popup looks](#8-changing-how-the-popup-looks)
 9. [Changing the OCR engine](#9-changing-the-ocr-engine)
 10. [Linux](#10-linux)
 11. [Getting help](#11-getting-help)
 12. [For developers](#12-for-developers)
-13. [Licence](#13-licence)
+13. [License](#13-license)
 
 ---
 
 ## 1. What you need
 
-- **A computer running Windows 10 or 11**, or **Linux with a Wayland
+- **A computer with Windows 10 or 11**, or **Linux with a Wayland
   desktop**. See [Linux](#10-linux) if you are not sure what that means.
 - **On Windows: Japanese language support.** Add it in Windows Settings >
-  Language & region. chibipop reads the screen with the recogniser that
-  comes with it.
+  Time & language > Language & region. The OCR engine that is built into
+  Windows reads the screen with this language pack.
 - **At least one dictionary.** chibipop does not include one. The next
   section explains how to get one.
 
-You do **not** need Python, a compiler, or any other tool. The download
-contains everything else.
+You do **not** need Python, a compiler, or another tool. The download
+contains everything else. The optional meikiocr plugin on Windows is the
+one exception. See [Changing the OCR engine](#9-changing-the-ocr-engine).
 
 ---
 
 ## 2. Get a dictionary
 
-chibipop does not ship with a dictionary, and it cannot work without one.
-Get this out of the way first.
+chibipop does not include a dictionary, and it cannot work without one.
+Do this step first.
 
-**What a dictionary is here.** A single `.zip` file in **Yomitan format**.
-Yomitan is a popular browser dictionary, and its files are shared freely.
-chibipop reads the same files. You do not need to install Yomitan itself.
+**What a dictionary is here.** One `.zip` file in **Yomitan format**.
+Yomitan is a popular browser dictionary, and people share its files freely.
+chibipop reads the same files. You do not need to install Yomitan.
 
-**Where to start.** These three are known to work:
+**Where to start.** These three dictionaries are known to work:
 
-| Dictionary | What it is | Licence |
+| Dictionary | What it is | License |
 |---|---|---|
 | **Jitendex** | Japanese to English | free, CC BY-SA 4.0 |
 | **大辞林 第四版** | Japanese to Japanese, from Sanseido | commercial |
-| **jiten_freq_global** | word frequency data — see below | free |
+| **jiten_freq_global** | word frequency data, see below | free |
 
 Download the `.zip` files and keep them together in one folder. That
-folder is your **library**. You will point chibipop at it in the next
-section.
+folder is your **library**. In the next section, you add the files from
+this folder to chibipop.
 
-**A frequency list is optional but recommended.** It tells chibipop how
-common each word is, so the pop-up can rank the likely meaning first.
-chibipop spots a frequency list on its own — you do not have to say which
-file it is.
+**A frequency list is optional but recommended.** A frequency list tells
+chibipop how common each word is. The popup then ranks the most likely
+meaning first. chibipop reads the role of each archive from the archive
+itself. You do not need to identify the frequency list.
 
 ---
 
 ## 3. Install chibipop
 
-**Step 1 — download.** Get the file for your system from
+**Step 1 — Download.** Get the file for your system from
 [Releases](../../releases).
 
 | Your system | Download | Unpack it with |
@@ -104,337 +112,412 @@ file it is.
 | Windows | `chibipop-vX.Y.Z-windows-x64.zip` | right-click > Extract All |
 | Linux | `chibipop-vX.Y.Z-linux-x64.tar.gz` | `tar xzf <file>` |
 
-Put the unpacked folder anywhere you like. On Arch Linux you can install
-`chibipop-bin` from the AUR instead; see [Linux](#10-linux).
+Put the unpacked folder where you want. On Arch Linux, you can install
+`chibipop-bin` from the AUR instead. On Nix, you can run the flake. See
+[Linux](#10-linux).
 
-**Step 2 — open the settings window.**
+**Step 2 — Open the settings window.**
 
-- **Windows:** double-click `chibipop.exe`. The settings window opens by
-  itself the first time.
+- **Windows:** double-click `chibipop.exe`. On a new install, the settings
+  window opens because there is no dictionary database yet.
 - **Linux:** run `chibipop settings`.
 
-**Step 3 — add your dictionaries.** On the *Dictionaries* tab, add the
-`.zip` files from your library folder. Press **Apply**.
+**Step 3 — Add your dictionaries.** The two platforms differ here.
 
-chibipop now builds its own database from those files. This takes about a
-minute the first time. You only do it once.
+- **Windows:** on the **Dictionaries** tab, click **Add…** and select the
+  `.zip` files from your library. Click **Apply**. chibipop builds its
+  database from the files. The status line says
+  `Rebuilding your dictionary. This can take a few minutes.` When the build
+  is complete, chibipop starts.
+- **Linux:** on the **Dictionaries** tab, click **Browse…** and select the
+  `.zip` files from your library. Or type a path and click **Add**. Then
+  click **Rebuild**. The rebuild reads every archive, and it can take a few
+  minutes.
 
-**Step 4 — read something.** Point at Japanese text anywhere on screen.
+**Step 4 — Read.** Put the cursor on Japanese text anywhere on the screen.
+The popup follows the cursor. This is the default lookup mode,
+**Follow pointer**. The **Shortcuts** tab has three other modes that use a
+lookup key. See [Windows and Linux](#4-windows-and-linux). On Linux, a key
+mode needs a bind in your desktop. [Linux](#10-linux) explains how.
 
-- **Windows:** just hover. The pop-up follows your cursor.
-- **Linux:** hold the trigger keys — `ALT+F` by default — while you hover.
-  [Linux](#10-linux) explains why, and how to set that up.
-
-If nothing appears, see [Getting help](#11-getting-help).
+If no popup appears, see [Getting help](#11-getting-help).
 
 ---
 
 ## 4. Windows and Linux
 
-chibipop is one program with two builds. Almost everything works the same
-way. These are the differences worth knowing before you start.
+chibipop is one program with two builds. Most features work the same way.
+This table shows the differences that matter before you start.
 
 | | Windows | Linux |
 |---|---|---|
-| **How you trigger a lookup** | hover, or hold a key you choose | hold a key combination your desktop passes on |
-| **Which OCR engine reads the screen** | the one built into Windows | **meikiocr**, bundled with chibipop |
-| **Reading languages other than Japanese** | yes, any recogniser Windows has | Japanese only |
+| **Lookup modes** | **Follow pointer**, **While held**, **Turn on / off**, and **Once per press**. chibipop reads the lookup key itself. | The same four modes. Your desktop sends the lookup key to chibipop. |
+| **OCR engine** | Windows OCR, built into Windows | **meikiocr**, bundled with chibipop |
+| **Text languages** | any language with a Windows OCR language pack | Japanese only |
 | **Other OCR engines** | yes, through plugins | no |
-| **Where your settings file lives** | beside the program | `~/.config/chibipop/` |
-| **Updating** | chibipop can replace itself | chibipop tells you, and never replaces itself |
+| **Dictionary changes** | **Apply** edits the database in place | **Rebuild** reads every archive again |
+| **Settings file** | beside the program | `~/.config/chibipop/`, or beside the program in portable mode |
+| **Updates** | chibipop can replace itself | chibipop reports a new version and never replaces itself |
 
-Everything else in this guide applies to both unless it says otherwise.
+Everything else in this guide applies to both platforms unless a section
+says otherwise.
 
-**OCR** means reading text out of a picture of a screen. It is how
-chibipop works on anything at all, including games that share no text with
-other programs.
+**OCR** means reading text from a picture of the screen. OCR lets chibipop
+work with any program, including a game that shares no text with other
+programs.
 
 ---
 
 ## 5. Settings
 
-Use the settings window to change preferences. Press **Apply** to save.
-Most changes take effect at once. Changing the Windows OCR engine still needs a restart.
+Use the settings window to change your preferences. Click **Apply** to
+save. While chibipop runs, most changes take effect at once. A change of
+the Windows OCR engine takes effect after a restart. On Windows,
+`chibipop settings` opens the window without a running chibipop. There,
+**Apply** saves the file, and the changes take effect when you start
+chibipop.
 
-On Windows, resize or maximize settings to give controls more room. The footer shows
-Apply progress, the active OCR language and engine, and whether Anki is enabled.
-Open **Debug > Show live logs** to inspect recent and live output in another window.
-The settings window's X exits chibipop. Closing the log viewer closes that viewer.
+On Windows, you can resize or maximize the settings window. The footer
+shows the Apply state, the active OCR language and engine, and the Anki
+state. **Show live logs** on the **Debug** tab opens the recent and live
+log output in a second window. The X button of the settings window exits
+chibipop. The X button of the log window closes only the log window.
 
-**Where the file lives.** Your settings are in a file called
-`chibipop.toml`. On Windows it sits beside the program. On Linux it is in
-`~/.config/chibipop/`. You can edit it by hand, but the settings window
-covers everything in it. See
+**Where the file lives.** Your settings are in a file named
+`chibipop.toml`. On Windows, the file is beside the program. On Linux, the
+file is `~/.config/chibipop/chibipop.toml`. A `chibipop.toml` beside the
+Linux program selects portable mode, and then every file stays beside the
+program. You can edit the file manually. The settings window covers the
+settings that your platform uses. See
 [`docs/REFERENCE.md`](docs/REFERENCE.md#paths) for every option.
 
 ### The settings worth knowing
 
-- **Screen area size** — how large an area chibipop reads around
-  your cursor, in pixels. Vertical mode swaps the two numbers.
-- **Read English letters and numbers** — on by default. Turn it off to ignore
-  English words. Mixed text like 「3人」 still works either way.
-- **Update for every character** (*Text recognition* tab) — off by default. Turn it
-  on to look up every character as you move the cursor, rather than whole
-  words. **Follow pointer** mode only.
-- **Text language** (*Text recognition* tab) — **Windows only.** Which language
-  the recogniser reads. Add more languages in Windows Settings > Language
-  & region. Linux always reads Japanese.
-- **Per-language dictionary list** (*Dictionaries* tab) — give each
-  reading language its own set of dictionaries, in its own order. A
-  language you have not set up searches all of them.
+- **Screen area size** (**Text recognition** tab) — the area that chibipop
+  reads around the cursor, in pixels. Linux names it **Capture width (px)**
+  and **Capture height (px)**. **Read vertical text first** swaps the two
+  numbers.
+- **Read English letters and numbers** (**Text recognition** tab) — on by
+  default. Disable it to ignore English words. Mixed text such as 「3人」
+  still works.
+- **Update for every character** — off by default. Enable it to look up
+  each character as the cursor crosses it, instead of whole words. It works
+  in **Follow pointer** mode only. Windows shows it on the
+  **Text recognition** tab. Linux shows it on the **Shortcuts** tab.
+- **Text language** (**Text recognition** tab) — **Windows only.** The
+  language that the OCR engine reads. Add more languages in Windows
+  Settings > Time & language > Language & region. Linux always reads
+  Japanese.
+- **Dictionaries for each language** (**Dictionaries** tab) —
+  **Windows only.** When you change **Text language**, the
+  **Definition dictionaries** list shows the dictionaries for that
+  language. Each language keeps its own list and its own order. A language
+  without a list searches every enabled dictionary.
 
 ---
 
 ## 6. Managing your dictionaries
 
-**Adding and removing is instant.** chibipop edits its database in place.
-Add a dictionary or remove one, press **Apply**, and it takes effect in
-under a second. You can keep hovering while it works.
+**Windows.** Add or remove a dictionary on the **Dictionaries** tab, then
+click **Apply**. chibipop edits its database in place while it runs. The
+change takes effect quickly, and you can keep hovering. A frequency
+list change updates the ranking in place too.
 
-**Frequency lists are the one exception.** A frequency list ranks words
-across *every* dictionary at once, so changing one means re-ranking
-everything. chibipop rebuilds the database instead, which takes about a
-minute. It tells you when this is about to happen.
+**Linux.** Add or remove a dictionary on the **Dictionaries** tab. The
+change is staged. Click **Rebuild** to import the staged archives and
+rebuild the database. The rebuild reads every archive again. The popup
+keeps working during the rebuild.
 
-You can also run that rebuild yourself:
+**Frequency ranking on both platforms.** The ranking rule, the order of the
+frequency lists, and their checkboxes control the ranks. A change to one of
+them recalculates the ranks in place. chibipop does not read the archives
+again for this change.
+
+**The `build-dict` command (Windows only).** You can also build the
+database from the command line:
 
 ```
-chibipop build-dict --library "<your library folder>" --out "<the database>"
+chibipop.exe build-dict --library "<your library folder>" --out "<the database>"
 ```
 
-You need this in four cases, and no others:
+You need this command in four cases only:
 
-1. Your first install, if you would rather not use the settings window.
-2. After a format upgrade.
+1. On a first install, if you do not want to use the settings window.
+2. After a format upgrade of the database.
 3. If the database is damaged.
-4. To make the database match your library folder again, after adding or
-   removing files outside chibipop.
+4. To make the database agree with your library folder again, after you
+   added or removed files outside chibipop.
+
+Linux has no `build-dict` command. The **Rebuild** button in the settings
+window does the same work.
 
 ---
 
 ## 7. Sending words to Anki
 
-chibipop can make an Anki card from the word you are looking at.
+chibipop can make an Anki card from the word in the popup.
 
-It talks to Anki through
+chibipop connects to Anki through
 [AnkiConnect](https://ankiweb.net/shared/info/2055492159), a free Anki
-add-on. Install that first, and leave Anki running.
+add-on. Install AnkiConnect first, and keep Anki open. chibipop connects to
+`http://localhost:8765` by default. **Connection address** on the **Anki**
+tab changes this address.
 
-### Turn it on
+### Enable Anki
 
-Open the *Anki* tab in Settings and tick the box. Choose your deck and
-your note type.
+1. Open the **Anki** tab.
+2. Select **Enable Anki**.
+3. Choose your **Deck** and your **Note type**.
 
-### Decide what goes on the card
+On Windows, **Reload decks and fields** loads the latest decks, note types,
+and fields from Anki.
 
-The **field map** matches each field of your Anki note to a piece of what
-chibipop found. Set it on the *Anki* tab; the dropdown lists everything
-below.
+### Choose the card fields
 
-| Put this in a field | And you get |
+The **field map** matches each field of your Anki note to one value that
+chibipop found. Set it on the **Anki** tab. Windows shows one dropdown for
+each field of the note type under **Choose card fields**. Linux shows one
+row for each mapped field.
+
+| Value | What it contains |
 |---|---|
-| `expression` | the word itself |
-| `reading` | how it is read |
-| `glossary` | numbered definitions, with only the optional heading formatted |
-| `glossary_html` | the definitions, with Dictionary formatting |
+| `expression` | the word |
+| `reading` | the reading of the word |
+| `glossary` | the numbered definitions as plain text, with an optional heading |
+| `glossary_html` | the definitions with the formatting of the dictionary |
 | `frequency` | how common the word is |
-| `sentence` | the sentence the word came from |
-| `screenshot` | a picture of what you were reading |
+| `pitch_html` | the pitch accent of the word, as HTML |
+| `sentence` | the sentence that contains the word |
+| `screenshot` | a picture of what you read |
 
-Definitions from different Dictionaries are separated by a heading and a line.
-Use **Include dictionary name** to show or hide these headings. A heading uses
-HTML instead of square brackets, which Anki can interpret as furigana.
+On Windows, `(none)` leaves a field empty.
 
-Use **First dictionary only** to send only the top Dictionary's definitions.
-This setting keeps cards short when several Dictionaries match the same word.
+A heading and a line separate the definitions of different dictionaries.
+**Include the dictionary name** shows or hides these headings. A heading
+uses HTML instead of square brackets, because Anki can read square brackets
+as furigana.
 
-The *Anki* tab also sets how glossary selection works. By default, the primary
-button adds text and the secondary button replaces it. Selected fragments use
-an ellipsis between them. Choose another click behavior or separator when needed.
+**Use the first dictionary only** sends the definitions of the top
+dictionary only. This setting keeps cards short when several dictionaries
+match the same word.
 
-A small notification confirms each card. Turn it off with **Notify after
-adding a card**.
+The **Anki** tab also sets how you select text in the glossary.
+**Primary click behavior** sets the primary mouse button to
+`Add to selection` or `Replace selection`. The secondary button always adds
+to the selection. **Join selected text with** sets the separator between
+the selected fragments. The default is `Ellipsis (…)`.
+**Triple-click selects** chooses a meaning, a meaning with examples, or a
+complete line.
 
-### Add a picture of what you were reading
+On Windows, a small notification confirms each card. **Notify after adding
+a card** turns the notification off.
 
-A screenshot gives the card context — the panel, the subtitle, or the line of
-the game where you found the word.
+### Add a picture of what you read
+
+A screenshot gives the card context — the panel, the subtitle, or the line
+of the game where you found the word.
 
 #### Choose a screenshot mode
 
-Choose a mode in the *Anki* tab with **Screenshot source**.
+Choose a mode with **Screenshot source** on the **Anki** tab.
 
-- **Choose a region** is the default. Select a region for each picture.
+- **Choose a region** is the default. You select a region for each picture.
 - **Choose a window** selects one visible window for each picture.
-- **Reuse one region** asks for one region on first use, then reuses its saved
-  global physical-pixel rectangle.
-- **Reuse one window** asks for one visible window on first use, then finds that
-  window for each picture.
+- **Reuse one region** asks for one region on first use, then reuses its
+  saved rectangle.
+- **Reuse one window** asks for one visible window on first use, then finds
+  that window for each picture.
 
-On Windows, the native selector uses a drag for a region and a click for a
-window. Hold `Alt` before you start the gesture to switch between these two
-choices. On Linux, `slurp` provides the selector. Region mode supports a
-window click or a region drag. Window mode uses a window click. Linux does
-not use the Windows `Alt` switch. A Linux window click needs the window list
-from Hyprland or Sway. On another compositor, only a region drag works, and
-the window modes fail.
+On Windows, a drag selects a region, and a click selects a window. Hold
+`Alt` before you start the gesture to switch between the two. On Linux,
+`slurp` provides the selector. **Choose a region** accepts a region drag,
+or a window click on Hyprland or Sway. **Choose a window** uses a window
+click. A Linux window click needs the window list from Hyprland or Sway. On
+another compositor, only a region drag works, and the window modes fail.
 
-A fixed window stores its exact `app_id` and title. Windows uses the window
-class as `app_id`. Linux uses the compositor class or `app_id`. Both values
-must match exactly one visible window. Window capture copies the visible
-screen rectangle. It does not copy hidden or occluded window contents.
+A saved window stores its exact `app_id` and title. Windows uses the window
+class as `app_id`. Linux uses the class or `app_id` from the compositor.
+Both values must match exactly one visible window. A window capture copies
+the visible screen rectangle. It does not copy hidden window contents.
 
-Fixed region keeps the same rectangle after a restart. Fixed window queries
-fresh geometry after a window moves or changes size. A title change breaks the
-match. Reset the saved target and select the window again.
+A saved region keeps the same rectangle after a restart. A saved window
+gets fresh geometry after the window moves or changes size. A title change
+breaks the match. Reset the saved target and select the window again.
 
-1. **Turn it on.** *Anki* tab > tick **Include screenshot when adding**.
-2. **Choose a mode.** Select **Region**, **Window**, **Fixed region**, or
-   **Fixed window**. Press **Apply** after you change the mode.
-3. **Find a word.** Hover until the pop-up appears.
-4. **Ask for the card.** Press the Anki key, or click the Anki button under
-   the pop-up.
-5. **Select the target when the mode asks for one.** Complete the drag or
-   click. Fixed modes save a successful first selection for later pictures.
+To attach a picture to each card:
 
-Settings shows the mode, each saved target summary, and a reset control. Use
-**Clear saved screenshot targets** on Windows or **Reset saved screenshot
-targets** on Linux. Press **Apply** to commit the reset. The next fixed-mode
-picture asks for a new target.
+1. On the **Anki** tab, select **Attach a screenshot to cards**.
+2. Choose a mode with **Screenshot source**, then click **Apply**.
+3. Hover a word until the popup appears.
+4. Press the **Add current result to Anki** key, or click the Anki button
+   under the popup.
+5. If the mode asks for a target, complete the drag or the click. The
+   **Reuse** modes save the first successful selection.
 
-chibipop saves the picture and, if Anki is open, makes the card.
+The **Anki** tab shows the mode, a summary of each saved target, and a
+reset button. Click **Clear saved targets** on Windows or
+**Reset saved screenshot targets** on Linux. Click **Apply** to save the
+reset. The next picture in a **Reuse** mode asks for a new target.
 
-**To skip the picture,** press **Esc** while the screen is dimmed. On Windows,
-you can also right-click. You still get the card without an image. After
-20 seconds without a selection, chibipop cancels the picture.
+chibipop saves the picture and makes the card. The card needs a connected
+Anki.
 
-**Where the picture is saved.** In a folder called `screenshots`. Change
-it with the **Screenshots folder** box on the *Anki* tab. A full path is
-used exactly as you type it. A plain name is placed:
+**To skip the picture,** press `Esc` while the screen is dimmed. On
+Windows, a right-click also skips it. You still get the card without a
+picture. On Linux, chibipop cancels the picture after 20 seconds without a
+selection. Windows waits until you select or cancel.
 
-- **beside the program**, on Windows, and on Linux in portable mode — that
-  is, when a `chibipop.toml` sits beside the program;
-- **in `~/.local/share/chibipop/screenshots`** on Linux otherwise — or
-  under `$XDG_DATA_HOME/chibipop` if you have set that variable.
+**Where the picture is saved.** The default folder is `screenshots`. On
+Linux, change it with the **Screenshots folder** box on the **Anki** tab.
+On Windows, set `save_dir` under `[actions.screenshot]` in `chibipop.toml`.
+A full path is used exactly as you type it. A plain name is placed:
 
-Keep that folder. It is not temporary — deleting it breaks the cards that
-point at the pictures.
+- **beside the program** on Windows, and on Linux in portable mode
+- **in `~/.local/share/chibipop/screenshots`** on Linux otherwise, or in
+  `$XDG_DATA_HOME/chibipop/screenshots` if you set that variable
 
-### Take a picture without making a card
+Anki copies each picture into its own media folder. The `screenshots`
+folder keeps your local copies.
 
-A separate key takes a screenshot for the pop-up already on screen. It uses
-the selected screenshot mode. chibipop saves the picture. If Anki is open, it
-also files a card.
+### Take a picture with a key
 
-- **Windows:** set the key as `actions.screenshot.hotkey`.
-- **Linux:** it is a key combination you set in your desktop, bound to
-  `chibipop ctl screenshot`. The *Anki* tab writes the line for you to
-  copy. See [`docs/LINUX.md`](docs/LINUX.md).
+A separate key takes a screenshot for the popup that is on the screen. The
+key uses the selected screenshot mode. chibipop saves the picture. If Anki
+is connected, chibipop also files a card.
 
-Press it with no pop-up on screen and chibipop says so in its log rather than
-doing nothing quietly. There is nothing to take a picture *of* until you have
-looked a word up.
+- **Windows:** set **Save a screenshot** on the **Shortcuts** tab. The
+  default is `Ctrl+Shift+S`.
+- **Linux:** set the **Screenshot shortcut** on the **Shortcuts** tab. The
+  tab shows the bind line for your compositor. The bind runs
+  `chibipop ctl screenshot`. See [`docs/LINUX.md`](docs/LINUX.md).
+
+If no popup is on the screen, the key does nothing. Linux writes a line to
+its log. There is nothing to photograph until you look up a word.
 
 ### Add the sentence
 
-chibipop can send the sentence around the word as well. Choose where it
-comes from on the *Anki* tab:
+chibipop can also send the sentence around the word. Choose the source with
+**Sentence source** on the **Anki** tab:
 
-- **Detected sentence** — the complete sentence containing the word. This is the default.
-- **Line under the pointer** — the captured line containing the word.
-- **All captured lines** — everything chibipop read around your cursor.
+- **Detected sentence** — the complete sentence that contains the word.
+  This is the default.
+- **Line under the pointer** — the captured line that contains the word.
+- **All captured lines** — everything that chibipop read around the cursor.
 - **Fixed screen area** — a fixed part of the screen that you mark once.
 
 #### Fixed screen area — for visual novels and games
 
 Games and visual novels usually put their text in the same box every time.
-Mark that box once and chibipop reads from it, instead of from wherever
-your cursor happens to be.
+Mark that box once, and chibipop reads the sentence from it instead of from
+the area around the cursor.
 
-1. Set the sentence source to **Fixed screen area** in Settings.
-2. Press the **Set sentence area** shortcut you chose. The screen dims.
+1. Set **Sentence source** to **Fixed screen area**.
+2. Press the **Set sentence area** shortcut. Set this shortcut on the
+   **Shortcuts** tab. The screen dims.
 3. Drag a rectangle around the text box, and release.
-4. A teal outline marks it.
+4. A teal outline marks the area.
 
-The outline can be turned off with **Outline the sentence area**. Your
-region is saved and survives a restart. Press the hotkey again to move it.
+**Outline the sentence area** on Windows, or **Show the static region
+outline** on Linux, turns the outline off. chibipop saves the area, and the
+area survives a restart. Press the shortcut again to move it.
 
 ---
 
-## 8. Changing how the pop-up looks
+## 8. Changing how the popup looks
 
-The pop-up is styled with a CSS file, the same language web pages use.
-Four ready-made themes come with chibipop, in the `themes/` folder:
-**midnight-purple**, **ocean-breeze**, **sakura-light** and **warm-paper**.
+A CSS file styles the popup. CSS is the language that web pages use. On
+Windows, the popup and the search windows read `popup.css` beside
+`chibipop.exe`. On Linux, Dictionary search and Sentence search read
+`popup.css` beside the settings file. The Linux OCR popup does not read CSS
+yet.
 
-1. In Settings, click **Customize CSS...** in the Pop-up group.
-2. Paste in a theme, or make your own changes.
-3. Click **Save & Apply**. The pop-up changes immediately.
+The repository has four ready-made themes in the [`themes/`](themes/)
+folder: **midnight-purple**, **ocean-breeze**, **sakura-light**, and
+**warm-paper**. The download does not include them.
 
-Your version is saved as `popup.css`, beside `chibipop.toml`. Delete that
-file to go back to the default.
+On Windows:
 
-[`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) lists everything you can
+1. On the **Popup** tab, click **Advanced popup style**.
+2. Paste a theme, or make your own changes.
+3. Click **Save & Apply**. The popup changes at once.
+
+On Linux, copy a theme file to `popup.css` beside `chibipop.toml`. The
+search windows use it on the next search.
+
+Delete `popup.css` to return to the default style. The Windows editor also
+has **Reset to Default**.
+
+[`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) lists everything that you can
 style.
 
 ---
 
 ## 9. Changing the OCR engine
 
-**Windows only.** By default chibipop reads the screen with the recogniser
-built into Windows. You can swap in a different one.
+**Windows only.** By default, chibipop reads the screen with Windows OCR,
+the engine that is built into Windows. You can replace it with a different
+engine. The settings window calls the engine the **Text reader**, and it
+calls a replacement an extension.
 
-On Linux there is nothing to change: the build always uses **meikiocr**,
-which comes with it. See [`docs/LINUX.md`](docs/LINUX.md).
+On Linux, there is nothing to change. The Linux build always uses
+**meikiocr**, which comes with it. See [`docs/LINUX.md`](docs/LINUX.md).
 
-A replacement engine runs as a separate program. chibipop sends it a
-picture; it sends back the text and the position of every character.
-chibipop still does the rest — the dictionary, the pop-up, the highlight.
+A replacement engine runs as a separate program, a plugin. chibipop sends
+it a picture. The plugin sends back the text lines. It can also send the
+position of each word. chibipop does the rest — the dictionary, the popup,
+and the highlight.
 
-### Setting up meikiocr
+### Configure meikiocr
 
 [meikiocr](https://github.com/rtr46/meikiocr) is a Japanese OCR engine
-trained on game text. It comes with chibipop as the worked example, and
-chibipop finds it on its own.
+trained on game text. The download includes its plugin in
+`plugins/meikiocr/` as the worked example, and chibipop finds the plugin
+automatically. The plugin needs a Python installation that you provide.
 
-1. **Install meikiocr.** Follow its own README. You need Python, with
-   meikiocr, OpenCV and ONNX Runtime.
-2. **Tell chibipop where it is.** In Settings, on the *Text recognition* tab:
-   1. choose **meikiocr** in the **Text reader** dropdown;
-   2. click **Configure...**;
-   3. pick any file inside your meikiocr folder.
-3. **Restart chibipop.** This line confirms it worked:
-   ```
-   chibipop: OCR engine: meikiocr
-   ```
+1. **Install meikiocr.** Use the README of meikiocr. You need Python with
+   meikiocr, OpenCV, and ONNX Runtime.
+2. **Tell chibipop where it is.** On the **Text recognition** tab:
+   1. Choose **meikiocr** in the **Text reader** dropdown.
+   2. Click **Configure…**.
+   3. Select your meikiocr installation folder.
+3. **Click Apply, then restart chibipop.** chibipop creates the OCR engine
+   once at startup.
 
-If meikiocr cannot start, chibipop goes back to the built-in engine and
-prints the reason.
+If meikiocr cannot start, chibipop uses the built-in engine and prints the
+reason to its log.
 
-### Checking which engine is running
+### Check which engine runs
 
-Tick **Show the active text reader** on the *Debug* tab and
-press **Apply**. The status bar names it.
+The footer of the settings window shows the active engine, for example
+`OCR: meikiocr`. To see which engine handled the latest lookup, select
+**Show the active text reader** on the **Debug** tab and click **Apply**.
+The status area of the settings window then names the engine.
 
-To watch the engine's own messages, start chibipop from a terminal:
+To watch the messages of the engine, start chibipop from a terminal:
 
 ```powershell
 .\chibipop.exe run 2>engine.log
 Get-Content engine.log -Wait -Tail 20
 ```
 
-### Writing your own
+**Show extension messages** on the **Debug** tab shows the last lines of
+these messages in the settings window.
 
-A plugin is a folder inside `plugins/` holding:
+### Write your own plugin
 
-- `plugin.toml` — its name, version, command and roles;
-- a program or script that exchanges JSON over standard input and output,
-  one message per line.
+A plugin is a folder inside `plugins/` that holds:
 
-`plugins/meikiocr/adapter.py` is a working example. There are two
-messages: `hello` to introduce itself, and `text/recognise` to read a
-picture. Both sides ignore anything they do not recognise. A plugin that
-fails three times is switched off until the next restart.
+- `plugin.toml` — the name, version, protocol, command, and roles of the
+  plugin
+- a program or script that exchanges JSON over standard input and standard
+  output, one message on each line
+
+`plugins/meikiocr/adapter.py` is a working example. The protocol has two
+methods: `hello` introduces the plugin, and `text/recognise` reads a
+picture. Both sides ignore unknown fields. A plugin answers an unknown
+method with an error. After three consecutive failed recognitions, chibipop
+switches the plugin off until the next restart. One successful recognition
+resets the count.
 
 ---
 
@@ -442,10 +525,12 @@ fails three times is switched off until the next restart.
 
 **Linux is supported from v0.9.9 onward.**
 
-chibipop needs a **Wayland** desktop — the modern display system most
-Linux distributions now use. **Hyprland** is the one it is developed
-against, with **sway** and its relatives equally supported. **KDE Plasma**
-works. **GNOME** mostly works. The older **X11** is not supported.
+chibipop needs a **Wayland** desktop. Wayland is the modern display system
+that most Linux distributions now use. **Hyprland** is the reference
+compositor. **sway** and its relatives get the same support. **KDE Plasma**
+works through the desktop portals. **GNOME** is best-effort: the popup
+cannot appear on stock GNOME, because its compositor does not implement the
+layer-shell protocol. The older **X11** is not a target.
 
 ### Installing
 
@@ -453,23 +538,27 @@ works. **GNOME** mostly works. The older **X11** is not supported.
 |---|---|---|
 | Download | `tar xzf chibipop-vX.Y.Z-linux-x64.tar.gz` | nothing else to install |
 | Arch Linux | install `chibipop-bin` from the AUR | the same build, through pacman |
-| Arch, from source | install `chibipop` from the AUR | uses your distribution's ONNX Runtime |
-| Nix | `nix run github:stellarie/chibipop` | builds with nixpkgs' ONNX Runtime |
+| Arch, from source | install `chibipop` from the AUR | uses the ONNX Runtime of your distribution |
+| Nix | `nix run github:stellarie/chibipop` | builds with the ONNX Runtime of nixpkgs |
 
-The download needs glibc 2.39, libstdc++ 3.4.31 and a Japanese font, and
-nothing else. The OCR engine is inside it, so it works with no internet
-connection and downloads nothing on first run.
+The download needs glibc 2.39, libstdc++ 3.4.31, and a CJK font such as
+Noto Sans CJK. `xdg-desktop-portal` and `pipewire` are optional. KDE and
+GNOME use them for screen capture and for the lookup key. The OCR engine
+and its models are inside the download. chibipop works without an internet
+connection and downloads nothing on the first run.
 
 ### Nix
 
-Run chibipop directly from the flake. It builds the Linux binary and includes
-its models, dictionaries, desktop entry, and systemd user unit:
+Run chibipop directly from the flake. The flake builds the Linux binary for
+`x86_64-linux` and `aarch64-linux`. The package includes the OCR models,
+the Japanese analysis model, the deconjugation rules, a desktop entry, and
+a systemd user unit. It does not include dictionaries.
 
 ```bash
 nix run github:stellarie/chibipop -- run
 ```
 
-The default package uses CPU ONNX Runtime. A CUDA-enabled package is also
+The default package uses the CPU ONNX Runtime. A CUDA package is also
 available:
 
 ```bash
@@ -485,7 +574,7 @@ inputs.chibipop = {
 };
 ```
 
-Then import its Home Manager module in and enable the program:
+Then import its Home Manager module and enable the program:
 
 ```nix
 { inputs, ... }:
@@ -498,7 +587,7 @@ Then import its Home Manager module in and enable the program:
 }
 ```
 
-To start chibipop automatically with the graphical session, use:
+To start chibipop with the graphical session, add the systemd option:
 
 ```nix
 programs.chibipop = {
@@ -507,90 +596,99 @@ programs.chibipop = {
 };
 ```
 
-The systemd option is not required. You can start it manually with
-`chibipop run`. See [For developers](#12-for-developers) for the development
-shell.
+The systemd option is optional. You can start chibipop manually with
+`chibipop run`. See [For developers](#12-for-developers) for the
+development shell.
 
-### Using CUDA with Home Manager
+### CUDA with Home Manager
 
 The Home Manager module uses the CPU package by default. To use the CUDA
-variant, set the `package` field in your existing `programs.chibipop` block:
+package, set the `package` field in your `programs.chibipop` block:
 
 ```nix
 programs.chibipop.package = inputs.chibipop.packages.${pkgs.system}.cuda;
 ```
 
-The development shells are available as `nix develop` for CPU or `nix develop
-.#cuda` for CUDA.
+The development shells are `nix develop` for CPU and `nix develop .#cuda`
+for CUDA.
 
-### Setting up the trigger key
+### The lookup key
 
-Wayland does not let a program watch your keyboard in the background — a
-deliberate security decision. So **your desktop sends chibipop the
-signal**, rather than chibipop listening for it.
+Wayland does not let a program watch the keyboard in the background. This
+is a deliberate security decision. Thus, **your desktop sends the key to
+chibipop**. KDE and GNOME can assign a global shortcut through the desktop
+portal. On another compositor, a keybind runs `chibipop ctl`, and this
+command sends a verb to chibipop.
 
-On Hyprland, two lines in your config set up the default `ALT+F`:
+On Hyprland, two lines in your configuration set the default `ALT+F` for
+the **While held** mode:
 
 ```
-bind  = ALT, F, exec, chibipop ctl trigger-down
+bind = ALT, F, exec, chibipop ctl trigger-down
 bindr = ALT, F, exec, chibipop ctl trigger-up
 ```
 
-Ready-made snippets for other desktops are in [`extras/`](extras/), and
-the settings window writes the right line for whatever keys you choose.
+[`extras/`](extras/) contains a ready-made `hyprland.conf`, and its README
+has the same lines for sway. The **Shortcuts** tab writes the bind line for
+the keys that you choose. It knows the syntax of Hyprland, Sway, Niri, KDE,
+and GNOME.
 
 ### Two things to expect
 
-- **Vertical text is not as accurate as horizontal.** The bundled engine
-  reads sideways text well and vertical columns less well. Expect an
-  occasional missing first character. Measured numbers are in
+- **Vertical text is beta.** The bundled engine reads horizontal text well.
+  With the default capture area, a vertical column can return a sentence
+  that is spliced from neighboring columns. Enable **Read vertical text
+  first** on the **Text recognition** tab when you read vertical text. The
+  setting swaps the capture width and height. Then expect a missing first
+  character, or a missing `。` at the end of a column. The measured numbers
+  are in
   [`docs/REFERENCE.md`](docs/REFERENCE.md#known-limits-measured-rather-than-assumed).
-- **chibipop will not update itself.** *Check for updates* tells you a new
-  version exists and stops there. Update through your package manager, or
-  download the new version.
+- **chibipop does not update itself.** **Check for updates** tells you
+  that a new version exists, and it stops there. Update through your
+  package manager, or download the new version.
 
 ### Everything else
 
 [`docs/LINUX.md`](docs/LINUX.md) is the full Linux guide. It covers:
 
-- getting started, and building from source;
-- how the trigger key works, and a Hyprland quirk to know about;
-- support for each desktop, including KDE and GNOME;
-- where your files are kept;
-- the command line;
-- what differs from Windows;
-- what to do when something does not work.
+- how to start, and how to build from source
+- how the lookup key works, and a Hyprland defect to know about
+- support for each desktop, including KDE and GNOME
+- where chibipop keeps your files
+- the command line
+- the differences from Windows
+- what to do when something does not work
 
 ---
 
 ## 11. Getting help
 
-Something not working, or an idea for what chibipop should do next? Open
-an [issue](https://github.com/stellarie/chibipop/issues). Pull requests
-are welcome too.
+Does something not work? Do you have an idea for chibipop? Open an
+[issue](https://github.com/stellarie/chibipop/issues). Pull requests are
+welcome too.
 
-It helps to say which version you are on (`chibipop --version`), which
-system, and what you were pointing at.
+Give your version (`chibipop --version`), your system, and what you
+pointed at.
 
 ---
 
 ## 12. For developers
 
-**Building** needs [Rust](https://rustup.rs) (stable, MSVC on Windows) and
-nothing else. The Windows icon is a committed resource, so no Windows SDK
-is required.
+**A build** needs [Rust](https://rustup.rs) (stable, with MSVC on Windows)
+and nothing else. The Windows icon is a committed resource, so you do not
+need the Windows SDK.
 
 ```bash
 cargo build --release -p chibipop-windows    # Windows
 cargo build --release -p chibipop-linux      # Linux
 ```
 
-Both produce a binary called `chibipop`.
+Both commands produce a binary named `chibipop`.
 
-**One repository, two binaries.** The core library is the root package,
-and one binary crate per platform lives in `crates/`. Because both are
-called `chibipop`, a command that spans them races two linkers over one
-output path. Exclude the other platform:
+**One repository, two binaries.** The core library is the root package.
+One binary crate for each platform lives in `crates/`. Both binaries have
+the name `chibipop`. Thus, a command that spans both crates races two
+linkers for one output path. Exclude the other platform:
 
 ```bash
 cargo test --workspace --exclude chibipop-linux     # Windows
@@ -599,7 +697,7 @@ cargo test --workspace --exclude chibipop-windows   # Linux
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#workspace-and-seams).
 
-### Running the Linux regression suite
+### The Linux regression suite
 
 Install Python 3 and start Docker or Podman. Then run the suite from the
 repository root:
@@ -608,7 +706,7 @@ repository root:
 python scripts/linux_container_regression.py
 ```
 
-Use Podman explicitly, or repeat the complete schedule to expose intermittent
+Use Podman explicitly, or repeat the complete schedule to find intermittent
 failures:
 
 ```bash
@@ -616,51 +714,58 @@ python scripts/linux_container_regression.py --runtime podman
 python scripts/linux_container_regression.py --loops 3
 ```
 
-The runner mounts the repository read-only. Each loop copies the current Git
-workspace into a fresh Ubuntu 24.04 container, including local non-ignored
-changes. It removes only its token-labelled container after the loop.
+The runner mounts the repository read-only. Each loop copies the current
+Git workspace, including local non-ignored changes, into a new container.
+The default image is Ubuntu 24.04, and `--image` selects another image.
+After the loop, the runner removes only the container that carries its own
+label. `--keep-failed-container` keeps a failed container for inspection.
 
-Results go to `linux-regression-artifacts/`. The directory contains JSON and
-JUnit reports, command logs, package output, and compositor evidence. Use
-`--artifacts-dir <directory>` to choose another location.
+Results go to `linux-regression-artifacts/`. The directory contains JSON
+and JUnit reports, command logs, package output, and compositor evidence.
+Use `--artifacts-dir <directory>` to choose another location.
 
-List the schedule or inspect the generated commands without starting a
-container:
+List the schedule, or inspect the generated commands without a container:
 
 ```bash
 python scripts/linux_container_regression.py --list
 python scripts/linux_container_regression.py --dry-run
 ```
 
-This tests Linux inside containers, not virtual machines. See
-[`docs/REGRESSION.md`](docs/REGRESSION.md) for the Windows and manual checks.
+This suite tests Linux inside containers, not virtual machines. See
+[`docs/REGRESSION.md`](docs/REGRESSION.md) for the Windows checks and the
+manual checks.
 
 ### The rest of the documentation
 
 | Document | What is in it |
 |---|---|
-| [`docs/REFERENCE.md`](docs/REFERENCE.md) | every setting, the diagnostics, the tests, the measured limits |
+| [`docs/REFERENCE.md`](docs/REFERENCE.md) | every setting, the diagnostics, the tests, and the measured limits |
 | [`docs/LINUX.md`](docs/LINUX.md) | the Linux build, in full |
-| [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) | every selector you can style |
-| [`docs/REGRESSION.md`](docs/REGRESSION.md) | the checklist that proves a build works, sorted by who can run it |
-| [`docs/RELEASING.md`](docs/RELEASING.md) | how a release is cut |
+| [`docs/CSS-THEMING.md`](docs/CSS-THEMING.md) | every selector that you can style |
+| [`docs/REGRESSION.md`](docs/REGRESSION.md) | the checks that prove a build works, sorted by who can run them |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | how a release is made |
 | [`docs/BACKLOG.md`](docs/BACKLOG.md) | known problems and deferred work, with the evidence |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | the architecture and every decision the code cannot state itself |
-| [`docs/research/`](docs/research/) | the measurements those decisions rest on |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | the architecture and every decision that the code cannot state itself |
+| [`docs/research/`](docs/research/) | the measurements behind those decisions |
 
 ---
 
-## 13. Licence
+## 13. License
 
 GNU General Public License v3.0 or later. See [`LICENSE`](LICENSE).
 
 The Linux build includes the [meikiocr](https://github.com/rtr46/meikiocr)
-text recognition models
-(`crates/chibipop-linux/models/meiki/`). Their weights are **LGPL-3.0**,
-included unchanged as data files, and ONNX Runtime is MIT. Both are
-compatible with the GPL. The details and the original sources are in
+text recognition models (`crates/chibipop-linux/models/meiki/`). The model
+weights are **LGPL-3.0**, included unchanged as data files, and ONNX
+Runtime is MIT. Both are compatible with the GPL. The details and the
+original sources are in
 [`models/meiki/LICENSE.md`](crates/chibipop-linux/models/meiki/LICENSE.md).
+
+Both builds include the IPADIC model for Japanese analysis
+(`data/ipadic/`). Its license is in
+[`data/ipadic/COPYING`](data/ipadic/COPYING) and
+[`data/ipadic/NOTICE`](data/ipadic/NOTICE).
 
 The deconjugation rules (`data/deconjugator.json`) are public domain.
 
-**Dictionaries are not included, and are not ours to distribute.**
+**Dictionaries are not included, and they are not ours to distribute.**
