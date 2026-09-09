@@ -23,20 +23,36 @@ use anyhow::Result;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Every glyph is `S x S` pixels.
+/// The body-text glyph size. Every glyph on a page is `glyph x glyph` pixels.
 const S: i32 = 40;
 /// The single output. Every page uses it.
 const BOUNDS: PhysRect = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
+
+/// One component box that an engine returns instead of the whole glyph.
+///
+/// `x`, `y`, `w`, `h` are quarters of the glyph. Issue #92: an engine boxed the
+/// components of a large `新` as `立` over `木`, two words stacked in the left half.
+struct Part {
+    text: &'static str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
 
 /// One glyph on the virtual screen.
 struct Glyph {
     ch: char,
     rect: PhysRect,
     line: usize,
+    /// The engine returns these parts as one line of their own instead of the glyph.
+    split: Option<&'static [Part]>,
 }
 
 struct Page {
     name: &'static str,
+    /// The glyph size in pixels.
+    glyph: i32,
     glyphs: Vec<Glyph>,
     /// The orientation of each line index, for the orientation invariant.
     lines: Vec<Orientation>,
@@ -44,27 +60,31 @@ struct Page {
 }
 
 impl Page {
-    fn new(name: &'static str) -> Self {
-        Page { name, glyphs: Vec::new(), lines: Vec::new(), bounds: BOUNDS }
+    fn new(name: &'static str, glyph: i32) -> Self {
+        Page { name, glyph, glyphs: Vec::new(), lines: Vec::new(), bounds: BOUNDS }
     }
 
-    /// Add one horizontal line. Glyph `i` sits at `x0 + S * i`.
+    fn push(&mut self, ch: char, rect: PhysRect, line: usize) {
+        self.glyphs.push(Glyph { ch, rect, line, split: None });
+    }
+
+    /// Add one horizontal line. Glyph `i` sits at `x0 + glyph * i`.
     fn row(&mut self, text: &str, x0: i32, y0: i32) {
         let line = self.lines.len();
         self.lines.push(Orientation::Horizontal);
         for (i, ch) in text.chars().enumerate() {
-            let rect = PhysRect { x: x0 + S * i as i32, y: y0, w: S, h: S };
-            self.glyphs.push(Glyph { ch, rect, line });
+            let s = self.glyph;
+            self.push(ch, PhysRect { x: x0 + s * i as i32, y: y0, w: s, h: s }, line);
         }
     }
 
-    /// Add one vertical line. Glyph `i` sits at `y0 + S * i`.
+    /// Add one vertical line. Glyph `i` sits at `y0 + glyph * i`.
     fn column(&mut self, text: &str, x0: i32, y0: i32) {
         let line = self.lines.len();
         self.lines.push(Orientation::Vertical);
         for (i, ch) in text.chars().enumerate() {
-            let rect = PhysRect { x: x0, y: y0 + S * i as i32, w: S, h: S };
-            self.glyphs.push(Glyph { ch, rect, line });
+            let s = self.glyph;
+            self.push(ch, PhysRect { x: x0, y: y0 + s * i as i32, w: s, h: s }, line);
         }
     }
 
@@ -75,6 +95,12 @@ impl Page {
             let row: String = chunk.iter().collect();
             self.row(&row, x0, y0 + pitch * k as i32);
         }
+    }
+
+    /// Make the engine return `parts` instead of the one glyph `ch`.
+    fn split(&mut self, ch: char, parts: &'static [Part]) {
+        let glyph = self.glyphs.iter_mut().find(|g| g.ch == ch).expect("a glyph to split");
+        glyph.split = Some(parts);
     }
 }
 
@@ -116,7 +142,8 @@ impl RegionCapture for PageCapture {
 ///
 /// A glyph that the grab edge cuts by less than half comes back with its cut box. A
 /// glyph that the edge cuts by more than half vanishes. Each page line index gives one
-/// OCR line, in page order.
+/// OCR line, in page order. A split glyph gives its parts as one more line, after the
+/// page lines, under the same cut rule.
 struct PageOcr {
     page: Rc<Page>,
     last: Rc<Cell<PhysRect>>,
@@ -126,17 +153,33 @@ impl OcrEngine for PageOcr {
     fn recognise(&self, _bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         let seen = self.last.get();
         assert_eq!((w, h), (seen.w, seen.h), "the fixture runs at upscale 1");
+        let visible = |rect: PhysRect| -> Option<PhysRect> {
+            let part = rect.intersection(seen)?;
+            (2 * area(part) > area(rect)).then(|| part.translated(-seen.x, -seen.y))
+        };
         let mut lines: Vec<OcrLine> =
             self.page.lines.iter().map(|_| OcrLine { words: Vec::new() }).collect();
         for glyph in &self.page.glyphs {
-            let Some(part) = glyph.rect.intersection(seen) else { continue };
-            if 2 * area(part) <= area(glyph.rect) {
+            let Some(parts) = glyph.split else {
+                if let Some(rect) = visible(glyph.rect) {
+                    lines[glyph.line].words.push(OcrWord { text: glyph.ch.to_string(), rect });
+                }
                 continue;
-            }
-            lines[glyph.line].words.push(OcrWord {
-                text: glyph.ch.to_string(),
-                rect: part.translated(-seen.x, -seen.y),
-            });
+            };
+            let quarter = self.page.glyph / 4;
+            let words = parts
+                .iter()
+                .filter_map(|part| {
+                    let rect = PhysRect {
+                        x: glyph.rect.x + part.x * quarter,
+                        y: glyph.rect.y + part.y * quarter,
+                        w: part.w * quarter,
+                        h: part.h * quarter,
+                    };
+                    visible(rect).map(|rect| OcrWord { text: part.text.to_string(), rect })
+                })
+                .collect();
+            lines.push(OcrLine { words });
         }
         lines.retain(|line| !line.words.is_empty());
         Ok(lines)
@@ -237,21 +280,21 @@ fn pt(x: i32, y: i32) -> PhysPoint {
 
 /// A short line inside the box. The separator stops the lookup.
 fn short_stop() -> Rc<Page> {
-    let mut page = Page::new("short_stop");
+    let mut page = Page::new("short_stop", S);
     page.row("日本語を話す。", 800, 480);
     Rc::new(page)
 }
 
 /// A short line inside the box. The lookup runs out at the end.
 fn short_open() -> Rc<Page> {
-    let mut page = Page::new("short_open");
+    let mut page = Page::new("short_open", S);
     page.row("日本語を話す", 800, 480);
     Rc::new(page)
 }
 
 /// A wrap at the margin with pitch 70.
 fn wrap() -> Rc<Page> {
-    let mut page = Page::new("wrap");
+    let mut page = Page::new("wrap", S);
     page.row("今日は日本語を勉強", 200, 480);
     page.row("しました", 200, 550);
     Rc::new(page)
@@ -259,7 +302,7 @@ fn wrap() -> Rc<Page> {
 
 /// Three wrapped rows of 12.
 fn paragraph() -> Rc<Page> {
-    let mut page = Page::new("paragraph");
+    let mut page = Page::new("paragraph", S);
     page.paragraph(
         "きょうはにほんごをべんきょうしましたあしたもがんばりたいとおもいますよね",
         200,
@@ -272,37 +315,83 @@ fn paragraph() -> Rc<Page> {
 
 /// A line wider than the box. It ends at x 1300 with a separator.
 fn long_stop() -> Rc<Page> {
-    let mut page = Page::new("long_stop");
+    let mut page = Page::new("long_stop", S);
     page.row("あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへ。", 100, 480);
     Rc::new(page)
 }
 
 /// A line that ends at x 1900, near the output edge.
 fn long_edge() -> Rc<Page> {
-    let mut page = Page::new("long_edge");
+    let mut page = Page::new("long_edge", S);
     page.row("あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ", 700, 480);
     Rc::new(page)
 }
 
 /// A line that the box clips. It ends at x 1200.
 fn clipped() -> Rc<Page> {
-    let mut page = Page::new("clipped");
+    let mut page = Page::new("clipped", S);
     page.row("あいうえおかきくけこさしすせそたちつてと", 400, 480);
     Rc::new(page)
 }
 
 /// One column that ends at y 540.
 fn column() -> Rc<Page> {
-    let mut page = Page::new("column");
+    let mut page = Page::new("column", S);
     page.column("日本語を話す", 900, 300);
     Rc::new(page)
 }
 
 /// A vertical wrap to the column on the left.
 fn two_columns() -> Rc<Page> {
-    let mut page = Page::new("two_columns");
+    let mut page = Page::new("two_columns", S);
     page.column("今日は日本語を勉強", 900, 200);
     page.column("しました", 830, 200);
+    Rc::new(page)
+}
+
+/// The issue-92 glyph size.
+const LARGE: i32 = 100;
+
+/// `新` as an engine returned it in issue #92: `立` over `木` in the left half.
+const SHIN_STACKED: &[Part] = &[
+    Part { text: "立", x: 0, y: 0, w: 2, h: 2 },
+    Part { text: "木", x: 0, y: 2, w: 2, h: 2 },
+];
+
+/// `意` as three full-width components: `立`, `日`, `心`.
+const I_STACKED: &[Part] = &[
+    Part { text: "立", x: 0, y: 0, w: 4, h: 1 },
+    Part { text: "日", x: 0, y: 1, w: 4, h: 2 },
+    Part { text: "心", x: 0, y: 3, w: 4, h: 1 },
+];
+
+/// `明` as `日` beside `月`.
+const MEI_SIDE_BY_SIDE: &[Part] = &[
+    Part { text: "日", x: 0, y: 0, w: 2, h: 4 },
+    Part { text: "月", x: 2, y: 0, w: 2, h: 4 },
+];
+
+/// The issue-92 line: `新規` at 100 px with `新` split in two stacked parts.
+fn issue_line() -> Rc<Page> {
+    let mut page = Page::new("issue_line", LARGE);
+    page.row("新規", 900, 490);
+    page.split('新', SHIN_STACKED);
+    Rc::new(page)
+}
+
+/// `意見` at 100 px with `意` split in three stacked parts.
+fn three_part_line() -> Rc<Page> {
+    let mut page = Page::new("three_part_line", LARGE);
+    page.row("意見", 900, 490);
+    page.split('意', I_STACKED);
+    Rc::new(page)
+}
+
+/// `明日` as a 100 px column with `明` split in two parts side by side.
+fn side_by_side_column() -> Rc<Page> {
+    let mut page = Page::new("side_by_side_column", LARGE);
+    page.column("明日", 900, 300);
+    page.split('明', MEI_SIDE_BY_SIDE);
     Rc::new(page)
 }
 
@@ -569,6 +658,93 @@ fn a_cursor_past_half_a_glyph_below_the_row_hits_nothing_and_draws_nothing() {
     assert_eq!(*grabs.borrow(), [r(650, 495, 500, 100)]);
 }
 
+// Issue #92. An engine boxed the components of one large glyph as words of their
+// own. Two words stacked in a horizontal box read as a column. The wrap probe then
+// started at the top edge of the output and the forward tile ran below the text.
+// The capture box is the prior: two words cannot outvote it.
+
+/// Pass 1 shows `立` cut to 45 px over `木`, and `規` cut to 95 px on its own line.
+/// The read stays horizontal. The probe band is 47 thick (the mean of 45 and 50):
+/// 35 above and 282 below the row center at y 541. The forward tile starts at the
+/// box edge with a band of `max(3 * 50, 100) = 150`.
+#[test]
+fn a_large_glyph_split_in_two_stacked_parts_keeps_the_scan_on_its_row() {
+    let page = issue_line();
+    let settings = Settings { max_passes: 3, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(925, 545));
+
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.orientation, Orientation::Horizontal, "{:?}", kinds(&scan));
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(675, 495, 500, 100)),
+            (ScanKind::Tile, r(0, 506, 973, 317)),
+            (ScanKind::Tile, r(1175, 490, 500, 150)),
+            (ScanKind::Anchor, r(900, 540, 50, 50)),
+        ]
+    );
+    assert_eq!(
+        *grabs.borrow(),
+        [r(675, 495, 500, 100), r(0, 506, 973, 317), r(1175, 490, 500, 150)]
+    );
+    assert_eq!(resolved.span.text, "立木");
+    assert_eq!(resolved.span.cursor_byte_offset, 3);
+}
+
+/// Three stacked parts outnumber two, but their union is one square glyph cell,
+/// not a column. The probe band is 33 thick: 24 above and 198 below y 539.
+#[test]
+fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
+    let page = three_part_line();
+    let settings = Settings { max_passes: 1, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(950, 540));
+
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.orientation, Orientation::Horizontal, "{:?}", kinds(&scan));
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(700, 490, 500, 100)),
+            (ScanKind::Tile, r(0, 515, 1000, 222)),
+            (ScanKind::Tile, r(500, 515, 516, 222)),
+            (ScanKind::Anchor, r(900, 515, 100, 50)),
+        ]
+    );
+    assert_eq!(
+        *grabs.borrow(),
+        [r(700, 490, 500, 100), r(0, 515, 1000, 222), r(500, 515, 516, 222)]
+    );
+    assert_eq!(resolved.span.text, "立日心");
+}
+
+/// The mirror case. A vertical box shows `日` cut to 35 px beside `月`. Two words
+/// side by side cannot turn a vertical box horizontal. The probe is the column probe
+/// from the top edge: 42 thick, 252 to the left and 31 to the right of x 953.
+#[test]
+fn a_large_glyph_split_side_by_side_keeps_the_scan_on_its_column() {
+    let page = side_by_side_column();
+    let settings = Settings { max_passes: 1, prefer_vertical: true };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(965, 350));
+
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.orientation, Orientation::Vertical, "{:?}", kinds(&scan));
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(915, 100, 100, 500)),
+            (ScanKind::Tile, r(701, 0, 283, 421)),
+            (ScanKind::Anchor, r(950, 300, 50, 100)),
+        ]
+    );
+    assert_eq!(*grabs.borrow(), [r(915, 100, 100, 500), r(701, 0, 283, 421)]);
+    assert_eq!(resolved.span.text, "日月");
+    assert_eq!(resolved.span.cursor_byte_offset, 3);
+}
+
 // The placement sweep.
 
 fn matrix() -> [Settings; 4] {
@@ -588,9 +764,9 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
         let c = g.center();
         out.push(c);
         out.push(pt(g.x + 1, g.y + 1));
-        out.push(pt(g.x + S - 1, g.y + S - 1));
+        out.push(pt(g.x + page.glyph - 1, g.y + page.glyph - 1));
         // Below the glyph, within the half-height slack.
-        out.push(pt(c.x, g.y + 55));
+        out.push(pt(c.x, g.y + page.glyph + 15));
         // Left of the glyph.
         out.push(pt(g.x - 15, c.y));
     }
