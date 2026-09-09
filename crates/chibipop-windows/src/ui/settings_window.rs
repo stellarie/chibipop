@@ -565,6 +565,39 @@ const WHILE_BUSY: [i32; 25] = [
     ID_SCREENSHOT_RESET,
 ];
 
+fn anki_setting_is_dependent(id: SettingId) -> bool {
+    matches!(
+        id,
+        SettingId::AnkiNotifyOnAdd
+            | SettingId::AnkiUrl
+            | SettingId::AnkiDeck
+            | SettingId::AnkiModel
+            | SettingId::AnkiRefresh
+            | SettingId::AnkiIncludeScreenshot
+            | SettingId::AnkiIncludeDictionaryName
+            | SettingId::AnkiFirstDictionaryOnly
+            | SettingId::AnkiSelectionButtons
+            | SettingId::AnkiSelectionSeparator
+            | SettingId::AnkiTripleClick
+            | SettingId::AnkiSentenceMode
+            | SettingId::AnkiStaticOverlay
+            | SettingId::AnkiFieldMap
+    )
+}
+
+fn anki_controls_are_enabled(anki_enabled: bool, busy: bool) -> bool {
+    anki_enabled && !busy
+}
+
+unsafe fn checkbox_is_checked(hwnd: HWND, id: i32) -> bool {
+    // SAFETY: The caller supplies a live window and checkbox identifier.
+    unsafe {
+        dlg_item(hwnd, id)
+            .ok()
+            .is_some_and(|control| SendMessageW(control, BM_GETCHECK, None, None).0 == 1)
+    }
+}
+
 // ---- Layout dimensions in 96-DPI pixels ----
 
 const WIN_W: i32 = 560;
@@ -1056,6 +1089,8 @@ thread_local! {
     // Stores a queued Anki model selection.
     static ANKI_MODEL_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
+    static ANKI_ENABLED_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
+
     // Stores a queued OCR language selection.
     static LANG_CHANGED: Cell<Option<isize>> = const { Cell::new(None) };
 
@@ -1366,6 +1401,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if id == ID_ANKI_MODEL && notify == CBN_SELCHANGE as u16 {
                 record_anki_model_change(hwnd);
+                return LRESULT(0);
+            }
+            if id == ID_ANKI_ENABLED && notify == BN_CLICKED as u16 {
+                ANKI_ENABLED_CHANGED.with(|c| c.set(Some(hwnd.0 as isize)));
                 return LRESULT(0);
             }
             if let Some(idx) = plugin_configure_idx(id) {
@@ -3417,6 +3456,18 @@ impl SettingsWindow {
             self.set_apply_state(ApplyState::Pending);
         }
         self.pump_field_map();
+        let anki_changed = ANKI_ENABLED_CHANGED.with(|slot| match slot.get() {
+            Some(owner) if owner == self.hwnd.0 as isize => {
+                slot.set(None);
+                true
+            }
+            _ => false,
+        });
+        if anki_changed {
+            // SAFETY: The checkbox remains a live descendant of this window.
+            let enabled = unsafe { checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED) };
+            self.update_anki_controls(enabled);
+        }
         if self.take_condition_change() {
             self.reflow_all_tabs();
             // SAFETY: Conditional controls remain live descendants.
@@ -3652,10 +3703,40 @@ impl SettingsWindow {
                     let _ = EnableWindow(c, enabled);
                 }
             }
+            self.update_anki_controls(checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED));
             if !busy {
                 update_list_buttons(self.hwnd);
                 update_engine_controls(self.hwnd);
             }
+        }
+    }
+
+    fn update_anki_controls(&self, enabled: bool) {
+        let enabled = anki_controls_are_enabled(enabled, self.busy.get());
+        let focused = unsafe { GetFocus() };
+        let mut move_focus = false;
+        // SAFETY: Every stored handle remains a live child until `Drop`.
+        unsafe {
+            for tab in &self.tabs {
+                for section in &tab.sections {
+                    for entry in &section.entries {
+                        if !anki_setting_is_dependent(entry.id) { continue; }
+                        for control in &entry.controls {
+                            move_focus |= !enabled && focused == control.hwnd;
+                            let _ = EnableWindow(control.hwnd, enabled);
+                        }
+                    }
+                }
+            }
+            for &control in self.field_map_extra.borrow().iter() {
+                move_focus |= !enabled && focused == control;
+                let _ = EnableWindow(control, enabled);
+            }
+            for &(_, control) in self.field_map_rows.borrow().iter() {
+                move_focus |= !enabled && focused == control;
+                let _ = EnableWindow(control, enabled);
+            }
+            if move_focus { let _ = SetFocus(Some(self.hwnd)); }
         }
     }
 
@@ -4349,7 +4430,10 @@ impl SettingsWindow {
             has_more
         };
         // SAFETY: Each window handle was created as a valid descendant of `self.hwnd`.
-        unsafe { self.apply_field_map_visibility() };
+        unsafe {
+            self.apply_field_map_visibility();
+            self.update_anki_controls(checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED));
+        }
         if let Some(tab) = self.field_map_tab() {
             self.reflow_tab(tab);
             self.reorder_tab_z_order(tab);
@@ -5594,6 +5678,7 @@ impl SettingsWindow {
         }
         self.plugin_names = plugin_names;
         remember_plugin_dirs(h, plugin_dirs);
+        self.update_anki_controls(form.cfg.anki.enabled);
 
         remember_conditional_tabs(
             h,
@@ -6132,6 +6217,17 @@ fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<Dic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anki_dependency_gate_keeps_standalone_screenshot_controls_active() {
+        assert!(anki_setting_is_dependent(SettingId::AnkiUrl));
+        assert!(anki_setting_is_dependent(SettingId::AnkiFieldMap));
+        assert!(!anki_setting_is_dependent(SettingId::AnkiEnabled));
+        assert!(!anki_setting_is_dependent(SettingId::ScreenshotTargets));
+        assert!(anki_controls_are_enabled(true, false));
+        assert!(!anki_controls_are_enabled(true, true));
+        assert!(!anki_controls_are_enabled(false, false));
+    }
 
     #[test]
     fn selected_shortcut_display_and_sentence_checkbox_round_trip() {

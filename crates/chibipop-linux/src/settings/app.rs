@@ -868,25 +868,38 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::CaptureH(v) => app.capture_h = v,
         Message::ShowLookupLog(on) => app.linux.show_lookup_log = on,
         Message::AnkiEnabled(on) => app.form.cfg.anki.enabled = on,
-        Message::AnkiUrl(v) => app.form.cfg.anki.url = v,
-        Message::AnkiDeck(v) => app.form.cfg.anki.deck = v,
-        Message::AnkiModel(v) => app.form.cfg.anki.model = v,
+        Message::AnkiUrl(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.url = v,
+        Message::AnkiUrl(_) => {}
+        Message::AnkiDeck(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.deck = v,
+        Message::AnkiDeck(_) => {}
+        Message::AnkiModel(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.model = v,
+        Message::AnkiModel(_) => {}
         Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
-        Message::IncludeDictionaryName(on) => app.form.cfg.anki.include_dictionary_name = on,
-        Message::FirstDictOnly(v) => app.form.cfg.anki.first_dict_only = v,
-        Message::SelectionButtonsPicked(label) => {
+        Message::IncludeDictionaryName(on) if app.form.cfg.anki.enabled => {
+            app.form.cfg.anki.include_dictionary_name = on;
+        }
+        Message::IncludeDictionaryName(_) => {}
+        Message::FirstDictOnly(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.first_dict_only = v,
+        Message::FirstDictOnly(_) => {}
+        Message::SelectionButtonsPicked(label) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.selection_buttons =
                 value_of(&SELECTION_BUTTONS, &label, SelectionButtons::PrimaryAdditive);
         }
-        Message::SelectionSeparatorPicked(label) => {
+        Message::SelectionButtonsPicked(_) => {}
+        Message::SelectionSeparatorPicked(label) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.selection_separator =
                 value_of(&SELECTION_SEPARATORS, &label, SelectionSeparator::Ellipsis);
         }
-        Message::TripleClickPicked(label) => {
+        Message::SelectionSeparatorPicked(_) => {}
+        Message::TripleClickPicked(label) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.triple_click =
                 value_of(&TRIPLE_CLICKS, &label, TripleClick::SenseWithExamples);
         }
-        Message::IncludeScreenshot(on) => app.form.cfg.actions.screenshot.include_on_add = on,
+        Message::TripleClickPicked(_) => {}
+        Message::IncludeScreenshot(on) if app.form.cfg.anki.enabled => {
+            app.form.cfg.actions.screenshot.include_on_add = on;
+        }
+        Message::IncludeScreenshot(_) => {}
         Message::ScreenshotModePicked(label) => {
             app.form.cfg.actions.screenshot.capture_mode =
                 value_of(&SCREENSHOT_MODES, &label, ScreenshotMode::default());
@@ -934,46 +947,54 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.cfg.actions.ocr_clipboard.get_or_insert_with(Default::default).open_sentence_search = on;
         }
         Message::SubPopups(on) => app.form.cfg.popup.sub_popups = on,
-        Message::SentenceModePicked(label) => {
+        Message::SentenceModePicked(label) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.sentence_mode = value_of(&SENTENCE_MODES, &label, SentenceMode::Sentence);
         }
-        Message::ShowStaticOverlay(on) => app.form.cfg.anki.show_static_overlay = on,
+        Message::SentenceModePicked(_) => {}
+        Message::ShowStaticOverlay(on) if app.form.cfg.anki.enabled => {
+            app.form.cfg.anki.show_static_overlay = on;
+        }
+        Message::ShowStaticOverlay(_) => {}
         Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
-        Message::FieldMapAnki(i, v) => {
+        Message::FieldMapAnki(i, v) if app.form.cfg.anki.enabled => {
             if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
                 m.anki_field = v;
             }
         }
+        Message::FieldMapAnki(_, _) => {}
         // The picker returns only [`FIELD_SOURCES`] entries, so the UI cannot produce
         // an invalid source. This arm still checks the value because it is the only
         // path from this message to the form. `anki.rs`'s `mapped_fields` silently
         // drops an unknown source, which would leave a row that looks configured but
         // does nothing.
-        Message::FieldMapSource(i, v) => {
+        Message::FieldMapSource(i, v) if app.form.cfg.anki.enabled => {
             let row = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i));
             if let (Some(source), Some(m)) = (field_source_of(&v), row) {
                 m.source = source.to_string();
             }
         }
+        Message::FieldMapSource(_, _) => {}
         // The Anki field starts empty because only the user's note type knows its
         // field names. `App::apply` removes the row if the field stays empty. The
         // field-map list can be `None`, so this arm creates the list and records the row.
-        Message::FieldMapAdd => {
+        Message::FieldMapAdd if app.form.cfg.anki.enabled => {
             app.form.field_map.get_or_insert_with(Vec::new).push(FieldMapping {
                 anki_field: String::new(),
                 source: NEW_ROW_SOURCE.to_string(),
             });
         }
+        Message::FieldMapAdd => {}
         // The index comes from the list that the last frame rendered, so it can be
         // stale and make `Vec::remove` panic. This arm checks the bound, so
         // message order is not enough.
-        Message::FieldMapRemove(i) => {
+        Message::FieldMapRemove(i) if app.form.cfg.anki.enabled => {
             if let Some(rows) = app.form.field_map.as_mut() {
                 if i < rows.len() {
                     rows.remove(i);
                 }
             }
         }
+        Message::FieldMapRemove(_) => {}
         Message::CopyBind(id) => {
             if let Some(snippet) = app.shortcut_snippet(id) {
                 return iced::clipboard::write(snippet);
@@ -1281,6 +1302,12 @@ fn snippet_box<'a>(snippet: impl text::IntoFragment<'a>) -> Element<'a, Message>
 
 fn labeled<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     row![text(label).width(240), control.into()].spacing(10).align_y(iced::Center).into()
+}
+
+fn disabled_anki_value<'a>(value: impl text::IntoFragment<'a>, width: impl Into<Length>) -> Element<'a, Message> {
+    button(text(value))
+        .width(width)
+        .into()
 }
 
 /// Keep every chord beside its bind instead of separate blocks on feature pages.
@@ -1958,19 +1985,29 @@ const SENTENCE_MODES: [(SentenceMode, &str); 4] = [
 /// Windows hides region rows outside Static, and Linux does the same.
 /// The chord stays on Shortcuts instead of this page, so it remains available in every mode.
 fn sentence_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let mut rows: Vec<Element<'_, Message>> = vec![labeled(
-        "Sentence source",
+    let anki_enabled = app.form.cfg.anki.enabled;
+    let source: Element<'_, Message> = if anki_enabled {
         pick_list(
             labels(&SENTENCE_MODES),
             Some(label_of(&SENTENCE_MODES, app.form.cfg.anki.sentence_mode).to_string()),
             Message::SentenceModePicked,
-        ),
+        )
+        .into()
+    } else {
+        disabled_anki_value(
+            label_of(&SENTENCE_MODES, app.form.cfg.anki.sentence_mode),
+            Length::Fixed(260.0),
+        )
+    };
+    let mut rows: Vec<Element<'_, Message>> = vec![labeled(
+        "Sentence source",
+        source,
     )];
     if app.form.cfg.anki.sentence_mode == SentenceMode::Static {
         rows.push(
             checkbox(app.form.cfg.anki.show_static_overlay)
                 .label("Show the static region outline")
-                .on_toggle(Message::ShowStaticOverlay)
+                .on_toggle_maybe(anki_enabled.then_some(Message::ShowStaticOverlay))
                 .into(),
         );
         rows.push(
@@ -1999,6 +2036,7 @@ const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
 /// Show every row in every state. The folder also affects the standalone action,
 /// so `include_on_add` does not control it.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let anki_enabled = app.form.cfg.anki.enabled;
     let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
         Some([x, y, width, height]) => format!(
             "Saved fixed region: x={x}, y={y}, width={width}, height={height} physical pixels."
@@ -2015,7 +2053,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     vec![
         checkbox(app.form.cfg.actions.screenshot.include_on_add)
             .label("Attach a screenshot to cards")
-            .on_toggle(Message::IncludeScreenshot)
+            .on_toggle_maybe(anki_enabled.then_some(Message::IncludeScreenshot))
             .into(),
         hint(
             "Choose a region uses a drag. Choose a window uses a click. Esc skips the \
@@ -2078,6 +2116,7 @@ const NEW_ROW_SOURCE: &str = "screenshot";
 /// note type. Add and Remove keep config rows stable. The user types the Anki
 /// field name, and the picker uses core's closed source vocabulary.
 fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let anki_enabled = app.form.cfg.anki.enabled;
     let mut rows: Vec<Element<'_, Message>> = app
         .form
         .field_map
@@ -2086,24 +2125,40 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
         .iter()
         .enumerate()
         .map(|(i, mapping)| {
-            row![
+            let field: Element<'_, Message> = if anki_enabled {
                 text_input("Anki field", &mapping.anki_field)
-                    .on_input(move |v| Message::FieldMapAnki(i, v))
-                    .width(220),
-                text("←").size(14),
+                    .on_input_maybe(anki_enabled.then_some(move |v| Message::FieldMapAnki(i, v)))
+                    .width(220)
+                    .into()
+            } else {
+                disabled_anki_value(mapping.anki_field.clone(), Length::Fixed(220.0))
+            };
+            let source: Element<'_, Message> = if anki_enabled {
                 pick_list(FIELD_SOURCES, field_source_of(&mapping.source), move |source| {
                     Message::FieldMapSource(i, source.to_string())
                 })
                 .placeholder("source")
-                .width(220),
-                button("Remove").on_press(Message::FieldMapRemove(i)),
+                .width(220)
+                .into()
+            } else {
+                disabled_anki_value(mapping.source.clone(), Length::Fixed(220.0))
+            };
+            row![
+                field,
+                text("←").size(14),
+                source,
+                button("Remove").on_press_maybe(anki_enabled.then_some(Message::FieldMapRemove(i))),
             ]
             .spacing(10)
             .align_y(iced::Center)
             .into()
         })
         .collect();
-    rows.push(button("Add field mapping").on_press(Message::FieldMapAdd).into());
+    rows.push(
+        button("Add field mapping")
+            .on_press_maybe(anki_enabled.then_some(Message::FieldMapAdd))
+            .into(),
+    );
     rows.push(
         hint(format!(
             "A new row arrives on \"{NEW_ROW_SOURCE}\", the one source the shipped \
@@ -2117,60 +2172,92 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
 
 /// Separate Anki connection and card content from capture options instead of one long group.
 fn anki_page(app: &App) -> Element<'_, Message> {
+    let anki_enabled = app.form.cfg.anki.enabled;
+    let selection_buttons: Element<'_, Message> = if anki_enabled {
+        pick_list(
+            labels(&SELECTION_BUTTONS),
+            Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
+            Message::SelectionButtonsPicked,
+        )
+        .into()
+    } else {
+        disabled_anki_value(
+            label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons),
+            Length::Fixed(260.0),
+        )
+    };
+    let selection_separator: Element<'_, Message> = if anki_enabled {
+        pick_list(
+            labels(&SELECTION_SEPARATORS),
+            Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
+            Message::SelectionSeparatorPicked,
+        )
+        .into()
+    } else {
+        disabled_anki_value(
+            label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator),
+            Length::Fixed(260.0),
+        )
+    };
+    let triple_click: Element<'_, Message> = if anki_enabled {
+        pick_list(
+            labels(&TRIPLE_CLICKS),
+            Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
+            Message::TripleClickPicked,
+        )
+        .into()
+    } else {
+        disabled_anki_value(
+            label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click),
+            Length::Fixed(260.0),
+        )
+    };
 
     column![
         card("Connection", column![
             checkbox(app.form.cfg.anki.enabled)
-                .label("Send cards to Anki")
+                .label("Enable Anki")
                 .on_toggle(Message::AnkiEnabled),
             labeled(
                 "Connection address",
                 text_input("http://localhost:8765", &app.form.cfg.anki.url)
-                    .on_input(Message::AnkiUrl)
+                    .on_input_maybe(anki_enabled.then_some(Message::AnkiUrl))
                     .width(260),
             ),
             labeled(
                 "Deck",
-                text_input("Default", &app.form.cfg.anki.deck).on_input(Message::AnkiDeck).width(260),
+                text_input("Default", &app.form.cfg.anki.deck)
+                    .on_input_maybe(anki_enabled.then_some(Message::AnkiDeck))
+                    .width(260),
             ),
             labeled(
                 "Note type",
-                text_input("Lapis", &app.form.cfg.anki.model).on_input(Message::AnkiModel).width(260),
+                text_input("Lapis", &app.form.cfg.anki.model)
+                    .on_input_maybe(anki_enabled.then_some(Message::AnkiModel))
+                    .width(260),
             ),
         ].spacing(10)),
         card("Card content", column![
             checkbox(app.form.cfg.anki.include_dictionary_name)
                 .label("Include the dictionary name")
-                .on_toggle(Message::IncludeDictionaryName),
+                .on_toggle_maybe(anki_enabled.then_some(Message::IncludeDictionaryName)),
             // Windows labels this field "First dictionary only" (`ui/settings_window.rs`).
             // The daemon reads `anki.first_dict_only`, so this row lets the user change it
             // without a TOML edit.
             checkbox(app.form.cfg.anki.first_dict_only)
                 .label("Use the first dictionary only")
-                .on_toggle(Message::FirstDictOnly),
+                .on_toggle_maybe(anki_enabled.then_some(Message::FirstDictOnly)),
             labeled(
                 "Primary click behavior",
-                pick_list(
-                    labels(&SELECTION_BUTTONS),
-                    Some(label_of(&SELECTION_BUTTONS, app.form.cfg.anki.selection_buttons).to_string()),
-                    Message::SelectionButtonsPicked,
-                ),
+                selection_buttons,
             ),
             labeled(
                 "Join selected text with",
-                pick_list(
-                    labels(&SELECTION_SEPARATORS),
-                    Some(label_of(&SELECTION_SEPARATORS, app.form.cfg.anki.selection_separator).to_string()),
-                    Message::SelectionSeparatorPicked,
-                ),
+                selection_separator,
             ),
             labeled(
                 "Triple-click selects",
-                pick_list(
-                    labels(&TRIPLE_CLICKS),
-                    Some(label_of(&TRIPLE_CLICKS, app.form.cfg.anki.triple_click).to_string()),
-                    Message::TripleClickPicked,
-                ),
+                triple_click,
             ),
         ].spacing(10)),
         card("Screenshot", column(screenshot_rows(app)).spacing(10)),
@@ -2506,6 +2593,7 @@ mod tests {
     fn the_dictionary_name_checkbox_round_trips_into_the_config() {
         let dir = scratch("dictionaryname");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let cfg = chibipop::config::Config::default();
         assert!(app.form.cfg.anki.include_dictionary_name, "the default keeps existing card output");
 
@@ -2523,6 +2611,7 @@ mod tests {
     fn the_first_dictionary_only_checkbox_round_trips_into_the_config() {
         let dir = scratch("firstdict");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let cfg = chibipop::config::Config::default();
         assert!(!app.form.cfg.anki.first_dict_only, "the default is every dictionary");
 
@@ -2535,9 +2624,54 @@ mod tests {
     }
 
     #[test]
+    fn disabled_anki_controls_preserve_values_and_restore_handlers() {
+        let dir = scratch("ankigated");
+        let mut app = app(&dir);
+        app.form.cfg.anki.enabled = false;
+        let before_cfg = app.form.cfg.clone();
+        let before_map = app.form.field_map.clone();
+
+        for message in [
+            Message::AnkiUrl("changed-url".into()),
+            Message::AnkiDeck("changed-deck".into()),
+            Message::AnkiModel("changed-model".into()),
+            Message::IncludeDictionaryName(false),
+            Message::FirstDictOnly(true),
+            Message::SelectionButtonsPicked("Replace selection".into()),
+            Message::SelectionSeparatorPicked("Space".into()),
+            Message::TripleClickPicked("Complete line".into()),
+            Message::IncludeScreenshot(true),
+            Message::SentenceModePicked("All captured lines".into()),
+            Message::ShowStaticOverlay(false),
+            Message::FieldMapAnki(0, "Changed".into()),
+            Message::FieldMapSource(0, "sentence".into()),
+            Message::FieldMapAdd,
+            Message::FieldMapRemove(0),
+        ] {
+            let _ = update(&mut app, message);
+        }
+        assert_eq!(before_cfg, app.form.cfg);
+        assert_eq!(before_map, app.form.field_map);
+        every_page(&app);
+
+        let _ = update(&mut app, Message::AnkiEnabled(true));
+        let _ = update(&mut app, Message::AnkiUrl("enabled-url".into()));
+        let _ = update(&mut app, Message::SelectionButtonsPicked("Replace selection".into()));
+        let _ = update(&mut app, Message::SentenceModePicked("All captured lines".into()));
+        let _ = update(&mut app, Message::FieldMapAnki(0, "Front".into()));
+        assert_eq!("enabled-url", app.form.cfg.anki.url);
+        assert_eq!(SelectionButtons::PrimaryReplacing, app.form.cfg.anki.selection_buttons);
+        assert_eq!(SentenceMode::All, app.form.cfg.anki.sentence_mode);
+        assert_eq!("Front", form_rows(&app)[0].anki_field);
+        every_page(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn selection_controls_round_trip_into_the_config() {
         let dir = scratch("selectioncontrols");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let cfg = chibipop::config::Config::default();
         let _ = update(
             &mut app,
@@ -2735,6 +2869,7 @@ mod tests {
     fn the_screenshot_rows_apply_the_gate_and_never_save_an_empty_folder() {
         let dir = scratch("shotrows");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let cfg = chibipop::config::Config::default();
 
         let _ = update(&mut app, Message::IncludeScreenshot(true));
@@ -2782,6 +2917,7 @@ mod tests {
     fn picking_the_static_region_mode_stages_it_on_the_form() {
         let dir = scratch("srmode");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         assert_eq!(SentenceMode::Sentence, app.form.cfg.anki.sentence_mode, "the shipped default");
 
         let _ = update(&mut app, Message::SentenceModePicked("Fixed screen area".to_string()));
@@ -2798,6 +2934,7 @@ mod tests {
     fn the_static_region_bind_remains_available_across_tabs_and_sentence_modes() {
         let dir = scratch("srrows");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
 
         let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
         let _ = update(&mut app, Message::StaticRegionKey("CTRL+R".to_string()));
@@ -2823,6 +2960,7 @@ mod tests {
     fn adding_a_row_can_finally_name_the_screenshot_field() {
         let dir = scratch("fmadd");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         assert!(
             !form_rows(&app).iter().any(|m| m.source == "screenshot"),
             "the shipped default_field_map has no screenshot row - that is the gap"
@@ -2857,6 +2995,7 @@ mod tests {
     fn removing_a_row_takes_the_one_that_was_pressed() {
         let dir = scratch("fmremove");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         app.form.field_map = Some(Vec::new());
         for name in ["First", "Middle", "Last"] {
             let _ = update(&mut app, Message::FieldMapAdd);
@@ -2882,6 +3021,7 @@ mod tests {
     fn a_row_with_no_anki_field_never_reaches_the_saved_config() {
         let dir = scratch("fmblank");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let shipped = form_rows(&app).len();
 
         let _ = update(&mut app, Message::FieldMapAdd);
@@ -2925,6 +3065,7 @@ mod tests {
     fn removing_every_row_saves_an_empty_map() {
         let dir = scratch("fmempty");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         assert!(!form_rows(&app).is_empty(), "the shipped map is what gets emptied");
         for _ in 0..form_rows(&app).len() {
             let _ = update(&mut app, Message::FieldMapRemove(0));
@@ -2944,6 +3085,7 @@ mod tests {
     fn the_source_picker_only_ever_yields_a_source_core_understands() {
         let dir = scratch("fmvocab");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         for source in FIELD_SOURCES {
             assert_eq!(Some(source), field_source_of(source), "{source} must be offered");
         }
@@ -2968,6 +3110,7 @@ mod tests {
     fn every_mapping_is_rendered_and_the_add_control_always_is() {
         let dir = scratch("fmrows");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
         let shipped = form_rows(&app).len();
         assert_eq!(
             shipped + 2,

@@ -239,7 +239,9 @@ mod tests {
 
     #[test]
     fn audit_follows_runtime_tabs_and_expands_the_field_map_owner() {
-        let form = crate::settings::from_config(&Config::default(), &[]);
+        let mut config = Config::default();
+        config.anki.enabled = true;
+        let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let data = collect(&window);
         let dumps = data["dumps"].as_array().unwrap();
@@ -278,7 +280,9 @@ mod tests {
             }
         }
         layout.tabs[0].sections[0].entries.insert(0, field_map.unwrap());
-        let form = crate::settings::from_config(&Config::default(), &[]);
+        let mut config = Config::default();
+        config.anki.enabled = true;
+        let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
         window.populate_fields(vec!["Expression".into(), "Reading".into()]);
         let data = collect(&window);
