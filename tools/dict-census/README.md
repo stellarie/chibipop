@@ -55,9 +55,11 @@ duplicating them:
 - `enum Role` from `src/dict/gloss/mod.rs` — its declaration order *is* the
   classification precedence, so the report's role columns run in the same order
   the parser resolves them.
-- `css_key`, `SUPPORTED_SELECTOR_KINDS` and `SUPPORTED_PSEUDO_CLASSES` from
-  `src/dict/sheet/mod.rs` — the `styles.css` property table and the selector
-  grammar the matcher compiles.
+- `css_key`, `SUPPORTED_SELECTOR_KINDS`, `SUPPORTED_PSEUDO_CLASSES` and
+  `IMAGE_CHROME_CLASSES` from `src/dict/sheet/mod.rs` — the `styles.css`
+  property table, the selector grammar the matcher compiles, and the three
+  Yomitan image chrome classes that grammar keeps. A selector on one of those
+  classes scores as `image-chrome`; any other class scores as `class`.
 
 So the `chibipop` column in the report is always measured against the current
 build, and two counts are live progress gauges that shrink as the renderer

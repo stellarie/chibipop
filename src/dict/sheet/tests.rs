@@ -151,6 +151,7 @@ fn the_declared_selector_kind_list_is_the_one_the_parser_accepts() {
         ("tag", "span { color: red }"),
         ("data-attr", "[data-sc-content=\"a\"] { color: red }"),
         ("pseudo-class", "span:first-child { color: red }"),
+        ("image-chrome", ".gloss-image-link { max-width: 1em }"),
     ];
     for (kind, css) in by_kind {
         assert!(
@@ -173,6 +174,161 @@ fn the_declared_selector_kind_list_is_the_one_the_parser_accepts() {
         );
         assert_eq!(1, Sheet::compile(css).counts().dropped_selector, "{css}");
     }
+}
+
+/// Keep the chrome class list that the census reads aligned with `chrome_of`.
+/// Every listed class compiles as a subject. A class that Yomitan's image chrome
+/// does not use drops its rule, even with the chrome prefix.
+#[test]
+fn the_declared_chrome_class_list_is_the_one_the_parser_accepts() {
+    for class in IMAGE_CHROME_CLASSES {
+        let sheet = Sheet::compile(&format!(".{class} {{ max-width: 1em }}"));
+        assert_eq!(1, sheet.counts().kept, ".{class} should compile");
+    }
+    for class in ["gloss-image-link-text", "gloss-image-sizer", "gloss-sc-span", "gaiji"] {
+        let sheet = Sheet::compile(&format!(".{class} {{ max-width: 1em }}"));
+        assert_eq!(1, sheet.counts().dropped_selector, ".{class} should drop its rule");
+    }
+}
+
+// ---- yomitan's image chrome ----
+
+/// The 明鏡国語辞典 shape, verbatim: a gaiji `img` with no size under a marked span,
+/// and a stylesheet that sizes the container the span holds. The rule lands on the
+/// image node alone, because the chrome belongs to that node. The wrapper span
+/// keeps an empty record.
+#[test]
+fn a_chrome_class_rule_lands_on_the_image_node_its_ancestor_holds() {
+    let d = styled(
+        "span[data-sc-img][data-sc-class=\"gaiji\"] .gloss-image-container {
+             width: 15em !important;
+             margin-inline-end: 2em;
+         }",
+        json!([{"tag": "span", "data": {"red": ""}, "content": [
+            {"tag": "span",
+             "data": {"img": "", "gaiji": "", "class": "gaiji", "alt": "［参考］", "src": "gaiji/参考1.svg"},
+             "content": [
+                {"tag": "img", "path": "gaiji/参考1.svg", "background": false,
+                 "collapsed": false, "collapsible": false,
+                 "data": {"img": "", "gaiji": "", "class": "gaiji", "alt": "［参考］", "src": "gaiji/参考1.svg"}}
+             ]}
+        ]}]),
+    );
+    let img = find(&d, Tag::Img);
+    assert_eq!(vec![(StyleKey::ImageWidth, "15em".to_string())], record(&d, img));
+    let wrapper = (0..d.all_nodes().len() as NodeId)
+        .filter(|id| d.node(*id).tag == Tag::Span)
+        .find(|id| d.data_of(*id, "img").is_some())
+        .expect("the wrapper span");
+    assert!(record(&d, wrapper).is_empty(), "the chrome is the image's, not the span's");
+}
+
+/// A bare chrome class reaches every image node and nothing else. 大辞泉 and
+/// 旺文社漢字典 cap every picture this way. A `type: image` glossary item is an
+/// image node too, so it takes the rule.
+#[test]
+fn a_bare_chrome_class_reaches_every_image_node_and_no_other_node() {
+    let css = ".gloss-image-link { max-width: 70% !important }";
+    let d = styled(
+        css,
+        json!([{"tag": "img", "path": "a.png"}, {"tag": "span", "content": "x"}]),
+    );
+    assert_eq!(Some("70%".to_string()), prop(&d, find(&d, Tag::Img), StyleKey::ImageLinkMaxWidth));
+    assert!(record(&d, find(&d, Tag::Span)).is_empty());
+
+    let sheet = Sheet::compile(css);
+    let mut item = GlossDoc::parse(&json!([{"type": "image", "path": "a.png"}]).to_string());
+    apply(&mut item, &sheet);
+    let image = (0..item.all_nodes().len() as NodeId)
+        .find(|id| item.node(*id).kind == Kind::Image)
+        .expect("the image item");
+    assert_eq!(Some("70%".to_string()), prop(&item, image, StyleKey::ImageLinkMaxWidth));
+}
+
+/// Each chrome element gives `width` and `max-width` its own key, because the link
+/// and the container resolve `em` against different font sizes. `.gloss-image`
+/// shares the container's key: 角川新字源 names both in one list. A `width` on the
+/// container needs `!important` to beat Yomitan's inline width, so a normal one
+/// drops. A `width` on the link sizes nothing, so it drops too.
+#[test]
+fn width_and_max_width_map_by_the_chrome_element_they_name() {
+    let mapped = [
+        (".gloss-image-container { width: 15em !important }", StyleKey::ImageWidth, "15em", "an important container width"),
+        (".gloss-image { width: 15em !important }", StyleKey::ImageWidth, "15em", "the picture shares the container's key"),
+        (".gloss-image-container { max-width: 15em }", StyleKey::ImageMaxWidth, "15em", "a container cap"),
+        (".gloss-image-link { max-width: 1em }", StyleKey::ImageLinkMaxWidth, "1em", "a link cap"),
+        (".gloss-image-link { max-width: 55% !important }", StyleKey::ImageLinkMaxWidth, "55%", "an important link cap"),
+    ];
+    for (css, key, value, why) in mapped {
+        let d = styled(css, json!([{"tag": "img", "path": "a.png"}]));
+        assert_eq!(vec![(key, value.to_string())], record(&d, find(&d, Tag::Img)), "{why}: {css}");
+    }
+    let dropped = [
+        (".gloss-image-container { width: 15em }", "a normal width loses to the inline width"),
+        (".gloss-image-link { width: 15em !important }", "a link width sizes no picture"),
+    ];
+    for (css, why) in dropped {
+        let d = styled(css, json!([{"tag": "img", "path": "a.png"}]));
+        assert!(record(&d, find(&d, Tag::Img)).is_empty(), "{why}: {css}");
+        let counts = Sheet::compile(css).counts().clone();
+        assert_eq!(0, counts.dropped_selector, "{why}: the selector compiles");
+        assert_eq!(1, counts.dropped_declarations, "{why}: the declaration is counted");
+    }
+}
+
+/// Every other property maps on chrome as on a node. 旺文社漢字典 aligns a gaiji with
+/// `vertical-align` on the link, and the image pass reads that key from the same
+/// record. A property outside the table still drops and counts.
+#[test]
+fn other_properties_on_chrome_map_as_they_do_on_a_node() {
+    let d = styled(
+        "[data-sc-img][data-sc解字] .gloss-image-link {
+             max-width: 2em;
+             vertical-align: middle;
+             filter: none !important;
+         }",
+        json!([{"tag": "span", "data": {"img": "", "解字": ""}, "content": [
+            {"tag": "img", "path": "a.avif"}
+        ]}]),
+    );
+    assert_eq!(
+        vec![
+            (StyleKey::ImageLinkMaxWidth, "2em".to_string()),
+            (StyleKey::VerticalAlign, "middle".to_string()),
+        ],
+        record(&d, find(&d, Tag::Img)),
+    );
+}
+
+/// A chrome class stands alone as the subject. The three elements belong to one
+/// node, so a selector that relates two of them, tests an attribute on one, or
+/// places a node under one describes an arrangement this tree cannot hold.
+/// 明鏡's `.gloss-image-link[data-background="true"] > .gloss-image-container` is
+/// the real case. A list that names the link beside the container would need two
+/// declaration slices, so it drops as one unit.
+#[test]
+fn a_chrome_class_compiles_only_alone_and_only_as_the_subject() {
+    let refused = [
+        (".gloss-image-link[data-background=\"true\"] > .gloss-image-container { background-color: inherit !important }", "chrome under chrome"),
+        (".gloss-image-container span { color: red }", "a node under chrome"),
+        (".gloss-image-link[data-sc-x] { max-width: 1em }", "a test on chrome"),
+        ("a.gloss-image-link { max-width: 1em }", "a tag on chrome"),
+        (".gloss-image-link:hover { color: red }", "state on chrome"),
+        (".gloss-image-link:first-child { max-width: 1em }", "a position on chrome"),
+        (".gloss-image-link.gloss-image-container { max-width: 1em }", "two classes"),
+        (".gloss-image-link, .gloss-image-container { max-width: 1em }", "a list across chrome elements"),
+        ("span, .gloss-image-container { max-width: 1em }", "a list across a node and chrome"),
+    ];
+    for (css, why) in refused {
+        let sheet = Sheet::compile(css);
+        assert!(sheet.is_empty(), "{why}: {css}");
+        assert_eq!(1, sheet.counts().dropped_selector, "{why}");
+    }
+    let sheet = Sheet::compile(
+        "span[data-sc-kodaimoji] span[data-sc-img] .gloss-image-container,
+         span[data-sc-kodaimoji] span[data-sc-img] .gloss-image { width: 15em !important }",
+    );
+    assert_eq!((1, 2), (sheet.counts().kept, sheet.counts().selectors), "角川's list shares one element");
 }
 
 // ---- a css-only dictionary draws its boxes ----
@@ -561,7 +717,7 @@ fn an_inline_longhand_leaves_the_other_edges_to_the_stylesheet() {
 #[test]
 fn an_unsupported_selector_drops_its_rule_whole_and_is_counted() {
     let cases: [(&str, &str); 10] = [
-        (".gloss-image-container { border: 1px }", "a class"),
+        (".gaiji { border: 1px }", "a class outside the image chrome"),
         ("#id { color: red }", "an id"),
         ("li + li { margin-top: 1px }", "an adjacent sibling combinator"),
         ("a ~ b { margin-top: 1px }", "a general sibling combinator"),

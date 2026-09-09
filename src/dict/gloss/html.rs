@@ -189,6 +189,10 @@ fn css_name(key: StyleKey) -> &'static str {
         StyleKey::PaddingRight => "padding-right",
         StyleKey::PaddingBottom => "padding-bottom",
         StyleKey::PaddingLeft => "padding-left",
+        // An image node emits its `alt` text alone, so these keys never reach
+        // the markup. The spellings are the properties that the fold read.
+        StyleKey::ImageWidth => "width",
+        StyleKey::ImageMaxWidth | StyleKey::ImageLinkMaxWidth => "max-width",
     }
 }
 /// Returns one HTML fragment for each selected node.

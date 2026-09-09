@@ -4769,7 +4769,9 @@ fn one_declared_length_takes_the_other_from_the_recorded_aspect() {
     assert_eq!((2.0 * BOX_EM, BOX_EM), (img.rect.w, img.rect.h), "aspect 2:1");
 }
 
-/// `sizeUnits: px` gives scene pixels. An absent unit and `em` use the text size.
+/// `sizeUnits: px` gives scene pixels. Only `sizeUnits: em` uses the text size.
+/// Yomitan gives the image container a font size of one base pixel unless the
+/// node asks for `em`, so an absent unit is a pixel too.
 #[test]
 fn size_units_px_is_taken_as_scene_pixels() {
     let p = imaged(
@@ -4796,6 +4798,166 @@ fn an_image_with_neither_size_nor_bytes_is_a_one_em_placeholder_box() {
     assert_eq!(None, scene_image.format);
     assert!(img.text.is_empty(), "and no alt to draw instead");
     assert!(img.rect.w > 0.0 && img.rect.h > 0.0, "never a gap");
+}
+
+// ---- a dictionary's styles.css sizes an image ----
+
+/// [`imaged`] for a dictionary whose `styles.css` reaches the image.
+///
+/// `dict::sheet` folds the sheet between parse and the tree cache, as
+/// [`css_tree`] does. The image pass then reads resolved keys and knows no CSS.
+fn styled_image(content: &str, css: &str, media: &[(&str, Intrinsic)]) -> Presentation {
+    let sheet = crate::dict::sheet::Sheet::compile(css);
+    let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(content));
+    crate::dict::sheet::apply(&mut doc, &sheet);
+    let doc = std::sync::Arc::new(doc);
+    card_with(vec![GlossBlock {
+        dict_name: "\u{660e}\u{93e1}".to_string(),
+        dict_id: 7,
+        entries: vec![GlossEntry {
+            entry_id: crate::present::NO_ROW,
+            glosses: crate::dict::gloss::plain_items(&doc),
+            tags: Vec::new(),
+            doc,
+            media: media.iter().map(|(p, i)| ((*p).to_string(), *i)).collect(),
+        }],
+    }])
+}
+
+/// The 明鏡国語辞典 gaiji, verbatim from the えっち entry. The node declares no
+/// size, and the SVG has only a 1024 px `viewBox`, so the size ladder alone
+/// fills the column with it. The dictionary's `styles.css` sets
+/// `width: 15em !important` on the container, whose em is one Yomitan base
+/// pixel. The gaiji is then fifteen fourteenths of the text em, on the
+/// baseline like any other character.
+#[test]
+fn a_stylesheet_width_on_the_container_sizes_a_gaiji_its_node_leaves_unsized() {
+    let node = concat!(
+        r#"{"tag":"span","data":{"red":""},"content":[{"tag":"span","#,
+        r#""data":{"img":"","gaiji":"","class":"gaiji","alt":"［参考］","src":"gaiji/参考1.svg"},"#,
+        r#""content":[{"tag":"img","path":"gaiji/参考1.svg","background":false,"#,
+        r#""collapsed":false,"collapsible":false,"#,
+        r#""data":{"img":"","gaiji":"","class":"gaiji","alt":"［参考］","src":"gaiji/参考1.svg"}}]}]}"#
+    );
+    let css = "span[data-sc-img][data-sc-class=\"gaiji\"] .gloss-image-container {
+                   width: 15em !important;
+                   margin-inline-end: 2em;
+               }";
+    let media = [("gaiji/参考1.svg", recorded(MediaFormat::Svg, 1024.0, 1024.0))];
+
+    let s = laid_out(&styled_image(node, css, &media), 424.0, 4000.0, false, false);
+    let img = one_image(&s);
+    let want = 15.0 * BOX_EM / 14.0;
+    assert_eq!((want, want), (img.rect.w, img.rect.h), "15 base pixels, square");
+    let host = image_host(&s);
+    assert_eq!(host.pen.0, img.rect.x, "at the paragraph's own pen");
+    assert!(img.rect.y >= host.pen.1, "inside its line, not above it");
+
+    let bare = laid_out(&styled_image(node, "", &media), 424.0, 4000.0, false, false);
+    let huge = one_image(&bare);
+    assert!(huge.rect.w > 20.0 * BOX_EM, "without the sheet the gaiji fills the column");
+}
+
+/// The container's em is the text em when the node declares `sizeUnits: "em"`
+/// beside a length. Yomitan sets `font-size: 1em` on the container then. A
+/// `sizeUnits` with no length keeps the base pixel.
+#[test]
+fn a_container_length_uses_the_text_em_when_the_node_asks_for_em() {
+    let css = ".gloss-image-container { width: 2em !important }";
+    let media = [("g/x.svg", recorded(MediaFormat::Svg, 40.0, 20.0))];
+
+    let asked = laid_out(
+        &styled_image(r#"{"tag":"img","path":"g/x.svg","height":1.0,"sizeUnits":"em"}"#, css, &media),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let img = one_image(&asked);
+    assert_eq!((2.0 * BOX_EM, BOX_EM), (img.rect.w, img.rect.h), "two text ems, aspect 2:1");
+
+    let bare = laid_out(
+        &styled_image(r#"{"tag":"img","path":"g/x.svg","sizeUnits":"em"}"#, css, &media),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let img = one_image(&bare);
+    assert_eq!(
+        (2.0 * BOX_EM / 14.0, BOX_EM / 14.0),
+        (img.rect.w, img.rect.h),
+        "two base pixels when no length asks for em",
+    );
+}
+
+/// 旺文社漢字典 caps each gaiji through the link: `max-width: 1em`. The link's em is
+/// the text em. A cap shrinks a wide picture with its aspect and leaves a small
+/// one alone.
+#[test]
+fn a_link_cap_in_em_shrinks_a_picture_with_its_aspect_and_never_enlarges() {
+    let node = concat!(
+        r#"{"tag":"span","data":{"img":"","gaiji":""},"content":["#,
+        r#"{"tag":"img","path":"img/a.avif"}]}"#
+    );
+    let css = ".gloss-image-link { max-width: 55%; }
+               [data-sc-img][data-sc-gaiji] .gloss-image-link { max-width: 1em; }";
+
+    let wide = laid_out(
+        &styled_image(node, css, &[("img/a.avif", recorded(MediaFormat::Avif, 87.0, 98.0))]),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let img = one_image(&wide);
+    assert_eq!(BOX_EM, img.rect.w, "one text em wide");
+    assert!((img.rect.h - BOX_EM * 98.0 / 87.0).abs() < 1e-3, "the 87:98 aspect survives");
+
+    let small = laid_out(
+        &styled_image(node, css, &[("img/a.avif", recorded(MediaFormat::Avif, 10.0, 12.0))]),
+        424.0,
+        4000.0,
+        false,
+        false,
+    );
+    let img = one_image(&small);
+    assert_eq!((10.0, 12.0), (img.rect.w, img.rect.h), "a cap is not a size");
+}
+
+/// 大辞泉 caps each illustration at `70%` of the link's parent. A percentage is
+/// a share of the room, which only the fit step knows. The picture then takes
+/// seven tenths of the width it would fill without the sheet.
+#[test]
+fn a_percentage_cap_on_the_link_is_a_share_of_the_room() {
+    let node = concat!(
+        r#"{"tag":"span","data":{"img":"","Image":""},"content":["#,
+        r#"{"tag":"img","path":"graphics/104054.avif","collapsible":false}]}"#
+    );
+    let media = [("graphics/104054.avif", recorded(MediaFormat::Avif, 640.0, 480.0))];
+    let css = "span[data-sc-img] .gloss-image-link { max-width: 70% !important; }";
+
+    let whole = one_image(&laid_out(&styled_image(node, "", &media), 424.0, 4000.0, false, false)).rect;
+    let capped = one_image(&laid_out(&styled_image(node, css, &media), 424.0, 4000.0, false, false)).rect;
+    assert!(whole.w < 640.0, "the room already fits the picture");
+    assert!((capped.w - 0.7 * whole.w).abs() < 1e-3, "seven tenths of that room");
+    assert!((capped.h - 0.7 * whole.h).abs() < 1e-3, "and the height follows");
+}
+
+/// The stylesheet reaches the image through the same gate as every other
+/// declaration. With dictionary styling off, the gaiji takes its recorded
+/// size again, as an inline `style` would be ignored.
+#[test]
+fn styling_off_drops_a_stylesheet_image_size_too() {
+    let p = styled_image(
+        r#"{"tag":"img","path":"g/x.png"}"#,
+        ".gloss-image-container { width: 15em !important }",
+        &[("g/x.png", recorded(MediaFormat::Png, 20.0, 10.0))],
+    );
+    let styled = one_image(&shown(&p, RenderSettings::default())).rect;
+    assert_eq!((15.0 * BOX_EM / 14.0, 15.0 * BOX_EM / 28.0), (styled.w, styled.h));
+    let plain = one_image(&shown(&p, without(|r| r.styling = false))).rect;
+    assert_eq!((20.0, 10.0), (plain.w, plain.h));
 }
 
 /// An absent asset uses its `alt` as ordinary flow text. The text wraps with

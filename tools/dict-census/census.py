@@ -117,13 +117,18 @@ def read_support() -> dict[str, object]:
         "role_value_keys": _rust_str_array(parse_src, "VALUE_KEYS", PARSE_RS),
         "role_order": _rust_role_order(gloss_src, GLOSS_RS),
         # The `styles.css` half: the CSS spelling of the same properties, and
-        # the selector grammar the matcher compiles.
+        # the selector grammar the matcher compiles. The chrome classes are the
+        # only class tokens that grammar keeps, so a `.gloss-image-link` scores
+        # as `image-chrome` and any other class as `class`.
         "css_props": _rust_match_keys(sheet_src, "css_key", SHEET_RS),
         "css_kinds": _rust_str_array(
             sheet_src, "SUPPORTED_SELECTOR_KINDS", SHEET_RS
         ),
         "css_pseudos": _rust_str_array(
             sheet_src, "SUPPORTED_PSEUDO_CLASSES", SHEET_RS
+        ),
+        "image_chrome": _rust_str_array(
+            sheet_src, "IMAGE_CHROME_CLASSES", SHEET_RS
         ),
     }
 
@@ -587,7 +592,11 @@ def _classify_attr(inner: str, seen: set[str], data_attrs: collections.Counter) 
 
 
 def _classify_pseudo(
-    sel: str, i: int, seen: set[str], data_attrs: collections.Counter
+    sel: str,
+    i: int,
+    seen: set[str],
+    data_attrs: collections.Counter,
+    chrome: set[str],
 ) -> int:
     double = sel.startswith("::", i)
     head = i + (2 if double else 1)
@@ -604,12 +613,17 @@ def _classify_pseudo(
     if end < len(sel) and sel[end] == "(":
         close = _skip_nested(sel, end, "(", ")")
         if name in SELECTOR_LIST_PSEUDOS:
-            _classify(sel[end + 1 : max(end + 1, close - 1)], seen, data_attrs)
+            _classify(sel[end + 1 : max(end + 1, close - 1)], seen, data_attrs, chrome)
         return close
     return end
 
 
-def _classify(sel: str, seen: set[str], data_attrs: collections.Counter) -> None:
+def _classify(
+    sel: str, seen: set[str], data_attrs: collections.Counter, chrome: set[str]
+) -> None:
+    """`chrome` holds the class names of Yomitan's image chrome. A class in
+    that set scores as `image-chrome`; every other class scores as `class`,
+    which no node can carry."""
     i, n = 0, len(sel)
     while i < n:
         ch = sel[i]
@@ -620,11 +634,16 @@ def _classify(sel: str, seen: set[str], data_attrs: collections.Counter) -> None
             _classify_attr(sel[i + 1 : max(i + 1, close - 1)], seen, data_attrs)
             i = close
         elif ch == ":":
-            i = _classify_pseudo(sel, i, seen, data_attrs)
+            i = _classify_pseudo(sel, i, seen, data_attrs, chrome)
         elif ch in ".#":
             end = _skip_ident(sel, i + 1)
             if end > i + 1:
-                seen.add("class" if ch == "." else "id")
+                if ch == "#":
+                    seen.add("id")
+                elif sel[i + 1 : end] in chrome:
+                    seen.add("image-chrome")
+                else:
+                    seen.add("class")
                 i = end
             else:
                 seen.add("unknown")
@@ -643,12 +662,15 @@ def _classify(sel: str, seen: set[str], data_attrs: collections.Counter) -> None
 
 
 def classify_selector(
-    sel: str, kinds: collections.Counter, data_attrs: collections.Counter
+    sel: str,
+    kinds: collections.Counter,
+    data_attrs: collections.Counter,
+    chrome: set[str],
 ) -> None:
     """Score one complex selector. Each kind counts once per selector, so a
     selector contributing `tag` and `data-attr` lands in both buckets."""
     seen: set[str] = set()
-    _classify(sel, seen, data_attrs)
+    _classify(sel, seen, data_attrs, chrome)
     for kind in seen or {"unknown"}:
         kinds[kind] += 1
 
@@ -733,6 +755,25 @@ def _pseudo_names(sel: str) -> set[str]:
     return out
 
 
+def _chrome_misplaced(sel: str, chrome: set[str]) -> bool:
+    """Whether a chrome class sits anywhere but alone as the subject. The
+    matcher keeps `span[data-sc-img] .gloss-image-container` and drops
+    `.gloss-image-link[data-background] > .gloss-image-container`, because
+    the three chrome elements belong to one node. Attribute tests are
+    blanked to `[]` so a space inside a value cannot split a compound, while
+    a test on the chrome itself still shows."""
+    blank = re.sub(r"\[[^\]]*\]", "[]", sel)
+    compounds = [c for c in re.split(r"[\s>]+", blank) if c]
+    for n, compound in enumerate(compounds):
+        names = re.findall(r"\.([\w-]+)", compound)
+        if not any(name in chrome for name in names):
+            continue
+        last = n == len(compounds) - 1
+        if not last or len(names) != 1 or compound != f".{names[0]}":
+            return True
+    return False
+
+
 def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
     """Why one complex selector leaves the matcher's grammar, or an empty set
     when it does not.
@@ -744,7 +785,7 @@ def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
     findings."""
     bad: set[str] = set()
     kinds: set[str] = set()
-    _classify(sel, kinds, collections.Counter())
+    _classify(sel, kinds, collections.Counter(), support["image_chrome"])
     for kind in kinds:
         if kind not in support["css_kinds"]:
             bad.add(kind)
@@ -756,6 +797,8 @@ def selector_support(sel: str, support: dict[str, set[str]]) -> set[str]:
     for name in _pseudo_names(sel):
         if name not in support["css_pseudos"]:
             bad.add(f"pseudo:{name}")
+    if "image-chrome" in kinds and _chrome_misplaced(sel, support["image_chrome"]):
+        bad.add("chrome-not-subject")
     if re.search(r"[+~]", _outside_brackets(sel)):
         bad.add("sibling-combinator")
     for inner in ATTR_OP_RE.findall(sel):
@@ -794,7 +837,9 @@ def css_stats(raw: bytes, support: dict[str, set[str]]) -> dict:
         # matcher compiles.
         for sel in split_selectors(block["prelude"]):
             st["selectors"] += 1
-            classify_selector(sel, st["selector_kinds"], st["data_attrs"])
+            classify_selector(
+                sel, st["selector_kinds"], st["data_attrs"], support["image_chrome"]
+            )
         score_rule(st, block, decls, bool(box), support)
     return st
 

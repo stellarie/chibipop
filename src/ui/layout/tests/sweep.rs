@@ -319,6 +319,9 @@ fn style_key_name(key: StyleKey) -> &'static str {
         StyleKey::PaddingRight => "padding-right",
         StyleKey::PaddingBottom => "padding-bottom",
         StyleKey::PaddingLeft => "padding-left",
+        StyleKey::ImageWidth => "image-width",
+        StyleKey::ImageMaxWidth => "image-max-width",
+        StyleKey::ImageLinkMaxWidth => "image-link-max-width",
     }
 }
 /// Every visible string from a parsed entry and its shape.
