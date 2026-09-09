@@ -256,6 +256,9 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - CI quality floor: horizontal CER <= 5 %, horizontal hit-scan >= 90 %, vertical CER
   <= 20 %, vertical hit-scan >= 75 %. It requires parity with the Python reference
   within 3 percentage points.
+- CI box-fit floor: a hit's box must also outline its glyph. Horizontal box fit >= 90 %,
+  vertical box fit >= 75 %, and the three large `smoke_2x` glyphs must fit whole. A
+  fragment box that contains the glyph centre passes hit-scan but fails fit (issue #92).
 - The repository commits models under `crates/chibipop-linux/models/meiki/`. It pins
   their hashes against `SHA256SUMS.txt`. Two steps verify them: `scripts/package-linux.sh`
   when it stages the tarball, and `models::verify` when the engine starts.

@@ -4,13 +4,18 @@
 //! `tests/fixtures/ocr-corpus/`. It is the same corpus that the Python
 //! benchmark harness (`tools/ocr-bench/`) used to measure every candidate
 //! engine. This test runs the ported pipeline on the full manifest and checks
-//! two conditions:
+//! three conditions:
 //!
 //! - **Absolute floors** (ARCHITECTURE.md#ocr-engine): horizontal CER <= 5 %
 //!   with hit-scan >= 90 %, vertical CER <= 20 % with hit-scan >= 75 %.
 //! - **Parity** with the harness's 1x values within +-3 pp. A resize rule, an
 //!   overlap threshold, or an ONNX Runtime upgrade can cause silent drift. The
 //!   gate catches that drift even when the absolute floors still pass.
+//! - **Box fit**: a hit's box must outline its glyph. Hit-scan asks only whether
+//!   the smallest box under the glyph centre carries the character. Issue #92
+//!   hovered a 100 px `新` and got `木` in a fragment box that passes that
+//!   question. The fit metric has no harness reference. It scores unmasked crops
+//!   at both scales.
 //!
 //! Each metric uses the method from `bench/common.py`. It selects the *smallest*
 //! box that contains the cursor point. It drops predictions that touch the mask
@@ -69,6 +74,12 @@ const HORIZONTAL_CER_CEILING: f64 = 0.05;
 const HORIZONTAL_HIT_FLOOR: f64 = 0.90;
 const VERTICAL_CER_CEILING: f64 = 0.20;
 const VERTICAL_HIT_FLOOR: f64 = 0.75;
+/// A hit's box must also outline its glyph. Issue #92 hovered `新規` at about 100 px
+/// and got `木`, a fragment of `新`, in a box that covered part of one glyph. The
+/// hit-scan floors cannot see that failure because the fragment's box still contains
+/// the glyph centre. The fit floors match the hit-scan floors.
+const HORIZONTAL_FIT_FLOOR: f64 = 0.90;
+const VERTICAL_FIT_FLOOR: f64 = 0.75;
 /// Set a generous limit. This catches a severe regression, not a slow runner.
 /// Release measured 20.8 ms and debug measured 37 ms on developer hardware.
 /// Container runs measured 88.0, 129.3, 132.5, 252.2, and 282.3 ms.
@@ -308,6 +319,58 @@ fn hit_scan(chars: &[GtChar], boxes: &[PredBox]) -> (u32, u32) {
     (hits, total)
 }
 
+/// Box-fit tolerances. A box fits its glyph when it covers the middle half of the
+/// ground-truth cell on both axes, its cross-axis thickness is at most 1.6 cells, and
+/// its reading-axis length per character is at most 2.0 cells. A fragment (issue #92:
+/// `木` inside `新`) fails the first rule. A line-tall or ruby-inclusive box fails the
+/// second. Ground-truth cells are ink or DOM ranges, so a per-character width varies.
+/// The tolerances leave room for that variation, not for a wrong box.
+const FIT_CORE: f64 = 0.25;
+const FIT_CROSS_MAX: f64 = 1.6;
+const FIT_READ_MAX: f64 = 2.0;
+
+/// Count the hits whose box fits its glyph, over the hits. Use the hit rule from
+/// `hit_scan`. Each misfit names the character and its box for the report.
+fn box_fit(chars: &[GtChar], boxes: &[PredBox], vertical: bool) -> (u32, u32, Vec<String>) {
+    let (mut fit, mut hits) = (0, 0);
+    let mut misfits = Vec::new();
+    for ch in chars {
+        let want = normalise(&ch.c);
+        if want.is_empty() {
+            continue;
+        }
+        let (px, py) = (ch.x + ch.w / 2.0, ch.y + ch.h / 2.0);
+        let Some(b) = boxes
+            .iter()
+            .filter(|b| b.contains(px, py))
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .filter(|b| normalise(&b.text).contains(&want))
+        else {
+            continue;
+        };
+        hits += 1;
+        let n = normalise(&b.text).chars().count().max(1) as f64;
+        let covers_core = b.x <= ch.x + FIT_CORE * ch.w
+            && b.x + b.w >= ch.x + (1.0 - FIT_CORE) * ch.w
+            && b.y <= ch.y + FIT_CORE * ch.h
+            && b.y + b.h >= ch.y + (1.0 - FIT_CORE) * ch.h;
+        let sized = if vertical {
+            b.w <= FIT_CROSS_MAX * ch.w && b.h / n <= FIT_READ_MAX * ch.h
+        } else {
+            b.h <= FIT_CROSS_MAX * ch.h && b.w / n <= FIT_READ_MAX * ch.w
+        };
+        if covers_core && sized {
+            fit += 1;
+        } else {
+            misfits.push(format!(
+                "{} at {},{} {}x{} hit {:?} at {},{} {}x{}",
+                ch.c, ch.x, ch.y, ch.w, ch.h, b.text, b.x, b.y, b.w, b.h
+            ));
+        }
+    }
+    (fit, hits, misfits)
+}
+
 // ------------------------------------------------------------------- report
 
 #[derive(Default, Clone)]
@@ -317,6 +380,10 @@ struct Tally {
     cer_dropped_sum: f64,
     hits: u32,
     total: u32,
+    /// Hits whose box fits the glyph, and the hits that the fit rule scored.
+    /// Only unmasked crops count, at both scales.
+    fit: u32,
+    fit_hits: u32,
 }
 
 impl Tally {
@@ -331,6 +398,10 @@ impl Tally {
     fn hit(&self) -> f64 {
         if self.total == 0 { f64::NAN } else { f64::from(self.hits) / f64::from(self.total) }
     }
+
+    fn fit(&self) -> f64 {
+        if self.fit_hits == 0 { f64::NAN } else { f64::from(self.fit) / f64::from(self.fit_hits) }
+    }
 }
 
 struct Report {
@@ -342,6 +413,8 @@ struct Report {
     smoke_gt: String,
     latency_p50_ms: f64,
     table: String,
+    /// Every misfit as `(crop id, description)`. `run` prints them under `--nocapture`.
+    misfits: Vec<(String, String)>,
 }
 
 static REPORT: LazyLock<Report> = LazyLock::new(run);
@@ -357,6 +430,7 @@ fn run() -> Report {
     let mut vertical = Tally::default();
     let mut masked = Tally::default();
     let (mut smoke_pred, mut smoke_gt) = (String::new(), String::new());
+    let mut misfits: Vec<(String, String)> = Vec::new();
 
     for crop in &corpus {
         let lines = engine.recognise(&crop.pixels, crop.pw, crop.ph).expect("recognising a corpus crop");
@@ -365,6 +439,14 @@ fn run() -> Report {
         let pred = normalise(&pred);
         let crop_cer = cer(&gt, &pred);
         let (hits, total) = hit_scan(&crop.chars, &boxes);
+        // The fit rule is scale-free, so both scales count. A masked crop stays out:
+        // the mask cuts boxes by design.
+        let (fit, fit_hits, crop_misfits) = if crop.mask.is_none() {
+            box_fit(&crop.chars, &boxes, crop.slice == "vertical")
+        } else {
+            (0, 0, Vec::new())
+        };
+        misfits.extend(crop_misfits.into_iter().map(|m| (crop.id.clone(), m)));
 
         // Use the harness score for a masked crop.
         // chibipop's layout drops words whose rects touch the mask.
@@ -399,6 +481,8 @@ fn run() -> Report {
             bucket.hits += hits;
             bucket.total += total;
         }
+        bucket.fit += fit;
+        bucket.fit_hits += fit_hits;
 
         let slice = by_slice.entry((crop.scale, crop.slice.clone())).or_default();
         slice.crops += 1;
@@ -406,6 +490,8 @@ fn run() -> Report {
         slice.cer_dropped_sum += cer_dropped;
         slice.hits += hits;
         slice.total += total;
+        slice.fit += fit;
+        slice.fit_hits += fit_hits;
 
         if crop.id == "smoke_1x" {
             smoke_pred = pred.clone();
@@ -430,14 +516,15 @@ fn run() -> Report {
     let latency_p50_ms = samples[samples.len() / 2];
 
     let mut table = String::from("\nOCR gate - measured vs the Python harness 1x reference\n");
-    table.push_str("  slice                 crops    CER%    hit%\n");
+    table.push_str("  slice                 crops    CER%    hit%    fit%\n");
     for ((scale, name), t) in &by_slice {
         table.push_str(&format!(
-            "  {:<12} {scale}x   {:>5}  {:>6.2}  {:>6.2}\n",
+            "  {:<12} {scale}x   {:>5}  {:>6.2}  {:>6.2}  {:>6.2}\n",
             name,
             t.crops,
             t.cer() * 100.0,
-            t.hit() * 100.0
+            t.hit() * 100.0,
+            t.fit() * 100.0
         ));
     }
     table.push_str(&format!(
@@ -465,11 +552,26 @@ fn run() -> Report {
         REF_MASKED_HIT * 100.0
     ));
     table.push_str(&format!(
+        "  ---\n  horizontal box fit    {:>5} hits  {:>6.2} % fit   (both scales, unmasked; floor {:.2})\n",
+        horizontal.fit_hits,
+        horizontal.fit() * 100.0,
+        HORIZONTAL_FIT_FLOOR * 100.0
+    ));
+    table.push_str(&format!(
+        "  vertical box fit      {:>5} hits  {:>6.2} % fit   (both scales, unmasked; floor {:.2})\n",
+        vertical.fit_hits,
+        vertical.fit() * 100.0,
+        VERTICAL_FIT_FLOOR * 100.0
+    ));
+    table.push_str(&format!(
         "  warm p50 on j1_1x: {latency_p50_ms:.1} ms (reference 21.8 ms, ceiling {LATENCY_P50_CEILING_MS:.0} ms)\n"
     ));
     println!("{table}");
+    for (id, misfit) in &misfits {
+        println!("  misfit {id}: {misfit}");
+    }
 
-    Report { by_slice, horizontal, vertical, masked, smoke_pred, smoke_gt, latency_p50_ms, table }
+    Report { by_slice, horizontal, vertical, masked, smoke_pred, smoke_gt, latency_p50_ms, table, misfits }
 }
 
 fn near(measured: f64, reference: f64, what: &str) {
@@ -507,6 +609,39 @@ fn vertical_text_clears_its_beta_ceiling() {
 fn vertical_text_clears_its_beta_hit_scan_floor() {
     let got = REPORT.vertical.hit();
     assert!(got >= VERTICAL_HIT_FLOOR, "vertical hit-scan {:.2} % < 75 %{}", got * 100.0, REPORT.table);
+}
+
+/// Check that a horizontal hit's box outlines its glyph, not a fragment or the line.
+#[test]
+fn horizontal_boxes_fit_their_glyphs() {
+    let got = REPORT.horizontal.fit();
+    assert!(got >= HORIZONTAL_FIT_FLOOR, "horizontal box fit {:.2} % < 90 %{}", got * 100.0, REPORT.table);
+}
+
+#[test]
+fn vertical_boxes_fit_their_glyphs() {
+    let got = REPORT.vertical.fit();
+    assert!(got >= VERTICAL_FIT_FLOOR, "vertical box fit {:.2} % < 75 %{}", got * 100.0, REPORT.table);
+}
+
+/// Check the issue-92 shape on real pixels. `smoke_2x` holds three 78-86 px glyphs.
+/// One box must hit each glyph and cover it. A fragment box (`木` inside `新`) hits
+/// the centre but fails the fit rule.
+#[test]
+fn large_glyphs_are_boxed_whole() {
+    let smoke = REPORT.by_slice.get(&(2, "smoke".to_string())).expect("smoke_2x slice");
+    let misfits: Vec<&str> = REPORT
+        .misfits
+        .iter()
+        .filter(|(id, _)| id == "smoke_2x")
+        .map(|(_, misfit)| misfit.as_str())
+        .collect();
+    assert_eq!(
+        (smoke.fit, smoke.fit_hits, smoke.total),
+        (3, 3, 3),
+        "every smoke_2x glyph must be hit by a box that covers it; misfits {misfits:?}{}",
+        REPORT.table
+    );
 }
 
 #[test]
