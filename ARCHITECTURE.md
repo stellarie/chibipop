@@ -107,14 +107,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   one large glyph as words of their own (issue #92: `新` as `立` over `木`). Two stacked
   words read as a column under a spread-only rule. The wrap probe then starts at the
   top edge of the output, and the forward tile runs below the text.
-- The capture box grows on its short side, at most twice, doubling each time around
-  the cursor and never clamped, while the box is too small for the text under the
-  cursor: a recognized line spans the short side, or no hit came back and ink under
-  the cursor spans 60 % of the configured short side (`text::ink`), or a grown box
-  read nothing. A glyph taller than the box comes back as a fragment, a misread, or
-  nothing. The Linux engine scales a crop to its detector size, so a large glyph in a
-  small box is too large to detect and a taller box scales it down. A cut read is
-  not an answer: the answer is the last read whose hit line does not span its box.
+- The capture box zooms out, at most twice, doubling both sides around the cursor,
+  while the box is too small for the text under the cursor: a recognized line spans
+  the short side, or the hit word touches one edge with at least half the box's
+  thickness, or no hit came back and ink under the cursor spans 60 % of the
+  configured short side (`text::ink`), or a grown box read nothing. Both sides
+  double because the Linux engine scales a crop to its detector size from both: a
+  500 px wide crop is always scaled up 1.92 times, and a 1000 px wide one 0.96
+  times. A grown box slides inside the output and shrinks to it only when larger.
+  A cut read is not an answer: the answer is the last read whose hit is not cut.
   Every grabbed box appears in the outline as a pass-1 box.
 - A word box thinner than one sixteenth of its thickness on the reading axis is a
   sliver, not a glyph. The capture seam drops it. The Linux engine returned a `」` in
@@ -282,7 +283,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   `TextSource` with the real engine. `新規` at 100, 130, and 160 px and
   `日本語を話す` at 130 px must come back whole from the hovered glyph to the line
   end. A news line in BIZ UDPGothic and in Noto Sans CJK, white on black, at 100 px
-  and at 125 px bold, must come back at least to the box edge. Every scan rect stays
+  and at 125 px bold, and hovered near the top and the bottom of a 110 px glyph,
+  must come back at least to the box edge. Every scan rect stays
   on the hovered line, and the anchor fits the glyph. `scripts/render-large-text.py`
   renders the screens.
 - The repository commits models under `crates/chibipop-linux/models/meiki/`. It pins

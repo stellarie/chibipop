@@ -18,7 +18,7 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::present::{match_highlight, Card, HIGHLIGHT_PAD};
 use crate::text::layout::{
-    grow, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
+    grow, hit_cut_by_edge, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
     Resolved, GROWTH_STEPS, OVERRIDE_WORDS,
 };
 use crate::text::ink;
@@ -969,8 +969,9 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
 /// Check that pass 1's boxes follow the growth rule.
 ///
 /// The first box is the configured one. Each next box exists only because a line
-/// spanned the short side of the previous box, because ink under the cursor spanned
-/// it with no hit, or because a grown box read nothing. It is the previous box grown
+/// spanned the short side of the previous box, because one edge cut the hit word,
+/// because ink under the cursor spanned it with no hit, or because a grown box read
+/// nothing. It is the previous box grown
 /// on its short side. The last box is not cut, or the step cap stopped the growth.
 fn check_growth(page: &Page, cursor: PhysPoint, boxes: &[PhysRect], context: &str) {
     assert!(!boxes.is_empty() && boxes.len() <= 1 + GROWTH_STEPS, "{context}");
@@ -978,6 +979,7 @@ fn check_growth(page: &Page, cursor: PhysPoint, boxes: &[PhysRect], context: &st
         let lines = page_lines(page, rect);
         (i > 0 && lines.is_empty())
             || spans_short_side(&lines, rect)
+            || hit_cut_by_edge(&lines, cursor, true, rect)
             || (resolve(&lines, cursor, rect, true).is_none()
                 && ink::spans_short_side(&page_frame(page, rect), rect, cursor, 1, 100, &[]))
     };

@@ -7,7 +7,7 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
-    band_of, box_orientation, discard_furigana, drop_slivers, grow_short_side, head_and_tail,
+    band_of, box_orientation, discard_furigana, drop_slivers, grow, head_and_tail, hit_cut_by_edge,
     hit_scan, map_from_upscaled, nearest_line, normalise, region_around, resolve, resolve_wrap,
     spans_short_side, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
     Orientation, Resolved, GROWTH_STEPS,
@@ -82,11 +82,13 @@ pub struct RegionRead {
     pub frame: Frame,
 }
 
-/// Return true when the line that answers the hover spans the short side of
-/// `region`. Such a read saw a cut glyph and is not an answer.
-fn hit_line_spans(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
+/// Return true when the read that answers the hover saw a cut glyph. Its hit line
+/// spans the short side of `region`, or its hit word touches one edge with at least
+/// half the box's thickness. Such a read is not an answer.
+fn hit_is_cut(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
     hit_scan(lines, cursor, scan_alnum)
         .is_some_and(|(li, _)| spans_short_side(std::slice::from_ref(&lines[li]), region))
+        || hit_cut_by_edge(lines, cursor, scan_alnum, region)
 }
 
 /// `PassOne` stores the read that answers pass 1 and every box that pass 1 grabbed.
@@ -345,7 +347,7 @@ impl TextSource {
         let factor = self.settings.upscale;
         let alnum = self.settings.scan_alphanumeric;
         let uncut_hit = |read: &RegionRead, region: PhysRect| {
-            read.resolved.is_some() && !hit_line_spans(&read.lines, cursor, alnum, region)
+            read.resolved.is_some() && !hit_is_cut(&read.lines, cursor, alnum, region)
         };
         let mut region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         let mut boxes = vec![region];
@@ -362,12 +364,13 @@ impl TextSource {
                 ink::spans_short_side(&read.frame, region, cursor, factor, reference, &popup)
             };
             let cut = spans_short_side(&read.lines, region)
+                || hit_cut_by_edge(&read.lines, cursor, alnum, region)
                 || (step > 0 && read.lines.is_empty())
                 || (read.resolved.is_none() && ink_spans());
             if !cut {
                 break;
             }
-            let grown = grow_short_side(region);
+            let grown = grow(region, self.capture.bounds_containing(cursor));
             let next = match self.resolve_in_region(cursor, grown, mask) {
                 Ok(next) => next,
                 Err(e) => {

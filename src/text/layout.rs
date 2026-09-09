@@ -258,12 +258,14 @@ pub fn box_orientation(region: PhysRect) -> Orientation {
     if region.h > region.w { Orientation::Vertical } else { Orientation::Horizontal }
 }
 
-/// A capture box grows on its short side this many times at most.
+/// A capture box grows this many times at most.
 ///
-/// Each step doubles the short side: 100 px becomes 200, then 400. Issue #92 hovered
-/// text at about the box height. On Linux, a 130 px glyph in a 100 px box came back
-/// as garbage, and a 200 px box read it whole. Low-stroke glyphs at 130 px needed 400
-/// px, where the engine scales the crop down. A glyph above 400 px is not popup text.
+/// Each step doubles both sides: 500 x 100 becomes 1000 x 200, then 2000 x 400. Issue
+/// #92 hovered text at about the box height. The Linux engine scales a crop to its
+/// detector size, and a 500 px wide crop is always scaled up by 1.92. A 120 px glyph
+/// in that crop is too large to detect, and no taller 500 px wide box changed that.
+/// A 1000 px wide box is scaled by 0.96, and every measured case read there. A
+/// glyph above 400 px is not popup text.
 pub const GROWTH_STEPS: usize = 2;
 
 /// Return true when a line spans the short side of `region`.
@@ -283,18 +285,48 @@ pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
     })
 }
 
-/// Return `region` with its short side doubled around the same center.
+/// Return true when the word under the cursor is cut by one edge of `region`.
 ///
-/// The box is not clamped to the output. Pass 1's own box is not clamped either, and
-/// a backend fills pixels outside the output with black. A clamp would move the
-/// glyph off the box center and shrink the box on one axis. The Linux engine scales a
-/// crop to its detector size, so a narrower box makes every glyph larger there. A
-/// bold 125 px line read in a 500 px wide box and not in a 432 px wide one.
-pub fn grow_short_side(region: PhysRect) -> PhysRect {
-    match box_orientation(region) {
-        Orientation::Horizontal => region.inflated(0, region.h / 2),
-        Orientation::Vertical => region.inflated(region.w / 2, 0),
-    }
+/// A cursor near the top or the bottom of a large glyph puts one box edge through
+/// the row. The visible part fits the box, so nothing spans it, and the engine
+/// returns garbage in boxes that touch that edge (issue #92: `サ千子ペナ` for the top
+/// half of `活発な`). The word is cut when it touches an edge within
+/// [`EDGE_MARGIN`] and is at least half the box thick. A body line under a cursor
+/// just below it touches the top edge too, but at 40 px in a 100 px box it is not a
+/// large glyph, and the engine reads it.
+pub fn hit_cut_by_edge(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
+    let Some((li, wi)) = hit_scan(lines, cursor, scan_alnum) else { return false };
+    let word = lines[li].words[wi].rect;
+    let orientation = box_orientation(region);
+    let start = orientation.cross(PhysPoint { x: region.x, y: region.y });
+    let end = start + orientation.thick(region);
+    let lead = orientation.cross(PhysPoint { x: word.x, y: word.y });
+    let thick = orientation.thick(word);
+    thick * 2 >= orientation.thick(region)
+        && (lead <= start + EDGE_MARGIN || lead + thick >= end - EDGE_MARGIN)
+}
+
+/// Return `region` doubled on both sides around the same center, inside `bounds`.
+///
+/// Both sides double because the engine's scale depends on both. A box that grew
+/// on its short side alone kept the reading axis at 500 px and the scale at 1.92.
+/// The grown box slides inside the output when it can, and it shrinks to the output
+/// only when it is larger. A box that starts outside its monitor fails the Windows
+/// DXGI grab and costs a one second BitBlt fallback. A box that shrinks on the
+/// reading axis raises the scale: a bold 125 px line read in a 500 px wide box and
+/// not in a 432 px wide one.
+pub fn grow(region: PhysRect, bounds: PhysRect) -> PhysRect {
+    let grown = region.inflated(region.w / 2, region.h / 2);
+    let fit = |start: i32, len: i32, bound_start: i32, bound_len: i32| {
+        if len >= bound_len {
+            (bound_start, bound_len)
+        } else {
+            (start.max(bound_start).min(bound_start + bound_len - len), len)
+        }
+    };
+    let (x, w) = fit(grown.x, grown.w, bounds.x, bounds.w);
+    let (y, h) = fit(grown.y, grown.h, bounds.y, bounds.h);
+    PhysRect { x, y, w, h }
 }
 
 /// A word box thinner than this fraction of its thickness on the reading axis is a
