@@ -47,8 +47,8 @@ mod tests;
 
 use select::{Chrome, Ctx, Pool, NO_ATTR};
 
-/// Selector kinds that this grammar compiles, in the vocabulary of
-/// `tools/dict-census`.
+/// This array lists the selector kinds that this grammar compiles in the
+/// vocabulary of `tools/dict-census`.
 ///
 /// This array stays in this module, not in the census, like the gloss
 /// allow-lists. The census parses this array from this source.
@@ -57,14 +57,15 @@ use select::{Chrome, Ctx, Pool, NO_ATTR};
 pub const SUPPORTED_SELECTOR_KINDS: [&str; 4] =
     ["tag", "data-attr", "pseudo-class", "image-chrome"];
 
-/// The class names of Yomitan's image chrome, the only classes a rule can reach.
+/// This array lists the class names for Yomitan's image chrome, the only
+/// classes that a rule can reach.
 ///
 /// Yomitan wraps each image node in `a.gloss-image-link >
-/// span.gloss-image-container > canvas.gloss-image`. A dictionary sizes an
-/// unsized picture through these names. The census reads this array from this
-/// source, as it reads [`SUPPORTED_SELECTOR_KINDS`], so its `class` count
+/// span.gloss-image-container > canvas.gloss-image`. A dictionary uses these
+/// names to size an unsized picture. The census reads this array and
+/// [`SUPPORTED_SELECTOR_KINDS`] from this source, so its `class` count
 /// separates this chrome from a class that no node can carry.
-/// `select::chrome_of` resolves each name. A test keeps the two aligned.
+/// `select::chrome_of` resolves each name. A test keeps both lists aligned.
 pub const IMAGE_CHROME_CLASSES: [&str; 3] =
     ["gloss-image-link", "gloss-image-container", "gloss-image"];
 
@@ -125,7 +126,7 @@ pub struct Sheet {
     /// a bare `:first-child`.
     any: Span,
     /// This span holds subjects that name an image chrome class. Only an image
-    /// node consults it, so a chrome rule costs the other nodes nothing.
+    /// node consults it, so other nodes do no work for a chrome rule.
     images: Span,
     /// This vector stores sorted attribute-name IDs. A document resolves its
     /// interned keys with binary search, not a scan of up to 322 names.
@@ -280,9 +281,9 @@ impl Sheet {
             }
         }
         // One selector list shares one declaration slice, and the chrome
-        // element decides the key of a `width` or `max-width`. A list that
-        // names the link beside the container would need two slices. No
-        // corpus list does, so the compiler drops such a list as unreadable.
+        // element decides the key for a `width` or `max-width`. A list that
+        // names the link beside the container needs two slices. The corpus has
+        // no such list, so the compiler drops it as unreadable.
         let chrome = compiled[0].chrome;
         if compiled.iter().any(|c| c.chrome != chrome) {
             self.pool.compounds.truncate(first);
@@ -311,9 +312,9 @@ impl Sheet {
     /// Maps one declaration to a [`StyleKey`] or counts it as dropped.
     ///
     /// `chrome` is the element that the rule's subject names. It decides the
-    /// key of a `width` or `max-width` ([`chrome_key`]). Every other property
-    /// maps the same way on chrome as on a node, so `vertical-align` on the
-    /// link aligns the picture as it would align a span.
+    /// key for a `width` or `max-width` ([`chrome_key`]). This function maps
+    /// every other property the same way for chrome and a node, so
+    /// `vertical-align` on the link aligns the picture as it aligns a span.
     fn push_decl(&mut self, decl: &scan::Decl, chrome: Chrome) {
         // The custom property that `var()` names belongs to Yomitan popup
         // chrome. This renderer has no equivalent chrome. A substitution would
@@ -366,10 +367,9 @@ impl Sheet {
     /// candidate set for a node small.
     ///
     /// The subject is the rightmost compound. It is the node that the rule
-    /// styles. The bucket uses the most selective item that the subject names:
-    /// an exact attribute value first, a bare attribute second, a tag third,
-    /// and an image chrome class fourth. A chrome subject has none of the
-    /// other three, so the order between them never applies to one rule.
+    /// styles. The bucket uses the most selective subject item: exact attribute
+    /// value, bare attribute, tag, then image chrome class. A chrome subject
+    /// has none of the other three, so their order never applies to one rule.
     /// Each rule enters exactly one bucket. Therefore a candidate list needs no
     /// deduplication.
     fn index(&mut self) {
@@ -472,7 +472,8 @@ impl Pool {
 /// The table does not map per-edge color or writing mode. The renderer drops
 /// those properties instead of assigning incomplete semantics.
 /// `width` and `max-width` are absent here because the layout pass sizes no
-/// node box. [`chrome_key`] maps both on an image chrome subject alone.
+/// node box. The [`chrome_key`] function maps both properties only for an image
+/// chrome subject.
 fn css_key(prop: &str) -> Option<StyleKey> {
     Some(match prop {
         "display" => StyleKey::Display,
@@ -508,21 +509,20 @@ fn css_key(prop: &str) -> Option<StyleKey> {
     })
 }
 
-/// The image keys that `width` and `max-width` map to on a chrome subject.
+/// This function returns the image keys for `width` and `max-width` on a chrome
+/// subject.
 ///
 /// Yomitan sizes a picture through its chrome. The container carries the
-/// picture's width as an inline `style`, so a stylesheet `width` on the
-/// container or the picture changes the box only with `!important`. This
-/// table keeps that rule: a normal `width` returns `None`, and the caller
-/// counts it as dropped. Nothing sets `max-width` inline, so a cap applies at
-/// either importance.
+/// picture's width in the inline `style`, so a stylesheet `width` on either
+/// element changes the box only with `!important`. This table applies that
+/// rule: a normal `width` returns `None`, and the caller counts it as dropped.
+/// Nothing sets `max-width` inline, so a cap applies at either importance.
 ///
-/// The link and the container resolve `em` against different font sizes. The
-/// container's em is one Yomitan base pixel unless the node asks for `em`.
-/// The link's em is the text around the picture. Two keys keep the two
-/// meanings apart, and `ui::layout::image` resolves each in its own em.
-/// A `width` on the link would only widen the link's own box, so it stays
-/// dropped.
+/// The link and the container resolve em against different font sizes. The
+/// container's em is one Yomitan base pixel unless the node asks for em.
+/// The link's em is the text around the picture. Two keys represent the two
+/// meanings, and `ui::layout::image` resolves each in its own em. A `width`
+/// on the link widens only the link's box, so the caller drops it.
 fn chrome_key(prop: &str, chrome: Chrome, important: bool) -> Option<StyleKey> {
     Some(match (chrome, prop) {
         (Chrome::Container, "width") if important => StyleKey::ImageWidth,

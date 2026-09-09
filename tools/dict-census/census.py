@@ -118,8 +118,8 @@ def read_support() -> dict[str, object]:
         "role_order": _rust_role_order(gloss_src, GLOSS_RS),
         # The `styles.css` half: the CSS spelling of the same properties, and
         # the selector grammar the matcher compiles. The chrome classes are the
-        # only class tokens that grammar keeps, so a `.gloss-image-link` scores
-        # as `image-chrome` and any other class as `class`.
+        # only class tokens that grammar keeps. A `.gloss-image-link` scores as
+        # `image-chrome`. Any other class scores as `class`.
         "css_props": _rust_match_keys(sheet_src, "css_key", SHEET_RS),
         "css_kinds": _rust_str_array(
             sheet_src, "SUPPORTED_SELECTOR_KINDS", SHEET_RS
@@ -622,8 +622,8 @@ def _classify(
     sel: str, seen: set[str], data_attrs: collections.Counter, chrome: set[str]
 ) -> None:
     """`chrome` holds the class names of Yomitan's image chrome. A class in
-    that set scores as `image-chrome`; every other class scores as `class`,
-    which no node can carry."""
+    that set scores as `image-chrome`. Every other class scores as `class`.
+    No node can carry the `class` score."""
     i, n = 0, len(sel)
     while i < n:
         ch = sel[i]
@@ -756,12 +756,12 @@ def _pseudo_names(sel: str) -> set[str]:
 
 
 def _chrome_misplaced(sel: str, chrome: set[str]) -> bool:
-    """Whether a chrome class sits anywhere but alone as the subject. The
-    matcher keeps `span[data-sc-img] .gloss-image-container` and drops
-    `.gloss-image-link[data-background] > .gloss-image-container`, because
-    the three chrome elements belong to one node. Attribute tests are
-    blanked to `[]` so a space inside a value cannot split a compound, while
-    a test on the chrome itself still shows."""
+    """A chrome class must be alone as the subject. The matcher keeps
+    `span[data-sc-img] .gloss-image-container` and drops
+    `.gloss-image-link[data-background] > .gloss-image-container` because the
+    three chrome elements belong to one node. Attribute tests become `[]`.
+    This prevents a space inside a value from splitting a compound. A test on
+    the chrome still shows."""
     blank = re.sub(r"\[[^\]]*\]", "[]", sel)
     compounds = [c for c in re.split(r"[\s>]+", blank) if c]
     for n, compound in enumerate(compounds):

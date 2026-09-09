@@ -193,10 +193,11 @@ fn the_declared_chrome_class_list_is_the_one_the_parser_accepts() {
 
 // ---- yomitan's image chrome ----
 
-/// The 明鏡国語辞典 shape, verbatim: a gaiji `img` with no size under a marked span,
-/// and a stylesheet that sizes the container the span holds. The rule lands on the
-/// image node alone, because the chrome belongs to that node. The wrapper span
-/// keeps an empty record.
+/// The 明鏡国語辞典 shape is verbatim.
+/// It has a gaiji `img` with no size under a marked span.
+/// Its stylesheet sizes the container that the span holds.
+/// The rule lands on the image node alone, because the chrome belongs to that node.
+/// The wrapper span keeps an empty record.
 #[test]
 fn a_chrome_class_rule_lands_on_the_image_node_its_ancestor_holds() {
     let d = styled(
@@ -223,9 +224,9 @@ fn a_chrome_class_rule_lands_on_the_image_node_its_ancestor_holds() {
     assert!(record(&d, wrapper).is_empty(), "the chrome is the image's, not the span's");
 }
 
-/// A bare chrome class reaches every image node and nothing else. 大辞泉 and
-/// 旺文社漢字典 cap every picture this way. A `type: image` glossary item is an
-/// image node too, so it takes the rule.
+/// A bare chrome class reaches every image node and nothing else.
+/// 大辞泉 and 旺文社漢字典 cap every picture this way.
+/// A `type: image` glossary item is also an image node, so it takes the rule.
 #[test]
 fn a_bare_chrome_class_reaches_every_image_node_and_no_other_node() {
     let css = ".gloss-image-link { max-width: 70% !important }";
@@ -246,10 +247,11 @@ fn a_bare_chrome_class_reaches_every_image_node_and_no_other_node() {
 }
 
 /// Each chrome element gives `width` and `max-width` its own key, because the link
-/// and the container resolve `em` against different font sizes. `.gloss-image`
-/// shares the container's key: 角川新字源 names both in one list. A `width` on the
-/// container needs `!important` to beat Yomitan's inline width, so a normal one
-/// drops. A `width` on the link sizes nothing, so it drops too.
+/// and the container resolve `em` against different font sizes.
+/// `.gloss-image` shares the container's key. 角川新字源 names both in one list.
+/// A container `width` needs `!important` to beat Yomitan's inline width.
+/// A normal container `width` drops.
+/// A link `width` sizes nothing, so its declaration drops.
 #[test]
 fn width_and_max_width_map_by_the_chrome_element_they_name() {
     let mapped = [
@@ -276,9 +278,10 @@ fn width_and_max_width_map_by_the_chrome_element_they_name() {
     }
 }
 
-/// Every other property maps on chrome as on a node. 旺文社漢字典 aligns a gaiji with
-/// `vertical-align` on the link, and the image pass reads that key from the same
-/// record. A property outside the table still drops and counts.
+/// Every other property maps on chrome as it maps on a node.
+/// 旺文社漢字典 aligns a gaiji with `vertical-align` on the link.
+/// The image pass reads that key from the same record.
+/// The matcher drops a property outside the table, and the census counts it.
 #[test]
 fn other_properties_on_chrome_map_as_they_do_on_a_node() {
     let d = styled(
@@ -300,12 +303,15 @@ fn other_properties_on_chrome_map_as_they_do_on_a_node() {
     );
 }
 
-/// A chrome class stands alone as the subject. The three elements belong to one
-/// node, so a selector that relates two of them, tests an attribute on one, or
-/// places a node under one describes an arrangement this tree cannot hold.
+/// A chrome class stands alone as the subject.
+/// The three elements belong to one node.
+/// A selector can relate two elements, test an attribute on one element, or place
+/// a node under one element.
+/// Those selectors describe arrangements that this tree cannot hold.
 /// 明鏡's `.gloss-image-link[data-background="true"] > .gloss-image-container` is
-/// the real case. A list that names the link beside the container would need two
-/// declaration slices, so it drops as one unit.
+/// the real case.
+/// A mixed list that names the link beside the container needs two declaration
+/// slices. It drops as one unit.
 #[test]
 fn a_chrome_class_compiles_only_alone_and_only_as_the_subject() {
     let refused = [

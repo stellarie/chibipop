@@ -4771,7 +4771,7 @@ fn one_declared_length_takes_the_other_from_the_recorded_aspect() {
 
 /// `sizeUnits: px` gives scene pixels. Only `sizeUnits: em` uses the text size.
 /// Yomitan gives the image container a font size of one base pixel unless the
-/// node asks for `em`, so an absent unit is a pixel too.
+/// node asks for `em`. An absent unit is a pixel too.
 #[test]
 fn size_units_px_is_taken_as_scene_pixels() {
     let p = imaged(
@@ -4802,10 +4802,12 @@ fn an_image_with_neither_size_nor_bytes_is_a_one_em_placeholder_box() {
 
 // ---- a dictionary's styles.css sizes an image ----
 
-/// [`imaged`] for a dictionary whose `styles.css` reaches the image.
+/// Build a presentation like [`imaged`] for a dictionary whose `styles.css`
+/// reaches the image.
 ///
 /// `dict::sheet` folds the sheet between parse and the tree cache, as
-/// [`css_tree`] does. The image pass then reads resolved keys and knows no CSS.
+/// [`css_tree`] does. The image pass then reads resolved keys and does not read
+/// CSS.
 fn styled_image(content: &str, css: &str, media: &[(&str, Intrinsic)]) -> Presentation {
     let sheet = crate::dict::sheet::Sheet::compile(css);
     let mut doc = crate::dict::gloss::GlossDoc::parse(&sc(content));
@@ -4824,9 +4826,9 @@ fn styled_image(content: &str, css: &str, media: &[(&str, Intrinsic)]) -> Presen
     }])
 }
 
-/// The 明鏡国語辞典 gaiji, verbatim from the えっち entry. The node declares no
-/// size, and the SVG has only a 1024 px `viewBox`, so the size ladder alone
-/// fills the column with it. The dictionary's `styles.css` sets
+/// The gaiji node comes verbatim from the 明鏡国語辞典 えっち entry. The node
+/// declares no size, and the SVG has only a 1024 px `viewBox`, so the size
+/// ladder alone fills the column with it. The dictionary's `styles.css` sets
 /// `width: 15em !important` on the container, whose em is one Yomitan base
 /// pixel. The gaiji is then fifteen fourteenths of the text em, on the
 /// baseline like any other character.
@@ -4945,8 +4947,8 @@ fn a_percentage_cap_on_the_link_is_a_share_of_the_room() {
 }
 
 /// The stylesheet reaches the image through the same gate as every other
-/// declaration. With dictionary styling off, the gaiji takes its recorded
-/// size again, as an inline `style` would be ignored.
+/// declaration. With dictionary styling off, the gate ignores inline `style`
+/// and stylesheet rules, so the gaiji takes its recorded size again.
 #[test]
 fn styling_off_drops_a_stylesheet_image_size_too() {
     let p = styled_image(

@@ -59,7 +59,7 @@ duplicating them:
   `IMAGE_CHROME_CLASSES` from `src/dict/sheet/mod.rs` — the `styles.css`
   property table, the selector grammar the matcher compiles, and the three
   Yomitan image chrome classes that grammar keeps. A selector on one of those
-  classes scores as `image-chrome`; any other class scores as `class`.
+  classes scores as `image-chrome`. Any other class scores as `class`.
 
 So the `chibipop` column in the report is always measured against the current
 build, and two counts are live progress gauges that shrink as the renderer

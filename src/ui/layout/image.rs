@@ -318,7 +318,8 @@ pub(super) fn sized_in_em(doc: &GlossDoc, id: NodeId) -> bool {
 enum SheetLen {
     /// Pixels, clamped at [`IMAGE_MAX_PX`].
     Px(f32),
-    /// A share of the room from a percentage. `1.0` is the whole room.
+    /// This value is the share of the room that a percentage sets.
+    /// `1.0` is the whole room.
     Share(f32),
 }
 
@@ -328,8 +329,8 @@ enum SheetLen {
 /// A percentage on a box width is a share of the containing block, not of the font size.
 /// Therefore this function reads a percentage first.
 /// CSS drops a length with no unit, such as the `max-width: 75` in 小学館例解学習国語.
-/// [`css_len`] would read that number as an em count, as it does for the schema's
-/// numeric fields, so this function requires a unit.
+/// [`css_len`] treats that number as an em count, as it does for the schema's
+/// numeric fields. This function therefore requires a unit.
 /// A negative length is invalid, and CSS drops it too.
 fn sheet_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<SheetLen> {
     let text = doc.scalar_str(value)?.trim();
@@ -518,7 +519,7 @@ pub(super) struct FlowImage {
     /// Resolved box in the panel's own pixels.
     pub(super) w: f32,
     pub(super) h: f32,
-    /// The share of the room that the box may fill, from a stylesheet percentage.
+    /// A stylesheet percentage sets the share of the room that the box can fill.
     /// `1.0` is the whole room. [`image_box`] fits the box into this share.
     pub(super) fit: f32,
     /// The em value that sizes the image.
@@ -621,7 +622,7 @@ impl Paragraphs<'_> {
     /// stylesheet, and 明鏡国語辞典 sizes every gaiji there alone. Its node declares
     /// no size, its SVG has a 1024 px `viewBox`, and its `styles.css` sets
     /// `width: 15em !important` on `.gloss-image-container`.
-    /// Without this step the gaiji fills the column.
+    /// Without this step, the gaiji fills the column.
     ///
     /// `dict::sheet` folds three keys onto an image node, and onto no other node.
     /// [`StyleKey::ImageWidth`] replaces the width, and the height follows.
