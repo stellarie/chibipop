@@ -639,10 +639,27 @@ jobs:
           echo "--- sway log ---"
           cat "$SMOKE/sway.log" 2> /dev/null || true
 
-      - uses: actions/upload-artifact@v4
+      # Evidence storage is diagnostic. A storage outage must not override the smoke result.
+      - name: Upload sway smoke evidence
+        id: sway_evidence
+        uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: sway-smoke-evidence
+          path: |
+            /tmp/chibipop-smoke/**/*.png
+            /tmp/chibipop-smoke/*.log
+            /tmp/chibipop-smoke/*.txt
+            /tmp/chibipop-smoke/state/chibipop/chibipop.log
+          if-no-files-found: warn
+
+      - name: Retry sway smoke evidence upload
+        if: always() && steps.sway_evidence.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: sway-smoke-evidence-retry
           path: |
             /tmp/chibipop-smoke/**/*.png
             /tmp/chibipop-smoke/*.log
