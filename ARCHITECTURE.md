@@ -100,6 +100,13 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   be up to half a thickness after the hovered line start. The rules use geometry,
   not ruby or heading labels. The reach is fixed. A pitch measured from neighbors
   fails on a two-line paragraph because the pair under test has no pitch beside it.
+- The capture box is the orientation prior. `prefer_vertical` shapes the box, and the
+  box shape decides the reading axis of pass 1. A line overrides the box only with at
+  least three words whose centers spread along the other axis and whose union is at
+  least twice as long as it is thick on that axis. An engine can box the components of
+  one large glyph as words of their own (issue #92: `新` as `立` over `木`). Two stacked
+  words read as a column under a spread-only rule. The wrap probe then starts at the
+  top edge of the output, and the forward tile runs below the text.
 - The build does not include the Windows hide-and-reshow capture guard on Linux.
 
 ## Input ladders

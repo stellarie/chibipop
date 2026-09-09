@@ -318,12 +318,13 @@ mod tests {
     }
 
     /// Keep the per-character boxes that core's `orientation_of` reads as a
-    /// column. Otherwise, vertical selection loses its purpose.
+    /// column. Otherwise, vertical selection loses its purpose. Three glyphs fill
+    /// a column that overrides even a horizontal box.
     #[test]
     fn a_vertical_columns_geometry_reads_as_vertical_to_core() {
         use chibipop::text::layout::{orientation_of, Orientation};
-        let got = to_ocr_lines(vec![line(true, &[('上', 100, 10), ('下', 100, 40)])]);
-        assert_eq!(Orientation::Vertical, orientation_of(&got[0]));
+        let got = to_ocr_lines(vec![line(true, &[('上', 100, 10), ('中', 100, 40), ('下', 100, 70)])]);
+        assert_eq!(Orientation::Vertical, orientation_of(&got[0], Orientation::Horizontal));
     }
 
     #[test]

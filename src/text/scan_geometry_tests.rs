@@ -17,7 +17,9 @@
 
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::present::{match_highlight, Card, HIGHLIGHT_PAD};
-use crate::text::layout::{hit_scan, CaptureSize, OcrLine, OcrWord, Orientation, Resolved};
+use crate::text::layout::{
+    hit_scan, CaptureSize, OcrLine, OcrWord, Orientation, Resolved, OVERRIDE_WORDS,
+};
 use crate::text::{CaptureMask, Frame, OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::Result;
 use std::cell::{Cell, RefCell};
@@ -893,12 +895,12 @@ fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
         }
     }
 
+    // The box is the prior. Only a line of `OVERRIDE_WORDS` words can override it.
+    // Page glyphs are square, so a line that fills the box's short side with that
+    // many words is always at least twice as long as it is thick.
     let (li, _) = hit_scan(&lines, cursor, true).unwrap_or_else(|| panic!("{context}"));
-    let expected = if lines[li].words.len() >= 2 {
-        page.lines[hovered.line]
-    } else {
-        Orientation::Horizontal
-    };
+    let prior = if settings.prefer_vertical { Orientation::Vertical } else { Orientation::Horizontal };
+    let expected = if lines[li].words.len() >= OVERRIDE_WORDS { page.lines[hovered.line] } else { prior };
     assert_eq!(orientation, expected, "{context}");
 }
 

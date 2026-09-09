@@ -323,7 +323,7 @@ impl TextSource {
         mask: CaptureMask,
     ) -> Result<RegionRead> {
         let (lines, frame) = self.recognise_at_capture(region, self.settings.upscale, mask)?;
-        let resolved = resolve(&lines, cursor, self.settings.scan_alphanumeric);
+        let resolved = resolve(&lines, cursor, region, self.settings.scan_alphanumeric);
         Ok(RegionRead {
             lines,
             resolved,
