@@ -19,9 +19,11 @@
 //! - selector-list forms `:is`, `:where`, `:not` and `:has`, whose arguments
 //!   are compounds. `td:has([data-sc親字])` uses content like a bare attribute
 //!   selector.
+//! - one of Yomitan's three image chrome classes as the subject, alone. See
+//!   [`Chrome`]. 72 of the 73 class tokens in the corpus name this chrome.
 //!
-//! Every other form fails the compile step. Examples are a class, an id, `*`,
-//! a sibling combinator, and a pseudo-element.
+//! Every other form fails the compile step. Examples include a class outside
+//! the image chrome, an id, `*`, a sibling combinator, and a pseudo-element.
 //! Other examples are `:hover`, `:link`, an attribute operator other than `=`,
 //! and a tag absent from the schema.
 //! The caller drops the whole rule and counts the drop.
@@ -38,6 +40,38 @@ pub(super) enum Combinator {
     Child,
 }
 
+/// This enum names the Yomitan element that a selector class names inside one
+/// image node.
+///
+/// Yomitan draws every image node as three nested elements:
+/// `a.gloss-image-link > span.gloss-image-container > canvas.gloss-image`.
+/// A dictionary stylesheet can size a picture only through these classes.
+/// The node itself has no `class`, so no other class token can match a node.
+/// 明鏡国語辞典, 角川新字源, 旺文社国語辞典 and 南山堂医学大辞典 all set
+/// `width: 15em !important` on the container of a gaiji. 旺文社漢字典 caps the
+/// link at `1em`. Each such rule sizes a picture that its node leaves unsized.
+///
+/// This grammar keeps a chrome class only as the subject compound, and only
+/// alone. The three elements form one node, so no selector can relate two
+/// elements or test an attribute on one that Yomitan adds.
+/// The compile step drops such a rule with the other unreadable forms.
+///
+/// Two variants represent three classes. `.gloss-image` inherits the
+/// container's font size and fills its box, so a length on either element
+/// resolves the same way. The link resolves lengths against the text around
+/// the image instead. `dict::sheet` maps a length onto a [`StyleKey`] with this
+/// variant.
+///
+/// [`StyleKey`]: crate::dict::gloss::StyleKey
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Chrome {
+    None,
+    /// `.gloss-image-link` names the outer box.
+    Link,
+    /// `.gloss-image-container` and `.gloss-image` name the picture's box.
+    Container,
+}
+
 /// One compound selector.
 #[derive(Clone, Copy)]
 pub(super) struct Compound {
@@ -47,6 +81,9 @@ pub(super) struct Compound {
     pub(super) combinator: Combinator,
     /// The compound's tag. [`Tag::None`] means that it names no tag.
     pub(super) tag: Tag,
+    /// This field stores the image chrome class that this compound names, if any.
+    /// Only a subject compound stores a value other than [`Chrome::None`].
+    pub(super) chrome: Chrome,
     /// Points into [`Pool::tests`].
     pub(super) tests: Span,
     /// Points into [`Pool::pseudos`].
@@ -192,6 +229,11 @@ pub(super) struct Compiled {
     pub(super) sel: Span,
     /// CSS specificity, packed so that one comparison orders two rules.
     pub(super) spec: u32,
+    /// This field stores the image chrome class that the subject names, if any.
+    ///
+    /// `dict::sheet` reads this field to map `width` and `max-width` onto the
+    /// image keys. Every other compound stores [`Chrome::None`].
+    pub(super) chrome: Chrome,
 }
 
 /// Accumulated selector specificity.
@@ -266,8 +308,16 @@ fn parse_complex(sel: &str, pool: &mut Pool) -> Option<Compiled> {
             return None;
         }
     }
+    // The three chrome elements belong to one node. A chrome class before the
+    // subject can relate two of them or place a node inside one.
+    // This tree has neither arrangement. An empty selector has no subject, so
+    // `split_last` also drops it.
+    let (subject, rest) = pool.compounds[at as usize..].split_last()?;
+    if rest.iter().any(|c| c.chrome != Chrome::None) {
+        return None;
+    }
     let len = pool.compounds.len() as u32 - at;
-    (len > 0).then_some(Compiled { sel: Span { at, len }, spec: spec.packed() })
+    Some(Compiled { sel: Span { at, len }, spec: spec.packed(), chrome: subject.chrome })
 }
 /// Parses one compound from `*i` to the next combinator or the input end.
 fn parse_compound(
@@ -279,6 +329,7 @@ fn parse_compound(
     let b = sel.as_bytes();
     let mut spec = Spec::default();
     let mut tag = Tag::None;
+    let mut chrome = Chrome::None;
     let tests_at = pool.tests.len() as u32;
     let pseudos_at = pool.pseudos.len() as u32;
     let mut parts = 0usize;
@@ -287,6 +338,9 @@ fn parse_compound(
             break;
         }
         match b[*i] {
+            b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'+' | b'~' | b',' => break,
+            // A chrome class must stand alone. See [`Chrome`].
+            _ if chrome != Chrome::None => return None,
             b'[' => {
                 let close = end_of(b, *i, b'[', b']')?;
                 let test = parse_test(&sel[*i + 1..close - 1], pool)?;
@@ -299,11 +353,22 @@ fn parse_compound(
                 pool.pseudos.push(pseudo);
                 spec.add(part);
             }
-            // Structured content cannot expose a class, an id, a universal
-            // selector, a namespace, or an unresolved nesting marker.
+            // Structured content has no `class` attribute. A rule can reach a
+            // class only on Yomitan's image chrome and only as a whole
+            // compound. The compiler drops every other class.
+            b'.' => {
+                if parts > 0 {
+                    return None;
+                }
+                let end = end_of_ident(b, *i + 1);
+                chrome = chrome_of(&sel[*i + 1..end])?;
+                spec.b += 1;
+                *i = end;
+            }
+            // Structured content cannot expose an id, a universal selector,
+            // a namespace, or an unresolved nesting marker.
             // The compiler drops the rule for each form.
-            b'.' | b'#' | b'*' | b'|' | b'&' => return None,
-            b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'+' | b'~' | b',' => break,
+            b'#' | b'*' | b'|' | b'&' => return None,
             _ => {
                 if tag != Tag::None || parts > 0 {
                     // This grammar rejects a second tag name and a tag after
@@ -328,6 +393,7 @@ fn parse_compound(
         Compound {
             combinator,
             tag,
+            chrome,
             tests: Span { at: tests_at, len: pool.tests.len() as u32 - tests_at },
             pseudos: Span { at: pseudos_at, len: pool.pseudos.len() as u32 - pseudos_at },
         },
@@ -546,6 +612,20 @@ fn tag_of(name: &str) -> Option<Tag> {
     crate::dict::gloss::tag_for(&name.to_ascii_lowercase())
 }
 
+/// Returns the chrome element that a class token names.
+///
+/// [`IMAGE_CHROME_CLASSES`](super::IMAGE_CHROME_CLASSES) contains the names,
+/// and the census reads that array. A class outside that list cannot match a
+/// node in this tree, so the compiler drops its rule. CSS treats class names
+/// as case-sensitive, so this function compares them exactly.
+fn chrome_of(name: &str) -> Option<Chrome> {
+    Some(match name {
+        "gloss-image-link" => Chrome::Link,
+        "gloss-image-container" | "gloss-image" => Chrome::Container,
+        _ => return None,
+    })
+}
+
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
     while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\r' | b'\n') {
         i += 1;
@@ -666,7 +746,13 @@ fn matches_at(
 }
 
 fn compound_matches(pool: &Pool, c: &Compound, ctx: &Ctx<'_>, id: NodeId) -> bool {
-    if c.tag != Tag::None && ctx.doc.node(id).tag != c.tag {
+    let node = ctx.doc.node(id);
+    if c.tag != Tag::None && node.tag != c.tag {
+        return false;
+    }
+    // Each image node owns its three chrome elements, so another node cannot
+    // match the chrome.
+    if c.chrome != Chrome::None && node.kind != Kind::Image {
         return false;
     }
     let tests = &pool.tests[c.tests.at as usize..(c.tests.at + c.tests.len) as usize];

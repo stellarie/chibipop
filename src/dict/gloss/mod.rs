@@ -320,6 +320,29 @@ pub enum StyleKey {
     PaddingRight,
     PaddingBottom,
     PaddingLeft,
+    /// The stylesheet-only size of an image box.
+    ///
+    /// The schema has no `width` style. Yomitan sizes a picture through the
+    /// chrome around an image node. A Dictionary's `styles.css` reaches that
+    /// chrome by class. 明鏡国語辞典 leaves each gaiji node unsized and sets
+    /// `width: 15em !important` on `.gloss-image-container`. Without this key,
+    /// that gaiji takes the 1024 px of its SVG. `dict::sheet` folds the three
+    /// keys from those rules onto an image node only.
+    ///
+    /// The value's `em` is the em of the *container*. Yomitan sets it to one
+    /// base pixel unless the node declares `sizeUnits: "em"`. `ui::layout::image`
+    /// resolves it. This key comes from `.gloss-image-container` or
+    /// `.gloss-image`.
+    ImageWidth,
+    /// A cap on an image box from `.gloss-image-container` or `.gloss-image`,
+    /// in the same em as [`ImageWidth`](Self::ImageWidth).
+    ImageMaxWidth,
+    /// A cap on an image box from `.gloss-image-link`.
+    ///
+    /// The link inherits the font size of the text around the picture. This
+    /// value's `em` is that text's em. 旺文社漢字典 caps a gaiji at `1em` this
+    /// way. A separate key keeps the two ems apart.
+    ImageLinkMaxWidth,
 }
 
 /// The editorial purpose that renderers use to filter a node.

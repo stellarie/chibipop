@@ -14,7 +14,7 @@
 //! (see ARCHITECTURE.md#popup-and-measurement).
 //! A replaced element occupies a line only as a span that the measurer charges for.
 
-use crate::dict::gloss::{GlossDoc, NodeId, NodePath, Scalar};
+use crate::dict::gloss::{GlossDoc, NodeId, NodePath, Scalar, StyleKey};
 use crate::dict::media::{Intrinsic, MediaKey};
 use super::flow::{Ctx, Flow};
 use super::gloss::{Paragraphs, ITEM_SEPARATOR};
@@ -23,7 +23,7 @@ use super::ruby::RUBY_FILLER;
 use super::scene::{
     Align, Appearance, ElemKind, ElemSpan, GlossOrigin, SceneElem, SceneImage, SceneRect,
 };
-use super::style::{finite, shift_on, Inline};
+use super::style::{css_len, finite, shift_on, Ems, Inline, YOMITAN_BASE_PX};
 
 /// Computes the room that each image needs in a paragraph.
 ///
@@ -223,6 +223,9 @@ pub(super) fn place_images(
 ///
 /// Yomitan sets `max-width: 100%` on the image link box, `.gloss-image-link`, and
 /// on `.gloss-image-container`.
+/// A dictionary stylesheet can lower the link's share. 大辞泉 caps each
+/// illustration at `70%`. [`FlowImage::fit`] carries that share, and this
+/// function fits the picture into that share of the room, not the whole room.
 /// It clips overflow with `overflow: hidden`, so the picture keeps its proportions.
 /// This build applies no clip.
 /// Its painters stretch an asset into the received rect.
@@ -234,6 +237,7 @@ pub(super) fn place_images(
 ///
 /// [`Pass::columns`]: super::pass::Pass::columns
 pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
+    let room = room * img.fit;
     if !(img.w > room && room > 0.0) {
         return (img.w, img.h);
     }
@@ -265,6 +269,7 @@ pub(super) fn image_rise(img: &FlowImage, line: LineBox, room: f32) -> f32 {
 /// The ladder tries the node declaration, the recorded intrinsic size, and a square of the text.
 /// No rung decodes the image.
 /// The build reads intrinsic size from the container header at extraction.
+/// A dictionary stylesheet can change the result. [`Paragraphs::sheet_box`] applies it.
 ///
 /// The two middle match arms handle a common form.
 /// 字通 and 三省堂 write `height: 1em` without a width.
@@ -279,15 +284,10 @@ pub(super) fn image_size(
     em: f32,
     recorded: Option<Intrinsic>,
 ) -> (f32, f32) {
-    // `em` multiplies the size of the text that contains the image.
-    // `px` represents one scene pixel.
-    // An absent `sizeUnits` field uses `em`.
-    // The schema treats numeric lengths as em multipliers by convention.
-    // [`length_px`] uses that convention, and Yomitan renders `width`/`height` as ems.
-    let unit = match doc.attr_of(id, "sizeUnits").and_then(|v| doc.scalar_str(v)) {
-        Some("px") => 1.0,
-        _ => em,
-    };
+    // Yomitan resolves a declared length in the em of its image container.
+    // That em is one base pixel unless the node declares `sizeUnits: "em"`.
+    // This build reads that pixel as one scene pixel. See [`sized_in_em`].
+    let unit = if sized_in_em(doc, id) { em } else { 1.0 };
     let declared = |name| image_len(doc, id, name).map(|n| (n * unit).min(IMAGE_MAX_PX));
     let aspect = recorded.map(|size| size.aspect).filter(|a| a.is_finite() && *a > 0.0);
     match (declared("width"), declared("height")) {
@@ -299,6 +299,49 @@ pub(super) fn image_size(
             None => (em * IMAGE_FALLBACK_EM, em * IMAGE_FALLBACK_EM),
         },
     }
+}
+
+/// Reports whether Yomitan resolves this image's lengths in the em of its text.
+///
+/// Yomitan gives the image container a font size of one base pixel.
+/// It switches the container to the text's em only when the node declares
+/// `sizeUnits: "em"` beside a `width` or a `height`.
+/// A `sizeUnits` with no length leaves the pixel in place.
+/// The node's own lengths and a stylesheet length on the container follow one rule,
+/// so [`image_size`] and [`Paragraphs::sheet_box`] both read this function.
+pub(super) fn sized_in_em(doc: &GlossDoc, id: NodeId) -> bool {
+    doc.attr_of(id, "sizeUnits").and_then(|v| doc.scalar_str(v)) == Some("em")
+        && (image_len(doc, id, "width").is_some() || image_len(doc, id, "height").is_some())
+}
+
+/// One stylesheet length on an image box.
+enum SheetLen {
+    /// Pixels, clamped at [`IMAGE_MAX_PX`].
+    Px(f32),
+    /// This value is the share of the room that a percentage sets.
+    /// `1.0` is the whole room.
+    Share(f32),
+}
+
+/// Reads one stylesheet length for an image box.
+///
+/// [`css_len`] resolves `em`, `rem`, and `px` against `em`.
+/// A percentage on a box width is a share of the containing block, not of the font size.
+/// Therefore this function reads a percentage first.
+/// CSS drops a length with no unit, such as the `max-width: 75` in 小学館例解学習国語.
+/// [`css_len`] treats that number as an em count, as it does for the schema's
+/// numeric fields. This function therefore requires a unit.
+/// A negative length is invalid, and CSS drops it too.
+fn sheet_len(doc: &GlossDoc, value: Scalar, em: Ems) -> Option<SheetLen> {
+    let text = doc.scalar_str(value)?.trim();
+    if let Some(pct) = text.strip_suffix('%') {
+        let share = pct.trim().parse::<f32>().ok()? / 100.0;
+        return finite(share).filter(|s| *s >= 0.0).map(SheetLen::Share);
+    }
+    if !text.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    css_len(text, em).filter(|px| *px >= 0.0).map(|px| SheetLen::Px(px.min(IMAGE_MAX_PX)))
 }
 
 /// Returns one declared length as a bare number.
@@ -476,6 +519,9 @@ pub(super) struct FlowImage {
     /// Resolved box in the panel's own pixels.
     pub(super) w: f32,
     pub(super) h: f32,
+    /// A stylesheet percentage sets the share of the room that the box can fill.
+    /// `1.0` is the whole room. [`image_box`] fits the box into this share.
+    pub(super) fit: f32,
     /// The em value that sizes the image.
     /// The `4em` tint bound uses this value.
     pub(super) em: f32,
@@ -520,7 +566,7 @@ impl Paragraphs<'_> {
             .and_then(|v| doc.scalar_str(v))
             .filter(|p| !p.is_empty());
         let recorded = path.and_then(|p| self.assets.size(p));
-        let (w, h) = image_size(doc, id, style.size, recorded);
+        let (w, h, fit) = self.sheet_box(id, style.size, image_size(doc, id, style.size, recorded));
         let alt = image_alt(doc, id);
         // "Show images: off" selects the text rung instead of node removal.
         // `alt` is the HTML text alternative for this case.
@@ -558,6 +604,7 @@ impl Paragraphs<'_> {
             FlowImage {
                 w,
                 h,
+                fit,
                 em: style.size,
                 style,
                 spacers: image_spacers(w, h),
@@ -567,6 +614,68 @@ impl Paragraphs<'_> {
             },
             ctx.link,
         );
+    }
+
+    /// Applies the dictionary stylesheet to one resolved image box.
+    ///
+    /// The size ladder reads the node and the media row. Neither knows the
+    /// stylesheet, and 明鏡国語辞典 sizes every gaiji there alone. Its node declares
+    /// no size, its SVG has a 1024 px `viewBox`, and its `styles.css` sets
+    /// `width: 15em !important` on `.gloss-image-container`.
+    /// Without this step, the gaiji fills the column.
+    ///
+    /// `dict::sheet` folds three keys onto an image node, and onto no other node.
+    /// [`StyleKey::ImageWidth`] replaces the width, and the height follows.
+    /// Yomitan derives the container's height from its width through a padding ratio,
+    /// so a resized picture keeps its proportions.
+    /// The two `max-width` keys cap the width the same way.
+    /// A length in `em` resolves against the element that carried it.
+    /// The container's em is one Yomitan base pixel unless the node asks for `em`
+    /// ([`sized_in_em`]). The link's em is the text's em.
+    /// A percentage is a share of the room, which this walk does not know yet.
+    /// The method returns that share, and [`image_box`] applies it.
+    /// A percentage `width` on the container has no meaning without the link's
+    /// width, so it does nothing.
+    ///
+    /// The first record entry for a key wins, as in every other reader.
+    /// The `"honour dictionary styling"` setting gates the record through
+    /// [`Paragraphs::declarations`], so the setting also turns this step off.
+    fn sheet_box(&self, id: NodeId, em: f32, (w, h): (f32, f32)) -> (f32, f32, f32) {
+        let doc = self.doc;
+        let text = self.ems(em);
+        let container = self.ems(if sized_in_em(doc, id) { em } else { em / YOMITAN_BASE_PX });
+        let (mut w, mut h) = (w, h);
+        let mut cap = f32::INFINITY;
+        let mut fit = 1.0f32;
+        let record = self.declarations(id);
+        for (i, (key, value)) in record.iter().enumerate() {
+            if record[..i].iter().any(|(seen, _)| seen == key) {
+                continue;
+            }
+            let ems = match key {
+                StyleKey::ImageWidth | StyleKey::ImageMaxWidth => container,
+                StyleKey::ImageLinkMaxWidth => text,
+                _ => continue,
+            };
+            let Some(len) = sheet_len(doc, *value, ems) else { continue };
+            match (key, len) {
+                (StyleKey::ImageWidth, SheetLen::Px(px)) => {
+                    let scale = px / w;
+                    if scale.is_finite() {
+                        h *= scale;
+                        w = px;
+                    }
+                }
+                (StyleKey::ImageWidth, SheetLen::Share(_)) => {}
+                (_, SheetLen::Px(px)) => cap = cap.min(px),
+                (_, SheetLen::Share(share)) => fit = fit.min(share),
+            }
+        }
+        if w > cap {
+            h *= cap / w;
+            w = cap;
+        }
+        (w, h, fit)
     }
 
     /// Reserves room for one image on its line.

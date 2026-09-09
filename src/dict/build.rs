@@ -2587,7 +2587,7 @@ mod tests {
     #[test]
     fn a_build_stores_the_stylesheet_and_reports_what_it_dropped() {
         let css = "span[data-sc-fbox] { padding: 0.1em }\n\
-                   .gloss-image { border: 1px }\n\
+                   .gaiji { border: 1px }\n\
                    @media (max-width: 500px) { span { color: red } }\n";
         let archive = styled_archive("stores_styles", css);
         let out = out_path("stores_styles");
@@ -2607,7 +2607,7 @@ mod tests {
         assert_eq!(1, counts.styles.sheets);
         assert_eq!(css.len(), counts.styles.bytes);
         assert_eq!(1, counts.styles.kept, "the fbox rule");
-        assert_eq!(2, counts.styles.dropped, "a chrome class, and an at-rule body");
+        assert_eq!(2, counts.styles.dropped, "a class outside the image chrome, and an at-rule body");
         assert_eq!(1, counts.styles.selectors);
         assert_eq!(0, counts.styles.malformed);
         let emitted = lines.into_inner();
