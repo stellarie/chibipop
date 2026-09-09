@@ -8,10 +8,11 @@ use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
     band_of, box_orientation, discard_furigana, drop_slivers, grow_short_side, head_and_tail,
-    map_from_upscaled, nearest_line, normalise, region_around, resolve, resolve_wrap,
+    hit_scan, map_from_upscaled, nearest_line, normalise, region_around, resolve, resolve_wrap,
     spans_short_side, tile_forward, trim_probe_edges, wrap_probe, CaptureSize, OcrLine, OcrWord,
     Orientation, Resolved, GROWTH_STEPS,
 };
+use crate::text::ink;
 use crate::text::sentence;
 use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
@@ -76,6 +77,16 @@ pub struct RegionRead {
     pub fallback: Option<String>,
     /// This flag reports that the backend returned the previous grab's pixels.
     pub unchanged: bool,
+    /// The pixels that OCR saw, after the mask and the upscale. The growth rule
+    /// measures ink in them when the engine returns no hit.
+    pub frame: Frame,
+}
+
+/// Return true when the line that answers the hover spans the short side of
+/// `region`. Such a read saw a cut glyph and is not an answer.
+fn hit_line_spans(lines: &[OcrLine], cursor: PhysPoint, scan_alnum: bool, region: PhysRect) -> bool {
+    hit_scan(lines, cursor, scan_alnum)
+        .is_some_and(|(li, _)| spans_short_side(std::slice::from_ref(&lines[li]), region))
 }
 
 /// `PassOne` stores the read that answers pass 1 and every box that pass 1 grabbed.
@@ -316,25 +327,47 @@ impl TextSource {
     /// Return pass 1: its lines and outcome, the box that answered, and every box it
     /// grabbed, in order.
     ///
-    /// The box grows on its short side while a line spans that side, at most
-    /// [`GROWTH_STEPS`] times. A glyph taller than the box comes back cut, as a
-    /// fragment, a misread, or nothing (issue #92). A grown box that reads nothing
-    /// still holds that glyph, so an empty read counts as cut and the box grows
-    /// again. The answer is the last read with a hit. A failed growth grab keeps the
-    /// earlier answer, as a failed tile does. The outline draws every box that was
-    /// grabbed, also a grown box that answered nothing.
+    /// The box grows on its short side, at most [`GROWTH_STEPS`] times, while the
+    /// box is too small for the text under the cursor (issue #92):
+    ///
+    /// - A recognized line spans the short side. The glyph is at least as tall as the
+    ///   box, and the engine returned a fragment or a misread.
+    /// - No hit, and ink under the cursor spans the configured short side
+    ///   ([`ink::spans_short_side`]). The engine returned nothing for a large glyph.
+    /// - A grown box read nothing. It still holds the glyph.
+    ///
+    /// A cut read is not an answer: its hit line spans the box, and the engine read a
+    /// cut glyph. The answer is the last read whose hit line does not span its box.
+    /// When no read qualifies, the last read stands, with or without a hit. A failed
+    /// growth grab stops the growth. The outline draws every box that was grabbed.
     fn resolve_at_verbose(&mut self, cursor: PhysPoint, mask: CaptureMask) -> Result<PassOne> {
+        let reference = self.settings.capture.short();
+        let factor = self.settings.upscale;
+        let alnum = self.settings.scan_alphanumeric;
+        let uncut_hit = |read: &RegionRead, region: PhysRect| {
+            read.resolved.is_some() && !hit_line_spans(&read.lines, cursor, alnum, region)
+        };
         let mut region = region_around(cursor, self.settings.prefer_vertical, self.settings.capture);
         let mut boxes = vec![region];
         let mut read = self.resolve_in_region(cursor, region, mask)?;
         let mut best: Option<(RegionRead, PhysRect)> = None;
-        let mut cut = spans_short_side(&read.lines, region);
-        for _ in 0..GROWTH_STEPS {
+        // A frozen hold reads without a mask, as `recognise_at_capture` does.
+        let masked = if self.frozen.is_some() { CaptureMask::NONE } else { mask };
+        for step in 0..GROWTH_STEPS {
+            let ink_spans = || {
+                let popup: Vec<PhysRect> = masked
+                    .overlap_in(region)
+                    .map(|r| PhysRect { x: r.x * factor, y: r.y * factor, w: r.w * factor, h: r.h * factor })
+                    .collect();
+                ink::spans_short_side(&read.frame, region, cursor, factor, reference, &popup)
+            };
+            let cut = spans_short_side(&read.lines, region)
+                || (step > 0 && read.lines.is_empty())
+                || (read.resolved.is_none() && ink_spans());
             if !cut {
                 break;
             }
-            let bounds = self.capture.bounds_containing(cursor);
-            let Some(grown) = grow_short_side(region, bounds) else { break };
+            let grown = grow_short_side(region);
             let next = match self.resolve_in_region(cursor, grown, mask) {
                 Ok(next) => next,
                 Err(e) => {
@@ -342,16 +375,15 @@ impl TextSource {
                     break;
                 }
             };
-            if read.resolved.is_some() {
+            if uncut_hit(&read, region) {
                 best = Some((read, region));
             }
             read = next;
             region = grown;
             boxes.push(region);
-            cut = read.lines.is_empty() || spans_short_side(&read.lines, region);
         }
         let (read, region) = match best {
-            Some(best) if read.resolved.is_none() => best,
+            Some(best) if !uncut_hit(&read, region) => best,
             _ => (read, region),
         };
         Ok(PassOne { lines: read.lines, resolved: read.resolved, region, boxes })
@@ -370,8 +402,9 @@ impl TextSource {
             lines,
             resolved,
             source: frame.source,
-            fallback: frame.fallback,
+            fallback: frame.fallback.clone(),
             unchanged: frame.unchanged,
+            frame,
         })
     }
 

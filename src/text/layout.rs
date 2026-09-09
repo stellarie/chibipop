@@ -283,14 +283,18 @@ pub fn spans_short_side(lines: &[OcrLine], region: PhysRect) -> bool {
     })
 }
 
-/// Return `region` with its short side doubled around the same center, clamped to
-/// `bounds`. Return `None` when the clamp leaves the box as it was.
-pub fn grow_short_side(region: PhysRect, bounds: PhysRect) -> Option<PhysRect> {
-    let grown = match box_orientation(region) {
+/// Return `region` with its short side doubled around the same center.
+///
+/// The box is not clamped to the output. Pass 1's own box is not clamped either, and
+/// a backend fills pixels outside the output with black. A clamp would move the
+/// glyph off the box center and shrink the box on one axis. The Linux engine scales a
+/// crop to its detector size, so a narrower box makes every glyph larger there. A
+/// bold 125 px line read in a 500 px wide box and not in a 432 px wide one.
+pub fn grow_short_side(region: PhysRect) -> PhysRect {
+    match box_orientation(region) {
         Orientation::Horizontal => region.inflated(0, region.h / 2),
         Orientation::Vertical => region.inflated(region.w / 2, 0),
-    };
-    clamp_tile(grown, bounds).filter(|clamped| *clamped != region)
+    }
 }
 
 /// A word box thinner than this fraction of its thickness on the reading axis is a

@@ -674,14 +674,17 @@ tile text found past the box replaces the joined wrap, so a hidden wrap is most 
 at 1. If a probe does not join a continuation, chibipop keeps pass 1. The
 `show_scan_region` overlay draws each region as a tile.
 
-The capture box grows when text is taller than it. A glyph at least as tall as
-the box touches both of its long edges, and an engine then returns a fragment, a
-misread, or nothing. When a recognized line spans the short side of the box, the
+The capture box grows when text is taller than it, or when the engine cannot read
+the text in a box that small. A glyph at least as tall as the box touches both of
+its long edges, and an engine then returns a fragment, a misread, or nothing. The
 box doubles on that side around the cursor, at most twice: 100 px becomes 200,
-then 400. A grown box that reads nothing still holds that glyph, so it grows again.
-The first box, and every grown box, appears in the `show_scan_region` overlay.
-Set `capture_height` to your usual line height. Growth covers the large heading
-or the manga panel, and it costs one extra capture and OCR pass per step.
+then 400. It grows when a recognized line spans the short side, when nothing was
+resolved and the ink under the cursor spans most of that side, or when a grown box
+read nothing. A read of a cut glyph is never the answer: the answer comes from a
+box that holds the glyph whole, or the hover shows nothing. The first box, and
+every grown box, appears in the `show_scan_region` overlay. Set `capture_height`
+to your usual line height. Growth covers the large heading or the manga panel, and
+it costs one extra capture and OCR pass per step.
 
 ### `discard_furigana`
 

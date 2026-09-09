@@ -107,11 +107,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   one large glyph as words of their own (issue #92: `新` as `立` over `木`). Two stacked
   words read as a column under a spread-only rule. The wrap probe then starts at the
   top edge of the output, and the forward tile runs below the text.
-- The capture box grows on its short side while a recognized line spans that side,
-  at most twice, doubling each time around the cursor and clamped to the output. A
-  glyph taller than the box comes back as a fragment, a misread, or nothing. A grown
-  box that reads nothing still holds that glyph and grows again. The answer is the
-  last read with a hit. Every grabbed box appears in the outline as a pass-1 box.
+- The capture box grows on its short side, at most twice, doubling each time around
+  the cursor and never clamped, while the box is too small for the text under the
+  cursor: a recognized line spans the short side, or no hit came back and ink under
+  the cursor spans 60 % of the configured short side (`text::ink`), or a grown box
+  read nothing. A glyph taller than the box comes back as a fragment, a misread, or
+  nothing. The Linux engine scales a crop to its detector size, so a large glyph in a
+  small box is too large to detect and a taller box scales it down. A cut read is
+  not an answer: the answer is the last read whose hit line does not span its box.
+  Every grabbed box appears in the outline as a pass-1 box.
 - A word box thinner than one sixteenth of its thickness on the reading axis is a
   sliver, not a glyph. The capture seam drops it. The Linux engine returned a `」` in
   a 4 x 92 box at the right edge of a 100 px `規`.
@@ -277,8 +281,10 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - CI large-text floor: the screens under `tests/fixtures/large-text/` go through
   `TextSource` with the real engine. `新規` at 100, 130, and 160 px and
   `日本語を話す` at 130 px must come back whole from the hovered glyph to the line
-  end, with every scan rect on the hovered line and an anchor that fits the glyph.
-  `scripts/render-large-text.py` renders the screens.
+  end. A news line in BIZ UDPGothic and in Noto Sans CJK, white on black, at 100 px
+  and at 125 px bold, must come back at least to the box edge. Every scan rect stays
+  on the hovered line, and the anchor fits the glyph. `scripts/render-large-text.py`
+  renders the screens.
 - The repository commits models under `crates/chibipop-linux/models/meiki/`. It pins
   their hashes against `SHA256SUMS.txt`. Two steps verify them: `scripts/package-linux.sh`
   when it stages the tarball, and `models::verify` when the engine starts.

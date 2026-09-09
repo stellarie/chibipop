@@ -21,6 +21,8 @@ use crate::text::layout::{
     grow_short_side, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
     Resolved, GROWTH_STEPS, OVERRIDE_WORDS,
 };
+use crate::text::ink;
+use crate::text::layout::resolve;
 use crate::text::{CaptureMask, Frame, OcrEngine, RegionCapture, SettingsSnapshot, TextSource};
 use anyhow::Result;
 use std::cell::{Cell, RefCell};
@@ -119,16 +121,27 @@ fn area(r: PhysRect) -> i64 {
 
 type Grabs = Rc<RefCell<Vec<PhysRect>>>;
 
-/// Return the pixels that a grab of `region` shows: every glyph painted white on
-/// black, so the ink rule can measure what the engine saw.
+/// Return the pixels that a grab of `region` shows, so the ink rule can measure what
+/// the engine saw. A glyph is a white square outline on black: strokes one tenth of
+/// the cell wide, inset by three percent. Its ink spans the cell on both axes, and
+/// most of the cell stays background, as with a real glyph.
 fn page_frame(page: &Page, region: PhysRect) -> Frame {
     let mut buf = vec![0u8; (region.w * region.h * 4) as usize];
+    let inset = (page.glyph * 3 / 100).max(1);
+    let stroke = (page.glyph / 10).max(2);
     for glyph in &page.glyphs {
-        let Some(part) = glyph.rect.intersection(region) else { continue };
+        let g = glyph.rect;
+        let outer = PhysRect { x: g.x + inset, y: g.y + inset, w: g.w - 2 * inset, h: g.h - 2 * inset };
+        let inner = outer.inflated(-stroke, -stroke);
+        let Some(part) = outer.intersection(region) else { continue };
         for y in part.y..part.y + part.h {
-            let row = ((y - region.y) * region.w) as usize * 4;
-            let start = row + (part.x - region.x) as usize * 4;
-            buf[start..start + part.w as usize * 4].fill(0xFF);
+            for x in part.x..part.x + part.w {
+                if inner.contains(PhysPoint { x, y }) {
+                    continue;
+                }
+                let at = (((y - region.y) * region.w) + (x - region.x)) as usize * 4;
+                buf[at..at + 4].fill(0xFF);
+            }
         }
     }
     Frame { buf, w: region.w, h: region.h, source: "page", fallback: None, unchanged: false }
@@ -928,21 +941,24 @@ fn placements(page: &Page) -> Vec<PhysPoint> {
 /// Check that pass 1's boxes follow the growth rule.
 ///
 /// The first box is the configured one. Each next box exists only because a line
-/// spanned the short side of the previous box, or because a grown box read nothing.
-/// It is the previous box grown on its short side. The last box is not cut, or the
-/// step cap or the output edge stopped the growth.
-fn check_growth(page: &Page, boxes: &[PhysRect], context: &str) {
+/// spanned the short side of the previous box, because ink under the cursor spanned
+/// it with no hit, or because a grown box read nothing. It is the previous box grown
+/// on its short side. The last box is not cut, or the step cap stopped the growth.
+fn check_growth(page: &Page, cursor: PhysPoint, boxes: &[PhysRect], context: &str) {
     assert!(!boxes.is_empty() && boxes.len() <= 1 + GROWTH_STEPS, "{context}");
     let cut = |i: usize, rect: PhysRect| {
         let lines = page_lines(page, rect);
-        (i > 0 && lines.is_empty()) || spans_short_side(&lines, rect)
+        (i > 0 && lines.is_empty())
+            || spans_short_side(&lines, rect)
+            || (resolve(&lines, cursor, rect, true).is_none()
+                && ink::spans_short_side(&page_frame(page, rect), rect, cursor, 1, 100, &[]))
     };
     for (i, pair) in boxes.windows(2).enumerate() {
         assert!(cut(i, pair[0]), "{context}: box {i} grew without a spanning line");
-        assert_eq!(Some(pair[1]), grow_short_side(pair[0], page.bounds), "{context}");
+        assert_eq!(pair[1], grow_short_side(pair[0]), "{context}");
     }
     let last = boxes.len() - 1;
-    let stopped = boxes.len() == 1 + GROWTH_STEPS || grow_short_side(boxes[last], page.bounds).is_none();
+    let stopped = boxes.len() == 1 + GROWTH_STEPS;
     assert!(!cut(last, boxes[last]) || stopped, "{context}: the last box is still cut");
 }
 
@@ -979,7 +995,7 @@ fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
     let Some(resolved) = resolved else {
         assert!(scan.is_empty(), "{context}");
         assert_eq!(grabs.first(), Some(&pass1), "{context}");
-        check_growth(page, &grabs, &context);
+        check_growth(page, cursor, &grabs, &context);
         return;
     };
 
@@ -987,7 +1003,7 @@ fn check_placement(page: &Rc<Page>, settings: Settings, cursor: PhysPoint) {
     let boxes: Vec<PhysRect> =
         scan.iter().take_while(|s| s.kind == ScanKind::Pass1).map(|s| s.rect).collect();
     assert_eq!(boxes.first(), Some(&pass1), "{context}");
-    check_growth(page, &boxes, &context);
+    check_growth(page, cursor, &boxes, &context);
     let last = scan[scan.len() - 1];
     assert_eq!(last.kind, ScanKind::Anchor, "{context}");
     let anchor = last.rect;
