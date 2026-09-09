@@ -910,6 +910,16 @@ fn a_cut_glyph_is_not_the_answer_when_a_grown_box_reads_it_whole() {
     read_whole(large("katsu_biz_bold_125"));
 }
 
+/// Cursor placement. A cursor near the top or the bottom of a large glyph puts the
+/// box edge through the glyph. The engine then returns garbage that fits the box,
+/// such as `サ千子ペナ` for the top half of `活発な`. A hit word that touches one
+/// edge of the box and is at least half the box thick is a cut read, not an answer.
+#[test]
+fn a_cursor_near_the_top_or_bottom_of_a_large_glyph_still_reads_it_whole() {
+    read_whole(large("katsu_biz_110_top"));
+    read_whole(large("katsu_biz_110_bottom"));
+}
+
 /// The scan rects stay on the hovered line, and the anchor outlines the glyph.
 #[test]
 fn large_text_scan_rects_face_the_hovered_line() {

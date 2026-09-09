@@ -18,7 +18,7 @@
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::present::{match_highlight, Card, HIGHLIGHT_PAD};
 use crate::text::layout::{
-    grow_short_side, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
+    grow, hit_scan, spans_short_side, CaptureSize, OcrLine, OcrWord, Orientation,
     Resolved, GROWTH_STEPS, OVERRIDE_WORDS,
 };
 use crate::text::ink;
@@ -616,9 +616,9 @@ fn a_column_with_prefer_vertical_pays_one_probe_from_the_top_edge() {
 }
 
 /// The first box shows 本 and を cut to 30 px around 語. The column spans the box's
-/// short side, so the box grows to 200 and then 400 tall, where the whole column
-/// fits. Six words override the horizontal box. The column probe then runs from
-/// the top edge, as for a vertical box.
+/// short side, so the box zooms out to 1000 x 200 and then to the output width and
+/// 400 tall, where the whole column fits. Six words override the horizontal box.
+/// The column probe then runs from the top edge, as for a vertical box.
 #[test]
 fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
     let page = column(S);
@@ -630,15 +630,15 @@ fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
         kinds(&scan),
         [
             (ScanKind::Pass1, r(670, 350, 500, 100)),
-            (ScanKind::Pass1, r(670, 300, 500, 200)),
-            (ScanKind::Pass1, r(670, 200, 500, 400)),
+            (ScanKind::Pass1, r(420, 300, 1000, 200)),
+            (ScanKind::Pass1, r(0, 200, 1920, 400)),
             (ScanKind::Tile, r(680, 0, 270, 560)),
             (ScanKind::Anchor, r(900, 380, 40, 40)),
         ]
     );
     assert_eq!(
         *grabs.borrow(),
-        [r(670, 350, 500, 100), r(670, 300, 500, 200), r(670, 200, 500, 400), r(680, 0, 270, 560)]
+        [r(670, 350, 500, 100), r(420, 300, 1000, 200), r(0, 200, 1920, 400), r(680, 0, 270, 560)]
     );
     let resolved = resolved.expect("hit");
     assert_eq!(resolved.orientation, Orientation::Vertical);
@@ -648,9 +648,9 @@ fn a_column_in_a_horizontal_box_grows_the_box_until_the_column_fits() {
 
 /// Issue #92 at 120 px. The 100 px box shows 本, 語, and を cut to 100 px tall, and
 /// drops 日 and 話, which it cuts to 70 px wide and 100 tall. The line spans the
-/// box's short side, so the box grows once to 200 tall. There the three glyphs fit,
-/// and 日 and 話 come back as 70 px wide cut boxes. The line now ends at the box
-/// edge, so no probe runs. The anchor is the whole glyph.
+/// box's short side, so the box zooms out once to 1000 x 200. There the line fits
+/// whole, and 。 comes back cut to 80 px at the box edge. The separator stops the
+/// lookup, so no probe runs. The anchor is the whole glyph.
 #[test]
 fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
     let page = short_stop(120);
@@ -662,31 +662,34 @@ fn a_glyph_taller_than_the_box_grows_the_box_until_it_fits() {
         kinds(&scan),
         [
             (ScanKind::Pass1, r(850, 490, 500, 100)),
-            (ScanKind::Pass1, r(850, 440, 500, 200)),
+            (ScanKind::Pass1, r(600, 440, 1000, 200)),
             (ScanKind::Anchor, r(1040, 480, 120, 120)),
         ]
     );
-    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(850, 440, 500, 200)]);
+    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(600, 440, 1000, 200)]);
     let resolved = resolved.expect("hit");
-    assert_eq!(resolved.span.text, "日本語を話");
+    assert_eq!(resolved.span.text, "日本語を話す。");
     assert_eq!(resolved.span.cursor_byte_offset, 6);
     let rects: Vec<PhysRect> = resolved.span.geom.iter().map(|g| g.rect).collect();
     assert_eq!(
         rects,
         [
-            r(850, 480, 70, 120),
+            r(800, 480, 120, 120),
             r(920, 480, 120, 120),
             r(1040, 480, 120, 120),
             r(1160, 480, 120, 120),
-            r(1280, 480, 70, 120),
+            r(1280, 480, 120, 120),
+            r(1400, 480, 120, 120),
+            r(1520, 480, 80, 120),
         ]
     );
 }
 
 /// Issue #92 follow-up: a 100 px line in a 100 px box, and an engine that returns
 /// no words at 100 and 200 px. Nothing spans the box, because nothing was read. The
-/// ink under the cursor spans the box's short side, so the box grows. The empty read
-/// at 200 px grows it again. At 400 px the engine reads the line.
+/// ink under the cursor spans the box's short side, so the box zooms out. The empty
+/// read at 200 px zooms it out again, to the output width. At 400 px the engine
+/// reads the whole line, and its separator stops the lookup.
 #[test]
 fn a_glyph_the_engine_cannot_read_in_a_small_box_grows_the_box_on_ink() {
     let mut page = Page::new("blind_small", LARGE);
@@ -701,14 +704,14 @@ fn a_glyph_the_engine_cannot_read_in_a_small_box_grows_the_box_on_ink() {
         kinds(&scan),
         [
             (ScanKind::Pass1, r(800, 480, 500, 100)),
-            (ScanKind::Pass1, r(800, 430, 500, 200)),
-            (ScanKind::Pass1, r(800, 330, 500, 400)),
+            (ScanKind::Pass1, r(550, 430, 1000, 200)),
+            (ScanKind::Pass1, r(0, 330, 1920, 400)),
             (ScanKind::Anchor, r(1000, 480, 100, 100)),
         ]
     );
-    assert_eq!(*grabs.borrow(), [r(800, 480, 500, 100), r(800, 430, 500, 200), r(800, 330, 500, 400)]);
+    assert_eq!(*grabs.borrow(), [r(800, 480, 500, 100), r(550, 430, 1000, 200), r(0, 330, 1920, 400)]);
     let resolved = resolved.expect("hit");
-    assert_eq!(resolved.span.text, "日本語を話");
+    assert_eq!(resolved.span.text, "日本語を話す。");
     assert_eq!(resolved.span.cursor_byte_offset, 6);
 }
 
@@ -727,7 +730,32 @@ fn a_cut_read_is_not_the_answer_when_no_grown_box_reads_the_glyph() {
 
     assert!(resolved.is_none(), "{:?}", kinds(&scan));
     assert!(scan.is_empty());
-    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(850, 440, 500, 200), r(850, 340, 500, 400)]);
+    assert_eq!(*grabs.borrow(), [r(850, 490, 500, 100), r(600, 440, 1000, 200), r(0, 340, 1920, 400)]);
+}
+
+/// Cursor placement. A cursor 10 px below the top of a 100 px glyph puts the box's
+/// bottom edge through the row. Every glyph comes back cut to 60 px, and the cut
+/// hit touches that edge with more than half the box's thickness. That is a cut
+/// read. The box zooms out once, and the whole row fits.
+#[test]
+fn a_cursor_near_the_top_of_a_large_glyph_grows_the_box() {
+    let page = short_stop(LARGE);
+    let settings = Settings { max_passes: 1, prefer_vertical: false };
+    let (mut source, grabs) = fixture(&page, settings);
+    let (resolved, scan, _) = read(&mut source, pt(1050, 490));
+
+    assert_eq!(
+        kinds(&scan),
+        [
+            (ScanKind::Pass1, r(800, 440, 500, 100)),
+            (ScanKind::Pass1, r(550, 390, 1000, 200)),
+            (ScanKind::Anchor, r(1000, 480, 100, 100)),
+        ]
+    );
+    assert_eq!(*grabs.borrow(), [r(800, 440, 500, 100), r(550, 390, 1000, 200)]);
+    let resolved = resolved.expect("hit");
+    assert_eq!(resolved.span.text, "日本語を話す。");
+    assert_eq!(resolved.span.cursor_byte_offset, 6);
 }
 
 #[test]
@@ -855,8 +883,8 @@ fn a_large_glyph_split_in_two_stacked_parts_keeps_the_scan_on_its_row() {
 }
 
 /// Three stacked parts outnumber two, but their union is one square glyph cell,
-/// not a column. That union spans the box's short side, so the box grows once to
-/// 200 tall. The probe band is 33 thick: 24 above and 198 below y 539.
+/// not a column. That union spans the box's short side, so the box zooms out once
+/// to 1000 x 200. The probe band is 33 thick: 24 above and 198 below y 539.
 #[test]
 fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
     let page = three_part_line();
@@ -870,7 +898,7 @@ fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
         kinds(&scan),
         [
             (ScanKind::Pass1, r(700, 490, 500, 100)),
-            (ScanKind::Pass1, r(700, 440, 500, 200)),
+            (ScanKind::Pass1, r(450, 440, 1000, 200)),
             (ScanKind::Tile, r(0, 515, 1000, 222)),
             (ScanKind::Tile, r(500, 515, 516, 222)),
             (ScanKind::Anchor, r(900, 515, 100, 50)),
@@ -878,7 +906,7 @@ fn a_large_glyph_split_in_three_stacked_parts_keeps_the_scan_on_its_row() {
     );
     assert_eq!(
         *grabs.borrow(),
-        [r(700, 490, 500, 100), r(700, 440, 500, 200), r(0, 515, 1000, 222), r(500, 515, 516, 222)]
+        [r(700, 490, 500, 100), r(450, 440, 1000, 200), r(0, 515, 1000, 222), r(500, 515, 516, 222)]
     );
     assert_eq!(resolved.span.text, "立日心");
 }
@@ -955,7 +983,7 @@ fn check_growth(page: &Page, cursor: PhysPoint, boxes: &[PhysRect], context: &st
     };
     for (i, pair) in boxes.windows(2).enumerate() {
         assert!(cut(i, pair[0]), "{context}: box {i} grew without a spanning line");
-        assert_eq!(pair[1], grow_short_side(pair[0]), "{context}");
+        assert_eq!(pair[1], grow(pair[0], page.bounds), "{context}");
     }
     let last = boxes.len() - 1;
     let stopped = boxes.len() == 1 + GROWTH_STEPS;
