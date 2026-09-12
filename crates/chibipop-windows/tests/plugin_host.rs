@@ -88,6 +88,7 @@ fn concrete_plugin_strikes_report_unavailability_and_keep_the_served_language() 
 
     let manifest = fixture("crash");
     let host = host::spawn(&manifest, std::path::Path::new(".")).unwrap();
+    let direct = Probe::open(host.pid());
     let monitor = OcrMonitor::default();
     let mut plugin = PluginText::new(host, &manifest).with_monitor(monitor.clone());
     plugin.set_language("ko");
@@ -97,6 +98,11 @@ fn concrete_plugin_strikes_report_unavailability_and_keep_the_served_language() 
         assert!(plugin.recognise(&[0, 0, 0, 255], 1, 1).is_err());
     }
     assert!(plugin.disabled());
+    let until = Instant::now() + Duration::from_secs(5);
+    while direct.alive() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!direct.alive(), "strike-disabled host is still running");
     let status = monitor.snapshot();
     assert!(!status.available);
     assert_eq!("echo", status.engine);
@@ -136,6 +142,8 @@ fn a_deaf_plugin_times_out_instead_of_blocking_the_writer() {
 fn dropping_the_host_kills_the_grandchild_too() {
     let m = fixture("tree");
     let mut h = host::spawn(&m, std::path::Path::new(".")).unwrap();
+    let direct_pid = h.pid();
+    let direct = Probe::open(direct_pid);
     let v = h
         .call("echo/grandchild", serde_json::json!({}), Duration::from_secs(2))
         .unwrap();
@@ -148,6 +156,21 @@ fn dropping_the_host_kills_the_grandchild_too() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!probe.alive(), "the grandchild {pid} outlived its host");
+    assert!(!direct.alive(), "the host {direct_pid} outlived its owner");
+}
+
+#[test]
+fn repeated_shutdown_reaps_the_direct_child() {
+    let m = fixture("ok");
+    let mut h = host::spawn(&m, std::path::Path::new(".")).unwrap();
+    let direct = Probe::open(h.pid());
+    h.shutdown();
+    h.shutdown();
+    let until = Instant::now() + Duration::from_secs(5);
+    while direct.alive() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!direct.alive(), "repeated shutdown left the host running");
 }
 
 /// This check needs the host to move to a worker thread.

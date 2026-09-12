@@ -765,6 +765,8 @@ pub const FIELD_SOURCES: [&str; 8] = [
 #[serde(default)]
 pub struct AnkiConfig {
     pub enabled: bool,
+    /// Updates one exact duplicate note when enabled.
+    pub overwrite_duplicates: bool,
     /// The AnkiConnect URL. The default is the local AnkiConnect endpoint.
     pub url: String,
     /// The deck name. The default is `"Default"`.
@@ -815,6 +817,7 @@ impl Default for AnkiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            overwrite_duplicates: false,
             url: "http://localhost:8765".to_string(),
             deck: "Default".to_string(),
             model: "Lapis".to_string(),
@@ -936,15 +939,6 @@ pub struct ScreenshotWindow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScreenshotConfig {
-    /// The screenshot shortcut. The default is `ctrl+shift+s`.
-    pub hotkey: String,
-    /// The same action on Linux. No value leaves the action unbound.
-    ///
-    /// Linux chords use portal syntax, like `anki.add_key_linux`.
-    /// Linux requests direct portal registration or supplies a native control-socket bind.
-    /// The field uses `Option`, like the OCR-clipboard twin.
-    /// Absence stays distinct from an empty string.
-    pub hotkey_linux: Option<String>,
     /// The screenshot folder. The default is `screenshots`.
     pub save_dir: String,
     pub include_on_add: bool,
@@ -985,8 +979,6 @@ impl Default for ActionsConfig {
 impl Default for ScreenshotConfig {
     fn default() -> Self {
         Self {
-            hotkey: "ctrl+shift+s".to_string(),
-            hotkey_linux: None,
             save_dir: "screenshots".to_string(),
             include_on_add: false,
             capture_mode: ScreenshotMode::default(),
@@ -1039,7 +1031,6 @@ pub enum HotkeyAction {
     Trigger,
     AnkiAdd,
     StaticRegion,
-    Screenshot,
     OcrClipboard,
     Search,
     SentenceSearch,
@@ -1053,7 +1044,6 @@ impl HotkeyAction {
             Self::Trigger => "Lookup",
             Self::AnkiAdd => "Add current result to Anki",
             Self::StaticRegion => "Set sentence area",
-            Self::Screenshot => "Save screenshot",
             Self::OcrClipboard => "Copy text from screen",
             Self::Search => "Open dictionary search",
             Self::SentenceSearch => "Open sentence search",
@@ -1064,8 +1054,7 @@ impl HotkeyAction {
 
 fn windows_hotkeys_overlap(a: HotkeyAction, first: &str, b: HotkeyAction, second: &str) -> bool {
     let parse = |action, key| match action {
-        HotkeyAction::Screenshot | HotkeyAction::Search | HotkeyAction::SentenceSearch
-        | HotkeyAction::SelectedText =>
+        HotkeyAction::Search | HotkeyAction::SentenceSearch | HotkeyAction::SelectedText =>
             parse_hotkey(key).map(|(vk, mods)| (vk, Some(mods))),
         HotkeyAction::Back | HotkeyAction::Trigger | HotkeyAction::AnkiAdd =>
             parse_trigger_key(key).map(|vk| (vk, None)),
@@ -1108,11 +1097,6 @@ impl Config {
                 !key.trim().is_empty() && parse_hotkey(key).is_none()) {
             anyhow::bail!("Selected text shortcut is invalid. Press a key or key combination.");
         }
-        if platform == Platform::Windows && self.actions.enabled
-            && !self.actions.screenshot.hotkey.trim().is_empty()
-            && parse_hotkey(&self.actions.screenshot.hotkey).is_none() {
-            anyhow::bail!("Screenshot shortcut is invalid. Use a key such as F5 or Ctrl+Shift+S.");
-        }
         if let Some((first, second)) = self.hotkey_conflicts(platform).first() {
             anyhow::bail!("{} conflicts with {}. Choose different keys.", second.name(), first.name());
         }
@@ -1122,18 +1106,17 @@ impl Config {
     pub fn hotkey_conflicts(&self, platform: Platform) -> Vec<(HotkeyAction, HotkeyAction)> {
         use HotkeyAction::*;
         let windows = platform == Platform::Windows;
+        let static_region_active = self.actions.enabled
+            && self.anki.sentence_mode == SentenceMode::Static;
         let bindings = [
             (Back, windows.then_some("0x1B")),
             (Trigger, Some(if windows { self.trigger.trigger_key.as_str() }
                 else { self.trigger.trigger_key_linux.as_str() })),
             (AnkiAdd, self.anki.enabled.then_some(if windows { self.anki.add_key.as_str() }
                 else { self.anki.add_key_linux.as_str() })),
-            (StaticRegion, self.actions.enabled.then_some(if windows {
+            (StaticRegion, static_region_active.then_some(if windows {
                 self.anki.static_region_key.as_str()
             } else { self.anki.static_region_key_linux.as_str() })),
-            (Screenshot, self.actions.enabled.then_some(if windows {
-                self.actions.screenshot.hotkey.as_str()
-            } else { self.actions.screenshot.hotkey_linux.as_deref().unwrap_or("") })),
             (OcrClipboard, self.actions.ocr_clipboard.as_ref().filter(|_| self.actions.enabled)
                 .and_then(|c| if windows { c.hotkey.as_deref() } else { c.hotkey_linux.as_deref() })),
             (Search, self.actions.enabled.then_some(&self.actions.search)
@@ -1303,12 +1286,12 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_shortcuts_accept_spacing_and_reject_invalid_edits() {
+    fn search_shortcuts_accept_spacing_and_reject_invalid_edits() {
         assert_eq!(parse_hotkey(" ctrl + shift + s "), parse_hotkey("Ctrl+Shift+S"));
         let mut cfg = Config::default();
-        cfg.actions.screenshot.hotkey = "not a key".into();
+        cfg.actions.search.hotkey = Some("not a key".into());
         assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("invalid"));
-        cfg.actions.screenshot.hotkey.clear();
+        cfg.actions.search.hotkey = None;
         cfg.validate_hotkeys(Platform::Windows).unwrap();
     }
 
@@ -1316,8 +1299,11 @@ mod tests {
     fn shortcut_aliases_and_bare_keys_conflict_with_chords() {
         let mut cfg = Config::default();
         cfg.trigger.trigger_key = "s".into();
-        assert_eq!(vec![(HotkeyAction::Trigger, HotkeyAction::Screenshot)], cfg.hotkey_conflicts(Platform::Windows));
+        cfg.anki.enabled = true;
+        cfg.anki.add_key = "s".into();
+        assert_eq!(vec![(HotkeyAction::Trigger, HotkeyAction::AnkiAdd)], cfg.hotkey_conflicts(Platform::Windows));
         cfg.trigger.trigger_key = "F2".into();
+        cfg.anki.sentence_mode = SentenceMode::Static;
         cfg.anki.static_region_key = "0x71".into();
         assert!(cfg.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Set sentence area conflicts with Lookup"));
     }
@@ -1325,9 +1311,10 @@ mod tests {
     #[test]
     fn modifiers_distinguish_action_chords_but_not_bare_triggers() {
         let mut cfg = Config::default();
+        cfg.anki.sentence_mode = SentenceMode::Static;
         cfg.anki.static_region_key = "s".into();
         cfg.validate_hotkeys(Platform::Windows).unwrap();
-        cfg.actions.screenshot.hotkey = "S".into();
+        cfg.actions.search.hotkey = Some("S".into());
         assert!(cfg.validate_hotkeys(Platform::Windows).is_err());
     }
 
@@ -1337,7 +1324,6 @@ mod tests {
         cfg.actions.enabled = false;
         cfg.anki.enabled = false;
         cfg.trigger.trigger_key = "a".into();
-        cfg.actions.screenshot.hotkey = "a".into();
         cfg.anki.static_region_key = "a".into();
         cfg.validate_hotkeys(Platform::Windows).unwrap();
     }
@@ -1368,9 +1354,35 @@ mod tests {
     #[test]
     fn clipboard_cannot_share_the_static_region_key() {
         let mut cfg = Config::default();
+        cfg.anki.sentence_mode = SentenceMode::Static;
         cfg.anki.static_region_key = "f3".into();
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false, hotkey: Some("F3".into()), hotkey_linux: None });
         assert_eq!(vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)], cfg.hotkey_conflicts(Platform::Windows));
+    }
+
+    #[test]
+    fn inactive_static_region_key_does_not_conflict() {
+        let mut cfg = Config::default();
+        cfg.anki.static_region_key = "f3".into();
+        cfg.anki.static_region_key_linux = "CTRL+F3".into();
+        cfg.actions.ocr_clipboard = Some(OcrClipboardConfig {
+            open_sentence_search: false,
+            hotkey: Some("F3".into()),
+            hotkey_linux: Some("CTRL+F3".into()),
+        });
+
+        assert!(cfg.hotkey_conflicts(Platform::Windows).is_empty());
+        assert!(cfg.hotkey_conflicts(Platform::Linux).is_empty());
+
+        cfg.anki.sentence_mode = SentenceMode::Static;
+        assert_eq!(
+            vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)],
+            cfg.hotkey_conflicts(Platform::Windows)
+        );
+        assert_eq!(
+            vec![(HotkeyAction::StaticRegion, HotkeyAction::OcrClipboard)],
+            cfg.hotkey_conflicts(Platform::Linux)
+        );
     }
 
     #[test]
@@ -1405,8 +1417,8 @@ mod tests {
         assert!(FIELD_SOURCES.contains(&"sentence"));
     }
 
-    /// A mining screenshot needs this row to find its field.
-    /// `shot::plan` finds the picture field from this source.
+    /// Screenshot-on-add needs this row to find its field.
+    /// `shot::plan_add` finds the picture field from this source.
     #[test]
     fn field_sources_offers_screenshot() {
         assert!(FIELD_SOURCES.contains(&"screenshot"));
@@ -1438,10 +1450,6 @@ mod tests {
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
         assert_eq!("", c.anki.static_region_key_linux, "unbound, like its Windows twin");
-        assert_eq!(
-            None, c.actions.screenshot.hotkey_linux,
-            "unbound: the control-socket verb has no compositor bind until a human writes one"
-        );
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         assert_eq!(
             DictionariesConfig::default(),
@@ -1883,6 +1891,11 @@ mod tests {
     }
 
     #[test]
+    fn overwrite_duplicates_defaults_to_false() {
+        assert!(!Config::default().anki.overwrite_duplicates);
+    }
+
+    #[test]
     fn sentence_mode_defaults_to_sentence() {
         assert_eq!(SentenceMode::Sentence, Config::default().anki.sentence_mode);
     }
@@ -1983,6 +1996,31 @@ mod tests {
         )).unwrap();
         let c = load_or_create(&p).expect("a pre-first_dict_only config must load");
         assert!(!c.anki.first_dict_only, "a missing key takes the field default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_anki_section_without_overwrite_duplicates_defaults_off() {
+        let p = tmp("anki_no_overwrite_duplicates");
+        std::fs::write(&p, concat!(
+            "[trigger]\nmode = \"live\"\n\n",
+            "[popup]\ntheme = \"dark\"\nexclude_from_capture = false\n",
+            "max_height_percent = 45\nsummary_chars = 40\nfont = \"Yu Gothic UI\"\n\n",
+            "[dictionaries]\ndisplay_order = [\"大辞林\"]\n\n",
+            "[anki]\nenabled = true\n",
+        )).unwrap();
+        let c = load_or_create(&p).expect("a pre-overwrite config must load");
+        assert!(!c.anki.overwrite_duplicates);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn overwrite_duplicates_round_trips_through_config() {
+        let p = tmp("overwrite_duplicates_round_trip");
+        let mut cfg = Config::default();
+        cfg.anki.overwrite_duplicates = true;
+        cfg.save(&p).unwrap();
+        assert!(load_or_create(&p).unwrap().anki.overwrite_duplicates);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -2546,7 +2584,6 @@ mod tests {
         c.anki.add_key_linux = "CTRL+ALT+A".to_string();
         c.anki.static_region_key = "0x52".to_string();
         c.anki.static_region_key_linux = "ALT+R".to_string();
-        c.actions.screenshot.hotkey_linux = Some("ALT+S".to_string());
         c.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".to_string()),
             hotkey_linux: Some("ALT+C".to_string()),
@@ -2580,7 +2617,6 @@ mod tests {
         assert_eq!("ALT+F", c.trigger.trigger_key_linux);
         assert_eq!("ALT+A", c.anki.add_key_linux);
         assert_eq!("", c.anki.static_region_key_linux);
-        assert_eq!(None, c.actions.screenshot.hotkey_linux);
         assert_eq!(PopupLayer::Overlay, c.popup.layer);
         // A whole-struct save writes the new keys with their defaults and preserves the old values.
         c.save(&p).unwrap();
@@ -2627,11 +2663,6 @@ mod tests {
             Some("SUPER+C".to_string()),
             back.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone()),
             "the Linux OCR-clipboard chord survives a Windows-side save"
-        );
-        assert_eq!(
-            Some("SUPER+S".to_string()),
-            back.actions.screenshot.hotkey_linux,
-            "the Linux screenshot chord survives a Windows-side save"
         );
         assert_eq!(PopupLayer::Top, back.popup.layer);
         assert_eq!("en", back.ocr.language, "hidden on Linux, never dropped");
@@ -2920,7 +2951,6 @@ mod tests {
     fn actions_config_defaults() {
         let cfg = Config::default();
         assert!(cfg.actions.enabled);
-        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
         assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
         assert_eq!(None, cfg.actions.ocr_clipboard);
     }
@@ -2939,6 +2969,39 @@ mod tests {
         let _ = std::fs::remove_file(path);
         assert_eq!(ScreenshotMode::FixedWindow, loaded.actions.screenshot.capture_mode);
         assert_eq!(cfg.actions.screenshot, loaded.actions.screenshot);
+    }
+
+    #[test]
+    fn retired_screenshot_keys_load_then_disappear_without_losing_anki_options() {
+        let mut cfg = Config::default();
+        cfg.actions.screenshot.save_dir = "card-shots".into();
+        cfg.actions.screenshot.include_on_add = true;
+        cfg.actions.screenshot.capture_mode = ScreenshotMode::FixedWindow;
+        cfg.actions.screenshot.fixed_region = Some([-1200, 80, 640, 480]);
+        cfg.actions.screenshot.fixed_window = Some(ScreenshotWindow {
+            app_id: "reader".into(),
+            title: "\u{8aad}\u{66f8}".into(),
+        });
+        let path = tmp("retired_screenshot_keys");
+        let text = toml::to_string_pretty(&cfg)
+            .unwrap()
+            .replacen(
+                "[actions.screenshot]\n",
+                "[actions.screenshot]\nhotkey = \"F4\"\nhotkey_linux = \"SUPER+S\"\n",
+                1,
+            );
+        std::fs::write(&path, text).unwrap();
+
+        let loaded = load_or_create(&path).unwrap();
+        assert_eq!(cfg.actions.screenshot, loaded.actions.screenshot);
+
+        loaded.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("hotkey = \"F4\""), "retired Windows key survived: {saved}");
+        assert!(!saved.contains("hotkey_linux = \"SUPER+S\""), "retired Linux key survived: {saved}");
+        let round_trip = load_or_create(&path).unwrap();
+        assert_eq!(cfg.actions.screenshot, round_trip.actions.screenshot);
+        let _ = std::fs::remove_file(path);
     }
 
     /// Both platform chords use one nested section.
@@ -3000,7 +3063,7 @@ mod tests {
         );
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.actions.enabled);
-        assert_eq!("ctrl+shift+s", cfg.actions.screenshot.hotkey);
+        assert_eq!("screenshots", cfg.actions.screenshot.save_dir);
     }
 
     fn di(id: i64, name: &str) -> crate::present::DictInfo {
@@ -3236,7 +3299,7 @@ mod search_config_tests {
         let saved = toml::to_string(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&saved).unwrap().actions.search, config.actions.search);
         config.validate_hotkeys(Platform::Windows).unwrap();
-        config.actions.search.hotkey = Some(config.actions.screenshot.hotkey.clone());
+        config.actions.search.hotkey = Some(config.trigger.trigger_key.clone());
         assert!(config.validate_hotkeys(Platform::Windows).unwrap_err().to_string().contains("Open dictionary search conflicts"));
         config.actions.search.hotkey = Some("not a key".into());
         assert!(config.validate_hotkeys(Platform::Windows).is_err());

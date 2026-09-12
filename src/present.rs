@@ -245,8 +245,10 @@ pub struct DictInfo {
 pub struct AnkiPopupState {
     pub dupes: HashSet<String>,
     pub added: HashSet<String>,
+    pub updated: HashSet<String>,
     pub enabled: bool,
     pub adding: bool,
+    pub saving: bool,
     /// True while the popup checks for duplicates.
     pub checking: bool,
     /// True until AnkiConnect gives an answer.
@@ -261,8 +263,10 @@ impl AnkiPopupState {
         Self {
             dupes: HashSet::new(),
             added: HashSet::new(),
+            updated: HashSet::new(),
             enabled: false,
             adding: false,
+            saving: false,
             checking: false,
             connected: false,
             failed: false,

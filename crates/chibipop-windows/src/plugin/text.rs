@@ -105,6 +105,7 @@ impl PluginText {
 impl chibipop::text::OcrEngine for PluginText {
     fn recognise(&self, buf: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         if self.disabled() {
+            self.host.borrow_mut().shutdown();
             if let Some(monitor) = &self.monitor {
                 monitor.publish(&self.name, &self.language, false);
             }
@@ -125,8 +126,13 @@ impl chibipop::text::OcrEngine for PluginText {
                 if let Some(notice) = strikes.record(false) {
                     eprintln!("chibipop: {}: {notice}", self.name);
                 }
+                let disabled = strikes.disabled();
+                drop(strikes);
+                if disabled {
+                    self.host.borrow_mut().shutdown();
+                }
                 if let Some(monitor) = &self.monitor {
-                    monitor.publish(&self.name, &self.language, !strikes.disabled());
+                    monitor.publish(&self.name, &self.language, !disabled);
                 }
                 Err(e)
             }

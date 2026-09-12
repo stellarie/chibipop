@@ -1,4 +1,4 @@
-//! The screenshot-on-add and Mining screenshot rules.
+//! The screenshot-on-add rules.
 //!
 //! This module decides whether an add carries a picture, names the file, selects
 //! the Anki field, and calls AnkiConnect. The platform bins hide windows, select
@@ -6,7 +6,6 @@
 //! platform facts (ARCHITECTURE.md#workspace-and-seams).
 
 use crate::config::{AnkiConfig, Config};
-use crate::controller::PopupView;
 use anyhow::{Context, Result};
 use base64::Engine;
 use std::collections::HashMap;
@@ -21,28 +20,8 @@ pub struct ShotPlan {
     pub fields: HashMap<String, String>,
     /// `<save_root>/<sanitized expr>_<epoch seconds>.png`.
     pub path: PathBuf,
-    /// The Anki field that receives the picture when the field map routes the
-    /// `screenshot` source. `None` means that the note has no picture.
-    pub picture_field: Option<String>,
-}
-
-/// Builds a screenshot add plan without guards.
-///
-/// This is the Mining screenshot plan. It saves a picture regardless of the
-/// popup add state. It does not apply [`plan_add`]'s config gate.
-pub fn plan(view: &PopupView<'_>, cfg: &Config, save_root: &Path, now: u64) -> ShotPlan {
-    // The Mining screenshot plan uses the same note as the Anki button.
-    // It applies the same Card selection.
-    let empty = crate::select::CardSelection::default();
-    let selection = view.selection.card(0).unwrap_or(&empty);
-    let (expr, fields) = crate::controller::note_payload(
-        view.presentation,
-        cfg.anki.first_dict_only,
-        cfg.anki.include_dictionary_name,
-        selection,
-        cfg.anki.selection_separator.into(),
-    );
-    make_plan(expr, fields, cfg, save_root, now)
+    /// The Anki fields that receive the picture.
+    pub picture_fields: Vec<String>,
 }
 
 /// Plans the screenshot that accompanies an already-authorized add, or returns
@@ -76,13 +55,14 @@ fn make_plan(
     now: u64,
 ) -> ShotPlan {
     let path = save_root.join(format!("{}_{now}.png", sanitize_filename(&expr)));
-    let picture_field = cfg
+    let picture_fields = cfg
         .anki
         .field_map
         .iter()
-        .find(|m| m.source == "screenshot")
-        .map(|m| m.anki_field.clone());
-    ShotPlan { expr, fields, path, picture_field }
+        .filter(|m| m.source == "screenshot")
+        .map(|m| m.anki_field.clone())
+        .collect();
+    ShotPlan { expr, fields, path, picture_fields }
 }
 
 /// Writes the PNG and creates the save folder when needed.
@@ -95,34 +75,39 @@ pub fn save(png: &[u8], plan: &ShotPlan) -> Result<()> {
         .with_context(|| format!("writing {}", plan.path.display()))
 }
 
-/// Calls [`save`], then adds the note with its picture. Returns the note ID.
+/// Calls [`save`], then writes the note with its picture.
 ///
 /// Anki copies the attached file to `collection.media`. The copy uses the
 /// `chibipop-screenshot-` namespace and the saved file stem, so a user can
 /// match the two names.
-pub fn save_and_add(png: &[u8], plan: &ShotPlan, anki: &AnkiConfig) -> Result<i64> {
+pub fn save_and_add(
+    png: &[u8],
+    plan: &ShotPlan,
+    anki: &AnkiConfig,
+) -> Result<crate::anki::WriteResult> {
     save(png, plan)?;
-    let picture = plan.picture_field.as_ref().map(|field| crate::anki::NotePicture {
+    let picture = (!plan.picture_fields.is_empty()).then(|| crate::anki::NotePicture {
         data_base64: base64::engine::general_purpose::STANDARD.encode(png),
         filename: format!(
             "chibipop-screenshot-{}.png",
             plan.path.file_stem().unwrap_or_default().to_string_lossy()
         ),
-        fields: vec![field.clone()],
+        fields: plan.picture_fields.clone(),
     });
-    crate::anki::add_note(
+    crate::anki::write_note(
         &anki.url,
         &anki.deck,
         &anki.model,
         &plan.fields,
         &anki.field_map,
         picture.as_ref(),
+        anki.overwrite_duplicates,
     )
 }
 
 /// Returns seconds since the epoch for a screenshot file name.
 ///
-/// [`plan`] names files `<word>_<epoch seconds>.png`. Both bins pass this value
+/// [`plan_add`] names files `<word>_<epoch seconds>.png`. Both bins pass this value
 /// as `now`, so a screenshots folder keeps one name pattern on both platforms.
 pub fn epoch_secs() -> u64 {
     std::time::SystemTime::now()
@@ -180,50 +165,8 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::config::FieldMapping;
-    use crate::geom::PhysRect;
-    use crate::present::{AnkiPopupState, Card, Presentation};
 
     const ROOT: &str = "/tmp/chibipop-shot-tests";
-
-    fn presentation(written: Option<&str>, reading: Option<&str>) -> Presentation {
-        Presentation {
-            top: Some(Card {
-                written: written.map(str::to_string),
-                reading: reading.map(str::to_string),
-                pos: Vec::new(),
-                inflections: Vec::new(),
-                freq: None,
-                blocks: Vec::new(),
-                match_len: 1,
-                pitch: Vec::new(),
-            }),
-            collapsed: Vec::new(),
-            all_cards: Vec::new(),
-            sentence: None,
-            surface: None,
-        }
-    }
-
-    fn view<'a>(p: &'a Presentation, anki: &'a AnkiPopupState) -> PopupView<'a> {
-        static NONE: std::sync::LazyLock<crate::select::Selections> =
-            std::sync::LazyLock::new(crate::select::Selections::default);
-        PopupView {
-            popup: PhysRect { x: 0, y: 0, w: 300, h: 200 },
-            anchor: PhysRect { x: 0, y: 0, w: 20, h: 20 },
-            scroll: 0,
-            content_h: 200,
-            view_h: 200,
-            presentation: p,
-            anki,
-            show_back: false,
-            selection: &NONE,
-        }
-    }
-
-    /// Returns an Anki state with Anki enabled and connected, with no added note or active add.
-    fn anki_state() -> AnkiPopupState {
-        AnkiPopupState::fresh(true)
-    }
 
     fn cfg_on() -> Config {
         let mut cfg = Config::default();
@@ -246,12 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn an_authorized_payload_wins_over_the_current_popup_card() {
-        let popup_presentation = presentation(Some("card B"), None);
-        let popup_anki = anki_state();
-        let popup = view(&popup_presentation, &popup_anki);
-        assert_eq!("card B", popup.presentation.top.as_ref().unwrap().written.as_deref().unwrap());
-
+    fn an_authorized_payload_is_used_without_rebuilding_it() {
         let fields = HashMap::from([("Expression".to_string(), "card A".to_string())]);
         let plan = plan_add("card A", &fields, &cfg_on(), Path::new(ROOT), 11).unwrap();
 
@@ -261,20 +199,24 @@ mod tests {
     }
 
     #[test]
-    fn the_picture_field_is_the_field_map_row_sourced_from_the_screenshot() {
+    fn the_picture_fields_are_the_screenshot_rows() {
         let mut cfg = cfg_on();
         cfg.anki.field_map.push(FieldMapping {
             anki_field: "Picture".into(),
             source: "screenshot".into(),
         });
+        cfg.anki.field_map.push(FieldMapping {
+            anki_field: "Picture2".into(),
+            source: "screenshot".into(),
+        });
         let plan = plan_add("", &HashMap::new(), &cfg, Path::new(ROOT), 1).unwrap();
-        assert_eq!(Some("Picture".to_string()), plan.picture_field);
+        assert_eq!(vec!["Picture".to_string(), "Picture2".to_string()], plan.picture_fields);
     }
 
     #[test]
     fn a_field_map_that_routes_no_screenshot_plans_a_pictureless_add() {
         let plan = plan_add("宿舎", &HashMap::new(), &cfg_on(), Path::new(ROOT), 1).unwrap();
-        assert_eq!(None, plan.picture_field);
+        assert!(plan.picture_fields.is_empty());
     }
 
     #[test]
@@ -294,26 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ungated_plan_ignores_include_on_add() {
-        let p = presentation(Some("\u{5bbf}\u{820e}"), None);
-        let mut a = anki_state();
-        a.adding = true;
-        a.added.insert("\u{5bbf}\u{820e}".to_string());
-        // The default config has `include_on_add` off.
-        let plan = plan(&view(&p, &a), &Config::default(), Path::new(ROOT), 7);
-        assert_eq!(Path::new(ROOT).join("\u{5bbf}\u{820e}_7.png"), plan.path);
-    }
-
-    #[test]
-    fn the_ungated_plan_expression_falls_back_to_the_reading() {
-        let p = presentation(None, Some("\u{306D}\u{3053}"));
-        let a = anki_state();
-        let plan = plan(&view(&p, &a), &cfg_on(), Path::new(ROOT), 3);
-        assert_eq!("\u{306D}\u{3053}", plan.expr);
-        assert_eq!(Path::new(ROOT).join("\u{306D}\u{3053}_3.png"), plan.path);
-    }
-
-    #[test]
     fn saving_creates_the_folder_it_was_told_to_write_into() {
         let dir = std::env::temp_dir().join(format!("chibipop-shot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -321,7 +243,7 @@ mod tests {
             expr: "x".into(),
             fields: HashMap::new(),
             path: dir.join("deeper").join("x_1.png"),
-            picture_field: None,
+            picture_fields: Vec::new(),
         };
         save(b"not really a png", &plan).unwrap();
         assert_eq!(b"not really a png".to_vec(), std::fs::read(&plan.path).unwrap());

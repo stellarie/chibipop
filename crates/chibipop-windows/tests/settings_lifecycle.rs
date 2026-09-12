@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowTextW, GetWindowThreadProcessId,
     IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SendMessageTimeoutW, SendMessageW, CB_SETCURSEL,
     BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND,
-    WM_GETTEXT, WM_SYSCOMMAND,
+    WM_GETTEXT, WM_KEYDOWN, WM_SYSCOMMAND,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -203,6 +203,24 @@ fn standalone_x_exits_and_reports_inactive_scanning() {
     assert!(status.contains("Not running"), "{status}");
     system_command(window, SC_CLOSE);
     process.wait_exit();
+}
+
+#[test]
+fn daemon_escape_closes_settings_without_exit() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let mut process = ProcessFixture::start("run");
+    let window = process.window("chibipop settings");
+    // SAFETY: The selected window belongs to this test's child process.
+    unsafe {
+        PostMessageW(Some(window), WM_KEYDOWN, WPARAM(0x1b), LPARAM(0)).unwrap();
+    }
+    wait_until("settings closes after Escape", || unsafe { !IsWindow(Some(window)).as_bool() });
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        process.child.try_wait().unwrap().is_none(),
+        "Escape stopped the daemon: {}",
+        process.logs()
+    );
 }
 
 #[test]

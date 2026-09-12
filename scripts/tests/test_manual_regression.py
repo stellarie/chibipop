@@ -29,7 +29,7 @@ class ManualRegressionTests(unittest.TestCase):
         self.assertEqual(len(all_ids), len(ids))
         required = (
             numbered("0", 1, 5)
-            | numbered("1", 1, 41)
+            | numbered("1", 1, 42)
             | {"1.8.1"}
             | {"1.7a"}
             | numbered("1.11", 1, 3)
@@ -49,6 +49,7 @@ class ManualRegressionTests(unittest.TestCase):
             | numbered("1.28", 1, 7)
             | numbered("1.29", 1, 4)
             | numbered("1.30", 1, 16)
+            | {"1.30.17"}
             | numbered("1.31", 1, 4)
             | numbered("1.32", 1, 3)
             | numbered("1.33", 1, 5)
@@ -59,6 +60,7 @@ class ManualRegressionTests(unittest.TestCase):
             | numbered("1.38", 1, 1)
             | numbered("1.39", 1, 3)
             | numbered("1.40", 1, 4)
+            | numbered("1.42", 1, 3)
             | numbered("2", 1, 14)
             | {"2.11a", "2.11b", "2.11c", "2.11d", "2.11e", "2.11f"}
             | {"2.14a", "2.14b", "2.14c", "2.14d", "2.14e", "2.14f"}
@@ -251,6 +253,7 @@ class ManualRegressionTests(unittest.TestCase):
                 self.assertIn(check.ident, documented)
         for index in range(11, 17):
             self.assertIn(f"1.30.{index}", documented)
+        self.assertIn("1.30.17", documented)
         self.assertTrue(documented.issubset({check.ident for check in checks}))
 
     def test_new_effects_and_partial_automation_are_explicit(self) -> None:

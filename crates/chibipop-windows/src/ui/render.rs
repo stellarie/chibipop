@@ -524,6 +524,25 @@ impl Renderer {
         })
     }
 
+    /// Replace decoded media and measured popup state after cache invalidation.
+    pub fn replace_lookup_cache(&mut self, db: &std::path::Path) -> Option<String> {
+        self.scene = None;
+        self.scene_font.clear();
+        self.hits.borrow_mut().clear();
+        let (media, warning) = match MediaSurfaces::open(db) {
+            Ok(cache) => (Some(cache), None),
+            Err(error) => {
+                let reason = format!("{error:#}");
+                eprintln!(
+                    "chibipop: dictionary media reopen failed: {reason}; image nodes will render their alt text"
+                );
+                (None, Some(reason))
+            }
+        };
+        self.media.replace(media);
+        warning
+    }
+
     fn dpi_scale(&self) -> f32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
         if dpi == 0 {

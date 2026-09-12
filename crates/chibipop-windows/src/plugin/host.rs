@@ -255,6 +255,11 @@ fn blank_ready() -> Ready {
 }
 
 impl Host {
+    /// Return process ID.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn ready(&self) -> &Ready {
         &self.ready
     }
@@ -325,10 +330,8 @@ impl Host {
     pub fn shutdown(&mut self) {
         // Wake the idle writer thread so it can exit.
         self.outbox.close();
-        // A failed kill does not reap the child.
-        if self.child.kill().is_ok() {
-            let _ = self.child.wait();
-        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
         // The job kills the process tree when its handle closes.
         drop(self.job.take());
     }

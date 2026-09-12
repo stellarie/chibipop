@@ -739,7 +739,6 @@ mod tests {
         let payload = shortcuts(vec![
             shortcut("trigger", Some("Alt+F")),
             shortcut("trigger", Some("Alt+G")),
-            shortcut("screenshot", Some("Print")),
             shortcut("", None),
         ]);
         assert_eq!(
@@ -776,12 +775,11 @@ mod tests {
         let asked = vec![
             (ShortcutId::Trigger, "ALT+f".to_string()),
             (ShortcutId::AnkiAdd, "ALT+a".to_string()),
-            (ShortcutId::Screenshot, "Print".to_string()),
         ];
         let built = payload(&asked);
-        assert_eq!(3, built.len());
+        assert_eq!(2, built.len());
         let ids: Vec<&str> = built.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(vec!["trigger", "anki-add", "screenshot"], ids);
+        assert_eq!(vec!["trigger", "anki-add"], ids);
         for (id, props) in &built {
             assert!(props.contains_key("description"), "{id} needs dialog text");
             assert!(props.contains_key("preferred_trigger"));

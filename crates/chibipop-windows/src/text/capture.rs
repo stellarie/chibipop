@@ -319,7 +319,7 @@ fn capture_region(region: PhysRect) -> Result<Frame> {
 /// Capture the current pixels and scale them by `factor` with nearest-neighbor interpolation.
 /// Return BGRA pixels.
 ///
-/// This function runs on its caller thread for a mining screenshot or OCR-to-clipboard.
+/// This function runs on its caller thread for screenshot-on-add or OCR-to-clipboard.
 /// It uses a capture separate from the Worker's thread-affine `WinCapture`.
 pub fn capture_upscaled_by(region: PhysRect, factor: i32) -> Result<Frame> {
     let cap = capture_region(region)?;

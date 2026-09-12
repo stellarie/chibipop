@@ -253,8 +253,7 @@ popup's Anki button uses the same add-card code path on every desktop.
 
 ### Screenshot sources
 
-The *Anki* tab sets **Screenshot source** for the mining screenshot and
-for **Attach a screenshot to cards**.
+The *Anki* tab sets **Screenshot source** for **Attach a screenshot to cards**.
 
 - **Choose a region** is the default. `slurp` lets you drag a region. On Hyprland or
   Sway, a window query also lets you click a visible window.
@@ -284,26 +283,8 @@ the match. Reset the saved target and select the window again.
 The Linux settings window shows the selected mode, saved target summaries, and
 **Reset saved screenshot targets**. Press **Apply** after a reset. The next
 fixed-mode picture asks for a new target. Press **Esc** to cancel a selection.
-The selection times out after 20 seconds. Include-on-add
-still files the card without a picture.
-
-**The mining screenshot shortcut** uses `chibipop ctl screenshot`.
-It files a picture as context for the popup's card.
-Its chord (`actions.screenshot.hotkey_linux`, unset by default) uses the portal
-where direct registration works. Otherwise, copy its native bind:
-
-```
-bind = SUPER, S, exec, chibipop ctl screenshot
-```
-
-```
-bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
-```
-
-Pressed with no popup up it writes one line to the log saying why nothing
-happened: the picture is filed against the word on screen, and there is no
-word without a lookup. The picture that rides an *add* needs no key of its own.
-See **Include screenshot when adding** in the README.
+The selection times out after 20 seconds. Include-on-add still files the card
+without a picture.
 
 ---
 
@@ -447,7 +428,7 @@ Otherwise, each configured row supplies its native bind.
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `screenshot`, `ocr-clipboard`, `static-region`, or `reload`. Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `ocr-clipboard`, `static-region`, or `reload`. Answers `OK` or `ERR` on one line. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
@@ -474,7 +455,7 @@ your frequency lists there and Apply.
   Clear the key, or set it to `ja`, to have your split apply.
 - **The Fixed screen area sentence mode has a global shortcut.**
   Select *Fixed screen area* as the Anki sentence field. Then draw its box.
-  The `static-region` verb starts this selection in any sentence mode.
+  The `static-region` verb starts this selection only in *Fixed screen area* mode.
   Use `Esc` or right-click to cancel the selection.
   Its chord (`anki.static_region_key_linux`, unset by default) uses the portal
   where direct registration works. Otherwise, copy its native bind from settings:
@@ -502,7 +483,7 @@ your frequency lists there and Apply.
 - **Anki works the same** (AnkiConnect, same field map). Its add key defaults to `ALT+A`.
   The key uses direct portal registration where supported or a native daemon bind.
   The popup's own Anki button works on every compositor.
-- **The mining screenshot has its own global shortcut.**
+- **Screenshots attach during Anki adds.**
   *Include screenshot when adding* uses the selected mode described above.
   The PNG lands in
   `$XDG_DATA_HOME/chibipop/screenshots` by default —
@@ -513,8 +494,6 @@ your frequency lists there and Apply.
   Interactive modes need `slurp` and layer-shell support. The Capture channel
   supplies the pixels. A saved fixed region bypasses the selector. A saved
   fixed window still needs fresh Hyprland or Sway window metadata.
-  A global shortcut or a native `chibipop ctl screenshot` bind starts the same action.
-  See [the trigger key](#the-trigger-key).
 - **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard` verb
   dims the screen, reads the region you drag with the same engine and the same
   OCR settings hovering uses, and puts the text on the clipboard — one line per

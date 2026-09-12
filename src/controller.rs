@@ -178,10 +178,20 @@ pub enum Event {
     DupesChecked { generation: u64, dupes: Option<HashSet<String>> },
     /// The result of one add-note request.
     NoteAdded { expr: String, failed: bool },
+    /// The result of an add or verified overwrite request.
+    NoteWritten { expr: String, status: NoteWriteStatus },
     /// The platform sent a new Controller configuration.
     ConfigReloaded(Box<ControllerConfig>),
     TrayAction(TrayAction),
     Quit,
+}
+
+/// Describes the visible result of one Anki write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteWriteStatus {
+    Added,
+    Updated,
+    Failed,
 }
 
 /// The instruction that the Controller returns to the platform bin.
@@ -274,6 +284,7 @@ pub struct ControllerConfig {
     pub per_character_lookup: bool,
     pub scroll_popup: bool,
     pub anki_enabled: bool,
+    pub overwrite_duplicates: bool,
     /// Read the full sentence on add (`SentenceMode::Sentence`).
     pub sentence_probe: bool,
     /// Include each Dictionary name in both Anki glossary fields.
@@ -311,6 +322,7 @@ impl ControllerConfig {
             per_character_lookup: false,
             scroll_popup: config.popup.scroll_popup,
             anki_enabled: false,
+            overwrite_duplicates: false,
             sentence_probe: false,
             include_dictionary_name: config.anki.include_dictionary_name,
             first_dict_only: config.anki.first_dict_only,
@@ -894,6 +906,7 @@ impl Controller {
             Event::DupesChecked { generation, dupes } => self.dupes_checked(generation, dupes),
             Event::AnalysisReady { generation, words } => self.analysis_ready(generation, words),
             Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
+            Event::NoteWritten { expr, status } => self.note_written(expr, status),
             Event::ConfigReloaded(cfg) => {
                 self.cancel_hover();
                 self.cfg = *cfg;
@@ -1243,6 +1256,7 @@ impl Controller {
                 !(self.trigger_held && matches!(self.cfg.trigger_mode, TriggerMode::HoldKey));
             let s = self.surface.as_mut().expect("surface checked above");
             s.anki.adding = true;
+            s.anki.saving = self.cfg.overwrite_duplicates;
             s.anki.failed = false;
             s.pending_sentence = Some(PendingSentence {
                 id,
@@ -1265,6 +1279,7 @@ impl Controller {
         {
             let s = self.surface.as_mut().expect("surface checked above");
             s.anki.adding = true;
+            s.anki.saving = self.cfg.overwrite_duplicates;
             s.anki.failed = false;
         }
         vec![
@@ -1291,7 +1306,7 @@ impl Controller {
             &selection,
             separator,
         );
-        if s.anki.added.contains(&expr) {
+        if s.anki.added.contains(&expr) || s.anki.updated.contains(&expr) {
             return None;
         }
         Some((expr, fields))
@@ -1972,6 +1987,13 @@ impl Controller {
     }
 
     fn note_added(&mut self, expr: String, failed: bool) -> Vec<Command> {
+        self.note_written(
+            expr,
+            if failed { NoteWriteStatus::Failed } else { NoteWriteStatus::Added },
+        )
+    }
+
+    fn note_written(&mut self, expr: String, status: NoteWriteStatus) -> Vec<Command> {
         for parent in &mut self.parents {
             let matches = |p: &Presentation| p.top.as_ref().is_some_and(|card| {
                 card.written.as_deref().or(card.reading.as_deref()) == Some(expr.as_str())
@@ -1984,8 +2006,17 @@ impl Controller {
             };
             if let Some(anki) = target {
                 anki.adding = false;
-                anki.failed = failed;
-                if !failed { anki.added.insert(expr); }
+                match status {
+                    NoteWriteStatus::Failed => anki.failed = true,
+                    NoteWriteStatus::Added => {
+                        anki.failed = false;
+                        anki.added.insert(expr);
+                    }
+                    NoteWriteStatus::Updated => {
+                        anki.failed = false;
+                        anki.updated.insert(expr);
+                    }
+                }
                 return Vec::new();
             }
         }
@@ -2011,18 +2042,30 @@ impl Controller {
             Some(index) => {
                 let anki = &mut s.history[index].anki;
                 anki.adding = false;
-                if failed {
-                    anki.failed = true;
-                } else {
-                    anki.added.insert(expr);
+                match status {
+                    NoteWriteStatus::Failed => anki.failed = true,
+                    NoteWriteStatus::Added => {
+                        anki.failed = false;
+                        anki.added.insert(expr);
+                    }
+                    NoteWriteStatus::Updated => {
+                        anki.failed = false;
+                        anki.updated.insert(expr);
+                    }
                 }
             }
             None if current_in_flight || fallback_current => {
                 s.anki.adding = false;
-                if failed {
-                    s.anki.failed = true;
-                } else {
-                    s.anki.added.insert(expr);
+                match status {
+                    NoteWriteStatus::Failed => s.anki.failed = true,
+                    NoteWriteStatus::Added => {
+                        s.anki.failed = false;
+                        s.anki.added.insert(expr);
+                    }
+                    NoteWriteStatus::Updated => {
+                        s.anki.failed = false;
+                        s.anki.updated.insert(expr);
+                    }
                 }
             }
             None => return Vec::new(),
@@ -2570,6 +2613,7 @@ mod tests {
             per_character_lookup: false,
             scroll_popup: true,
             anki_enabled: false,
+            overwrite_duplicates: false,
             include_dictionary_name: true,
             first_dict_only: false,
             summary_chars: 60,
@@ -3907,6 +3951,25 @@ mod tests {
             c.anki().expect("card B Anki state").added.contains("card B"),
             "a screenshot-filed note has no local in-flight add"
         );
+    }
+
+    #[test]
+    fn an_updated_note_blocks_a_second_write_from_the_same_popup() {
+        let mut c = Controller::new(ControllerConfig {
+            anki_enabled: true,
+            overwrite_duplicates: true,
+            ..cfg()
+        });
+        shown(&mut c);
+        assert!(c.handle(Event::AddRequested).iter().any(|command| {
+            matches!(command, Command::AddNote { .. })
+        }));
+        c.handle(Event::NoteWritten {
+            expr: "\u{732B}".into(),
+            status: NoteWriteStatus::Updated,
+        });
+        assert!(c.anki().expect("popup state").updated.contains("\u{732B}"));
+        assert!(c.handle(Event::AddRequested).is_empty());
     }
 
     #[test]

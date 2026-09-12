@@ -350,6 +350,14 @@ impl SearchWindow {
         self.state.submit.set(true);
     }
 
+    /// Drop displayed lookup results and pending replies.
+    pub fn clear_lookup_cache(&mut self) {
+        self.invalidate();
+        self.clear_results();
+        self.tokens.clear();
+        self.state.preserve_definitions.set(false);
+    }
+
     pub fn set_config_path(&mut self, path: &Path) { self.config_path = Some(path.to_path_buf()); }
 
     fn invalidate(&mut self) {

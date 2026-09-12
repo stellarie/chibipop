@@ -41,8 +41,7 @@ pub struct SentenceProbe {
     pub mask: CaptureMask,
 }
 
-/// The Worker accepts `Hover`, `Sentence`, and `DrillDown` lookups, `Reload`,
-/// `Freeze`, and `Thaw` state changes, and `Serve` wake requests.
+/// The Worker accepts lookups, state changes, and cache maintenance requests.
 pub enum TriggerKind {
     Hover(Hover),
     Sentence(SentenceProbe),
@@ -66,6 +65,9 @@ pub enum TriggerKind {
     /// This variant returns no result and changes no state, so the Worker
     /// never reads its `id`.
     Serve,
+    /// Reopen the dictionary, then clear lookup-derived OCR state.
+    /// The reply carries fresh dictionary identities or a failure reason.
+    CacheBust(mpsc::Sender<std::result::Result<Vec<DictInfo>, String>>),
 }
 
 /// The settings that the Worker owns.
@@ -142,8 +144,7 @@ pub struct WorkerParts {
     /// The bin calls this callback after each reload when it supplies one.
     ///
     /// `None` applies when a rebuild replaces the whole process.
-    /// The Windows bin restarts after a build finishes, so its Worker does not
-    /// outlive the database that it opened. It does not need this callback.
+    /// A running bin supplies this callback when it must reopen the database.
     /// If this callback fails, keep the current handle. An old Dictionary still
     /// answers. A dropped Dictionary answers nothing.
     pub reopen_dict: Option<ReopenDict>,
@@ -248,6 +249,7 @@ enum Pre {
     Freeze(RequestId, PhysPoint),
     Thaw(RequestId),
     Sentence(RequestId, SentenceProbe),
+    CacheBust(RequestId, mpsc::Sender<std::result::Result<Vec<DictInfo>, String>>),
 }
 
 /// The newest lookup that a drained batch runs after its state changes.
@@ -331,6 +333,7 @@ fn drain(
         TriggerKind::Freeze(at) => pre.push(Pre::Freeze(t.id, at)),
         TriggerKind::Thaw => pre.push(Pre::Thaw(t.id)),
         TriggerKind::Sentence(probe) => pre.push(Pre::Sentence(t.id, probe)),
+        TriggerKind::CacheBust(reply) => pre.push(Pre::CacheBust(t.id, reply)),
         TriggerKind::Hover(h) => lookup = Some((t.id, Lookup::Hover(Box::new(h)))),
         TriggerKind::DrillDown(text) => lookup = Some((t.id, Lookup::DrillDown(text))),
         // The wake already arrived.
@@ -454,6 +457,9 @@ fn worker_main(
                 Pre::Reload(id, s) => {
                     let started = Instant::now();
                     log_request_start(id, "reload");
+                    if let Some(hook) = &mut serve {
+                        hook(&source);
+                    }
                     source.apply_settings(s.snapshot(), &s.language);
                     source.set_show_lookup_log(s.show_lookup_log);
                     take_reload(s, reopen_dict.as_ref(), &mut dict, &mut state);
@@ -479,6 +485,36 @@ fn worker_main(
                     log_request_start(id, "thaw");
                     source.thaw();
                     log_state_complete(id, "thaw", "released", started);
+                }
+                Pre::CacheBust(id, reply) => {
+                    let started = Instant::now();
+                    log_request_start(id, "cache_bust");
+                    let result = reopen_dict
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("dictionary reopen is unavailable"))
+                        .and_then(|reopen| {
+                            reopen().and_then(|fresh| {
+                                let identities = fresh
+                                    .dicts()
+                                    .context("reading dictionary identities")?;
+                                Ok((fresh, identities))
+                            })
+                        })
+                        .map_err(|error| format!("{error:#}"));
+                    match result {
+                        Ok((fresh, identities)) => {
+                            source.clear_lookup_cache();
+                            dict = fresh;
+                            state.dicts = identities.clone();
+                            let _ = reply.send(Ok(identities));
+                            log_state_complete(id, "cache_bust", "cleared", started);
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            log_state_complete(id, "cache_bust", "unchanged", started);
+                        }
+                    }
+                    wake();
                 }
                 Pre::Sentence(id, probe) => {
                     let started = Instant::now();
@@ -1114,6 +1150,21 @@ mod tests {
     }
 
     #[test]
+    fn drain_keeps_cache_bust_in_order_with_other_state_changes() {
+        let (tx, rx) = mpsc::channel::<Trigger>();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        tx.send(Trigger { kind: TriggerKind::Thaw, id: RequestId(2) }).unwrap();
+        tx.send(Trigger { kind: TriggerKind::CacheBust(reply_tx), id: RequestId(3) }).unwrap();
+        drop(tx);
+        let first = Trigger { kind: TriggerKind::Freeze(PhysPoint { x: 1, y: 2 }), id: RequestId(1) };
+        let (_, pre) = drain(first, &rx);
+        assert!(matches!(
+            pre.as_slice(),
+            [Pre::Freeze(_, _), Pre::Thaw(_), Pre::CacheBust(_, _)]
+        ));
+    }
+
+    #[test]
     fn a_panicking_sentence_probe_returns_none_and_closes_live_read_before_later_hover() {
         let mut settings = ws(1);
         settings.present_cfg = Config::default().present_config(&[di(1, "FakeDict")]);
@@ -1178,6 +1229,147 @@ mod tests {
         assert_eq!(2, reads.begins.load(Ordering::SeqCst), "sentence and hover each open a read");
         assert_eq!(2, reads.ends.load(Ordering::SeqCst), "every live read must end");
         assert_eq!(0, reads.active.load(Ordering::SeqCst), "no live read may remain open");
+    }
+
+    struct ReuseCapture;
+
+    impl RegionCapture for ReuseCapture {
+        fn grab(&mut self, region: PhysRect) -> anyhow::Result<crate::text::Frame> {
+            Ok(crate::text::Frame {
+                buf: vec![0; (region.w * region.h * 4) as usize],
+                w: region.w,
+                h: region.h,
+                source: "cache-test",
+                fallback: None,
+                unchanged: true,
+            })
+        }
+
+        fn bounds_containing(&self, _p: PhysPoint) -> PhysRect {
+            PhysRect { x: 0, y: 0, w: 1000, h: 1000 }
+        }
+    }
+
+    struct ReuseOcr {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl OcrEngine for ReuseOcr {
+        fn recognise(&self, _bgra: &[u8], _w: i32, _h: i32) -> anyhow::Result<Vec<OcrLine>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        fn set_language(&mut self, _tag: &str) {}
+
+        fn name(&self) -> &str {
+            "cache-test"
+        }
+
+        fn provides_geometry(&self) -> bool {
+            true
+        }
+    }
+
+    fn cache_hover(worker: &Worker, id: u64) -> WorkerResult {
+        worker
+            .trigger()
+            .send(Trigger {
+                kind: TriggerKind::Hover(Hover {
+                    at: PhysPoint { x: 400, y: 400 },
+                    mask: CaptureMask::NONE,
+                }),
+                id: RequestId(id),
+            })
+            .unwrap();
+        worker
+            .results()
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the cache test hover must complete")
+    }
+
+    #[test]
+    fn cache_bust_reopens_dictionary_and_clears_text_source_before_reply() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let open_calls = Arc::clone(&calls);
+        let mut settings = ws(1);
+        settings.present_cfg = Config::default().present_config(&[di(7, "Before")]);
+        let (worker, _) = Worker::spawn(
+            settings,
+            move || {
+                let calls = Arc::clone(&open_calls);
+                Ok(WorkerParts {
+                    capture: Box::new(ReuseCapture),
+                    ocr: Box::new(ReuseOcr { calls }),
+                    dict: one_dict("Before"),
+                    reopen_dict: Some(Box::new(|| Ok(one_dict("After")))),
+                    engine: engine(),
+                    serve: None,
+                })
+            },
+            || {},
+        )
+        .expect("the Worker starts");
+
+        assert!(matches!(cache_hover(&worker, 1).outcome, LookupOutcome::Hide));
+        assert!(matches!(cache_hover(&worker, 2).outcome, LookupOutcome::Hide));
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        worker
+            .trigger()
+            .send(Trigger { kind: TriggerKind::CacheBust(reply_tx), id: RequestId(3) })
+            .unwrap();
+        let identities = reply_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the cache bust must reply")
+            .expect("the fresh dictionary must open");
+        assert_eq!(vec![di(7, "After")], identities);
+
+        assert!(matches!(cache_hover(&worker, 4).outcome, LookupOutcome::Hide));
+        assert_eq!(2, calls.load(Ordering::SeqCst), "success must require fresh OCR");
+    }
+
+    #[test]
+    fn failed_cache_bust_keeps_dictionary_and_ocr_cache_unchanged() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let open_calls = Arc::clone(&calls);
+        let mut settings = ws(1);
+        settings.present_cfg = Config::default().present_config(&[di(7, "Before")]);
+        let (worker, _) = Worker::spawn(
+            settings,
+            move || {
+                let calls = Arc::clone(&open_calls);
+                Ok(WorkerParts {
+                    capture: Box::new(ReuseCapture),
+                    ocr: Box::new(ReuseOcr { calls }),
+                    dict: one_dict("Before"),
+                    reopen_dict: Some(Box::new(|| anyhow::bail!("fixture reopen failed"))),
+                    engine: engine(),
+                    serve: None,
+                })
+            },
+            || {},
+        )
+        .expect("the Worker starts");
+
+        assert!(matches!(cache_hover(&worker, 1).outcome, LookupOutcome::Hide));
+        assert!(matches!(cache_hover(&worker, 2).outcome, LookupOutcome::Hide));
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        worker
+            .trigger()
+            .send(Trigger { kind: TriggerKind::CacheBust(reply_tx), id: RequestId(3) })
+            .unwrap();
+        let reason = reply_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the cache bust must reply")
+            .expect_err("the fixture reopen must fail");
+        assert!(reason.contains("fixture reopen failed"));
+
+        assert!(matches!(cache_hover(&worker, 4).outcome, LookupOutcome::Hide));
+        assert_eq!(1, calls.load(Ordering::SeqCst), "failure must retain OCR cache");
     }
 
     fn di(id: i64, name: &str) -> DictInfo {

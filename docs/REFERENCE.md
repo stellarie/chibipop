@@ -175,7 +175,7 @@ settings process, control-socket verbs, and three diagnostics.
 
 **The `ctl` verb set is fixed**
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#input-ladders)): `reload`,
-`trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `screenshot`,
+`trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`,
 `ocr-clipboard`, `static-region`, `search`, `sentence-search`, `selected-text`.
 One verb per global action, never a
 scripting API. Compositor binds on the **Shortcuts** tab name the running
@@ -295,12 +295,19 @@ Optional shortcuts have Clear buttons. Escape remains reserved for closing the p
 Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.
 The footer separates Apply progress from the active OCR language, OCR engine, and Anki enablement.
 It reports successful Apply only after the matching save completes. Unsaved controls do not change the runtime line.
-Changing the OCR engine still requires a restart; the runtime line names the backend currently running.
+Changing the OCR engine replaces the Worker-owned backend without a restart. The runtime line names the backend currently running.
 
 **Debug > Show live logs** opens a separate window with bounded recent output and live updates.
 Selecting text or reading older output pauses following. Returning to the tail resumes it.
 Closing the viewer leaves chibipop running. Closing the settings window with X exits the process after any active write finishes.
 Escape retains the live settings hide behavior.
+
+**Debug > Clear lookup cache** applies to the running Windows daemon. Confirmation names cached
+OCR pixels and text, parsed definitions, dictionary styles, frequencies, and decoded dictionary
+images. The action closes the current popup, reopens the read-only dictionary connection, and
+leaves the database, library, settings, role cache, and logs unchanged. The next lookup recaptures
+text and rereads dictionary data. A separate Search window clears its current results; a future
+query opens a fresh SearchService. The standalone settings process reports that no daemon is running.
 
 The embedded `crates/chibipop-windows/assets/settings-layout.toml` controls organization
 and labels. Developers can reorder entries or move them between sections and tabs, then rebuild.
@@ -460,7 +467,7 @@ display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in pr
 "zh-Hans-CN" = ["中日大辞典"]
 
 [plugins]
-enabled = []                # Windows only; discovery extends this in memory
+enabled = []                # Windows only; discovery never changes this list
 
 [ocr]
 max_ocr_passes = 1          # 1-5; 1 = no forward tiling (the default)
@@ -471,6 +478,9 @@ scan_alphanumeric = true
 discard_furigana = true     # remove geometric ruby from every OCR output
 language = "ja"             # Windows recogniser tag; Linux always reads ja
 engine = "builtin"          # Windows: "builtin", or a discovered plugin name
+
+# A plugin must also appear in plugins.enabled. A disabled or failed selection
+# uses Windows OCR and does not start the plugin process.
 
 [debug]
 show_scan_region = false    # outline what each hover captured
@@ -504,8 +514,6 @@ source = "expression"       # see the field-map table in the README
 enabled = true
 
 [actions.screenshot]
-hotkey = "ctrl+shift+s"     # Windows
-# hotkey_linux = "ALT+S"    # Linux; absent leaves it unbound
 save_dir = "screenshots"
 include_on_add = false
 capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-window"
@@ -519,10 +527,18 @@ capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-wind
 # hotkey_linux = "ALT+C"        # Linux
 ```
 
+## OCR resource measurements
+
+Use `scripts/measure_ocr_resources.ps1` with the same release executable and fixture for both engines.
+It samples every 100 ms and writes parent, descendants, and process-tree totals.
+Each row reports working set, private bytes, cumulative CPU, normalized CPU, threads, and handles.
+Use `-DryRun` to inspect a command without starting it. The 100 MiB and 200 MiB values remain
+measurement goals until Windows working-set and private-byte results are recorded.
+
 ### `capture_mode`
 
-`capture_mode` selects the target that the screenshot action captures. The default is
-`"region"`. The mode applies to screenshot-on-add and the standalone Mining screenshot.
+`capture_mode` selects the target that screenshot-on-add captures. The default is
+`"region"`.
 
 | Value | Selection |
 |---|---|
@@ -566,7 +582,7 @@ window contents. Existing OCR and static-region selectors remain region-only.
 On Linux, interactive selection has a 20-second timeout. On Windows, the selector
 waits until you select or cancel. Press Esc to cancel. On Windows, you can also
 right-click. If screenshot-on-add selection or capture fails, chibipop files the card
-without an image. A standalone Mining screenshot saves nothing in that case.
+without an image.
 
 ### `sentence_mode`
 
@@ -598,6 +614,26 @@ sentence that does not contain the surface form stays plain.
 The five default `[[anki.field_map]]` blocks are `Expression`/`expression`,
 `ExpressionReading`/`reading`, `Glossary`/`glossary`, `Frequency`/`frequency`
 and `FreqSort`/`frequency`.
+
+### `anki.overwrite_duplicates`
+
+This setting defaults to `false`. The default keeps Anki's duplicate rejection
+behavior unchanged.
+
+When `true`, chibipop reads the note type's first field, searches that field
+at write time, and verifies every returned note with `notesInfo`. It updates
+exactly one matching note. A missing match uses `addNote` with duplicate
+creation disabled. Multiple exact matches fail without mutation.
+
+Only mapped fields change during an update. Unmapped fields, tags, cards,
+scheduling, and deck placement stay unchanged. A screenshot update stores
+media first, then writes one image tag to the mapped screenshot field. A
+pictureless update clears that mapped field.
+
+Do not keep the target note open in Anki Browser during an update. AnkiConnect
+does not provide an atomic find-and-update operation. A timeout can therefore
+leave the final write state uncertain. A media file can remain unused after a
+later field-update failure.
 
 ### Selecting glossary text
 

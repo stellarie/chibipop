@@ -9,13 +9,12 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 64] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 65] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
     SettingId::AnkiAddKey,
     SettingId::StaticRegionKey,
-    SettingId::ScreenshotKey,
     SettingId::OcrClipboardKey,
     SettingId::SearchKey,
     SettingId::SentenceSearchKey,
@@ -57,8 +56,10 @@ pub(super) const SETTING_INVENTORY: [SettingId; 64] = [
     SettingId::DebugEngine,
     SettingId::DebugAdapter,
     SettingId::ShowLiveLogs,
+    SettingId::ClearLookupCache,
     SettingId::AnkiEnabled,
     SettingId::AnkiNotifyOnAdd,
+    SettingId::AnkiOverwriteDuplicates,
     SettingId::AnkiUrl,
     SettingId::AnkiDeck,
     SettingId::AnkiModel,
@@ -152,7 +153,6 @@ pub(super) enum SettingId {
     LookupKey,
     AnkiAddKey,
     StaticRegionKey,
-    ScreenshotKey,
     OcrClipboardKey,
     SearchKey,
     SentenceSearchKey,
@@ -194,8 +194,10 @@ pub(super) enum SettingId {
     DebugEngine,
     DebugAdapter,
     ShowLiveLogs,
+    ClearLookupCache,
     AnkiEnabled,
     AnkiNotifyOnAdd,
+    AnkiOverwriteDuplicates,
     AnkiUrl,
     AnkiDeck,
     AnkiModel,
@@ -368,6 +370,7 @@ mod tests {
         assert_eq!(location(&layout, SettingId::DebugEngine).0, 6);
         assert_eq!(location(&layout, SettingId::DebugAdapter).0, 6);
         assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 6);
+        assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 6);
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());

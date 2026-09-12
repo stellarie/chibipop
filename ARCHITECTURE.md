@@ -131,7 +131,7 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Trigger rungs: the GlobalShortcuts portal, then a native compositor keybind into the
   control socket.
 - The portal shortcut identifiers are `trigger`, `anki-add`, `search`, `sentence-search`,
-  `selected-text`, `screenshot`, `ocr-clipboard`, and `static-region`. Register only enabled actions with configured chords.
+  `selected-text`, `ocr-clipboard`, and `static-region`. Register only enabled actions with configured chords.
 - Hyprland uses native compositor bindings because its portal does not assign keys.
 - Apply replaces changed portal registrations without a daemon restart. Retired sessions cannot fire actions.
 - Each settings row reports its confirmed portal binding or copies a native bind with `chibipop ctl`.
@@ -293,6 +293,17 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   sets no rpath.
 - The source-AUR path keeps `--features system-onnxruntime` active. This feature opens
   the distribution library with dlopen.
+- Windows discovers providers without changing the saved enablement list. A provider
+  starts only when the selected engine is enabled.
+- The Windows Worker owns the OCR engine. Apply queues engine and enablement changes through
+  the existing Worker reload command, replaces the engine on that thread, and drops the old
+  plugin host before publishing active status.
+- A disabled selection and a failed plugin start use Windows OCR. A strike-disabled plugin
+  shuts down its host before reporting unavailable, which closes its process tree.
+- The MeikiOCR adapter caps ONNX and OpenCV worker threads through `config.toml`.
+- `scripts/measure_ocr_resources.ps1` reports parent, descendants, and process-tree totals
+  for working set, private bytes, CPU, threads, and handles. The 100 MiB and 200 MiB goals
+  remain measured targets, not guarantees.
 
 ## Japanese analysis
 
@@ -323,18 +334,17 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - Interactive Windows commands tee output into a bounded live log. Machine-readable commands
   keep their output contract. Restore original streams before spawning a replacement daemon.
 - Settings reject conflicting platform shortcuts before applying or saving changes.
-  Validation compares the complete pending form, including the editable Windows screenshot shortcut.
-  Users can swap keys in one Apply. An unedited Windows screenshot field remains untouched by a Linux Apply.
+  Users can swap keys in one Apply.
   Windows suppresses lower-priority legacy conflicts in memory and reports them without rewriting the file.
-  Priority is Back/Escape, lookup, Anki add, static region, screenshot, then OCR clipboard.
+  Priority is Back/Escape, lookup, Anki add, static region, then OCR clipboard.
   Linux validates configured chords. Apply requests direct portal bindings where supported.
   Native compositor bindings remain external configuration.
 - Linux settings run as a separate `chibipop settings` process with iced. The daemon
   contains no GUI toolkit.
 - The shared `Config` and `SettingsForm` model lives in core. Both platform bins render
   widgets only.
-- Live-apply saves the configuration and sends `reload` over the control socket. It never
-  uses a structured push.
+- Live-apply saves the configuration and sends `reload` over the control socket. Windows
+  also queues OCR engine changes to the existing Worker command path.
 - `anki.include_dictionary_name` controls headings in both Anki glossary fields. The plain
   definitions use an HTML heading because square brackets can become furigana in Anki.
 - Any setting that must round-trip is a field on the shared `Config`. It is never a
@@ -364,6 +374,15 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - The tray Search item and configured shortcut use the same platform entry point.
 - Linux Search holds a runtime focus lock while its input window has focus. The daemon suppresses lookup and actions during that interval.
 - Linux replaces portal shortcuts on reload. Only confirmed IDs from the current session can dispatch actions.
+
+- Windows Debug can clear lookup-derived in-memory state while the daemon runs. The ordered
+  Worker request validates a freshly opened Dictionary before dropping frozen capture, both OCR
+  generations, parsed definitions, stylesheet and frequency caches, and SQLite handles.
+- Successful Windows invalidation replaces decoded media caches and dismisses the current popup.
+  Media reopen failure leaves media disabled and uses alt text, without retaining stale bytes.
+- The Windows Search window clears displayed results and definitions. Separate future queries use
+  a fresh SearchService. Linux maintenance transport and separate Search processes remain outside
+  this action's scope.
 
 - The system derives the roles of a Dictionary by inspecting its banks. It never derives
   roles from a filename, and a user never declares them.

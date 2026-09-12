@@ -906,6 +906,54 @@ mod tests {
         assert_eq!(1, d.sheets.borrow().len(), "one compile for one dictionary");
     }
 
+    #[test]
+    fn reopened_dictionary_drops_cached_gloss_sheet_and_reported_frequency() {
+        let path = fixture_path("reopened_dictionary_drops_lookup_caches");
+        let _guard = TempDbGuard(path.clone());
+        seed_fixture_db(
+            &path,
+            "INSERT INTO dict VALUES (1,'d',0);
+             INSERT INTO entry VALUES (1,1,'[{\"type\":\"structured-content\",\"content\":[{\"tag\":\"span\",\"content\":\"old gloss\"}]}]');
+             INSERT INTO term VALUES ('食','食','しょく','',10,1,1);
+             INSERT INTO dict_style VALUES (1,'span { margin-top: 1px }');
+             INSERT INTO reported_freq VALUES (1,'食',NULL,10);
+             INSERT INTO meta VALUES ('schema_version','4');
+             INSERT INTO meta VALUES ('frequency_order','[1]');
+             INSERT INTO meta VALUES ('frequency_strategy','best-rank');",
+        );
+
+        let old = SqliteDictionary::open(&path).unwrap();
+        let warm = old.entries(&[1]).unwrap();
+        assert_eq!(vec!["old gloss".to_string()], warm[0].glosses());
+        assert_eq!(Some(10), warm[0].reported_freq);
+
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "UPDATE entry SET glossary='[{\"type\":\"structured-content\",\"content\":[{\"tag\":\"span\",\"content\":\"new gloss\"}]}]' WHERE entry_id=1;
+                 UPDATE dict_style SET css='span { margin-top: 3px }' WHERE dict_id=1;
+                 UPDATE reported_freq SET rank=20 WHERE dict_id=1 AND term='食';",
+            )
+            .unwrap();
+
+        let stale = old.entries(&[1]).unwrap();
+        assert_eq!(vec!["old gloss".to_string()], stale[0].glosses());
+        assert_eq!(Some(10), stale[0].reported_freq);
+
+        let fresh = SqliteDictionary::open(&path).unwrap();
+        let current = fresh.entries(&[1]).unwrap();
+        assert_eq!(vec!["new gloss".to_string()], current[0].glosses());
+        assert_eq!(Some(20), current[0].reported_freq);
+        let span = (0..current[0].gloss.all_nodes().len() as NodeId)
+            .find(|id| current[0].gloss.node(*id).tag == crate::dict::gloss::Tag::Span)
+            .expect("the styled span parsed");
+        assert_eq!(
+            Some("3px"),
+            current[0].gloss.style_of(span, crate::dict::gloss::StyleKey::MarginTop)
+                .and_then(|value| current[0].gloss.scalar_str(value)),
+        );
+    }
+
     // ---- pitch ----
 
     /// This read returns every table field with markers. Each claim keeps its
