@@ -4955,6 +4955,7 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
+        app.config.anki.sentence_mode = chibipop::config::SentenceMode::Sentence;
 
         app.handle_request("static-region", Verb::parse("static-region"));
 
@@ -6792,9 +6793,9 @@ mod tests {
         anki_at(&mut app, &format!("http://{dead}"));
 
         app.execute(Command::AddNote { expr: WORD.to_string(), fields: HashMap::new() });
-        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: adding the card", 60);
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: Anki write failed", 60);
 
-        assert!(written.contains("anki: adding the card failed"), "log was: {written}");
+        assert!(written.contains("anki: Anki write failed"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
