@@ -37,9 +37,6 @@ pub enum Verb {
     /// Add a card for the lookup on screen. This is the same action that the
     /// portal `anki-add` shortcut performs. Both channels use this wire name.
     AnkiAdd,
-    /// Grab a region and save it as the mining context for the lookup on screen
-    /// (`actions.screenshot`). Portal and native shortcuts use this same verb.
-    Screenshot,
     /// Pick a region, run OCR, and place the text on the clipboard
     /// (`actions.ocr_clipboard`). Portal and native shortcuts use this verb.
     OcrClipboard,
@@ -49,14 +46,13 @@ pub enum Verb {
     SelectedText,
 }
 
-pub const VERBS: [Verb; 12] = [
+pub const VERBS: [Verb; 11] = [
     Verb::Reload,
     Verb::TriggerDown,
     Verb::TriggerUp,
     Verb::Toggle,
     Verb::Lookup,
     Verb::AnkiAdd,
-    Verb::Screenshot,
     Verb::OcrClipboard,
     Verb::StaticRegion,
     Verb::Search,
@@ -75,7 +71,6 @@ impl Verb {
             Verb::Toggle => "toggle",
             Verb::Lookup => "lookup",
             Verb::AnkiAdd => "anki-add",
-            Verb::Screenshot => "screenshot",
             Verb::OcrClipboard => "ocr-clipboard",
             Verb::StaticRegion => "static-region",
             Verb::SelectedText => "selected-text",
@@ -133,10 +128,6 @@ impl StubState {
             // an already added card. A counter here would provide a second, less accurate
             // answer. This line reports the request.
             Verb::AnkiAdd => "card requested for the lookup on screen".to_string(),
-            // Do not count this action. A picture depends on the region pick and on
-            // whether AnkiConnect can accept a card. A counter would not report that
-            // result. This line reports the request, not the result.
-            Verb::Screenshot => "picking the mining screenshot's region".to_string(),
             // Do not count this action. The pick, the grab, and the OCR engine can each
             // fail. The compositor can lack a clipboard protocol. This line reports the
             // request.
@@ -277,7 +268,7 @@ mod tests {
     #[test]
     fn the_wire_names_are_the_forever_contract() {
         assert_eq!(
-            "reload, trigger-down, trigger-up, toggle, lookup, anki-add, screenshot, \
+            "reload, trigger-down, trigger-up, toggle, lookup, anki-add, \
              ocr-clipboard, static-region, search, sentence-search, selected-text",
             verb_list()
         );
@@ -301,7 +292,6 @@ mod tests {
             (ShortcutId::Search, Verb::Search),
             (ShortcutId::SentenceSearch, Verb::SentenceSearch),
             (ShortcutId::SelectedText, Verb::SelectedText),
-            (ShortcutId::Screenshot, Verb::Screenshot),
             (ShortcutId::OcrClipboard, Verb::OcrClipboard),
             (ShortcutId::StaticRegion, Verb::StaticRegion),
         ] {
@@ -323,6 +313,7 @@ mod tests {
         assert_eq!(None, Verb::parse("open-settings"));
         assert_eq!(None, Verb::parse(""));
         assert_eq!(None, Verb::parse("TRIGGER-DOWN"));
+        assert_eq!(None, Verb::parse("screenshot"));
     }
 
     #[test]

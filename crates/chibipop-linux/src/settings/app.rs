@@ -356,7 +356,6 @@ impl App {
             ShortcutId::Trigger => &self.linux.trigger_key_linux,
             ShortcutId::AnkiAdd => &self.linux.add_key_linux,
             ShortcutId::StaticRegion => &self.linux.static_region_key_linux,
-            ShortcutId::Screenshot => self.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
             ShortcutId::OcrClipboard => self.linux.ocr_clipboard_key_linux.as_deref().unwrap_or_default(),
             ShortcutId::Search => self.linux.search_key_linux.as_deref().unwrap_or_default(),
             ShortcutId::SentenceSearch => self.linux.sentence_key_linux.as_deref().unwrap_or_default(),
@@ -365,7 +364,9 @@ impl App {
     }
 
     fn shortcut_control(&self, id: ShortcutId) -> HotkeyControl {
-        if id == ShortcutId::OcrClipboard && self.clipboard_rung.is_none() {
+        if (id == ShortcutId::AnkiAdd && !self.form.cfg.anki.enabled)
+            || (id == ShortcutId::OcrClipboard && self.clipboard_rung.is_none())
+        {
             return HotkeyControl::NoChord;
         }
         let bind = if id == ShortcutId::Trigger {
@@ -740,6 +741,7 @@ enum Message {
     AnkiDeck(String),
     AnkiModel(String),
     AnkiAddKey(String),
+    OverwriteDuplicates(bool),
     IncludeDictionaryName(bool),
     FirstDictOnly(bool),
     /// This label identifies a selection button mode.
@@ -758,9 +760,6 @@ enum Message {
     ScreenshotModePicked(String),
     /// Clear both saved fixed screenshot targets.
     ResetScreenshotTargets,
-    /// The mining screenshot chord. Empty text becomes `None` in the config field,
-    /// and this arm stores that value.
-    ScreenshotKey(String),
     ScreenshotSaveDir(String),
     /// The OCR-to-clipboard chord. Empty text becomes `None` in the config field,
     /// and this arm stores that value.
@@ -874,7 +873,12 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AnkiDeck(_) => {}
         Message::AnkiModel(v) if app.form.cfg.anki.enabled => app.form.cfg.anki.model = v,
         Message::AnkiModel(_) => {}
-        Message::AnkiAddKey(v) => app.linux.add_key_linux = v,
+        Message::AnkiAddKey(v) if app.form.cfg.anki.enabled => app.linux.add_key_linux = v,
+        Message::AnkiAddKey(_) => {}
+        Message::OverwriteDuplicates(on) if app.form.cfg.anki.enabled => {
+            app.form.cfg.anki.overwrite_duplicates = on;
+        }
+        Message::OverwriteDuplicates(_) => {}
         Message::IncludeDictionaryName(on) if app.form.cfg.anki.enabled => {
             app.form.cfg.anki.include_dictionary_name = on;
         }
@@ -912,9 +916,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // This is the only place where empty text becomes `None`. The config field
         // uses `Option`, so absence has a distinct value. An empty chord would be
         // a sentinel that the daemon would need to interpret.
-        Message::ScreenshotKey(v) => {
-            app.linux.screenshot_key_linux = (!v.trim().is_empty()).then_some(v);
-        }
         Message::ScreenshotSaveDir(v) => app.linux.screenshot_save_dir = v,
         // The OCR-to-clipboard key uses the same empty-text rule. The Windows
         // counterpart also rejects this sentinel.
@@ -955,7 +956,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.cfg.anki.show_static_overlay = on;
         }
         Message::ShowStaticOverlay(_) => {}
-        Message::StaticRegionKey(v) => app.linux.static_region_key_linux = v,
+        Message::StaticRegionKey(v) if app.form.cfg.anki.sentence_mode == SentenceMode::Static => {
+            app.linux.static_region_key_linux = v;
+        }
+        Message::StaticRegionKey(_) => {}
         Message::FieldMapAnki(i, v) if app.form.cfg.anki.enabled => {
             if let Some(m) = app.form.field_map.as_mut().and_then(|rows| rows.get_mut(i)) {
                 m.anki_field = v;
@@ -995,6 +999,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::FieldMapRemove(_) => {}
+        Message::CopyBind(ShortcutId::AnkiAdd) if !app.form.cfg.anki.enabled => {}
+        Message::CopyBind(ShortcutId::StaticRegion)
+            if app.form.cfg.anki.sentence_mode != SentenceMode::Static => {}
         Message::CopyBind(id) => {
             if let Some(snippet) = app.shortcut_snippet(id) {
                 return iced::clipboard::write(snippet);
@@ -1433,28 +1440,19 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
             labeled(
                 "Anki shortcut",
                 text_input("ALT+A", &app.linux.add_key_linux)
-                    .on_input(Message::AnkiAddKey)
+                    .on_input_maybe(app.form.cfg.anki.enabled.then_some(Message::AnkiAddKey))
                     .width(200),
             ),
             shortcut_bind(app, ShortcutId::AnkiAdd),
-        ].spacing(10)),
-        card("Save a screenshot", column![
-            labeled(
-                "Screenshot shortcut",
-                text_input(
-                    "SUPER+S",
-                    app.linux.screenshot_key_linux.as_deref().unwrap_or_default(),
-                )
-                .on_input(Message::ScreenshotKey)
-                .width(200),
-            ),
-            shortcut_bind(app, ShortcutId::Screenshot),
         ].spacing(10)),
         card("Set sentence area", column![
             labeled(
                 "Sentence-area shortcut",
                 text_input("ALT+R", &app.linux.static_region_key_linux)
-                    .on_input(Message::StaticRegionKey)
+                    .on_input_maybe(
+                        (app.form.cfg.anki.sentence_mode == SentenceMode::Static)
+                            .then_some(Message::StaticRegionKey),
+                    )
                     .width(200),
             ),
             shortcut_bind(app, ShortcutId::StaticRegion),
@@ -1482,13 +1480,15 @@ fn shortcuts_page(app: &App) -> Element<'_, Message> {
 /// Every row uses its own confirmed binding. Native rows copy the same
 /// daemon verbs that portal activations execute.
 fn shortcut_bind(app: &App, id: ShortcutId) -> Element<'_, Message> {
+    let can_copy = id != ShortcutId::StaticRegion
+        || app.form.cfg.anki.sentence_mode == SentenceMode::Static;
     match app.shortcut_control(id) {
         HotkeyControl::Snippet { text: snippet } => column![
             hint(app.snippet_compositor.bind_help()),
             snippet_box(snippet),
             button(if matches!(app.snippet_compositor, Compositor::Kde | Compositor::Gnome | Compositor::Other) {
                 "Copy daemon command"
-            } else { "Copy bind snippet" }).on_press(Message::CopyBind(id)),
+            } else { "Copy bind snippet" }).on_press_maybe(can_copy.then_some(Message::CopyBind(id))),
         ].spacing(6).into(),
         HotkeyControl::Rebind { current } => column![
             text("Global shortcut: your desktop registered this action."),
@@ -2030,11 +2030,9 @@ const SCREENSHOT_MODES: [(ScreenshotMode, &str); 4] = [
     (ScreenshotMode::FixedWindow, "Reuse one window"),
 ];
 
-/// The mining screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
-/// The standalone screenshot chord lives on Shortcuts instead of this card.
+/// The screenshot rows control inclusion on add, the save folder, the mode, and saved targets.
 ///
-/// Show every row in every state. The folder also affects the standalone action,
-/// so `include_on_add` does not control it.
+/// Show every row in every state. The folder stores local copies of card pictures.
 fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
     let anki_enabled = app.form.cfg.anki.enabled;
     let region_summary = match app.form.cfg.actions.screenshot.fixed_region {
@@ -2086,7 +2084,6 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             "An absolute path is taken as typed. A relative one lands under your XDG data \
              directory, or beside the executable in portable mode."
         ),
-        hint("The Save a screenshot shortcut is on the Shortcuts tab."),
     ]
 }
 
@@ -2238,6 +2235,9 @@ fn anki_page(app: &App) -> Element<'_, Message> {
             ),
         ].spacing(10)),
         card("Card content", column![
+            checkbox(app.form.cfg.anki.overwrite_duplicates)
+                .label("Update matching duplicate notes")
+                .on_toggle_maybe(anki_enabled.then_some(Message::OverwriteDuplicates)),
             checkbox(app.form.cfg.anki.include_dictionary_name)
                 .label("Include the dictionary name")
                 .on_toggle_maybe(anki_enabled.then_some(Message::IncludeDictionaryName)),
@@ -2509,11 +2509,12 @@ mod tests {
     fn every_shortcut_uses_its_own_portal_key_or_daemon_bind() {
         let dir = scratch("all-shortcut-rows");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
+        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
         app.linux.search_key_linux = Some("SUPER+F".into());
         app.linux.sentence_key_linux = Some("SUPER+G".into());
         app.linux.selected_key_linux = Some("SUPER+H".into());
         app.linux.static_region_key_linux = "ALT+R".into();
-        app.linux.screenshot_key_linux = Some("SUPER+S".into());
         app.linux.ocr_clipboard_key_linux = Some("ALT+C".into());
         app.form.cfg.trigger.mode = TriggerMode::Press;
         let actions = [
@@ -2523,7 +2524,6 @@ mod tests {
             (ShortcutId::SentenceSearch, "sentence-search"),
             (ShortcutId::SelectedText, "selected-text"),
             (ShortcutId::StaticRegion, "static-region"),
-            (ShortcutId::Screenshot, "screenshot"),
             (ShortcutId::OcrClipboard, "ocr-clipboard"),
         ];
         app.shortcuts = Some(shortcuts::state::Published::portal(actions.iter().map(|(id, _)| {
@@ -2635,6 +2635,7 @@ mod tests {
             Message::AnkiUrl("changed-url".into()),
             Message::AnkiDeck("changed-deck".into()),
             Message::AnkiModel("changed-model".into()),
+            Message::OverwriteDuplicates(true),
             Message::IncludeDictionaryName(false),
             Message::FirstDictOnly(true),
             Message::SelectionButtonsPicked("Replace selection".into()),
@@ -2656,10 +2657,12 @@ mod tests {
 
         let _ = update(&mut app, Message::AnkiEnabled(true));
         let _ = update(&mut app, Message::AnkiUrl("enabled-url".into()));
+        let _ = update(&mut app, Message::OverwriteDuplicates(true));
         let _ = update(&mut app, Message::SelectionButtonsPicked("Replace selection".into()));
         let _ = update(&mut app, Message::SentenceModePicked("All captured lines".into()));
         let _ = update(&mut app, Message::FieldMapAnki(0, "Front".into()));
         assert_eq!("enabled-url", app.form.cfg.anki.url);
+        assert!(app.form.cfg.anki.overwrite_duplicates);
         assert_eq!(SelectionButtons::PrimaryReplacing, app.form.cfg.anki.selection_buttons);
         assert_eq!(SentenceMode::All, app.form.cfg.anki.sentence_mode);
         assert_eq!("Front", form_rows(&app)[0].anki_field);
@@ -2783,6 +2786,7 @@ mod tests {
     fn the_add_card_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("addbind");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
 
         let _ = update(&mut app, Message::AnkiAddKey("CTRL+SHIFT+A".to_string()));
         let snippet = app.shortcut_snippet(ShortcutId::AnkiAdd).expect("a chord has a bind");
@@ -2796,6 +2800,7 @@ mod tests {
     fn a_cleared_add_card_chord_offers_no_bind_at_all() {
         let dir = scratch("addnobind");
         let mut app = app(&dir);
+        app.form.cfg.anki.enabled = true;
 
         let _ = update(&mut app, Message::AnkiAddKey(String::new()));
 
@@ -2807,12 +2812,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn disabled_anki_shortcut_preserves_chord_and_restores_handlers() {
+        let dir = scratch("ankishortcutgated");
+        let mut app = app(&dir);
+        app.form.cfg.anki.enabled = false;
+        app.linux.add_key_linux = "CTRL+SHIFT+A".into();
+
+        let _ = update(&mut app, Message::AnkiAddKey("ALT+B".into()));
+        assert_eq!("CTRL+SHIFT+A", app.linux.add_key_linux);
+        assert_eq!(HotkeyControl::NoChord, app.shortcut_control(ShortcutId::AnkiAdd));
+        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
+        let _ = update(&mut app, Message::CopyBind(ShortcutId::AnkiAdd));
+
+        let _ = update(&mut app, Message::AnkiEnabled(true));
+        let _ = update(&mut app, Message::AnkiAddKey("ALT+B".into()));
+        assert_eq!("ALT+B", app.linux.add_key_linux);
+        assert!(app.shortcut_snippet(ShortcutId::AnkiAdd).is_some());
+
+        let _ = update(&mut app, Message::AnkiEnabled(false));
+        let _ = update(&mut app, Message::AnkiAddKey("SUPER+C".into()));
+        assert_eq!("ALT+B", app.linux.add_key_linux);
+        assert_eq!(None, app.shortcut_snippet(ShortcutId::AnkiAdd));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// The static-region row must use the pending chord and its daemon verb.
     #[test]
     fn the_static_region_chord_offers_a_pasteable_bind_for_the_typed_chord() {
         let dir = scratch("srbind");
         let mut app = app(&dir);
+        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
 
         let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
         let snippet = app.shortcut_snippet(ShortcutId::StaticRegion)
@@ -2823,43 +2854,6 @@ mod tests {
     }
 
 
-
-    /// The screenshot row uses an `Option` chord. Only the text box maps `""` to
-    /// `None`, so a typed chord is `Some` and a cleared chord is absent, never an
-    /// empty-string sentinel in config.
-    #[test]
-    fn the_screenshot_chord_offers_a_pasteable_bind_and_clears_to_none() {
-        let dir = scratch("shotbind");
-        let mut app = app(&dir);
-
-        assert_eq!(None, app.linux.screenshot_key_linux, "the shipped default is unset");
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::Screenshot)
-        );
-
-        let _ = update(&mut app, Message::ScreenshotKey("SUPER+S".to_string()));
-        assert_eq!(Some("SUPER+S".to_string()), app.linux.screenshot_key_linux);
-        assert_eq!(
-            "bind = SUPER, S, exec, /usr/bin/chibipop ctl screenshot",
-            app.shortcut_snippet(ShortcutId::Screenshot)
-            .expect("a chord has a bind")
-        );
-
-        let _ = update(&mut app, Message::ScreenshotKey("   ".to_string()));
-        assert_eq!(None, app.linux.screenshot_key_linux, "blank is absence, not an empty chord");
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::Screenshot)
-        );
-        // The copy action does nothing, so it cannot paste an old bind.
-        let _ = update(&mut app, Message::CopyBind(ShortcutId::Screenshot));
-        assert_eq!(
-            None,
-            app.shortcut_snippet(ShortcutId::Screenshot)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
 
     /// These rows apply the inclusion flag and folder. An empty folder uses the
@@ -2928,24 +2922,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The static-region bind stays available outside Static mode.
-    /// Check the copyable command after tab and mode changes instead of counting widget rows.
+    /// Fixed-area controls follow the pending sentence source.
     #[test]
-    fn the_static_region_bind_remains_available_across_tabs_and_sentence_modes() {
+    fn the_static_region_controls_follow_each_pending_sentence_mode() {
         let dir = scratch("srrows");
         let mut app = app(&dir);
         app.form.cfg.anki.enabled = true;
+        app.linux.static_region_key_linux = "CTRL+R".into();
 
         let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
-        let _ = update(&mut app, Message::StaticRegionKey("CTRL+R".to_string()));
-        let _ = update(&mut app, Message::TabPicked(Tab::Anki));
-        let _ = update(&mut app, Message::SentenceModePicked("Fixed screen area".to_string()));
-        let _ = update(&mut app, Message::SentenceModePicked("All captured lines".to_string()));
-        let _ = update(&mut app, Message::TabPicked(Tab::Shortcuts));
+        for mode in [
+            SentenceMode::Sentence,
+            SentenceMode::Line,
+            SentenceMode::All,
+        ] {
+            app.form.cfg.anki.sentence_mode = mode;
+            let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
+            assert_eq!("CTRL+R", app.linux.static_region_key_linux, "{mode:?}");
+            let _ = update(&mut app, Message::CopyBind(ShortcutId::StaticRegion));
+        }
+
+        app.form.cfg.anki.sentence_mode = SentenceMode::Static;
+        let _ = update(&mut app, Message::StaticRegionKey("ALT+R".to_string()));
+        assert_eq!("ALT+R", app.linux.static_region_key_linux);
         assert_eq!(
-            Some("bind = CTRL, R, exec, /usr/bin/chibipop ctl static-region"),
+            Some("bind = ALT, R, exec, /usr/bin/chibipop ctl static-region"),
             app.shortcut_snippet(ShortcutId::StaticRegion).as_deref(),
-            "a non-static mode must not hide or reset the chord on Shortcuts"
         );
         every_page(&app);
         let _ = std::fs::remove_dir_all(&dir);

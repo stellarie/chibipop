@@ -58,8 +58,6 @@ pub struct SettingsForm {
     pub field_map: Option<Vec<FieldMapping>>,
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
-    /// Only the Windows editor can change this platform field.
-    pub screenshot_hotkey_edited: bool,
     /// Saved targets can change while this form is open.
     /// Only an explicit reset can remove a target from the latest Config.
     pub screenshot_reset_targets: bool,
@@ -368,7 +366,6 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
             .ocr_clipboard
             .as_ref()
             .and_then(|action| action.hotkey.clone()),
-        screenshot_hotkey_edited: false,
         screenshot_reset_targets: false,
     }
 }
@@ -431,9 +428,6 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
             hotkey_linux: hotkey_linux.clone(),
         }),
     };
-    if form.screenshot_hotkey_edited {
-        out.actions.screenshot.hotkey = form.cfg.actions.screenshot.hotkey.trim().to_string();
-    }
     out.clamp_ranges(None);
     // Each role list becomes an enabled array and a disabled array. Each array
     // keeps its rows in screen order. An unreadable file remains a row for
@@ -774,7 +768,6 @@ mod tests {
         cfg.trigger.trigger_key_linux = "SUPER+J".to_string();
         cfg.anki.add_key_linux = "SUPER+K".to_string();
         cfg.anki.static_region_key_linux = "SUPER+R".to_string();
-        cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".to_string());
         cfg.actions.ocr_clipboard = Some(OcrClipboardConfig { open_sentence_search: false,
             hotkey: Some("f9".into()),
             hotkey_linux: Some("SUPER+C".into()),
@@ -790,7 +783,6 @@ mod tests {
             Some("SUPER+C".to_string()),
             out.actions.ocr_clipboard.as_ref().and_then(|a| a.hotkey_linux.clone())
         );
-        assert_eq!(Some("SUPER+S".to_string()), out.actions.screenshot.hotkey_linux);
         assert_eq!(crate::config::PopupLayer::Top, out.popup.layer);
         assert_eq!("light", out.popup.theme);
     }
@@ -1074,44 +1066,12 @@ mod tests {
             title: "日本語".into(),
         });
         cfg.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
-        cfg.actions.screenshot.hotkey_linux = Some("SUPER+S".into());
         let mut form = from_config(&cfg, &dicts());
         form.screenshot_reset_targets = true;
         let out = apply_to(&form, &cfg);
         assert_eq!(None, out.actions.screenshot.fixed_region);
         assert_eq!(None, out.actions.screenshot.fixed_window);
         assert_eq!(cfg.actions.screenshot.capture_mode, out.actions.screenshot.capture_mode);
-        assert_eq!(cfg.actions.screenshot.hotkey_linux, out.actions.screenshot.hotkey_linux);
-    }
-
-    #[test]
-    fn include_screenshot_does_not_touch_hotkey() {
-        let mut cfg = cfg_with(&[]);
-        cfg.actions.screenshot.hotkey = "f10".into();
-        cfg.actions.screenshot.include_on_add = true;
-        let form = from_config(&cfg, &dicts());
-        let out = apply_to(&form, &cfg);
-        assert_eq!("f10", out.actions.screenshot.hotkey);
-    }
-
-    #[test]
-    fn an_unedited_screenshot_shortcut_preserves_the_latest_saved_value() {
-        let mut cfg = cfg_with(&[]);
-        let form = from_config(&cfg, &dicts());
-        cfg.actions.screenshot.hotkey = "f10".into();
-        assert_eq!(apply_to(&form, &cfg).actions.screenshot.hotkey, "f10");
-    }
-
-    #[test]
-    fn an_edited_screenshot_shortcut_replaces_the_saved_value_and_keeps_the_linux_key() {
-        let mut cfg = cfg_with(&[]);
-        cfg.actions.screenshot.hotkey_linux = Some("ALT+S".into());
-        let mut form = from_config(&cfg, &dicts());
-        form.cfg.actions.screenshot.hotkey = " F5 ".into();
-        form.screenshot_hotkey_edited = true;
-        let pending = apply_to(&form, &cfg);
-        assert_eq!(pending.actions.screenshot.hotkey, "F5");
-        assert_eq!(pending.actions.screenshot.hotkey_linux.as_deref(), Some("ALT+S"));
     }
 
     #[test]
@@ -1198,6 +1158,15 @@ mod tests {
         assert!(form.cfg.anki.first_dict_only);
         let out = apply_to(&form, &cfg);
         assert!(out.anki.first_dict_only);
+    }
+
+    #[test]
+    fn overwrite_duplicates_round_trips_through_the_settings_form() {
+        let mut cfg = cfg_with(&[]);
+        cfg.anki.overwrite_duplicates = true;
+        let form = from_config(&cfg, &dicts());
+        assert!(form.cfg.anki.overwrite_duplicates);
+        assert!(apply_to(&form, &cfg).anki.overwrite_duplicates);
     }
 
     #[test]

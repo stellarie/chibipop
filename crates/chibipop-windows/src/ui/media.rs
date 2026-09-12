@@ -87,6 +87,13 @@ impl MediaSurfaces {
         MediaSurfaces::with_budget(db, SURFACE_BUDGET)
     }
 
+    /// Replace the store connection and every decoded slot.
+    pub fn reopen(&mut self, db: &Path) -> anyhow::Result<()> {
+        let fresh = Self::open(db)?;
+        *self = fresh;
+        Ok(())
+    }
+
     fn with_budget(db: &Path, budget: usize) -> anyhow::Result<MediaSurfaces> {
         Ok(MediaSurfaces {
             store: MediaStore::open(db)?,
@@ -263,6 +270,22 @@ mod tests {
         assert_eq!(12 * 7 * 4, held, "the budget counts decoded pixels");
         assert_eq!(&first, cache.bitmap(&key, AS_DRAWN.0, AS_DRAWN.1).expect("still paints"));
         assert_eq!(held, cache.footprint(), "a hit admits nothing");
+    }
+
+    #[test]
+    fn replacement_drops_cached_pixels_and_cached_refusals() {
+        let (db, _guard) = built("replacement");
+        let mut cache = MediaSurfaces::open(&db).expect("the store opens");
+        let key = MediaKey::new(1, "gaiji/one.png");
+        let missing = MediaKey::new(1, "gaiji/missing.png");
+        assert!(cache.bitmap(&key, AS_DRAWN.0, AS_DRAWN.1).is_ok());
+        assert!(cache.bitmap(&missing, AS_DRAWN.0, AS_DRAWN.1).is_err());
+        assert!(cache.footprint() > 0);
+
+        cache.reopen(&db).expect("the replacement store opens");
+
+        assert_eq!(0, cache.footprint());
+        assert!(cache.bitmap(&missing, AS_DRAWN.0, AS_DRAWN.1).is_err());
     }
 
     /// Every format that the census found now decodes into pixels.

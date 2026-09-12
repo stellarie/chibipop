@@ -1,9 +1,7 @@
-//! This module captures a Mining screenshot.
+//! This module selects Anki screenshot targets.
 
-use crate::action::{Action, ActionContext, ActionOutcome, AppState};
 use crate::action::selection::SelectionTarget;
 use crate::config::ScreenshotMode;
-use crate::text::capture;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -23,7 +21,6 @@ pub fn save_root(cfg: &crate::config::ScreenshotConfig, exe_dir: &Path) -> PathB
         exe_dir.join(&cfg.save_dir)
     }
 }
-
 /// Validate and convert a saved fixed region.
 fn fixed_region(target: [i32; 4]) -> Result<crate::geom::PhysRect> {
     let rect = crate::geom::PhysRect {
@@ -75,41 +72,4 @@ pub fn select_target(
         }
     };
     Ok(selected)
-}
-
-/// Capture a region for a Mining screenshot.
-pub struct MiningContextScreenshot;
-
-impl Action for MiningContextScreenshot {
-    fn name(&self) -> &str {
-        "screenshot"
-    }
-
-    fn is_available(&self, state: &AppState) -> bool {
-        state.popup_visible
-            && state
-                .presentation
-                .as_ref()
-                .and_then(|p| p.top.as_ref())
-                .is_some()
-    }
-
-    fn execute(&mut self, ctx: &mut ActionContext) -> Result<ActionOutcome> {
-        let cancellation = crate::input::hooks::EscapeCancellation::new();
-        let selected = select_target(&mut *ctx.selection, &ctx.config.screenshot)?;
-        let Some(selected) = selected else {
-            return Ok(ActionOutcome::Cancelled);
-        };
-        if cancellation.cancelled() { return Ok(ActionOutcome::Cancelled); }
-        let cap = capture::capture_upscaled_by(selected.rect(), 1)?;
-        if cancellation.cancelled() { return Ok(ActionOutcome::Cancelled); }
-
-        Ok(ActionOutcome::ScreenshotCaptured {
-            bgra_buf: cap.buf,
-            width: cap.w,
-            height: cap.h,
-            save_dir: save_root(&ctx.config.screenshot, ctx.exe_dir),
-            target: selected,
-        })
-    }
 }

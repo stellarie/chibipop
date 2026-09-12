@@ -75,12 +75,15 @@ PROTOCOL = 1
 NAME = "meikiocr"
 VERSION = "0.1.0"
 
-# Trap 6. 16 cores gave 65 ms, 4 cores gave 70 ms. 8% for 12 free cores.
-# config.toml's threads overrides this default.
-try:
-    OCR_THREADS = int(_CFG.get("threads", 4))
-except (TypeError, ValueError):
-    OCR_THREADS = 4
+def _thread_count(name, fallback):
+    try:
+        return max(1, min(4, int(_CFG.get(name, fallback))))
+    except (TypeError, ValueError):
+        return fallback
+
+
+OCR_THREADS = _thread_count("threads", 4)
+OPENCV_THREADS = _thread_count("opencv_threads", 1)
 
 _ocr = None
 _cv2 = None
@@ -102,6 +105,9 @@ def cap_threads():
     """meikiocr exposes no thread knob, so preset the options it builds."""
     import onnxruntime as ort
 
+    setter = getattr(_cv2, "setNumThreads", None)
+    if setter is not None:
+        setter(OPENCV_THREADS)
     real = ort.SessionOptions
 
     def capped():
@@ -130,7 +136,8 @@ def load():
     cap_threads()
     _ocr = meikiocr.MeikiOCR(provider="CPUExecutionProvider")
     log(f"loaded in {time.perf_counter() - t0:.2f}s "
-        f"provider={_ocr.active_provider} threads={OCR_THREADS}")
+        f"provider={_ocr.active_provider} onnx_threads={OCR_THREADS} "
+        f"opencv_threads={OPENCV_THREADS}")
 
     # A cold first inference is slower. Pay it here, not on the first hover.
     try:

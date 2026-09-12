@@ -64,8 +64,6 @@ pub enum ShortcutId {
     SentenceSearch,
     /// Read the application's PRIMARY selection.
     SelectedText,
-    /// Capture the mining screenshot.
-    Screenshot,
     /// OCR a selected region onto the clipboard.
     OcrClipboard,
     /// Select the static sentence region.
@@ -75,13 +73,12 @@ pub enum ShortcutId {
 impl ShortcutId {
     /// The complete set in the order that the daemon registers it. The
     /// fixed-size array makes the identifier set part of the application.
-    pub const ALL: [ShortcutId; 8] = [
+    pub const ALL: [ShortcutId; 7] = [
         ShortcutId::Trigger,
         ShortcutId::AnkiAdd,
         ShortcutId::Search,
         ShortcutId::SentenceSearch,
         ShortcutId::SelectedText,
-        ShortcutId::Screenshot,
         ShortcutId::OcrClipboard,
         ShortcutId::StaticRegion,
     ];
@@ -96,7 +93,6 @@ impl ShortcutId {
             ShortcutId::Search => "search",
             ShortcutId::SentenceSearch => "sentence-search",
             ShortcutId::SelectedText => "selected-text",
-            ShortcutId::Screenshot => "screenshot",
             ShortcutId::OcrClipboard => "ocr-clipboard",
             ShortcutId::StaticRegion => "static-region",
         }
@@ -117,7 +113,6 @@ impl ShortcutId {
             ShortcutId::Search => "Open dictionary search",
             ShortcutId::SentenceSearch => "Open sentence search",
             ShortcutId::SelectedText => "Look up selected application text",
-            ShortcutId::Screenshot => "Capture a mining screenshot",
             ShortcutId::OcrClipboard => "Copy OCR text from a selected region",
             ShortcutId::StaticRegion => "Select the static sentence region",
         }
@@ -392,15 +387,14 @@ pub fn preferred(config: &chibipop::config::Config) -> Vec<(ShortcutId, String)>
         if let Some(key) = config.actions.search.selected_hotkey_linux.as_deref() {
             push(&mut shortcuts, ShortcutId::SelectedText, key);
         }
-        if let Some(key) = config.actions.screenshot.hotkey_linux.as_deref() {
-            push(&mut shortcuts, ShortcutId::Screenshot, key);
-        }
         if let Some(ocr) = config.actions.ocr_clipboard.as_ref() {
             if let Some(key) = ocr.hotkey_linux.as_deref() {
                 push(&mut shortcuts, ShortcutId::OcrClipboard, key);
             }
         }
-        push(&mut shortcuts, ShortcutId::StaticRegion, &config.anki.static_region_key_linux);
+        if config.anki.sentence_mode == chibipop::config::SentenceMode::Static {
+            push(&mut shortcuts, ShortcutId::StaticRegion, &config.anki.static_region_key_linux);
+        }
     }
     shortcuts
 }
@@ -487,8 +481,6 @@ pub fn action(id: ShortcutId, activated: bool, mode: TriggerMode) -> Action {
         (ShortcutId::SentenceSearch, false, _) => Action::Nothing,
         (ShortcutId::SelectedText, true, _) => Action::Verb(Verb::SelectedText),
         (ShortcutId::SelectedText, false, _) => Action::Nothing,
-        (ShortcutId::Screenshot, true, _) => Action::Verb(Verb::Screenshot),
-        (ShortcutId::Screenshot, false, _) => Action::Nothing,
         (ShortcutId::OcrClipboard, true, _) => Action::Verb(Verb::OcrClipboard),
         (ShortcutId::OcrClipboard, false, _) => Action::Nothing,
         (ShortcutId::StaticRegion, true, _) => Action::Verb(Verb::StaticRegion),
@@ -545,7 +537,7 @@ mod tests {
 
     #[test]
     fn shortcut_ids_round_trip_and_keep_wire_names() {
-        assert_eq!(8, ShortcutId::ALL.len());
+        assert_eq!(7, ShortcutId::ALL.len());
         assert_eq!(
             [
                 "trigger",
@@ -553,7 +545,6 @@ mod tests {
                 "search",
                 "sentence-search",
                 "selected-text",
-                "screenshot",
                 "ocr-clipboard",
                 "static-region",
             ],
@@ -572,12 +563,12 @@ mod tests {
         let mut config = chibipop::config::Config::default();
         config.trigger.trigger_key_linux = "ALT+F".into();
         config.anki.enabled = true;
+        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
         config.anki.add_key_linux = "SUPER+A".into();
         config.anki.static_region_key_linux = "CTRL+R".into();
         config.actions.search.hotkey_linux = Some("SUPER+F5".into());
         config.actions.search.sentence_hotkey_linux = Some("SUPER+F6".into());
         config.actions.search.selected_hotkey_linux = Some("SUPER+F7".into());
-        config.actions.screenshot.hotkey_linux = Some("PRINT".into());
         config.actions.ocr_clipboard = Some(chibipop::config::OcrClipboardConfig {
             hotkey_linux: Some("SUPER+O".into()),
             ..Default::default()
@@ -589,7 +580,6 @@ mod tests {
                 (ShortcutId::Search, "LOGO+F5".into()),
                 (ShortcutId::SentenceSearch, "LOGO+F6".into()),
                 (ShortcutId::SelectedText, "LOGO+F7".into()),
-                (ShortcutId::Screenshot, "PRINT".into()),
                 (ShortcutId::OcrClipboard, "LOGO+o".into()),
                 (ShortcutId::StaticRegion, "CTRL+r".into()),
             ],
@@ -603,13 +593,31 @@ mod tests {
     }
 
     #[test]
+    fn static_region_preference_requires_static_sentence_mode() {
+        let mut config = chibipop::config::Config::default();
+        config.actions.enabled = true;
+        config.anki.static_region_key_linux = "CTRL+R".into();
+
+        assert!(preferred(&config)
+            .iter()
+            .all(|(id, _)| *id != ShortcutId::StaticRegion));
+
+        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        assert_eq!(
+            Some(&(ShortcutId::StaticRegion, "CTRL+r".to_string())),
+            preferred(&config)
+                .iter()
+                .find(|(id, _)| *id == ShortcutId::StaticRegion)
+        );
+    }
+
+    #[test]
     fn an_empty_chord_is_not_registered() {
         let mut config = chibipop::config::Config::default();
         config.trigger.trigger_key_linux.clear();
         config.anki.enabled = true;
         config.anki.add_key_linux.clear();
         config.actions.search.hotkey_linux = Some(" ".into());
-        config.actions.screenshot.hotkey_linux = Some(String::new());
         config.anki.static_region_key_linux.clear();
         assert!(preferred(&config).is_empty());
     }
@@ -713,7 +721,6 @@ mod tests {
             (ShortcutId::Search, Verb::Search),
             (ShortcutId::SentenceSearch, Verb::SentenceSearch),
             (ShortcutId::SelectedText, Verb::SelectedText),
-            (ShortcutId::Screenshot, Verb::Screenshot),
             (ShortcutId::OcrClipboard, Verb::OcrClipboard),
             (ShortcutId::StaticRegion, Verb::StaticRegion),
         ] {
@@ -767,12 +774,10 @@ mod tests {
     fn status_details_name_the_owner_of_the_binding() {
         let named = vec![
             Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-            Binding { id: ShortcutId::Screenshot, trigger: Some("Print".into()) },
         ];
         let detail = portal_detail(&named);
         assert!(detail.contains("GlobalShortcuts portal"), "{detail}");
         assert!(detail.contains("trigger Alt+F"), "{detail}");
-        assert!(detail.contains("screenshot Print"), "{detail}");
         assert!(portal_detail(&[Binding { id: ShortcutId::Trigger, trigger: None }])
             .contains("key not reported"));
         assert!(portal_detail(&[]).contains("bound nothing"));

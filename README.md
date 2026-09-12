@@ -353,6 +353,24 @@ A heading and a line separate the definitions of different dictionaries.
 dictionary only. This setting keeps cards short when several dictionaries
 match the same word.
 
+### Update matching duplicate notes
+
+**Update matching duplicate notes** is off by default. When it is off,
+Anki keeps its existing duplicate rejection behavior.
+
+When it is on, chibipop resolves the note type's first field at write time.
+It updates one exact matching note across the note type, even when that note
+is outside the selected deck. Multiple exact matches fail without adding or
+changing a note. A missing match uses the normal new-note path.
+
+An update replaces only fields in the field map. Unmapped fields, tags,
+cards, scheduling, and deck placement stay unchanged. A new screenshot
+replaces the mapped screenshot field. A pictureless update clears that field.
+
+Do not view the target note in Anki Browser during an update. AnkiConnect has
+no atomic find-and-update request, so a timed-out write can have an uncertain
+result. A stored screenshot can remain unused if the field update fails.
+
 The **Anki** tab also sets how you select text in the glossary.
 **Primary click behavior** sets the primary mouse button to
 `Add to selection` or `Replace selection`. The secondary button always adds
@@ -443,21 +461,6 @@ For example, the default Linux folder is
 
 Anki copies each screenshot into its own media folder. The `screenshots`
 folder keeps your local copies.
-
-### Use the screenshot shortcut
-
-The screenshot shortcut acts on the current popup and uses the selected
-screenshot mode. chibipop saves the screenshot. If Anki is connected,
-chibipop also adds a card.
-
-- **Windows:** set **Save a screenshot** on the **Shortcuts** tab. The
-  default is `Ctrl+Shift+S`.
-- **Linux:** set the **Screenshot shortcut** on the **Shortcuts** tab. The
-  tab shows the bind line for your compositor. The bind runs
-  `chibipop ctl screenshot`. See [`docs/LINUX.md`](docs/LINUX.md).
-
-If no popup is visible, the shortcut does nothing. Linux writes a message
-to its log.
 
 ### Add the sentence
 

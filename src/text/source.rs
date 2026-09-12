@@ -18,6 +18,7 @@ use crate::text::frozen::FrozenFrame;
 use crate::text::mask::CaptureMask;
 use crate::text::{Frame, OcrEngine, RegionCapture, TextSpan};
 use anyhow::{Context, Result};
+use std::cell::RefCell;
 
 // The capture upscale factor belongs to each platform.
 // It comes from `SettingsSnapshot::upscale`.
@@ -172,7 +173,7 @@ enum Frozen {
 /// `TextSource` accepts a point and returns a text span.
 pub struct TextSource {
     capture: Box<dyn RegionCapture>,
-    ocr: Box<dyn OcrEngine>,
+    ocr: RefCell<Box<dyn OcrEngine>>,
     settings: SettingsSnapshot,
     show_lookup_log: bool,
     /// This is the press-time grab for the active trigger hold.
@@ -198,7 +199,7 @@ impl TextSource {
     /// This method gives one-off OCR calls the same seam as lookups.
     pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
         let started = std::time::Instant::now();
-        let lines = match self.ocr.recognise(bgra, w, h) {
+        let lines = match self.ocr.borrow().recognise(bgra, w, h) {
             Ok(lines) => lines,
             Err(error) => {
                 eprintln!(
@@ -250,8 +251,8 @@ impl TextSource {
 
     /// Return the name of the engine that reads this source's pixels.
     /// A diagnostic uses this name in the `probe` report.
-    pub fn engine_name(&self) -> &str {
-        self.ocr.name()
+    pub fn engine_name(&self) -> String {
+        self.ocr.borrow().name().to_string()
     }
 }
 
@@ -263,7 +264,7 @@ impl TextSource {
     ) -> Self {
         TextSource {
             capture,
-            ocr,
+            ocr: RefCell::new(ocr),
             settings,
             show_lookup_log: false,
             frozen: None,
@@ -278,7 +279,7 @@ impl TextSource {
 
     /// Replace the OCR settings.
     pub fn apply_settings(&mut self, settings: SettingsSnapshot, language: &str) {
-        self.ocr.set_language(language);
+        self.ocr.borrow_mut().set_language(language);
         self.settings = settings;
         // A new language or capture size produces a new answer.
         self.recognised.clear();
@@ -316,6 +317,18 @@ impl TextSource {
             self.recognised.clear();
             self.previous.clear();
         }
+    }
+
+    /// Drop every lookup result owned by this source.
+    pub fn clear_lookup_cache(&mut self) {
+        self.frozen = None;
+        self.recognised.clear();
+        self.previous.clear();
+    }
+
+    /// Swap OCR backend.
+    pub fn replace_ocr(&self, ocr: Box<dyn OcrEngine>) {
+        drop(self.ocr.replace(ocr));
     }
 
     /// Return the box covered by the hold's frozen grab, if one exists.
@@ -518,7 +531,7 @@ impl TextSource {
             return Ok((lines, frame));
         }
         let ocr_started = std::time::Instant::now();
-        let raw = match self.ocr.recognise(&frame.buf, frame.w, frame.h) {
+        let raw = match self.ocr.borrow().recognise(&frame.buf, frame.w, frame.h) {
             Ok(raw) => raw,
             Err(error) => {
                 let ocr_ms = ocr_started.elapsed().as_secs_f64() * 1000.0;
@@ -1448,7 +1461,7 @@ mod tests {
         assert!(!source.recognise_at_capture(BOX, 1, CaptureMask::NONE).unwrap().0.is_empty());
         source.capture = Box::new(Paced { unchanged: true, grabs: std::cell::Cell::new(0) });
         let calls = Rc::new(std::cell::Cell::new(0));
-        source.ocr = Box::new(FailOnce(calls.clone()));
+        source.ocr.replace(Box::new(FailOnce(calls.clone())));
         assert!(source.recognise_at_capture(BOX, 1, CaptureMask::NONE).is_err());
         assert!(source.recognise_at_capture(BOX, 1, CaptureMask::NONE).unwrap().0.is_empty());
         assert_eq!(calls.get(), 2);
@@ -2086,6 +2099,25 @@ mod tests {
         source.apply_settings(settings, "ja");
         source.resolve_in_region(AT, BOX, CaptureMask::NONE).expect("read after reload");
         assert_eq!(runs.get(), 2, "a reload must re-recognise");
+    }
+
+    #[test]
+    fn cache_bust_drops_both_ocr_generations_and_the_frozen_frame() {
+        let (mut source, runs) = paced(true);
+        source.resolve_at_tiled(AT, CaptureMask::NONE).expect("first read");
+        source.resolve_at_tiled(AT, CaptureMask::NONE).expect("second read");
+        assert_eq!(runs.get(), 1);
+        assert!(!source.recognised.is_empty());
+        assert!(!source.previous.is_empty());
+        source.frozen = Some(Frozen::Failed("stale frame".to_string()));
+
+        source.clear_lookup_cache();
+
+        assert!(source.frozen.is_none());
+        assert!(source.recognised.is_empty());
+        assert!(source.previous.is_empty());
+        source.resolve_at_tiled(AT, CaptureMask::NONE).expect("read after bust");
+        assert_eq!(runs.get(), 2, "a cache bust must require fresh OCR");
     }
 
     // -- where the two features meet: the mask is part of "same words" --

@@ -498,7 +498,7 @@ pub fn run() -> Result<()> {
         Command::Settings { dict, config, audit } => {
             let dict = dict_path(dict);
             let config_path = config.unwrap_or_else(default_config_path);
-            let mut cfg = chibipop::config::load_or_create(&config_path)
+            let cfg = chibipop::config::load_or_create(&config_path)
                 .with_context(|| format!("loading config from {}", config_path.display()))?;
             // The database path supplies only the Dictionary names.
             // A rebuild replaces the file at the same path.
@@ -512,13 +512,6 @@ pub fn run() -> Result<()> {
             if audit {
                 chibipop_windows::text::capture::init_dpi_awareness()?;
                 return chibipop_windows::ui::audit::run(&cfg, &dicts);
-            }
-            let plugins_root = chibipop::paths::beside_exe("plugins");
-            let found = chibipop_windows::plugin::discover::discover(&plugins_root);
-            for name in chibipop_windows::plugin::discover::text_provider_names(&found) {
-                if !cfg.plugins.enabled.contains(&name) {
-                    cfg.plugins.enabled.push(name);
-                }
             }
             chibipop_windows::app::settings_only(cfg, &dicts, &config_path, &dict)
         }

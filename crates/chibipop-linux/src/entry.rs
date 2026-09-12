@@ -32,13 +32,12 @@ enum Command {
     /// Send one verb to the active daemon's control socket.
     ///
     /// The forever verb set contains reload, trigger-down, trigger-up, toggle,
-    /// anki-add, screenshot, ocr-clipboard, and static-region. Each verb names
+    /// anki-add, ocr-clipboard, and static-region. Each verb names
     /// one global action. This is not an API for scripts
     /// (ARCHITECTURE.md#input-ladders). Bind these verbs in your compositor.
     /// For example, use these sway binds:
     ///   bindsym --no-repeat Mod4+j exec chibipop ctl trigger-down
     ///   bindsym --no-repeat Mod4+a exec chibipop ctl anki-add
-    ///   bindsym --no-repeat Mod4+s exec chibipop ctl screenshot
     ///   bindsym --no-repeat Mod4+c exec chibipop ctl ocr-clipboard
     ///   bindsym --no-repeat Mod4+r exec chibipop ctl static-region
     Ctl { verb: String },

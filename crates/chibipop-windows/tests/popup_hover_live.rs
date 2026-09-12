@@ -201,17 +201,25 @@ fn run_hover(mode: TriggerMode, enabled: bool) {
         if fixture.visible_popups().len() >= 2 {
             assert!(enabled, "disabled sub-popups opened a child");
             eprintln!("real hover passed: {mode:?}");
-            cancel_popups(&fixture, true);
+            cancel_popups(&mut fixture, true);
             return;
         }
     }
     assert!(!enabled, "hover never opened a visible child in {mode:?} at root {rect:?}: {}", fixture.logs());
     assert_eq!(fixture.visible_popups().len(), 1, "disabling sub-popups must preserve the root");
     eprintln!("disabled hover passed: {mode:?}");
-    cancel_popups(&fixture, false);
+    cancel_popups(&mut fixture, false);
 }
 
-fn cancel_popups(fixture: &Fixture, child: bool) {
+fn wait_popup_count(fixture: &Fixture, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fixture.visible_popups().len() != count {
+        assert!(Instant::now() < deadline, "Escape expected {count} popup(s): {}", fixture.logs());
+        pause(Duration::from_millis(30));
+    }
+}
+
+fn cancel_popups(fixture: &mut Fixture, child: bool) {
     // SAFETY: Only the fixture's own source window receives the injected Escape keys.
     unsafe {
         SetWindowPos(fixture.word, Some(HWND_TOPMOST), 20, 20, 240, 100, SWP_SHOWWINDOW).unwrap();
@@ -225,15 +233,21 @@ fn cancel_popups(fixture: &Fixture, child: bool) {
         unsafe { assert_eq!(SendInput(&[event(KEYBD_EVENT_FLAGS(0)), event(KEYEVENTF_KEYUP)],
             std::mem::size_of::<INPUT>() as i32), 2); }
     };
-    let wait_count = |count| {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while fixture.visible_popups().len() != count {
-            assert!(Instant::now() < deadline, "Escape expected {count} popup(s): {}", fixture.logs());
-            pause(Duration::from_millis(30));
-        }
-    };
-    if child { escape(); wait_count(1); }
-    escape(); wait_count(0);
+    if child {
+        escape();
+        wait_popup_count(fixture, 1);
+        assert!(
+            fixture.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+            "child Escape stopped the daemon: {}",
+            fixture.logs()
+        );
+    }
+    escape(); wait_popup_count(fixture, 0);
+    assert!(
+        fixture.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "root Escape stopped the daemon: {}",
+        fixture.logs()
+    );
     pause(Duration::from_millis(250));
     assert!(fixture.visible_popups().is_empty(), "cancelled work reopened the popup");
 }

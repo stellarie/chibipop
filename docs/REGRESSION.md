@@ -29,7 +29,7 @@ This runner's Tier 0 commands target Windows. Use `scripts/linux_container_regre
 
 ## Recent feature case index
 
-Cases 1.31-1.41 cover the newer search, hover, clipboard, furigana, sentence-field, and audit-isolation behavior.
+Cases 1.31-1.42 cover the newer search, hover, clipboard, furigana, sentence-field, audit-isolation, and cache-invalidation behavior.
 Cases 1.30.11-1.30.16 cover screenshot modes and saved targets. Existing settings, plugin, and live-log cases retain their identifiers.
 Record the exact feature-bearing revision. Chinese sentence segmentation and search resize repaint require their implementation in the tested build.
 A feature branch may be tested before merge; a missing feature in an older build is not a successful regression result.
@@ -1828,18 +1828,19 @@ Native tests cover dimensions, client edges, focus, scrolling, and reflow. Physi
 ### 1.27 Live-apply engine switching (transitions)
 
 The Windows footer reports the active backend and its actual language. It reports an unavailable backend after three plugin failures.
-Engine hot-swap, automatic fallback after those failures, and a popup failure notice remain unimplemented.
-Changing the configured engine requires a restart. A separate plugin-test process cannot prove the daemon's state.
+Engine hot-swap runs through the Worker command path. A disabled or failed selection falls back to Windows OCR.
+A separate plugin-test process cannot prove the daemon's state.
 
 1. **Enable a provider.** On Extensions, check Enable beside an installed provider. Confirm its configured enabled state.
-2. **Select the provider.** Choose it under Text recognition and Apply. The runtime footer must keep naming the backend still running.
-   Restart chibipop, then verify the provider name and its served language. Perform a real lookup.
-3. **Return to Windows OCR.** Select Built-in, Apply, and restart. Verify Windows OCR and its actual language in the footer.
+2. **Select the provider.** Choose it under Text recognition and Apply. The runtime footer must switch to the provider without a restart.
+   Verify the provider name and its served language. Perform a real lookup.
+3. **Return to Windows OCR.** Select Built-in and Apply. Verify Windows OCR and its actual language in the footer.
+   Confirm the old provider process and descendants exit before the footer changes.
 4. **Reach three failures in the running provider.** Use a controlled provider or fixture through the daemon's lookup path.
-   The footer must retain its name and language, mark it unavailable, and show the language as inactive.
-   Live logs must contain the failure details. The daemon does not automatically switch to Windows OCR or show a new popup notice.
+   The provider process tree must exit before the footer marks it unavailable and shows the language as inactive.
+   Live logs must contain the failure details.
 5. **Check recovery boundaries.** A successful lookup before the threshold resets the failure streak.
-   After the provider is disabled, ordinary Apply does not restart it. Restart the daemon after correcting the provider failure.
+   Uncheck an active provider and Apply. Windows OCR must replace it without starting Python.
 
 The crash-provider integration test verifies the concrete strike-to-status path without changing the user's Anki or plugin configuration.
 
@@ -1848,8 +1849,8 @@ The crash-provider integration test verifies the concrete strike-to-status path 
 
 **Why this exists.** A fresh install seeds the whole `plugins/` tree, so
 `plugins/meikiocr` ships even to installs that never asked for a plugin. This
-item verifies that discovery makes it available and checks its Enable box
-without starting it, while the built-in engine remains selected.
+item verifies that discovery makes it available without changing enablement,
+while the built-in engine remains selected.
 
 > [!note] The seeding script is gone — corrected 2026-08-29
 > This item, and 1.29 below, named `scripts/blank-copy.ps1`. That script does
@@ -1865,8 +1866,8 @@ without starting it, while the built-in engine remains selected.
 exists.
 
 1. `<folder>\chibipop.exe run` starts with no errors or plugin warnings. The
-   built-in engine remains selected, so discovery extends the in-memory enabled
-   list without spawning a plugin. The stderr startup line reads
+   built-in engine remains selected, so discovery leaves saved enablement
+   unchanged without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
 2. `chibipop.exe settings` opens with seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
@@ -1877,22 +1878,20 @@ exists.
    includes every successfully parsed discovered text-provider.
 4. The **Extensions** tab does not say "No plugins found" here. `discover()` finds
    `plugins/meikiocr` and lists one row: **"meikiocr 0.1.0"**, status
-   **"Enabled"**, with the **Enable** checkbox checked. The state comes from the
-   in-memory config extended before `settings_only`; it is not read from disk.
+   **"Disabled"**, with the **Enable** checkbox unchecked. The state comes from the
+   saved config and is not changed by discovery.
    "No plugins found in `<path>`." remains valid only when `plugins/` is empty
    or missing.
 5. OCR works normally: hover Japanese text on screen and confirm it resolves through the popup, same
    as any pre-plugin build.
 6. No `[meikiocr-adapter]` line appears anywhere in stderr. The built-in engine
    is still selected, so discovery has not spawned the adapter process.
-7. The first-run TOML may still contain an empty `enabled` list because the
-   discovery extension is in memory. Applying the checked plugin row saves its
-   name; reopening settings then reads the saved list. Both states resolve the
-   same way at startup because discovery extends the loaded config again.
+7. The first-run TOML keeps an empty `enabled` list. Applying the unchecked
+   plugin row after checking it saves its name; reopening settings reads the saved list.
 
 **Pass** when all seven hold with `plugins/meikiocr` discovered on disk: the
-provider is visible in the dropdown, its checkbox is checked, the built-in
-engine still runs until selected, and no adapter starts prematurely.
+provider is visible in the dropdown, its checkbox is unchecked, the built-in
+engine still runs until the provider is enabled and selected, and no adapter starts prematurely.
 
 <a id="129-per-engine-live-regression"></a>
 ### 1.29 Per-engine live regression — added 2026-08-19, not run
@@ -1900,10 +1899,8 @@ engine still runs until selected, and no adapter starts prematurely.
 **Why this exists.** 1.28 proves discovery surfaces the plugin while the
 built-in engine remains selected. This is the opposite proof: with meikiocr
 selected, do the two OCR engines agree on the same fixture, and does
-naming a broken engine string fail safely instead of hanging or crashing. The engine is picked once,
-at worker-thread startup (`resolve_recogniser`, `src/app.rs:1936-1955`; "Resolved once, never saved"
-— hot-swap is not wired, see 1.27), so every engine change below needs a real restart of
-`chibipop.exe run`, never a Settings Apply.
+naming a broken engine string fail safely instead of hanging or crashing. The engine is replaced
+on the Worker thread through Apply, so engine changes do not require a process restart.
 
 **Setup.** meikiocr installed and importable (`plugins/meikiocr/config.toml`'s `meikiocr_path`
 points at its venv). That file is machine-specific: a refresh must copy `plugin.toml` and
@@ -1918,10 +1915,10 @@ Fixture: `docs/fixtures/live/01-japanese-modern.html` ("01 — modern" in `docs/
 recognizer language `ja`. `m26` is the 26px baseline line — "学生は図書館で新しい辞書を借りました。",
 the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J1.
 
-1. **Built-in.** `[ocr]` has no `engine` key, or `engine = "builtin"`. Restart
+1. **Built-in.** `[ocr]` has no `engine` key, or `engine = "builtin"`. Start
    (`chibipop.exe run`). Open page 01, hover `m26`, record the resolved word. Confirm the stderr
    startup line reads `chibipop: OCR engine: windows-ocr`.
-2. **meikiocr.** Set `engine = "meikiocr"` under `[ocr]`. Restart. Open page 01, hover the same spot
+2. **meikiocr.** Set `engine = "meikiocr"` under `[ocr]`. Apply. Open page 01, hover the same spot
    on `m26`, record the resolved word. Confirm the stderr startup line reads
    `chibipop: OCR engine: meikiocr` (`PluginText::name()` returns the manifest's own `name`,
    `src/plugin/text.rs:98,149-151`). Confirm adapter lines appear on stderr: the adapter process
@@ -1929,7 +1926,7 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
    line unconditionally (`src/plugin/host.rs:206-217`) — the `show_adapter_log` debug checkbox only
    echoes a status string inside the Settings window (`src/app.rs:1537-1539`); it does not gate this
    passthrough. Expect, once at process start, `[meikiocr-adapter] loaded in <N>s provider=...
-   threads=4` and a `warm-up <N>ms` line (`adapter.py:132-139`), then on the hover itself
+   onnx_threads=4 opencv_threads=1` and a `warm-up <N>ms` line (`adapter.py:132-139`), then on the hover itself
    `[meikiocr-adapter] recognise <N>ms 1 line(s)` (`adapter.py:291-292`).
 
    | | Built-in (windows-ocr) | meikiocr |
@@ -1942,7 +1939,7 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
    should resolve the same word — 学生 or 図書館, depending on exactly where within the line the
    cursor sits. A difference between the two is the finding to record, not a failure to explain away.
 4. **Fallback — unknown engine name.** Leave `enabled = ["meikiocr"]`. Set `engine = "nonexistent"`.
-   Restart. `resolve_engine("nonexistent", ["meikiocr"])` (`src/config.rs:274-283`) matches neither
+   Apply. `resolve_engine("nonexistent", ["meikiocr"])` (`src/config.rs:274-283`) matches neither
    `"builtin"` nor the enabled list, so it returns `EngineChoice::FellBack("nonexistent")` — a path
    that never touches plugin discovery or spawning at all. Confirm:
    - stderr prints the fallback warning, naming the missing engine, verbatim:
@@ -1961,65 +1958,67 @@ the fixture's own label calls it the same line and size as `ocr-corpus.html`'s J
 `[meikiocr-adapter]` lines appear only while meikiocr is the engine, and the fallback case starts
 clean on Windows OCR with the exact warning quoted above.
 
-<a id="130-screenshot-action"></a>
-### 1.30 Screenshot action — added 2026-08-24, not run
+<a id="130-screenshot-on-add"></a>
+### 1.30 Anki screenshot-on-add - added 2026-09-12, not run
 
-Start `chibipop run` with a popup visible. Hover a Japanese word before each
-standalone or include-on-add screenshot check. Use the configured screenshots
-folder when you check files.
-Keep Anki disabled except for explicit scratch-card cases. Restore saved targets, hotkeys, configuration, and scratch screenshots afterward.
+Start `chibipop run` with a popup visible. Enable **Attach a screenshot to cards**
+and configure the target mode on the **Anki** tab. Use scratch Anki and restore
+saved targets, configuration, and scratch screenshots afterward.
 
 #### 1.30a Region and window selection
 
-1. **Drag a region.** Set **Screenshot source** to **Choose a region** and press
-   **Apply**. Start the screenshot action and drag a region. Release the mouse
-   button. The selector must show the chosen region and save a PNG.
-2. **Use the Region window choice.** On Windows, hold `Alt` before the gesture
-   and click a visible window. On Linux, click a visible window when Hyprland
-   or Sway metadata is available. Without that metadata, drag a region instead.
-3. **Click a window.** Set the mode to **Choose a window** and press
-   **Apply**. Click a visible window. Windows uses the native selector. Linux
-   uses `slurp -r`.
-4. **Check visible pixels.** Open the PNG and compare it with the visible
-   screen rectangle. A window capture must not contain hidden or occluded
-   window content. If Anki is connected, check the configured screenshot field.
-5. **Cancel the selection.** Press **Esc**. On Windows, also check right-click.
-   The selector must close without a PNG. The popup must return.
+1. Set **Screenshot source** to **Choose a region** and press **Apply**. Add a
+   card and drag a region. Confirm the selected visible pixels and attachment.
+2. Set **Choose a window** and press **Apply**. Add a card by clicking a visible
+   window. Confirm the image excludes hidden or occluded content.
+3. Press **Esc** during selection. Windows also supports right-click. The card
+   must save without an image, and the popup must return.
 
 #### 1.30b Fixed target persistence
 
-1. **Save a fixed region.** Reset the saved targets. Set **Reuse one region**.
-   Press **Apply**. Drag a region on first use. Check the saved summary and
-   the global physical-pixel rectangle.
-2. **Reuse the fixed region.** Restart chibipop and take another picture. The
-   action must bypass selection and use the saved rectangle.
-3. **Save a fixed window.** Reset the saved targets. Set **Reuse one window**.
-   Press **Apply**. Click one visible window on first use. Check its exact
-   `app_id` and title in the saved summary. On Windows, `app_id` is the window
-   class. On Linux, it is the compositor class or `app_id`.
-4. **Reuse moved geometry.** Restart chibipop, move or resize the saved window,
-   and take a picture. The action must use its current visible screen rectangle.
-5. **Reject a bad identity.** Change the saved window title, or create a second
-   visible window with the same `app_id` and title. The action must report an
-   absent or ambiguous match and select no other window.
+1. Reset targets. Set **Reuse one region** and press **Apply**. Add a card and
+   check the saved physical-pixel rectangle.
+2. Restart chibipop and add another card. The saved region must bypass selection.
+3. Set **Reuse one window**. Add a card and check the saved `app_id` and title.
+4. Restart, move or resize the window, and add another card. Require current
+   visible bounds.
+5. Break the saved identity or create an ambiguous match. Refuse another target.
 
-#### 1.30c Reset and failure behavior
+#### 1.30c Reset, migration, and failure behavior
 
-1. **Check the settings controls.** Confirm that Settings shows the selected
-   mode, saved target summaries, and a reset control. Confirm that **Apply**
-   commits the reset.
-2. **Select after reset.** Use a fixed mode after reset. The next picture must
-   ask for a target and save the new target after a successful selection.
-3. **Keep the card after a failed picture.** Cancel an include-on-add
-   selection, or cause a selection or capture failure. The card must save
-   without an image. A standalone mining screenshot must save no file.
-4. **Check the popup state.** Take a successful picture. The popup must show
-   the word as added. A second regular Anki add must use `allowDuplicate: false`.
-5. **Reload the hotkey.** On Windows, use key capture with a modifier chord, cancel a capture with Escape, and test Clear.
-   Confirm cancellation preserves the previous chord and Clear disables it. Rebind `actions.screenshot.hotkey`. On
-   Linux, change `actions.screenshot.hotkey_linux` and its compositor bind.
-   Press **Apply**. The new key must work, the old key must fail, and the
-   process ID must stay unchanged.
+1. Confirm Settings shows the mode, target summaries, and reset control. Apply
+   the reset, then require a new target on the next fixed-mode add.
+2. Disable **Attach a screenshot to cards**. Add a card without a selector,
+   PNG, or image field.
+3. Load a config with retired screenshot hotkey keys. Save it and confirm the
+   retained screenshot options and targets survive without those keys.
+4. Cause selection, capture, or save failure. The requested card must finish
+   without an image.
+5. Take a successful picture. Confirm the popup shows added and a later regular
+   Anki add uses `allowDuplicate: false`.
+
+#### 1.30d Verified duplicate overwrite
+
+This case is destructive. Use a disposable Anki profile, note type, and deck.
+Run it only with `--allow-anki-write`. Do not keep the target note open in
+Anki Browser during the update.
+
+1. Create one note and record its note ID, card IDs, tags, scheduling, deck,
+   mapped fields, and one unmapped field.
+2. Enable **Update matching duplicate notes** and Apply. Mine the same
+   expression with changed mapped content.
+3. Require the same note ID and card IDs. Require changed mapped fields and
+   the unchanged unmapped field, tags, scheduling, and deck placement.
+4. Repeat with a new screenshot. Require one new image tag in the mapped
+   screenshot field and a local PNG copy.
+5. Create a second exact duplicate. Repeat the write and require a truthful
+   failure. Both notes must remain unchanged.
+6. Disable the setting and repeat the duplicate write. Require normal Anki
+   duplicate rejection and no mutation.
+
+**Pass** requires one verified update, one safe ambiguous failure, unchanged
+default-off behavior, and the screenshot path. Record note IDs and AnkiConnect
+request logs without recording private screen text.
 
 **Pass** when every applicable subsection meets its checks. Do not treat a
 selector test as proof of the live screen, compositor, or Anki path.
@@ -2028,12 +2027,13 @@ The following registered cases cover the saved-target behavior independently:
 
 | ID | Case | Steps and expected result |
 |---|---|---|
-| 1.30.11 | Region and Window modes | Compare both modes and visible pixels. Test Windows Alt selection and the documented Linux metadata or region fallback. |
-| 1.30.12 | Fixed region restart | Save a region, restart, and capture without selecting again. Require the saved physical rectangle. |
-| 1.30.13 | Fixed window current bounds | Save a window, restart, move or resize it, and capture its current visible bounds. |
-| 1.30.14 | Invalid window identity | Close the saved window or create an ambiguous fixture identity. Refuse a different target. |
-| 1.30.15 | Reset targets | Reset and Apply. Clear summaries and require selection on the next fixed-mode capture. Preserve the save directory. |
-| 1.30.16 | Optional screenshot cancellation | Cancel include-on-add capture; save the requested scratch card without an image. Cancelled standalone screenshots save no file or card. |
+| 1.30.11 | Region and Window modes | Compare both modes during Anki adds. Verify visible pixels and attachment. |
+| 1.30.12 | Fixed region restart | Save a region, restart, and add without selecting again. Require the saved physical rectangle. |
+| 1.30.13 | Fixed window current bounds | Save a window, restart, move or resize it, and add using current visible bounds. |
+| 1.30.14 | Invalid window identity | Close the saved window or create an ambiguous identity. Refuse a different target. |
+| 1.30.15 | Reset targets | Reset and Apply. Clear summaries, require a new fixed-mode target, and preserve unrelated settings. |
+| 1.30.16 | Optional screenshot cancellation | Cancel include-on-add capture and save the requested card without an image. |
+| 1.30.17 | Verified duplicate overwrite | Enable overwrite, update one exact note, reject ambiguous matches, and confirm default-off duplicate rejection. |
 
 ---
 
@@ -2207,6 +2207,24 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
 
 ---
 
+<a id="case-1-42"></a>
+### 1.42 Windows lookup cache invalidation
+
+**Prerequisites.** Windows daemon with a disposable install, a valid dictionary, and the Debug settings tab.
+Keep a Search window open beside the popup. Record the database, library, configuration, role-cache, and log paths.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.42 | Clear running-daemon lookup caches | Warm a popup lookup, a dictionary Search result, and a definition window. Record SHA-256 hashes for the database, library archives, `chibipop.toml`, `.roles-v1.json`, and logs. Open **Settings > Debug > Clear lookup cache**. Confirm the exact scope text. The popup closes, the Search result and definitions clear, and status shows `Clearing lookup cache...` followed by success. The next popup lookup recaptures text and rereads dictionary data. |
+| 1.42.1 | Preserve authoritative files | Compare the recorded hashes after completion. The database, library, settings, role cache, and logs must remain byte-identical. No rebuild, archive scan, or Apply operation starts. |
+| 1.42.2 | Media warning remains truthful | Make dictionary media unavailable only in a disposable fixture, repeat the action, and verify the status names the reopen warning. Images use alt text, and stale decoded pixels do not appear. |
+| 1.42.3 | Search future-query behavior | Submit a new query after the clear. It must use a fresh SearchService and return current dictionary data. The action does not modify Linux maintenance transport or separate Search processes. |
+
+**Evidence and cleanup.** Record status text, screenshots, hashes, tested revision, and executable hash per ID.
+Restore only disposable fixture changes.
+
+---
+
 <a id="tier-2"></a>
 ## Tier 2 — mostly automatable (~5 min)
 
@@ -2275,7 +2293,7 @@ Linux OCR popups still lack CSS support; that separate gap must not fail the imp
     Old save results must not replace the current state or leave a false failure message.
     The runtime line shows the active OCR language and engine, including fallback or disabled-backend state, and applied Anki enablement.
     Standalone settings show that scanning is inactive. Unsaved controls must not change the reported runtime.
-    A different OCR engine still requires a restart; the status line reports the backend actually running.
+    Applying a different OCR engine replaces the Worker backend; the status line reports the backend actually running.
     A successful standalone Apply saves and closes. A standalone dictionary rebuild starts a fresh daemon after saving.
 
 11e. **Close through the top-right X.** Click X in standalone settings and in the running daemon's settings.

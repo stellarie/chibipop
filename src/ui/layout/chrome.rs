@@ -905,9 +905,13 @@ pub fn anki_button_label(
     let (text, color) = if anki.checking {
         ("Checking\u{2026}", theme.dimmed_text)
     } else if anki.adding {
-        ("Adding\u{2026}", theme.dimmed_text)
+        if anki.saving { ("Saving\u{2026}", theme.dimmed_text) }
+        else { ("Adding\u{2026}", theme.dimmed_text) }
     } else if anki.failed {
-        ("\u{2717} Failed to add", theme.dimmed_text)
+        if anki.saving { ("\u{2717} Failed to save", theme.dimmed_text) }
+        else { ("\u{2717} Failed to add", theme.dimmed_text) }
+    } else if anki.updated.contains(expr) {
+        ("\u{2713} Updated", theme.dimmed_text)
     } else if anki.added.contains(expr) {
         ("\u{2713} Added", theme.dimmed_text)
     } else if anki.dupes.contains(expr) {

@@ -931,6 +931,11 @@ impl Hooks {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_action_hotkey_for_test(vk: u16, modifiers: u8) -> bool {
+        action_hotkey_hit(true, vk, modifiers)
+    }
+
     /// Sets the Region selector state.
     pub fn set_selection_active(active: bool) {
         SELECTION_ACTIVE.store(active, Ordering::SeqCst);

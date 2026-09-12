@@ -10,7 +10,7 @@ use crate::present::Presentation;
 use crate::text::layout::OcrLine;
 use anyhow::{Context, Result};
 use chibipop::worker::ServeNudge;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 /// Define one operation that `ActionRegistry` can dispatch from a hotkey.
@@ -35,8 +35,6 @@ pub struct AppState<'a> {
 pub struct ActionContext<'a> {
     pub selection: &'a mut selection::RegionSelection,
     pub config: &'a crate::config::ActionsConfig,
-    pub exe_dir: &'a Path,
-    pub screenshot_tx: &'a mpsc::Sender<ScreenshotCommand>,
     /// This value owns two channel senders. The pump clones it for each dispatch.
     pub ocr_jobs: OcrJobs,
 }
@@ -78,12 +76,9 @@ impl ActionContext<'_> {
     /// Return a minimal context for tests.
     #[cfg(test)]
     pub fn empty() -> ActionContext<'static> {
-        let (tx, _rx) = mpsc::channel();
         ActionContext {
             selection: Box::leak(Box::new(selection::RegionSelection::dummy())),
             config: Box::leak(Box::new(crate::config::ActionsConfig::default())),
-            exe_dir: Path::new("."),
-            screenshot_tx: Box::leak(Box::new(tx)),
             // No Worker reads this queue. Tests can use this context without a Worker.
             ocr_jobs: OcrJobs::new(mpsc::channel().0, ServeNudge::disconnected()),
         }
@@ -94,14 +89,6 @@ impl ActionContext<'_> {
 #[derive(Debug)]
 pub enum ActionOutcome {
     Completed,
-    ScreenshotCaptured {
-        bgra_buf: Vec<u8>,
-        width: i32,
-        height: i32,
-        save_dir: PathBuf,
-        /// The selected target, including a fresh window identity and bounds.
-        target: selection::SelectionTarget,
-    },
     TextCaptured {
         text: String,
     },
@@ -127,7 +114,7 @@ pub struct ScreenshotCommand {
 
 /// Result that the Worker returns after it handles the picture.
 ///
-/// This result has three states. A Mining screenshot still writes its PNG when Anki is
+/// This result has three states. Screenshot-on-add still writes its PNG when Anki is
 /// unreachable.
 /// That state is neither a card that the popup can report as added nor a failure.
 /// A single error flag would make the popup claim that Anki saw a note when it did not.
@@ -136,32 +123,40 @@ pub struct ScreenshotResult {
     /// Directory that the no-card diagnostic reports.
     /// The result includes it because the PNG can exist without a filed card.
     pub dir: PathBuf,
-    /// The Worker files a note when the result is `Ok(Some(id))`.
+    /// The Worker files a note when the result is `Ok(Some(status))`.
     /// The Worker writes the picture without a note when the result is `Ok(None)`.
     /// `Err` means that an error stopped the operation. The picture can still exist.
-    pub filed: Result<Option<i64>, String>,
+    pub filed: Result<Option<crate::anki::WriteResult>, String>,
 }
 
 impl ScreenshotResult {
     /// Return the add result for this screenshot.
     ///
-    /// Return `Some(false)` when `expr` is non-empty and the Worker files the note.
-    /// Return `Some(true)` when `expr` is non-empty and the Worker reports an error.
+    /// Return a status when `expr` is non-empty and the Worker files the note.
     /// Return `None` when `expr` is empty or the Worker saves the PNG without a card.
     ///
     /// A saved PNG without a card does not mean that the word was filed.
     /// A filed card or an error closes the popup state that `start_add` marked before it sent
     /// the command.
     /// A screenshot without a popup has no word, so no add waits for it.
-    pub fn add_failed(&self) -> Option<bool> {
+    pub fn write_status(&self) -> Option<crate::controller::NoteWriteStatus> {
         if self.expr.is_empty() {
             return None;
         }
         match self.filed {
-            Ok(Some(_)) => Some(false),
-            Ok(None) => None,
-            Err(_) => Some(true),
+            Ok(Some(crate::anki::WriteResult::Added(_))) => {
+                Some(crate::controller::NoteWriteStatus::Added)
+            }
+            Ok(Some(crate::anki::WriteResult::Updated(_))) => {
+                Some(crate::controller::NoteWriteStatus::Updated)
+            }
+            Ok(None) => Some(crate::controller::NoteWriteStatus::Failed),
+            Err(_) => Some(crate::controller::NoteWriteStatus::Failed),
         }
+    }
+
+    pub fn add_failed(&self) -> Option<bool> {
+        self.write_status().map(|status| matches!(status, crate::controller::NoteWriteStatus::Failed))
     }
 }
 
@@ -291,20 +286,24 @@ mod tests {
         ));
     }
 
-    fn shot_result(expr: &str, filed: Result<Option<i64>, String>) -> ScreenshotResult {
+    fn shot_result(
+        expr: &str,
+        filed: Result<Option<crate::anki::WriteResult>, String>,
+    ) -> ScreenshotResult {
         ScreenshotResult { expr: expr.to_string(), dir: PathBuf::from("shots"), filed }
     }
 
     #[test]
     fn a_filed_note_closes_the_add() {
-        assert_eq!(shot_result("猫", Ok(Some(1729))).add_failed(), Some(false));
+        assert_eq!(
+            shot_result("猫", Ok(Some(crate::anki::WriteResult::Added(1729)))).add_failed(),
+            Some(false)
+        );
     }
 
     #[test]
-    fn filing_nothing_is_not_an_add() {
-        // Anki did not see the word. This is not an add.
-        // An add would change the button and cache a duplicate for a note that does not exist.
-        assert_eq!(shot_result("猫", Ok(None)).add_failed(), None);
+    fn filing_nothing_closes_the_add_as_failed() {
+        assert_eq!(shot_result("猫", Ok(None)).add_failed(), Some(true));
     }
 
     #[test]

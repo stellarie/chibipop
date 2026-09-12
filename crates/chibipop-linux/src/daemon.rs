@@ -37,7 +37,8 @@ use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use calloop_wayland_source::WaylandSource;
 use chibipop::controller::{
-    Command, Controller, ControllerConfig, Event, LookupOutcome, RequestId, CLICK_CHAIN_MS,
+    Command, Controller, ControllerConfig, Event, LookupOutcome, NoteWriteStatus, RequestId,
+    CLICK_CHAIN_MS,
 };
 use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use chibipop::present::DictInfo;
@@ -324,13 +325,13 @@ pub(crate) struct App {
 enum AnkiCall {
     Dupes { generation: u64, exprs: Vec<String> },
     Add { expr: String, fields: HashMap<String, String> },
-    /// Pixels of a mined region. The job encodes pixels, writes the PNG, and
+    /// Pixels selected for an Anki card. The job encodes pixels, writes the PNG, and
     /// files the card that points to it.
     /// It runs here instead of on the grab thread because file work calls
     /// AnkiConnect.
     /// It reads the same `[anki]` snapshot as other calls.
     /// It also encodes here because deflate for a 4K region is not pump work.
-    Shot { plan: chibipop::shot::ShotPlan, bgra: Vec<u8>, w: i32, h: i32, files_a_card: bool },
+    Shot { plan: chibipop::shot::ShotPlan, bgra: Vec<u8>, w: i32, h: i32 },
 }
 
 /// One answer that the pump receives.
@@ -340,15 +341,14 @@ enum AnkiCall {
 enum AnkiOutcome {
     /// `Err` means that AnkiConnect refused the request or does not run.
     Dupes { generation: u64, dupes: Result<HashSet<String>, String> },
-    Added { expr: String, note: Result<i64, String> },
-    /// Complete answer for a mined picture.
-    /// `Ok(Some(note))` means that the picture was saved and filed.
-    /// `Ok(None)` means that it was saved without a card.
+    Added { expr: String, note: Result<chibipop::anki::WriteResult, String> },
+    /// Complete answer for a picture attached to an Anki card.
+    /// `Ok(note)` means that the picture was saved and filed.
     /// `Err` means that a step failed.
     /// `dir` is the folder that received the file, not the file itself.
     /// The filename carries the word. The word is screen content, so
     /// diagnostics must not hold it (ARCHITECTURE.md#platform-integration).
-    Shot { expr: String, dir: PathBuf, filed: Result<Option<i64>, String> },
+    Shot { expr: String, dir: PathBuf, filed: Result<chibipop::anki::WriteResult, String> },
 }
 
 /// Complete life of one screenshot on this side of the seam.
@@ -362,8 +362,7 @@ enum Shot {
     /// The user must choose a target, either by clicking a window or dragging
     /// a region.
     ///
-    /// The `AddNote` arm of [`App::execute`] or `Verb::Screenshot` parks this
-    /// state.
+    /// The `AddNote` arm of [`App::execute`] parks this state.
     /// The pump's top level drains it.
     /// The Windows bin uses the same rule at the bottom of its message loop
     /// (`crates/chibipop-windows/src/app.rs`).
@@ -380,7 +379,7 @@ struct Pending {
     /// This bin picks a region and grabs pixels.
     plan: chibipop::shot::ShotPlan,
     kind: ShotKind,
-    /// Snapshot the mode when the add or mining request is authorized.
+    /// Snapshot the mode when the add request is authorized.
     mode: chibipop::config::ScreenshotMode,
 }
 fn outcome_selection(outcome: screenshot::Outcome) -> Result<Option<screenshot::Selection>> {
@@ -390,10 +389,7 @@ fn outcome_selection(outcome: screenshot::Outcome) -> Result<Option<screenshot::
     }
 }
 
-/// Screenshot feature that owns a plan. Two features exist.
-///
-/// This enum chooses the no-picture result and whether the daemon asks
-/// AnkiConnect for a card.
+/// Screenshot-on-add state owns the authorized plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShotKind {
     /// `actions.screenshot.include_on_add`. The Controller put the popup in the
@@ -401,24 +397,6 @@ enum ShotKind {
     /// The daemon must file the card in both cases. A pick that returns nothing
     /// still files the card without a picture.
     Add,
-    /// The mining screenshot (`actions.screenshot` and
-    /// `MiningContextScreenshot` on Windows). No code waits for it.
-    /// `files_a_card` records the popup's AnkiConnect state when the verb
-    /// arrives.
-    /// A false value still writes the PNG without a card.
-    Mining { files_a_card: bool },
-}
-
-impl ShotKind {
-    /// True when this shot sends pixels to AnkiConnect.
-    /// An add always sends them. `plan_add` answers only for a popup with a
-    /// card. The old plain add also sent them.
-    fn files_a_card(self) -> bool {
-        match self {
-            ShotKind::Add => true,
-            ShotKind::Mining { files_a_card } => files_a_card,
-        }
-    }
 }
 
 /// The operation that currently needs the popup to stay transparent.
@@ -538,29 +516,22 @@ impl AnkiCall {
                 AnkiOutcome::Dupes { generation, dupes: dupes.map_err(|e| format!("{e:#}")) }
             }
             AnkiCall::Add { expr, fields } => {
-                let note = chibipop::anki::add_note(
+                let note = chibipop::anki::write_note(
                     &anki.url,
                     &anki.deck,
                     &anki.model,
                     &fields,
                     &anki.field_map,
                     None,
+                    anki.overwrite_duplicates,
                 );
                 AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
             }
-            // Core owns the filename, the `source = "screenshot"` field lookup,
-            // the base64 payload, and the AnkiConnect call.
-            // This arm calls three core functions and makes no decisions.
-            AnkiCall::Shot { plan, bgra, w, h, files_a_card } => {
-                let filed = (|| -> Result<Option<i64>> {
+            // Core owns the filename, field lookup, payload, and AnkiConnect call.
+            AnkiCall::Shot { plan, bgra, w, h } => {
+                let filed = (|| -> Result<chibipop::anki::WriteResult> {
                     let png = chibipop::image::encode_bgra_to_png(&bgra, w, h)?;
-                    if files_a_card {
-                        return chibipop::shot::save_and_add(&png, &plan, anki).map(Some);
-                    }
-                    // Anki cannot take a card. The daemon still writes the
-                    // picture without a card.
-                    chibipop::shot::save(&png, &plan)?;
-                    Ok(None)
+                    chibipop::shot::save_and_add(&png, &plan, anki)
                 })();
                 AnkiOutcome::Shot {
                     dir: plan.path.parent().unwrap_or(plan.path.as_path()).to_path_buf(),
@@ -673,9 +644,11 @@ impl App {
             // The in-panel Anki slot raises the same Event, so every card path
             // uses one AnkiConnect flow.
             Verb::AnkiAdd => self.feed(Event::AddRequested),
-            Verb::Screenshot => self.mining_screenshot(),
             Verb::OcrClipboard => self.ocr_to_clipboard(),
-            Verb::StaticRegion => self.pick_static_region(),
+            Verb::StaticRegion if self.config.anki.sentence_mode == chibipop::config::SentenceMode::Static => {
+                self.pick_static_region()
+            }
+            Verb::StaticRegion => {}
         }
     }
 
@@ -1327,7 +1300,7 @@ impl App {
         });
     }
 
-    // ---- Mining screenshot and picture for an add ----
+    // ---- Screenshot-on-add and picture carried by an add ----
 
     /// Resolve `actions.screenshot.save_dir`.
     /// Absolute values stay absolute. Relative values use the executable
@@ -1354,57 +1327,6 @@ impl App {
             &self.screenshots_dir(),
             chibipop::shot::epoch_secs(),
         )
-    }
-
-    /// `screenshot`: grab a region and save it as the Mining context for the
-    /// on-screen lookup (`MiningContextScreenshot` on Windows).
-    ///
-    /// Windows uses `popup_visible` and a top card as its gate
-    /// (`action/screenshot.rs::is_available`).
-    /// If either is absent, Windows does nothing.
-    /// This method uses the same gate because the picture belongs to the
-    /// on-screen word.
-    /// It logs the reason because a compositor bind has no dialog or visible
-    /// return code.
-    fn mining_screenshot(&mut self) {
-        let planned = self.controller.popup().map(|view| {
-            (
-                view.presentation.top.is_some(),
-                // This plan has no add gate. The Mining screenshot saves a
-                // picture regardless of the popup add state.
-                // It therefore skips `plan_add` guards and `include_on_add`.
-                chibipop::shot::plan(
-                    &view,
-                    &self.config,
-                    &self.screenshots_dir(),
-                    chibipop::shot::epoch_secs(),
-                ),
-                // Popup AnkiConnect state. False still writes the PNG without
-                // a card.
-                view.anki.enabled && view.anki.connected,
-            )
-        });
-        match planned {
-            Some((true, plan, files_a_card)) => {
-                self.log.diag(&format!(
-                    "screenshot: mining context wanted; the picture {}",
-                    if files_a_card {
-                        "will be filed on a card"
-                    } else {
-                        "will be saved with no card (AnkiConnect is not serving this popup)"
-                    }
-                ));
-                self.park_shot(Pending {
-                    plan,
-                    kind: ShotKind::Mining { files_a_card },
-                    mode: self.config.actions.screenshot.capture_mode,
-                });
-            }
-            _ => self.log.diag(
-                "screenshot: nothing to file - the mining screenshot captures the context of \
-                 the lookup on screen, and no popup is showing one",
-            ),
-        }
     }
 
     /// Park a plan and ask the pump to drain it after this batch.
@@ -1640,7 +1562,6 @@ impl App {
                     bgra: frame.buf,
                     w: frame.w,
                     h: frame.h,
-                    files_a_card: shot.kind.files_a_card(),
                 });
             }
             // Windows uses the same rule: a failed grab yields a card without
@@ -1656,21 +1577,11 @@ impl App {
     ///
     /// An add still files its card. `start_add` marked the popup in the add
     /// state before it approved the picture.
-    /// This dispatch alone clears "Adding…". A Mining screenshot has no caller
-    /// and ends here.
+    /// This dispatch alone clears "Adding…".
     fn shot_without_picture(&mut self, shot: Pending, why: &str) {
-        match shot.kind {
-            ShotKind::Add => {
-                self.log.diag(&format!(
-                    "screenshot: {why} - the card goes in without a picture"
-                ));
-                let Pending { plan, .. } = shot;
-                self.spawn_anki(AnkiCall::Add { expr: plan.expr, fields: plan.fields });
-            }
-            ShotKind::Mining { .. } => {
-                self.log.diag(&format!("screenshot: {why} - nothing was saved"));
-            }
-        }
+        self.log.diag(&format!("screenshot: {why} - the card goes in without a picture"));
+        let Pending { plan, .. } = shot;
+        self.spawn_anki(AnkiCall::Add { expr: plan.expr, fields: plan.fields });
     }
 
     fn hide_surfaces(&mut self) {
@@ -3141,47 +3052,44 @@ impl App {
                 self.feed(Event::DupesChecked { generation, dupes });
             }
             AnkiOutcome::Added { expr, note } => {
-                let failed = match note {
-                    Ok(id) => {
+                let status = match note {
+                    Ok(chibipop::anki::WriteResult::Added(id)) => {
                         self.log.diag(&format!("anki: card added as note {id}"));
-                        false
+                        NoteWriteStatus::Added
+                    }
+                    Ok(chibipop::anki::WriteResult::Updated(id)) => {
+                        self.log.diag(&format!("anki: card updated as note {id}"));
+                        NoteWriteStatus::Updated
                     }
                     Err(e) => {
-                        self.log.diag(&format!("anki: adding the card failed - {e}"));
-                        true
+                        self.log.diag(&format!("anki: Anki write failed - {e}"));
+                        NoteWriteStatus::Failed
                     }
                 };
-                self.feed(Event::NoteAdded { expr, failed });
+                self.feed(Event::NoteWritten { expr, status });
             }
             AnkiOutcome::Shot { expr, dir, filed } => {
-                // `None` means a picture without a card.
-                // No add lifecycle closes, and no code can claim that it filed
-                // the word.
-                // Other outcomes answer the popup because `start_add` marked
-                // it in the add state before it allowed the picture.
-                let failed = match filed {
-                    Ok(Some(id)) => {
+                let status = match filed {
+                    Ok(chibipop::anki::WriteResult::Added(id)) => {
                         self.log.diag(&format!(
                             "anki: card added with a screenshot as note {id} (picture in {})",
                             dir.display()
                         ));
-                        Some(false)
+                        NoteWriteStatus::Added
                     }
-                    Ok(None) => {
+                    Ok(chibipop::anki::WriteResult::Updated(id)) => {
                         self.log.diag(&format!(
-                            "screenshot: saved to {} - no card to file it on",
+                            "anki: card updated with a screenshot as note {id} (picture in {})",
                             dir.display()
                         ));
-                        None
+                        NoteWriteStatus::Updated
                     }
                     Err(e) => {
                         self.log.diag(&format!("screenshot: the picture never landed - {e}"));
-                        Some(true)
+                        NoteWriteStatus::Failed
                     }
                 };
-                if let Some(failed) = failed {
-                    self.feed(Event::NoteAdded { expr, failed });
-                }
+                self.feed(Event::NoteWritten { expr, status });
             }
         }
     }
@@ -3795,6 +3703,7 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
         per_character_lookup: config.trigger.per_character_lookup,
         scroll_popup: config.popup.scroll_popup,
         anki_enabled: config.anki.enabled,
+        overwrite_duplicates: config.anki.overwrite_duplicates,
         sentence_probe: config.anki.sentence_mode == chibipop::config::SentenceMode::Sentence,
         include_dictionary_name: config.anki.include_dictionary_name,
         first_dict_only: config.anki.first_dict_only,
@@ -5020,6 +4929,7 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
+        app.config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
         assert!(!app.paths.config_file.exists(), "the fixture starts with no config file");
 
         app.handle_request("static-region", Verb::parse("static-region"));
@@ -5036,6 +4946,22 @@ mod tests {
         assert!(!written.contains("static region: set to"), "log was: {written}");
         assert_eq!(None, app.config.anki.static_region, "nothing in memory either");
         assert!(!app.paths.config_file.exists(), "and nothing was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn static_region_native_verb_requires_static_sentence_mode() {
+        let dir = scratch("static_region_gate");
+        let log_file = dir.join("chibipop.log");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+
+        app.handle_request("static-region", Verb::parse("static-region"));
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert!(written.contains("control: static-region"), "log was: {written}");
+        assert!(!written.contains("picking the static sentence region"), "log was: {written}");
+        assert!(!app.paths.config_file.exists(), "an inactive verb must not write config");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7076,7 +7002,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---- mining screenshot and picture carried by an add ----
+    // ---- screenshot-on-add and picture carried by an add ----
     //
     // **Stub for region pick.** These tests use no compositor.
     // Two seams represent the real flow:
@@ -7151,7 +7077,7 @@ mod tests {
         let stem =
             shot.plan.path.file_stem().expect("a stem").to_string_lossy().into_owned();
         assert!(stem.starts_with(WORD), "core names the file after the word: {stem}");
-        assert_eq!(Some("Screenshot".to_string()), shot.plan.picture_field);
+        assert_eq!(vec!["Screenshot".to_string()], shot.plan.picture_fields);
         assert!(anki.seen().is_empty(), "the plain add must not have gone out too");
 
         // The grab thread returns the answer.
@@ -7326,149 +7252,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The screenshot verb saves the lookup's mining context as its own card.
-    /// It ignores `include_on_add`. Core has a separate entry point
-    /// (`shot::plan`).
-    #[test]
-    fn the_screenshot_verb_files_the_mining_context_for_the_lookup_on_screen() {
-        let dir = scratch("shotverb");
-        let log_file = dir.join("chibipop.log");
-        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        let anki = FakeAnki::start(1);
-        anki_at(&mut app, &anki.url);
-        screenshots_on(&mut app);
-        app.config.actions.screenshot.include_on_add = false;
-        let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
-        // A served dupe check leaves the popup's AnkiConnect state.
-        // This state decides whether a card exists.
-        app.feed(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
-        assert!(app.controller.anki().expect("shown").connected);
-
-        app.handle_request("screenshot", Verb::parse("screenshot"));
-
-        let shot = parked(&mut app);
-        assert_eq!(ShotKind::Mining { files_a_card: true }, shot.kind);
-        let stem =
-            shot.plan.path.file_stem().expect("a stem").to_string_lossy().into_owned();
-        app.shot = Some(Shot::Grabbing(shot));
-        app.handle_shot(Ok(test_frame()));
-        let written =
-            pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
-
-        let seen = anki.seen();
-        assert_eq!(1, seen.len(), "one press, one card: {seen:?}");
-        assert_eq!(
-            Some(format!("chibipop-screenshot-{stem}.png").as_str()),
-            seen[0]["params"]["note"]["picture"][0]["filename"].as_str(),
-            "the mining picture rides the card: {seen:?}"
-        );
-        assert!(
-            written.contains("control: screenshot - picking the mining screenshot's region"),
-            "the socket logs what it was asked for: {written}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// If AnkiConnect does not serve the popup, still save the picture.
-    /// Save it to disk without a card. Do not claim that the word was added.
-    #[test]
-    fn a_mining_screenshot_with_no_card_to_file_still_saves_the_picture() {
-        let dir = scratch("shotnocard");
-        let log_file = dir.join("chibipop.log");
-        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        let anki = FakeAnki::start(1);
-        anki_at(&mut app, &anki.url);
-        screenshots_on(&mut app);
-        let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
-        // A fresh popup sets `connected` true when Anki is enabled
-        // (`AnkiPopupState::fresh`).
-        // A dupe check with no result makes the state inactive.
-        // This matches the AnkiConnect-down state.
-        app.feed(Event::DupesChecked { generation, dupes: None });
-        assert!(!app.controller.anki().expect("shown").connected);
-
-        app.handle_request("screenshot", Verb::parse("screenshot"));
-
-        let shot = parked(&mut app);
-        assert_eq!(ShotKind::Mining { files_a_card: false }, shot.kind);
-        let png = shot.plan.path.clone();
-        app.shot = Some(Shot::Grabbing(shot));
-        app.handle_shot(Ok(test_frame()));
-        let written = pump_until(&mut event_loop, &mut app, &log_file, "screenshot: saved", 60);
-
-        assert!(png.is_file(), "the PNG is at {}", png.display());
-        assert!(
-            written.contains("screenshot: saved to") && written.contains("no card to file it on"),
-            "log was: {written}"
-        );
-        assert!(anki.seen().is_empty(), "nothing was asked of AnkiConnect: {:?}", anki.seen());
-        assert!(
-            !app.controller.anki().expect("shown").added.contains(WORD),
-            "and no add lifecycle was faked for a card that does not exist"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A screenshot verb with no popup reports a clear reason.
-    ///
-    /// Windows `is_available` uses the same gate: a visible popup with a card.
-    /// Windows fails silently, but a compositor bind has no dialog or return
-    /// code.
-    /// The log line is the only diagnosis.
-    #[test]
-    fn the_screenshot_verb_with_nothing_on_screen_says_why() {
-        let dir = scratch("shotnopopup");
-        let log_file = dir.join("chibipop.log");
-        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        let anki = FakeAnki::start(1);
-        anki_at(&mut app, &anki.url);
-        screenshots_on(&mut app);
-
-        app.handle_request("screenshot", Verb::parse("screenshot"));
-        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
-
-        assert!(app.shot.is_none(), "nothing to plan, so nothing parked");
-        assert!(
-            written.contains("screenshot: nothing to file"),
-            "and it says so rather than failing silently: {written}"
-        );
-        assert!(anki.seen().is_empty(), "no popup, no card: {:?}", anki.seen());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Allow one pick at a time. `Option<Shot>` is this slot.
-    /// Two verbs can arrive in one socket callback.
-    /// The second must not put a box over the dim from the first.
-    /// The add still files the card.
-    #[test]
-    fn a_second_shot_is_refused_while_one_is_already_owed() {
-        let dir = scratch("shotbusy");
-        let log_file = dir.join("chibipop.log");
-        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        let anki = FakeAnki::start(2);
-        anki_at(&mut app, &anki.url);
-        screenshots_on(&mut app);
-        let generation = place_a_popup(&mut app).expect("anki is on, so a dupe check was ordered");
-        app.feed(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
-
-        // The add parks first. The mining verb arrives before the pump idle
-        // pass.
-        app.handle_request("anki-add", Verb::parse("anki-add"));
-        app.handle_request("screenshot", Verb::parse("screenshot"));
-
-        assert!(matches!(app.shot, Some(Shot::Parked(_))), "the first one keeps the slot");
-        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
-        assert!(
-            written.contains("screenshot: a region pick is already owed"),
-            "log was: {written}"
-        );
-        assert_eq!(1, anki.seen().len(), "one card, from the add that owned the slot");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     // ---- a protocol error ends the daemon ----
 

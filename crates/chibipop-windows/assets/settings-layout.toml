@@ -143,11 +143,6 @@ label = "Set sentence area"
 help = "Press this shortcut, then select the screen area used for Anki sentences."
 
 [[tabs.sections.entries]]
-id = "screenshot-key"
-label = "Save a screenshot"
-help = "Captures the configured region or window in the screenshots folder."
-
-[[tabs.sections.entries]]
 id = "ocr-clipboard-key"
 label = "Copy text from the screen"
 help = "Select a screen area. Chibipop reads and copies its text."
@@ -290,6 +285,11 @@ id = "anki-notify-on-add"
 label = "Notify after adding a card"
 
 [[tabs.sections.entries]]
+id = "anki-overwrite-duplicates"
+label = "Update matching duplicate notes"
+help = "Updates one matching note. Multiple matches fail without changes."
+
+[[tabs.sections.entries]]
 id = "anki-url"
 label = "Connection address"
 help = "Leave unchanged unless AnkiConnect uses another address."
@@ -363,7 +363,7 @@ help = "Chooses which text Chibipop puts into the card's sentence field."
 [[tabs.sections.entries]]
 id = "anki-static-overlay"
 label = "Outline the sentence area"
-help = "Available when the sentence source uses a fixed screen area."
+help = "Configure the Set sentence area button in the Shortcuts section."
 
 [[tabs.sections]]
 id = "anki-field-map"
@@ -413,3 +413,8 @@ help = "Displays diagnostic messages from the selected text reader."
 id = "show-live-logs"
 label = "Show live logs"
 help = "Shows recent Chibipop diagnostic messages in a separate window."
+
+[[tabs.sections.entries]]
+id = "clear-lookup-cache"
+label = "Clear lookup cache"
+help = "Clears OCR, dictionary, and decoded media caches without changing files."

@@ -33,9 +33,6 @@ pub struct LinuxFields {
     /// An empty chord leaves static-region selection unbound.
     /// Apply requests direct portal registration where the desktop supports it.
     pub static_region_key_linux: String,
-    /// Preserve the config's optional chord. Convert an empty text box to
-    /// absence here so portal registration and native snippets share one value.
-    pub screenshot_key_linux: Option<String>,
     /// `actions.screenshot.save_dir` exactly as the user typed it. The
     /// daemon resolves the final path (`Paths::screenshots_dir`), not
     /// this window.
@@ -59,7 +56,6 @@ impl LinuxFields {
             selected_key_linux: cfg.actions.search.selected_hotkey_linux.clone(),
             add_key_linux: cfg.anki.add_key_linux.clone(),
             static_region_key_linux: cfg.anki.static_region_key_linux.clone(),
-            screenshot_key_linux: cfg.actions.screenshot.hotkey_linux.clone(),
             screenshot_save_dir: cfg.actions.screenshot.save_dir.clone(),
             ocr_clipboard_key_linux: cfg
                 .actions
@@ -78,7 +74,6 @@ impl LinuxFields {
         cfg.trigger.trigger_key_linux = self.trigger_key_linux.clone();
         cfg.anki.add_key_linux = self.add_key_linux.clone();
         cfg.anki.static_region_key_linux = self.static_region_key_linux.clone();
-        cfg.actions.screenshot.hotkey_linux = self.screenshot_key_linux.clone();
         // The nested section carries the chords of *both* platforms, so
         // it can disappear only when both chords are absent.
         // `chibipop::settings::apply_to` already applies that rule from
@@ -424,7 +419,6 @@ mod tests {
             trigger_key_linux: "CTRL+SHIFT+K".into(),
             add_key_linux: "ALT+B".into(),
             static_region_key_linux: "ALT+R".into(),
-            screenshot_key_linux: Some("SUPER+S".into()),
             screenshot_save_dir: "shots".into(),
             ocr_clipboard_key_linux: Some("SUPER+C".into()),
             search_key_linux: Some("SUPER+F".into()),
@@ -442,7 +436,6 @@ mod tests {
         assert_eq!(saved.trigger.trigger_key, cfg.trigger.trigger_key);
         assert_eq!(saved.anki.add_key, cfg.anki.add_key);
         assert_eq!(saved.anki.static_region_key, cfg.anki.static_region_key);
-        assert_eq!(saved.actions.screenshot.hotkey, cfg.actions.screenshot.hotkey);
         assert_eq!(saved.ocr.language, cfg.ocr.language);
     }
 
