@@ -378,7 +378,6 @@ struct Pending {
     /// Core owns every file and note rule (`chibipop::shot`).
     /// This bin picks a region and grabs pixels.
     plan: chibipop::shot::ShotPlan,
-    kind: ShotKind,
     /// Snapshot the mode when the add request is authorized.
     mode: chibipop::config::ScreenshotMode,
 }
@@ -387,16 +386,6 @@ fn outcome_selection(outcome: screenshot::Outcome) -> Result<Option<screenshot::
         screenshot::Outcome::Cancelled => Ok(None),
         screenshot::Outcome::Selected(selection) => Ok(Some(selection)),
     }
-}
-
-/// Screenshot-on-add state owns the authorized plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShotKind {
-    /// `actions.screenshot.include_on_add`. The Controller put the popup in the
-    /// add state.
-    /// The daemon must file the card in both cases. A pick that returns nothing
-    /// still files the card without a picture.
-    Add,
 }
 
 /// The operation that currently needs the popup to stay transparent.
@@ -2827,7 +2816,6 @@ impl App {
             Command::AddNote { expr, fields } => match self.plan_shot_for_add(&expr, &fields) {
                 Some(plan) => self.park_shot(Pending {
                     plan,
-                    kind: ShotKind::Add,
                     mode: self.config.actions.screenshot.capture_mode,
                 }),
                 None => self.spawn_anki(AnkiCall::Add { expr, fields }),
