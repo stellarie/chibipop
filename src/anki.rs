@@ -165,7 +165,7 @@ fn build_find_notes_body(model: &str, first_field: &str, expression: &str) -> se
     let query = format!(
         "note:{} {}:{}",
         quote_search(model),
-        quote_search(first_field),
+        first_field,
         quote_search(expression)
     );
     serde_json::json!({
@@ -1622,6 +1622,8 @@ mod tests {
     fn anki_query_escapes_quotes_backslashes_wildcards_underscores_and_html_entities() {
         let body = build_find_notes_body("Model", "Field", "a\\b\"c*d_e<font>");
         let query = body["params"]["query"].as_str().expect("query text");
+        assert!(query.starts_with("note:\"Model\" Field:"), "{query}");
+        assert!(!query.contains("\"Field\":"), "{query}");
         assert!(query.contains("a\\\\b"), "{query}");
         assert!(query.contains("\\\"c"), "{query}");
         assert!(query.contains("\\*d\\_e"), "{query}");
