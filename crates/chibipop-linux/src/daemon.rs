@@ -613,6 +613,13 @@ impl App {
             self.log.diag(&format!("control: rejected {request:?}"));
             return;
         };
+        if verb == Verb::StaticRegion
+            && self.config.anki.sentence_mode != chibipop::config::SentenceMode::Static
+        {
+            self.log
+                .diag("control: static-region - requires Fixed screen area");
+            return;
+        }
         let outcome = self.stub.apply(verb);
         self.log.diag(&format!("control: {} - {}", verb.as_str(), outcome));
         self.apply_verb(verb);
@@ -4961,6 +4968,7 @@ mod tests {
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(written.contains("control: static-region"), "log was: {written}");
+        assert!(written.contains("requires Fixed screen area"), "log was: {written}");
         assert!(!written.contains("picking the static sentence region"), "log was: {written}");
         assert!(!app.paths.config_file.exists(), "an inactive verb must not write config");
         let _ = std::fs::remove_dir_all(&dir);
