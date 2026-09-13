@@ -148,6 +148,56 @@ jobs:
           path: target/release/chibipop.exe
           if-no-files-found: error
 
+  ocr-performance:
+    name: OCR performance report
+    runs-on: windows-2025
+    if: github.event.inputs.bless != 'true'
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: OCR performance clippy
+        run: cargo clippy -p chibipop-windows --test ocr_performance --color never
+
+      - name: Prebuild release OCR benchmark
+        run: cargo test --release -p chibipop-windows --test ocr_performance --no-run
+
+      - name: PowerShell OCR performance tests
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/tests/test_ocr_performance.ps1
+
+      - name: Locate release OCR benchmark
+        shell: pwsh
+        run: |
+          $test = Get-ChildItem "$env:GITHUB_WORKSPACE\target\release\deps\ocr_performance-*.exe" |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+          if ($null -eq $test) { throw "release OCR benchmark executable was not built" }
+          "CHIBIPOP_OCR_PERF_TEST=$($test.FullName)" >> $env:GITHUB_ENV
+
+      - name: OCR performance report
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -File scripts/ocr_performance_report.ps1
+          -TestExecutablePath "$env:CHIBIPOP_OCR_PERF_TEST"
+          -OutputPath "$env:GITHUB_WORKSPACE\ocr-performance.json"
+          -DurationSeconds 60 -SampleMilliseconds 100
+
+      - name: Upload OCR performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chibipop-ocr-performance
+          path: ocr-performance.json
+          if-no-files-found: warn
+
   # The second native job, mirrored gates, no cross-compilation.
   # Pinned to ubuntu-24.04, not ubuntu-latest, per the rolling
   # oldest-supported-runner policy (the runner's glibc is the release

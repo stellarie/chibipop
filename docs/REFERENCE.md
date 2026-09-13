@@ -529,6 +529,11 @@ capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-wind
 
 ## OCR resource measurements
 
+The full report-only lifecycle schema is documented in
+[`docs/OCR-PERFORMANCE.md`](OCR-PERFORMANCE.md).
+Run its checked-in script coverage with
+`pwsh -File scripts/tests/test_ocr_performance.ps1`.
+
 Use `scripts/measure_ocr_resources.ps1` with the same release executable and fixture for both engines.
 It samples every 100 ms and writes parent, descendants, and process-tree totals.
 Each row reports working set, private bytes, cumulative CPU, normalized CPU, threads, and handles.
