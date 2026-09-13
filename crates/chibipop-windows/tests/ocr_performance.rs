@@ -748,9 +748,9 @@ fn sha256_hex(input: &[u8]) -> String {
         0x1f83_d9ab,
         0x5be0_cd19,
     ];
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut words = [0u32; 64];
-        for (index, bytes) in chunk.chunks_exact(4).take(16).enumerate() {
+        for (index, bytes) in chunk.as_chunks::<4>().0.iter().take(16).enumerate() {
             words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
         for index in 16..64 {
