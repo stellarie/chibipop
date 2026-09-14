@@ -1,13 +1,18 @@
 # chibipop
 
-A Japanese popup dictionary for the whole screen. Put the pointer on a
-Japanese word, and chibipop shows what the word means.
-
-chibipop reads screen pixels through **optical character recognition
-(OCR)**. It works with games, videos, PDFs, and images on Windows and Linux.
+point at a word to become dekiru at japanese
 
 <img width="2560" height="1080" alt="chibipop shows Japanese and English definitions over a Japanese game menu" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
+---
+## FAQ so that people dont scroll down
+1. Q: can you add this feature A: go to issues 
+2. Q: can you fix x A: go to issues
+3. Q: can you add x language support A: go to issues
+4. Q: can you add x plugin from y A: go to issues
+5. Q: can you find me a wife A: go to issues
+
+**now that you have read all of the above, proceed**
 ---
 
 ## Contents
