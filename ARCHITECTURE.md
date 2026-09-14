@@ -29,6 +29,7 @@ crates/chibipop-linux/src/    Linux bin: a calloop daemon.
 crates/chibipop-windows/src/  Windows bin: a GetMessageW loop.
   input/ action/ plugin/  Hooks, the actions they drive, the plugin host.
   ui/render/            Direct2D paint, DirectWrite TextMeasure adapter.
+crates/ocr-performance/  Shared non-product OCR benchmark and process monitor.
 tests/                  Core integration tests, fixtures, render sweep.
 docs/                   REFERENCE, REGRESSION, RELEASING, LINUX, research.
 themes/ plugins/ data/  CSS themes; bundled meikiocr; deconjugator.json.
@@ -301,9 +302,16 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
 - A disabled selection and a failed plugin start use Windows OCR. A strike-disabled plugin
   shuts down its host before reporting unavailable, which closes its process tree.
 - The MeikiOCR adapter caps ONNX and OpenCV worker threads through `config.toml`.
-- `scripts/measure_ocr_resources.ps1` reports parent, descendants, and process-tree totals
-  for working set, private bytes, CPU, threads, and handles. The 100 MiB and 200 MiB goals
-  remain measured targets, not guarantees.
+- `crates/ocr-performance/` reports parent, descendants, and process-tree totals for working
+  set, private bytes, CPU, threads, and handles. Windows uses ToolHelp and ProcessStatus.
+  Linux reads `/proc` and uses existing `nix` signals. The 100 MiB and 200 MiB goals remain
+  report-only targets, not guarantees. The monitor anchors PID start identities immediately,
+  re-discovers descendants during cleanup, rejects partial process tables, and fails closed on
+  identity, signal, or temporary-directory cleanup errors. Windows anchors creation time from
+  the retained child handle before cleanup discovery. Linux signals the recorded process group
+  when the root is absent after identity validation. Stable output hashes participate in baseline
+  matching. Linux and Windows examples use distinct Cargo binary names. Phase holds use four sample intervals
+  and a 1000 ms floor so every lifecycle phase remains visible to the sampler.
 
 ## Japanese analysis
 
@@ -457,6 +465,8 @@ Comments in `crates/chibipop-windows/tests/geometry_goldens.rs` and
 - Only Windows uses the `.new` and `.old` executable swap.
 - CI runs two native jobs with mirrored gates and no cross-compilation. Each job excludes
   the other platform bin crate.
+- Both native jobs run the Rust OCR performance reporter and upload its report as a diagnostic
+  artifact. Performance thresholds remain disabled and never gate the product build.
 - The CI runner image is pinned to `ubuntu-24.04`. This is the oldest image that can link
   the statically linked `ort` prebuilt binary.
 

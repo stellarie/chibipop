@@ -531,14 +531,27 @@ capture_mode = "region"     # "region" | "window" | "fixed-region" | "fixed-wind
 
 The full report-only lifecycle schema is documented in
 [`docs/OCR-PERFORMANCE.md`](OCR-PERFORMANCE.md).
-Run its checked-in script coverage with
-`pwsh -File scripts/tests/test_ocr_performance.ps1`.
+Build the native reporter and wrapper for the target platform:
 
-Use `scripts/measure_ocr_resources.ps1` with the same release executable and fixture for both engines.
-It samples every 100 ms and writes parent, descendants, and process-tree totals.
-Each row reports working set, private bytes, cumulative CPU, normalized CPU, threads, and handles.
-Use `-DryRun` to inspect a command without starting it. The 100 MiB and 200 MiB values remain
-measurement goals until Windows working-set and private-byte results are recorded.
+```powershell
+cargo test --release -p chibipop-windows --test ocr_performance --no-run
+cargo run --release -p chibipop-windows --example ocr_performance_windows
+```
+
+```bash
+cargo test --release -p chibipop-linux --test ocr_performance --no-run
+cargo run --release -p chibipop-linux --example ocr_performance_linux
+```
+
+The shared support lives under `crates/ocr-performance/`.
+The Windows sampler uses ToolHelp, ProcessStatus, and Threading APIs.
+The Linux sampler uses `/proc`, process groups, and existing `nix` signals.
+Each report records parent, descendants, and process-tree totals.
+Each row reports working set, private bytes, cumulative CPU, normalized CPU,
+threads, and handles. The 100 MiB and 200 MiB values remain report-only goals.
+The Windows and Linux examples have distinct Cargo names.
+Cleanup errors, identity-sidecar errors, phase-sidecar errors, and invalid
+baseline input fail the report command.
 
 ### `capture_mode`
 
