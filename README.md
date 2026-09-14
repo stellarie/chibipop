@@ -1,6 +1,6 @@
 # chibipop
 
-point at a word to become dekiru at japanese
+point at a word to become dekiru 
 
 <img width="2560" height="1080" alt="chibipop shows Japanese and English definitions over a Japanese game menu" src="https://github.com/user-attachments/assets/58834926-8563-4741-815a-94ab4c7d9c09" />
 
