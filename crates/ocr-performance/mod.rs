@@ -1884,6 +1884,7 @@ pub fn build_revision(repo_root: &Path) -> Option<String> {
         .then_some(value)
 }
 
+#[cfg(windows)]
 pub fn empty_plugin_identity() -> Value {
     json!({
         "model_hashes": null,
@@ -1897,6 +1898,7 @@ pub fn empty_plugin_identity() -> Value {
     })
 }
 
+#[cfg(windows)]
 pub fn plugin_identity(dir: &Path) -> Value {
     let mut plugin_hashes = Map::new();
     for name in ["plugin.toml", "adapter.py"] {
@@ -1970,6 +1972,7 @@ pub fn plugin_identity(dir: &Path) -> Value {
     })
 }
 
+#[cfg(windows)]
 fn path_setting(config: &str, key: &str) -> Option<String> {
     config.lines().find_map(|line| {
         let (name, value) = line.split_once('=')?;
@@ -1982,15 +1985,18 @@ fn path_setting(config: &str, key: &str) -> Option<String> {
     })
 }
 
+#[cfg(windows)]
 fn resolve_plugin_path(dir: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() { path } else { dir.join(path) }
 }
 
+#[cfg(windows)]
 fn collect_model_files(path: &Path, explicit: bool, files: &mut Vec<PathBuf>) -> bool {
     collect_model_files_at_depth(path, explicit, files, 0)
 }
 
+#[cfg(windows)]
 fn collect_model_files_at_depth(
     path: &Path,
     explicit: bool,
@@ -2032,6 +2038,7 @@ fn collect_model_files_at_depth(
     complete
 }
 
+#[cfg(windows)]
 fn is_model_asset(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -2042,6 +2049,7 @@ fn is_model_asset(path: &Path) -> bool {
     )
 }
 
+#[cfg(windows)]
 fn setting_value(line: &str, key: &str) -> Option<String> {
     let (name, value) = line.split_once('=')?;
     if name.trim() != key {
