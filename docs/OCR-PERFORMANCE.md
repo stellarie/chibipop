@@ -59,13 +59,20 @@ After the `CI` workflow completes successfully for a `pull_request`,
 default-branch definition. It downloads only the named Windows artifact from
 the triggering run and updates one marker-based bot comment with backend
 status, six-phase coverage, key aggregates, cleanup survivors, disabled
-report-only thresholds, the commit, and the workflow run and artifact link.
+report-only thresholds, the commit, and workflow run and full artifact links.
 
 The summary workflow never checks out or executes pull-request code. It uses
 only `actions: read` and `issues: write`. Forks, read-only tokens, missing or
 ambiguous artifacts, malformed reports, and API failures skip optional comment
 delivery without changing the CI measurement result. The full JSON report
 remains the diagnostic artifact.
+
+The comment includes a fenced plain-text visualization. It uses deterministic
+proportional bars with one shared maximum for each working-set, private-bytes,
+and repeated-identical p95 latency metric. It shows numeric values beside each
+bar. Resource bars use the maximum valid total across all observed phases.
+It labels null, zero, and unavailable values safely, and omits harness-only
+resource values for unavailable backends.
 
 ## Schema
 
