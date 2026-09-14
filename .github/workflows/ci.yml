@@ -17,6 +17,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   tier0:
     # docs/REGRESSION.md tier 0, lifted as-is. Windows is not a preference:
@@ -29,7 +32,7 @@ jobs:
     # the test floor. A label migration changing fonts would red the gate for
     # no code change. Image EOL is one scheduled re-baseline: bless on the
     # new image, review, and commit stating re-baseline vs finding.
-    name: Tier 0 gate
+    name: Windows gate
     runs-on: windows-2025
     # A bless dispatch replaces the gate run: blessing exists precisely
     # because the goldens (or the image) changed, so verifying against the
