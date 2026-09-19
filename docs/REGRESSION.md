@@ -2005,7 +2005,7 @@ Anki Browser during the update.
 
 1. Create one note and record its note ID, card IDs, tags, scheduling, deck,
    mapped fields, and one unmapped field.
-2. Enable **Update matching duplicate notes** and Apply. Mine the same
+2. Enable **Update cards already in this deck** and Apply. Mine the same
    expression with changed mapped content.
 3. Require the same note ID and card IDs. Require changed mapped fields and
    the unchanged unmapped field, tags, scheduling, and deck placement.
@@ -2019,6 +2019,26 @@ Anki Browser during the update.
 **Pass** requires one verified update, one safe ambiguous failure, unchanged
 default-off behavior, and the screenshot path. Record note IDs and AnkiConnect
 request logs without recording private screen text.
+
+#### 1.30e Deck-scoped duplicates and live re-check
+
+This case needs a disposable Anki profile with two decks, A and B, on one note
+type. Run it only with `--allow-anki-write`.
+
+1. Add a card for one word to deck A. On the next scan, require the popup to
+   show **Add to Anki (duplicate)**. (Issue #116.)
+2. Delete that note in Anki. Scan the word again without a chibipop restart.
+   Require **Add to Anki**. (Issue #116.)
+3. Add the word to deck A again. Select deck B in settings and press Apply.
+   Scan the word. Require **Add to Anki**. (Issue #113.)
+4. Add the card. Require a new note in deck B and no change to deck A's note.
+   (Issue #113.)
+5. Enable **Update cards already in this deck**. Mine the word again with deck
+   B selected. Require the deck B note to update and the deck A note to stay
+   unchanged.
+
+**Pass** when every label follows live Anki state, and a duplicate counts only
+inside the selected deck.
 
 **Pass** when every applicable subsection meets its checks. Do not treat a
 selector test as proof of the live screen, compositor, or Anki path.
