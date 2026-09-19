@@ -78,7 +78,7 @@ pub enum WriteResult {
     Updated(i64),
 }
 
-/// Finds expressions that already exist in Anki.
+/// Finds expressions that the selected deck already holds.
 ///
 /// The probe routes each word through `field_map`, as the add operation does.
 /// The `canAddNotes` result is `false` for *any* rejection reason.
@@ -123,6 +123,7 @@ fn build_can_add_notes_body(
                 "fields": mapped_fields(&fields, field_map),
                 "options": {
                     "allowDuplicate": false,
+                    "duplicateScope": "deck",
                 },
             })
         })
@@ -150,20 +151,31 @@ fn collect_dupes(
 }
 
 /// Escapes a value for an Anki search query.
-fn quote_search(value: &str) -> String {
-    let escaped = value
+fn escape_search(value: &str) -> String {
+    value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('*', "\\*")
         .replace('_', "\\_")
         .replace('<', "\\<")
-        .replace('>', "\\>");
-    format!("\"{escaped}\"")
+        .replace('>', "\\>")
 }
 
-fn build_find_notes_body(model: &str, first_field: &str, expression: &str) -> serde_json::Value {
+/// Wraps a value in quotes.
+fn quote_search(value: &str) -> String {
+    format!("\"{}\"", escape_search(value))
+}
+
+fn build_find_notes_body(
+    deck: &str,
+    model: &str,
+    first_field: &str,
+    expression: &str,
+) -> serde_json::Value {
     let query = format!(
-        "note:{} {}:{}",
+        "deck:{} -deck:\"{}::*\" note:{} {}:{}",
+        quote_search(deck),
+        escape_search(deck),
         quote_search(model),
         first_field,
         quote_search(expression)
@@ -324,7 +336,7 @@ fn build_add_note_body(
         "deckName": deck,
         "modelName": model,
         "fields": mapped_fields(fields, field_map),
-        "options": { "allowDuplicate": false },
+        "options": { "allowDuplicate": false, "duplicateScope": "deck" },
     });
     if let Some(pic) = picture {
         note["picture"] = serde_json::json!([{
@@ -390,7 +402,7 @@ pub fn write_note(
 
     let ids = note_ids(&post(
         url,
-        &build_find_notes_body(model, first_field, expression),
+        &build_find_notes_body(deck, model, first_field, expression),
     )?)?;
     let matches = if ids.is_empty() {
         Vec::new()
@@ -1157,6 +1169,56 @@ mod tests {
         assert_eq!(Some("猫"), fields["Key"].as_str());
     }
 
+    /// The probe must judge the note's own deck, not the collection.
+    #[test]
+    fn the_dupe_probe_scopes_duplicates_to_the_selected_deck() {
+        let body =
+            build_can_add_notes_body("My Deck", "JP Mining Note", &["猫"], &mining_note_map());
+        let note = &body["params"]["notes"][0];
+        assert_eq!(Some("My Deck"), note["deckName"].as_str());
+        assert_eq!(
+            json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
+            note["options"],
+        );
+    }
+
+    /// The add must judge the same deck as the probe.
+    #[test]
+    fn the_add_note_body_scopes_duplicates_to_the_selected_deck() {
+        let fields = HashMap::from([("expression".to_string(), "猫".to_string())]);
+        let map = vec![crate::config::FieldMapping {
+            anki_field: "Word".into(),
+            source: "expression".into(),
+        }];
+        let body = build_add_note_body("N5_Tango*", "Lapis", &fields, &map, None);
+        let note = &body["params"]["note"];
+        assert_eq!(Some("N5_Tango*"), note["deckName"].as_str());
+        assert_eq!(
+            json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
+            note["options"],
+        );
+    }
+
+    /// The update lookup must not read another deck's notes.
+    #[test]
+    fn find_notes_scopes_the_query_to_the_deck_and_excludes_its_children() {
+        let body = build_find_notes_body("My Deck", "Lapis", "Expression", "食べる");
+        assert_eq!(
+            r#"deck:"My Deck" -deck:"My Deck::*" note:"Lapis" Expression:"食べる""#,
+            body["params"]["query"].as_str().expect("query text"),
+        );
+    }
+
+    /// Escape the deck name, but keep the child wildcard raw.
+    #[test]
+    fn find_notes_escapes_the_deck_name_and_keeps_the_child_wildcard_raw() {
+        let body = build_find_notes_body("N5_Tango*", "Model", "Field", "猫");
+        assert_eq!(
+            "deck:\"N5\\_Tango\\*\" -deck:\"N5\\_Tango\\*::*\" note:\"Model\" Field:\"猫\"",
+            body["params"]["query"].as_str().expect("query text"),
+        );
+    }
+
     /// Confirms that the field-map check runs before network access, as the add test does.
     #[test]
     fn find_duplicates_rejects_a_field_map_that_drops_the_word() {
@@ -1179,9 +1241,10 @@ mod tests {
     /// A fake AnkiConnect server applies Anki's `canAddNotes` rule.
     ///
     /// Anki checks `duplicate_or_empty` on the note type's **first field**.
-    /// A blank value means Empty. A value that already exists means Duplicate.
+    /// A blank value means Empty. A value in the same deck means Duplicate.
     /// `canAddNotes` reports both cases as `false`.
-    /// The fake therefore needs the first field name and the stored collection values.
+    /// The fake needs the first field name and the held deck-word pairs.
+    /// A probe that asks for deck scope reads that deck alone.
     /// A probe that names another field returns `false` for every word.
     /// This test reproduces that bug.
     struct FakeAnki {
@@ -1191,7 +1254,7 @@ mod tests {
 
     impl FakeAnki {
         /// Answers one request and then closes the connection.
-        fn start(first_field: &str, collection: &[&str]) -> FakeAnki {
+        fn start(first_field: &str, collection: &[(&str, &str)]) -> FakeAnki {
             use std::io::Write;
             let listener =
                 std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -1199,7 +1262,10 @@ mod tests {
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let recorded = seen.clone();
             let first_field = first_field.to_string();
-            let held: Vec<String> = collection.iter().map(|s| s.to_string()).collect();
+            let held: Vec<(String, String)> = collection
+                .iter()
+                .map(|(deck, word)| (deck.to_string(), word.to_string()))
+                .collect();
             std::thread::spawn(move || {
                 let Ok((mut stream, _)) = listener.accept() else { return };
                 let request: serde_json::Value =
@@ -1246,19 +1312,25 @@ mod tests {
         String::from_utf8_lossy(&body).to_string()
     }
 
-    /// Returns `false` for a note when its first field is blank or already in the collection.
+    /// Empty or duplicate is false.
     /// Anki calls these cases Empty and Duplicate.
     fn can_add_reply(
         request: &serde_json::Value,
         first_field: &str,
-        collection: &[String],
+        collection: &[(String, String)],
     ) -> String {
         let notes = request["params"]["notes"].as_array().cloned().unwrap_or_default();
         let flags: Vec<&str> = notes
             .iter()
             .map(|note| {
+                let deck = note["deckName"].as_str().unwrap_or("");
+                let deck_scoped = note["options"]["duplicateScope"].as_str() == Some("deck");
                 let word = note["fields"][first_field].as_str().unwrap_or("");
-                let can_add = !word.is_empty() && !collection.iter().any(|held| held == word);
+                let held = collection.iter().any(|(held_deck, held_word)| {
+                    held_word.as_str() == word
+                        && (!deck_scoped || held_deck.as_str() == deck)
+                });
+                let can_add = !word.is_empty() && !held;
                 if can_add { "true" } else { "false" }
             })
             .collect();
@@ -1268,11 +1340,11 @@ mod tests {
     /// Reproduces the full bug.
     /// If a note type names its word field something other than `Expression`,
     /// the probe marks every word as a duplicate.
-    /// The popup then flags words absent from the collection.
+    /// The popup then flags words absent from the deck.
     /// The add uses the same map and files those words correctly.
     #[test]
     fn a_word_not_in_the_collection_is_no_dupe_for_a_note_type_of_its_own_naming() {
-        let anki = FakeAnki::start("VocabKanji", &["猫"]);
+        let anki = FakeAnki::start("VocabKanji", &[("Mining", "猫")]);
         let dupes = find_duplicates(
             &anki.url,
             "Mining",
@@ -1281,7 +1353,7 @@ mod tests {
             &mining_note_map(),
         )
         .expect("the fake answers");
-        assert!(dupes.contains("猫"), "猫 is in the collection: {dupes:?}");
+        assert!(dupes.contains("猫"), "猫 is in Mining: {dupes:?}");
         assert!(
             !dupes.contains("犬"),
             "犬 is in no deck; a probe Anki refuses as empty is not a duplicate: {dupes:?}",
@@ -1294,10 +1366,23 @@ mod tests {
         );
     }
 
-    /// The Lapis default is unchanged: same wire, same answers.
+    /// Another deck holding the word does not make it a duplicate.
+    #[test]
+    fn a_word_another_deck_holds_is_no_dupe_for_this_deck() {
+        let anki = FakeAnki::start("Expression", &[("Other Deck", "猫")]);
+        let map = crate::config::AnkiConfig::default().field_map;
+        let dupes = find_duplicates(&anki.url, "Mining", "Lapis", &["猫"], &map)
+            .expect("the fake answers");
+        assert!(
+            dupes.is_empty(),
+            "the probe asked for deck scope and 猫 is in Other Deck: {dupes:?}",
+        );
+    }
+
+    /// The Lapis default fields are unchanged: same fields, same answers.
     #[test]
     fn the_default_map_still_probes_the_expression_field() {
-        let anki = FakeAnki::start("Expression", &["猫"]);
+        let anki = FakeAnki::start("Expression", &[("Mining", "猫")]);
         let map = crate::config::AnkiConfig::default().field_map;
         let dupes = find_duplicates(&anki.url, "Mining", "Lapis", &["猫", "犬"], &map)
             .expect("the fake answers");
@@ -1399,6 +1484,36 @@ mod tests {
         let actions: Vec<_> = seen.iter()
             .map(|request| request["action"].as_str().unwrap()).collect();
         assert_eq!(vec!["modelFieldNames", "findNotes", "addNote"], actions);
+    }
+
+    #[test]
+    fn overwrite_searches_the_selected_deck_only() {
+        let server = scripted_anki(vec![
+            serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": [], "error": null }),
+            serde_json::json!({ "result": 8, "error": null }),
+        ]);
+        let result = write_note(
+            &server.url,
+            "My Deck",
+            "Basic",
+            &write_input(),
+            &write_fields(),
+            None,
+            true,
+        )
+        .expect("the unmatched add path");
+        assert_eq!(WriteResult::Added(8), result);
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(
+            r#"deck:"My Deck" -deck:"My Deck::*" note:"Basic" Front:"猫""#,
+            seen[1]["params"]["query"].as_str().expect("a findNotes query"),
+        );
+        assert_eq!(Some("My Deck"), seen[2]["params"]["note"]["deckName"].as_str());
+        assert_eq!(
+            json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
+            seen[2]["params"]["note"]["options"],
+        );
     }
 
     #[test]
@@ -1620,9 +1735,12 @@ mod tests {
 
     #[test]
     fn anki_query_escapes_quotes_backslashes_wildcards_underscores_and_html_entities() {
-        let body = build_find_notes_body("Model", "Field", "a\\b\"c*d_e<font>");
+        let body = build_find_notes_body("N5_Deck", "Model", "Field", "a\\b\"c*d_e<font>");
         let query = body["params"]["query"].as_str().expect("query text");
-        assert!(query.starts_with("note:\"Model\" Field:"), "{query}");
+        assert!(
+            query.starts_with("deck:\"N5\\_Deck\" -deck:\"N5\\_Deck::*\" note:\"Model\" Field:\""),
+            "{query}"
+        );
         assert!(!query.contains("\"Field\":"), "{query}");
         assert!(query.contains("a\\\\b"), "{query}");
         assert!(query.contains("\\\"c"), "{query}");

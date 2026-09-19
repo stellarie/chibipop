@@ -358,15 +358,17 @@ A heading and a line separate the definitions of different dictionaries.
 dictionary only. This setting keeps cards short when several dictionaries
 match the same word.
 
-### Update matching duplicate notes
+### Update cards already in this deck
 
-**Update matching duplicate notes** is off by default. When it is off,
-Anki keeps its existing duplicate rejection behavior.
+**Update cards already in this deck** is off by default. A duplicate is a
+note in the selected deck with the same note type and the same first-field
+value. Child decks and other decks do not count.
 
-When it is on, chibipop resolves the note type's first field at write time.
-It updates one exact matching note across the note type, even when that note
-is outside the selected deck. Multiple exact matches fail without adding or
-changing a note. A missing match uses the normal new-note path.
+When the setting is off, chibipop does not add a duplicate.
+
+When the setting is on, chibipop updates the one matching note in the
+selected deck. Several matches fail without changes. A missing match adds a
+new note.
 
 An update replaces only fields in the field map. Unmapped fields, tags,
 cards, scheduling, and deck placement stay unchanged. A new screenshot

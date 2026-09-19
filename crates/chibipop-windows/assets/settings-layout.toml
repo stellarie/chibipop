@@ -286,8 +286,8 @@ label = "Notify after adding a card"
 
 [[tabs.sections.entries]]
 id = "anki-overwrite-duplicates"
-label = "Update matching duplicate notes"
-help = "Updates one matching note. Multiple matches fail without changes."
+label = "Update cards already in this deck"
+help = "Off: skip words this deck already has. On: update that card. Other decks do not count."
 
 [[tabs.sections.entries]]
 id = "anki-url"
