@@ -80,7 +80,12 @@ The top-level schema is `chibipop-ocr-performance/v1`.
 The resource schema is `chibipop-ocr-resources/v1`.
 The report includes:
 
+- `schema`: always `chibipop-ocr-performance/v1`.
+- `generated_at`: the UTC timestamp of the report.
 - `mode`: always `report-only`.
+- `measurement_target`: the measurement layer, `rust-native`.
+- `sample_milliseconds`: the resource sample interval.
+- `phase_hold_milliseconds`: the minimum hold inside each phase.
 - `runner`: image, operating system, architecture, and build revision.
 - `fixture`: ID, SHA-256, dimensions, and pixel format.
 - `backends`: one result for each requested platform backend.
@@ -88,6 +93,7 @@ The report includes:
 - `baseline`: optional reviewed input and per-backend comparisons.
 - `thresholds`: separate disabled warning and failure threshold objects.
 - `categories`: warning and failure category names.
+- `failure_categories`: the failures that decide the exit code.
 - `product_goals`: separate 100 MiB and 200 MiB product goals.
 - `privacy`: included and excluded data classes.
 
@@ -121,6 +127,10 @@ process-tree total. Each row includes working set, private bytes, cumulative
 CPU, normalized CPU, threads, handles, phase, runner identity, and backend
 identity. It also emits phase and role aggregates with median, p95, and peak.
 The monitor reports child exit code and explicit timeout state.
+
+`handles` is a Win32 handle count on Windows.
+On Linux it counts the open file descriptors in `/proc/<pid>/fd`.
+The two platforms therefore report the same field with different units.
 
 Phase events use UTC timestamps in an append-only file.
 Resource samples use those intervals when a phase is active.
@@ -170,7 +180,8 @@ Warning categories include `working-set-observation`,
 `thread-growth-observation`, `handle-growth-observation`,
 `unstable-text-hash`, `unstable-geometry-hash`, and `identity-incomplete`.
 
-Failure categories include `backend-unavailable`, `launch-error`,
+Failure categories include `backend-unavailable`,
+`required-backend-unavailable`, `launch-error`,
 `child-failure`, `timeout`, `benchmark-command`,
 `benchmark-report-missing`, `benchmark-report-failed`,
 `resource-report-missing`, `resource-metric-missing`, `recognition-error`,
@@ -182,7 +193,19 @@ Failure categories include `backend-unavailable`, `launch-error`,
 `phase-sidecar-missing`, `fixture-text-mismatch`, and
 `report-workspace-cleanup`.
 
-Backend unavailability is report-only.
+A backend plan carries `required`. The flag decides what an unavailable
+backend costs.
+
+- `required: true` adds `required-backend-unavailable` and fails the command.
+  A green run then means the backend was measured.
+- `required: false` records `backend-unavailable` alone and keeps exit code 0.
+  Use it for a backend that a runner cannot provide.
+
+The Windows report requires both backends.
+Its runner must install the Japanese OCR language pack and set
+`CHIBIPOP_OCR_PERF_PLUGIN`. Without them the report fails instead of
+reporting harness overhead as a measurement.
+
 Other categories fail the report command.
 A cleanup survivor remains a hard failure after JSON output.
 

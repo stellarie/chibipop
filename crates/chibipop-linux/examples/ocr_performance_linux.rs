@@ -78,6 +78,8 @@ fn report_main() -> Result<()> {
             child_backend: "meikiocr".to_string(),
             fallback_identity: meiki_identity(),
             environment: BTreeMap::new(),
+            // The models are committed, so this runner must measure them.
+            required: true,
         }],
         output_path: output_path.clone(),
         baseline_path,
