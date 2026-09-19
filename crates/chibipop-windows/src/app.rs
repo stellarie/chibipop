@@ -193,36 +193,20 @@ fn route_escape(search_focused: bool, popup_depth: usize) -> Option<Event> {
 /// The result of one duplicate check.
 struct AnkiDupeResult {
     gen: u64,
-    checked: Vec<String>,
     /// `None` means that the connection failed.
     dupes: Option<HashSet<String>>,
 }
 
-/// Separates cached duplicate references from references that need a check.
-fn partition_dupes(
-    exprs: Vec<String>,
-    cache: &HashMap<String, bool>,
-) -> (HashSet<String>, Vec<String>, bool) {
+/// Drops repeated expressions.
+fn unique_exprs(exprs: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut dupes = HashSet::new();
-    let mut uncached = Vec::new();
-    let mut cached_any = false;
+    let mut unique = Vec::new();
     for expr in exprs {
-        if !seen.insert(expr.clone()) {
-            continue;
-        }
-        match cache.get(&expr) {
-            Some(true) => {
-                cached_any = true;
-                dupes.insert(expr);
-            }
-            Some(false) => {
-                cached_any = true;
-            }
-            None => uncached.push(expr),
+        if seen.insert(expr.clone()) {
+            unique.push(expr);
         }
     }
-    (dupes, uncached, cached_any)
+    unique
 }
 
 /// The result of one add-note operation.
@@ -1715,8 +1699,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let sr_prev_visible = std::cell::Cell::new(false);
     let sr_hwnd = static_overlay.as_ref().map(StaticRegionOverlay::hwnd);
     let (anki_tx, anki_rx) = mpsc::channel::<AnkiDupeResult>();
-    // Cache Anki duplicate answers by `expr`.
-    let mut dupe_cache: HashMap<String, bool> = HashMap::new();
     let (add_tx, add_rx) = mpsc::channel::<AddNoteResult>();
     let (settings_tx, settings_rx) = mpsc::channel::<SettingsStatus>();
     let mut cache_bust: Option<PendingCacheBust> = None;
@@ -1862,7 +1844,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     main_tid,
                     want_settings: &mut want_settings,
                     pending_shot: &mut pending_shot,
-                    dupe_cache: &dupe_cache,
                     analysis: &analysis_service,
                     pointer_buttons: &mut pointer_buttons,
                     last_pointer: &mut last_pointer,
@@ -2626,11 +2607,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             }
         } else if msg.message == WM_APP_ANKI {
             while let Ok(result) = anki_rx.try_recv() {
-                if let Some(found) = &result.dupes {
-                    for expr in &result.checked {
-                        dupe_cache.insert(expr.clone(), found.contains(expr));
-                    }
-                }
                 drive!(Event::DupesChecked {
                     generation: result.gen,
                     dupes: result.dupes
@@ -2641,7 +2617,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 let status = match &result.result {
                     Ok(anki::WriteResult::Added(id)) => {
                         eprintln!("chibipop: Anki note added as {id}");
-                        dupe_cache.insert(result.expr.clone(), true);
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} added", result.expr));
                         }
@@ -2649,7 +2624,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                     Ok(anki::WriteResult::Updated(id)) => {
                         eprintln!("chibipop: Anki note updated as {id}");
-                        dupe_cache.insert(result.expr.clone(), true);
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} updated", result.expr));
                         }
@@ -2685,14 +2659,12 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 match &result.filed {
                     Ok(Some(anki::WriteResult::Added(id))) => {
                         eprintln!("chibipop: Anki note added as {id}");
-                        dupe_cache.insert(result.expr.clone(), true);
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} added", result.expr));
                         }
                     }
                     Ok(Some(anki::WriteResult::Updated(id))) => {
                         eprintln!("chibipop: Anki note updated as {id}");
-                        dupe_cache.insert(result.expr.clone(), true);
                         if live.notify_on_add {
                             tray.notify("chibipop", &format!("{} updated", result.expr));
                         }
@@ -3240,8 +3212,6 @@ struct Exec<'a> {
     want_settings: &'a mut bool,
     /// An add that needs a screenshot. The loop does the OS half.
     pending_shot: &'a mut Option<PendingShot>,
-    /// This cache is read-only here. The pump owns all writes.
-    dupe_cache: &'a HashMap<String, bool>,
     /// The Japanese analysis service has the same process lifetime as the Worker.
     analysis: &'a chibipop::analysis::Service,
     /// Button bits and the last local point let repaint feedback continue the drag.
@@ -3510,14 +3480,11 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             None
         }
         Command::CheckDupes { generation, exprs } => {
-            let (cached_dupes, uncached, _) = partition_dupes(exprs, x.dupe_cache);
-            if uncached.is_empty() {
-                // The cache answers every reference.
-                // Do not start a thread or open a connection.
+            let refs = unique_exprs(exprs);
+            if refs.is_empty() {
                 let _ = x.anki_tx.send(AnkiDupeResult {
                     gen: generation,
-                    checked: Vec::new(),
-                    dupes: Some(cached_dupes),
+                    dupes: Some(HashSet::new()),
                 });
                 // SAFETY: This call wakes the main loop.
                 unsafe {
@@ -3532,14 +3499,9 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             let tx = x.anki_tx.clone();
             let main_tid = x.main_tid;
             thread::spawn(move || {
-                let refs: Vec<&str> = uncached.iter().map(|s| s.as_str()).collect();
-                // The Controller replaces its duplicate set. It does not merge it.
+                let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
                 let dupes = match anki::find_duplicates(&url, &deck, &model, &refs, &field_map) {
-                    Ok(found) => {
-                        let mut all = cached_dupes;
-                        all.extend(found);
-                        Some(all)
-                    }
+                    Ok(found) => Some(found),
                     Err(e) => {
                         eprintln!("chibipop: dupe check failed: {e:#}");
                         None
@@ -3547,7 +3509,6 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 };
                 let _ = tx.send(AnkiDupeResult {
                     gen: generation,
-                    checked: uncached,
                     dupes,
                 });
                 // SAFETY: This call wakes the main loop.
@@ -4404,15 +4365,18 @@ mod tests {
     }
 
     #[test]
-    fn dupe_partition_uses_cached_results_and_deduplicates_refs() {
-        let cache = HashMap::from([("宿舎".to_string(), true), ("駅".to_string(), false)]);
-        let (dupes, uncached, cached_any) = partition_dupes(
-            vec!["宿舎".into(), "宿舎".into(), "駅".into(), "猫".into()],
-            &cache,
+    fn dupe_refs_are_deduplicated_and_keep_their_order() {
+        assert_eq!(
+            vec!["宿舎".to_string(), "駅".to_string(), "猫".to_string()],
+            unique_exprs(vec![
+                "宿舎".into(),
+                "宿舎".into(),
+                "駅".into(),
+                "猫".into(),
+                "駅".into(),
+            ]),
         );
-        assert_eq!(HashSet::from(["宿舎".to_string()]), dupes);
-        assert_eq!(vec!["猫".to_string()], uncached);
-        assert!(cached_any);
+        assert!(unique_exprs(Vec::new()).is_empty());
     }
 
     #[test]
