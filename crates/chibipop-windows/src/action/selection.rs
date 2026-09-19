@@ -62,6 +62,7 @@ impl SelectionTarget {
 thread_local! {
     static ANCHOR: Cell<Option<PhysPoint>> = const { Cell::new(None) };
     static DONE: Cell<bool> = const { Cell::new(false) };
+    static PRESSED: Cell<bool> = const { Cell::new(false) };
     static PAINT_CTX: RefCell<Option<PaintCtx>> = const { RefCell::new(None) };
     static TARGET: RefCell<Option<SelectionTarget>> = const { RefCell::new(None) };
     static MODE: Cell<ScreenshotMode> = const { Cell::new(ScreenshotMode::Region) };
@@ -544,10 +545,12 @@ fn on_lbuttondown(hwnd: HWND) {
             SetCapture(hwnd);
         }
         TARGET.with(|cell| *cell.borrow_mut() = find_window_at(cursor_point()));
+        PRESSED.set(true);
         // Keep the selector captured until button-up commits the target.
         return;
     }
     ANCHOR.set(Some(cursor_point()));
+    PRESSED.set(true);
     // SAFETY: `wndproc` receives `hwnd` from the OS for each message and passes it here.
     // `hwnd` therefore identifies a live window.
     unsafe {
@@ -560,13 +563,24 @@ fn on_mousemove(hwnd: HWND) {
     paint_overlay(hwnd, Some((anchor, cursor_point())));
 }
 
-/// Commit the drag when both dimensions are nonzero and one reaches the threshold.
+/// Return the region a drag commits.
+fn committed_region(anchor: Option<PhysPoint>, point: PhysPoint) -> Option<PhysRect> {
+    let anchor = anchor?;
+    let rect = normalized_rect(anchor, point);
+    meets_drag_threshold(rect).then_some(rect)
+}
+
+/// End the drag on release.
 fn on_lbuttonup() {
-    if let Some(anchor) = ANCHOR.get() {
-        let r = normalized_rect(anchor, cursor_point());
-        if meets_drag_threshold(r) {
-            TARGET.with(|cell| *cell.borrow_mut() = Some(SelectionTarget::Region(r)));
-        }
+    if !PRESSED.replace(false) {
+        return;
+    }
+    commit_release(cursor_point());
+}
+
+fn commit_release(point: PhysPoint) {
+    if let Some(region) = committed_region(ANCHOR.get(), point) {
+        TARGET.with(|cell| *cell.borrow_mut() = Some(SelectionTarget::Region(region)));
     }
     ANCHOR.set(None);
     // Finish while the selector still owns the button-up message.
@@ -578,6 +592,7 @@ fn on_lbuttonup() {
 fn on_cancel() {
     ANCHOR.set(None);
     TARGET.with(|cell| *cell.borrow_mut() = None);
+    PRESSED.set(false);
     DONE.set(true);
 }
 
@@ -707,6 +722,7 @@ impl RegionSelection {
     ) -> Option<SelectionTarget> {
         let cancellation = EscapeCancellation::new();
         ANCHOR.set(None);
+        PRESSED.set(false);
         TARGET.with(|cell| *cell.borrow_mut() = None);
         MODE.set(mode);
         ALLOW_TARGET_SWITCH.with(|cell| cell.set(allow_target_switch));
@@ -918,6 +934,86 @@ mod tests {
             w: 1,
             h: 5
         }));
+    }
+
+    #[test]
+    fn committed_region_ignores_a_small_drag() {
+        assert!(committed_region(None, p(0, 0)).is_none());
+        assert!(committed_region(Some(p(0, 0)), p(2, 2)).is_none());
+        assert_eq!(
+            Some(PhysRect {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 9
+            }),
+            committed_region(Some(p(1, 9)), p(0, 0))
+        );
+    }
+
+    fn reset_session() {
+        PRESSED.set(false);
+        ANCHOR.set(None);
+        DONE.set(false);
+        TARGET.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    #[test]
+    fn release_without_a_press_leaves_the_session_open() {
+        reset_session();
+        on_lbuttonup();
+        assert!(!DONE.get(), "a leftover release must not finish");
+        assert!(ANCHOR.get().is_none());
+        assert!(TARGET.with(|cell| cell.borrow().is_none()));
+    }
+
+    #[test]
+    fn region_press_then_release_commits_the_region() {
+        reset_session();
+        let at = cursor_point();
+        PRESSED.set(true);
+        ANCHOR.set(Some(p(at.x - 40, at.y - 40)));
+        on_lbuttonup();
+        assert!(DONE.get());
+        assert!(!PRESSED.get());
+        assert!(ANCHOR.get().is_none());
+        let target = TARGET.with(|cell| cell.borrow().clone());
+        let Some(SelectionTarget::Region(rect)) = target else {
+            panic!("the drag must commit a region");
+        };
+        assert!(meets_drag_threshold(rect));
+    }
+
+    #[test]
+    fn window_press_then_release_commits_the_window() {
+        reset_session();
+        let window = SelectionTarget::Window {
+            rect: PhysRect {
+                x: 1,
+                y: 2,
+                w: 30,
+                h: 40,
+            },
+            target: ScreenshotWindow {
+                app_id: "app".to_string(),
+                title: "title".to_string(),
+            },
+        };
+        TARGET.with(|cell| *cell.borrow_mut() = Some(window.clone()));
+        PRESSED.set(true);
+        on_lbuttonup();
+        assert!(DONE.get());
+        assert!(!PRESSED.get());
+        assert_eq!(Some(window), TARGET.with(|cell| cell.borrow().clone()));
+    }
+
+    #[test]
+    fn cancel_clears_the_press() {
+        reset_session();
+        PRESSED.set(true);
+        on_cancel();
+        assert!(!PRESSED.get());
+        assert!(DONE.get());
     }
 
     #[test]

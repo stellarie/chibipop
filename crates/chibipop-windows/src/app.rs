@@ -2215,6 +2215,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 if let Some(ov) = &static_overlay {
                     ov.hide();
                 }
+                disarm_for_selection(&popup, &mut pointer_buttons);
                 let rect = region_selection.run();
                 if let Some(rect) = rect {
                     live.static_region = Some(rect);
@@ -2266,6 +2267,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         b.hide();
                     }
                 }
+                disarm_for_selection(&popup, &mut pointer_buttons);
 
                 let outcome = {
                     let view = controller.popup();
@@ -2738,6 +2740,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             if let Some(b) = &anki_button {
                 b.hide();
             }
+            disarm_for_selection(&popup, &mut pointer_buttons);
             let selected = match crate::action::screenshot::select_target(
                 &mut region_selection,
                 &cfg.actions.screenshot,
@@ -3040,6 +3043,15 @@ fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, v
         if visible { let _ = popup.show_without_activating(); }
         else { let _ = popup.hide(); }
     }
+}
+
+/// Disarms hooks for a pump.
+fn disarm_for_selection(popup: &Popup, pointer_buttons: &mut u8) {
+    Hooks::set_scroll_armed(false);
+    Hooks::set_click_armed(false);
+    Hooks::discard_pointer_state();
+    *pointer_buttons = 0;
+    popup.release_pointer();
 }
 
 /// Convert a screen point into popup-local physical coordinates.
