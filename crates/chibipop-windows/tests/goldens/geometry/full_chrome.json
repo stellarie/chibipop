@@ -4,11 +4,11 @@
     "default": {
       "anki_button": {
         "color": [
-          130,
-          170,
-          220
+          110,
+          112,
+          120
         ],
-        "label": "＋ Add to Anki (duplicate)"
+        "label": "Duplicate"
       },
       "content": {
         "content_w": "456.00",
