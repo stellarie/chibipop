@@ -821,6 +821,16 @@ impl Hooks {
         }
     }
 
+    /// Clears held pointer state.
+    pub fn discard_pointer_state() {
+        POINTER_BUTTONS.store(0, Ordering::SeqCst);
+        pointer_events()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        PENDING_POINTER_MOVE.store(NO_POINT, Ordering::SeqCst);
+    }
+
     /// Watches outside button presses while a Press-mode popup is visible.
     ///
     /// The observer never swallows the click because an outside click in Press
@@ -1117,6 +1127,45 @@ mod tests {
             .map(|(_, button, down, point)| PointerEvent { button, down, point: PhysPoint { x: point.x, y: point.y } })
             .collect();
         assert_eq!(want, got);
+        Hooks::set_click_armed(false);
+    }
+
+    #[test]
+    fn discard_pointer_state_drops_buttons_edges_and_move() {
+        let _g = pointer_guard();
+        Hooks::set_click_armed(false);
+        Hooks::set_click_armed(true);
+        let data = MSLLHOOKSTRUCT {
+            pt: POINT { x: 10, y: 20 },
+            ..Default::default()
+        };
+        let lparam = LPARAM(&data as *const MSLLHOOKSTRUCT as isize);
+        // SAFETY: `data` is live and aligned for this callback, like the
+        // structure supplied by the low-level mouse hook.
+        let result = unsafe { mouse_hook_proc(0, WPARAM(WM_LBUTTONDOWN as usize), lparam) };
+        assert_eq!(1, result.0, "an armed button edge must be swallowed");
+        assert_eq!(1, POINTER_BUTTONS.load(Ordering::SeqCst));
+        assert_eq!(1, Hooks::take_pointer_events().len(), "the edge is queued");
+
+        queue_pointer_event(PointerEvent {
+            button: PointerButton::Left,
+            down: true,
+            point: PhysPoint { x: 10, y: 20 },
+        });
+        PENDING_POINTER_MOVE.store(pack(PhysPoint { x: 11, y: 21 }), Ordering::SeqCst);
+
+        Hooks::discard_pointer_state();
+
+        assert_eq!(
+            0,
+            POINTER_BUTTONS.load(Ordering::SeqCst),
+            "buttons are dropped"
+        );
+        assert!(
+            Hooks::take_pointer_events().is_empty(),
+            "queued edges are dropped"
+        );
+        assert_eq!(None, Hooks::take_pointer_move(), "the move is dropped");
         Hooks::set_click_armed(false);
     }
 

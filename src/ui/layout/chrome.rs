@@ -13,7 +13,7 @@
 //! Each element uses the seam as before the inline pass.
 use crate::dict::gloss::{extent, DocAddr, DocRange, RoleFilter};
 use crate::dict::pitch::marked_morae;
-use crate::present::{AnkiPopupState, Card, PitchRow, Presentation};
+use crate::present::{top_expr, AnkiPopupState, Card, PitchRow, Presentation};
 use crate::select::{Coverage, Selections};
 use crate::ui::theme::Theme;
 use super::flow::Flow;
@@ -899,9 +899,7 @@ pub fn anki_button_label(
 ) -> Option<(String, Rgb)> {
     if !anki.enabled { return None; }
     if !anki.connected { return None; }
-    let expr = p.top.as_ref()
-        .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
-        .unwrap_or("");
+    let expr = top_expr(p);
     let (text, color) = if anki.checking {
         ("Checking\u{2026}", theme.dimmed_text)
     } else if anki.adding {
@@ -914,8 +912,10 @@ pub fn anki_button_label(
         ("\u{2713} Updated", theme.dimmed_text)
     } else if anki.added.contains(expr) {
         ("\u{2713} Added", theme.dimmed_text)
+    } else if anki.blocks_add(expr) {
+        ("Duplicate", theme.dimmed_text)
     } else if anki.dupes.contains(expr) {
-        ("\u{ff0b} Add to Anki (duplicate)", theme.dict_label_text)
+        ("\u{ff0b} Update card", theme.dict_label_text)
     } else {
         ("\u{ff0b} Add to Anki", theme.dict_label_text)
     };

@@ -617,13 +617,22 @@ and `FreqSort`/`frequency`.
 
 ### `anki.overwrite_duplicates`
 
-This setting defaults to `false`. The default keeps Anki's duplicate rejection
-behavior unchanged.
+This setting defaults to `false`.
 
-When `true`, chibipop reads the note type's first field, searches that field
-at write time, and verifies every returned note with `notesInfo`. It updates
-exactly one matching note. A missing match uses `addNote` with duplicate
-creation disabled. Multiple exact matches fail without mutation.
+A duplicate is a note in the selected deck. The note has the same note type
+and the same first-field value. Child decks and other decks do not count.
+
+When the setting is off, chibipop does not add a duplicate.
+
+When the setting is on, chibipop updates the one matching note in the
+selected deck. Three outcomes are possible:
+
+- One match: chibipop updates that note.
+- Several matches: the write fails and nothing changes.
+- No match: chibipop adds a new note.
+
+At write time, chibipop reads the note type's first field. It searches the
+selected deck, then verifies each candidate note with `notesInfo`.
 
 Only mapped fields change during an update. Unmapped fields, tags, cards,
 scheduling, and deck placement stay unchanged. A screenshot update stores

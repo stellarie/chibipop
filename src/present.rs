@@ -64,6 +64,14 @@ pub struct Presentation {
     pub surface: Option<OcrSurface>,
 }
 
+/// The top card's expression.
+pub fn top_expr(p: &Presentation) -> &str {
+    p.top
+        .as_ref()
+        .and_then(|c| c.written.as_deref().or(c.reading.as_deref()))
+        .unwrap_or("")
+}
+
 /// The complete top [`Card`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
@@ -246,6 +254,8 @@ pub struct AnkiPopupState {
     pub dupes: HashSet<String>,
     pub added: HashSet<String>,
     pub updated: HashSet<String>,
+    /// True if an add may overwrite a known duplicate.
+    pub update_dupes: bool,
     pub enabled: bool,
     pub adding: bool,
     pub saving: bool,
@@ -264,6 +274,7 @@ impl AnkiPopupState {
             dupes: HashSet::new(),
             added: HashSet::new(),
             updated: HashSet::new(),
+            update_dupes: false,
             enabled: false,
             adding: false,
             saving: false,
@@ -275,13 +286,19 @@ impl AnkiPopupState {
 
     /// Returns the initial state of a new popup.
     /// The popup checks for duplicates when Anki is enabled.
-    pub fn fresh(enabled: bool) -> Self {
+    pub fn fresh(enabled: bool, update_dupes: bool) -> Self {
         Self {
             enabled,
+            update_dupes,
             checking: enabled,
             connected: enabled,
             ..Self::disabled()
         }
+    }
+
+    /// True if an add for `expr` must do nothing.
+    pub fn blocks_add(&self, expr: &str) -> bool {
+        self.dupes.contains(expr) && !self.update_dupes
     }
 }
 

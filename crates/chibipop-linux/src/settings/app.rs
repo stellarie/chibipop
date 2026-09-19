@@ -2236,7 +2236,7 @@ fn anki_page(app: &App) -> Element<'_, Message> {
         ].spacing(10)),
         card("Card content", column![
             checkbox(app.form.cfg.anki.overwrite_duplicates)
-                .label("Update matching duplicate notes")
+                .label("Update cards already in this deck")
                 .on_toggle_maybe(anki_enabled.then_some(Message::OverwriteDuplicates)),
             checkbox(app.form.cfg.anki.include_dictionary_name)
                 .label("Include the dictionary name")
