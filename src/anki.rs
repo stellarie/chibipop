@@ -476,23 +476,21 @@ fn plain_dictionary_group(name: &str, definitions: String, include_dictionary_na
 
 /// Places one Dictionary's formatted definitions under its optional heading.
 ///
-/// `items` is one list item for each definition when the Dictionary is plural.
-/// It is one bare definition when the Dictionary is singular.
-/// A lone definition needs no `<ol>` wrapper, because a list of one is not a list.
+/// - `items` is one list item per definition when the Dictionary is plural.
+/// - It is one bare definition when the Dictionary is singular.
 fn html_dictionary_group(name: &str, items: String, include_dictionary_name: bool) -> String {
     let heading =
         if include_dictionary_name { format!("<b>{}</b>", escape_html(name)) } else { String::new() };
     format!("{heading}{items}")
 }
 
-/// Wraps one definition list for the HTML glossary field.
+/// Wraps the HTML definition list for one Dictionary group.
 ///
-/// A single definition stays bare. The popup already leaves a lone row
-/// unnumbered (see `src/ui/layout/chrome.rs`), and the card must agree.
-/// An `<ol>` of one item renders as "1." in Anki, which is the defect in #100.
+/// - A lone definition stays bare. An `<ol>` of one item renders as "1." in Anki.
+/// - The popup already leaves a lone row unnumbered (`src/ui/layout/chrome.rs`).
+/// - A plural list needs `<li>` tags, because a newline has no effect in HTML.
 fn html_definition_items(values: Vec<String>) -> String {
     if values.len() > 1 {
-        // A newline has no effect in HTML, so a plural list uses `<li>` tags.
         let items =
             values.into_iter().map(|value| format!("<li>{value}</li>")).collect::<String>();
         format!("<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>")
@@ -501,11 +499,11 @@ fn html_definition_items(values: Vec<String>) -> String {
     }
 }
 
-/// Joins one Dictionary's definitions for the plain-text glossary field.
+/// Joins the plain-text definitions for one Dictionary group.
 ///
-/// The count decides the shape, and one definition carries no number.
-/// Two or more definitions number from one and continue across the rows
-/// of one Dictionary. A reader needs "sense 3 of 大辞林", not "sense 1 of row 2".
+/// - A lone definition carries no number. The item count decides the shape.
+/// - Two or more number from one across the rows of one Dictionary, so a reader
+///   can identify "sense 3 of 大辞林" rather than "sense 1 of row 2".
 fn plain_definition_lines(values: Vec<String>) -> String {
     if values.len() > 1 {
         values
