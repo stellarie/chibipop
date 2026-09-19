@@ -1227,6 +1227,13 @@ impl Controller {
         if self.add_in_flight() {
             return Vec::new();
         }
+        {
+            let Some(s) = self.surface.as_ref() else { return Vec::new() };
+            // A blocked dupe does nothing.
+            if s.anki.blocks_add(present::top_expr(&s.presentation)) {
+                return Vec::new();
+            }
+        }
         let sentence_probe = self.cfg.sentence_probe && !self.selected_text_active();
         let (scroll, show_back, anchor, orientation, matched_surface) = {
             let Some(s) = self.surface.as_ref() else { return Vec::new() };
@@ -1765,7 +1772,7 @@ impl Controller {
             hold,
             hold_char,
             presentation,
-            anki: AnkiPopupState::fresh(self.cfg.anki_enabled),
+            anki: AnkiPopupState::fresh(self.cfg.anki_enabled, self.cfg.overwrite_duplicates),
             history: Vec::new(),
             scroll: 0,
             generation: 0,
@@ -1787,6 +1794,7 @@ impl Controller {
     /// Save the current state, then replace it with the drill-down result.
     fn push_drilldown(&mut self, mut presentation: Presentation) -> Vec<Command> {
         let anki_enabled = self.cfg.anki_enabled;
+        let update_dupes = self.cfg.overwrite_duplicates;
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         if s.placed.is_none() {
             return Vec::new();
@@ -1798,7 +1806,7 @@ impl Controller {
         let pending_sentence = s.pending_sentence.take();
         s.history.push(HistoryEntry {
             presentation: std::mem::replace(&mut s.presentation, presentation),
-            anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled)),
+            anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled, update_dupes)),
             pending_sentence,
         });
         s.selection = Selections::default();
@@ -2734,6 +2742,15 @@ mod tests {
         c.handle(placed(POPUP, 200, 200));
     }
 
+    /// Mark the shown headword as a known duplicate for Anki.
+    fn a_known_dupe(c: &mut Controller) {
+        c.handle(Event::DupesChecked {
+            generation: 1,
+            dupes: Some(HashSet::from(["\u{732B}".to_string()])),
+        });
+        c.handle(placed(POPUP, 200, 200));
+    }
+
     fn gloss_card(first: &str, second: &str) -> Card {
         let glossary = serde_json::json!([first, second]).to_string();
         Card {
@@ -3568,6 +3585,44 @@ mod tests {
         c.handle(placed(POPUP, 200, 200));
         assert!(c.handle(Event::AddRequested).is_empty());
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
+    }
+
+    /// A duplicate that the update setting blocks does nothing at all.
+    #[test]
+    fn a_blocked_duplicate_add_does_nothing() {
+        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        shown(&mut c);
+        a_known_dupe(&mut c);
+        let before = c.anki().expect("shown").clone();
+        assert!(before.dupes.contains("\u{732B}"));
+        assert!(c.handle(Event::AddRequested).is_empty());
+        let below = PhysPoint { x: 10, y: POPUP.h + 5 };
+        assert!(click(&mut c, below, Button::Primary, None).is_empty());
+        assert_eq!(before, *c.anki().expect("shown"));
+    }
+
+    /// Both the hotkey and the click update a dupe when the setting is on.
+    #[test]
+    fn a_duplicate_add_updates_the_card_when_the_setting_is_on() {
+        let config = ControllerConfig {
+            anki_enabled: true,
+            overwrite_duplicates: true,
+            ..cfg()
+        };
+        let mut c = Controller::new(config.clone());
+        shown(&mut c);
+        a_known_dupe(&mut c);
+        let out = c.handle(Event::AddRequested);
+        assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
+        assert!(c.anki().expect("shown").saving);
+
+        let mut c = Controller::new(config);
+        shown(&mut c);
+        a_known_dupe(&mut c);
+        let below = PhysPoint { x: 10, y: POPUP.h + 5 };
+        let out = click(&mut c, below, Button::Primary, None);
+        assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
+        assert!(c.anki().expect("shown").saving);
     }
 
     #[test]

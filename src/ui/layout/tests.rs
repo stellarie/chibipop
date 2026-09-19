@@ -4074,7 +4074,7 @@ fn the_box_model_leaves_the_panels_own_hit_targets_alone() {
         r#""borderStyle":"solid","borderRadius":0.4,"backgroundColor":"green","#,
         r#""textAlign":"center"},"content":"chatting"}"#
     );
-    let anki = AnkiPopupState { connected: true, ..AnkiPopupState::fresh(true) };
+    let anki = AnkiPopupState { connected: true, ..AnkiPopupState::fresh(true, false) };
     let theme = Theme::dark();
     let of = |p: &Presentation| {
         scene(
@@ -4533,11 +4533,29 @@ fn anki_button_label_shows_adding_while_in_flight() {
 #[test]
 fn anki_button_label_flags_a_known_dupe() {
     let theme = Theme::dark();
-    let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+    let mut anki = AnkiPopupState {
+        enabled: true,
+        connected: true,
+        update_dupes: true,
+        ..AnkiPopupState::disabled()
+    };
     anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
     let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
-    assert_eq!("\u{ff0b} Add to Anki (duplicate)", text);
+    assert_eq!("\u{ff0b} Update card", text);
     assert_eq!(theme.dict_label_text, color);
+}
+
+/// With the update setting off, a duplicate reads as a disabled button.
+#[test]
+fn anki_button_label_shows_a_blocked_dupe() {
+    let theme = Theme::dark();
+    let mut anki = AnkiPopupState { enabled: true, connected: true, ..AnkiPopupState::disabled() };
+    anki.dupes.insert("\u{96D1}\u{8AC7}".to_string());
+    assert!(!anki.update_dupes);
+    assert!(anki.blocks_add("\u{96D1}\u{8AC7}"));
+    let (text, color) = anki_button_label(&one_card(&[], None), &theme, &anki).unwrap();
+    assert_eq!("Duplicate", text);
+    assert_eq!(theme.dimmed_text, color);
 }
 
 #[test]
