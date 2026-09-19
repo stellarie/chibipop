@@ -436,6 +436,13 @@ pub struct BackendPlan {
     pub child_backend: String,
     pub fallback_identity: Value,
     pub environment: BTreeMap<String, String>,
+    /// Whether this run must measure the backend.
+    ///
+    /// - `true` fails the run when the backend is unavailable.
+    ///   A green run then means the backend was measured.
+    /// - `false` records the category and keeps the exit code at 0.
+    ///   Use it for a backend that a runner cannot provide.
+    pub required: bool,
 }
 
 pub struct ReportOptions {
@@ -506,6 +513,27 @@ fn empty_resource_report(config: &ProcessConfig, reason: &str) -> Value {
         "records": [],
         "aggregates": [],
     })
+}
+
+/// Collects the failure categories that one backend contributes to the run.
+///
+/// - `required` turns a missing backend into `required-backend-unavailable`.
+///   A green run then means the backend was measured.
+/// - `false` records `backend-unavailable` alone, so the exit code stays 0.
+fn backend_failure_categories(result: &Value, required: bool) -> Vec<String> {
+    let mut categories = result
+        .get("failure_categories")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let unavailable = categories.iter().any(|category| category == "backend-unavailable");
+    if unavailable && required {
+        categories.push("required-backend-unavailable".to_string());
+    }
+    categories
 }
 
 fn combine_backend_result(
@@ -1284,16 +1312,7 @@ fn run_report_inner(
             &resources,
             command_exit_code,
         );
-        for category in result
-            .get("failure_categories")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter(|category| *category != "backend-unavailable")
-        {
-            overall_failures.push(category.to_string());
-        }
+        overall_failures.extend(backend_failure_categories(&result, plan.required));
         backend_results.push(result);
     }
     let baseline = baseline_report(options.baseline_path.as_deref());
@@ -1364,12 +1383,14 @@ fn run_report_inner(
                 "identity-incomplete"
             ],
             "failure": [
-                "backend-unavailable", "launch-error", "child-failure", "timeout",
+                "backend-unavailable", "required-backend-unavailable",
+                "launch-error", "child-failure", "timeout",
                 "benchmark-command", "benchmark-report-missing", "benchmark-report-failed",
                 "resource-report-missing", "resource-metric-missing", "recognition-error",
                 "cleanup-survivor", "cleanup-identity-unverified", "cleanup-identity-mismatch",
                 "phase-resource-incomplete", "benchmark-phase-incomplete", "baseline-input",
-                "baseline-output-mismatch", "cleanup-signal", "identity-sidecar-write",
+                "baseline-output-mismatch", "fixture-text-mismatch", "cleanup-signal",
+                "identity-sidecar-write",
                 "identity-sidecar-missing", "phase-sidecar-write", "phase-sidecar-read",
                 "phase-sidecar-missing", "report-workspace-cleanup"
             ],
@@ -2460,6 +2481,42 @@ mod tests {
         assert_eq!(threshold_state(None, &enabled), "not-evaluable");
     }
 
+    /// A required backend that cannot run must fail the run.
+    /// The delivered Windows job was green while both backends measured nothing,
+    /// because the aggregate dropped `backend-unavailable`.
+    #[test]
+    fn a_required_unavailable_backend_becomes_a_run_failure() {
+        let result = json!({
+            "status": "unavailable",
+            "failure_categories": ["backend-unavailable"],
+        });
+        let categories = backend_failure_categories(&result, true);
+        assert!(categories.contains(&"backend-unavailable".to_string()), "{categories:?}");
+        assert!(categories.contains(&"required-backend-unavailable".to_string()), "{categories:?}");
+    }
+
+    /// An optional backend stays report-only. The category is recorded, and the
+    /// run keeps its exit code, so a runner that cannot provide it still passes.
+    #[test]
+    fn an_optional_unavailable_backend_stays_report_only() {
+        let result = json!({
+            "status": "unavailable",
+            "failure_categories": ["backend-unavailable"],
+        });
+        let categories = backend_failure_categories(&result, false);
+        assert_eq!(categories, vec!["backend-unavailable".to_string()]);
+    }
+
+    /// A measured backend contributes no category of its own.
+    #[test]
+    fn an_available_backend_contributes_its_own_categories_only() {
+        let result = json!({
+            "status": "available",
+            "failure_categories": [],
+        });
+        assert!(backend_failure_categories(&result, true).is_empty());
+    }
+
     #[test]
     fn redaction_hides_drive_and_unc_paths() {
         assert_eq!(
@@ -2986,6 +3043,7 @@ mod tests {
             child_backend: "backend".to_string(),
             fallback_identity: json!({"id": "backend", "version": "1", "language": "ja"}),
             environment: BTreeMap::new(),
+            required: true,
         };
         let config = ProcessConfig {
             program: PathBuf::from("tool"),

@@ -116,12 +116,17 @@ fn report_main() -> Result<()> {
                 child_backend: "windows".to_string(),
                 fallback_identity: windows_identity,
                 environment: BTreeMap::new(),
+                // The runner must install the ja OCR language pack.
+                // Without it the leg measures nothing and the run fails.
+                required: true,
             },
             monitor::BackendPlan {
                 id: "meikiocr".to_string(),
                 child_backend: "meikiocr".to_string(),
                 fallback_identity: meiki_identity,
                 environment: plugin_environment,
+                // The runner must set CHIBIPOP_OCR_PERF_PLUGIN.
+                required: true,
             },
         ],
         output_path: output_path.clone(),
