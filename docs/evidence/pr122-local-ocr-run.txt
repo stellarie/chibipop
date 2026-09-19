@@ -1,0 +1,55 @@
+chibipop -- OCR performance report, local run on a physical Windows machine
+===========================================================================
+Branch : fix/ocr-performance-honest-backend-status (PR 122, stacked on PR 115)
+Commit : 98ff555
+Command: cargo run --release -p chibipop-windows --example ocr_performance_windows
+Env    : CHIBIPOP_OCR_PERF_OUTPUT, DURATION_SECONDS=15, SAMPLE_MS=100,
+         IDLE_MS=100, PHASE_HOLD_MS=1000
+
+$ cargo run --release -p chibipop-windows --example ocr_performance_windows
+    Finished `release` profile [optimized] target(s) in 39.32s
+     Running `target\release\examples\ocr_performance_windows.exe`
+Wrote <path>/ocr-perf-local-run.json
+Failure categories: backend-unavailable, required-backend-unavailable
+error: process didn't exit successfully: `...ocr_performance_windows.exe` (exit code: 1)
+
+That exit code is the repair working. The artifact from the same run:
+
+top-level failure_categories : backend-unavailable, required-backend-unavailable
+backend=windows-ocr  status=available    failure_categories=(none)
+backend=meikiocr     status=unavailable  failure_categories=backend-unavailable
+                     identity_incomplete_reason=model-assets-unidentified
+
+windows-ocr phases observed (6 of 6):
+  cold-startup, post-handshake-idle, first-recognition,
+  repeated-identical-recognition, uncached-recognition,
+  post-activity-steady-state
+
+windows-ocr latency samples : 1
+windows-ocr text hash stable: True
+cleanup survivors           : (none)
+artifact size              : 149782 bytes
+
+---------------------------------------------------------------------------
+WHAT THIS PROVES
+---------------------------------------------------------------------------
+1. On a machine that really has the Japanese OCR language pack, windows-ocr
+   reaches status "available" and completes all six lifecycle phases.
+2. The only reason this run exits 1 is the missing MeikiOCR plugin
+   (CHIBIPOP_OCR_PERF_PLUGIN unset). A required backend that cannot run now
+   fails the run instead of passing quietly.
+3. The failure is attributed, not vague: the report names which backend fell
+   over and why the identity is incomplete.
+
+BEFORE THIS REPAIR the same condition produced:
+  failure_categories: []      exit code 0      job green
+with latency: null and stable_hashes: null in the artifact, which is the
+signature of a run that measured nothing.
+
+---------------------------------------------------------------------------
+STILL RED ON PURPOSE
+---------------------------------------------------------------------------
+The CI OCR performance job fails until the hosted runner provides:
+  - the Japanese OCR language pack (Windows Settings > Language), and
+  - CHIBIPOP_OCR_PERF_PLUGIN pointing at a built MeikiOCR plugin directory.
+That red is the finding, not a defect in the reporter.

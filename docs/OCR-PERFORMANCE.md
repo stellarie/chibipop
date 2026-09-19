@@ -61,7 +61,48 @@ the triggering run and updates one marker-based bot comment with backend
 status, six-phase coverage, key aggregates, cleanup survivors, disabled
 report-only thresholds, the commit, and workflow run and full artifact links.
 
+The Linux artifact is uploaded for evidence and is read by no workflow.
+A Linux comparison needs Linux runner identity, and it is not built here.
+Use the artifact for a manual Linux review until a Linux baseline exists.
+
+## Capture a reviewed baseline
+
+No baseline is committed yet. Both the comparison and the variance numbers
+depend on one, and both need repeated runs on one machine.
+
+1. Run the reporter at least three times on an idle machine, with the same
+   backend and no other load. Keep every output file.
+
+   ```bash
+   for attempt in 1 2 3; do
+     CHIBIPOP_OCR_PERF_OUTPUT="ocr-performance-run-$attempt.json" \
+       cargo run --release -p chibipop-windows --example ocr_performance_windows
+   done
+   ```
+
+2. Confirm that all three reports name the same identity fields, and that
+   `stable_hashes.repeated_identical.stable` is `true` in each. A report with
+   unstable hashes cannot serve as a baseline.
+
+3. Record the spread of `latency.p95_ms` and of each resource peak across the
+   three runs. That spread is the runner's variance. A threshold below it
+   would fail on noise alone.
+
+4. Name one run as the baseline. Record the machine, the backend identity, the
+   date, and the observed spread beside the file.
+
+5. Commit the chosen report, then set `CHIBIPOP_OCR_PERF_BASELINE` for later
+   runs. A comparison with a mismatch is `not-comparable`; it never guesses.
+
+Variance stays uncited until step 3 has real numbers. The report therefore
+keeps every threshold at `enabled: false`.
+
+A threshold label does not fail a run. `threshold_state` stores `within` or
+`exceeded` as a string, and no code converts a label into a failure category.
+Failures come from the structural categories only.
+
 The summary workflow never checks out or executes pull-request code. It uses
+## Run a report
 only `actions: read` and `issues: write`. Forks, read-only tokens, missing or
 ambiguous artifacts, malformed reports, and API failures skip optional comment
 delivery without changing the CI measurement result. The full JSON report
