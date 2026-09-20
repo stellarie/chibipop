@@ -12,6 +12,7 @@ point at a word to become dekiru
 4. Q: can you add x plugin from y A: go to issues
 5. Q: can you find me a wife A: go to issues
 
+### chibipop is in active development and has a rapid release cycle - we may break stuff from time-to-time (who doesnt)
 **now that you have read all of the above, proceed**
 ---
 
