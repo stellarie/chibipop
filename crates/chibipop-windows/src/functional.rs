@@ -614,7 +614,7 @@ fn anki_fields(ctx: &Ctx) -> Result<Outcome> {
 fn png_encoding(ctx: &Ctx) -> Result<Outcome> {
     let (w, h) = (320, 120);
     let mut pixels = vec![0u8; (w * h * 4) as usize];
-    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = (index as i32 % w, index as i32 / w);
         let dark = x % 11 < 2 || y % 13 < 2;
         let value = if dark { 0x18 } else { 0xF4 };
@@ -681,7 +681,7 @@ fn plugin_cli(ctx: &Ctx) -> Result<Outcome> {
         .with_context(|| format!("writing {}", dir.join("plugin.toml").display()))?;
 
     let mut pixels = vec![0u8; 4 * 4 * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
         pixel.copy_from_slice(&[0x20, 0x20, 0x20, 0xFF]);
     }
     let image = ctx.run_root.join("artifacts").join("plugin.png");
