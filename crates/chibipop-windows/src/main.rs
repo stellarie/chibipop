@@ -15,7 +15,7 @@
 mod entry;
 
 #[cfg(windows)]
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<std::process::ExitCode> {
     entry::run()
 }
 

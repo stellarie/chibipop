@@ -19,6 +19,12 @@ use chibipop::text::SettingsSnapshot;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
+/// The headless functional phase of `chibipop test functional`. It opens no
+/// window, and it owns its own process exit code, so it stays out of the
+/// command loop below.
+#[path = "functional.rs"]
+mod functional;
+
 /// `probe` does not show a popup. The pixels need no Capture mask.
 /// See `ARCHITECTURE.md#capture-and-masking`.
 const MASKLESS: CaptureMask = CaptureMask::NONE;
@@ -141,6 +147,28 @@ enum Command {
         #[command(subcommand)]
         cmd: ActionCmd,
     },
+    /// Run automated test phases. The phases emit machine-readable evidence.
+    #[command(hide = true)]
+    Test {
+        #[command(subcommand)]
+        cmd: TestCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum TestCmd {
+    /// Run the functional cases of one manifest without a window.
+    Functional {
+        /// Read the case list from this manifest.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Run this one case instead of every case.
+        #[arg(long, value_name = "ID")]
+        case: Option<String>,
+        /// Write the case output here. Defaults to a fresh directory.
+        #[arg(long)]
+        run_root: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -161,7 +189,7 @@ enum ActionCmd {
     TestSelection,
 }
 
-pub fn run() -> Result<()> {
+pub fn run() -> Result<std::process::ExitCode> {
     chibipop::update::cleanup_old();
     chibipop_windows::ui::console::hide();
     let cli = Cli::parse();
@@ -185,7 +213,7 @@ pub fn run() -> Result<()> {
     } else {
         None
     };
-    match command {
+    let () = match command {
         Command::Lookup { text, dict, rules } => {
             let dict = dict_path(dict);
             let rules = rules_path(rules);
@@ -199,7 +227,7 @@ pub fn run() -> Result<()> {
             let hits = engine.run(&dictionary, &text)?;
             if hits.is_empty() {
                 println!("no results for {text}");
-                return Ok(());
+                return Ok(std::process::ExitCode::SUCCESS);
             }
             print_hits(&hits);
             Ok(())
@@ -268,7 +296,7 @@ pub fn run() -> Result<()> {
                         read.lines.len()
                     );
                 }
-                return Ok(());
+                return Ok(std::process::ExitCode::SUCCESS);
             }
 
             // The single OCR pass makes the dump match the pixels that OCR read.
@@ -511,7 +539,8 @@ pub fn run() -> Result<()> {
             };
             if audit {
                 chibipop_windows::text::capture::init_dpi_awareness()?;
-                return chibipop_windows::ui::audit::run(&cfg, &dicts);
+                chibipop_windows::ui::audit::run(&cfg, &dicts)?;
+                return Ok(std::process::ExitCode::SUCCESS);
             }
             chibipop_windows::app::settings_only(cfg, &dicts, &config_path, &dict)
         }
@@ -613,7 +642,14 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
         },
-    }
+        Command::Test { cmd } => match cmd {
+            TestCmd::Functional { manifest, case, run_root } => {
+                let code = functional::run(&manifest, case.as_deref(), run_root.as_deref())?;
+                std::process::exit(code);
+            }
+        },
+    }?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 /// Writes raw BGRA pixels to an uncompressed BMP file.
