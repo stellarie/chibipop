@@ -138,6 +138,73 @@ The script carries both clippy counts as `--expected-clippy-warnings 1` and
 `--expected-other-clippy 0`. Its `--stop-target-strays` flag replaces the kill line above, and it
 matches on the repo's `target` directory for the reason the callout below gives.
 
+<a id="phases"></a>
+## Phases — how much desktop a run needs
+
+`--phase` partitions every check into three phases. The default, `--phase all`, keeps the full
+sweep and is what every earlier revision of this page described. A phase run is the same
+sequential result loop with a filter in front of it, so `--tier`, `--only` and `--skip` still
+apply, and the JSON report records the selected phase under `args.phase`.
+
+| Phase | Checks | What it may open |
+|---|---|---|
+| `functional` | 29 | No desktop process. Tier 0, lookup, probe, OCR-quality, plugin-CLI, executable-size, and manifest checks |
+| `ui` | 198 | One desktop session. Window state, resize, tabs, search, hover, selection, and every interactive case |
+| `performance` | 3 | One process tree at a time. Executable size, idle sampling, and hover sampling |
+
+The counts are a measurement at `018640a` plus the phase work, not a contract. The partition is
+total and disjoint: `phase_of` returns exactly one phase for every check id, and a unit test
+asserts that the three phases cover the registry with no overlap. That is the property to preserve
+when a case is added — pick its phase in `phase_of`, and do not let it fall through to `ui` by
+accident. A second unit test asserts the registry equals an explicit set. Add a new check to that
+set as well.
+
+A `ui` run reuses one disposable install and one daemon session for the whole phase. Start the
+daemon once, then drive every interactive check against that instance. Restart only for a case that
+changes process-global state: the popup trigger mode, the selected-text provider, or the DPI
+awareness of the process. Those three cannot be undone inside one process.
+
+Run one phase while you work on it, and the whole sweep before you hand work over:
+
+```bash
+python scripts/manual_regression.py --phase functional --repo-root .
+python scripts/manual_regression.py --phase ui --repo-root .
+python scripts/manual_regression.py --phase performance --repo-root .
+```
+
+**The phases exist because of one measured problem.** Opening many chibipop instances in rapid
+succession slows the whole desktop, and a run that starts a daemon per check pays that cost once
+per check. The `ui` phase is the only phase that owns a desktop process, the `performance` phase
+owns at most one process tree, and the `functional` phase owns none.
+
+**The performance phase measures, it does not gate.** `scripts/ocr_resources.py` takes an ordered
+plan as `--phase label=seconds[:x,y;x,y]`. It drives the pointer along each path. It reports one
+`phase_summary` row per phase: peak working set, peak private bytes, the CPU-seconds delta, peak
+threads, and peak handles. The 100 MiB and 200 MiB goals in `ARCHITECTURE.md#ocr-engine` remain
+measured targets. A regression threshold is a separate decision.
+
+The planner, the summary and the report are pure Python, so they run on every platform and the unit
+tests cover them everywhere. Only the process-tree sampling is platform-native. On Windows,
+`WindowsSampler` starts the child and calls `scripts/ocr_resources_windows.ps1` to sample the tree.
+On any other host, `sampler_for` refuses with exit code 2 instead of guessing. The backend writes
+one JSON record per process per sample and then one `total` row for the tree. `RECORD_KEYS` in
+`ocr_resources.py` is the shared contract, and a test asserts a real backend run produces exactly
+those keys.
+
+```bash
+python -m unittest scripts.tests.test_ocr_resources
+python scripts/ocr_resources.py --file ./target/debug/chibipop.exe --dry-run
+python scripts/ocr_resources.py --file ./target/debug/chibipop.exe \
+  --arguments run --phase idle=20 --phase 'hover=30:1200,400;1400,400' --output perf.json
+```
+
+Quote a phase that carries a path. An unquoted `;` is a statement separator in PowerShell and a
+command separator in `sh`.
+
+`scripts/measure_ocr_resources.ps1` remains the standalone single-phase tool for a two-engine
+comparison, which `docs/REFERENCE.md` describes. The phased sampler above is what produces phase
+evidence.
+
 The `--workspace --exclude chibipop-linux` flags arrived with `default-members`, which
 serves the Linux dev box since then, so a bare `cargo test` here would silently skip the
 Windows crate — the exact under-coverage this tier exists to catch. Both bins are named
@@ -2222,6 +2289,36 @@ Keep a Search window open beside the popup. Record the database, library, config
 
 **Evidence and cleanup.** Record status text, screenshots, hashes, tested revision, and executable hash per ID.
 Restore only disposable fixture changes.
+
+---
+
+<a id="case-1-43"></a>
+### 1.43 The headless functional manifest
+
+**Prerequisites.** Windows, a built `chibipop.exe`, and the committed manifest at
+`tests/functional/manifest.json`. This case opens no window and needs no desktop session.
+
+The command runs the production seams directly. It never reaches `app::run`, the settings window,
+the search window, the capture path, or the audit path.
+
+```powershell
+$run = Join-Path $env:TEMP "chibipop-functional"
+.\target\debug\chibipop.exe test functional --manifest .\tests\functional\manifest.json --run-root $run
+```
+
+One JSON object arrives on stdout per case, in manifest order. Every line carries `id`, `title`,
+`status`, `detail`, `duration_ms`, and `pid`. The exit code is 0 when every case is `PASS` or
+`SKIP`, and 1 when any case is `FAIL`.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.43 | Headless functional manifest | Run the command above. Require eleven lines, one per manifest case. Every `status` is `PASS` or `SKIP`. Every line carries the same `pid`, which is the proof that one process ran the whole manifest. Nothing is written outside `--run-root`. |
+
+A case whose fixture or recognizer is missing reports `SKIP` and names the gap in `detail`. The
+`windows-ocr` case skips when no Japanese recognizer is installed.
+
+**Evidence and cleanup.** Record the exit code, the eleven lines, and the `--run-root` path.
+Delete the run root after the run. The runner performs this case as `--phase functional`.
 
 ---
 

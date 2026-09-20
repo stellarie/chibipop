@@ -98,6 +98,7 @@ def build_checks() -> list[Check]:
         Check("1.7a", "1", "Outlined glyph ceiling", "auto-or-interactive", "docs/REGRESSION.md#17a-outlined-glyphs-still-read-at-about-half", "Score outlined text from ocr line 0 and compare with solid text in the same run.", auto="probe_outlined"),
         Check("1.8", "1", "Runtime resources", "interactive", "docs/REGRESSION.md#18-resources", "Measure idle CPU and memory, watch plateau, startup time, and sustained-hover memory on the supported target. Record durations and measurements; executable size alone cannot pass."),
         Check("1.8.1", "1", "Executable size only", "auto", "docs/REGRESSION.md#18-resources", "Measure executable bytes only. Runtime resources remain a separate manual case.", auto="resources"),
+        Check("1.8.2", "1", "Phased resource sampling", "auto", "docs/REGRESSION.md#18-resources", "Drive scripts/ocr_resources.py through an idle phase and a hover phase against the target exe. Require one phase_summary row per phase, peak metrics from a real process tree, and no surviving process.", auto="phased_resources"),
         Check("1.9", "1", "Settings apply without restarting", "interactive", "docs/REGRESSION.md#19-settings-apply-without-restarting", "Change capture height, Apply, verify PID unchanged, window remains, clamp message, and probe height."),
         Check("1.10", "1", "Alphanumeric scanning", "interactive", "docs/REGRESSION.md#110-alphanumeric-scanning", "Disable alphanumeric scan live and check English, mixed numeric Japanese, and numeric hover behavior."),
         Check("1.11", "1", "Trigger and hotkeys apply live", "interactive", "docs/REGRESSION.md#111-trigger-mode-and-both-hotkeys-apply-live", "Change trigger mode, trigger key, and Anki key. Each must work with the same PID."),
@@ -285,6 +286,7 @@ def build_checks() -> list[Check]:
         Check("1.42.1", "1", "Cache clear preserves authoritative files", "interactive", "docs/REGRESSION.md#case-1-42", "Hash the database, library, settings, role cache, and logs before and after. Require byte-identical files and no rebuild or Apply."),
         Check("1.42.2", "1", "Cache media warning", "interactive", "docs/REGRESSION.md#case-1-42", "Windows disposable fixture: make media unavailable, clear the cache, and require a reopen warning, alt text, and no stale pixels."),
         Check("1.42.3", "1", "Cache clear refreshes future Search queries", "interactive", "docs/REGRESSION.md#case-1-42", "Windows: submit a new Search query after clearing and require fresh dictionary data from a new service."),
+        Check("1.43", "1", "Headless functional manifest", "auto", "docs/REGRESSION.md#case-1-43", "Run the target exe's `test functional` command over tests/functional/manifest.json. Require one JSON record per case, every case PASS or SKIP, and one process id across the whole manifest.", auto="functional_manifest"),
         Check("2.1", "2", "Hover popup appears", "interactive", "docs/REGRESSION.md#tier-2", "Hover Japanese text and confirm the popup appears beside it."),
         Check("2.2", "2", "Reach into popup", "interactive", "docs/REGRESSION.md#tier-2", "Move from word into popup. It must not change or vanish."),
         Check("2.3", "2", "Leave popup", "interactive", "docs/REGRESSION.md#tier-2", "Leave the popup and confirm normal hover resumes with no dead patch."),
@@ -335,6 +337,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--secondary-exe", action="append", default=[], type=Path, help="Secondary executable or install directory. Repeat for language-specific installs.")
     parser.add_argument("--target", action="append", default=[], metavar="NAME=PATH", help="Named target exe or install directory. Repeat for named installs.")
     parser.add_argument("--tier", choices=["all", "0", "1", "2"], default="all")
+    parser.add_argument("--phase", choices=["all", *PHASES], default="all",
+                        help="Run one test phase. Phases partition the checks; `all` keeps the full sweep.")
     parser.add_argument("--only", action="append", default=[], help="Run only matching check ids or prefixes. Repeatable.")
     parser.add_argument("--skip", action="append", default=[], help="Skip matching check ids or prefixes. Repeatable.")
     parser.add_argument("--list", action="store_true", help="List checks and exit.")
@@ -794,6 +798,107 @@ def auto_resources(check: Check, args: argparse.Namespace, logs_dir: Path, targe
     return Result(check.ident, check.tier, check.title, check.mode, status, detail, 0.0, {"exe": rel(target.exe, args.repo_root), "bytes": size})
 
 
+def auto_phased_resources(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target]) -> Result:
+    """The performance phase's own evidence: one report per phase plan."""
+    if os.name != "nt":
+        return unavailable(check, "resource sampling needs Windows")
+    target = first_target(targets) or default_target(args.repo_root)
+    if not target.exe.exists():
+        return unavailable(check, f"missing target exe {target.exe}")
+    sampler = args.repo_root / "scripts" / "ocr_resources.py"
+    if not sampler.exists():
+        return unavailable(check, f"missing sampler {sampler}")
+    report = args.artifacts_dir / "resources-phases.json"
+    labels = ["idle", "hover"]
+    # The daemon writes a default chibipop.toml when its config is absent. Point
+    # it at a disposable path, so the sampled run leaves the target install and
+    # the protected-state postflight untouched.
+    run_config = args.artifacts_dir / "resources-run" / "chibipop.toml"
+    run_config.parent.mkdir(parents=True, exist_ok=True)
+    cmd: list[str | os.PathLike[str]] = [
+        sys.executable, sampler,
+        "--file", target.exe,
+        "--arguments", f"run,--config,{run_config}",
+        "--sample-milliseconds", "200",
+        "--output", report,
+    ]
+    for phase in ("idle=5", "hover=5:400,300;600,300"):
+        cmd += ["--phase", phase]
+    code, output, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, f"tier1-{check.ident}-resources", timeout=300)
+    evidence: dict[str, object] = {"log": rel(log, args.repo_root)}
+    if code != 0:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"sampler exited {code}: {output.strip().splitlines()[-1] if output.strip() else 'no output'}",
+                      elapsed, evidence)
+    if not report.exists():
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      "the sampler wrote no report", elapsed, evidence)
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"report is not JSON: {exc}", elapsed, evidence)
+    evidence["report"] = rel(report, args.repo_root)
+    remaining = list(data.get("cleanup_remaining_process_ids") or [])
+    if remaining:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"processes survived cleanup: {remaining}", elapsed, evidence)
+    found = [str(row.get("phase")) for row in data.get("phase_summary") or []]
+    if found != labels:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"phase rows {found}, expected {labels}", elapsed, evidence)
+    evidence["phase_summary"] = data.get("phase_summary")
+    return Result(check.ident, check.tier, check.title, check.mode, STATUS_PASS,
+                  f"phases {', '.join(found)} from one process tree", elapsed, evidence)
+
+
+def auto_functional_manifest(check: Check, args: argparse.Namespace, logs_dir: Path, targets: list[Target]) -> Result:
+    """The functional phase's own command. One manifest, one process."""
+    target = first_target(targets) or default_target(args.repo_root)
+    if not target.exe.exists():
+        return unavailable(check, f"missing target exe {target.exe}")
+    manifest = args.repo_root / "tests" / "functional" / "manifest.json"
+    if not manifest.exists():
+        return unavailable(check, f"missing manifest {manifest}")
+    run_root = args.artifacts_dir / "functional-run"
+    cmd = [target.exe, "test", "functional", "--manifest", manifest, "--run-root", run_root]
+    code, output, elapsed, log = run_cmd(cmd, args.repo_root, logs_dir, f"tier1-{check.ident}-functional", timeout=900)
+    evidence: dict[str, object] = {"log": rel(log, args.repo_root)}
+    records: list[dict] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                          f"a case line is not JSON: {line[:120]}", elapsed, evidence)
+        if isinstance(record, dict) and "id" in record:
+            records.append(record)
+    if not records:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"no case records in the output; exit {code}", elapsed, evidence)
+    evidence["cases"] = [{"id": r.get("id"), "status": r.get("status")} for r in records]
+    failed = [str(r.get("id")) for r in records if r.get("status") == "FAIL"]
+    skipped = [str(r.get("id")) for r in records if r.get("status") == "SKIP"]
+    if failed:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"{len(records)} cases, failed: {', '.join(failed)}", elapsed, evidence)
+    if code != 0:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"{len(records)} cases, no FAIL, but the command exited {code}", elapsed, evidence)
+    pids = sorted({int(r["pid"]) for r in records if isinstance(r.get("pid"), int)})
+    if len(pids) != 1:
+        return Result(check.ident, check.tier, check.title, check.mode, STATUS_FAIL,
+                      f"{len(records)} cases ran in {len(pids)} processes: {pids}", elapsed, evidence)
+    evidence["pid"] = pids[0]
+    detail = f"{len(records)} cases in one process, {len(skipped)} skipped"
+    if skipped:
+        detail += f" ({', '.join(skipped)})"
+    return Result(check.ident, check.tier, check.title, check.mode, STATUS_PASS, detail, elapsed, evidence)
+
+
 def find_controls_by_id(node: object, control_id: int, out: list[dict[str, object]]) -> None:
     if isinstance(node, dict):
         if node.get("id") == control_id:
@@ -920,6 +1025,8 @@ AUTO: dict[str, Callable[..., Result]] = {
     "probe_vertical": auto_probe_vertical,
     "probe_outlined": auto_probe_outlined,
     "resources": auto_resources,
+    "phased_resources": auto_phased_resources,
+    "functional_manifest": auto_functional_manifest,
     "settings_audit": auto_settings_audit,
     "plugin_cli": auto_plugin_cli,
 }
@@ -939,6 +1046,8 @@ def matches_selector(ident: str, selector: str) -> bool:
 
 
 def should_run(check: Check, args: argparse.Namespace) -> bool:
+    if not phase_runs(args.phase, check.ident):
+        return False
     if args.tier != "all" and check.tier != args.tier:
         return False
     if args.only and not any(matches_selector(check.ident, item) for item in args.only):
@@ -985,6 +1094,43 @@ def requires_display_change(check: Check) -> bool:
 
 def matches_any_prefix(ident: str, prefixes: tuple[str, ...]) -> bool:
     return any(matches_selector(ident, prefix) for prefix in prefixes)
+
+
+# The three concrete phases partition every check. `all` runs them in order.
+PHASES = ("functional", "ui", "performance")
+
+# Resource measurement owns the performance phase.
+PERFORMANCE_CHECKS = frozenset({"1.8", "1.8.1", "1.8.2"})
+
+# Functional cases need no desktop session. Each entry is a check-id prefix.
+FUNCTIONAL_PREFIXES = (
+    "0",
+    "1.1",
+    "1.5",
+    "1.6",
+    "1.7a",
+    "1.21.4",
+    "1.23",
+    "1.25",
+    "1.26.1",
+    "1.29",
+    "1.38",
+    "1.43",
+)
+
+
+def phase_of(ident: str) -> str:
+    """Return the single phase that owns a check id."""
+    if ident in PERFORMANCE_CHECKS:
+        return "performance"
+    if matches_any_prefix(ident, FUNCTIONAL_PREFIXES):
+        return "functional"
+    return "ui"
+
+
+def phase_runs(phase: str, ident: str) -> bool:
+    """Report whether one phase run includes a check id."""
+    return phase == "all" or phase_of(ident) == phase
 
 
 def prompt_check(check: Check) -> Result:
@@ -1079,6 +1225,7 @@ def write_report(args: argparse.Namespace, targets: list[Target], results: list[
         "repo_root": rel(args.repo_root, args.repo_root),
         "args": {
             "tier": args.tier,
+            "phase": args.phase,
             "only": args.only,
             "skip": args.skip,
             "strict": args.strict,

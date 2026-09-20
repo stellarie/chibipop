@@ -30,7 +30,8 @@ class ManualRegressionTests(unittest.TestCase):
         required = (
             numbered("0", 1, 5)
             | numbered("1", 1, 42)
-            | {"1.8.1"}
+            | {"1.8.1", "1.8.2"}
+            | {"1.43"}
             | {"1.7a"}
             | numbered("1.11", 1, 3)
             | numbered("1.14", 1, 5)
@@ -306,6 +307,247 @@ class ManualRegressionTests(unittest.TestCase):
             self.assertFalse(report["args"]["allow_anki_write"])
             self.assertEqual(report["summary"]["MANUAL"], 1)
             self.assertEqual(report["summary"]["PASS"], 0)
+
+    def test_phase_defaults_to_all(self) -> None:
+        from unittest.mock import patch
+        with patch.object(sys, "argv", [str(SCRIPT), "--non-interactive"]):
+            self.assertEqual(manual_regression.parse_args().phase, "all")
+
+    def test_phase_rejects_an_unknown_name(self) -> None:
+        from unittest.mock import patch
+        with patch.object(sys, "argv", [str(SCRIPT), "--phase", "smoke"]):
+            with self.assertRaises(SystemExit):
+                manual_regression.parse_args()
+
+    def test_phase_selects_only_its_own_checks(self) -> None:
+        from unittest.mock import patch
+        cases = {
+            "functional": {"0.1", "1.1", "1.25"},
+            "performance": {"1.8.1"},
+            "ui": {"1.26"},
+        }
+        for phase, expected in cases.items():
+            with patch.object(sys, "argv", [str(SCRIPT), "--phase", phase, "--non-interactive"]):
+                args = manual_regression.parse_args()
+            args.only = []
+            args.skip = []
+            selected = {
+                check.ident
+                for check in manual_regression.build_checks()
+                if manual_regression.should_run(check, args)
+            }
+            self.assertTrue(expected.issubset(selected), phase)
+            for ident in selected:
+                self.assertEqual(manual_regression.phase_of(ident), phase, ident)
+
+    def test_every_phase_runs_its_cases_in_document_order(self) -> None:
+        from unittest.mock import patch
+        with patch.object(sys, "argv", [str(SCRIPT), "--phase", "all", "--non-interactive"]):
+            args = manual_regression.parse_args()
+        args.only = []
+        args.skip = []
+        identities = [check.ident for check in manual_regression.build_checks()]
+        for phase in manual_regression.PHASES:
+            selected = [
+                ident
+                for ident in identities
+                if manual_regression.phase_of(ident) == phase
+            ]
+            self.assertEqual(selected, sorted(selected, key=identities.index), phase)
+            with patch.object(sys, "argv", [str(SCRIPT), "--phase", phase, "--non-interactive"]):
+                scoped = manual_regression.parse_args()
+            scoped.only = []
+            scoped.skip = []
+            self.assertEqual(
+                [c.ident for c in manual_regression.build_checks() if manual_regression.should_run(c, scoped)],
+                selected,
+                phase,
+            )
+
+    def test_phase_all_is_the_union_of_every_phase(self) -> None:
+        identities = [check.ident for check in manual_regression.build_checks()]
+        union = [
+            ident
+            for phase in manual_regression.PHASES
+            for ident in identities
+            if manual_regression.phase_of(ident) == phase
+        ]
+        self.assertEqual(sorted(union), sorted(identities))
+        self.assertEqual(len(union), len(set(union)))
+
+    def test_report_records_the_selected_phase(self) -> None:
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(sys, "argv", [str(SCRIPT), "--phase", "performance", "--non-interactive"]):
+                args = manual_regression.parse_args()
+            args.repo_root = Path(tmp)
+            args.report = Path(tmp) / "report.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                manual_regression.write_report(args, [], [], {})
+            report = json.loads(args.report.read_text(encoding="utf-8"))
+            self.assertEqual(report["args"]["phase"], "performance")
+
+
+class PhaseWiringTests(unittest.TestCase):
+    """Each phase drives its own command, and bad evidence fails that phase."""
+
+    def phase_args(self, root: Path, artifacts: Path):
+        return manual_regression.argparse.Namespace(repo_root=root, artifacts_dir=artifacts)
+
+    def run_with(self, output: str, code: int, log: Path, call) -> object:
+        original = manual_regression.run_cmd
+        manual_regression.run_cmd = lambda *a, **kw: (code, output, 0.0, log)
+        try:
+            return call()
+        finally:
+            manual_regression.run_cmd = original
+
+    def functional_fixture(self, root: Path):
+        (root / "tests" / "functional").mkdir(parents=True, exist_ok=True)
+        (root / "tests" / "functional" / "manifest.json").write_text("{", encoding="utf-8")
+        exe = root / "chibipop.exe"
+        exe.write_bytes(b"")
+        check = {c.ident: c for c in manual_regression.build_checks()}["1.43"]
+        return check, manual_regression.Target("primary", exe)
+
+    def test_the_functional_phase_accepts_one_process_and_records_its_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            check, target = self.functional_fixture(root)
+            lines = "\n".join(
+                json.dumps({"id": f"case-{index}", "status": "PASS", "pid": 4242})
+                for index in range(3)
+            )
+            result = self.run_with(
+                lines, 0, root / "log.txt",
+                lambda: manual_regression.auto_functional_manifest(
+                    check, self.phase_args(root, artifacts), root, [target]
+                ),
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_PASS)
+        self.assertEqual(result.evidence["pid"], 4242)
+        self.assertIn("3 cases in one process", result.detail)
+
+    def test_the_functional_phase_fails_when_cases_span_two_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            check, target = self.functional_fixture(root)
+            lines = "\n".join([
+                json.dumps({"id": "a", "status": "PASS", "pid": 1}),
+                json.dumps({"id": "b", "status": "PASS", "pid": 2}),
+            ])
+            result = self.run_with(
+                lines, 0, root / "log.txt",
+                lambda: manual_regression.auto_functional_manifest(
+                    check, self.phase_args(root, artifacts), root, [target]
+                ),
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_FAIL)
+        self.assertIn("2 processes", result.detail)
+
+    def test_the_functional_phase_fails_on_one_failed_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            check, target = self.functional_fixture(root)
+            lines = "\n".join([
+                json.dumps({"id": "a", "status": "PASS", "pid": 7}),
+                json.dumps({"id": "b", "status": "FAIL", "pid": 7}),
+            ])
+            result = self.run_with(
+                lines, 1, root / "log.txt",
+                lambda: manual_regression.auto_functional_manifest(
+                    check, self.phase_args(root, artifacts), root, [target]
+                ),
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_FAIL)
+        self.assertIn("b", result.detail)
+
+    def test_the_functional_phase_skips_without_a_target_exe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            check, target = self.functional_fixture(root)
+            target.exe.unlink()
+            result = manual_regression.auto_functional_manifest(
+                check, self.phase_args(root, root / "artifacts"), root, [target]
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_SKIP)
+
+    def test_the_performance_phase_reads_one_summary_row_per_phase(self) -> None:
+        if manual_regression.os.name != "nt":
+            self.skipTest("resource sampling needs Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "ocr_resources.py").write_text("", encoding="utf-8")
+            exe = root / "chibipop.exe"
+            exe.write_bytes(b"")
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            report = artifacts / "resources-phases.json"
+            check = {c.ident: c for c in manual_regression.build_checks()}["1.8.2"]
+            target = manual_regression.Target("primary", exe)
+            payload = {
+                "phase_summary": [{"phase": "idle"}, {"phase": "hover"}],
+                "cleanup_remaining_process_ids": [],
+            }
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            result = self.run_with(
+                "", 0, root / "log.txt",
+                lambda: manual_regression.auto_phased_resources(
+                    check, self.phase_args(root, artifacts), root, [target]
+                ),
+            )
+            surviving = {
+                "phase_summary": [{"phase": "idle"}, {"phase": "hover"}],
+                "cleanup_remaining_process_ids": [99],
+            }
+            report.write_text(json.dumps(surviving), encoding="utf-8")
+            leaked = self.run_with(
+                "", 0, root / "log.txt",
+                lambda: manual_regression.auto_phased_resources(
+                    check, self.phase_args(root, artifacts), root, [target]
+                ),
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_PASS)
+        self.assertEqual(
+            [row["phase"] for row in result.evidence["phase_summary"]], ["idle", "hover"]
+        )
+        self.assertEqual(leaked.status, manual_regression.STATUS_FAIL)
+        self.assertIn("survived cleanup", leaked.detail)
+
+    def test_the_performance_phase_fails_on_a_wrong_phase_row(self) -> None:
+        if manual_regression.os.name != "nt":
+            self.skipTest("resource sampling needs Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "ocr_resources.py").write_text("", encoding="utf-8")
+            exe = root / "chibipop.exe"
+            exe.write_bytes(b"")
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "resources-phases.json").write_text(
+                json.dumps({
+                    "phase_summary": [{"phase": "idle"}],
+                    "cleanup_remaining_process_ids": [],
+                }),
+                encoding="utf-8",
+            )
+            check = {c.ident: c for c in manual_regression.build_checks()}["1.8.2"]
+            result = self.run_with(
+                "", 0, root / "log.txt",
+                lambda: manual_regression.auto_phased_resources(
+                    check,
+                    self.phase_args(root, artifacts),
+                    root,
+                    [manual_regression.Target("primary", exe)],
+                ),
+            )
+        self.assertEqual(result.status, manual_regression.STATUS_FAIL)
+        self.assertIn("expected", result.detail)
 
 
 if __name__ == "__main__":
