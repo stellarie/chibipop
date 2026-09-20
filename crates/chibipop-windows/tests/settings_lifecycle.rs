@@ -194,7 +194,7 @@ fn system_command(window: HWND, command: u32) {
 }
 
 #[test]
-fn standalone_x_exits_and_reports_inactive_scanning() {
+fn standalone_x_exits_and_audit_keeps_machine_readable_json() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("settings");
     let window = process.window("chibipop settings");
@@ -203,6 +203,17 @@ fn standalone_x_exits_and_reports_inactive_scanning() {
     assert!(status.contains("Not running"), "{status}");
     system_command(window, SC_CLOSE);
     process.wait_exit();
+    let output = Command::new(process.root.join("chibipop.exe"))
+        .args(["settings", "--audit", "--config"]).arg(process.root.join("chibipop.toml"))
+        .arg("--dict").arg(process.root.join("data/chibipop.sqlite"))
+        .current_dir(&process.root).creation_flags(CREATE_NO_WINDOW.0).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let audit: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let labels: Vec<_> = audit["dumps"].as_array().unwrap().iter()
+        .filter(|dump| dump["field_map_expanded"] == false)
+        .map(|dump| dump["tab_label"].as_str().unwrap()).collect();
+    assert_eq!(vec!["Popup", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("live diagnostics enabled"));
 }
 
 #[test]
@@ -221,26 +232,6 @@ fn daemon_escape_closes_settings_without_exit() {
         "Escape stopped the daemon: {}",
         process.logs()
     );
-}
-
-#[test]
-fn audit_keeps_machine_readable_json_and_does_not_enable_capture() {
-    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
-    let mut process = ProcessFixture::start("settings");
-    let window = process.window("chibipop settings");
-    system_command(window, SC_CLOSE);
-    process.wait_exit();
-    let output = Command::new(process.root.join("chibipop.exe"))
-        .args(["settings", "--audit", "--config"]).arg(process.root.join("chibipop.toml"))
-        .arg("--dict").arg(process.root.join("data/chibipop.sqlite"))
-        .current_dir(&process.root).creation_flags(CREATE_NO_WINDOW.0).output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let audit: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let labels: Vec<_> = audit["dumps"].as_array().unwrap().iter()
-        .filter(|dump| dump["field_map_expanded"] == false)
-        .map(|dump| dump["tab_label"].as_str().unwrap()).collect();
-    assert_eq!(vec!["Popup", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("live diagnostics enabled"));
 }
 
 #[test]
