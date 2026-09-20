@@ -476,11 +476,16 @@ fn plain_dictionary_group(name: &str, definitions: String, include_dictionary_na
 
 /// Places one Dictionary's formatted definitions under its optional heading.
 ///
-/// - `items` is one list item per definition when the Dictionary is plural.
-/// - It is one bare definition when the Dictionary is singular.
-fn html_dictionary_group(name: &str, items: String, include_dictionary_name: bool) -> String {
-    let heading =
-        if include_dictionary_name { format!("<b>{}</b>", escape_html(name)) } else { String::new() };
+/// - A lone definition needs an explicit break after the heading.
+/// - A plural group uses the block boundary of its ordered list.
+fn html_dictionary_group(name: &str, values: Vec<String>, include_dictionary_name: bool) -> String {
+    let heading = if include_dictionary_name {
+        let separator = if values.len() == 1 { "<br>" } else { "" };
+        format!("<b>{}</b>{separator}", escape_html(name))
+    } else {
+        String::new()
+    };
+    let items = html_definition_items(values);
     format!("{heading}{items}")
 }
 
@@ -539,7 +544,7 @@ fn glossary_fields<'a>(
         if !html.is_empty() {
             html_groups.push(html_dictionary_group(
                 dict_name,
-                html_definition_items(html),
+                html,
                 include_dictionary_name,
             ));
         }
@@ -759,7 +764,7 @@ mod tests {
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"<b>大辞林</b>ネコ科の<b>哺乳類</b>。<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
+            Some(&"<b>大辞林</b><br>ネコ科の<b>哺乳類</b>。<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
@@ -803,6 +808,9 @@ mod tests {
         assert!(html.contains("second sense"), "{html}");
         assert!(!html.contains("first sense"), "{html}");
         assert!(!html.contains("Jitendex"), "{html}");
+
+        let named = fields_from_selection(&selected_card, &selection, Separator::Ellipsis, true);
+        assert_eq!(format!("<b>Jitendex</b><br>{html}"), named["glossary_html"]);
     }
 
     #[test]
@@ -811,7 +819,7 @@ mod tests {
         let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
         assert_eq!(Some(&"<b>A &amp; B &lt;dict&gt;</b><br>\ncat".to_string()), f.get("glossary"));
         assert_eq!(
-            Some(&"<b>A &amp; B &lt;dict&gt;</b>cat".to_string()),
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>cat".to_string()),
             f.get("glossary_html"),
         );
     }
@@ -845,7 +853,7 @@ mod tests {
         let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
-            "<b>Wenlin</b>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b>evening meal",
+            "<b>Wenlin</b><br>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><br>evening meal",
             html,
         );
         assert_eq!(1, html.matches("<hr").count(), "one divider, none trailing");
@@ -865,7 +873,7 @@ mod tests {
             "one definition is not a list",
         );
         assert_eq!(
-            Some(&"<b>Jitendex</b>to eat".to_string()),
+            Some(&"<b>Jitendex</b><br>to eat".to_string()),
             f.get("glossary_html"),
             "one definition needs no list wrap",
         );
@@ -883,7 +891,7 @@ mod tests {
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"<b>Wenlin</b>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b>evening meal".to_string()),
+            Some(&"<b>Wenlin</b><br>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><br>evening meal".to_string()),
             f.get("glossary_html"),
         );
     }
