@@ -1595,8 +1595,26 @@ This box has `en-US`, `ja`, `zh-Hans-CN`, `zh-Hant-TW`. **PowerShell 7 cannot lo
 ### 1.22 The Anki card carries HTML, if the field map asks for it — **added 2026-08-17, run**
 
 The `[[anki.field_map]]` `source` values are `expression`, `reading`, `glossary`, `glossary_html`,
-`frequency` (`src/anki.rs:228-234`). **`glossary` has numbered text with an optional HTML
-heading. `glossary_html` keeps the Dictionary formatting.** Picking the wrong one fails silently.
+`frequency` ([fields_with_glossary](../src/anki.rs)). **`glossary` has plain text with an optional HTML
+heading, numbered only when the Dictionary contributes more than one definition.
+`glossary_html` keeps the Dictionary formatting.** Picking the wrong one fails silently.
+Per issue #100, a single definition arrives unnumbered on both sources.
+The HTML glossary must separate its Dictionary heading from a lone definition, including a selected definition.
+
+#### Manual add after a failed connection check — added 2026-09-20, live check pending
+
+The automated Windows handler test uses a local AnkiConnect fixture.
+A live desktop check remains necessary.
+
+1. Enable Anki and screenshot-on-add with a scratch deck.
+2. Stop Anki, then open a popup to make its duplicate check fail.
+3. Start Anki without replacing the popup.
+4. Press the add hotkey and complete the screenshot selection.
+5. Confirm that Anki receives the note and picture.
+6. Confirm that the log reports an added note ID, not only `action=add_note`.
+
+A failed duplicate check must not suppress an authorized add.
+Standalone screenshots retain their existing offline save-only behavior.
 
 Mined 2026-08-17 into a sample deck, 12 notes over three languages, `glossary_html` mapped:
 

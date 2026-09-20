@@ -2781,19 +2781,18 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             sync_anki_button(anki_button.as_ref(), view, &theme);
             match selected {
                 Some((_target, cap)) => {
-                    let _ = screenshot_tx.send(crate::action::ScreenshotCommand {
-                        bgra_buf: cap.buf,
-                        width: cap.w,
-                        height: cap.h,
-                        plan: pending.plan,
-                        anki: anki_snapshot(&cfg, &live),
-                        anki_connected: pending.anki_connected,
-                    });
+                    let _ = screenshot_tx.send(parked_add_command(
+                        pending,
+                        anki_snapshot(&cfg, &live),
+                        cap.buf,
+                        cap.w,
+                        cap.h,
+                    ));
                 }
                 // If the user cancels or the grab fails, send the add without a screenshot.
                 // The popup already marks the add, so this path must clear that state.
                 None => {
-                    let PendingShot { plan, .. } = pending;
+                    let PendingShot { plan } = pending;
                     spawn_add_note(plan.expr, plan.fields, &live, &add_tx, main_tid);
                 }
             }
@@ -3191,9 +3190,21 @@ fn controller_config(live: &LiveSettings) -> ControllerConfig {
 /// it inside a Command batch.
 struct PendingShot {
     plan: crate::shot::ShotPlan,
-    /// The popup's AnkiConnect state when the add was authorized.
-    /// `false` still writes the PNG but does not file a card.
-    anki_connected: bool,
+}
+
+/// Builds the Worker command for a parked, authorized add.
+///
+/// A parked plan exists only for an authorized `AddNote`, so the Worker files the
+/// card. The duplicate probe decides the popup's button, not the note.
+fn parked_add_command(
+    pending: PendingShot,
+    anki: crate::config::AnkiConfig,
+    bgra_buf: Vec<u8>,
+    width: i32,
+    height: i32,
+) -> crate::action::ScreenshotCommand {
+    let PendingShot { plan } = pending;
+    crate::action::ScreenshotCommand { bgra_buf, width, height, plan, anki, anki_connected: true }
 }
 
 /// Provides the values that Command handling needs.
@@ -3540,7 +3551,6 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
             // re-enter `drive` halfway through the batch. Park the plan, and
             // let the loop drain it after the batch ends.
             let root = crate::action::screenshot::save_root(&x.cfg.actions.screenshot, x.exe_dir);
-            let anki_connected = controller.anki().is_some_and(|anki| anki.connected);
             let pending = crate::shot::plan_add(
                 &expr,
                 &fields,
@@ -3548,7 +3558,7 @@ fn execute(controller: &Controller, cmd: Command, x: &mut Exec<'_>) -> Option<Ev
                 &root,
                 crate::shot::epoch_secs(),
             )
-            .map(|plan| PendingShot { plan, anki_connected });
+            .map(|plan| PendingShot { plan });
             if pending.is_some() {
                 *x.pending_shot = pending;
                 return None;
@@ -5557,5 +5567,219 @@ mod tests {
 
         assert!(text.contains("freq.zip"), "{text}");
         assert!(text.contains("chibipop build-dict --library"), "{text}");
+    }
+
+    /// Bounds for the stand-in. A wrong request cannot hang a test.
+    const HEADER_LIMIT: usize = 8 * 1024;
+    const BODY_LIMIT: usize = 4 * 1024 * 1024;
+    const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+    const SOCKET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A local AnkiConnect stand-in. It answers one request and records it.
+    ///
+    /// `Drop` stops the listener and joins it, so a test that files nothing
+    /// leaves no socket and no thread behind.
+    struct FakeAnki {
+        url: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        stop: std::sync::Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeAnki {
+        fn start(note_id: i64) -> FakeAnki {
+            use std::io::Write;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            listener.set_nonblocking(true).expect("a polling listener");
+            let url = format!("http://{}", listener.local_addr().expect("the bound address"));
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let recorded = seen.clone();
+            let done = stop.clone();
+            let worker = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + ACCEPT_LIMIT;
+                while !done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        continue;
+                    };
+                    let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
+                    let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
+                    let body = read_request_body(&mut stream);
+                    let request = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    recorded.lock().expect("the request log").push(request);
+                    let reply = format!("{{\"result\":{note_id},\"error\":null}}");
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    return;
+                }
+            });
+            FakeAnki { url, seen, stop, worker: Some(worker) }
+        }
+
+        fn seen(&self) -> Vec<serde_json::Value> {
+            self.seen.lock().expect("the request log").clone()
+        }
+    }
+
+    impl Drop for FakeAnki {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// Reads one HTTP request body from its `Content-Length` header.
+    /// The header and the body reads are bounded.
+    fn read_request_body(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        let mut byte = [0u8; 1];
+        // Read headers one byte at a time. This keeps body bytes for the next read.
+        while !raw.ends_with(b"\r\n\r\n") && raw.len() < HEADER_LIMIT {
+            match stream.read(&mut byte) {
+                Ok(1) => raw.push(byte[0]),
+                _ => return String::new(),
+            }
+        }
+        let headers = String::from_utf8_lossy(&raw).to_lowercase();
+        let len = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(BODY_LIMIT);
+        let mut body = vec![0u8; len];
+        if stream.read_exact(&mut body).is_err() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&body).to_string()
+    }
+
+    /// The `[anki]` section that files the note on the stand-in.
+    fn anki_that_files(url: &str) -> crate::config::AnkiConfig {
+        crate::config::AnkiConfig { enabled: true, url: url.to_string(), ..Default::default() }
+    }
+
+    /// The plan for one authorized add of 猫, with one 2x2 capture.
+    fn cat_add_plan(path: PathBuf) -> crate::shot::ShotPlan {
+        crate::shot::ShotPlan {
+            expr: "猫".to_string(),
+            fields: HashMap::from([("expression".to_string(), "猫".to_string())]),
+            path,
+            picture_fields: vec!["Screenshot".to_string()],
+        }
+    }
+
+    /// The duplicate probe can fail or lag while AnkiConnect still answers adds.
+    /// `AddNote` is authorized before that answer. Its card must therefore reach
+    /// Anki: the probe decides the popup's button, not the note.
+    #[test]
+    fn an_authorized_add_files_its_card_when_the_probe_never_answered() {
+        let anki = FakeAnki::start(1729);
+        let (dir, _guard) = edit_scratch("add_shot_files");
+        let picture_path = dir.join("cat_1.png");
+        let pending = PendingShot { plan: cat_add_plan(picture_path.clone()) };
+
+        let result = handle_screenshot_save(parked_add_command(
+            pending,
+            anki_that_files(&anki.url),
+            vec![0u8; 16],
+            2,
+            2,
+        ));
+
+        let seen = anki.seen();
+        assert_eq!(1, seen.len(), "the authorized add never reached Anki: {seen:?}");
+        assert_eq!(Some("addNote"), seen[0]["action"].as_str());
+        assert_eq!(
+            Some("猫"),
+            seen[0]["params"]["note"]["fields"]["Expression"].as_str(),
+            "the card keeps the looked-up word: {}",
+            seen[0]
+        );
+        let picture = &seen[0]["params"]["note"]["picture"][0];
+        assert_eq!(
+            Some("Screenshot"),
+            picture["fields"][0].as_str(),
+            "the picture lands in the field the plan routes: {}",
+            seen[0]
+        );
+        assert!(
+            !picture["data"].as_str().unwrap_or_default().is_empty(),
+            "the PNG itself travels as base64: {}",
+            seen[0]
+        );
+        assert!(
+            picture["filename"].as_str().unwrap_or_default().starts_with("chibipop-screenshot-"),
+            "the attachment keeps its chibipop name: {}",
+            seen[0]
+        );
+        assert!(picture_path.is_file(), "the PNG is on disk at {}", picture_path.display());
+        assert!(
+            matches!(result.filed, Ok(Some(crate::anki::WriteResult::Added(1729)))),
+            "the card was not filed: {:?}",
+            result.filed
+        );
+    }
+
+    /// The standalone screenshot action can run with no Anki answer. It saves the
+    /// picture and files nothing, because the filing intent stays false.
+    #[test]
+    fn a_standalone_shot_with_no_anki_answer_saves_the_picture_without_filing_it() {
+        let anki = FakeAnki::start(1729);
+        let (dir, _guard) = edit_scratch("shot_offline");
+        let picture_path = dir.join("cat_1.png");
+        let cmd = crate::action::ScreenshotCommand {
+            bgra_buf: vec![0u8; 16],
+            width: 2,
+            height: 2,
+            plan: cat_add_plan(picture_path.clone()),
+            anki: anki_that_files(&anki.url),
+            anki_connected: false,
+        };
+
+        let result = handle_screenshot_save(cmd);
+
+        assert!(anki.seen().is_empty(), "an offline picture files nothing");
+        assert!(picture_path.is_file(), "the PNG is on disk at {}", picture_path.display());
+        assert!(matches!(result.filed, Ok(None)), "{:?}", result.filed);
+        assert_eq!(
+            Some(NoteWriteStatus::Failed),
+            result.write_status(),
+            "a word with no card must report the failure"
+        );
+    }
+
+    /// A picture with no word has no add to wait for it. The Worker saves it and
+    /// leaves the popup state alone.
+    #[test]
+    fn a_wordless_shot_saves_the_picture_without_filing_it() {
+        let anki = FakeAnki::start(1729);
+        let (dir, _guard) = edit_scratch("shot_no_word");
+        let picture_path = dir.join("cat_1.png");
+        let mut plan = cat_add_plan(picture_path.clone());
+        plan.expr = String::new();
+        let cmd = crate::action::ScreenshotCommand {
+            bgra_buf: vec![0u8; 16],
+            width: 2,
+            height: 2,
+            plan,
+            anki: anki_that_files(&anki.url),
+            anki_connected: true,
+        };
+
+        let result = handle_screenshot_save(cmd);
+
+        assert!(anki.seen().is_empty(), "a wordless picture files nothing");
+        assert!(picture_path.is_file(), "the PNG is on disk at {}", picture_path.display());
+        assert!(matches!(result.filed, Ok(None)), "{:?}", result.filed);
+        assert_eq!(None, result.write_status(), "a wordless picture leaves the popup alone");
     }
 }

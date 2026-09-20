@@ -3740,11 +3740,8 @@ mod tests {
         };
         assert_eq!("card A", expr);
         assert_eq!(Some("card A"), fields.get("expression").map(String::as_str));
-        assert_eq!(Some("1. A-only gloss"), fields.get("glossary").map(String::as_str));
-        assert_eq!(
-            Some("<ol style=\"margin:2px 0 2px 20px;padding:0\"><li>A-only gloss</li></ol>"),
-            fields.get("glossary_html").map(String::as_str),
-        );
+        assert_eq!(Some("A-only gloss"), fields.get("glossary").map(String::as_str));
+        assert_eq!(Some("A-only gloss"), fields.get("glossary_html").map(String::as_str));
         assert_eq!(Some("A sentence"), fields.get("sentence").map(String::as_str));
     }
     #[test]

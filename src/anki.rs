@@ -459,23 +459,67 @@ const PLAIN_GROUP_SEPARATOR: &str = "<br><br>\n";
 
 const HTML_GROUP_SEPARATOR: &str = "<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\">";
 
-/// Places a Dictionary name above its numbered plain-text definitions.
+/// Places a Dictionary name above its plain-text definitions.
+///
+/// The definitions arrive numbered when the Dictionary is plural, and bare when
+/// it is singular. `plain_definition_lines` decides which form applies.
 ///
 /// Anki stores field values as HTML. Square brackets can become furigana under a
 /// Japanese note template, so the name uses HTML instead of `[Dictionary]` text.
-fn plain_dictionary_group(name: &str, numbered: String, include_dictionary_name: bool) -> String {
+fn plain_dictionary_group(name: &str, definitions: String, include_dictionary_name: bool) -> String {
     if include_dictionary_name {
-        format!("<b>{}</b><br>\n{numbered}", escape_html(name))
+        format!("<b>{}</b><br>\n{definitions}", escape_html(name))
     } else {
-        numbered
+        definitions
     }
 }
 
 /// Places one Dictionary's formatted definitions under its optional heading.
-fn html_dictionary_group(name: &str, items: String, include_dictionary_name: bool) -> String {
-    let heading =
-        if include_dictionary_name { format!("<b>{}</b>", escape_html(name)) } else { String::new() };
-    format!("{heading}<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>")
+///
+/// - A lone definition needs an explicit break after the heading.
+/// - A plural group uses the block boundary of its ordered list.
+fn html_dictionary_group(name: &str, values: Vec<String>, include_dictionary_name: bool) -> String {
+    let heading = if include_dictionary_name {
+        let separator = if values.len() == 1 { "<br>" } else { "" };
+        format!("<b>{}</b>{separator}", escape_html(name))
+    } else {
+        String::new()
+    };
+    let items = html_definition_items(values);
+    format!("{heading}{items}")
+}
+
+/// Wraps the HTML definition list for one Dictionary group.
+///
+/// - A lone definition stays bare. An `<ol>` of one item renders as "1." in Anki.
+/// - The popup already leaves a lone row unnumbered (`src/ui/layout/chrome.rs`).
+/// - A plural list needs `<li>` tags, because a newline has no effect in HTML.
+fn html_definition_items(values: Vec<String>) -> String {
+    if values.len() > 1 {
+        let items =
+            values.into_iter().map(|value| format!("<li>{value}</li>")).collect::<String>();
+        format!("<ol style=\"margin:2px 0 2px 20px;padding:0\">{items}</ol>")
+    } else {
+        values.into_iter().collect()
+    }
+}
+
+/// Joins the plain-text definitions for one Dictionary group.
+///
+/// - A lone definition carries no number. The item count decides the shape.
+/// - Two or more number from one across the rows of one Dictionary, so a reader
+///   can identify "sense 3 of 大辞林" rather than "sense 1 of row 2".
+fn plain_definition_lines(values: Vec<String>) -> String {
+    if values.len() > 1 {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| format!("{}. {value}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        values.into_iter().collect()
+    }
 }
 
 /// Builds the glossary fields for the supplied Dictionary groups.
@@ -491,25 +535,18 @@ fn glossary_fields<'a>(
             continue;
         }
         if !plain.is_empty() {
-            let numbered = plain
-                .into_iter()
-                .enumerate()
-                .map(|(index, value)| format!("{}. {value}", index + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
             plain_groups.push(plain_dictionary_group(
                 dict_name,
-                numbered,
+                plain_definition_lines(plain),
                 include_dictionary_name,
             ));
         }
         if !html.is_empty() {
-            // A newline has no effect in HTML, so use `<li>` tags.
-            let items = html
-                .into_iter()
-                .map(|value| format!("<li>{value}</li>"))
-                .collect();
-            html_groups.push(html_dictionary_group(dict_name, items, include_dictionary_name));
+            html_groups.push(html_dictionary_group(
+                dict_name,
+                html,
+                include_dictionary_name,
+            ));
         }
     }
     fields_with_glossary(
@@ -721,13 +758,13 @@ mod tests {
         assert_eq!(Some(&"ねこ".to_string()), f.get("reading"));
         assert_eq!(
             Some(
-                &"<b>大辞林</b><br>\n1. ネコ科の哺乳類。<br><br>\n<b>Jitendex</b><br>\n1. cat\n2. feline"
+                &"<b>大辞林</b><br>\nネコ科の哺乳類。<br><br>\n<b>Jitendex</b><br>\n1. cat\n2. feline"
                     .to_string()
             ),
             f.get("glossary"),
         );
         assert_eq!(
-            Some(&"<b>大辞林</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>ネコ科の<b>哺乳類</b>。</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
+            Some(&"<b>大辞林</b><br>ネコ科の<b>哺乳類</b>。<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>Jitendex</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li><li><i>feline</i></li></ol>".to_string()),
             f.get("glossary_html"),
         );
         assert_eq!(Some(&"42".to_string()), f.get("frequency"));
@@ -771,18 +808,18 @@ mod tests {
         assert!(html.contains("second sense"), "{html}");
         assert!(!html.contains("first sense"), "{html}");
         assert!(!html.contains("Jitendex"), "{html}");
+
+        let named = fields_from_selection(&selected_card, &selection, Separator::Ellipsis, true);
+        assert_eq!(format!("<b>Jitendex</b><br>{html}"), named["glossary_html"]);
     }
 
     #[test]
     fn a_dictionary_name_is_html_not_furigana_syntax() {
         let blocks = vec![block("A & B <dict>", json!(["cat"]))];
         let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
+        assert_eq!(Some(&"<b>A &amp; B &lt;dict&gt;</b><br>\ncat".to_string()), f.get("glossary"));
         assert_eq!(
-            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>\n1. cat".to_string()),
-            f.get("glossary"),
-        );
-        assert_eq!(
-            Some(&"<b>A &amp; B &lt;dict&gt;</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
+            Some(&"<b>A &amp; B &lt;dict&gt;</b><br>cat".to_string()),
             f.get("glossary_html"),
         );
     }
@@ -791,11 +828,8 @@ mod tests {
     fn dictionary_names_can_be_omitted_from_both_glossary_fields() {
         let blocks = vec![block("Jitendex", json!(["cat"]))];
         let f = fields_from_card(&card(Some("猫"), None, None), &blocks, false);
-        assert_eq!(Some(&"1. cat".to_string()), f.get("glossary"));
-        assert_eq!(
-            Some(&"<ol style=\"margin:2px 0 2px 20px;padding:0\"><li>cat</li></ol>".to_string()),
-            f.get("glossary_html"),
-        );
+        assert_eq!(Some(&"cat".to_string()), f.get("glossary"));
+        assert_eq!(Some(&"cat".to_string()), f.get("glossary_html"));
     }
 
     #[test]
@@ -819,11 +853,47 @@ mod tests {
         let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
         let html = f.get("glossary_html").unwrap();
         assert_eq!(
-            "<b>Wenlin</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>supper</li></ol><hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><ol style=\"margin:2px 0 2px 20px;padding:0\"><li>evening meal</li></ol>",
+            "<b>Wenlin</b><br>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><br>evening meal",
             html,
         );
         assert_eq!(1, html.matches("<hr").count(), "one divider, none trailing");
-        assert!(html.ends_with("</ol>"), "no divider after last dict");
+        assert!(html.ends_with("evening meal"), "no divider after last dict");
+    }
+
+    /// Issue #100. A single definition is not a numbered list.
+    /// The popup already leaves a lone row unnumbered
+    /// (`src/ui/layout/chrome.rs`), and the card must agree with it.
+    #[test]
+    fn a_group_of_one_item_carries_no_number_in_either_glossary_field() {
+        let blocks = vec![block("Jitendex", json!(["to eat"]))];
+        let f = fields_from_card(&card(Some("食べる"), None, None), &blocks, true);
+        assert_eq!(
+            Some(&"<b>Jitendex</b><br>\nto eat".to_string()),
+            f.get("glossary"),
+            "one definition is not a list",
+        );
+        assert_eq!(
+            Some(&"<b>Jitendex</b><br>to eat".to_string()),
+            f.get("glossary_html"),
+            "one definition needs no list wrap",
+        );
+    }
+
+    /// The rule is about the item count, not about the dictionary count.
+    /// Two dictionaries with one definition each keep both definitions bare.
+    #[test]
+    fn two_single_item_dictionaries_stay_unnumbered() {
+        let blocks =
+            vec![block("Wenlin", json!(["supper"])), block("CC-CEDICT", json!(["evening meal"]))];
+        let f = fields_from_card(&card(Some("猫"), None, None), &blocks, true);
+        assert_eq!(
+            Some(&"<b>Wenlin</b><br>\nsupper<br><br>\n<b>CC-CEDICT</b><br>\nevening meal".to_string()),
+            f.get("glossary"),
+        );
+        assert_eq!(
+            Some(&"<b>Wenlin</b><br>supper<hr style=\"border:none;border-top:1px solid #666;margin:4px 0\"><b>CC-CEDICT</b><br>evening meal".to_string()),
+            f.get("glossary_html"),
+        );
     }
 
     #[test]
@@ -836,9 +906,9 @@ mod tests {
 
         assert_eq!(
             concat!(
-                "<b>NEW斎藤和英大辞典</b><br>\n1. first definition",
+                "<b>NEW斎藤和英大辞典</b><br>\nfirst definition",
                 "<br><br>\n",
-                "<b>新和英</b><br>\n1. second definition",
+                "<b>新和英</b><br>\nsecond definition",
             ),
             f["glossary"],
         );
@@ -866,7 +936,7 @@ mod tests {
             ]}]),
         )];
         let f = fields_from_card(&card(Some("食べる"), None, None), &blocks, true);
-        assert_eq!(Some(&"<b>Jitendex</b><br>\n1. to eat".to_string()), f.get("glossary"));
+        assert_eq!(Some(&"<b>Jitendex</b><br>\nto eat".to_string()), f.get("glossary"));
         let html = f.get("glossary_html").expect("the html field");
         assert!(html.contains("ご飯を食べる"), "the card keeps the example: {html}");
     }
