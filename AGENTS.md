@@ -90,9 +90,20 @@ defines the terms. Do not restate these files.
 - Doc comments must give the rationale. Use long `//!` and `///` headers that
   state why a component exists and what was rejected. A comment that restates a
   signature is noise.
+- A comment states why, never what. Keep one only where the code is ambiguous.
+  An inline `//` comment is a one-liner of 50 characters or fewer. If it does
+  not fit, restructure the code. The three exceptions are a `//!` or `///`
+  header, a `// SAFETY:` block, and a test doc comment.
 - Write prose in ASD-STE100 Simplified Technical English: one instruction per
   sentence, active voice, and one term for each thing. Code and tables are
   exempt from this rule.
+
+## What never enters the repository
+
+Never commit a reasoning trace, an agent transcript, a research record, a
+findings document, or a scratch artifact. Unless oniichan asks for that exact
+file, keep it in the working tree and add its directory to `.gitignore`. A
+reviewer reads the diff, the tests, and the gate output, not an agent's prose.
 
 ## Git workflow
 
