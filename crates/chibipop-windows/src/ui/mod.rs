@@ -6,6 +6,7 @@ pub mod editor;
 pub mod media;
 pub mod log_window;
 pub mod overlay;
+pub mod placement;
 pub mod render;
 pub(super) mod settings_layout;
 pub mod settings_window;

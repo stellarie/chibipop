@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use chibipop::config::{Config, TriggerMode};
+use chibipop_windows::ui::placement::Placement;
 use std::fs::{File, Permissions};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -10,14 +11,14 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Controls::TCM_SETCURFOCUS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SendMessageTimeoutW, SendMessageW, CB_SETCURSEL,
-    BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND,
-    WM_GETTEXT, WM_KEYDOWN, WM_SYSCOMMAND,
+    EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, PostMessageW,
+    SendMessageTimeoutW, SendMessageW, CB_SETCURSEL, BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE,
+    SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND, WM_GETTEXT, WM_KEYDOWN, WM_SYSCOMMAND,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -88,6 +89,22 @@ impl ProcessFixture {
 
     fn logs(&self) -> String {
         std::fs::read_to_string(self.root.join("stderr.log")).unwrap_or_default()
+    }
+
+    /// Starts the executable again in this fixture's folder.
+    ///
+    /// The folder keeps every file of the last run, and
+    /// `chibipop.window.toml` is one of them (issue #112).
+    fn restart(&mut self, mode: &str) {
+        let root = self.root.clone();
+        self.child = Command::new(root.join("chibipop.exe"))
+            .arg(mode)
+            .arg("--config").arg(root.join("chibipop.toml"))
+            .arg("--dict").arg(root.join("data/chibipop.sqlite"))
+            .current_dir(&root).stdin(Stdio::null())
+            .stdout(File::create(root.join("stdout.log")).unwrap())
+            .stderr(File::create(root.join("stderr.log")).unwrap())
+            .creation_flags(CREATE_NO_WINDOW.0).spawn().unwrap();
     }
 
     fn wait_exit(&mut self) {
@@ -193,6 +210,16 @@ fn system_command(window: HWND, command: u32) {
     unsafe { PostMessageW(Some(window), WM_SYSCOMMAND, WPARAM(command as usize), LPARAM(0)).unwrap(); }
 }
 
+/// Returns the top-left corner of a window, in physical pixels.
+fn corner_of(window: HWND) -> (i32, i32) {
+    // SAFETY: The test selected this window by its owned child process ID.
+    unsafe {
+        let mut rect = RECT::default();
+        GetWindowRect(window, &mut rect).expect("window rectangle");
+        (rect.left, rect.top)
+    }
+}
+
 #[test]
 fn standalone_x_exits_and_reports_inactive_scanning() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
@@ -202,6 +229,29 @@ fn standalone_x_exits_and_reports_inactive_scanning() {
     assert!(status.contains("Not scanning"), "{status}");
     assert!(status.contains("Not running"), "{status}");
     system_command(window, SC_CLOSE);
+    process.wait_exit();
+}
+
+/// Issue #112: the settings window reopens where the last run closed it.
+#[test]
+fn settings_reopens_where_the_last_run_closed_it() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let mut process = ProcessFixture::start("settings");
+    let window = process.window("chibipop settings");
+    // The window appears before it is placed, so wait for the placement.
+    wait_until("settings visible", || unsafe { IsWindowVisible(window).as_bool() });
+    let closed = corner_of(window);
+    system_command(window, SC_CLOSE);
+    process.wait_exit();
+    let stored = std::fs::read_to_string(process.root.join("chibipop.window.toml"))
+        .expect("the position file beside the executable");
+    let saved: Placement = toml::from_str(&stored).unwrap();
+    assert_eq!(closed, (saved.x, saved.y), "the stored corner");
+    process.restart("settings");
+    let reopened = process.window("chibipop settings");
+    wait_until("settings visible again", || unsafe { IsWindowVisible(reopened).as_bool() });
+    assert_eq!(closed, corner_of(reopened), "the reopened corner");
+    system_command(reopened, SC_CLOSE);
     process.wait_exit();
 }
 
@@ -301,6 +351,11 @@ fn daemon_reports_real_ocr_saves_truthfully_opens_logs_and_exits_via_x() {
     let saved: Config = toml::from_str(&std::fs::read_to_string(process.root.join("chibipop.toml")).unwrap()).unwrap();
     assert_eq!("light", saved.popup.theme);
     assert!(saved.anki.enabled);
+    let closed = corner_of(window);
     system_command(window, SC_CLOSE);
     process.wait_exit();
+    let stored = std::fs::read_to_string(process.root.join("chibipop.window.toml"))
+        .expect("the position file beside the executable");
+    let placement: Placement = toml::from_str(&stored).unwrap();
+    assert_eq!(closed, (placement.x, placement.y), "the stored corner");
 }

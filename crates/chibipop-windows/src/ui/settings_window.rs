@@ -13,6 +13,7 @@ use crate::settings::{
     DictRow, SettingsForm, MAX_HEIGHT_RANGE, MAX_WIDTH_RANGE, PASSES_RANGE, SUMMARY_RANGE,
 };
 use crate::text::ocr::tag_matches;
+use crate::ui::placement::{self, Area, Placement};
 use crate::ui::settings_layout::{EntrySpec, SettingId, SettingsLayout, TabId};
 use anyhow::{Context, Result};
 use std::cell::{Cell, RefCell};
@@ -24,9 +25,10 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, DrawTextW, EnumFontFamiliesExW, GetDC, GetMonitorInfoW,
-    GetSysColor, MonitorFromWindow, PtInRect, ReleaseDC, ScreenToClient, SelectObject,
-    COLOR_BTNFACE, COLOR_WINDOWTEXT, DT_CALCRECT, DT_WORDBREAK, ENUMLOGFONTEXW, HFONT,
-    LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET, TEXTMETRICW,
+    GetSysColor, MonitorFromPoint, MonitorFromWindow, PtInRect, ReleaseDC, ScreenToClient,
+    SelectObject, COLOR_BTNFACE, COLOR_WINDOWTEXT, DT_CALCRECT, DT_WORDBREAK, ENUMLOGFONTEXW,
+    HFONT, HMONITOR, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, SHIFTJIS_CHARSET,
+    TEXTMETRICW,
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
@@ -808,23 +810,74 @@ fn window_dpi(hwnd: HWND) -> u32 {
     }
 }
 
-/// Gets the monitor work-area height.
+/// Gets the work area of one monitor.
 ///
-/// The function measures physical pixels. It returns None when the height is
-/// unknown.
-fn work_area_height(hwnd: HWND) -> Option<i32> {
-    // SAFETY: `hwnd` can be invalid because MonitorFromWindow selects
-    // the nearest monitor. `mi` sets `cbSize` to its structure size,
-    // as GetMonitorInfoW requires.
+/// The function measures physical pixels. It returns None when the monitor
+/// gives no work area.
+fn monitor_work_area(hmon: HMONITOR) -> Option<Area> {
+    // SAFETY: `mi` sets `cbSize` to its structure size, as GetMonitorInfoW
+    // requires. The call writes only `mi`.
     unsafe {
-        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        GetMonitorInfoW(hmon, &mut mi)
-            .as_bool()
-            .then(|| mi.rcWork.bottom - mi.rcWork.top)
+        GetMonitorInfoW(hmon, &mut mi).as_bool().then_some(Area {
+            left: mi.rcWork.left,
+            top: mi.rcWork.top,
+            right: mi.rcWork.right,
+            bottom: mi.rcWork.bottom,
+        })
+    }
+}
+
+/// Gets the work area of the monitor nearest a window.
+fn work_area(hwnd: HWND) -> Option<Area> {
+    // SAFETY: `hwnd` can be invalid, because MonitorFromWindow then selects
+    // the nearest monitor. The call only reads.
+    let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    monitor_work_area(hmon)
+}
+
+/// Gets the work area of the monitor nearest a point.
+fn work_area_at(point: POINT) -> Option<Area> {
+    // SAFETY: `point` is a value that the call only reads.
+    let hmon = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    monitor_work_area(hmon)
+}
+
+/// Gets the top-left corner of a window.
+///
+/// The value uses physical pixels in screen coordinates.
+fn corner(hwnd: HWND) -> Option<(i32, i32)> {
+    // SAFETY: `hwnd` can be invalid. The call writes only `rect`.
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    Some((rect.left, rect.top))
+}
+
+/// The work area that will hold the settings window, and its wanted corner.
+///
+/// The wanted corner is a request. `Area::fit` trims it into the area.
+struct Target {
+    area: Area,
+    corner: (i32, i32),
+}
+
+/// Returns the target for the next placement of a window.
+///
+/// A remembered corner selects its own monitor, because that monitor can differ
+/// from the one that the system chose for the window. Without a remembered
+/// corner, the window keeps the monitor and the corner that the system chose
+/// (issue #112).
+fn target(hwnd: HWND, saved: Option<Placement>) -> Option<Target> {
+    match saved {
+        Some(p) => work_area_at(POINT { x: p.x, y: p.y })
+            .map(|area| Target { area, corner: (p.x, p.y) }),
+        None => {
+            let area = work_area(hwnd)?;
+            Some(Target { area, corner: corner(hwnd)? })
+        }
     }
 }
 
@@ -3661,9 +3714,11 @@ impl SettingsWindow {
             if let Some(tag) = win.selected_language() {
                 win.staged.borrow_mut().dict_list_language = tag;
             }
-            // Adjusts size and shows the window. Refer to `fit_to` for why
-            // `ShowWindow` is not used here.
-            win.fit_to(WIN_W, content_h + PAD);
+            // Adjusts size, position, and visibility. Refer to `fit_to` for
+            // why `ShowWindow` is not used here. The corner of the last run
+            // decides which monitor holds the window, so read it here.
+            let saved = placement::load(&placement::state_path());
+            win.fit_to(WIN_W, content_h + PAD, target(hwnd, saved));
             win.reflow_all_tabs();
             win.resize_content();
             place_bottom(hwnd);
@@ -3678,6 +3733,22 @@ impl SettingsWindow {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Returns the corner where the window sits, for the next run.
+    ///
+    /// A minimized window reports the position of its icon, and a maximized
+    /// window reports the corner of its monitor. Neither one is a corner that
+    /// the user chose, so both return None and keep the last chosen corner.
+    pub fn placement(&self) -> Option<Placement> {
+        // SAFETY: `self.hwnd` is live. Both calls only read.
+        unsafe {
+            if IsIconic(self.hwnd).as_bool() || IsZoomed(self.hwnd).as_bool() {
+                return None;
+            }
+        }
+        let (x, y) = corner(self.hwnd)?;
+        Some(Placement { x, y })
     }
 
     /// Activates the current window. It does not open a duplicate.
@@ -5055,25 +5126,36 @@ impl SettingsWindow {
     }
 
     /// Resizes the client area to `client_w` by `client_h` 96-DPI pixels,
-    /// and displays the window.
+    /// moves the window inside a work area, and displays it.
     ///
     /// Frame metrics and the native scrollbar reserve space at the window DPI.
-    fn fit_to(&self, client_w: i32, client_h: i32) {
+    /// `target` holds the monitor that will show the window. The placement uses
+    /// the height that the window really takes, because the system refuses a
+    /// window below its minimum track size. A window that covers no pixel of
+    /// its monitor, or that is taller than it, would open cropped (issue #112).
+    fn fit_to(&self, client_w: i32, client_h: i32, target: Option<Target>) {
         // SAFETY: `self.hwnd` is a valid window handle. `rc` is local stack
         // storage that the call modifies. Failure leaves the current window size.
         unsafe {
             if let Ok(size) = outer_size_for_client(self.hwnd,
                 dpi_scale(self.hwnd, client_w), dpi_scale(self.hwnd, client_h),
                 window_dpi(self.hwnd)) {
-                let mut outer_h = size.y;
-                if let Some(cap) = work_area_height(self.hwnd) {
-                    outer_h = outer_h.min(cap);
+                // The system enforces a minimum track size.
+                let minimum = minimum_outer_size(self.hwnd);
+                let mut outer_h = size.y.max(minimum.y);
+                if let Some(target) = &target {
+                    let room = target.area.bottom - target.area.top;
+                    outer_h = outer_h.min(room.max(minimum.y));
                 }
+                let corner = target.map(|t| t.area.fit(t.corner, (size.x, outer_h)));
+                let (x, y) = corner.unwrap_or((0, 0));
+                // No work area means no position: keep the current corner.
+                let flags = if corner.is_some() { SWP_NOZORDER } else { SWP_NOMOVE | SWP_NOZORDER };
                 let _ = SetWindowPos(
                     self.hwnd,
                     None,
-                    0,
-                    0,
+                    x,
+                    y,
                     size.x,
                     outer_h,
                     // Use SWP_SHOWWINDOW instead of a separate `ShowWindow` call.
@@ -5081,7 +5163,7 @@ impl SettingsWindow {
                     // `STARTUPINFO.wShowWindow` instead of `nCmdShow`.
                     // A hidden startup state can hide the settings window.
                     // `SetWindowPos` sets `WS_VISIBLE` directly and avoids that state.
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW,
+                    flags | SWP_SHOWWINDOW,
                 );
             }
         }
@@ -7401,7 +7483,8 @@ mod tests {
     }
 
     fn resize_client(window: &SettingsWindow, width: i32, height: i32) {
-        window.fit_to(width, height);
+        // No target: this helper resizes in place, as a user drag does.
+        window.fit_to(width, height, None);
         window.pump(|| {});
     }
 
@@ -10248,5 +10331,93 @@ mod tests {
     fn write_config_creates_from_empty() {
         let result = set_config_path("", r"C:\tools\meikiocr");
         assert_eq!(result, "meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n");
+    }
+
+    /// Asserts that a window covers no pixel above or left of its work area.
+    ///
+    /// The bottom edge must also be inside, unless the minimum size of the
+    /// window is taller than the work area. No position fits such a window.
+    fn assert_inside_work_area(window: &SettingsWindow) {
+        let area = work_area(window.hwnd).unwrap();
+        let rect = outer_rect(window);
+        assert!(rect.left >= area.left && rect.top >= area.top, "{rect:?} vs {area:?}");
+        let room = area.bottom - area.top;
+        if minimum_outer_size(window.hwnd).y <= room {
+            assert!(rect.bottom <= area.bottom, "{rect:?} vs {area:?}");
+        }
+    }
+
+    /// The reported crop. A window that opens with its bottom edge below the
+    /// work area hides its lowest controls, and no scrollbar reaches them.
+    #[test]
+    fn every_open_leaves_the_window_inside_its_work_area() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_inside_work_area(&window);
+    }
+
+    /// A remembered corner can name a monitor that is no longer attached. A
+    /// window at such a corner is invisible rather than cropped, so the corner
+    /// must come back onto a monitor.
+    #[test]
+    fn a_corner_off_every_monitor_comes_back_inside_the_work_area() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let area = work_area(window.hwnd).unwrap();
+        let gone = Placement { x: area.right + 5000, y: area.bottom + 5000 };
+        // Move the window where the stale corner puts it.
+        // SAFETY: The test owns this window. The call only moves it.
+        unsafe {
+            let _ = SetWindowPos(window.hwnd, None, gone.x, gone.y, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        window.pump(|| {});
+        let stranded = outer_rect(&window);
+        assert_eq!((gone.x, gone.y), (stranded.left, stranded.top));
+        window.fit_to(600, 200, target(window.hwnd, Some(gone)));
+        window.pump(|| {});
+        assert_inside_work_area(&window);
+    }
+
+    /// The user story of issue #112: the window reopens where it closed.
+    #[test]
+    fn the_window_reopens_where_it_closed() {
+        let path = placement::state_path();
+        let _ = std::fs::remove_file(&path);
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let area = work_area(window.hwnd).unwrap();
+        // The top-left corner of a work area holds every window size, so this
+        // corner tests the round trip and not the trim.
+        let wanted = Placement { x: area.left, y: area.top };
+        window.fit_to(600, 240, target(window.hwnd, Some(wanted)));
+        window.pump(|| {});
+        let placed = outer_rect(&window);
+        assert_eq!((wanted.x, wanted.y), (placed.left, placed.top));
+        let stored = window.placement().unwrap();
+        assert_eq!((wanted.x, wanted.y), (stored.x, stored.y));
+        placement::store(&path, stored);
+        let reopened = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let again = outer_rect(&reopened);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((stored.x, stored.y), (again.left, again.top));
+    }
+
+    /// A minimized window reports the position of its icon, and a maximized
+    /// window reports the corner of its monitor. Neither corner belongs to the
+    /// user, so neither one replaces the last chosen corner.
+    #[test]
+    fn a_minimized_or_maximized_window_remembers_no_corner() {
+        let form = nondefault_form();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The test owns this window. Both calls only change its state.
+        unsafe { let _ = ShowWindow(window.hwnd, SW_MAXIMIZE); }
+        window.pump(|| {});
+        assert_eq!(None, window.placement());
+        // SAFETY: The same window is restored, then minimized.
+        unsafe { let _ = ShowWindow(window.hwnd, SW_RESTORE); }
+        unsafe { let _ = ShowWindow(window.hwnd, SW_MINIMIZE); }
+        window.pump(|| {});
+        assert_eq!(None, window.placement());
     }
 }

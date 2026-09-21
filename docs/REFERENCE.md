@@ -380,6 +380,7 @@ Then verify: `& "$dst\chibipop.exe" --version`.
 build's:
 
 - `chibipop.toml` — their settings
+- `chibipop.window.toml` — the position of the settings window
 - `library/` — their dictionary archives, hundreds of MB
 - `data/chibipop.sqlite` — their built database
 - `popup.css` — their theming
