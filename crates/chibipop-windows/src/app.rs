@@ -300,21 +300,14 @@ fn quit_when_idle(outcome: Option<SettingsOutcome>, working: bool, pending: &mut
     false
 }
 
-/// Remembers where the settings window was, so the next run reopens there.
-///
-/// A minimized or maximized window reports no corner of its own, and then the
-/// previous corner stays. Refer to `SettingsWindow::placement` (issue #112).
+/// Stores the corner for the next run.
 fn remember_settings_position(window: &SettingsWindow) {
     if let Some(corner) = window.placement() {
         placement::store(&placement::state_path(), corner);
     }
 }
 
-/// Remembers the corner when the settings window goes away.
-///
-/// The standalone process leaves its loop from six places. One guard covers
-/// every one of them. The guard drops before the window does, so the handle
-/// stays live (issue #112).
+/// Stores the corner when the window goes away.
 struct RememberPosition<'a>(&'a SettingsWindow);
 
 impl Drop for RememberPosition<'_> {

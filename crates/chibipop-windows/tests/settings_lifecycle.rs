@@ -91,10 +91,7 @@ impl ProcessFixture {
         std::fs::read_to_string(self.root.join("stderr.log")).unwrap_or_default()
     }
 
-    /// Starts the executable again in this fixture's folder.
-    ///
-    /// The folder keeps every file of the last run, and
-    /// `chibipop.window.toml` is one of them (issue #112).
+    /// Starts the executable again in this folder.
     fn restart(&mut self, mode: &str) {
         let root = self.root.clone();
         self.child = Command::new(root.join("chibipop.exe"))
@@ -210,7 +207,7 @@ fn system_command(window: HWND, command: u32) {
     unsafe { PostMessageW(Some(window), WM_SYSCOMMAND, WPARAM(command as usize), LPARAM(0)).unwrap(); }
 }
 
-/// Returns the top-left corner of a window, in physical pixels.
+/// Gets the top-left corner of a window.
 fn corner_of(window: HWND) -> (i32, i32) {
     // SAFETY: The test selected this window by its owned child process ID.
     unsafe {
@@ -232,13 +229,12 @@ fn standalone_x_exits_and_reports_inactive_scanning() {
     process.wait_exit();
 }
 
-/// Issue #112: the settings window reopens where the last run closed it.
 #[test]
 fn settings_reopens_where_the_last_run_closed_it() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("settings");
     let window = process.window("chibipop settings");
-    // The window appears before it is placed, so wait for the placement.
+    // Wait for the placement first.
     wait_until("settings visible", || unsafe { IsWindowVisible(window).as_bool() });
     let closed = corner_of(window);
     system_command(window, SC_CLOSE);
