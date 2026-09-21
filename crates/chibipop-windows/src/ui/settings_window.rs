@@ -30,7 +30,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, SetScrollInfo, INITCOMMONCONTROLSEX, LVCOLUMNW, LVINSERTMARK, LVITEMW,
-    LIST_VIEW_ITEM_STATE_FLAGS, NMLISTVIEW, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, LVCF_WIDTH,
+    LIST_VIEW_ITEM_STATE_FLAGS, NMLISTVIEW, ICC_LISTVIEW_CLASSES, ICC_TAB_CLASSES, ICC_BAR_CLASSES,
+    LVCF_WIDTH,
+    TTS_ALWAYSTIP, TTM_ACTIVATE, TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTTOOLINFOW, TTF_TRACK,
     LVIF_TEXT, LVIM_AFTER, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVIS_STATEIMAGEMASK,
     LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT,
     LVM_GETITEMSTATE, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
@@ -1326,7 +1329,9 @@ unsafe fn begin_capture(hwnd: HWND, id: i32) {
         let prompt = if matches!(id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY) {
             w!("Press keys (Esc cancels)")
         } else {
-            w!("Press a key...")
+            // A single ellipsis character follows the convention that the
+            // `Configure` caption uses. Three periods are not an ellipsis.
+            w!("Press a key\u{2026}")
         };
         let _ = SetWindowTextW(btn, prompt);
     }
@@ -1525,6 +1530,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CAPTURECHANGED if drag_of(hwnd).is_some() => {
             unsafe { cancel_drag(hwnd) };
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == ID_TIP_TIMER => {
+            let tip = TIP_STATE.with(|state| state.borrow().tip);
+            if tip != HWND::default() {
+                // SAFETY: The tooltip control stays live for the window's life.
+                unsafe { tip_poll(tip) };
+            }
             LRESULT(0)
         }
         WM_SIZE => {
@@ -3155,6 +3168,304 @@ unsafe extern "system" fn set_child_font(hwnd: HWND, font: LPARAM) -> windows::c
     true.into()
 }
 
+/// The size that a tooltip control accepts for a `TOOLINFO` structure.
+///
+/// `size_of::<TTTOOLINFOW>()` is 72 on this crate, and a tooltip rejects that
+/// value: `TTM_ADDTOOLW` returns FALSE. The control accepts 56, which is the
+/// version-5 `TOOLINFO` size. Every member this module sets lies inside the
+/// first 56 bytes, so the trailing `lpReserved` is unreachable and unused.
+const TOOLINFO_V5_SIZE: u32 = 56;
+
+/// Poll interval for the hover check, in milliseconds.
+///
+/// A control is its own window and consumes `WM_MOUSEMOVE`, so the frame never
+/// sees a hover. The window polls the cursor position instead.
+const TIP_POLL_MS: u32 = 150;
+
+/// The timer that drives the hover check.
+const ID_TIP_TIMER: usize = 0x71;
+
+/// Vertical space between the control and its tooltip, in pixels.
+///
+/// The gap keeps the tooltip clear of the pointer, so a click still reaches the
+/// control the tooltip describes.
+const TIP_GAP: i32 = 10;
+
+/// The least distance between the pointer and the tooltip, in pixels.
+///
+/// The gap from the control is not always enough. A pointer near the control's
+/// bottom edge would sit under the tooltip, so the tooltip moves further down.
+const TIP_CLEARANCE: i32 = 24;
+
+/// The margin between the tooltip and a screen edge, in pixels.
+const TIP_MARGIN: i32 = 8;
+
+/// The width at which a long help string wraps, in pixels.
+const TIP_MAX_WIDTH: isize = 420;
+
+thread_local! {
+    /// The tooltip control, its tools, and the tool that is currently shown.
+    static TIP_STATE: RefCell<TipState> = RefCell::new(TipState::default());
+}
+
+/// Owns the tooltip control and the text of every tool.
+///
+/// The tooltip is driven by this module. Each tool is registered with `TTF_TRACK`,
+/// which positions the tooltip from an explicit coordinate. The subclass
+/// mechanism is not used.
+#[derive(Default)]
+struct TipState {
+    tip: HWND,
+    /// The text buffer of each tool. `TOOLINFO.lpszText` is a pointer that the
+    /// tooltip keeps, so every buffer must outlive its tool.
+    text: std::collections::HashMap<isize, Box<[u16]>>,
+    /// Help text for each control that holds one.
+    help: std::collections::HashMap<isize, String>,
+    /// The control whose tooltip is displayed, or `None`.
+    shown: Option<isize>,
+}
+
+/// Registers one tool per control, so a later update has a tool to address.
+///
+/// A tracking tooltip needs a registered tool. Every entry points at the same
+/// text buffer because `TTM_UPDATETIPTEXT` replaces it before a display.
+unsafe fn tip_register_controls(tip: HWND, controls: Vec<(HWND, String)>) {
+    if controls.is_empty() {
+        return;
+    }
+    // Build every buffer before any tool points at one, so no `push` can move a
+    // buffer that a tool already holds.
+    let buffers: Vec<Box<[u16]>> = controls
+        .iter()
+        .map(|(_, help)| wide(help).into_boxed_slice())
+        .collect();
+    TIP_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        for ((control, help), buffer) in controls.into_iter().zip(buffers) {
+            state.help.insert(control.0 as isize, help);
+            state.text.insert(control.0 as isize, buffer);
+        }
+    });
+    // SAFETY: `tip` is a live tooltip control, every handle is a live child, and
+    // each text buffer is owned by `TIP_STATE` for the window's lifetime.
+    unsafe {
+        for (control, _) in TIP_STATE.with(|state| {
+            state
+                .borrow()
+                .help
+                .keys()
+                .map(|key| (HWND(*key as *mut core::ffi::c_void), ()))
+                .collect::<Vec<_>>()
+        }) {
+            let text = TIP_STATE.with(|state| {
+                state
+                    .borrow()
+                    .text
+                    .get(&(control.0 as isize))
+                    .map(|buffer| buffer.as_ptr() as *mut u16)
+            });
+            let Some(text) = text else { continue };
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(control, &mut rect);
+            let tool = TTTOOLINFOW {
+                cbSize: TOOLINFO_V5_SIZE,
+                uFlags: TTF_TRACK,
+                hwnd: control,
+                uId: 0,
+                rect,
+                hinst: HINSTANCE::default(),
+                lpszText: PWSTR(text),
+                lParam: LPARAM(0),
+                lpReserved: std::ptr::null_mut(),
+            };
+            SendMessageW(
+                tip,
+                TTM_ADDTOOLW,
+                Some(WPARAM(0)),
+                Some(LPARAM((&tool as *const TTTOOLINFOW) as isize)),
+            );
+        }
+        let _ = SendMessageW(tip, TTM_ACTIVATE, Some(WPARAM(1)), None);
+    }
+}
+
+/// The width and height of the visible tooltip.
+#[derive(Clone, Copy)]
+struct TipSize {
+    width: i32,
+    height: i32,
+}
+
+/// Measures the visible tooltip window.
+///
+/// `TTM_GETBUBBLESIZE` reports nothing usable before the tooltip is shown, so
+/// this reads the window itself. Call it after the tooltip is active. A zero
+/// result means the window is not laid out yet, and the fallback keeps the
+/// placement sane.
+unsafe fn tip_size(tip: HWND) -> TipSize {
+    let mut rect = RECT::default();
+    // SAFETY: `tip` is a live tooltip control.
+    if unsafe { GetWindowRect(tip, &mut rect) }.is_ok() {
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width > 0 && height > 0 {
+            return TipSize { width, height };
+        }
+    }
+    TipSize {
+        width: TIP_MAX_WIDTH as i32,
+        height: 40,
+    }
+}
+
+/// Where a tooltip goes for one hover.
+struct TipPlacement {
+    x: i32,
+    y: i32,
+}
+
+/// Chooses the tooltip position for one control.
+///
+/// The tooltip goes below the control when it fits on the screen, and above it
+/// otherwise. Both positions keep `TIP_CLEARANCE` between the pointer and the
+/// tooltip, so the tooltip never covers the control the pointer aims at.
+///
+/// This is pure arithmetic, so a test fixes the geometry without a pointer, a
+/// window, or a screen.
+fn tip_placement(
+    control: RECT,
+    pointer: POINT,
+    size: TipSize,
+    screen_top: i32,
+    screen_bottom: i32,
+) -> TipPlacement {
+    let below = control.bottom + TIP_GAP;
+    // Prefer below the control. Flip above only when the tooltip would run off
+    // the bottom of the screen.
+    let fits_below = below + size.height + TIP_MARGIN <= screen_bottom;
+    let y = if fits_below {
+        // A pointer near the control's bottom edge would sit under the tooltip,
+        // so the tooltip moves further down than the plain gap.
+        below.max(pointer.y + TIP_CLEARANCE)
+    } else {
+        // Above the control, clear of the pointer, and on the screen. Clearance
+        // from the pointer wins over the gap from the control, because the
+        // pointer is what the user aims with.
+        let clear_of_pointer = pointer.y - TIP_CLEARANCE - size.height;
+        let above_control = control.top - TIP_GAP - size.height;
+        clear_of_pointer.min(above_control).max(screen_top + TIP_MARGIN)
+    };
+    let centre = control.left + (control.right - control.left) / 2;
+    let x = (centre - size.width / 2).max(TIP_MARGIN);
+    TipPlacement { x, y }
+}
+
+/// Shows, moves, or hides the tracking tooltip for the control under the cursor.
+unsafe fn tip_poll(tip: HWND) {
+    // SAFETY: `tip` is a live tooltip control. Every handle below is live.
+    unsafe {
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point).is_err() {
+            return;
+        }
+        let under = WindowFromPoint(point);
+        let shown = TIP_STATE.with(|state| state.borrow().shown);
+        // A visible tooltip can sit under the pointer, so a hit test can return
+        // the tooltip itself. Treat that as a hit on the control already
+        // showing, so the state does not alternate and flash.
+        let over_tip = under == tip || GetAncestor(under, GA_ROOT) == tip;
+        let wanted = if over_tip {
+            shown
+        } else {
+            TIP_STATE.with(|state| {
+                let state = state.borrow();
+                state
+                    .help
+                    .contains_key(&(under.0 as isize))
+                    .then_some(under.0 as isize)
+            })
+        };
+        let Some(target) = wanted else {
+            if shown.is_some() {
+                let _ = SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), None);
+                TIP_STATE.with(|state| state.borrow_mut().shown = None);
+            }
+            return;
+        };
+        // The tooltip sits clear of the pointer, so the pointer keeps its target
+        // and a click still reaches the control.
+        let control = HWND(target as *mut core::ffi::c_void);
+        let mut rect = RECT::default();
+        if GetWindowRect(control, &mut rect).is_err() {
+            return;
+        }
+        // A combo box reports the height of its closed list as well, so use the
+        // height of one item, which is the height the user sees.
+        let item = SendMessageW(control, CB_GETITEMHEIGHT, Some(WPARAM(0)), None).0;
+        if item > 0 {
+            let visible_h = (item as i32).min(rect.bottom - rect.top);
+            rect.bottom = rect.top + visible_h;
+        }
+        let width = rect.right - rect.left;
+        let landing_x = rect.left + width / 2;
+        // Every tool already holds its own text, so this only shows it.
+        let tool = TTTOOLINFOW {
+            cbSize: TOOLINFO_V5_SIZE,
+            uFlags: TTF_TRACK,
+            hwnd: control,
+            uId: 0,
+            rect: RECT::default(),
+            hinst: HINSTANCE::default(),
+            lpszText: PWSTR::null(),
+            lParam: LPARAM(0),
+            lpReserved: std::ptr::null_mut(),
+        };
+        let switching = shown != Some(target);
+        if switching {
+            // A long help string wraps instead of running off the screen.
+            let _ = SendMessageW(
+                tip,
+                TTM_SETMAXTIPWIDTH,
+                Some(WPARAM(0)),
+                Some(LPARAM(TIP_MAX_WIDTH)),
+            );
+            // Park the tooltip on the control before it becomes visible. A
+            // tooltip keeps its previous position, so showing it first would
+            // flash it wherever it last appeared.
+            let _ = SendMessageW(
+                tip,
+                TTM_TRACKPOSITION,
+                Some(WPARAM(0)),
+                Some(LPARAM((landing_x | ((rect.bottom + TIP_GAP) << 16)) as isize)),
+            );
+            SendMessageW(
+                tip,
+                TTM_TRACKACTIVATE,
+                Some(WPARAM(1)),
+                Some(LPARAM((&tool as *const TTTOOLINFOW) as isize)),
+            );
+        }
+        // The tooltip holds this tool's text now, so its window reports the
+        // size of that text.
+        let size = tip_size(tip);
+        let screen_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let screen_bottom = screen_top + GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+        let placed = tip_placement(rect, point, size, screen_top, screen_bottom);
+        let x = placed.x;
+        let y = placed.y;
+        // `TTM_TRACKPOSITION` packs the x coordinate in the low word.
+        let _ = SendMessageW(
+            tip,
+            TTM_TRACKPOSITION,
+            Some(WPARAM(0)),
+            Some(LPARAM((x | (y << 16)) as isize)),
+        );
+        if switching {
+            TIP_STATE.with(|state| state.borrow_mut().shown = Some(target));
+        }
+    }
+}
+
 unsafe fn capture_control_runtime(
     content: HWND,
     entry_top: i32,
@@ -3256,6 +3567,10 @@ pub struct SettingsWindow {
     /// True while the settings controls are disabled.
     busy: Cell<bool>,
     apply_state: Cell<ApplyState>,
+    /// The tooltip control that carries an entry's help text on hover.
+    tip: HWND,
+    /// Each control that carries a hover tooltip, with its help text.
+    tips: RefCell<Vec<(HWND, String)>>,
 }
 
 impl SettingsWindow {
@@ -3318,6 +3633,9 @@ impl SettingsWindow {
             let font = ui_font(dpi);
             let mut win = SettingsWindow {
                 hwnd,
+                // `build` creates the tooltip, the viewport, and the content pane.
+                tip: HWND::default(),
+                tips: RefCell::new(Vec::new()),
                 // `build` creates the viewport and content panes.
                 viewport: HWND::default(),
                 content: HWND::default(),
@@ -4862,22 +5180,27 @@ impl SettingsWindow {
 
         macro_rules! help {
             () => {{
+                // An entry that carries its help in a tooltip draws no line.
+                // The flag records that this entry already reached its help, so
+                // the fallback below does not draw a second copy.
                 help_rendered = true;
-                if let Some(text) = spec.help.as_deref() {
-                    let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
-                    controls.push(child(
-                        page,
-                        w!("STATIC"),
-                        text,
-                        WINDOW_STYLE(0),
-                        PAD,
-                        y,
-                        WIN_W - 2 * PAD - 20,
-                        height,
-                        0,
-                        f,
-                    )?);
-                    y += height + ROW_GAP;
+                if spec.inline_help {
+                    if let Some(text) = spec.help.as_deref() {
+                        let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
+                        controls.push(child(
+                            page,
+                            w!("STATIC"),
+                            text,
+                            WINDOW_STYLE(0),
+                            PAD,
+                            y,
+                            WIN_W - 2 * PAD - 20,
+                            height,
+                            0,
+                            f,
+                        )?);
+                        y += height + ROW_GAP;
+                    }
                 }
             }};
         }
@@ -5339,7 +5662,7 @@ impl SettingsWindow {
             SettingId::AnkiRefresh => {
                 controls.push(child(page, w!("BUTTON"), &spec.label, WS_TABSTOP, PAD, y,
                     160, ROW_H, ID_ANKI_TEST, f)?);
-                if let Some(text) = spec.help.as_deref() {
+                if let Some(text) = spec.help.as_deref().filter(|_| spec.inline_help) {
                     help_rendered = true;
                     let width = WIN_W - PAD - (PAD + 168) - 20;
                     let height = measured_text_height(h, f, text, width);
@@ -5508,7 +5831,10 @@ impl SettingsWindow {
             }
         }
 
-            if !help_rendered {
+            // An inline entry keeps its help on the page. Every other entry
+            // carries the same text in a tooltip, which keeps the window short.
+            // An entry uses one surface, never both.
+            if !help_rendered && spec.inline_help {
                 if let Some(text) = spec.help.as_deref() {
                     let height = measured_text_height(h, f, text, WIN_W - 2 * PAD - 20);
                     controls.push(child(page, w!("STATIC"), text, WINDOW_STYLE(0), PAD, y,
@@ -5520,6 +5846,20 @@ impl SettingsWindow {
             if let Some(&control) = controls.first() {
                 let style = GetWindowLongW(control, GWL_STYLE) as u32 | WS_GROUP.0;
                 SetWindowLongW(control, GWL_STYLE, style as i32);
+            }
+
+            // The tooltip subclasses the control, so it runs after the style
+            // change above. Otherwise the tooltip reads a stale style. An entry
+            // that recorded its own `help!()` call still needs the tooltip, so
+            // this branch does not read `help_rendered`.
+            if !spec.inline_help {
+                if let Some(text) = spec.help.as_deref() {
+                    // Every control of the entry carries the hover, because a
+                    // hit test returns whichever control the pointer is over.
+                    self.tips
+                        .borrow_mut()
+                        .extend(controls.iter().map(|&control| (control, text.to_string())));
+                }
             }
 
             Ok(BuiltEntry {
@@ -5545,9 +5885,47 @@ impl SettingsWindow {
         unsafe {
             let controls = INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES,
+                dwICC: ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES,
             };
             let _ = InitCommonControlsEx(&controls);
+            // `TTS_ALWAYSTIP` keeps the tooltip working while another window is
+            // active. This window is modeless, so without the style a hover over
+            // it shows nothing. The tooltip is created here because
+            // `InitCommonControlsEx` must run first.
+            if self.tip == HWND::default() {
+                let instance: HINSTANCE = GetModuleHandleW(None)?.into();
+                // A tooltip is a top-level popup. A child tooltip does not
+                // display, so the parent is `None`. `TTS_ALWAYSTIP` keeps it
+                // visible while another window holds the foreground.
+                self.tip = CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("tooltips_class32"),
+                    None,
+                    WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    Some(instance),
+                    None,
+                )
+                .context("CreateWindowExW for the settings tooltip")?;
+                // A parentless popup sorts below an active window, so the
+                // tooltip would draw behind the settings window. `HWND_TOPMOST`
+                // puts it in front.
+                let _ = SetWindowPos(
+                    self.tip,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                TIP_STATE.with(|state| state.borrow_mut().tip = self.tip);
+            }
             let tab_control = child(
                 h,
                 w!("SysTabControl32"),
@@ -5612,6 +5990,8 @@ impl SettingsWindow {
         let mut runtime_tabs = Vec::with_capacity(layout.tabs.len());
         let mut plugin_names = Vec::new();
         let mut plugin_dirs = Vec::new();
+        // Each control that carries a hover tooltip is collected here, and
+        // `build_entry` fills it.
         for tab in &layout.tabs {
             let mut y = 0;
             let mut runtime_sections = Vec::with_capacity(tab.sections.len());
@@ -5710,6 +6090,13 @@ impl SettingsWindow {
         );
         self.reflow_all_tabs();
         self.bottom_y0 = self.layout_bottom();
+        let tips = self.tips.borrow().clone();
+        // SAFETY: The tooltip and every registered control are live.
+        unsafe {
+            tip_register_controls(self.tip, tips);
+            // A control consumes `WM_MOUSEMOVE`, so the frame polls the cursor.
+            SetTimer(Some(self.hwnd), ID_TIP_TIMER, TIP_POLL_MS, None);
+        }
 
         // SAFETY: Bottom controls are direct children of the live main window.
         unsafe {
@@ -6192,8 +6579,12 @@ impl Drop for SettingsWindow {
         });
         // SAFETY: `SettingsWindow` owns the window and destroys it once. The font
         // outlives every control because this code destroys the window and
-        // its children before it deletes the font.
+        // its children before it deletes the font. The tooltip is a child of the
+        // window, so destroying the window destroys it first.
         unsafe {
+            // The hover poll has no other owner, so it stops here. A timer that
+            // outlives its window keeps posting to a dead window.
+            let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
             let _ = DestroyWindow(self.hwnd);
             if let Some(f) = self.font.get() {
                 let _ = DeleteObject(f.into());
@@ -6229,6 +6620,8 @@ fn scope_rows(all: &[String], list: &[String], unreadable: &[String]) -> Vec<Dic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::Controls::TTM_GETTEXTW;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SetCursorPos};
 
     #[test]
     fn anki_dependency_gate_keeps_screenshot_target_controls_active() {
@@ -6964,15 +7357,39 @@ mod tests {
         assert!(window.entry_top(SettingId::LookupMode) < window.entry_top(SettingId::PopupTheme));
         // SAFETY: These controls belong to one live dialog group.
         unsafe {
-            let press = dlg_item(window.hwnd, ID_MODE_PRESS).unwrap();
-            let next = GetNextDlgGroupItem(window.content, Some(press), false).unwrap();
-            let next_id = GetDlgCtrlID(next);
+            // Entry boundaries are explicit. `build_entry` marks the first
+            // control of every entry with `WS_GROUP`, so a radio group ends with
+            // its own controls. `GetNextDlgGroupItem` returns the first visible
+            // control without `WS_GROUP`, which is the next entry's label or its
+            // help line. Test the style contract that creates the boundary.
+            let lookup = window
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.sections)
+                .flat_map(|section| &section.entries)
+                .find(|entry| entry.id == SettingId::LookupMode)
+                .unwrap();
+            let styles: Vec<u32> = lookup
+                .controls
+                .iter()
+                .map(|control| GetWindowLongW(control.hwnd, GWL_STYLE) as u32)
+                .collect();
             assert!(
-                [ID_MODE_LIVE, ID_MODE_HOLD, ID_MODE_TOGGLE, ID_MODE_PRESS]
-                    .contains(&next_id),
-                "radio group escaped to control {next_id}",
+                styles[0] & WS_GROUP.0 != 0,
+                "the first control of the entry must start a dialog group",
             );
-            assert_ne!(dlg_item(window.hwnd, ID_THEME).unwrap(), next);
+            for id in [ID_MODE_LIVE, ID_MODE_HOLD, ID_MODE_TOGGLE, ID_MODE_PRESS] {
+                assert!(dlg_item(window.hwnd, id).is_ok(), "missing radio {id}");
+            }
+            let mut cursor = dlg_item(window.hwnd, ID_MODE_PRESS).unwrap();
+            let theme = dlg_item(window.hwnd, ID_THEME).unwrap();
+            for _ in 0..8 {
+                cursor = GetNextDlgGroupItem(window.content, Some(cursor), false).unwrap();
+                assert_ne!(
+                    theme, cursor,
+                    "the group must not reach the next entry's control",
+                );
+            }
         }
     }
 
@@ -7354,6 +7771,41 @@ mod tests {
         assert!(error.contains("Lookup (F2)"), "{error}");
     }
 
+    /// Reads the text that the tooltip holds for one control.
+    ///
+    /// `TTM_GETTEXT` identifies a tool by its window handle and its identifier,
+    /// and `attach_tip` registers every tool with identifier zero. The structure
+    /// size must equal the one used at registration, or the lookup finds nothing.
+    fn tip_text(window: &SettingsWindow, control: HWND) -> Option<String> {
+        let mut buf = [0u16; 512];
+        let mut tool = TTTOOLINFOW {
+            cbSize: TOOLINFO_V5_SIZE,
+            uFlags: TTF_TRACK,
+            hwnd: control,
+            uId: 0,
+            rect: RECT::default(),
+            hinst: HINSTANCE::default(),
+            lpszText: PWSTR(buf.as_mut_ptr()),
+            lParam: LPARAM(0),
+            lpReserved: std::ptr::null_mut(),
+        };
+        // SAFETY: `window.tip` is the live tooltip control. `tool` names its own
+        // size, and `lpszText` points at a buffer that `wParam` sizes.
+        unsafe {
+            SendMessageW(
+                window.tip,
+                TTM_GETTEXTW,
+                Some(WPARAM(buf.len())),
+                Some(LPARAM((&mut tool as *mut TTTOOLINFOW) as isize)),
+            );
+        }
+        // Stop at the first terminator. A trailing trim would erase the whole
+        // value when the control returns an unterminated buffer.
+        let end = buf.iter().position(|unit| *unit == 0).unwrap_or(buf.len());
+        let text = String::from_utf16_lossy(&buf[..end]);
+        (!text.is_empty()).then_some(text)
+    }
+
     #[test]
     fn every_supplied_help_value_renders_once() {
         let mut layout = SettingsLayout::embedded().unwrap();
@@ -7364,6 +7816,7 @@ mod tests {
                     .find(|entry| entry.id == SettingId::LookupKey)
                 {
                     entry.help = Some(help.into());
+                    entry.inline_help = true;
                 }
             }
         }
@@ -7390,6 +7843,377 @@ mod tests {
             assert!(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).is_ok());
         }
         assert_eq!(1, count);
+    }
+
+    /// Every tooltip entry carries its help in the tooltip, and no tooltip entry
+    /// draws a help line on the page.
+    ///
+    /// `TTM_GETTEXT` returns at most 80 characters, so a long help string is
+    /// compared up to that cap. The window shows the full text; the cap applies
+    /// to this read only.
+    #[test]
+    fn every_tooltip_entry_reaches_the_tooltip_and_not_the_page() {
+        const READ_CAP: usize = 80;
+        let layout = SettingsLayout::embedded().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window =
+            SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout.clone())
+                .unwrap();
+        let mut checked = 0;
+        for tab_index in 0..window.tab_count() {
+            window.switch_tab(tab_index);
+            // SAFETY: The tab strip and every page control stay live.
+            unsafe {
+                for spec in layout
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| &tab.sections)
+                    .flat_map(|section| &section.entries)
+                {
+                    let Some(help) = spec.help.as_deref() else {
+                        continue;
+                    };
+                    let controls: Vec<HWND> = window
+                        .tabs
+                        .iter()
+                        .flat_map(|tab| &tab.sections)
+                        .flat_map(|section| &section.entries)
+                        .find(|entry| entry.id == spec.id)
+                        .map(|entry| entry.controls.iter().map(|c| c.hwnd).collect())
+                        .unwrap_or_default();
+                    let Some(&_first) = controls.first() else {
+                        continue;
+                    };
+                    if spec.inline_help {
+                        for control in &controls {
+                            assert_eq!(
+                                None,
+                                tip_text(&window, *control),
+                                "{:?} is inline and must register no tooltip",
+                                spec.id,
+                            );
+                        }
+                        continue;
+                    }
+                    let want: String = help.chars().take(READ_CAP).collect();
+                    for control in &controls {
+                        // Two entries own a dedicated hint control whose identity
+                        // other tests pin, so their line stays visible by design.
+                        if matches!(
+                            GetDlgCtrlID(*control),
+                            ID_SCREENSHOT_HINT | ID_STATIC_CAPTURE_HINT,
+                        ) {
+                            continue;
+                        }
+                        assert_ne!(
+                            help,
+                            window_text(*control),
+                            "{:?} must not draw its help as a visible line",
+                            spec.id,
+                        );
+                        // Every control of the entry answers a hover, because a
+                        // hit test returns whichever control the pointer is over.
+                        let got = tip_text(&window, *control);
+                        let Some(text) = got.as_deref() else {
+                            panic!(
+                                "{:?} control {} carries no tooltip",
+                                spec.id,
+                                GetDlgCtrlID(*control),
+                            );
+                        };
+                        // The read may return the whole text or stop at 80
+                        // characters, so the stored text must start with the
+                        // first `READ_CAP` characters of the help.
+                        assert!(
+                            text.starts_with(&want),
+                            "{:?} control {} holds {:?}, which does not start with {:?}",
+                            spec.id,
+                            GetDlgCtrlID(*control),
+                            text,
+                            want,
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 60,
+            "expected most entries to use a tooltip, saw {checked}",
+        );
+    }
+
+    /// An inline entry keeps its help on the page and registers no tooltip.
+    #[test]
+    fn inline_help_stays_on_the_page_and_registers_no_tooltip() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let entry = layout
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.entries)
+            .find(|entry| entry.id == SettingId::PopupCaptureExclusion)
+            .unwrap();
+        assert!(entry.inline_help, "the capture exclusion entry is inline");
+        let help = entry.help.clone().unwrap();
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window =
+            SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let mut on_page = false;
+        // SAFETY: The loop follows live content-pane siblings.
+        unsafe {
+            let mut next = GetWindow(window.content, GW_CHILD);
+            while let Ok(child) = next {
+                if window_text(child) == help {
+                    on_page = true;
+                }
+                next = GetWindow(child, GW_HWNDNEXT);
+            }
+        }
+        assert!(on_page, "an inline entry must draw its help on the page");
+        // SAFETY: The check box stays live for the window's lifetime.
+        unsafe {
+            let control = dlg_item(window.hwnd, ID_EXCLUDE).unwrap();
+            assert_eq!(None, tip_text(&window, control));
+        }
+    }
+
+    /// Registers one tool with a tooltip and a target window, both created here.
+    /// This isolates the Win32 contract from the settings window.
+    #[test]
+    fn a_fresh_tooltip_accepts_a_tool() {
+        // SAFETY: Every handle below is created on this thread and released here.
+        unsafe {
+            let instance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+            register_class(instance).unwrap();
+            let owner = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class_name(),
+                w!("tooltip probe"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                200,
+                200,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+            .unwrap();
+            let tip = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("tooltips_class32"),
+                None,
+                WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance),
+                None,
+            )
+            .unwrap();
+            let text = "probe help text";
+            let mut buffer = wide(text);
+            let tool = TTTOOLINFOW {
+                cbSize: TOOLINFO_V5_SIZE,
+                uFlags: TTF_TRACK,
+                hwnd: owner,
+                uId: 0,
+                rect: RECT::default(),
+                hinst: HINSTANCE::default(),
+                lpszText: PWSTR(buffer.as_mut_ptr()),
+                lParam: LPARAM(0),
+                lpReserved: std::ptr::null_mut(),
+            };
+            let ok = SendMessageW(
+                tip,
+                TTM_ADDTOOLW,
+                Some(WPARAM(0)),
+                Some(LPARAM((&tool as *const TTTOOLINFOW) as isize)),
+            )
+            .0;
+            let mut read = [0u16; 128];
+            let mut query = TTTOOLINFOW {
+                cbSize: TOOLINFO_V5_SIZE,
+                uFlags: TTF_TRACK,
+                hwnd: owner,
+                uId: 0,
+                rect: RECT::default(),
+                hinst: HINSTANCE::default(),
+                lpszText: PWSTR(read.as_mut_ptr()),
+                lParam: LPARAM(0),
+                lpReserved: std::ptr::null_mut(),
+            };
+            SendMessageW(
+                tip,
+                TTM_GETTEXTW,
+                Some(WPARAM(read.len())),
+                Some(LPARAM((&mut query as *mut TTTOOLINFOW) as isize)),
+            );
+            let end = read.iter().position(|u| *u == 0).unwrap_or(read.len());
+            let got = String::from_utf16_lossy(&read[..end]);
+            let _ = DestroyWindow(tip);
+            let _ = DestroyWindow(owner);
+            assert_eq!(1, ok, "TTM_ADDTOOLW must succeed");
+            assert_eq!(text, got);
+        }
+    }
+
+    /// The tooltip goes below its control, centred, and clear of the pointer.
+    ///
+    /// This is the arithmetic the poll uses. It needs no pointer, no window, and
+    /// no screen, so the result is the same on every run.
+    #[test]
+    fn the_tooltip_placement_sits_below_its_control_and_clears_the_pointer() {
+        let control = RECT {
+            left: 200,
+            top: 100,
+            right: 600,
+            bottom: 124,
+        };
+        let size = TipSize {
+            width: 300,
+            height: 40,
+        };
+        // A pointer near the bottom of the control must not end up under the
+        // tooltip.
+        let pointer = POINT { x: 400, y: 122 };
+        let placed = tip_placement(control, pointer, size, 0, 1080);
+        assert_eq!(250, placed.x, "the tooltip centres on the control");
+        assert!(
+            placed.y >= control.bottom + TIP_GAP,
+            "the tooltip sits below the control, got y={}",
+            placed.y,
+        );
+        assert!(
+            placed.y >= pointer.y + TIP_CLEARANCE,
+            "the tooltip clears the pointer: y={} pointer={}",
+            placed.y,
+            pointer.y,
+        );
+    }
+
+    /// A tooltip with no room below flips above the control.
+    #[test]
+    fn the_tooltip_placement_flips_above_when_the_screen_is_low() {
+        // The control sits near the bottom edge, so a tooltip below it would run
+        // off the screen.
+        let control = RECT {
+            left: 200,
+            top: 1050,
+            right: 600,
+            bottom: 1074,
+        };
+        let size = TipSize {
+            width: 300,
+            height: 40,
+        };
+        let pointer = POINT { x: 400, y: 1060 };
+        let placed = tip_placement(control, pointer, size, 0, 1080);
+        assert!(
+            placed.y < control.top,
+            "the tooltip must move above the control, got y={}",
+            placed.y,
+        );
+        assert!(
+            placed.y + size.height <= pointer.y - TIP_CLEARANCE,
+            "the tooltip clears the pointer: y={} pointer={}",
+            placed.y,
+            pointer.y,
+        );
+        assert!(
+            placed.y > 0,
+            "the tooltip stays on the screen, got y={}",
+            placed.y,
+        );
+    }
+
+    /// The tooltip style must survive an inactive owner window, because the
+    /// settings window is modeless.
+    #[test]
+    fn the_tooltip_control_always_tips() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The tooltip is a live child of the settings window.
+        let style = unsafe { GetWindowLongW(window.tip, GWL_STYLE) as u32 };
+        assert_eq!(TTS_ALWAYSTIP, style & TTS_ALWAYSTIP);
+    }
+
+    /// Every entry must explain itself in the window.
+    ///
+    /// A label alone does not carry the consequence of a control. The Microsoft
+    /// app-settings guidance requires a descriptive message when a control is
+    /// disabled. Most entries carry that text in a tooltip; the entries whose
+    /// text prevents a privacy or data surprise keep it on the page.
+    ///
+    /// This test covers coverage. `every_supplied_help_value_renders_once`
+    /// covers rendering. Together they prove that every entry carries a help
+    /// string and that each supplied string reaches the window.
+    #[test]
+    fn every_layout_entry_supplies_help() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut missing = Vec::new();
+        for tab in &layout.tabs {
+            for section in &tab.sections {
+                for entry in &section.entries {
+                    if entry.help.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                        missing.push(format!("{:?}", entry.id));
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these entries supply no help: {}",
+            missing.join(", ")
+        );
+    }
+
+    /// A help line must add information that the label does not carry.
+    ///
+    /// The mechanical half of that rule: the sentence is whole, and it holds at
+    /// least one word that the label does not. A string that only reuses the
+    /// label's words restates the label. A reviewer judges the other half, which
+    /// is whether the stated consequence is accurate.
+    #[test]
+    fn every_help_line_is_a_sentence_that_adds_to_its_label() {
+        let layout = SettingsLayout::embedded().unwrap();
+        let mut problems = Vec::new();
+        for tab in &layout.tabs {
+            for section in &tab.sections {
+                for entry in &section.entries {
+                    let Some(help) = entry.help.as_deref().map(str::trim) else {
+                        continue;
+                    };
+                    let id = format!("{:?}", entry.id);
+                    if !help.ends_with('.') {
+                        problems.push(format!("{id}: no closing period"));
+                    }
+                    if help.split_whitespace().count() < 5 {
+                        problems.push(format!("{id}: shorter than a sentence"));
+                    }
+                    let label_words: Vec<String> = entry
+                        .label
+                        .split_whitespace()
+                        .map(|word| word.to_ascii_lowercase())
+                        .collect();
+                    let adds_a_word = help.split_whitespace().any(|word| {
+                        let word = word
+                            .trim_matches(|c: char| !c.is_alphanumeric())
+                            .to_ascii_lowercase();
+                        !word.is_empty() && !label_words.contains(&word)
+                    });
+                    if !adds_a_word {
+                        problems.push(format!("{id}: repeats only its label's words"));
+                    }
+                }
+            }
+        }
+        assert!(problems.is_empty(), "help defects: {}", problems.join("; "));
     }
 
     #[test]

@@ -5574,6 +5574,8 @@ mod tests {
     const BODY_LIMIT: usize = 4 * 1024 * 1024;
     const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
     const SOCKET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+    /// How many connections the stand-in handles before it stops.
+    const ACCEPT_ATTEMPTS: usize = 8;
 
     /// A local AnkiConnect stand-in. It answers one request and records it.
     ///
@@ -5582,6 +5584,12 @@ mod tests {
     struct FakeAnki {
         url: String,
         seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        /// The request body of each connection, as it arrived.
+        ///
+        /// A body that fails to parse is recorded as `Value::Null`, so the
+        /// parsed log cannot say why. This keeps the bytes for the failure
+        /// message.
+        raw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         stop: std::sync::Arc<AtomicBool>,
         worker: Option<std::thread::JoinHandle<()>>,
     }
@@ -5593,20 +5601,37 @@ mod tests {
             listener.set_nonblocking(true).expect("a polling listener");
             let url = format!("http://{}", listener.local_addr().expect("the bound address"));
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let raw = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let recorded = seen.clone();
+            let recorded_raw = raw.clone();
             let done = stop.clone();
             let worker = std::thread::spawn(move || {
                 let deadline = std::time::Instant::now() + ACCEPT_LIMIT;
-                while !done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                // An abandoned connection arrives with no body on a loaded
+                // runner. Ignoring one keeps the log about the request under
+                // test instead of about whatever opened a socket and left.
+                let mut attempts = 0;
+                while !done.load(Ordering::Relaxed)
+                    && std::time::Instant::now() < deadline
+                    && attempts < ACCEPT_ATTEMPTS
+                {
                     let Ok((mut stream, _)) = listener.accept() else {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
                     };
+                    attempts += 1;
                     let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
                     let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
                     let body = read_request_body(&mut stream);
+                    if body.trim().is_empty() {
+                        continue;
+                    }
                     let request = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    recorded_raw
+                        .lock()
+                        .expect("the raw request log")
+                        .push(body.clone());
                     recorded.lock().expect("the request log").push(request);
                     let reply = format!("{{\"result\":{note_id},\"error\":null}}");
                     let _ = write!(
@@ -5618,11 +5643,16 @@ mod tests {
                     return;
                 }
             });
-            FakeAnki { url, seen, stop, worker: Some(worker) }
+            FakeAnki { url, seen, raw, stop, worker: Some(worker) }
         }
 
         fn seen(&self) -> Vec<serde_json::Value> {
             self.seen.lock().expect("the request log").clone()
+        }
+
+        /// The raw bodies, for a failure message.
+        fn raw(&self) -> Vec<String> {
+            self.raw.lock().expect("the raw request log").clone()
         }
     }
 
@@ -5697,7 +5727,12 @@ mod tests {
 
         let seen = anki.seen();
         assert_eq!(1, seen.len(), "the authorized add never reached Anki: {seen:?}");
-        assert_eq!(Some("addNote"), seen[0]["action"].as_str());
+        assert_eq!(
+            Some("addNote"),
+            seen[0]["action"].as_str(),
+            "the request body did not parse. Raw bodies: {:?}",
+            anki.raw(),
+        );
         assert_eq!(
             Some("猫"),
             seen[0]["params"]["note"]["fields"]["Expression"].as_str(),

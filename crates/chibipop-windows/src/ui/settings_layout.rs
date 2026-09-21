@@ -106,6 +106,13 @@ pub(super) struct EntrySpec {
     pub(super) id: SettingId,
     pub(super) label: String,
     pub(super) help: Option<String>,
+    /// Keep the help text on the page instead of a hover tooltip.
+    ///
+    /// The default is a tooltip, which keeps the window short. Set this only
+    /// when the text prevents a privacy or data surprise, because a tooltip is
+    /// invisible to a keyboard-only user.
+    #[serde(default)]
+    pub(super) inline_help: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
