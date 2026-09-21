@@ -10,9 +10,12 @@ __pycache__/
 # LLMS
 /.omp/
 
-# Design specs, plans and findings - local only.
+# Design specs, plans, findings and research records - local only.
+# Research records hold working notes and agent transcripts, not shipped
+# behavior. They stay in the working tree and out of the history.
 /docs/superpowers/
 /.superpowers/
+/docs/research/
 
 # Bless-run artifact cache - local only.
 /.scratch/

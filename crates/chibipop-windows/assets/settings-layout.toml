@@ -11,6 +11,7 @@ label = "Appearance"
 [[tabs.sections.entries]]
 id = "popup-theme"
 label = "Color theme"
+help = "Dark and light set the base colors. A custom style can replace them."
 
 [[tabs.sections.entries]]
 id = "popup-font"
@@ -74,6 +75,7 @@ help = "Hover over popup text to open another definition."
 id = "popup-capture-exclusion"
 label = "Hide the popup in screenshots"
 help = "Keeps the popup out of screenshots and screen recordings."
+inline_help = true
 
 [[tabs.sections]]
 id = "popup-content"
@@ -92,14 +94,17 @@ help = "Keeps colors and formatting supplied by the dictionary."
 [[tabs.sections.entries]]
 id = "popup-examples"
 label = "Show example sentences"
+help = "Shows the example sentences that a dictionary entry supplies."
 
 [[tabs.sections.entries]]
 id = "popup-attributions"
 label = "Show sources and notes"
+help = "Shows the source and the notes that a dictionary entry supplies."
 
 [[tabs.sections.entries]]
 id = "popup-images"
 label = "Show images"
+help = "Hides the images inside definitions. Their alternative text remains."
 
 [[tabs.sections.entries]]
 id = "popup-part-of-speech"
@@ -122,6 +127,7 @@ help = "Press Escape. This shortcut cannot be changed."
 [[tabs.sections.entries]]
 id = "lookup-mode"
 label = "When lookups run"
+help = "While held runs lookups only while the key is down. Turn on / off reads between presses. Once per press reads one time."
 
 [[tabs.sections.entries]]
 id = "lookup-key"
@@ -183,10 +189,12 @@ label = "Search"
 [[tabs.sections.entries]]
 id = "open-dictionary-search"
 label = "Open dictionary search"
+help = "Opens a search window. Click the button, then press a key combination."
 
 [[tabs.sections.entries]]
 id = "open-sentence-search"
 label = "Open sentence search"
+help = "Opens a search window for a complete sentence. Click the button, then press a key combination."
 
 [[tabs.sections]]
 id = "dictionary-terms"
@@ -283,6 +291,7 @@ help = "Requires Anki and AnkiConnect to be running."
 [[tabs.sections.entries]]
 id = "anki-notify-on-add"
 label = "Notify after adding a card"
+help = "Shows a tray notification after each successful add."
 
 [[tabs.sections.entries]]
 id = "anki-overwrite-duplicates"
@@ -317,6 +326,7 @@ label = "Card content"
 id = "anki-include-screenshot"
 label = "Attach a screenshot to cards"
 help = "Captures the configured area when adding an Anki card."
+inline_help = true
 
 [[tabs.sections.entries]]
 id = "screenshot-targets"
@@ -326,6 +336,7 @@ help = "Choose options ask each time. Reuse options remember the first choice. H
 [[tabs.sections.entries]]
 id = "anki-include-dictionary-name"
 label = "Include the dictionary name"
+help = "Puts the name of each dictionary before its definitions in the card."
 
 [[tabs.sections.entries]]
 id = "anki-first-dictionary-only"
@@ -385,6 +396,7 @@ label = "Installed extensions"
 [[tabs.sections.entries]]
 id = "plugin-list"
 label = "Extensions"
+help = "Reads the extensions in the plugins folder beside the executable."
 
 [[tabs]]
 id = "debug"
