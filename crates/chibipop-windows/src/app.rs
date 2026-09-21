@@ -31,6 +31,7 @@ use crate::text::ocr::{recogniser_available, WinrtOcr};
 use crate::text::runtime::{OcrMonitor, OcrRuntime};
 use crate::ui::layout::anki_button_label;
 use crate::ui::overlay::Overlay;
+use crate::ui::placement;
 use crate::ui::render::{Renderer, SceneInputs};
 use crate::ui::settings_window::{ApplyMode, ApplyState, SettingsClick, SettingsOutcome, SettingsWindow};
 use crate::ui::static_overlay::StaticRegionOverlay;
@@ -299,6 +300,29 @@ fn quit_when_idle(outcome: Option<SettingsOutcome>, working: bool, pending: &mut
     false
 }
 
+/// Remembers where the settings window was, so the next run reopens there.
+///
+/// A minimized or maximized window reports no corner of its own, and then the
+/// previous corner stays. Refer to `SettingsWindow::placement` (issue #112).
+fn remember_settings_position(window: &SettingsWindow) {
+    if let Some(corner) = window.placement() {
+        placement::store(&placement::state_path(), corner);
+    }
+}
+
+/// Remembers the corner when the settings window goes away.
+///
+/// The standalone process leaves its loop from six places. One guard covers
+/// every one of them. The guard drops before the window does, so the handle
+/// stays live (issue #112).
+struct RememberPosition<'a>(&'a SettingsWindow);
+
+impl Drop for RememberPosition<'_> {
+    fn drop(&mut self) {
+        remember_settings_position(self.0);
+    }
+}
+
 impl SettingsStatus {
     fn any(text: String) -> Self {
         Self { gen: None, text }
@@ -329,6 +353,7 @@ pub fn settings_only(
     let stale = settings::stale_order_entries(&cfg, dicts);
     let window = SettingsWindow::open(&form, &stale, ApplyMode::Standalone)
         .context("opening the settings window")?;
+    let _remember = RememberPosition(&window);
 
     window.set_runtime_status("Not scanning", "Not running", cfg.anki.enabled);
     let mut rebuild: Option<InFlight> = None;
@@ -2424,6 +2449,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                         // Keep the tray and hide only the settings window.
                         Some(SettingsOutcome::Cancel) => {
                             pending_apply_save = None;
+                            remember_settings_position(w);
                             settings = None;
                         }
                         // The main thread handles this event directly.
@@ -2813,6 +2839,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         finish_save(None, &mut pending_apply_save, result, config_path, save_sequence);
     }
     crate::diagnostics::shutdown_capture();
+    if let Some(w) = &settings {
+        remember_settings_position(w);
+    }
     std::process::exit(0)
 }
 
