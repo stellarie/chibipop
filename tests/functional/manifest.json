@@ -1,0 +1,60 @@
+{
+  "schema": "chibipop-functional/v1",
+  "cases": [
+    {
+      "id": "dictionary-build",
+      "title": "Dictionary build",
+      "requires": ["tests/fixtures/yomitan/terms.zip"]
+    },
+    {
+      "id": "lookup",
+      "title": "Text lookup",
+      "requires": ["tests/fixtures/yomitan/terms.zip", "data/deconjugator.json"]
+    },
+    {
+      "id": "windows-ocr",
+      "title": "Windows OCR",
+      "requires": ["crates/chibipop-windows/tests/fixtures/japanese_bgra.bin"]
+    },
+    {
+      "id": "text-resolution",
+      "title": "Text resolution",
+      "requires": []
+    },
+    {
+      "id": "sentence-analysis",
+      "title": "Sentence analysis",
+      "requires": ["data/ipadic/system.dic"]
+    },
+    {
+      "id": "search-candidates",
+      "title": "Search candidates",
+      "requires": ["tests/fixtures/yomitan/terms.zip", "data/deconjugator.json"]
+    },
+    {
+      "id": "presentation",
+      "title": "Popup presentation",
+      "requires": ["tests/fixtures/yomitan/terms.zip", "data/deconjugator.json"]
+    },
+    {
+      "id": "anki-fields",
+      "title": "Anki field payload",
+      "requires": ["tests/fixtures/yomitan/terms.zip", "data/deconjugator.json"]
+    },
+    {
+      "id": "png-encoding",
+      "title": "PNG encoding and save",
+      "requires": []
+    },
+    {
+      "id": "config",
+      "title": "Configuration parse and validation",
+      "requires": []
+    },
+    {
+      "id": "plugin-cli",
+      "title": "Plugin discovery and one test call",
+      "requires": []
+    }
+  ]
+}
