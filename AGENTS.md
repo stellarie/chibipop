@@ -87,13 +87,13 @@ defines the terms. Do not restate these files.
 
 - **Never run a formatter.** See rule 1.
 - Render rules as terse lists. Prose explains, but a list decides.
-- Doc comments must give the rationale. Use long `//!` and `///` headers that
-  state why a component exists and what was rejected. A comment that restates a
-  signature is noise.
-- A comment states why, never what. Keep one only where the code is ambiguous.
-  An inline `//` comment is a one-liner of 50 characters or fewer. If it does
-  not fit, restructure the code. The three exceptions are a `//!` or `///`
-  header, a `// SAFETY:` block, and a test doc comment.
+- A comment explains what the code does. Two lines maximum, 50 characters per
+  line. It never gives rationale, history, or a rejected alternative. That
+  rationale belongs in the pull request.
+- No comment on a variable, field, constant, or enum variant unless its meaning
+  is not obvious from the name.
+- `// SAFETY:` is the one exception. It states the proof that the unsafe block
+  needs, at the length that proof needs.
 - Write prose in ASD-STE100 Simplified Technical English: one instruction per
   sentence, active voice, and one term for each thing. Code and tables are
   exempt from this rule.

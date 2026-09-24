@@ -810,10 +810,8 @@ fn window_dpi(hwnd: HWND) -> u32 {
     }
 }
 
-/// Gets the work area of one monitor.
-///
-/// The function measures physical pixels. It returns None when the monitor
-/// gives no work area.
+/// Gets the work area of one monitor, in pixels.
+/// None when the monitor reports no work area.
 fn monitor_work_area(hmon: HMONITOR) -> Option<Area> {
     // SAFETY: `mi` sets `cbSize` to its structure size, as GetMonitorInfoW
     // requires. The call writes only `mi`.
@@ -831,7 +829,7 @@ fn monitor_work_area(hmon: HMONITOR) -> Option<Area> {
     }
 }
 
-/// Gets the work area of the monitor nearest a window.
+/// Gets the work area nearest to a window.
 fn work_area(hwnd: HWND) -> Option<Area> {
     // SAFETY: `hwnd` can be invalid, because MonitorFromWindow then selects
     // the nearest monitor. The call only reads.
@@ -839,16 +837,14 @@ fn work_area(hwnd: HWND) -> Option<Area> {
     monitor_work_area(hmon)
 }
 
-/// Gets the work area of the monitor nearest a point.
+/// Gets the work area nearest to a point.
 fn work_area_at(point: POINT) -> Option<Area> {
     // SAFETY: `point` is a value that the call only reads.
     let hmon = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
     monitor_work_area(hmon)
 }
 
-/// Gets the top-left corner of a window.
-///
-/// The value uses physical pixels in screen coordinates.
+/// Gets the top-left corner, in pixels.
 fn corner(hwnd: HWND) -> Option<(i32, i32)> {
     // SAFETY: `hwnd` can be invalid. The call writes only `rect`.
     let mut rect = RECT::default();
@@ -856,20 +852,14 @@ fn corner(hwnd: HWND) -> Option<(i32, i32)> {
     Some((rect.left, rect.top))
 }
 
-/// The work area that will hold the settings window, and its wanted corner.
-///
-/// The wanted corner is a request. `Area::fit` trims it into the area.
+/// A work area and the corner wanted inside it.
 struct Target {
     area: Area,
     corner: (i32, i32),
 }
 
-/// Returns the target for the next placement of a window.
-///
-/// A remembered corner selects its own monitor, because that monitor can differ
-/// from the one that the system chose for the window. Without a remembered
-/// corner, the window keeps the monitor and the corner that the system chose
-/// (issue #112).
+/// Picks the corner and monitor for a window.
+/// A saved corner chooses its own monitor.
 fn target(hwnd: HWND, saved: Option<Placement>) -> Option<Target> {
     match saved {
         Some(p) => work_area_at(POINT { x: p.x, y: p.y })
@@ -3735,11 +3725,8 @@ impl SettingsWindow {
         self.hwnd
     }
 
-    /// Returns the corner where the window sits, for the next run.
-    ///
-    /// A minimized window reports the position of its icon, and a maximized
-    /// window reports the corner of its monitor. Neither one is a corner that
-    /// the user chose, so both return None and keep the last chosen corner.
+    /// Returns the corner where the window sits.
+    /// None while minimized or maximized.
     pub fn placement(&self) -> Option<Placement> {
         // SAFETY: `self.hwnd` is live. Both calls only read.
         unsafe {
@@ -5125,14 +5112,7 @@ impl SettingsWindow {
         self.set_status(&format!("Saved {name} path."));
     }
 
-    /// Resizes the client area to `client_w` by `client_h` 96-DPI pixels,
-    /// moves the window inside a work area, and displays it.
-    ///
-    /// Frame metrics and the native scrollbar reserve space at the window DPI.
-    /// `target` holds the monitor that will show the window. The placement uses
-    /// the height that the window really takes, because the system refuses a
-    /// window below its minimum track size. A window that covers no pixel of
-    /// its monitor, or that is taller than it, would open cropped (issue #112).
+    /// Resizes, places, and shows the window.
     fn fit_to(&self, client_w: i32, client_h: i32, target: Option<Target>) {
         // SAFETY: `self.hwnd` is a valid window handle. `rc` is local stack
         // storage that the call modifies. Failure leaves the current window size.
@@ -5149,7 +5129,7 @@ impl SettingsWindow {
                 }
                 let corner = target.map(|t| t.area.fit(t.corner, (size.x, outer_h)));
                 let (x, y) = corner.unwrap_or((0, 0));
-                // No work area means no position: keep the current corner.
+                // No work area: keep the current corner.
                 let flags = if corner.is_some() { SWP_NOZORDER } else { SWP_NOMOVE | SWP_NOZORDER };
                 let _ = SetWindowPos(
                     self.hwnd,
@@ -10333,10 +10313,7 @@ mod tests {
         assert_eq!(result, "meikiocr_path = \"C:\\\\tools\\\\meikiocr\"\n");
     }
 
-    /// Asserts that a window covers no pixel above or left of its work area.
-    ///
-    /// The bottom edge must also be inside, unless the minimum size of the
-    /// window is taller than the work area. No position fits such a window.
+    /// Asserts the window lies inside its work area.
     fn assert_inside_work_area(window: &SettingsWindow) {
         let area = work_area(window.hwnd).unwrap();
         let rect = outer_rect(window);
@@ -10347,8 +10324,6 @@ mod tests {
         }
     }
 
-    /// The reported crop. A window that opens with its bottom edge below the
-    /// work area hides its lowest controls, and no scrollbar reaches them.
     #[test]
     fn every_open_leaves_the_window_inside_its_work_area() {
         let form = nondefault_form();
@@ -10356,9 +10331,6 @@ mod tests {
         assert_inside_work_area(&window);
     }
 
-    /// A remembered corner can name a monitor that is no longer attached. A
-    /// window at such a corner is invisible rather than cropped, so the corner
-    /// must come back onto a monitor.
     #[test]
     fn a_corner_off_every_monitor_comes_back_inside_the_work_area() {
         let form = nondefault_form();
@@ -10379,7 +10351,6 @@ mod tests {
         assert_inside_work_area(&window);
     }
 
-    /// The user story of issue #112: the window reopens where it closed.
     #[test]
     fn the_window_reopens_where_it_closed() {
         let path = placement::state_path();
@@ -10387,8 +10358,8 @@ mod tests {
         let form = nondefault_form();
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let area = work_area(window.hwnd).unwrap();
-        // The top-left corner of a work area holds every window size, so this
-        // corner tests the round trip and not the trim.
+        // This corner fits any size, so the trim
+        // does not move the window.
         let wanted = Placement { x: area.left, y: area.top };
         window.fit_to(600, 240, target(window.hwnd, Some(wanted)));
         window.pump(|| {});
@@ -10403,9 +10374,6 @@ mod tests {
         assert_eq!((stored.x, stored.y), (again.left, again.top));
     }
 
-    /// A minimized window reports the position of its icon, and a maximized
-    /// window reports the corner of its monitor. Neither corner belongs to the
-    /// user, so neither one replaces the last chosen corner.
     #[test]
     fn a_minimized_or_maximized_window_remembers_no_corner() {
         let form = nondefault_form();
