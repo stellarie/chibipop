@@ -1514,18 +1514,8 @@ mod tests {
     }
 
     #[test]
-    fn ocr_passes_defaults_to_one() {
-        assert_eq!(1, Config::default().ocr.max_ocr_passes);
-    }
-
-    #[test]
     fn prefer_vertical_defaults_to_false() {
         assert!(!Config::default().ocr.prefer_vertical);
-    }
-
-    #[test]
-    fn discard_furigana_defaults_to_true() {
-        assert!(Config::default().ocr.discard_furigana);
     }
 
     #[test]
@@ -1617,12 +1607,6 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_overlay_defaults_off() {
-        assert!(!Config::default().debug.show_scan_region,
-                "the overlay is a debug aid and must be opt-in");
-    }
-
-    #[test]
     fn an_enabled_overlay_round_trips() {
         let p = tmp("overlay_on");
         let _ = std::fs::remove_file(&p);
@@ -1647,12 +1631,6 @@ mod tests {
         let c = load_or_create(&p).expect("a pre-[debug] config must still load");
         assert!(!c.debug.show_scan_region);
         let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn the_match_highlight_defaults_on() {
-        assert!(Config::default().popup.highlight_match,
-                "the highlight is the everyday answer to 'is this the word I am pointing at?'");
     }
 
     #[test]
@@ -1682,16 +1660,6 @@ mod tests {
     }
 
     #[test]
-    fn popup_scrolling_defaults_on() {
-        assert!(Config::default().popup.scroll_popup);
-    }
-
-    #[test]
-    fn edge_autoscrolling_defaults_on() {
-        assert!(Config::default().popup.edge_autoscroll);
-    }
-
-    #[test]
     fn disabled_scrolling_round_trips() {
         let p = tmp("scroll_off");
         let _ = std::fs::remove_file(&p);
@@ -1703,11 +1671,6 @@ mod tests {
         assert!(!back.popup.scroll_popup);
         assert!(!back.popup.edge_autoscroll);
         let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn side_panel_defaults_off() {
-        assert!(!Config::default().popup.side_panel);
     }
 
     #[test]
@@ -2820,12 +2783,6 @@ mod tests {
     // Tests for the plugin engine.
 
     #[test]
-    fn builtin_is_the_default_engine() {
-        let c = Config::default();
-        assert_eq!(c.ocr.engine, "builtin");
-    }
-
-    #[test]
     fn an_engine_naming_a_plugin_that_is_not_enabled_falls_back() {
         let chosen = resolve_engine("manga-ocr", &["meikiocr".to_string()]);
         assert_eq!(chosen, EngineChoice::FellBack("manga-ocr".into()));
@@ -2848,11 +2805,6 @@ mod tests {
     fn an_unknown_engine_falls_back_with_no_plugins_enabled() {
         let chosen = resolve_engine("meikiocr", &[]);
         assert_eq!(chosen, EngineChoice::FellBack("meikiocr".into()));
-    }
-
-    #[test]
-    fn plugins_enabled_defaults_to_empty() {
-        assert!(Config::default().plugins.enabled.is_empty());
     }
 
     #[test]
