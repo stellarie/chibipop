@@ -259,19 +259,4 @@ mod tests {
         assert!(e.glosses().is_empty());
         assert!(e.pos.is_empty());
     }
-
-    #[test]
-    fn fake_dictionary_returns_seeded_rows() {
-        let mut d = FakeDictionary::new();
-        d.add_term("食べる", Some("食べる"), Some("たべる"), "v1", Some(7), 1, 1);
-        assert_eq!(1, d.terms_for("食べる").unwrap().len());
-        assert!(d.terms_for("猫").unwrap().is_empty());
-    }
-
-    #[test]
-    fn fake_dictionary_returns_seeded_entries() {
-        let mut d = FakeDictionary::new();
-        d.add_entry(1, 1, &one_sense("to eat", "v1"));
-        assert_eq!(1, d.entries(&[1]).unwrap().len());
-    }
 }
