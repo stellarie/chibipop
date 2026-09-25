@@ -23,12 +23,22 @@ pub const CAPTURE_W_RANGE: (i32, i32) = (100, 1600);
 /// The lower limit sets the reach of the hit scan.
 pub const CAPTURE_H_RANGE: (i32, i32) = (80, 600);
 
+/// Keeps application preferences shared across platform-specific Settings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ApplicationConfig {
+    /// Keeps the daemon reachable after live Settings closes.
+    pub background_on_close: bool,
+}
+
 /// The root section of the TOML configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub trigger: TriggerConfig,
     pub popup: PopupConfig,
     pub dictionaries: DictionariesConfig,
+    #[serde(default)]
+    pub application: ApplicationConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
     #[serde(default)]
@@ -1016,6 +1026,7 @@ impl Default for Config {
             // Earlier defaults stored two substrings.
             // Those substrings guessed which Dictionary a user installed.
             dictionaries: DictionariesConfig::default(),
+            application: ApplicationConfig::default(),
             plugins: PluginsConfig::default(),
             ocr: OcrConfig::default(),
             debug: DebugConfig::default(),
@@ -2597,6 +2608,52 @@ mod tests {
         c.dictionaries.display_order.clear();
         assert_eq!(c, load_or_create(&p).unwrap());
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn background_on_close_defaults_off_and_round_trips_both_values() {
+        let serialized = toml::to_string(&Config::default()).unwrap();
+        let mut legacy = toml::from_str::<toml::Value>(&serialized).unwrap();
+        legacy.as_table_mut().unwrap().remove("application");
+        let legacy = toml::to_string(&legacy).unwrap();
+        let loaded: Config = toml::from_str(&legacy).unwrap();
+        let saved = toml::to_string(&loaded).unwrap();
+        let saved: toml::Value = toml::from_str(&saved).unwrap();
+
+        assert_eq!(
+            Some(false),
+            saved
+                .get("application")
+                .and_then(|application| application.get("background-on-close"))
+                .and_then(toml::Value::as_bool),
+            "an older config should default to background off",
+        );
+
+        for enabled in [false, true] {
+            let mut value = toml::from_str::<toml::Value>(&legacy).unwrap();
+            let application = value
+                .as_table_mut()
+                .unwrap()
+                .entry("application")
+                .or_insert_with(|| toml::Value::Table(Default::default()));
+            application.as_table_mut().unwrap().insert(
+                "background-on-close".to_string(),
+                toml::Value::Boolean(enabled),
+            );
+
+            let loaded: Config =
+                toml::from_str(&toml::to_string(&value).unwrap()).unwrap();
+            let saved: toml::Value =
+                toml::from_str(&toml::to_string(&loaded).unwrap()).unwrap();
+
+            assert_eq!(
+                Some(enabled),
+                saved
+                    .get("application")
+                    .and_then(|application| application.get("background-on-close"))
+                    .and_then(toml::Value::as_bool),
+            );
+        }
     }
 
     /// Confirms that a save preserves fields for the other platform.

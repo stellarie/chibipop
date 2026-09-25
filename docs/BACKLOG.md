@@ -261,10 +261,13 @@ coordinate-taking click tools reject their own input. This is the tier-1/tier-2 
 
 ### Next step — instrument, do not theorise
 
-The mitigation is shipped and **confirmed by oniichan on 2026-07-29**, so this is not urgent:
-settings open automatically at startup, `chibipop settings` reaches the same window with no tray at
-all, and **`Quit chibipop` is a button in that window** — the tray menu now offers nothing that is
-not reachable without it. Fixing the tray is therefore a correctness and polish item, not a blocker.
+The mitigation is shipped and **confirmed by oniichan on 2026-07-29**. Settings opens at startup,
+so the tray failure is not urgent for the default configuration.
+
+Issue 111 adds opt-in background-on-close. When enabled, the hidden Settings window removes its
+in-window Quit path. The tray menu then becomes the only in-app way to reopen Settings or quit the
+daemon. `chibipop settings` launches a separate process and cannot control the active daemon.
+Keep the preference off until a real tray click passes on Windows 10 LTSC.
 
 To actually fix it, log every message arriving in `app::run`'s loop with its `hwnd`, `message`,
 `wParam` and `lParam`, run it, have oniichan right-click once, and read the log. That distinguishes
