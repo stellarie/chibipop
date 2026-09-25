@@ -1888,8 +1888,8 @@ exists.
    unchanged without spawning a plugin. The stderr startup line reads
    `chibipop: OCR engine: windows-ocr` (`WindowsOcr::name()` at
    `src/text/ocr.rs:275`).
-2. `chibipop.exe settings` opens with seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
-   Anki, Extensions, and Debug. `crates/chibipop-windows/assets/settings-layout.toml` defines their order.
+2. `chibipop.exe settings` opens with eight tabs: Popup, General, Shortcuts, Dictionaries,
+   Text recognition, Anki, Extensions, and Debug. The layout asset defines their order.
 3. The **Text reader** dropdown on Text recognition lists **"Built-in (Windows OCR)"**
    and **"meikiocr"**. The list is `["builtin"]` extended by
    `discovered_text_providers(found)` (`src/ui/settings_window.rs`), which
@@ -2334,11 +2334,17 @@ Restore only disposable fixture changes.
     Applying a different OCR engine replaces the Worker backend; the status line reports the backend actually running.
     A successful standalone Apply saves and closes. A standalone dictionary rebuild starts a fresh daemon after saving.
 
-11e. **Close through the top-right X.** Click X in standalone settings and in the running daemon's settings.
-    Both must exit the process. The daemon's tray, hooks, popup, and other owned windows must stop.
-    If an operation is writing, remember the close request, finish that operation, then exit.
-    Escape retains its separate behavior: it hides live settings while the daemon continues.
-    `tests/settings_lifecycle.rs` checks actual process exit through the native close command.
+11e. **Close Settings with X.** Run `chibipop run` with both background-on-close values.
+    The preference defaults off for old and new configs. With it off, X exits after active edits.
+    During an active dictionary edit, close with X and confirm the edit finishes before exit.
+    With it on, X hides live Settings, removes its taskbar button, and keeps the daemon running.
+    Perform one ordinary lookup while Settings stays hidden. The popup must still work.
+    Right-click the real tray icon. Settings must restore one window, and Quit must exit.
+    Run `chibipop settings` with either value. X exits that standalone process.
+    Escape keeps its independent live-settings hide behavior.
+    `tests/settings_lifecycle.rs` checks process state, HWND visibility, and preference save/reload.
+    Manually check the taskbar button and tray callback on Windows 10 LTSC.
+    A posted `WM_TRAYICON` message does not verify Shell delivery. See BACKLOG 7.
 
 11f. **Live logs.** On Debug, press **Show live logs**. A separate window must show recent and new output.
     Resize it, select and copy text, and scroll back while output continues.

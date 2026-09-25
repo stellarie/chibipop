@@ -288,9 +288,11 @@ be compared with a plain line diff on their output — a clean diff after a
 change that should not move anything is the evidence, not an argument.
 `--dict` and `--config` are inherited from `settings`.
 
-Windows settings use seven tabs: Popup, Shortcuts, Dictionaries, Text recognition,
+Windows settings use eight tabs: Popup, General, Shortcuts, Dictionaries, Text recognition,
 Anki, Extensions, and Debug. All shortcut controls appear together on Shortcuts.
 Optional shortcuts have Clear buttons. Escape remains reserved for closing the popup.
+General > Window behavior controls background-on-close. The setting defaults off.
+Enable it only after the tray menu passes physical Windows acceptance.
 
 Resize or maximize settings to give controls more room. Lists, fields, help text, and the footer adapt to the client area.
 The footer separates Apply progress from the active OCR language, OCR engine, and Anki enablement.
@@ -299,8 +301,10 @@ Changing the OCR engine replaces the Worker-owned backend without a restart. The
 
 **Debug > Show live logs** opens a separate window with bounded recent output and live updates.
 Selecting text or reading older output pauses following. Returning to the tail resumes it.
-Closing the viewer leaves chibipop running. Closing the settings window with X exits the process after any active write finishes.
-Escape retains the live settings hide behavior.
+Closing the viewer leaves chibipop running. With background-on-close off, live Settings X
+exits after active edits finish. When enabled, X hides Settings and keeps the daemon running.
+Use tray Settings to restore it and tray Quit to exit. Standalone Settings X always exits.
+Escape retains its independent live-settings hide behavior.
 
 **Debug > Clear lookup cache** applies to the running Windows daemon. Confirmation names cached
 OCR pixels and text, parsed definitions, dictionary styles, frequencies, and decoded dictionary
@@ -421,18 +425,19 @@ hand to bring it level with a fresh install.
 
 ## Configuration file
 
-The settings window covers every option below, and is the expected way in.
-The file remains hand-editable.
+Windows Settings covers its options below, and is the expected way in. Linux Settings
+preserves the Windows-only background-on-close value without rendering it. The file remains
+hand-editable.
 
 Malformed TOML is a **hard error naming the file**, never a silent fallback —
 that is how a typo quietly erases someone's settings. A value that parses but
 is out of range is **clamped on load and named on stderr**.
 
 This is the whole file, at its defaults, as `Config::default()` serializes it
-on 2026-08-29. Both platforms read the same schema
+on 2026-09-25. Both platforms read the same schema
 ([`ARCHITECTURE.md`](../ARCHITECTURE.md#settings-and-config)); the keys that
 end in `_linux` are the Linux twin of the key above them, and Windows ignores
-them.
+them. Linux also preserves the Windows-only `application.background-on-close` value.
 
 ```toml
 [trigger]
@@ -466,6 +471,9 @@ display_order = ["大辞林", "Jitendex"]   # case-insensitive substrings, in pr
 [dictionaries.per_language]              # optional; keyed by OCR recognizer tag
 "ja"         = ["大辞林", "Jitendex"]    # these, in this order, and nothing else
 "zh-Hans-CN" = ["中日大辞典"]
+
+[application]
+background-on-close = false # Windows: hide live Settings on X
 
 [plugins]
 enabled = []                # Windows only; discovery never changes this list
