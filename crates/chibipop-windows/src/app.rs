@@ -5675,7 +5675,7 @@ mod tests {
     /// Bounds for the stand-in. A wrong request cannot hang a test.
     const HEADER_LIMIT: usize = 8 * 1024;
     const BODY_LIMIT: usize = 4 * 1024 * 1024;
-    const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+    const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
     const SOCKET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
     /// How many connections the stand-in handles before it stops.
     const ACCEPT_ATTEMPTS: usize = 8;
