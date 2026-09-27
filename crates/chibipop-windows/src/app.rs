@@ -5675,7 +5675,6 @@ mod tests {
     /// Bounds for the stand-in. A wrong request cannot hang a test.
     const HEADER_LIMIT: usize = 8 * 1024;
     const BODY_LIMIT: usize = 4 * 1024 * 1024;
-    const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
     const SOCKET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
     /// How many connections the stand-in handles before it stops.
     const ACCEPT_ATTEMPTS: usize = 8;
@@ -5693,6 +5692,7 @@ mod tests {
         /// parsed log cannot say why. This keeps the bytes for the failure
         /// message.
         raw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        accepted_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         stop: std::sync::Arc<AtomicBool>,
         worker: Option<std::thread::JoinHandle<()>>,
     }
@@ -5705,25 +5705,25 @@ mod tests {
             let url = format!("http://{}", listener.local_addr().expect("the bound address"));
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let raw = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let accepted_attempts =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let recorded = seen.clone();
             let recorded_raw = raw.clone();
+            let recorded_attempts = accepted_attempts.clone();
             let done = stop.clone();
             let worker = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + ACCEPT_LIMIT;
                 // An abandoned connection arrives with no body on a loaded
                 // runner. Ignoring one keeps the log about the request under
                 // test instead of about whatever opened a socket and left.
                 let mut attempts = 0;
-                while !done.load(Ordering::Relaxed)
-                    && std::time::Instant::now() < deadline
-                    && attempts < ACCEPT_ATTEMPTS
-                {
+                while !done.load(Ordering::Relaxed) && attempts < ACCEPT_ATTEMPTS {
                     let Ok((mut stream, _)) = listener.accept() else {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
                     };
                     attempts += 1;
+                    recorded_attempts.store(attempts, Ordering::Relaxed);
                     let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
                     let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
                     let body = read_request_body(&mut stream);
@@ -5746,7 +5746,7 @@ mod tests {
                     return;
                 }
             });
-            FakeAnki { url, seen, raw, stop, worker: Some(worker) }
+            FakeAnki { url, seen, raw, accepted_attempts, stop, worker: Some(worker) }
         }
 
         fn seen(&self) -> Vec<serde_json::Value> {
@@ -5756,6 +5756,10 @@ mod tests {
         /// The raw bodies, for a failure message.
         fn raw(&self) -> Vec<String> {
             self.raw.lock().expect("the raw request log").clone()
+        }
+
+        fn accepted_attempts(&self) -> usize {
+            self.accepted_attempts.load(Ordering::Relaxed)
         }
     }
 
@@ -5829,7 +5833,14 @@ mod tests {
         ));
 
         let seen = anki.seen();
-        assert_eq!(1, seen.len(), "the authorized add never reached Anki: {seen:?}");
+        assert_eq!(
+            1,
+            seen.len(),
+            "the authorized add never reached Anki: {seen:?}, attempts: {}, raw: {:?}, result: {:?}",
+            anki.accepted_attempts(),
+            anki.raw(),
+            result.filed,
+        );
         assert_eq!(
             Some("addNote"),
             seen[0]["action"].as_str(),
