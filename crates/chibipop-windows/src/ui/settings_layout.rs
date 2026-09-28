@@ -9,7 +9,7 @@ use std::collections::HashSet;
 const LAYOUT_VERSION: u32 = 1;
 const EMBEDDED_LAYOUT: &str = include_str!("../../assets/settings-layout.toml");
 
-pub(super) const SETTING_INVENTORY: [SettingId; 65] = [
+pub(super) const SETTING_INVENTORY: [SettingId; 66] = [
     SettingId::ClosePopup,
     SettingId::LookupMode,
     SettingId::LookupKey,
@@ -75,6 +75,7 @@ pub(super) const SETTING_INVENTORY: [SettingId; 65] = [
     SettingId::AnkiStaticOverlay,
     SettingId::AnkiFieldMap,
     SettingId::PluginList,
+    SettingId::BackgroundOnClose,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -119,6 +120,7 @@ pub(super) struct EntrySpec {
 #[serde(rename_all = "kebab-case")]
 pub(super) enum TabId {
     Popup,
+    General,
     Shortcuts,
     Dictionaries,
     TextRecognition,
@@ -150,6 +152,7 @@ pub(super) enum SectionId {
     AnkiFieldMap,
     ExtensionPlugins,
     DebugDiagnostics,
+    WindowBehavior,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -220,6 +223,7 @@ pub(super) enum SettingId {
     AnkiStaticOverlay,
     AnkiFieldMap,
     PluginList,
+    BackgroundOnClose,
 }
 
 impl SettingsLayout {
@@ -353,6 +357,7 @@ mod tests {
             labels,
             [
                 "Popup",
+                "General",
                 "Shortcuts",
                 "Dictionaries",
                 "Text recognition",
@@ -361,11 +366,11 @@ mod tests {
                 "Debug",
             ]
         );
-        assert_eq!(layout.tab_count(), 7);
-        assert_eq!(layout.field_map_tab(), Some(4));
-        assert!(layout.tab_needs_anki_detection(4));
+        assert_eq!(layout.tab_count(), 8);
+        assert_eq!(layout.field_map_tab(), Some(5));
+        assert!(layout.tab_needs_anki_detection(5));
         assert!(!layout.tab_needs_anki_detection(0));
-        assert_eq!(layout.tab_label(1), Some("Shortcuts"));
+        assert_eq!(layout.tab_label(2), Some("Shortcuts"));
         let (tab, section, entry) = location(&layout, SettingId::AnkiEnabled);
         assert_eq!(layout.tabs[tab].sections[section].entries[entry].label, "Enable Anki");
         for (key, option) in [(SettingId::OcrClipboardKey, SettingId::OcrSentenceSearch),
@@ -373,27 +378,44 @@ mod tests {
             let (tab, section, row) = location(&layout, key);
             assert_eq!(location(&layout, option), (tab, section, row + 1));
         }
-        assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 6);
-        assert_eq!(location(&layout, SettingId::DebugEngine).0, 6);
-        assert_eq!(location(&layout, SettingId::DebugAdapter).0, 6);
-        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 6);
-        assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 6);
+        assert_eq!(location(&layout, SettingId::BackgroundOnClose).0, 1);
+        assert_eq!(location(&layout, SettingId::DebugCaptureOutline).0, 7);
+        assert_eq!(location(&layout, SettingId::DebugEngine).0, 7);
+        assert_eq!(location(&layout, SettingId::DebugAdapter).0, 7);
+        assert_eq!(location(&layout, SettingId::ShowLiveLogs).0, 7);
+        assert_eq!(location(&layout, SettingId::ClearLookupCache).0, 7);
 
         let ids: HashSet<_> = SETTING_INVENTORY.into_iter().collect();
         assert_eq!(ids.len(), SETTING_INVENTORY.len());
     }
 
     #[test]
+    fn background_on_close_preference_is_in_general_settings() {
+        let layout = SettingsLayout::embedded().expect("embedded layout should load");
+        let general = layout
+            .tabs
+            .iter()
+            .find(|tab| tab.label == "General")
+            .expect("General tab should exist");
+        assert!(general.sections.iter().any(|section| {
+            section.label == "Window behavior"
+                && section.entries.iter().any(|entry| {
+                    entry.label == "Keep Chibipop running when Settings closes"
+                })
+        }));
+    }
+
+    #[test]
     fn toml_order_controls_tabs_sections_and_entries() {
         let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
-        layout.tabs.swap(0, 1);
-        layout.tabs[1].sections.swap(0, 1);
-        layout.tabs[1].sections[1].entries.swap(0, 1);
+        layout.tabs.swap(0, 2);
+        layout.tabs[2].sections.swap(0, 1);
+        layout.tabs[2].sections[1].entries.swap(0, 1);
 
         let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
         assert_eq!(parsed.tabs[0].id, TabId::Shortcuts);
-        assert_eq!(parsed.tabs[1].sections[0].id, SectionId::PopupSize);
-        assert_eq!(parsed.tabs[1].sections[1].entries[0].id, SettingId::PopupFont);
+        assert_eq!(parsed.tabs[2].sections[0].id, SectionId::PopupSize);
+        assert_eq!(parsed.tabs[2].sections[1].entries[0].id, SettingId::PopupFont);
     }
 
     #[test]
@@ -410,14 +432,15 @@ mod tests {
     }
 
     #[test]
-    fn accepts_removing_an_empty_tab() {
+    fn accepts_removing_a_tab_after_moving_its_settings() {
         let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
         let removed = layout.tabs.remove(1);
+        assert_eq!(TabId::General, removed.id);
         layout.tabs[0].sections.extend(removed.sections);
 
         let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(parsed.tab_count(), 6);
-        assert_eq!(location(&parsed, SettingId::LookupMode).0, 0);
+        assert_eq!(parsed.tab_count(), 7);
+        assert_eq!(location(&parsed, SettingId::LookupMode).0, 1);
     }
 
     #[test]

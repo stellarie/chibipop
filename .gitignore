@@ -20,5 +20,8 @@ __pycache__/
 # Bless-run artifact cache - local only.
 /.scratch/
 
+# Linux container regression output - local only.
+/linux-regression-artifacts/
+
 # Project memory - local only.
 /MEMORY.md

@@ -112,6 +112,19 @@ label = "Show word types"
 help = "Shows labels such as noun, verb, and adjective."
 
 [[tabs]]
+id = "general"
+label = "General"
+
+[[tabs.sections]]
+id = "window-behavior"
+label = "Window behavior"
+
+[[tabs.sections.entries]]
+id = "background-on-close"
+label = "Keep Chibipop running when Settings closes"
+help = "Off by default. Only affects live Settings; a working tray menu reopens or quits."
+
+[[tabs]]
 id = "shortcuts"
 label = "Shortcuts"
 

@@ -300,6 +300,30 @@ fn quit_when_idle(outcome: Option<SettingsOutcome>, working: bool, pending: &mut
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditCloseAction {
+    Continue,
+    HideWindow,
+}
+
+fn edit_close_action(
+    outcome: Option<SettingsOutcome>,
+    background_on_close: bool,
+    quit_requested: &mut bool,
+) -> EditCloseAction {
+    match outcome {
+        Some(SettingsOutcome::Close) if background_on_close => EditCloseAction::HideWindow,
+        Some(SettingsOutcome::Close) => {
+            let _ = quit_when_idle(Some(SettingsOutcome::Quit), true, quit_requested);
+            EditCloseAction::Continue
+        }
+        outcome => {
+            let _ = quit_when_idle(outcome, true, quit_requested);
+            EditCloseAction::Continue
+        }
+    }
+}
+
 /// Stores the corner for the next run.
 fn remember_settings_position(window: &SettingsWindow) {
     if let Some(corner) = window.placement() {
@@ -453,7 +477,11 @@ pub fn settings_only(
         }
 
         if rebuild.is_some() {
-            let _ = quit_when_idle(window.take_outcome(), true, &mut quit_requested);
+            let outcome = match window.take_outcome() {
+                Some(SettingsOutcome::Close) => Some(SettingsOutcome::Quit),
+                outcome => outcome,
+            };
+            let _ = quit_when_idle(outcome, true, &mut quit_requested);
             // Read the result only after the child finishes.
             let Some(built) = rebuild.as_ref().and_then(|f| pump_rebuild(&f.rx, &window)) else {
                 continue;
@@ -507,7 +535,9 @@ pub fn settings_only(
 
         match window.take_outcome() {
             // Without a tray, the window's X acts like Quit.
-            Some(SettingsOutcome::Cancel) | Some(SettingsOutcome::Quit) => return Ok(()),
+            Some(SettingsOutcome::Cancel)
+            | Some(SettingsOutcome::Close)
+            | Some(SettingsOutcome::Quit) => return Ok(()),
             Some(SettingsOutcome::Apply) => {
                 let edited = window.read(&form);
                 let updated = settings::apply_to(&edited, &cfg);
@@ -2373,7 +2403,17 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
 
             if let Some(w) = &settings {
                 if edit.is_some() {
-                    let _ = quit_when_idle(w.take_outcome(), true, &mut quit_requested);
+                    match edit_close_action(
+                        w.take_outcome(),
+                        cfg.application.background_on_close,
+                        &mut quit_requested,
+                    ) {
+                        EditCloseAction::HideWindow => {
+                            remember_settings_position(w);
+                            w.hide();
+                        }
+                        EditCloseAction::Continue => {}
+                    }
                     let done = edit.as_ref().and_then(|f| pump_edit(&f.rx, w));
                     if let Some(done) = done {
                         edit = None;
@@ -2445,6 +2485,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             remember_settings_position(w);
                             settings = None;
                         }
+                        Some(SettingsOutcome::Close) if cfg.application.background_on_close => {
+                            remember_settings_position(w);
+                            w.hide();
+                        }
+                        Some(SettingsOutcome::Close) => drive!(Event::Quit),
                         // The main thread handles this event directly.
                         Some(SettingsOutcome::Quit) => drive!(Event::Quit),
                         Some(SettingsOutcome::Apply) => {
@@ -5067,14 +5112,17 @@ mod tests {
     }
 
     #[test]
-    fn closing_during_a_write_is_remembered_and_exits_after_completion() {
+    fn explicit_quit_during_a_write_is_remembered_and_exits_after_completion() {
         let form = settings::from_config(&Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
         window.set_busy(true);
-        // SAFETY: The test owns this live settings window and sends its native close message.
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                window.hwnd(), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, None, None);
+                window.hwnd(),
+                windows::Win32::UI::WindowsAndMessaging::WM_COMMAND,
+                Some(WPARAM(116)),
+                None,
+            );
         }
         let mut pending = false;
         assert!(!quit_when_idle(window.take_outcome(), true, &mut pending));
@@ -5082,6 +5130,39 @@ mod tests {
         assert!(quit_when_idle(None, false, &mut pending));
         assert!(!quit_when_idle(None, false, &mut pending));
         assert!(!quit_when_idle(Some(SettingsOutcome::Cancel), false, &mut pending));
+    }
+
+    #[test]
+    fn close_during_an_edit_uses_the_preference_and_defers_exit() {
+        let form = settings::from_config(&Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        window.set_busy(true);
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                window.hwnd(),
+                windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                None,
+                None,
+            );
+        }
+
+        let mut quit_requested = false;
+        let close = window.take_outcome();
+        assert_eq!(Some(SettingsOutcome::Close), close);
+        assert_eq!(
+            EditCloseAction::Continue,
+            edit_close_action(close, false, &mut quit_requested),
+        );
+        assert!(quit_requested);
+        assert!(!quit_when_idle(None, true, &mut quit_requested));
+        assert!(quit_when_idle(None, false, &mut quit_requested));
+
+        let mut quit_requested = false;
+        assert_eq!(
+            EditCloseAction::HideWindow,
+            edit_close_action(Some(SettingsOutcome::Close), true, &mut quit_requested),
+        );
+        assert!(!quit_requested);
     }
 
     #[test]
@@ -5594,7 +5675,6 @@ mod tests {
     /// Bounds for the stand-in. A wrong request cannot hang a test.
     const HEADER_LIMIT: usize = 8 * 1024;
     const BODY_LIMIT: usize = 4 * 1024 * 1024;
-    const ACCEPT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
     const SOCKET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
     /// How many connections the stand-in handles before it stops.
     const ACCEPT_ATTEMPTS: usize = 8;
@@ -5612,6 +5692,7 @@ mod tests {
         /// parsed log cannot say why. This keeps the bytes for the failure
         /// message.
         raw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        accepted_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         stop: std::sync::Arc<AtomicBool>,
         worker: Option<std::thread::JoinHandle<()>>,
     }
@@ -5624,25 +5705,25 @@ mod tests {
             let url = format!("http://{}", listener.local_addr().expect("the bound address"));
             let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let raw = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let accepted_attempts =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let recorded = seen.clone();
             let recorded_raw = raw.clone();
+            let recorded_attempts = accepted_attempts.clone();
             let done = stop.clone();
             let worker = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + ACCEPT_LIMIT;
                 // An abandoned connection arrives with no body on a loaded
                 // runner. Ignoring one keeps the log about the request under
                 // test instead of about whatever opened a socket and left.
                 let mut attempts = 0;
-                while !done.load(Ordering::Relaxed)
-                    && std::time::Instant::now() < deadline
-                    && attempts < ACCEPT_ATTEMPTS
-                {
+                while !done.load(Ordering::Relaxed) && attempts < ACCEPT_ATTEMPTS {
                     let Ok((mut stream, _)) = listener.accept() else {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
                     };
                     attempts += 1;
+                    recorded_attempts.store(attempts, Ordering::Relaxed);
                     let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
                     let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
                     let body = read_request_body(&mut stream);
@@ -5665,7 +5746,7 @@ mod tests {
                     return;
                 }
             });
-            FakeAnki { url, seen, raw, stop, worker: Some(worker) }
+            FakeAnki { url, seen, raw, accepted_attempts, stop, worker: Some(worker) }
         }
 
         fn seen(&self) -> Vec<serde_json::Value> {
@@ -5675,6 +5756,10 @@ mod tests {
         /// The raw bodies, for a failure message.
         fn raw(&self) -> Vec<String> {
             self.raw.lock().expect("the raw request log").clone()
+        }
+
+        fn accepted_attempts(&self) -> usize {
+            self.accepted_attempts.load(Ordering::Relaxed)
         }
     }
 
@@ -5748,7 +5833,14 @@ mod tests {
         ));
 
         let seen = anki.seen();
-        assert_eq!(1, seen.len(), "the authorized add never reached Anki: {seen:?}");
+        assert_eq!(
+            1,
+            seen.len(),
+            "the authorized add never reached Anki: {seen:?}, attempts: {}, raw: {:?}, result: {:?}",
+            anki.accepted_attempts(),
+            anki.raw(),
+            result.filed,
+        );
         assert_eq!(
             Some("addNote"),
             seen[0]["action"].as_str(),

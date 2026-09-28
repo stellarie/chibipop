@@ -17,7 +17,7 @@ use windows::Win32::UI::Controls::TCM_SETCURFOCUS;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, PostMessageW,
-    SendMessageTimeoutW, SendMessageW, CB_SETCURSEL, BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE,
+    SendMessageTimeoutW, SendMessageW, CB_SETCURSEL, BM_GETCHECK, BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE,
     SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND, WM_GETTEXT, WM_KEYDOWN, WM_SYSCOMMAND,
 };
 
@@ -33,6 +33,10 @@ struct ProcessFixture {
 
 impl ProcessFixture {
     fn start(mode: &str) -> Self {
+        Self::start_with_background_on_close(mode, None)
+    }
+
+    fn start_with_background_on_close(mode: &str, enabled: Option<bool>) -> Self {
         let root = std::env::temp_dir().join(format!("chibipop_ui_process_{}_{}",
             std::process::id(), NEXT_ID.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(root.join("library")).unwrap();
@@ -55,7 +59,22 @@ impl ProcessFixture {
         if let Some((_, language)) = chibipop_windows::text::ocr::installed_recognisers().first() {
             config.ocr.language = language.clone();
         }
-        config.save(&root.join("chibipop.toml")).unwrap();
+        let config_path = root.join("chibipop.toml");
+        config.save(&config_path).unwrap();
+        if let Some(enabled) = enabled {
+            let mut saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+            let application = saved
+                .as_table_mut()
+                .unwrap()
+                .entry("application")
+                .or_insert_with(|| toml::Value::Table(Default::default()));
+            application.as_table_mut().unwrap().insert(
+                "background-on-close".to_string(),
+                toml::Value::Boolean(enabled),
+            );
+            std::fs::write(&config_path, toml::to_string_pretty(&saved).unwrap()).unwrap();
+        }
         let expected_language = if mode == "run" {
             let engine = chibipop_windows::text::ocr::WinrtOcr::new(&config.ocr.language).unwrap();
             engine.engine().RecognizerLanguage().unwrap().LanguageTag().unwrap().to_string()
@@ -222,10 +241,60 @@ fn standalone_x_exits_and_reports_inactive_scanning() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("settings");
     let window = process.window("chibipop settings");
+    assert_eq!(0, unsafe { SendMessageW(control(window, 28000), BM_GETCHECK, None, None).0 });
     let status = text(control(window, 194));
     assert!(status.contains("Not scanning"), "{status}");
     assert!(status.contains("Not running"), "{status}");
     system_command(window, SC_CLOSE);
+    process.wait_exit();
+}
+
+#[test]
+fn standalone_x_exits_when_background_preference_is_enabled() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let mut process = ProcessFixture::start_with_background_on_close("settings", Some(true));
+    let window = process.window("chibipop settings");
+    system_command(window, SC_CLOSE);
+    process.wait_exit();
+}
+
+#[test]
+fn background_on_close_preference_saves_and_reloads() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let mut process = ProcessFixture::start_with_background_on_close("settings", Some(true));
+    let window = process.window("chibipop settings");
+    let preference = control(window, 28000);
+    let apply_state = control(window, 193);
+    assert_eq!(1, unsafe { SendMessageW(preference, BM_GETCHECK, None, None).0 });
+
+    unsafe {
+        SendMessageW(preference, BM_SETCHECK, Some(WPARAM(0)), None);
+        PostMessageW(Some(window), WM_COMMAND, WPARAM(28000), LPARAM(preference.0 as isize)).unwrap();
+    }
+    assert!(unsafe { IsWindow(Some(window)).as_bool() }, "Settings window closed during edit");
+    assert!(process.child.try_wait().unwrap().is_none(), "Settings process closed during edit");
+    assert!(unsafe { IsWindow(Some(apply_state)).as_bool() }, "Apply state control disappeared");
+    wait_until("background preference pending", || text(apply_state).contains("Pending"));
+    unsafe {
+        PostMessageW(Some(window), WM_COMMAND, WPARAM(100), LPARAM(0)).unwrap();
+    }
+    process.wait_exit();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(process.root.join("chibipop.toml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        Some(false),
+        saved
+            .get("application")
+            .and_then(|application| application.get("background-on-close"))
+            .and_then(toml::Value::as_bool),
+    );
+
+    process.restart("settings");
+    let reopened = process.window("chibipop settings");
+    let preference = control(reopened, 28000);
+    assert_eq!(0, unsafe { SendMessageW(preference, BM_GETCHECK, None, None).0 });
+    system_command(reopened, SC_CLOSE);
     process.wait_exit();
 }
 
@@ -270,6 +339,21 @@ fn daemon_escape_closes_settings_without_exit() {
 }
 
 #[test]
+fn daemon_x_hides_settings_and_keeps_running_when_preference_is_enabled() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    let mut process = ProcessFixture::start_with_background_on_close("run", Some(true));
+    let window = process.window("chibipop settings");
+    system_command(window, SC_CLOSE);
+    wait_until("settings hidden after X", || unsafe { !IsWindowVisible(window).as_bool() });
+    assert!(unsafe { IsWindow(Some(window)).as_bool() }, "the hidden Settings window remains available");
+    assert!(
+        process.child.try_wait().unwrap().is_none(),
+        "X stopped the daemon: {}",
+        process.logs()
+    );
+}
+
+#[test]
 fn audit_keeps_machine_readable_json_and_does_not_enable_capture() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("settings");
@@ -285,12 +369,12 @@ fn audit_keeps_machine_readable_json_and_does_not_enable_capture() {
     let labels: Vec<_> = audit["dumps"].as_array().unwrap().iter()
         .filter(|dump| dump["field_map_expanded"] == false)
         .map(|dump| dump["tab_label"].as_str().unwrap()).collect();
-    assert_eq!(vec!["Popup", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
+    assert_eq!(vec!["Popup", "General", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("live diagnostics enabled"));
 }
 
 #[test]
-fn daemon_reports_real_ocr_saves_truthfully_opens_logs_and_exits_via_x() {
+fn daemon_reports_real_ocr_saves_truthfully_and_exits_when_background_is_disabled() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("run");
     let window = process.window("chibipop settings");
@@ -307,7 +391,7 @@ fn daemon_reports_real_ocr_saves_truthfully_opens_logs_and_exits_via_x() {
     let tab = control(window, 130);
     // SAFETY: These messages contain only control identifiers, handles, and integers.
     unsafe {
-        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(6)), None);
+        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(7)), None);
     }
     wait_until("Debug controls visible", || unsafe { IsWindowVisible(control(window, 192)).as_bool() });
     // SAFETY: This is the selected child-process window's log command.

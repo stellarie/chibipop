@@ -56,6 +56,8 @@ pub struct SettingsForm {
     /// learned field names must not wipe a good field map. `Some(vec![])` means
     /// that a user mapped no fields. That is an answer, and the form saves it.
     pub field_map: Option<Vec<FieldMapping>>,
+    /// Windows preference answer.
+    pub background_on_close: Option<bool>,
     /// The action is off when this value is `None`.
     pub ocr_clipboard_key: Option<String>,
     /// Saved targets can change while this form is open.
@@ -361,6 +363,7 @@ pub fn from_config(cfg: &Config, dicts: &[DictInfo]) -> SettingsForm {
         library_empty: false,
         unreadable: Vec::new(),
         field_map: Some(cfg.anki.field_map.clone()),
+        background_on_close: None,
         ocr_clipboard_key: cfg
             .actions
             .ocr_clipboard
@@ -397,6 +400,9 @@ pub fn apply_to(form: &SettingsForm, cfg: &Config) -> Config {
     out.popup = form.cfg.popup.clone();
     out.ocr = form.cfg.ocr.clone();
     out.debug = form.cfg.debug.clone();
+    if let Some(background_on_close) = form.background_on_close {
+        out.application.background_on_close = background_on_close;
+    }
     out.anki = form.cfg.anki.clone();
     out.plugins.enabled = form.cfg.plugins.enabled.clone();
     out.actions.screenshot.include_on_add = form.cfg.actions.screenshot.include_on_add;
@@ -1338,6 +1344,45 @@ mod tests {
         cfg.ocr.language = "zh-Hans".to_string();
         assert_eq!("zh-Hans", from_config(&cfg, &dicts()).cfg.ocr.language);
         assert_eq!("ja", from_config(&Config::default(), &dicts()).cfg.ocr.language);
+    }
+
+    #[test]
+    fn an_unrendered_application_preference_is_preserved() {
+        let mut saved: toml::Value =
+            toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
+        let application = saved
+            .as_table_mut()
+            .unwrap()
+            .entry("application")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        application
+            .as_table_mut()
+            .unwrap()
+            .insert("background-on-close".to_string(), toml::Value::Boolean(true));
+        let loaded: Config = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
+        let form = from_config(&loaded, &dicts());
+        let applied = apply_to(&form, &loaded);
+        let saved: toml::Value = toml::from_str(&toml::to_string(&applied).unwrap()).unwrap();
+
+        assert_eq!(
+            Some(true),
+            saved
+                .get("application")
+                .and_then(|application| application.get("background-on-close"))
+                .and_then(toml::Value::as_bool),
+        );
+    }
+
+    #[test]
+    fn a_windows_application_preference_answer_is_applied() {
+        let cfg = Config::default();
+        let mut form = from_config(&cfg, &dicts());
+        assert_eq!(None, form.background_on_close);
+        form.background_on_close = Some(true);
+
+        let applied = apply_to(&form, &cfg);
+
+        assert!(applied.application.background_on_close);
     }
 
     #[test]

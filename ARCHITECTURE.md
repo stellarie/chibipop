@@ -330,7 +330,11 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   or duplicate entries before controls are created. Editing the asset requires a rebuild.
 - Windows settings reflow controls in current client dimensions and preserve user sizing.
   Runtime status comes from the concrete OCR backend. Save sequences reject stale results.
-  The settings X requests process exit after active writes. The Debug viewer closes independently.
+  General > Window behavior controls background-on-close and defaults off. When enabled,
+  live Settings X hides its window and keeps the daemon running. Tray Settings shows the
+  retained window, and tray Quit exits after active edits finish. When disabled, live Settings
+  X exits after active edits finish. Standalone Settings X always exits. The Debug viewer
+  closes independently.
 - Interactive Windows commands tee output into a bounded live log. Machine-readable commands
   keep their output contract. Restore original streams before spawning a replacement daemon.
 - Settings reject conflicting platform shortcuts before applying or saving changes.
@@ -349,6 +353,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   definitions use an HTML heading because square brackets can become furigana in Anki.
 - Any setting that must round-trip is a field on the shared `Config`. It is never a
   platform-interpreted field, and never a `[linux]` side table.
+- `application.background-on-close` is shared TOML state and defaults off.
+  Windows Settings edits it in General. Linux preserves it without using it.
 - The configuration uses no sentinel values. An unresolvable `popup.font` value falls
   back to the platform default font with a visible warning.
 - Each platform bin renders only the fields of its own platform. A save operation

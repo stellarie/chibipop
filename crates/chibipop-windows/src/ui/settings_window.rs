@@ -65,6 +65,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub enum SettingsOutcome {
     Apply,
     Cancel,
+    Close,
     /// Available only from an active instance.
     Quit,
 }
@@ -248,6 +249,7 @@ const ID_SHOW_LIVE_LOGS: i32 = 192;
 const ID_CLEAR_LOOKUP_CACHE: i32 = 155;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
+const ID_BACKGROUND_ON_CLOSE: i32 = 28000;
 const ID_SEARCH_KEY: i32 = 195;
 const ID_SENTENCE_SEARCH_KEY: i32 = 196;
 const ID_SELECTED_TEXT_KEY: i32 = 94;
@@ -1636,7 +1638,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CLOSE => {
-            record_outcome(hwnd, SettingsOutcome::Quit);
+            record_outcome(hwnd, SettingsOutcome::Close);
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -3738,17 +3740,26 @@ impl SettingsWindow {
         Some(Placement { x, y })
     }
 
-    /// Activates the current window. It does not open a duplicate.
+    /// Activates the Settings window.
     ///
-    /// Restores minimized windows before activation. `SetForegroundWindow`
-    /// does not restore minimized windows.
+    /// Shows it, then focuses it.
     pub fn focus(&self) {
         // SAFETY: `self.hwnd` remains valid until `Drop`.
         unsafe {
-            if IsIconic(self.hwnd).as_bool() {
+            if !IsWindowVisible(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_SHOW);
+            } else if IsIconic(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_RESTORE);
             }
             let _ = SetForegroundWindow(self.hwnd);
+        }
+    }
+
+    /// Hides the Settings window.
+    pub fn hide(&self) {
+        // SAFETY: The handle stays valid until this window is dropped.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 
@@ -5660,6 +5671,10 @@ impl SettingsWindow {
                 let _ = EnableWindow(control, is_live);
                 help!();
             }
+            SettingId::BackgroundOnClose => {
+                checkbox!(ID_BACKGROUND_ON_CLOSE, form.cfg.application.background_on_close);
+                help!();
+            }
             SettingId::DebugCaptureOutline => {
                 checkbox!(ID_SHOW_SCAN, form.cfg.debug.show_scan_region);
             }
@@ -6412,6 +6427,7 @@ impl SettingsWindow {
             form.cfg.debug.show_scan_region = checked(ID_SHOW_SCAN);
             form.cfg.debug.show_engine_log = checked(ID_ENGINE_LOG);
             form.cfg.debug.show_adapter_log = checked(ID_ADAPTER_LOG);
+            form.background_on_close = Some(checked(ID_BACKGROUND_ON_CLOSE));
             form.freq_changed = staged.freq_changed;
             form.staged_adds = staged.staged_adds.clone();
             form.staged_removes = staged.staged_removes.clone();
@@ -6915,6 +6931,7 @@ mod tests {
             anki_field: "Front".into(),
             source: "expression".into(),
         }]);
+        form.background_on_close = Some(form.cfg.application.background_on_close);
         form.ocr_clipboard_key = Some("f5".into());
         form
     }
@@ -6922,8 +6939,8 @@ mod tests {
     #[test]
     fn runtime_tabs_follow_layout_and_queue_the_initial_selection() {
         let mut layout = SettingsLayout::embedded().unwrap();
-        layout.tabs.swap(0, 1);
-        layout.tabs[1].sections.swap(0, 1);
+        layout.tabs.swap(0, 2);
+        layout.tabs[2].sections.swap(0, 1);
         move_layout_entry(&mut layout, SettingId::AnkiFieldMap, 0, 0, 0);
         layout.validate().unwrap();
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
@@ -6935,14 +6952,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(7, window.tab_count());
+        assert_eq!(8, window.tab_count());
         assert_eq!(Some("Shortcuts"), window.tab_label(0));
         assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
         assert_eq!(Some(0), window.field_map_tab());
         assert!(window.tab_needs_anki_detection(0));
         assert_eq!(Some(0), window.take_tab_change());
 
-        window.switch_tab(1);
+        window.switch_tab(2);
         assert!(control_top(&window, ID_MAX_WIDTH) < control_top(&window, ID_THEME));
         let audit = crate::ui::audit::dump(window.hwnd);
         let ring = audit["tab_ring"].as_array().unwrap();
@@ -7356,9 +7373,9 @@ mod tests {
     fn debug_action_is_separate_from_dirty_settings() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        assert_eq!(7, window.tab_count());
-        assert_eq!(Some("Debug"), window.tab_label(6));
-        window.switch_tab(6);
+        assert_eq!(8, window.tab_count());
+        assert_eq!(Some("Debug"), window.tab_label(7));
+        window.switch_tab(7);
         send_command(&window, ID_SHOW_LIVE_LOGS);
         window.pump(|| {});
         assert!(window.take_show_logs());
@@ -7594,7 +7611,7 @@ mod tests {
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
         }
-        window.switch_tab(1);
+        window.switch_tab(2);
         // SAFETY: The shortcut stays visible but disabled outside Static mode.
         unsafe {
             for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
@@ -7606,7 +7623,7 @@ mod tests {
 
         for mode in [SentenceMode::Line, SentenceMode::All] {
             select_sentence_mode(&window, mode);
-            window.switch_tab(1);
+            window.switch_tab(2);
             unsafe {
                 for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
                     assert!(!windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
@@ -7617,7 +7634,7 @@ mod tests {
         }
 
         select_sentence_mode(&window, SentenceMode::Static);
-        window.switch_tab(1);
+        window.switch_tab(2);
         // SAFETY: Static mode enables every fixed-area control.
         unsafe {
             for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
@@ -7633,7 +7650,7 @@ mod tests {
             assert!(IsWindowVisible(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).unwrap()).as_bool());
         }
         assert!(control_top(&window, ID_THEME) > collapsed_top);
-        window.switch_tab(4);
+        window.switch_tab(5);
         // SAFETY: The owner tab is hidden.
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
@@ -7766,7 +7783,7 @@ mod tests {
         let mut form = nondefault_form();
         form.cfg.anki.sentence_mode = SentenceMode::Sentence;
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        window.switch_tab(1);
+        window.switch_tab(2);
         // SAFETY: The fixed-area controls stay visible but disabled outside Static mode.
         unsafe {
             for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
@@ -8296,15 +8313,15 @@ mod tests {
     }
 
     #[test]
-    fn wm_close_records_a_quit_outcome() {
+    fn wm_close_records_a_close_outcome() {
         let hwnd = HWND(4242 as *mut core::ffi::c_void);
         let _ = unsafe { wndproc(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
         let got = OUTCOME.with(|c| c.get());
-        assert_eq!(Some((hwnd.0 as isize, SettingsOutcome::Quit)), got);
+        assert_eq!(Some((hwnd.0 as isize, SettingsOutcome::Close)), got);
     }
 
     #[test]
-    fn escape_cancels_and_close_quits_while_busy() {
+    fn escape_cancels_and_close_reports_separately_while_busy() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
         send_command(&window, 2);
@@ -8314,7 +8331,17 @@ mod tests {
         unsafe {
             SendMessageW(window.hwnd, WM_CLOSE, None, None);
         }
-        assert_eq!(Some(SettingsOutcome::Quit), window.take_outcome());
+        assert_eq!(Some(SettingsOutcome::Close), window.take_outcome());
+    }
+
+    #[test]
+    fn focus_shows_a_hidden_settings_window() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        window.hide();
+        assert!(!unsafe { IsWindowVisible(window.hwnd()).as_bool() });
+        window.focus();
+        assert!(unsafe { IsWindowVisible(window.hwnd()).as_bool() });
     }
 
     #[test]
