@@ -2156,9 +2156,9 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
             .into(),
     );
     rows.push(
-        hint(format!(
+        hint(
             "Card fields must match the name of the field on your Anki note type exactly."
-        )),
+        ),
     );
     rows
 }
