@@ -1866,7 +1866,7 @@ fn dictionaries_page(app: &App) -> Element<'_, Message> {
             hint(
                 "Priority is determined by the position of a dict in its section. \
                  The checkbox toggles a dictionary on/off for its section. \
-                 Adds and removals are applied via the database Rebuild button." \
+                 Adds and removals are applied via the database Rebuild button."
             ),
             rebuild_row(app),
         ].spacing(10)),
