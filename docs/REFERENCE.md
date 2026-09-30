@@ -452,6 +452,16 @@ Each ordinary field can override its parent separately.
 An override remains explicit when its value equals the parent value.
 `Clear` is valid only for optional fields.
 
+Use **Settings > Profiles** to create, duplicate, rename, or delete profiles.
+The same page and the tray menu select the default profile.
+
+To restore an inherited field:
+
+1. Select the Derived profile in **Settings > Profiles**.
+2. On Windows, select the reset button beside the field.
+3. On Linux, select **Reset** for the field under **Profiles > Profile fields**.
+4. Select **Apply** or **Apply & Restart** to save the change.
+
 Dictionary role lists have ordered `enabled` and `disabled` arrays.
 An explicit empty list means no Dictionary for that role.
 It does not inherit the parent list or enable every installed Dictionary.
