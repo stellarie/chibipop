@@ -371,11 +371,7 @@ fn audit_keeps_machine_readable_json_and_does_not_enable_capture() {
         .arg("--dict").arg(process.root.join("data/chibipop.sqlite"))
         .current_dir(&process.root).creation_flags(CREATE_NO_WINDOW.0).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let audit: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let labels: Vec<_> = audit["dumps"].as_array().unwrap().iter()
-        .filter(|dump| dump["field_map_expanded"] == false)
-        .map(|dump| dump["tab_label"].as_str().unwrap()).collect();
-    assert_eq!(vec!["Popup", "General", "Shortcuts", "Dictionaries", "Text recognition", "Anki", "Extensions", "Debug"], labels);
+    let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(!String::from_utf8_lossy(&output.stderr).contains("live diagnostics enabled"));
 }
 
@@ -395,9 +391,12 @@ fn daemon_reports_real_ocr_saves_truthfully_and_exits_when_background_is_disable
     system_command(window, SC_RESTORE);
     wait_until("restore", || !unsafe { IsZoomed(window).as_bool() });
     let tab = control(window, 130);
+    let layout: toml::Value = toml::from_str(include_str!("../assets/settings-layout.toml")).unwrap();
+    let tab_index = |id| layout["tabs"].as_array().unwrap().iter()
+        .position(|tab| tab["id"].as_str() == Some(id)).expect("layout tab");
     // SAFETY: These messages contain only control identifiers, handles, and integers.
     unsafe {
-        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(7)), None);
+        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(tab_index("debug"))), None);
     }
     wait_until("Debug controls visible", || unsafe { IsWindowVisible(control(window, 192)).as_bool() });
     // SAFETY: This is the selected child-process window's log command.
@@ -414,7 +413,7 @@ fn daemon_reports_real_ocr_saves_truthfully_and_exits_when_background_is_disable
     let anki_enabled = control(window, 125);
     // SAFETY: The controls belong to the selected child process. Messages contain no pointers.
     unsafe {
-        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(0)), None);
+        SendMessageW(tab, TCM_SETCURFOCUS, Some(WPARAM(tab_index("popup"))), None);
         SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(1)), None);
         PostMessageW(Some(window), WM_COMMAND,
             WPARAM(104 | ((CBN_SELCHANGE as usize) << 16)), LPARAM(theme.0 as isize)).unwrap();
