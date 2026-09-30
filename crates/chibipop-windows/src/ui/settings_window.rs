@@ -1186,7 +1186,7 @@ fn record_user_edit(hwnd: HWND) {
     }
 }
 
-fn without_edit_tracking(hwnd: HWND, action: impl FnOnce()) {
+fn without_edit_tracking<T>(hwnd: HWND, action: impl FnOnce() -> T) -> T {
     let owner = hwnd.0 as isize;
     let active = EDIT_TRACKING.with(|slot| {
         let active = slot.get() == Some(owner);
@@ -1195,10 +1195,11 @@ fn without_edit_tracking(hwnd: HWND, action: impl FnOnce()) {
         }
         active
     });
-    action();
+    let result = action();
     if active {
         EDIT_TRACKING.with(|slot| slot.set(Some(owner)));
     }
+    result
 }
 
 fn user_edit_command(id: i32, notify: u16) -> bool {
@@ -4372,7 +4373,7 @@ impl SettingsWindow {
 
         let stale = self.stale.clone();
         let layout = self.layout.clone();
-        unsafe { self.build(form, &stale, &layout)?; }
+        without_edit_tracking(self.hwnd, || unsafe { self.build(form, &stale, &layout) })?;
         self.reflow_all_tabs();
         self.resize_content();
         place_bottom(self.hwnd);
@@ -8128,7 +8129,8 @@ mod tests {
 
     #[test]
     fn footer_keeps_apply_runtime_and_operation_state_separate() {
-        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.terms = rows(&[("Terms", true)]);
         let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: Footer controls remain live for this test.
         unsafe {
@@ -8138,6 +8140,8 @@ mod tests {
                 window_text(dlg_item(window.hwnd, ID_RUNTIME_STATUS).unwrap()),
             );
         }
+        window.set_apply_state(ApplyState::Applying);
+        window.replace_form(&form).unwrap();
         window.set_apply_state(ApplyState::Applied);
         window.set_runtime_status("ja-JP", "builtin fallback", true);
         window.set_status("Saved configuration.");
