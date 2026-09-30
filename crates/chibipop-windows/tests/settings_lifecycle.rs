@@ -201,14 +201,10 @@ unsafe extern "system" fn find_control(hwnd: HWND, parameter: LPARAM) -> BOOL {
 }
 
 fn control(root: HWND, id: i32) -> HWND {
-    control_if_present(root, id).unwrap_or_else(|| panic!("missing control {id}"))
-}
-
-fn control_if_present(root: HWND, id: i32) -> Option<HWND> {
     let mut search = (id, None);
     // SAFETY: The callback borrows this tuple only during enumeration.
     unsafe { let _ = EnumChildWindows(Some(root), Some(find_control), LPARAM(&mut search as *mut _ as isize)); }
-    search.1
+    search.1.unwrap_or_else(|| panic!("missing control {id}"))
 }
 
 fn text(control: HWND) -> String {
@@ -435,10 +431,8 @@ fn daemon_reports_real_ocr_saves_truthfully_and_exits_when_background_is_disable
     std::fs::set_permissions(process.root.join("chibipop.toml"), process.config_permissions.clone()).unwrap();
     // SAFETY: The same live window owns the retry command.
     unsafe { PostMessageW(Some(window), WM_COMMAND, WPARAM(100), LPARAM(0)).unwrap(); }
-    wait_until("save success", || control_if_present(window, 193)
-        .is_some_and(|status| text(status).contains("Applied")));
-    wait_until("applied Anki state", || control_if_present(window, 194)
-        .is_some_and(|status| text(status).contains("Anki: enabled")));
+    wait_until("save success", || text(control(window, 193)).contains("Applied"));
+    wait_until("applied Anki state", || text(control(window, 194)).contains("Anki: enabled"));
     let saved: Config = toml::from_str(&std::fs::read_to_string(process.root.join("chibipop.toml")).unwrap()).unwrap();
     let profile = saved.resolve(&saved.default_profile).unwrap();
     assert_eq!("light", profile.popup.theme);

@@ -4336,9 +4336,9 @@ impl SettingsWindow {
 
         unsafe {
             let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
-            while let Ok(child) = GetWindow(self.hwnd, GW_CHILD) {
-                if DestroyWindow(child).is_err() {
-                    break;
+            for id in [ID_TAB, ID_VIEWPORT] {
+                if let Ok(child) = dlg_item(self.hwnd, id) {
+                    DestroyWindow(child)?;
                 }
             }
             if self.tip != HWND::default() {
@@ -4477,6 +4477,7 @@ impl SettingsWindow {
             // match content dimensions. Window frame borders and title bar
             // are accounted for so buttons remain visible across display DPIs.
             let content_h = win.build(form, stale, &layout)?;
+            win.build_footer()?;
             // Populates both sides from a single vector.
             if let Some(tag) = win.selected_language() {
                 win.staged.borrow_mut().dict_list_language = tag;
@@ -4747,8 +4748,8 @@ impl SettingsWindow {
 
     /// Displays status text during an Apply operation.
     pub fn set_status(&self, text: &str) {
-        // SAFETY: `ID_STATUS` is a valid child of `self.hwnd` created in
-        // `build`. `SetWindowTextW` copies the string during the call.
+        // SAFETY: The footer stays live until `Drop`.
+        // `SetWindowTextW` copies the text.
         unsafe {
             if let Ok(c) = dlg_item(self.hwnd, ID_STATUS) {
                 let _ = SetWindowTextW(c, PCWSTR(wide(text).as_ptr()));
@@ -6967,7 +6968,38 @@ impl SettingsWindow {
             SetTimer(Some(self.hwnd), ID_TIP_TIMER, TIP_POLL_MS, None);
         }
 
-        // SAFETY: Bottom controls are direct children of the live main window.
+        // SAFETY: The viewport and content pane remain live.
+        unsafe {
+            let band_h = self.bottom_y0 - CONTENT_Y;
+            let _ = SetWindowPos(
+                self.viewport,
+                None,
+                0,
+                0,
+                dpi_scale(h, WIN_W),
+                dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                self.content,
+                None,
+                0,
+                0,
+                dpi_scale(h, WIN_W),
+                dpi_scale(h, band_h),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            self.place_viewport();
+            update_list_buttons(h);
+        }
+        self.switch_tab(0);
+        Ok(self.bottom_y0 + BOTTOM_H)
+    }
+
+    unsafe fn build_footer(&self) -> Result<()> {
+        let h = self.hwnd;
+        let f = self.font.get();
+        // SAFETY: The live main window owns these controls.
         unsafe {
             child(
                 h,
@@ -7058,32 +7090,10 @@ impl SettingsWindow {
                 ID_QUIT,
                 f,
             )?;
-
-            let band_h = self.bottom_y0 - CONTENT_Y;
-            let _ = SetWindowPos(
-                self.viewport,
-                None,
-                0,
-                0,
-                dpi_scale(h, WIN_W),
-                dpi_scale(h, band_h),
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            let _ = SetWindowPos(
-                self.content,
-                None,
-                0,
-                0,
-                dpi_scale(h, WIN_W),
-                dpi_scale(h, band_h),
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            self.place_viewport();
-            update_list_buttons(h);
         }
-        self.switch_tab(0);
-        Ok(self.bottom_y0 + BOTTOM_H)
+        Ok(())
     }
+
     /// Returns the current values of the controls as a form.
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
         // SAFETY: every id below names a live descendant of `self.hwnd`.
@@ -8140,11 +8150,11 @@ mod tests {
                 window_text(dlg_item(window.hwnd, ID_RUNTIME_STATUS).unwrap()),
             );
         }
+        window.set_runtime_status("ja-JP", "builtin fallback", true);
+        window.set_status("Saved configuration.");
         window.set_apply_state(ApplyState::Applying);
         window.replace_form(&form).unwrap();
         window.set_apply_state(ApplyState::Applied);
-        window.set_runtime_status("ja-JP", "builtin fallback", true);
-        window.set_status("Saved configuration.");
         window.set_capture_fields(&form.cfg.ocr);
         window.populate_combos(&[], &[], Vec::new());
         window.switch_tab(1);
