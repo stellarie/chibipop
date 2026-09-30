@@ -157,8 +157,7 @@ fn escape_search(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('*', "\\*")
         .replace('_', "\\_")
-        .replace('<', "\\<")
-        .replace('>', "\\>")
+        .replace(':', "\\:")
 }
 
 /// Wraps a value in quotes.
@@ -172,13 +171,17 @@ fn build_find_notes_body(
     first_field: &str,
     expression: &str,
 ) -> serde_json::Value {
+    let field_predicate = format!(
+        "{}:{}",
+        escape_search(first_field),
+        escape_search(expression)
+    );
     let query = format!(
-        "deck:{} -deck:\"{}::*\" note:{} {}:{}",
+        "deck:{} -deck:\"{}::*\" note:{} \"{}\"",
         quote_search(deck),
         escape_search(deck),
         quote_search(model),
-        first_field,
-        quote_search(expression)
+        field_predicate
     );
     serde_json::json!({
         "action": "findNotes",
@@ -1274,7 +1277,7 @@ mod tests {
     fn find_notes_scopes_the_query_to_the_deck_and_excludes_its_children() {
         let body = build_find_notes_body("My Deck", "Lapis", "Expression", "食べる");
         assert_eq!(
-            r#"deck:"My Deck" -deck:"My Deck::*" note:"Lapis" Expression:"食べる""#,
+            r#"deck:"My Deck" -deck:"My Deck::*" note:"Lapis" "Expression:食べる""#,
             body["params"]["query"].as_str().expect("query text"),
         );
     }
@@ -1284,7 +1287,7 @@ mod tests {
     fn find_notes_escapes_the_deck_name_and_keeps_the_child_wildcard_raw() {
         let body = build_find_notes_body("N5_Tango*", "Model", "Field", "猫");
         assert_eq!(
-            "deck:\"N5\\_Tango\\*\" -deck:\"N5\\_Tango\\*::*\" note:\"Model\" Field:\"猫\"",
+            r#"deck:"N5\_Tango\*" -deck:"N5\_Tango\*::*" note:"Model" "Field:猫""#,
             body["params"]["query"].as_str().expect("query text"),
         );
     }
@@ -1575,10 +1578,9 @@ mod tests {
         .expect("the unmatched add path");
         assert_eq!(WriteResult::Added(8), result);
         let seen = server.seen.lock().unwrap();
-        assert_eq!(
-            r#"deck:"My Deck" -deck:"My Deck::*" note:"Basic" Front:"猫""#,
-            seen[1]["params"]["query"].as_str().expect("a findNotes query"),
-        );
+        let query = seen[1]["params"]["query"].as_str().expect("a findNotes query");
+        assert!(query.contains(r#"deck:"My Deck""#), "{query}");
+        assert!(query.contains(r#"-deck:"My Deck::*""#), "{query}");
         assert_eq!(Some("My Deck"), seen[2]["params"]["note"]["deckName"].as_str());
         assert_eq!(
             json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
@@ -1612,6 +1614,34 @@ mod tests {
         assert_eq!("猫", update["params"]["note"]["fields"]["Front"]);
         assert_eq!("ねこ", update["params"]["note"]["fields"]["Back"]);
         assert!(update["params"]["note"]["fields"].get("Missing").is_none());
+    }
+
+    #[test]
+    fn overwrite_matches_literal_search_names_and_values() {
+        let deck = "Japanese <Mining>";
+        let model = "Japanese <Mining>";
+        let field = "Word \"Text\"\\_*:Name";
+        let expression = "猫\"\\*:";
+        let map = vec![crate::config::FieldMapping {
+            anki_field: field.into(),
+            source: "expression".into(),
+        }];
+        let fields = HashMap::from([("expression".into(), expression.into())]);
+        let server = scripted_anki(vec![
+            serde_json::json!({ "result": [field], "error": null }),
+            serde_json::json!({ "result": [42], "error": null }),
+            serde_json::json!({ "result": [one_note_info(model, 42, field, expression)], "error": null }),
+            serde_json::json!({ "result": null, "error": null }),
+        ]);
+        let result = write_note(&server.url, deck, model, &fields, &map, None, true)
+            .expect("the exact update path");
+        assert_eq!(WriteResult::Updated(42), result);
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(
+            r#"deck:"Japanese <Mining>" -deck:"Japanese <Mining>::*" note:"Japanese <Mining>" "Word \"Text\"\\\_\*\:Name:猫\"\\\*\:""#,
+            seen[1]["params"]["query"].as_str().expect("the overwrite query"),
+        );
+        assert_eq!(42, seen[3]["params"]["note"]["id"]);
     }
 
     #[test]
@@ -1804,18 +1834,19 @@ mod tests {
     }
 
     #[test]
-    fn anki_query_escapes_quotes_backslashes_wildcards_underscores_and_html_entities() {
+    fn anki_query_escapes_search_operators_but_preserves_angle_brackets() {
         let body = build_find_notes_body("N5_Deck", "Model", "Field", "a\\b\"c*d_e<font>");
         let query = body["params"]["query"].as_str().expect("query text");
         assert!(
-            query.starts_with("deck:\"N5\\_Deck\" -deck:\"N5\\_Deck::*\" note:\"Model\" Field:\""),
+            query.starts_with("deck:\"N5\\_Deck\" -deck:\"N5\\_Deck::*\" note:\"Model\" "),
             "{query}"
         );
         assert!(!query.contains("\"Field\":"), "{query}");
         assert!(query.contains("a\\\\b"), "{query}");
         assert!(query.contains("\\\"c"), "{query}");
         assert!(query.contains("\\*d\\_e"), "{query}");
-        assert!(query.contains("\\<font\\>"), "{query}");
+        assert!(query.contains("<font>"), "{query}");
+        assert!(!query.contains("\\<") && !query.contains("\\>"), "{query}");
     }
 
     // Tests for pitch fields.

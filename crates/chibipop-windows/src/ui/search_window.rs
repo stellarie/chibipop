@@ -146,13 +146,22 @@ impl From<&Config> for SharedPolicy {
 
 struct Query {
     generation: u64, text: String, session: ProfileSession, mode: SearchMode,
-    clicked: Option<usize>, definition: Option<(usize, bool)>,
+    clicked: Option<usize>, definition: Option<(usize, bool)>, click_generation: Option<u64>,
 }
 
 struct Reply {
     generation: u64, result: std::result::Result<SearchResult, String>,
     tokens: Vec<SentenceToken>, selected: Option<Range<usize>>,
-    definition: Option<(usize, bool)>, session: ProfileSession,
+    definition: Option<(usize, bool)>, click_generation: Option<u64>, session: ProfileSession,
+}
+
+impl Reply {
+    fn is_current(&self, generation: u64, click_generation: u64) -> bool {
+        match self.definition {
+            Some((_, false)) => self.click_generation == Some(click_generation),
+            _ => self.click_generation.is_none() && self.generation == generation,
+        }
+    }
 }
 
 enum SearchRequest { Run(Query), Clear }
@@ -168,6 +177,8 @@ pub struct SearchWindow {
     resource_check: Instant,
     database_signature: Option<FileSignature>,
     generation: u64,
+    click_generation: u64,
+    click_parent: Option<usize>,
     requests: Sender<SearchRequest>,
     replies: Receiver<Reply>,
     result: SearchResult,
@@ -285,7 +296,7 @@ impl SearchWindow {
         let mut window = Self { hwnd, state, session, database: database.to_path_buf(),
             rules: rules.to_path_buf(), resource_config_path: None, resource_policy: None,
             resource_check: Instant::now(), database_signature: file_signature(database),
-            generation: 0, requests, replies, result: SearchResult::Empty,
+            generation: 0, click_generation: 0, click_parent: None, requests, replies, result: SearchResult::Empty,
             tokens: Vec::new(), definitions: Vec::new(), hover: None };
         window.switch_mode(mode, text);
         Ok(window)
@@ -482,8 +493,19 @@ impl SearchWindow {
         self.definitions.clear();
     }
 
+    fn invalidate_clicks(&mut self) {
+        self.click_generation = self.click_generation.wrapping_add(1);
+        self.click_parent = None;
+    }
+
+    fn begin_click(&mut self, parent: usize) {
+        self.click_generation = self.click_generation.wrapping_add(1);
+        self.click_parent = Some(parent);
+    }
+
     fn cancel_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.invalidate_clicks();
         self.hover = None;
         self.state.selected.set(None);
     }
@@ -545,8 +567,10 @@ impl SearchWindow {
             }
         }
         while let Ok(reply) = self.replies.try_recv() {
-            if reply.generation != self.generation || self.state.composing.get() { continue; }
+            if !reply.is_current(self.generation, self.click_generation) || self.state.composing.get() { continue; }
             if let Some((parent, hover)) = reply.definition {
+                if self.definitions.get(parent).is_none()
+                    || (!hover && self.click_parent != Some(parent)) { continue; }
                 if hover {
                     let expected = self.hover.as_ref().filter(|(index, _, _, sent)| *index == parent && *sent)
                         .map(|(_, query, _, _)| query.clone());
@@ -557,9 +581,18 @@ impl SearchWindow {
                 if let Ok(SearchResult::Found(presentation)) = reply.result {
                     if let Some(popup) = self.definitions.get(parent) {
                         if let Ok(anchor) = popup.child_anchor() {
-                            self.definitions.truncate(parent + 1);
-                            match SearchPopup::open(&self.database, reply.session.clone(), self.hwnd, *presentation, anchor, true) {
-                                Ok(popup) => self.definitions.push(popup),
+                            match SearchPopup::open(&self.database, reply.session.clone(), self.hwnd,
+                                *presentation, anchor, true) {
+                                Ok(child) => {
+                                    if !hover {
+                                        self.generation = self.generation.wrapping_add(1);
+                                        self.hover = None;
+                                    }
+                                    self.invalidate_clicks();
+                                    self.definitions[parent].note_child_opened();
+                                    self.definitions.truncate(parent + 1);
+                                    self.definitions.push(child);
+                                }
                                 Err(error) => self.set_status(&format!("Cannot open definition: {error:#}")),
                             }
                         }
@@ -578,6 +611,7 @@ impl SearchWindow {
         if let Some(index) = self.state.selected.take() {
             if let Some(presentation) = selected_presentation(&self.result, index) {
                 self.generation = self.generation.wrapping_add(1);
+                self.invalidate_clicks();
                 self.definitions.clear(); self.hover = None;
                 let mut point = POINT { x: 24, y: 48 };
                 // SAFETY: Conversion uses the owned listbox HWND and point storage.
@@ -594,7 +628,8 @@ impl SearchWindow {
 
     fn enqueue(&self, text: String, mode: SearchMode, clicked: Option<usize>,
         definition: Option<(usize, bool)>, session: ProfileSession) {
-        let query = Query { generation: self.generation, text, session, mode, clicked, definition };
+        let click_generation = definition.filter(|(_, hover)| !*hover).map(|_| self.click_generation);
+        let query = Query { generation: self.generation, text, session, mode, clicked, definition, click_generation };
         if self.requests.send(SearchRequest::Run(query)).is_err() {
             self.set_status("Search stopped. Reopen the application to retry.");
         }
@@ -605,11 +640,16 @@ impl SearchWindow {
             match self.definitions[index].poll() {
                 Ok(Some(Action::Back)) => {
                     self.generation = self.generation.wrapping_add(1);
+                    self.invalidate_clicks();
                     self.definitions.truncate(index); self.hover = None; self.restore_focus(); return;
                 }
                 Ok(Some(Action::Lookup(query))) => {
-                    if index >= 15 { self.set_status("Use Back before opening another nested definition."); return; }
+                    if index >= 15 {
+                        self.invalidate_clicks();
+                        self.set_status("Use Back before opening another nested definition."); return;
+                    }
                     self.generation = self.generation.wrapping_add(1);
+                    self.begin_click(index);
                     self.hover = None;
                     let session = self.definitions[index].session.nested();
                     self.enqueue(query, SearchMode::Dictionary, None, Some((index, false)), session); return;
@@ -621,6 +661,18 @@ impl SearchWindow {
         let hovered = self.definitions.iter().rposition(SearchPopup::contains_pointer);
         let next = hovered.and_then(|index| self.definitions[index].hover().map(|query| (index, query)));
         let Some((index, query)) = next else {
+            if let Some(parent) = hovered.filter(|parent| self.definitions.len() > *parent + 1
+                && self.definitions[*parent].pointer_moved_since_child_open()) {
+                if self.click_parent.is_some_and(|owner| owner > parent) {
+                    self.invalidate_clicks();
+                }
+                if self.hover.as_ref().is_some_and(|(_, _, _, sent)| *sent) {
+                    self.generation = self.generation.wrapping_add(1);
+                }
+                self.definitions.truncate(parent + 1);
+                self.hover = None;
+                return;
+            }
             if self.hover.as_ref().is_some_and(|(_, _, _, sent)| *sent) {
                 self.generation = self.generation.wrapping_add(1);
             }
@@ -705,15 +757,18 @@ fn search(service: &SearchService, query: &Query) -> Reply {
     };
     match run() {
         Ok((tokens, selected, result)) => Reply { generation: query.generation, result: Ok(result),
-            tokens, selected, definition: query.definition, session: query.session.clone() },
+            tokens, selected, definition: query.definition, click_generation: query.click_generation,
+            session: query.session.clone() },
         Err(error) => Reply { generation: query.generation, result: Err(format!("{error:#}")),
-            tokens: Vec::new(), selected: None, definition: query.definition, session: query.session.clone() },
+            tokens: Vec::new(), selected: None, definition: query.definition,
+            click_generation: query.click_generation, session: query.session.clone() },
     }
 }
 
 fn search_error(query: Query, error: impl std::fmt::Display) -> Reply {
     Reply { generation: query.generation, result: Err(format!("{error}")), tokens: Vec::new(),
-        selected: None, definition: query.definition, session: query.session }
+        selected: None, definition: query.definition, click_generation: query.click_generation,
+        session: query.session }
 }
 
 fn utf16_range(text: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -1167,6 +1222,26 @@ mod tests {
         assert_eq!(byte_offset(text, 6), 10);
     }
 
+    #[test]
+    fn click_replies_survive_pointer_changes_but_not_navigation_or_new_clicks() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let click = Reply {
+            generation: 11, result: Ok(SearchResult::Empty), tokens: Vec::new(),
+            selected: None, definition: Some((0, false)), click_generation: Some(4),
+            session: session.clone(),
+        };
+        assert!(click.is_current(12, 4));
+        assert!(!click.is_current(12, 5));
+
+        let hover = Reply {
+            generation: 11, result: Ok(SearchResult::Empty), tokens: Vec::new(),
+            selected: None, definition: Some((0, true)), click_generation: None, session,
+        };
+        assert!(!hover.is_current(12, 4));
+    }
+
     struct Fixture(PathBuf);
     impl Drop for Fixture { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
 
@@ -1353,14 +1428,16 @@ mod tests {
         wait(&mut window, "candidate");
         let (sender, replies) = mpsc::channel(); window.replies = replies;
         sender.send(Reply { generation: window.generation.wrapping_sub(1), result: Ok(SearchResult::Miss),
-            tokens: vec![], selected: None, definition: None, session: window.session.clone() }).unwrap();
+            tokens: vec![], selected: None, definition: None, click_generation: None,
+            session: window.session.clone() }).unwrap();
         window.poll(); assert!(matches!(window.result, SearchResult::Found(_)));
         window.state.selected.set(Some(0));
         window.poll();
         assert_eq!(1, window.definitions.len());
         let cancelled_generation = window.generation;
         sender.send(Reply { generation: cancelled_generation, result: Ok(SearchResult::Miss),
-            tokens: vec![], selected: None, definition: None, session: window.session.clone() }).unwrap();
+            tokens: vec![], selected: None, definition: None, click_generation: None,
+            session: window.session.clone() }).unwrap();
         // SAFETY: This query reads the current test thread's actual keyboard focus.
         let focused = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
         assert_eq!(focused, window.definitions[0].hwnd());

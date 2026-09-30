@@ -18,6 +18,7 @@ pub struct Definition {
     pub hovered: Option<String>,
     pub generation: u64,
     pub pointer: Point,
+    pub(crate) pointer_left: bool,
     pub session: ProfileSession,
     theme: Theme,
 }
@@ -30,8 +31,8 @@ impl Definition {
         size.height = paint::surface_height(&scene).ceil().max(1.0);
         let mut definition = Self {
             presentation, scene, image: Handle::from_rgba(1, 1, vec![0; 4]),
-            size, scale: 1.0, scroll: 0.0, hovered: None, generation: 0, pointer: Point::ORIGIN,
-            session, theme,
+            size, scale: 1.0, scroll: 0.0, hovered: None, generation: 0,
+            pointer: Point::ORIGIN, pointer_left: false, session, theme,
         };
         definition.paint(text, media)?;
         Ok(definition)

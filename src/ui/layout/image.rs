@@ -232,12 +232,16 @@ pub(super) fn place_images(
 /// A width-only constraint would squash a scanned illustration.
 /// This function scales both axes together, so the reader sees the full picture inside its cell.
 ///
-/// This function negates the fit condition instead of reversing the comparison.
-/// A non-number room or width leaves the declared box unchanged.
+/// This function preserves the declared box for an invalid room or width.
+/// A zero share with a valid positive room produces a zero-sized box.
 ///
 /// [`Pass::columns`]: super::pass::Pass::columns
 pub(super) fn image_box(img: &FlowImage, room: f32) -> (f32, f32) {
-    let room = room * img.fit;
+    let available = room;
+    let room = available * img.fit;
+    if room == 0.0 && available.is_finite() && available > 0.0 {
+        return (0.0, 0.0);
+    }
     if !(img.w > room && room > 0.0) {
         return (img.w, img.h);
     }

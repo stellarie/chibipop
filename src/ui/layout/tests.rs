@@ -4964,6 +4964,19 @@ fn a_percentage_cap_on_the_link_is_a_share_of_the_room() {
     assert!((capped.h - 0.7 * whole.h).abs() < 1e-3, "and the height follows");
 }
 
+#[test]
+fn a_zero_percent_link_cap_collapses_image_geometry() {
+    let node = concat!(
+        r#"{"tag":"span","data":{"img":""},"content":["#,
+        r#"{"tag":"img","path":"graphics/104054.avif"}]}"#
+    );
+    let media = [("graphics/104054.avif", recorded(MediaFormat::Avif, 640.0, 480.0))];
+    let p = styled_image(node, ".gloss-image-link { max-width: 0% }", &media);
+    let image = one_image(&laid_out(&p, 424.0, 4000.0, false, false)).rect;
+
+    assert_eq!((0.0, 0.0), (image.w, image.h));
+}
+
 /// The stylesheet reaches the image through the same gate as every other
 /// declaration. With dictionary styling off, the gate ignores inline `style`
 /// and stylesheet rules, so the gaiji takes its recorded size again.

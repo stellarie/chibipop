@@ -2,6 +2,7 @@ import importlib.util
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -61,6 +62,8 @@ class ManualRegressionTests(unittest.TestCase):
             | numbered("1.39", 1, 3)
             | numbered("1.40", 1, 4)
             | numbered("1.42", 1, 3)
+            | {"1.43"}
+            | numbered("1.43", 1, 5)
             | numbered("2", 1, 14)
             | {"2.11a", "2.11b", "2.11c", "2.11d", "2.11e", "2.11f"}
             | {"2.14a", "2.14b", "2.14c", "2.14d", "2.14e", "2.14f"}
@@ -193,8 +196,16 @@ class ManualRegressionTests(unittest.TestCase):
             root = Path(tmp)
             install = root / "install"
             install.mkdir()
-            target = manual_regression.parse_target("main=install", root)
-            self.assertEqual(target.exe, install / "chibipop.exe")
+            elsewhere = root / "elsewhere"
+            elsewhere.mkdir()
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(elsewhere)
+                target = manual_regression.parse_target("main=install", root)
+            finally:
+                os.chdir(original_cwd)
+            executable = "chibipop.exe" if os.name == "nt" else "chibipop"
+            self.assertEqual(target.exe, install / executable)
 
     def test_timeout_is_logged_as_nonzero_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,12 +231,101 @@ class ManualRegressionTests(unittest.TestCase):
         self.assertTrue(manual_regression.requires_anki_write(checks["1.30"]))
         self.assertTrue(manual_regression.requires_anki_write(checks["1.30.4"]))
         self.assertTrue(manual_regression.requires_anki_write(checks["1.30.9"]))
-        self.assertFalse(manual_regression.requires_anki_write(checks["1.30.5"]))
         self.assertTrue(manual_regression.requires_anki_write(checks["1.22.6"]))
+        for ident in ("1.30.1", "1.30.2", "1.30.5", "1.30.6", "1.30.7", "1.30.8"):
+            self.assertTrue(manual_regression.requires_anki_write(checks[ident]), ident)
+            self.assertIn("anki", checks[ident].effects, ident)
+            self.assertTrue(checks[ident].destructive, ident)
+        self.assertEqual(set(checks["1.30.8"].effects), {"config", "anki"})
+        self.assertTrue(manual_regression.requires_config_write(checks["1.30.8"]))
         self.assertTrue(manual_regression.requires_dictionary_mutation(checks["1.19.6"]))
         self.assertTrue(manual_regression.requires_config_write(checks["1.14.2"]))
         self.assertFalse(manual_regression.requires_display_change(checks["1.26"]))
         self.assertTrue(manual_regression.requires_display_change(checks["1.26.7"]))
+        for ident in ("1.43", "1.43.1", "1.43.2", "1.43.3", "1.43.4", "1.43.5"):
+            self.assertIn("config", checks[ident].effects, ident)
+            self.assertTrue(checks[ident].destructive, ident)
+            self.assertTrue(manual_regression.requires_config_write(checks[ident]), ident)
+        self.assertIn("dictionary", checks["1.43.5"].effects)
+        self.assertTrue(manual_regression.requires_dictionary_mutation(checks["1.43.5"]))
+
+    def test_missing_permissions_prevent_prompts_for_mutating_cases(self) -> None:
+        from unittest.mock import patch
+
+        def run_case(ident, permission_flags):
+            with tempfile.TemporaryDirectory() as tmp:
+                argv = [
+                    str(SCRIPT),
+                    "--repo-root",
+                    tmp,
+                    "--only",
+                    ident,
+                    "--interactive",
+                    *permission_flags,
+                ]
+                with contextlib.ExitStack() as patches:
+                    patches.enter_context(patch.object(sys, "argv", argv))
+                    patches.enter_context(
+                        patch.object(manual_regression, "snapshot_target", return_value={})
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            manual_regression,
+                            "backup_protected_state",
+                            return_value=(Path(tmp) / "backup", {}),
+                        )
+                    )
+                    report = patches.enter_context(
+                        patch.object(manual_regression, "write_report")
+                    )
+                    prompt = patches.enter_context(
+                        patch.object(
+                            manual_regression,
+                            "prompt_check",
+                            side_effect=AssertionError("permission gate allowed a prompt"),
+                        )
+                    )
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        exit_code = manual_regression.main()
+                    prompt.assert_not_called()
+                    results = report.call_args.args[2]
+                    result = next(row for row in results if row.ident == ident)
+                    return exit_code, result
+
+        anki_ids = ("1.30.1", "1.30.2", "1.30.5", "1.30.6", "1.30.7", "1.30.8")
+        for ident in anki_ids:
+            _, result = run_case(ident, ["--allow-destructive"])
+            self.assertEqual(result.status, "SKIP", ident)
+
+        _, result = run_case("1.30.1", ["--allow-anki-write"])
+        self.assertEqual(result.status, "SKIP")
+        _, result = run_case(
+            "1.30.8", ["--allow-destructive", "--allow-anki-write"]
+        )
+        self.assertEqual(result.status, "MANUAL")
+        _, result = run_case(
+            "1.30.8", ["--allow-destructive", "--allow-config-write"]
+        )
+        self.assertEqual(result.status, "SKIP")
+        _, result = run_case(
+            "1.30.8", ["--allow-anki-write", "--allow-config-write"]
+        )
+        self.assertEqual(result.status, "SKIP")
+
+        profile_ids = ("1.43", "1.43.1", "1.43.2", "1.43.3", "1.43.4")
+        for ident in profile_ids:
+            _, result = run_case(ident, ["--allow-destructive"])
+            self.assertEqual(result.status, "MANUAL", ident)
+        _, result = run_case("1.43.5", ["--allow-destructive"])
+        self.assertEqual(result.status, "SKIP")
+        _, result = run_case(
+            "1.43.5", ["--allow-destructive", "--allow-config-write"]
+        )
+        self.assertEqual(result.status, "SKIP")
+        _, result = run_case(
+            "1.43.5", ["--allow-destructive", "--allow-dictionary-mutation"]
+        )
+        self.assertEqual(result.status, "MANUAL")
 
     def test_source_does_not_embed_local_machine_paths(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -285,6 +385,33 @@ class ManualRegressionTests(unittest.TestCase):
         self.assertIn("effects=clipboard", result.stdout)
         self.assertIn("destructive=true", result.stdout)
         self.assertNotIn("wrote report:", result.stdout)
+
+    def test_profile_selector_records_registered_cases_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "report.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--repo-root",
+                    str(root),
+                    "--report",
+                    str(report_path),
+                    "--only",
+                    "1.43",
+                    "--non-interactive",
+                    "--strict",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            expected = {"1.43", "1.43.1", "1.43.2", "1.43.3", "1.43.4", "1.43.5"}
+            self.assertEqual({check["ident"] for check in report["checks"]}, expected)
+            self.assertEqual({item["ident"] for item in report["results"]}, expected)
+            self.assertEqual(report["summary"]["SKIP"], len(expected))
 
     def test_report_keeps_selected_case_metadata_and_permissions(self) -> None:
         from unittest.mock import patch

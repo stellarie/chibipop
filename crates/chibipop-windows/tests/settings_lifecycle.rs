@@ -15,10 +15,11 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Controls::TCM_SETCURFOCUS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowRect, GetWindowTextW,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetDlgCtrlID, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, PostMessageW,
-    SendMessageTimeoutW, SendMessageW, CB_SETCURSEL, BM_GETCHECK, BM_SETCHECK, CBN_SELCHANGE, SC_CLOSE,
-    SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND, WM_GETTEXT, WM_KEYDOWN, WM_SYSCOMMAND,
+    SendMessageTimeoutW, SendMessageW, SetCursorPos, CB_SETCURSEL, BM_GETCHECK, BM_SETCHECK,
+    CBN_SELCHANGE, SC_CLOSE, SC_MAXIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, WM_COMMAND, WM_GETTEXT,
+    WM_KEYDOWN, WM_SYSCOMMAND,
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -188,6 +189,36 @@ fn owned_windows(process: u32, title: &str) -> Vec<HWND> {
     search.windows
 }
 
+struct ClassSearch<'a> {
+    process: u32,
+    class: &'a str,
+    windows: Vec<HWND>,
+}
+
+unsafe extern "system" fn find_class(hwnd: HWND, parameter: LPARAM) -> BOOL {
+    // SAFETY: EnumWindows calls synchronously while the caller owns this search.
+    unsafe {
+        let search = &mut *(parameter.0 as *mut ClassSearch<'_>);
+        let mut process = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process));
+        if process == search.process {
+            let mut class = [0u16; 256];
+            let len = GetClassNameW(hwnd, &mut class);
+            if String::from_utf16_lossy(&class[..len.max(0) as usize]) == search.class {
+                search.windows.push(hwnd);
+            }
+        }
+    }
+    BOOL(1)
+}
+
+fn owned_class_windows(process: u32, class: &str) -> Vec<HWND> {
+    let mut search = ClassSearch { process, class, windows: Vec::new() };
+    // SAFETY: The callback borrows this search only during enumeration.
+    unsafe { let _ = EnumWindows(Some(find_class), LPARAM(&mut search as *mut _ as isize)); }
+    search.windows
+}
+
 unsafe extern "system" fn find_control(hwnd: HWND, parameter: LPARAM) -> BOOL {
     // SAFETY: EnumChildWindows calls synchronously with a live search tuple.
     unsafe {
@@ -327,15 +358,44 @@ fn settings_reopens_where_the_last_run_closed_it() {
 }
 
 #[test]
-fn daemon_escape_closes_settings_without_exit() {
+fn daemon_escape_closes_settings_and_destroys_tooltip_without_exit() {
     let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let mut process = ProcessFixture::start("run");
     let window = process.window("chibipop settings");
+    let layout: toml::Value = toml::from_str(include_str!("../assets/settings-layout.toml")).unwrap();
+    let general = layout["tabs"].as_array().unwrap().iter()
+        .position(|tab| tab["id"].as_str() == Some("general")).expect("General tab");
+    // SAFETY: The tab belongs to this test's window.
+    unsafe {
+        SendMessageW(control(window, 130), TCM_SETCURFOCUS, Some(WPARAM(general)), None);
+    }
+    let preference = control(window, 28000);
+    wait_until("General preference visible", || unsafe { IsWindowVisible(preference).as_bool() });
+    // SAFETY: The control belongs to the selected settings window.
+    unsafe {
+        let mut rect = RECT::default();
+        GetWindowRect(preference, &mut rect).unwrap();
+        SetCursorPos((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2).unwrap();
+    }
+    wait_until("settings tooltip visible", || {
+        owned_class_windows(process.child.id(), "tooltips_class32")
+            .into_iter()
+            .any(|tip| unsafe { IsWindowVisible(tip).as_bool() })
+    });
+    let tooltip = owned_class_windows(process.child.id(), "tooltips_class32")
+        .into_iter()
+        .find(|tip| unsafe { IsWindowVisible(*tip).as_bool() })
+        .expect("a visible settings tooltip");
+
     // SAFETY: The selected window belongs to this test's child process.
     unsafe {
         PostMessageW(Some(window), WM_KEYDOWN, WPARAM(0x1b), LPARAM(0)).unwrap();
     }
     wait_until("settings closes after Escape", || unsafe { !IsWindow(Some(window)).as_bool() });
+    wait_until("settings tooltip is destroyed", || unsafe {
+        !IsWindow(Some(tooltip)).as_bool()
+    });
+    assert!(owned_class_windows(process.child.id(), "tooltips_class32").is_empty());
     thread::sleep(Duration::from_millis(250));
     assert!(
         process.child.try_wait().unwrap().is_none(),

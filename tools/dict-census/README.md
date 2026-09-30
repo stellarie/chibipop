@@ -55,11 +55,12 @@ duplicating them:
 - `enum Role` from `src/dict/gloss/mod.rs` — its declaration order *is* the
   classification precedence, so the report's role columns run in the same order
   the parser resolves them.
-- `css_key`, `SUPPORTED_SELECTOR_KINDS`, `SUPPORTED_PSEUDO_CLASSES` and
-  `IMAGE_CHROME_CLASSES` from `src/dict/sheet/mod.rs` — the `styles.css`
-  property table, the selector grammar the matcher compiles, and the three
-  Yomitan image chrome classes that grammar keeps. A selector on one of those
-  classes scores as `image-chrome`. Any other class scores as `class`.
+- `css_key`, `chrome_key`, `SUPPORTED_SELECTOR_KINDS`, `SUPPORTED_PSEUDO_CLASSES`,
+  and `IMAGE_CHROME_CLASSES` from `src/dict/sheet/mod.rs` — the stylesheet
+  properties, selector grammar, and image chrome classes.
+  Image width support depends on the chrome subject and `!important`.
+  The census rejects mixed chrome subjects in one selector list.
+  It also rejects direct-child selectors into inner image chrome.
 
 So the `chibipop` column in the report is always measured against the current
 build, and two counts are live progress gauges that shrink as the renderer

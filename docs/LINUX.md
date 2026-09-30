@@ -10,6 +10,8 @@ target.
 
 ## Quick start (Hyprland)
 
+### Do now
+
 1. **Build it.** Needs [Rust](https://rustup.rs) (stable) and nothing else:
 
    ```bash
@@ -30,10 +32,19 @@ target.
 3. **Configure a Bind.** Open `chibipop settings`, select **Shortcuts**, and
    set a lookup action, mode, profile, and `ALT+F` chord.
 
-4. **Add dictionaries.** On **Dictionaries**, click **Browse…** and select
+4. **Install the native binding.** Copy the Bind's **Copy bind snippet**
+   output into `~/.config/hypr/hyprland.conf`.
+
+   Hold mode needs both `bind-down ID` and `bind-up ID`.
+
+5. **Reload Hyprland.** Run `hyprctl reload`.
+
+### Read
+
+1. **Add dictionaries.** On **Dictionaries**, click **Browse…** and select
    Yomitan `.zip` archives. Press **Rebuild** to import the staged archives.
 
-5. **Read.** Activate the configured lookup Bind over Japanese text.
+2. **Read.** Activate the configured lookup Bind over Japanese text.
 
 
 Every snippet in this document writes the bare command name `chibipop`, which

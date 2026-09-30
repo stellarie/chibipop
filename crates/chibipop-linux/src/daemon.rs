@@ -1035,6 +1035,19 @@ impl App {
     /// configuration UI after binding.
     fn sync_shortcuts(&mut self) {
         if self.shortcut_selection != shortcuts::Selection::Portal {
+            let retired_hold = self.hold.is_some_and(|hold| !hold.latched)
+                && self.controller.trigger_mode() == TriggerMode::HoldKey
+                && self.controller.active_bind_id().is_some_and(|id| {
+                    !self.saved.binds.iter().any(|bind| {
+                        bind.id == id
+                            && bind.enabled
+                            && bind.action == chibipop::config::BindAction::Lookup
+                            && bind.mode == TriggerMode::HoldKey
+                    })
+                });
+            if retired_hold {
+                self.release_active_lookup_bind();
+            }
             self.shortcut_config = None;
             self.retire_shortcut_session();
             return;
@@ -1494,7 +1507,12 @@ impl App {
     /// This matches the Windows bin rule in
     /// `LiveSettings::static_overlay_region`.
     fn sync_static_outline(&mut self) {
-        let wanted = static_overlay_region(self.displayed_session().config());
+        let session = self.displayed_session();
+        self.sync_static_outline_for(&session);
+    }
+
+    fn sync_static_outline_for(&mut self, session: &ProfileSession) {
+        let wanted = static_overlay_region(session.config());
         let screens = self.screens();
         let Some(outline) = self.static_outline.as_mut() else {
             // No layer shell means no border.
@@ -2829,6 +2847,7 @@ impl App {
             Command::RestorePopup { depth } => {
                 if let Some(popup) = self.popup.as_mut() { popup.restore_parent(depth); }
                 self.popup_generation = self.popup_generation.wrapping_add(1);
+                self.sync_static_outline();
             }
             Command::ClearPopupParents => {
                 if let Some(popup) = self.popup.as_mut() { popup.clear_parents(); }
@@ -2915,6 +2934,7 @@ impl App {
                     self.popup_generation = self.popup_generation.wrapping_add(1);
                 }
                 self.controller_hidden = false;
+                self.sync_static_outline_for(&session);
                 let request = ShowRequest {
                     presentation: *presentation,
                     anchor,
@@ -2988,6 +3008,7 @@ impl App {
             Command::HidePopup => {
                 if let Some(popup) = self.popup.as_mut() { popup.clear_parents(); }
                 self.hide_popup();
+                self.sync_static_outline();
             }
             // Two settings use this path:
             // `debug.show_scan_region` shows capture boxes.
@@ -3727,16 +3748,14 @@ impl App {
             self.feed(Event::ConfigReloaded { cfg, session: default_session });
         }
         let layer = self.popup.as_ref().map(Popup::layer);
-        let shown = self.popup.as_ref().and_then(Popup::shown).map(|shown| shown.placement.rect);
+        let rects = self.controller.popup_rects();
         let screens = self.screens();
         if let Some(catcher) = self.catcher.as_mut() {
             if let Some(layer) = layer {
                 catcher.set_layer(layer);
             }
-            if self.controller.watches_outside_clicks() {
-                if let Some(rect) = shown {
-                    catcher.show(&screens, &[rect]);
-                }
+            if self.controller.watches_outside_clicks() && !rects.is_empty() {
+                catcher.show(&screens, &rects);
             } else {
                 catcher.hide();
             }
@@ -5977,6 +5996,56 @@ mod tests {
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("trigger: portal activated lookup"), "log was: {written}");
         assert!(written.contains("trigger: portal deactivated lookup"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Keep a valid native Hold, then retire it before a displaced release.
+    #[test]
+    fn a_native_hold_is_thawed_when_its_bind_is_replaced() {
+        let dir = scratch("native_hold_reload");
+        let log_file = dir.join("chibipop.log");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        app.shortcut_selection = shortcuts::Selection::Native(shortcuts::NativeReason::Forced);
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
+        app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
+        app.last_cursor = Some(AT);
+        let (worker, _worker_log) = fake_worker(None, None);
+        app.worker = Some(worker);
+
+        app.apply_configured_bind("lookup", true);
+        assert!(app.hold.is_some(), "the configured Hold starts");
+
+        let unchanged = app.saved.clone();
+        app.install_saved_config(unchanged).unwrap();
+        assert!(app.hold.is_some(), "an unchanged Hold survives reload");
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(1, written.matches("frozen grab of output").count(), "log: {written}");
+        assert_eq!(0, written.matches("hold released, frozen grab dropped").count(), "log: {written}");
+
+        let mut replaced = app.saved.clone();
+        let old = replaced.binds.iter_mut().find(|bind| bind.id == "lookup").unwrap();
+        old.enabled = false;
+        let mut replacement = old.clone();
+        replacement.id = "lookup-replacement".to_string();
+        replacement.action = chibipop::config::BindAction::Lookup;
+        replacement.linux = "ALT+G".to_string();
+        replacement.mode = TriggerMode::HoldKey;
+        replacement.enabled = true;
+        replaced.binds.push(replacement);
+        app.install_saved_config(replaced).unwrap();
+        assert_eq!(None, app.hold, "reload thaws a retired native Hold");
+
+        app.apply_configured_bind("lookup-replacement", true);
+        assert!(app.hold.is_some(), "the replacement Hold starts");
+        app.lookup_bind_up("lookup");
+        assert!(app.hold.is_some(), "the displaced release cannot end the replacement Hold");
+        app.lookup_bind_up("lookup-replacement");
+        assert_eq!(None, app.hold, "the replacement release ends its own Hold");
+
+        let written = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(2, written.matches("frozen grab of output").count(), "log: {written}");
+        assert_eq!(2, written.matches("hold released, frozen grab dropped").count(), "log: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

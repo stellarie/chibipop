@@ -15,10 +15,31 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+#[derive(Clone, Copy, Default)]
+struct PointerEpoch {
+    movement: u64,
+    child_opened_at: u64,
+}
+
+impl PointerEpoch {
+    fn moved(&mut self) {
+        self.movement = self.movement.wrapping_add(1);
+    }
+
+    fn child_opened(&mut self) {
+        self.child_opened_at = self.movement;
+    }
+
+    fn moved_since_child_open(&self) -> bool {
+        self.movement != self.child_opened_at
+    }
+}
+
 #[derive(Default)]
 struct Events {
     click: Cell<Option<PhysPoint>>,
     pointer: Cell<Option<PhysPoint>>,
+    pointer_epoch: Cell<PointerEpoch>,
     wheel: Cell<i32>,
     repaint: Cell<bool>,
     close: Cell<bool>,
@@ -128,6 +149,16 @@ impl SearchPopup {
         self.events.close.get()
     }
 
+    pub(super) fn note_child_opened(&self) {
+        let mut epoch = self.events.pointer_epoch.get();
+        epoch.child_opened();
+        self.events.pointer_epoch.set(epoch);
+    }
+
+    pub(super) fn pointer_moved_since_child_open(&self) -> bool {
+        self.events.pointer_epoch.get().moved_since_child_open()
+    }
+
     fn place(&mut self, anchor: PhysPoint) -> Result<()> {
         let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default() };
@@ -224,7 +255,13 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             WM_NCHITTEST => return LRESULT(HTCLIENT as isize),
             WM_MOUSEACTIVATE => return LRESULT(MA_ACTIVATE as isize),
             WM_LBUTTONUP => { events.click.set(Some(point)); return LRESULT(0); }
-            WM_MOUSEMOVE => { events.pointer.set(Some(point)); return LRESULT(0); }
+            WM_MOUSEMOVE => {
+                events.pointer.set(Some(point));
+                let mut epoch = events.pointer_epoch.get();
+                epoch.moved();
+                events.pointer_epoch.set(epoch);
+                return LRESULT(0);
+            }
             WM_MOUSEWHEEL => {
                 events.wheel.set(events.wheel.get().saturating_add((wp.0 >> 16) as i16 as i32));
                 return LRESULT(0);
@@ -245,6 +282,20 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_reentry_requires_movement_after_the_child_opens() {
+        let mut epoch = PointerEpoch::default();
+        epoch.moved();
+        epoch.child_opened();
+        assert!(!epoch.moved_since_child_open());
+
+        epoch.moved();
+        assert!(epoch.moved_since_child_open());
+
+        epoch.child_opened();
+        assert!(!epoch.moved_since_child_open());
+    }
 
     #[test]
     fn candidate_defaults_allow_explicit_css_font_overrides() {

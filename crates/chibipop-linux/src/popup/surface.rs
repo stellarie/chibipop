@@ -791,6 +791,9 @@ impl Popup {
         self.pointer.set_wheel_enabled(config.popup.scroll_popup);
         self.vis = Visibility::Shown(saved.shown);
         self.current = Some(saved.request);
+        if self.text.family() != saved.theme.font_name.as_str() {
+            self.text.set_family(&saved.theme.font_name);
+        }
         self.theme = saved.theme;
         self.scene = saved.scene;
         self.hits = saved.hits;
@@ -817,8 +820,14 @@ impl Popup {
             };
             if let Some(slot) = self.slot(saved.shown.output) {
                 self.panels[slot].awaiting_frame = None;
+                if self.text.family() != saved.theme.font_name.as_str() {
+                    self.text.set_family(&saved.theme.font_name);
+                }
                 self.commit_show(slot, pending)?;
             }
+        }
+        if self.text.family() != self.theme.font_name.as_str() {
+            self.text.set_family(&self.theme.font_name);
         }
         self.parents_hidden = false;
         Ok(())

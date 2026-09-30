@@ -10,7 +10,7 @@ use crate::geom::PhysPoint;
 use anyhow::{anyhow, Context, Result};
 use std::collections::VecDeque;
 use std::panic::catch_unwind;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
@@ -136,8 +136,9 @@ static CONFIGURED_BINDS: LazyLock<Mutex<ConfiguredBinds>> =
 /// Tracks physical key edges independently from the current bind list.
 static PHYSICAL_KEYS: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
-/// Keeps the selected-text key consumed through release after a rebind.
-static SELECTED_TEXT_SWALLOWED: AtomicU16 = AtomicU16::new(0);
+/// Keeps selected-text keys consumed through release after a rebind.
+static SELECTED_TEXT_SWALLOWED_KEYS: [AtomicBool; 256] =
+    [const { AtomicBool::new(false) }; 256];
 
 /// Marks whether a configured Anki-add action can run on the active popup.
 static ADD_ARMED: AtomicBool = AtomicBool::new(false);
@@ -315,19 +316,26 @@ fn add_key_swallowed(down: bool, vk: u16) -> bool {
     }
 }
 
-/// The selection action consumes its key through release, even after a rebind.
+/// The selection action consumes each key through release, even after a rebind.
 fn selected_text_key(down: bool, vk: u16, eligible: bool, matched: bool) -> bool {
-    if vk != 0 && SELECTED_TEXT_SWALLOWED.load(Ordering::SeqCst) == vk {
-        if !down {
-            SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst);
-        }
-        return true;
-    }
-    if !down || !eligible || !matched {
+    if vk == 0 {
         return false;
     }
-    SELECTED_TEXT_SWALLOWED.store(vk, Ordering::SeqCst);
-    true
+    let Some(swallowed) = SELECTED_TEXT_SWALLOWED_KEYS.get(vk as usize) else {
+        return false;
+    };
+    if down {
+        if swallowed.load(Ordering::SeqCst) {
+            return true;
+        }
+        if !eligible || !matched {
+            return false;
+        }
+        swallowed.store(true, Ordering::SeqCst);
+        true
+    } else {
+        swallowed.swap(false, Ordering::SeqCst)
+    }
 }
 
 fn own_foreground() -> bool {
@@ -975,7 +983,9 @@ mod tests {
         for key in &PHYSICAL_KEYS {
             key.store(false, Ordering::SeqCst);
         }
-        SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst);
+        for key in &SELECTED_TEXT_SWALLOWED_KEYS {
+            key.store(false, Ordering::SeqCst);
+        }
         ESCAPE_DOWN.store(false, Ordering::SeqCst);
         BACK_ARMED.store(false, Ordering::SeqCst);
         ADD_ARMED.store(false, Ordering::SeqCst);
@@ -1546,8 +1556,6 @@ mod tests {
     #[test]
     fn selected_text_consumes_repeats_and_release_after_rebinding() {
         let _guard = keyboard_guard();
-        PHYSICAL_KEYS[0x47].store(false, Ordering::SeqCst);
-        SELECTED_TEXT_SWALLOWED.store(0, Ordering::SeqCst);
         let bind = configured_bind(
             "selected",
             crate::config::BindAction::SelectedText,
@@ -1566,6 +1574,43 @@ mod tests {
         assert!(!selected_text_key(false, 0x47, false, false));
 
         PHYSICAL_KEYS[0x47].store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn overlapping_selected_text_keys_stay_swallowed_until_each_release() {
+        let _guard = keyboard_guard();
+        let binds = [
+            configured_bind(
+                "selected-g",
+                crate::config::BindAction::SelectedText,
+                "Ctrl+G",
+                TriggerMode::Press,
+            ),
+            configured_bind(
+                "selected-h",
+                crate::config::BindAction::SelectedText,
+                "Ctrl+H",
+                TriggerMode::Press,
+            ),
+        ];
+        Hooks::set_configured_binds(&binds);
+
+        for release_order in [[0x47, 0x48], [0x48, 0x47]] {
+            for vk in [0x47, 0x48] {
+                let matched = action_hotkey_hit(true, vk, crate::config::MOD_CTRL);
+                assert!(selected_text_key(true, vk, true, matched));
+            }
+            for vk in [0x47, 0x48] {
+                assert!(!action_hotkey_hit(true, vk, crate::config::MOD_CTRL));
+                assert!(selected_text_key(true, vk, false, false), "repeats stay swallowed");
+            }
+            for vk in release_order {
+                assert!(!action_hotkey_hit(false, vk, 0));
+                assert!(selected_text_key(false, vk, false, false), "each release stays swallowed");
+            }
+            assert!(!selected_text_key(false, 0x47, false, false));
+            assert!(!selected_text_key(false, 0x48, false, false));
+        }
     }
 
     #[test]

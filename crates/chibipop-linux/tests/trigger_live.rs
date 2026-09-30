@@ -10,12 +10,12 @@
 //! portal, and is not Hyprland.
 //! `daemon.rs` has tests for that diagnostic.
 //!
-//! One test drives one daemon with a real screencopy backend, real meikiocr models, and a
-//! real SQLite dictionary built from the repository's Yomitan fixtures.
-//! It sends the three trigger verbs and reads the daemon log.
-//! It synthesizes no input and never touches the seat.
-//! Therefore, it does not assert which screen word resolves.
-//! That lookup is outside this test. The test checks frozen-hold behavior.
+//! The trigger tests drive one daemon at a time with real screencopy, meikiocr, and a
+//! SQLite dictionary built from the repository's Yomitan fixtures.
+//! They send control verbs and read the daemon log.
+//! They synthesize no input and never touch the seat.
+//! They do not assert which screen word resolves.
+//! These tests check frozen-Hold behavior and reload ownership.
 //!
 //! The lookup log stays off because the screen belongs to the person at the machine.
 
@@ -85,6 +85,7 @@ impl Session {
 
         let mut cmd = Command::new(BIN);
         wayland::xdg(&mut cmd, &dir);
+        cmd.env("CHIBIPOP_TRIGGER_CHANNEL", "native");
         let daemon = cmd.arg("run").spawn().expect("spawning the chibipop daemon");
         Session { log: dir.join("state/chibipop/chibipop.log"), dir, daemon }
     }
@@ -100,7 +101,7 @@ impl Session {
     fn ctl(&self, verb: &str) {
         let mut cmd = Command::new(BIN);
         wayland::xdg(&mut cmd, &self.dir);
-        let out = cmd.args(["ctl", verb]).output().expect("spawning chibipop ctl");
+        let out = cmd.arg("ctl").args(verb.split_ascii_whitespace()).output().expect("spawning chibipop ctl");
         assert!(out.status.success(), "ctl {verb} failed: {}", String::from_utf8_lossy(&out.stderr));
     }
 
@@ -116,6 +117,18 @@ impl Session {
     /// Count the log lines that contain `needle`.
     fn count(&self, needle: &str) -> usize {
         self.log().lines().filter(|l| l.contains(needle)).count()
+    }
+
+    /// Wait until the log contains `count` matching lines.
+    fn wait_for_count(&self, needle: &str, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if self.count(needle) >= count {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("waited for {count} lines containing {needle:?}; log:\n{}", self.log());
     }
 }
 
@@ -205,6 +218,67 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
 
     // A press without a dictionary rebuild must still create only one grab.
     assert_eq!(1, session.count("frozen grab of output"), "no grab without a press");
+}
+
+#[test]
+fn a_reload_retires_a_replaced_native_hold() {
+    if skip() {
+        return;
+    }
+    let session = Session::start("native-hold-reload");
+    let cursor = session.wait_for("cursor: ");
+    if cursor.contains("hover unsupported") {
+        eprintln!("skipping: this session gave the cursor ladder no rung - {cursor}");
+        return;
+    }
+    session.wait_for("worker: pipeline up");
+    session.wait_for("lookups ready");
+
+    session.ctl("bind-down lookup");
+    session.wait_for_count("frozen grab of output", 1);
+    let reloads = session.count("config: reloaded");
+    session.ctl("reload");
+    session.wait_for_count("config: reloaded", reloads + 1);
+    assert_eq!(
+        0,
+        session.count("hold released, frozen grab dropped"),
+        "an unchanged native Hold must stay frozen"
+    );
+
+    let config_path = session.dir.join("config/chibipop/chibipop.toml");
+    let mut config = chibipop::config::load_or_create(&config_path)
+        .expect("reading the live daemon config");
+    let old = config.binds.iter_mut().find(|bind| bind.id == "lookup")
+        .expect("the fixture config has its lookup bind");
+    old.action = chibipop::config::BindAction::AnkiAdd;
+    old.mode = chibipop::config::TriggerMode::Press;
+    let mut replacement = chibipop::config::Bind::new(
+        "lookup-replacement".to_string(),
+        chibipop::config::BindAction::Lookup,
+    );
+    replacement.linux = "ALT+G".to_string();
+    replacement.mode = chibipop::config::TriggerMode::HoldKey;
+    config.binds.push(replacement);
+    config.save(&config_path).expect("saving the replacement bind");
+
+    let reloads = session.count("config: reloaded");
+    session.ctl("reload");
+    session.wait_for_count("config: reloaded", reloads + 1);
+    session.wait_for_count("hold released, frozen grab dropped", 1);
+    session.ctl("bind-down lookup-replacement");
+    session.wait_for_count("frozen grab of output", 2);
+
+    session.ctl("bind-up lookup");
+    session.wait_for_count("control: bind lookup up", 1);
+    assert_eq!(
+        1,
+        session.count("hold released, frozen grab dropped"),
+        "the displaced release must not thaw the replacement Hold"
+    );
+
+    session.ctl("bind-up lookup-replacement");
+    session.wait_for_count("hold released, frozen grab dropped", 2);
+    assert_eq!(2, session.count("frozen grab of output"));
 }
 
 /// This test reproduces the reported failure with a real daemon.

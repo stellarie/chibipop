@@ -821,7 +821,10 @@ impl Controller {
     }
 
     fn popup_hover(&mut self, local: PhysPoint, query: Option<String>) -> Vec<Command> {
-        if !self.cfg.sub_popups {
+        let Some(sub_popups) = self.surface_config().map(|config| config.popup.sub_popups) else {
+            return Vec::new();
+        };
+        if !sub_popups {
             self.cancel_hover();
             return Vec::new();
         }
@@ -837,7 +840,7 @@ impl Controller {
         self.surface.as_mut().expect("surface exists").hovered = query.clone();
         if let Some(query) = query {
             self.next_lookup_request();
-            let delay = 300u64.div_ceil(u64::from(self.cfg.tick_ms.max(1)));
+            let delay = 300u64.div_ceil(u64::from(self.future_cfg.tick_ms.max(1)));
             self.hover_candidate = Some((query, local, self.clock.saturating_add(delay)));
         }
         Vec::new()
@@ -845,7 +848,7 @@ impl Controller {
 
     fn popup_hover_at(&mut self, depth: usize, local: PhysPoint, query: Option<String>) -> Vec<Command> {
         let enabled = if depth == self.parents.len() {
-            self.cfg.sub_popups
+            self.surface_config().is_some_and(|config| config.popup.sub_popups)
         } else {
             self.parents.get(depth)
                 .is_some_and(|parent| parent.session.config().popup.sub_popups)
@@ -862,7 +865,13 @@ impl Controller {
     }
 
     fn hover_tick(&mut self) -> Vec<Command> {
-        if !self.cfg.sub_popups { self.cancel_hover(); return Vec::new(); }
+        let Some(sub_popups) = self.surface_config().map(|config| config.popup.sub_popups) else {
+            return Vec::new();
+        };
+        if !sub_popups {
+            self.cancel_hover();
+            return Vec::new();
+        }
         if self.hover_candidate.as_ref().is_none_or(|(_, _, deadline)| self.clock < *deadline) {
             return Vec::new();
         }
@@ -889,21 +898,24 @@ impl Controller {
         self.awaiting = None;
         self.pending_cursor = None;
         let mut out = vec![Command::RestorePopup { depth }, Command::SetDragging(false), Command::SyncAnkiButton];
-        if let Some(session) = self.surface.as_ref().map(|surface| surface.session.clone()) {
-            self.set_profile_config(&session);
-        }
+        let session = self.request_session_default();
+        self.set_profile_config(&session);
         if let Some(s) = self.surface.as_ref() {
             out.push(self.repaint(s.scroll));
         }
         out.push(Command::SetBackArmed(self.has_history()));
-        if self.cfg.anki_enabled {
+        let (anki_enabled, roles) = self
+            .surface_config()
+            .map(|config| (config.anki.enabled, config.popup.render_settings().roles))
+            .expect("restored parent surface");
+        if anki_enabled {
             if let Some(s) = self.surface.as_mut().filter(|s| s.analysis.is_none()) {
                 self.generation = self.generation.wrapping_add(1);
                 s.analysis_generation = self.generation;
                 let mut texts = Vec::new();
                 if let Some(card) = &s.presentation.top {
                     for (entry, gloss) in entries(card) {
-                        for leaf in leaves(&gloss.doc, self.cfg.roles) {
+                        for leaf in leaves(&gloss.doc, roles) {
                             let text = leaf_text(&gloss.doc, leaf.path);
                             if !text.is_empty() { texts.push(((entry, leaf.path), text.to_string())); }
                         }
@@ -1073,6 +1085,19 @@ impl Controller {
             .clone()
     }
 
+    fn config_for_session(&self, session: &ProfileSession) -> ControllerConfig {
+        if &self.cfg_session == session {
+            return self.cfg.clone();
+        }
+        let mut config = ControllerConfig::for_profile(session.config());
+        config.tick_ms = self.future_cfg.tick_ms;
+        config
+    }
+
+    fn surface_config(&self) -> Option<&crate::config::ResolvedConfig> {
+        self.surface.as_ref().map(|surface| surface.session.config())
+    }
+
     fn set_profile_config(&mut self, session: &ProfileSession) {
         if self.cfg_session == *session {
             return;
@@ -1143,14 +1168,8 @@ impl Controller {
             Vec::new()
         };
         self.active_bind = None;
-        if let Some(session) = self.surface.as_ref().map(|surface| surface.session.clone()) {
-            self.set_profile_config(&session);
-        } else if let Some(session) = self.chain_bind.as_ref().map(|bind| bind.session.clone()) {
-            self.set_profile_config(&session);
-        } else {
-            self.cfg = self.future_cfg.clone();
-            self.cfg_session = self.future_session.clone();
-        }
+        let session = self.request_session_default();
+        self.set_profile_config(&session);
         if matches!(mode, TriggerMode::Live | TriggerMode::Press) {
             self.trigger_held = false;
         }
@@ -1198,14 +1217,23 @@ impl Controller {
         let over_popup_or_btn = over_popup || placed.is_some_and(|p| {
             PhysRect { h: p.popup.h + button_h, ..p.popup }.contains(cursor)
         });
-        let armed = self.cfg.scroll_popup
+        let scroll_enabled = depth.is_some_and(|depth| {
+            let surface = if depth == self.parents.len() {
+                self.surface.as_ref()
+            } else {
+                self.parents.get(depth)
+            };
+            surface.is_some_and(|surface| surface.session.config().popup.scroll_popup)
+        });
+        let add_enabled = self.surface_config().is_some_and(|config| config.anki.enabled);
+        let armed = scroll_enabled
             && over_popup
             && hovered.is_some_and(|p| p.content_h > p.view_h);
 
         let mut out = vec![
             Command::SetScrollArmed(armed),
             Command::SetClickArmed(over_popup_or_btn),
-            Command::SetAddArmed(self.surface.is_some() && self.cfg.anki_enabled),
+            Command::SetAddArmed(add_enabled),
         ];
         if let (Some(p), Some(s)) = (placed, self.surface.as_ref()) {
             if depth == Some(self.parents.len()) {
@@ -1273,7 +1301,7 @@ impl Controller {
         self.hover_buttons |= match button { Button::Primary => 1, Button::Secondary => 2 };
         let Some(s) = self.surface.as_ref() else { return Vec::new() };
         let Some(p) = s.placed else { return Vec::new() };
-        let anki = self.cfg.anki_enabled;
+        let anki = s.session.config().anki.enabled;
 
         match hit {
             Some(HitAction::ExpandEntry(index)) => self.expand_entry(index),
@@ -1313,7 +1341,7 @@ impl Controller {
     }
 
     fn pointer_moved(&mut self, local: PhysPoint, text: Option<TextAddr>) -> Vec<Command> {
-        if !self.cfg.anki_enabled {
+        if !self.surface_config().is_some_and(|config| config.anki.enabled) {
             return Vec::new();
         }
         if let Some(s) = self.surface.as_mut() {
@@ -1329,7 +1357,7 @@ impl Controller {
 
     fn pointer_up(&mut self, local: PhysPoint, button: Button) -> Vec<Command> {
         self.hover_buttons &= !match button { Button::Primary => 1, Button::Secondary => 2 };
-        if !self.cfg.anki_enabled {
+        if !self.surface_config().is_some_and(|config| config.anki.enabled) {
             return Vec::new();
         }
         if self.surface.as_ref().is_none_or(|s| s.placed.is_none()) {
@@ -1343,7 +1371,9 @@ impl Controller {
     }
 
     fn expand_entry(&mut self, index: usize) -> Vec<Command> {
-        let summary = self.cfg.summary_chars;
+        let Some(summary) = self.surface_config().map(|config| config.popup.summary_chars) else {
+            return Vec::new();
+        };
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         let card_index = index.saturating_add(1);
         if card_index >= s.presentation.all_cards.len() {
@@ -1361,7 +1391,9 @@ impl Controller {
     }
 
     fn toggle_entry(&mut self, entry: u32) -> Vec<Command> {
-        let roles = self.cfg.roles;
+        let Some(roles) = self.surface_config().map(|config| config.popup.render_settings().roles) else {
+            return Vec::new();
+        };
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
         let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
         let Some(gloss) = entries(card).find_map(|(ordinal, value)| (ordinal == entry).then_some(value)) else {
@@ -1378,25 +1410,25 @@ impl Controller {
     }
 
     fn run_gesture(&mut self, input: GestureInput) -> Vec<Command> {
-        let env = self.gesture_env();
-        let roles = self.cfg.roles;
+        let Some(profile) = self.surface_config() else { return Vec::new() };
+        let tick_ms = u64::from(self.future_cfg.tick_ms.max(1));
+        let env = GestureEnv {
+            chain_ticks: CLICK_CHAIN_MS.div_ceil(tick_ms),
+            threshold_px: ANCHOR_JITTER_PX,
+            primary_additive: profile.anki.selection_buttons
+                == crate::config::SelectionButtons::PrimaryAdditive,
+        };
+        let roles = profile.popup.render_settings().roles;
+        let triple_click = profile.anki.triple_click;
         let effects = {
             let Some(s) = self.surface.as_mut() else { return Vec::new() };
             let Some(card) = s.presentation.top.as_ref() else { return Vec::new() };
             let words = s.analysis.as_ref().map(|(_, words)| words);
-            let source = ItemSource::new(card, roles, self.cfg.triple_click, words);
+            let source = ItemSource::new(card, roles, triple_click, words);
             let selection = s.selection.card_mut(0);
             s.gesture.handle(input, env, &source, selection)
         };
         self.gesture_commands(effects)
-    }
-    fn gesture_env(&self) -> GestureEnv {
-        let tick_ms = u64::from(self.cfg.tick_ms.max(1));
-        GestureEnv {
-            chain_ticks: CLICK_CHAIN_MS.div_ceil(tick_ms),
-            threshold_px: ANCHOR_JITTER_PX,
-            primary_additive: self.cfg.primary_additive,
-        }
     }
 
     fn gesture_commands(&mut self, effects: Vec<GestureEffect>) -> Vec<Command> {
@@ -1436,7 +1468,9 @@ impl Controller {
     }
 
     fn edge_autoscroll(&mut self) -> Vec<Command> {
-        if !self.cfg.anki_enabled || !self.cfg.edge_autoscroll || !self.cfg.scroll_popup {
+        if !self.surface_config().is_some_and(|config| {
+            config.anki.enabled && config.popup.edge_autoscroll && config.popup.scroll_popup
+        }) {
             return Vec::new();
         }
         let Some(s) = self.surface.as_mut() else { return Vec::new() };
@@ -1464,7 +1498,9 @@ impl Controller {
 
     fn add_requested(&mut self) -> Vec<Command> {
         self.cancel_hover();
-        if self.popup().is_none() || !self.cfg.anki_enabled {
+        if self.popup().is_none()
+            || !self.surface_config().is_some_and(|config| config.anki.enabled)
+        {
             return Vec::new();
         }
         self.start_add()
@@ -1484,6 +1520,15 @@ impl Controller {
 
     /// Apply the same guard as the pointer path.
     fn start_add(&mut self) -> Vec<Command> {
+        let Some((sentence_probe, overwrite_duplicates)) = self.surface.as_ref().map(|surface| {
+            let config = surface.session.config();
+            (
+                config.anki.sentence_mode == crate::config::SentenceMode::Sentence,
+                config.anki.overwrite_duplicates,
+            )
+        }) else {
+            return Vec::new();
+        };
         if self.add_in_flight() {
             return Vec::new();
         }
@@ -1494,7 +1539,7 @@ impl Controller {
                 return Vec::new();
             }
         }
-        let sentence_probe = self.cfg.sentence_probe && !self.selected_text_active();
+        let sentence_probe = sentence_probe && !self.selected_text_active();
         let (scroll, show_back, anchor, orientation, matched_surface, session) = {
             let Some(s) = self.surface.as_ref() else { return Vec::new() };
             if s.placed.is_none() || s.presentation.top.is_none() {
@@ -1521,7 +1566,7 @@ impl Controller {
             };
             let s = self.surface.as_mut().expect("surface checked above");
             s.anki.adding = true;
-            s.anki.saving = self.cfg.overwrite_duplicates;
+            s.anki.saving = overwrite_duplicates;
             s.anki.failed = false;
             s.pending_sentence = Some(id);
             self.pending_sentences.insert(id, pending);
@@ -1535,7 +1580,7 @@ impl Controller {
         let id = self.next_request();
         let s = self.surface.as_mut().expect("surface checked above");
         s.anki.adding = true;
-        s.anki.saving = self.cfg.overwrite_duplicates;
+        s.anki.saving = overwrite_duplicates;
         s.anki.failed = false;
         s.anki_write = Some(id);
         self.pending_writes.insert(id, session.clone());
@@ -1550,10 +1595,11 @@ impl Controller {
     ///
     /// A sentence probe caller stores this result before any popup mutation.
     fn add_note_payload(&self) -> Option<(String, HashMap<String, String>)> {
-        let first_dict_only = self.cfg.first_dict_only;
-        let include_dictionary_name = self.cfg.include_dictionary_name;
-        let separator = self.cfg.separator;
         let s = self.surface.as_ref()?;
+        let config = s.session.config();
+        let first_dict_only = config.anki.first_dict_only;
+        let include_dictionary_name = config.anki.include_dictionary_name;
+        let separator = config.anki.selection_separator.into();
         s.presentation.top.as_ref()?;
         let selection = s.selection.card(0).cloned().unwrap_or_default();
         let (expr, fields) = note_payload(
@@ -1749,7 +1795,7 @@ impl Controller {
     }
 
     fn dispatch_hover_for(&mut self, pos: PhysPoint, session: ProfileSession) -> Vec<Command> {
-        if self.frozen(pos) {
+        if self.frozen(pos, &session) {
             return Vec::new();
         }
         self.dispatch_lookup_for(pos, session, false)
@@ -1822,7 +1868,7 @@ impl Controller {
 
     /// Press mode has no sticky region. A press over the popup is a deliberate
     /// lookup that the mask turns into a miss, which hides the popup.
-    fn frozen(&self, p: PhysPoint) -> bool {
+    fn frozen(&self, p: PhysPoint, session: &ProfileSession) -> bool {
         if self.parents.iter().any(|s| s.placed.is_some_and(|placed| {
             in_sticky(p, s.hold, s.hold, placed.popup)
         })) {
@@ -1835,7 +1881,7 @@ impl Controller {
         let Some(s) = self.surface.as_ref() else { return false };
         let Some(placed) = s.placed else { return false };
         let sticky = PhysRect { h: placed.popup.h + self.button_h, ..placed.popup };
-        let freeze = if per_char_freeze(self.cfg.per_character_lookup, mode) {
+        let freeze = if per_char_freeze(session.config().trigger.per_character_lookup, mode) {
             s.hold_char
         } else {
             s.hold
@@ -2018,7 +2064,7 @@ impl Controller {
         // A new popup invalidates probes owned by the popup it replaces.
         self.pending_sentences.clear();
         let mut out = Vec::new();
-        if self.cfg.log_lookups {
+        if session.config().debug.show_lookup_log {
             if let Some(card) = &presentation.top {
                 out.push(Command::LogLookup {
                     headword: card
@@ -2031,6 +2077,8 @@ impl Controller {
             }
         }
         let HoldRects { hold, hold_char } = hold_regions(anchor, matched, orientation);
+        let anki_enabled = session.config().anki.enabled;
+        let overwrite_duplicates = session.config().anki.overwrite_duplicates;
         self.cancel_hover();
         if !self.parents.is_empty() {
             self.parents.clear();
@@ -2049,7 +2097,7 @@ impl Controller {
             hold_char,
             presentation,
             anki_write: None,
-            anki: AnkiPopupState::fresh(self.cfg.anki_enabled, self.cfg.overwrite_duplicates),
+            anki: AnkiPopupState::fresh(anki_enabled, overwrite_duplicates),
             history: Vec::new(),
             scroll: 0,
             generation: 0,
@@ -2082,13 +2130,7 @@ impl Controller {
         }
 
         let cfg_session = session.clone();
-        let cfg = if self.cfg_session == session {
-            self.cfg.clone()
-        } else {
-            let mut cfg = ControllerConfig::for_profile(session.config());
-            cfg.tick_ms = self.future_cfg.tick_ms;
-            cfg
-        };
+        let cfg = self.config_for_session(&session);
         let anki_enabled = cfg.anki_enabled;
         let update_dupes = cfg.overwrite_duplicates;
         {
@@ -2155,9 +2197,15 @@ impl Controller {
         if self.surface.is_none() {
             return Vec::new();
         }
-        let session = self.surface.as_ref().expect("checked above").session.clone();
-        let anki_enabled = self.cfg.anki_enabled;
-        let roles = self.cfg.roles;
+        let (session, anki_enabled, roles) = {
+            let surface = self.surface.as_ref().expect("checked above");
+            let config = surface.session.config();
+            (
+                surface.session.clone(),
+                config.anki.enabled,
+                config.popup.render_settings().roles,
+            )
+        };
         let generation = self.generation.wrapping_add(1);
         self.generation = generation;
 
@@ -2253,7 +2301,12 @@ impl Controller {
                     return self.enter_parent(self.parents.len() - 1);
                 }
                 self.surface = None;
+                self.pending_cursor = None;
                 self.pending_scan.clear();
+                self.active_bind = None;
+                self.chain_bind = None;
+                self.trigger_held = false;
+                self.last_accepted = None;
                 let session = self.request_session_default();
                 self.set_profile_config(&session);
                 vec![
@@ -4121,6 +4174,73 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_press_root_retires_its_chain_and_resumes_live_lookup() {
+        let mut c = test_controller(cfg());
+        let session = c.future_session.clone();
+        let down = c.handle(Event::LookupBindDown {
+            bind_id: "press".into(),
+            mode: TriggerMode::Press,
+            session: session.clone(),
+            pos: PhysPoint { x: 110, y: 110 },
+        });
+        let id = down
+            .iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, session: requested, .. } => {
+                    assert_eq!(requested, &session);
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("the Press bind starts a lookup");
+        bind_up(&mut c, "press");
+        c.handle(ready_id(id, "猫", ANCHOR));
+        assert_eq!(TriggerMode::Press, c.trigger_mode());
+
+        c.handle(Event::PopupPlaceFailed);
+
+        assert!(c.chain_bind.is_none());
+        assert!(c.pending_cursor.is_none());
+        assert_eq!(TriggerMode::Live, c.trigger_mode());
+        let later = PhysPoint { x: 900, y: 900 };
+        assert!(c.handle(Event::CursorMoved { pos: later }).iter().any(|command| {
+            matches!(command, Command::RequestLookup { point, session: requested, .. }
+                if *point == later && requested == &session)
+        }));
+    }
+
+    #[test]
+    fn a_failed_root_placement_discards_a_cursor_waiting_for_placement() {
+        let mut c = test_controller(cfg());
+        let first = PhysPoint { x: 110, y: 110 };
+        c.handle(Event::CursorMoved { pos: first });
+        let id = c.latest_lookup;
+        c.handle(ready_id(id, "猫", ANCHOR));
+
+        let stale = PhysPoint { x: 900, y: 900 };
+        assert!(c.handle(Event::CursorMoved { pos: stale }).is_empty());
+        assert!(c.pending_cursor.is_some());
+        c.handle(Event::PopupPlaceFailed);
+        assert!(c.pending_cursor.is_none());
+
+        let current = PhysPoint { x: 1200, y: 1200 };
+        let request = c
+            .handle(Event::CursorMoved { pos: current })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, point, .. } if point == current => Some(id),
+                _ => None,
+            })
+            .expect("Live lookup resumes at the current cursor");
+        c.handle(ready_id(request, "犬", ANCHOR));
+        let placed = c.handle(placed(POPUP, 200, 200));
+        assert!(!placed.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { point, .. } if *point == stale
+        )));
+    }
+
+    #[test]
     fn a_failed_reshow_leaves_the_popup_where_it_was() {
         let mut c = test_controller(cfg());
         shown_sized(&mut c, 500, 200);
@@ -4285,6 +4405,120 @@ mod tests {
         assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
         // Allow only one add request at a time.
         assert!(c.handle(Event::AddRequested).is_empty());
+    }
+
+    #[test]
+    fn adding_during_replacement_uses_the_displayed_profile() {
+        let mut shown_cfg = cfg();
+        shown_cfg.anki_enabled = true;
+        shown_cfg.first_dict_only = false;
+        shown_cfg.include_dictionary_name = true;
+        let shown_session = session_for_controller_cfg(&shown_cfg);
+
+        let mut replacement_cfg = cfg();
+        replacement_cfg.anki_enabled = false;
+        replacement_cfg.first_dict_only = true;
+        replacement_cfg.include_dictionary_name = false;
+        let replacement_session = session_for_controller_cfg(&replacement_cfg);
+
+        remember_test_session(&shown_session);
+        let mut c = Controller::new(shown_cfg, shown_session.clone());
+        let card = Card {
+            blocks: vec![
+                GlossBlock::parse("First Dictionary", r#"["first definition"]"#),
+                GlossBlock::parse("Second Dictionary", r#"["second definition"]"#),
+            ],
+            ..card("cat")
+        };
+        shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
+
+        let bind = c.handle(Event::LookupBindDown {
+            bind_id: "replacement".into(),
+            mode: TriggerMode::Press,
+            session: replacement_session.clone(),
+            pos: PhysPoint { x: 120, y: 120 },
+        });
+        assert!(bind.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { session, .. } if session == &replacement_session
+        )));
+
+        let add = c.handle(Event::AddRequested);
+        let (session, fields) = add
+            .iter()
+            .find_map(|command| match command {
+                Command::AddNote { session, fields, .. } => Some((session, fields)),
+                _ => None,
+            })
+            .expect("the displayed Anki-enabled profile accepts the add");
+        assert_eq!(session, &shown_session);
+        assert!(fields["glossary"].contains("First Dictionary"));
+        assert!(fields["glossary"].contains("first definition"));
+        assert!(fields["glossary"].contains("Second Dictionary"));
+        assert!(fields["glossary"].contains("second definition"));
+    }
+
+    #[test]
+    fn selection_remains_enabled_for_the_displayed_profile_during_replacement() {
+        let mut shown_cfg = cfg();
+        shown_cfg.anki_enabled = true;
+        let shown_session = session_for_controller_cfg(&shown_cfg);
+        let mut replacement_cfg = cfg();
+        replacement_cfg.anki_enabled = false;
+        let replacement_session = session_for_controller_cfg(&replacement_cfg);
+
+        remember_test_session(&shown_session);
+        let mut c = Controller::new(shown_cfg, shown_session.clone());
+        let card = gloss_card("first", "second");
+        shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
+        c.handle(Event::LookupBindDown {
+            bind_id: "replacement".into(),
+            mode: TriggerMode::Press,
+            session: replacement_session,
+            pos: PhysPoint { x: 120, y: 120 },
+        });
+
+        let first_path = crate::dict::gloss::NodePath::ROOT.child(0).unwrap();
+        let second_path = crate::dict::gloss::NodePath::ROOT.child(1).unwrap();
+        let first = TextAddr {
+            entry: 0,
+            addr: crate::select::DocAddr { path: first_path, byte: 0 },
+        };
+        let second_end = TextAddr {
+            entry: 0,
+            addr: crate::select::DocAddr { path: second_path, byte: 1 },
+        };
+        c.handle(Event::PointerDown {
+            local: PhysPoint { x: 0, y: 0 },
+            button: Button::Primary,
+            hit: None,
+            text: Some(first),
+        });
+        assert!(c
+            .handle(Event::PointerMoved {
+                local: PhysPoint { x: 5, y: 0 },
+                text: Some(second_end),
+            })
+            .contains(&Command::SetDragging(true)));
+        c.handle(Event::PointerUp {
+            local: PhysPoint { x: 5, y: 0 },
+            button: Button::Primary,
+        });
+
+        assert!(c
+            .selection()
+            .and_then(|selection| selection.card(0))
+            .is_some_and(|selection| !selection.is_empty()));
+        let add = c.handle(Event::AddRequested);
+        let (session, fields) = add
+            .iter()
+            .find_map(|command| match command {
+                Command::AddNote { session, fields, .. } => Some((session, fields)),
+                _ => None,
+            })
+            .expect("the displayed profile accepts a note from its selection");
+        assert_eq!(session, &shown_session);
+        assert!(fields["glossary"].contains("Test"));
     }
 
     #[test]

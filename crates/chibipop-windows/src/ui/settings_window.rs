@@ -3901,6 +3901,17 @@ struct TipState {
     shown: Option<isize>,
 }
 
+fn destroy_tip(tip: &mut HWND) {
+    if *tip != HWND::default() {
+        // SAFETY: SettingsWindow owns this parentless tooltip control.
+        unsafe {
+            let _ = DestroyWindow(*tip);
+        }
+        *tip = HWND::default();
+    }
+    TIP_STATE.with(|state| *state.borrow_mut() = TipState::default());
+}
+
 /// Registers one tool per control, so a later update has a tool to address.
 ///
 /// A tracking tooltip needs a registered tool. Every entry points at the same
@@ -4010,12 +4021,11 @@ fn tip_placement(
     control: RECT,
     pointer: POINT,
     size: TipSize,
-    screen_top: i32,
-    screen_bottom: i32,
+    work_area: Area,
 ) -> TipPlacement {
     let below = control.bottom + TIP_GAP;
-    // Below the control, unless the screen is too low.
-    let fits_below = below + size.height + TIP_MARGIN <= screen_bottom;
+    // Below the control, unless the work area is too low.
+    let fits_below = below + size.height <= work_area.bottom - TIP_MARGIN;
     let y = if fits_below {
         // Clear the pointer, not only the control edge.
         below.max(pointer.y + TIP_CLEARANCE)
@@ -4023,11 +4033,23 @@ fn tip_placement(
         // Above the control; pointer clearance wins.
         let clear_of_pointer = pointer.y - TIP_CLEARANCE - size.height;
         let above_control = control.top - TIP_GAP - size.height;
-        clear_of_pointer.min(above_control).max(screen_top + TIP_MARGIN)
+        clear_of_pointer.min(above_control).max(work_area.top + TIP_MARGIN)
     };
     let centre = control.left + (control.right - control.left) / 2;
-    let x = (centre - size.width / 2).max(TIP_MARGIN);
+    let x = centre - size.width / 2;
+    let bounds = Area {
+        left: work_area.left + TIP_MARGIN,
+        top: work_area.top + TIP_MARGIN,
+        right: work_area.right - TIP_MARGIN,
+        bottom: work_area.bottom - TIP_MARGIN,
+    };
+    let (x, y) = bounds.fit((x, y), (size.width, size.height));
     TipPlacement { x, y }
+}
+
+fn tip_track_position(x: i32, y: i32) -> LPARAM {
+    let packed = (u32::from(y as u16) << 16) | u32::from(x as u16);
+    LPARAM(packed as isize)
 }
 
 /// Shows, moves, or hides the tracking tooltip for the control under the cursor.
@@ -4111,18 +4133,22 @@ unsafe fn tip_poll(tip: HWND) {
         }
         // The window now reports this tool's size.
         let size = tip_size(tip);
-        let screen_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let screen_bottom = screen_top + GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
-        let placed = tip_placement(rect, point, size, screen_top, screen_bottom);
+        let area = work_area(control).unwrap_or_else(|| {
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            Area {
+                left,
+                top,
+                right: left + GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+                bottom: top + GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
+            }
+        });
+        let placed = tip_placement(rect, point, size, area);
         let x = placed.x;
         let y = placed.y;
+        let position = tip_track_position(x, y);
         // Low word is x, high word is y.
-        let _ = SendMessageW(
-            tip,
-            TTM_TRACKPOSITION,
-            Some(WPARAM(0)),
-            Some(LPARAM((x | (y << 16)) as isize)),
-        );
+        let _ = SendMessageW(tip, TTM_TRACKPOSITION, Some(WPARAM(0)), Some(position));
         if switching {
             TIP_STATE.with(|state| state.borrow_mut().shown = Some(target));
         }
@@ -4339,12 +4365,8 @@ impl SettingsWindow {
                     DestroyWindow(child)?;
                 }
             }
-            if self.tip != HWND::default() {
-                let _ = DestroyWindow(self.tip);
-                self.tip = HWND::default();
-            }
+            destroy_tip(&mut self.tip);
         }
-        TIP_STATE.with(|state| *state.borrow_mut() = TipState::default());
         BIND_CAPTURED.with(|state| {
             let mut state = state.borrow_mut();
             if state.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
@@ -6463,7 +6485,10 @@ impl SettingsWindow {
                 help!();
             }
             SettingId::BackgroundOnClose => {
-                checkbox!(ID_BACKGROUND_ON_CLOSE, form.cfg.application.background_on_close);
+                checkbox!(
+                    ID_BACKGROUND_ON_CLOSE,
+                    form.background_on_close.unwrap_or(form.cfg.application.background_on_close)
+                );
                 help!();
             }
             SettingId::DebugCaptureOutline => {
@@ -7493,6 +7518,7 @@ impl Drop for SettingsWindow {
         unsafe {
             // Stop the poll before the window dies.
             let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
+            destroy_tip(&mut self.tip);
             let _ = DestroyWindow(self.hwnd);
             if let Some(f) = self.font.get() {
                 let _ = DeleteObject(f.into());
@@ -8615,14 +8641,16 @@ mod tests {
     }
 
     #[test]
-    fn configured_bind_catalog_actions_add_clear_and_remove_rows() {
+    fn configured_bind_catalog_actions_keep_background_on_close_preference() {
         let mut config = crate::config::Config::default();
         let original_id = config.next_bind_id();
         let mut original = Bind::new(original_id.clone(), BindAction::SelectedText);
         original.windows = "F6".into();
         original.linux = "SUPER+K".into();
         config.binds.push(original);
-        let form = crate::settings::from_config(&config, &[]);
+        let mut form = crate::settings::from_config(&config, &[]);
+        form.cfg.application.background_on_close = false;
+        form.background_on_close = Some(true);
         let original_row = form
             .catalog
             .binds
@@ -8640,6 +8668,7 @@ mod tests {
         let added_id = added.catalog.binds.last().unwrap().id.clone();
         assert!(!initial_ids.contains(&added_id));
         assert_eq!(BindAction::Lookup, added.catalog.binds.last().unwrap().action);
+        assert_eq!(Some(true), added.background_on_close);
 
         send_button_click(
             &window,
@@ -8655,6 +8684,7 @@ mod tests {
             .unwrap();
         assert!(cleared_bind.windows.is_empty());
         assert_eq!("SUPER+K", cleared_bind.linux);
+        assert_eq!(Some(true), cleared.background_on_close);
 
         send_button_click(
             &window,
@@ -8664,6 +8694,26 @@ mod tests {
         let removed = window.read(&form);
         assert!(!removed.catalog.binds.iter().any(|bind| bind.id == original_id));
         assert!(removed.catalog.binds.iter().any(|bind| bind.id == added_id));
+        assert_eq!(Some(true), removed.background_on_close);
+    }
+
+    #[test]
+    fn background_on_close_uses_application_value_when_form_value_is_absent() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.application.background_on_close = true;
+        form.background_on_close = None;
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The settings window owns the background-on-close checkbox.
+        let checked = unsafe {
+            SendMessageW(
+                dlg_item(window.hwnd, ID_BACKGROUND_ON_CLOSE).unwrap(),
+                BM_GETCHECK,
+                None,
+                None,
+            )
+            .0
+        };
+        assert_eq!(1, checked);
     }
 
     #[test]
@@ -9026,7 +9076,12 @@ mod tests {
         };
         // A pointer near the bottom edge is not covered.
         let pointer = POINT { x: 400, y: 122 };
-        let placed = tip_placement(control, pointer, size, 0, 1080);
+        let placed = tip_placement(
+            control,
+            pointer,
+            size,
+            Area { left: 0, top: 0, right: 1920, bottom: 1080 },
+        );
         assert_eq!(250, placed.x, "the tooltip centres on the control");
         assert!(
             placed.y >= control.bottom + TIP_GAP,
@@ -9056,7 +9111,12 @@ mod tests {
             height: 40,
         };
         let pointer = POINT { x: 400, y: 1060 };
-        let placed = tip_placement(control, pointer, size, 0, 1080);
+        let placed = tip_placement(
+            control,
+            pointer,
+            size,
+            Area { left: 0, top: 0, right: 1920, bottom: 1080 },
+        );
         assert!(
             placed.y < control.top,
             "the tooltip must move above the control, got y={}",
@@ -9073,6 +9133,57 @@ mod tests {
             "the tooltip stays on the screen, got y={}",
             placed.y,
         );
+    }
+
+    #[test]
+    fn tooltip_placement_stays_inside_negative_origin_work_area() {
+        let work_area = Area {
+            left: -1920,
+            top: -1080,
+            right: 0,
+            bottom: -960,
+        };
+        let control = RECT {
+            left: -1910,
+            top: -1050,
+            right: -1810,
+            bottom: -1026,
+        };
+        let pointer = POINT { x: -1900, y: -1040 };
+        let size = TipSize { width: 300, height: 80 };
+        let placed = tip_placement(control, pointer, size, work_area);
+
+        assert_eq!(work_area.left + TIP_MARGIN, placed.x);
+        assert_eq!(work_area.top + TIP_MARGIN, placed.y);
+        assert!(placed.x + size.width <= work_area.right - TIP_MARGIN);
+        assert!(placed.y + size.height <= work_area.bottom - TIP_MARGIN);
+        let packed = tip_track_position(placed.x, placed.y).0 as u32;
+        assert_eq!(placed.x as i16, packed as u16 as i16);
+        assert_eq!(placed.y as i16, (packed >> 16) as u16 as i16);
+    }
+
+    #[test]
+    fn tooltip_placement_clamps_right_and_bottom_edges_of_work_area() {
+        let work_area = Area {
+            left: -1920,
+            top: -100,
+            right: 0,
+            bottom: 1080,
+        };
+        let control = RECT {
+            left: -120,
+            top: 926,
+            right: -20,
+            bottom: 950,
+        };
+        let pointer = POINT { x: -60, y: 950 };
+        let size = TipSize { width: 300, height: 100 };
+        let placed = tip_placement(control, pointer, size, work_area);
+
+        assert_eq!(work_area.right - TIP_MARGIN - size.width, placed.x);
+        assert_eq!(work_area.bottom - TIP_MARGIN - size.height, placed.y);
+        assert!(placed.x >= work_area.left + TIP_MARGIN);
+        assert!(placed.y >= work_area.top + TIP_MARGIN);
     }
 
     /// The tooltip style must survive an inactive owner window, because the

@@ -31,14 +31,8 @@ const INK_PIXELS: usize = 2;
 /// it without a larger box.
 const SPAN_PERCENT: i32 = 60;
 
-/// Return true when ink near `cursor` spans at least [`SPAN_PERCENT`] of `reference`
-/// on the short side of `region`.
-///
-/// `frame` contains `region` at scale `factor`. `masked` lists popup rects in frame
-/// pixels. The mask fills those rects with flat white, so the rects do not count as
-/// ink. The window on the reading axis extends one short side to each side of the
-/// cursor. The background is the most common frame color, with each channel grouped
-/// into 16 levels.
+/// Checks the ink span near the cursor.
+/// Masks use scaled frame pixels.
 pub fn spans_short_side(
     frame: &Frame,
     region: PhysRect,
@@ -52,7 +46,7 @@ pub fn spans_short_side(
         return false;
     }
     let pixels = frame.buf[..w * h * 4].as_chunks::<4>().0;
-    let background = background_of(pixels);
+    let Some(background) = background_of(pixels, w, masked) else { return false };
     let is_ink = |x: usize, y: usize| {
         let px = &pixels[y * w + x];
         let at = PhysPoint { x: x as i32, y: y as i32 };
@@ -90,16 +84,25 @@ pub fn spans_short_side(
     extent * 100 >= reference * factor * SPAN_PERCENT
 }
 
-/// Return the most common color of the frame, quantized to 16 levels per channel.
-fn background_of(pixels: &[[u8; 4]]) -> [u8; 3] {
+/// Return the most common unmasked color, quantized to 16 levels per channel.
+fn background_of(pixels: &[[u8; 4]], width: usize, masked: &[PhysRect]) -> Option<[u8; 3]> {
     let mut counts = [0u32; 4096];
-    for px in pixels {
+    let mut included = 0usize;
+    for (index, px) in pixels.iter().enumerate() {
+        let at = PhysPoint { x: (index % width) as i32, y: (index / width) as i32 };
+        if masked.iter().any(|m| m.contains(at)) {
+            continue;
+        }
         let key = (usize::from(px[0] >> 4) << 8) | (usize::from(px[1] >> 4) << 4) | usize::from(px[2] >> 4);
         counts[key] += 1;
+        included += 1;
+    }
+    if included == 0 {
+        return None;
     }
     let key = counts.iter().enumerate().max_by_key(|(_, &n)| n).map_or(0, |(k, _)| k);
     let level = |shift: usize| ((key >> shift) & 0xF) as u8 * 16 + 8;
-    [level(8), level(4), level(0)]
+    Some([level(8), level(4), level(0)])
 }
 
 #[cfg(test)]
@@ -180,5 +183,27 @@ mod tests {
         let f = frame(500, 100, BLACK, |x, y| popup.contains(PhysPoint { x, y }), WHITE);
         assert!(spans_short_side(&f, BOX, CURSOR, 1, 100, &[]));
         assert!(!spans_short_side(&f, BOX, CURSOR, 1, 100, &[popup]));
+    }
+    #[test]
+    fn a_blank_masked_half_does_not_span_the_box() {
+        let region = PhysRect { x: 0, y: 0, w: 500, h: 100 };
+        let mask = PhysRect { x: 0, y: 0, w: 250, h: 100 };
+        let f = frame(500, 100, BLACK, |x, _| x < 250, WHITE);
+        assert!(!spans_short_side(&f, region, PhysPoint { x: 250, y: 50 }, 1, 100, &[mask]));
+    }
+
+    #[test]
+    fn real_ink_beyond_a_mask_still_spans_the_box() {
+        let region = PhysRect { x: 0, y: 0, w: 500, h: 100 };
+        let mask = PhysRect { x: 0, y: 0, w: 250, h: 100 };
+        let f = frame(500, 100, BLACK, |x, y| x < 250 || (250..330).contains(&x) && (3..97).contains(&y), WHITE);
+        assert!(spans_short_side(&f, region, PhysPoint { x: 250, y: 50 }, 1, 100, &[mask]));
+    }
+
+    #[test]
+    fn a_fully_masked_frame_does_not_span_the_box() {
+        let f = frame(500, 100, WHITE, |_, _| false, BLACK);
+        let mask = PhysRect { x: 0, y: 0, w: 500, h: 100 };
+        assert!(!spans_short_side(&f, BOX, CURSOR, 1, 100, &[mask]));
     }
 }

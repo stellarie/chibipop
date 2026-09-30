@@ -2142,7 +2142,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                 Hooks::set_click_armed(false);
                 drain_capture_guard();
             });
-            join_save(&mut save_job);
+            join_save_if_finished(&mut save_job);
             while let Ok(result) = save_rx.try_recv() {
                 finish_save(
                     Some(w),
@@ -3096,15 +3096,19 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     }
                     let previous = cfg.clone();
                     let previous_dicts = dicts.clone();
-                    let mut latest = crate::config::load_or_create(config_path)?;
-                    if latest.profiles.iter().any(|profile| profile.id == id) {
-                        latest.default_profile = id;
-                        latest.validate()?;
-                        latest.validate_hotkeys(crate::config::Platform::Windows)?;
-                        latest.save(config_path)?;
-                        install_runtime_catalog!(latest, previous, previous_dicts);
-                    } else {
-                        eprintln!("chibipop: default profile no longer exists");
+                    match persist_default_profile(config_path, &id) {
+                        Ok(Some(latest)) => {
+                            install_runtime_catalog!(latest, previous, previous_dicts);
+                        }
+                        Ok(None) => {
+                            eprintln!("chibipop: default profile no longer exists");
+                        }
+                        Err(error) => {
+                            if let Some(window) = &settings {
+                                window.set_status(&format!("Could not set default profile: {error}"));
+                            }
+                            eprintln!("chibipop: setting default profile failed: {error:#}");
+                        }
                     }
                 }
                 TrayCommand::OpenSettings => drive!(Event::TrayAction(TrayAction::OpenSettings)),
@@ -4471,6 +4475,27 @@ fn persist_screenshot_target(
     }
 }
 
+/// Joins a completed save without blocking the message pump.
+fn join_save_if_finished(job: &mut Option<thread::JoinHandle<()>>) {
+    if job.as_ref().is_some_and(|handle| handle.is_finished()) {
+        join_save(job);
+    }
+}
+
+/// Loads, validates, and saves the selected default profile.
+fn persist_default_profile(config_path: &Path, id: &str) -> Result<Option<Config>> {
+    let mut latest = crate::config::load_or_create(config_path)?;
+    if !latest.profiles.iter().any(|profile| profile.id == id) {
+        return Ok(None);
+    }
+    latest.default_profile = id.to_string();
+    latest.validate()?;
+    latest.validate_hotkeys(crate::config::Platform::Windows)?;
+    latest.save(config_path)?;
+    Ok(Some(latest))
+}
+
+
 /// Joins the previous save before a new save starts.
 fn join_save(job: &mut Option<thread::JoinHandle<()>>) {
     if let Some(h) = job.take() {
@@ -5189,6 +5214,47 @@ mod tests {
             assert_eq!(Some(ApplyState::Failed), saved_apply_state(&mut pending,
                 &SaveResult { sequence: 0, generation: Some(9), result }));
         }
+    }
+
+    #[test]
+    fn pending_save_poll_does_not_wait_for_disk_write() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut save = Some(thread::spawn(move || {
+            release_rx.recv().unwrap();
+        }));
+
+        join_save_if_finished(&mut save);
+
+        assert!(save.is_some());
+        release_tx.send(()).unwrap();
+        join_save(&mut save);
+        assert!(save.is_none());
+    }
+
+    #[test]
+    fn failed_default_profile_save_keeps_the_saved_default() {
+        let (dir, _scratch) = edit_scratch("default_profile_save_failure");
+        let path = dir.join("config.toml");
+        let mut original = Config::default();
+        let parent = original.profiles[0].id.clone();
+        let target_id = original.next_profile_id();
+        original.profiles.push(crate::config::Profile {
+            id: target_id.clone(),
+            name: "Other".to_string(),
+            data: crate::config::ProfileData::Derived {
+                parent,
+                overrides: std::collections::BTreeMap::new(),
+            },
+        });
+        original.save(&path).unwrap();
+        let saved_default = original.default_profile.clone();
+        std::fs::create_dir(path.with_extension("toml.tmp")).unwrap();
+
+        assert!(persist_default_profile(&path, &target_id).is_err());
+        assert_eq!(
+            saved_default,
+            crate::config::load_or_create(&path).unwrap().default_profile
+        );
     }
 
     #[test]

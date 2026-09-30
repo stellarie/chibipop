@@ -538,7 +538,7 @@ pub fn run(paths: Paths, mode: SearchMode, initial: Option<String>, saved: Confi
         let mut search = Search {
             mode: identity.mode, query: initial.clone(), editor: text_editor::Content::with_text(&initial),
             tokens: Vec::new(), selected: None, result: SearchResult::Empty, status: String::new(),
-            generation: 0, worker: worker.clone(), busy: false, pending: None,
+            generation: 0, click_generation: 0, worker: worker.clone(), busy: false, pending: None,
             main, definitions: Vec::new(), session: session.clone(),
             css_path: css_path.clone(),
             theme, font, engine, media,
@@ -603,6 +603,7 @@ struct Search {
     result: SearchResult,
     status: String,
     generation: u64,
+    click_generation: u64,
     worker: std::sync::Arc<Worker>,
     busy: bool,
     pending: Option<Job>,
@@ -623,7 +624,7 @@ struct Search {
 }
 
 #[derive(Clone, Debug)]
-enum Target { Input(u64), Word(u64), Hover(window::Id, u64) }
+enum Target { Input(u64), Word(u64), Hover(window::Id, u64), Click(window::Id, u64) }
 
 #[derive(Clone, Debug)]
 struct Job { target: Target, query: String, tokenize: bool, session: ProfileSession }
@@ -703,8 +704,24 @@ impl Search {
             reply.unwrap_or_else(|_| Err("Search worker stopped unexpectedly.".into()))))
     }
 
+    fn enqueue_click(&mut self, id: window::Id, query: String) -> Task<Message> {
+        let session = {
+            let Some((_, definition)) = self.definitions.iter_mut().find(|(known, _)| *known == id) else {
+                return Task::none();
+            };
+            definition.hovered = Some(query.clone());
+            definition.generation = definition.generation.wrapping_add(1);
+            definition.session.nested()
+        };
+        self.cancel_pending_hover(id);
+        self.cancel_clicks();
+        let target = Target::Click(id, self.click_generation);
+        self.enqueue(Job { target, query, tokenize: false, session })
+    }
+
     fn input_changed(&mut self) -> Task<Message> {
         self.generation = self.generation.wrapping_add(1);
+        self.cancel_clicks();
         self.tokens.clear();
         self.selected = None;
         self.result = SearchResult::Empty;
@@ -726,6 +743,15 @@ impl Search {
     }
 
     fn close_from(&mut self, depth: usize) -> Task<Message> {
+        if self.pending.as_ref().is_some_and(|job| {
+            let owner = match &job.target {
+                Target::Hover(id, _) | Target::Click(id, _) => Some(*id),
+                _ => None,
+            };
+            owner.is_some_and(|id| self.definitions[depth..].iter().any(|(retired, _)| *retired == id))
+        }) {
+            self.pending = None;
+        }
         let mut tasks = Vec::new();
         for (id, _) in self.definitions.drain(depth..) {
             self.focused.remove(&id);
@@ -736,10 +762,28 @@ impl Search {
         Task::batch(tasks)
     }
 
-    fn cancel_hovers(&mut self) {
+    fn cancel_pending_hover(&mut self, id: window::Id) {
+        if self.pending.as_ref().is_some_and(|job|
+            matches!(&job.target, Target::Hover(target, _) if *target == id)) {
+            self.pending = None;
+        }
+    }
+
+    fn cancel_pending_hovers(&mut self) {
         if self.pending.as_ref().is_some_and(|job| matches!(job.target, Target::Hover(_, _))) {
             self.pending = None;
         }
+    }
+
+    fn cancel_clicks(&mut self) {
+        self.click_generation = self.click_generation.wrapping_add(1);
+        if self.pending.as_ref().is_some_and(|job| matches!(job.target, Target::Click(_, _))) {
+            self.pending = None;
+        }
+    }
+
+    fn cancel_hovers(&mut self) {
+        self.cancel_pending_hovers();
         for (_, definition) in &mut self.definitions {
             definition.hovered = None;
             definition.generation = definition.generation.wrapping_add(1);
@@ -750,6 +794,7 @@ impl Search {
         self.generation = self.generation.wrapping_add(1);
         self.pending = None;
         self.cancel_hovers();
+        self.cancel_clicks();
     }
 
     fn open_definition(&mut self, presentation: chibipop::present::Presentation,
@@ -758,6 +803,7 @@ impl Search {
             self.status = "Close a definition window before opening another level.".into();
             return Task::none();
         }
+        self.cancel_clicks();
         let theme = crate::search_popup::theme(session.config(), Some(&self.css_path), &mut self.engine);
         match Definition::new(presentation, session, theme, &mut self.engine, self.media.as_mut()) {
             Ok(definition) => {
@@ -777,6 +823,7 @@ impl Search {
             Err(error) => { self.status = format!("Cannot render definition: {error:#}"); Task::none() }
         }
     }
+
 }
 
 fn update(search: &mut Search, message: Message) -> Task<Message> {
@@ -822,6 +869,7 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
             let query = token.text.clone();
             search.selected = Some(index);
             search.generation = search.generation.wrapping_add(1);
+            search.cancel_clicks();
             search.result = SearchResult::Empty;
             search.status = "Searching…".into();
             let close = search.close_from(0);
@@ -843,6 +891,8 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                 Target::Input(generation) | Target::Word(generation) => generation == search.generation,
                 Target::Hover(id, generation) => search.definitions.iter().any(|(known, definition)|
                     *known == id && definition.generation == generation && definition.hovered.is_some()),
+                Target::Click(id, generation) => search.click_generation == generation
+                    && search.definitions.iter().any(|(known, _)| *known == id),
             };
             let mut tasks = Vec::new();
             if valid {
@@ -861,9 +911,12 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                                     SearchResult::Empty => "Type or paste a word or expression.",
                                 }.into();
                             }
-                            Target::Hover(id, _) => {
+                            Target::Hover(id, _) | Target::Click(id, _) => {
                                 if let Some(presentation) = selected_presentation(&result, 0) {
                                     if let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) {
+                                        if matches!(target, Target::Click(_, _)) {
+                                            search.cancel_hovers();
+                                        }
                                         tasks.push(search.close_from(depth + 1));
                                         tasks.push(search.open_definition(presentation, session));
                                     }
@@ -916,11 +969,27 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
         }
         Message::Hover(id, point) => {
             let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) else { return Task::none() };
+            let (query, reentered, unchanged) = {
+                let definition = &mut search.definitions[depth].1;
+                let reentered = definition.pointer_left || definition.pointer != point;
+                definition.pointer = point;
+                definition.pointer_left = false;
+                let query = if definition.session.config().popup.sub_popups {
+                    definition.hover(point, &mut search.engine)
+                } else { None };
+                let unchanged = query.as_ref() == definition.hovered.as_ref();
+                (query, reentered, unchanged)
+            };
+            if query.is_none() && reentered && search.definitions.len() > depth + 1 {
+                let definition = &mut search.definitions[depth].1;
+                definition.hovered = None;
+                definition.generation = definition.generation.wrapping_add(1);
+                search.cancel_pending_hovers();
+                return search.close_from(depth + 1);
+            }
+            if unchanged { return Task::none(); }
+            search.cancel_pending_hover(id);
             let definition = &mut search.definitions[depth].1;
-            definition.pointer = point;
-            if !definition.session.config().popup.sub_popups { return Task::none(); }
-            let query = definition.hover(point, &mut search.engine);
-            if query == definition.hovered { return Task::none(); }
             definition.hovered = query.clone();
             definition.generation = definition.generation.wrapping_add(1);
             let generation = definition.generation;
@@ -935,14 +1004,17 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
         }
         Message::Leave(id) => {
             if let Some((_, definition)) = search.definitions.iter_mut().find(|(known, _)| *known == id) {
+                definition.pointer_left = true;
                 definition.hovered = None;
                 definition.generation = definition.generation.wrapping_add(1);
             }
+            search.cancel_pending_hover(id);
         }
         Message::Back(id) => {
             if let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) {
                 let parent = depth.checked_sub(1).map_or(search.main, |index| search.definitions[index].0);
                 search.cancel_hovers();
+                search.cancel_clicks();
                 return Task::batch([search.close_from(depth), window::gain_focus(parent)]);
             }
             if id == search.main {
@@ -951,19 +1023,14 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
             }
         }
         Message::Click(id) => {
-            if let Some((_, definition)) = search.definitions.iter().find(|(known, _)| *known == id) {
-                match definition.click() {
-                    Some(chibipop::controller::HitAction::Back) => return update(search, Message::Back(id)),
-                    Some(chibipop::controller::HitAction::DrillDown(query)) => {
-                        let session = definition.session.nested();
-                        let definition = &mut search.definitions.iter_mut().find(|(known, _)| *known == id).expect("existing definition").1;
-                        definition.hovered = Some(query.clone());
-                        definition.generation = definition.generation.wrapping_add(1);
-                        let target = Target::Hover(id, definition.generation);
-                        return search.enqueue(Job { target, query, tokenize: false, session });
-                    }
-                    _ => {}
+            let action = search.definitions.iter().find(|(known, _)| *known == id)
+                .and_then(|(_, definition)| definition.click());
+            match action {
+                Some(chibipop::controller::HitAction::Back) => return update(search, Message::Back(id)),
+                Some(chibipop::controller::HitAction::DrillDown(query)) => {
+                    return search.enqueue_click(id, query);
                 }
+                _ => {}
             }
         }
         Message::Scroll(id, delta) => {
@@ -1274,7 +1341,7 @@ mod tests {
         (Search {
             mode: SearchMode::Dictionary, query: String::new(), editor: text_editor::Content::new(),
             tokens: Vec::new(), selected: None, result: SearchResult::Empty, status: String::new(),
-            generation: 0, worker: std::sync::Arc::new(Worker { sender }), busy: false, pending: None,
+            generation: 0, click_generation: 0, worker: std::sync::Arc::new(Worker { sender }), busy: false, pending: None,
             main: window::Id::unique(), definitions: Vec::new(), session,
             css_path: PathBuf::new(),
             theme, font: iced::Font::DEFAULT, engine, media: None,
@@ -1282,6 +1349,38 @@ mod tests {
             resource_watch, ipc: None,
         }, receiver)
     }
+    fn nested_profile_session() -> ProfileSession {
+        let mut config = Config::default();
+        let parent_id = config.default_profile.clone();
+        let mut nested_settings = {
+            let profile = config.profiles.iter_mut()
+                .find(|profile| profile.id == parent_id).unwrap();
+            let chibipop::config::ProfileData::Full { settings } = &mut profile.data else {
+                panic!("default profile has full settings");
+            };
+            settings.nested_profile = Some("nested".into());
+            (**settings).clone()
+        };
+        nested_settings.nested_profile = None;
+        config.profiles.push(chibipop::config::Profile {
+            id: "nested".into(), name: "Nested".into(),
+            data: chibipop::config::ProfileData::Full {
+                settings: Box::new(nested_settings),
+            },
+        });
+        chibipop::config::ProfileCatalog::new(&config, &[])
+            .unwrap().session(Some(&parent_id)).unwrap()
+    }
+
+    fn found_search_result(written: &str) -> SearchResult {
+        let mut presentation = crate::popup::canned();
+        let mut card = presentation.top.clone().unwrap();
+        card.written = Some(written.into());
+        presentation.top = Some(card.clone());
+        presentation.all_cards = vec![card];
+        SearchResult::Found(Box::new(presentation))
+    }
+
 
     struct RuntimeDir(PathBuf);
     impl RuntimeDir {
@@ -1595,6 +1694,154 @@ mod tests {
     }
 
     #[test]
+    fn a_stationary_parent_pointer_keeps_a_new_child_open() {
+        let (mut search, _) = fixture();
+        let parent = window::Id::unique();
+        let child = window::Id::unique();
+        let session = search.session.clone();
+        for id in [parent, child] {
+            let definition = Definition::new(
+                crate::popup::canned(), session.clone(), search.theme.clone(),
+                &mut search.engine, search.media.as_mut(),
+            ).unwrap();
+            search.definitions.push((id, definition));
+        }
+        let blank = Point::new(-20.0, -20.0);
+        search.definitions[0].1.pointer = blank;
+
+        let _ = update(&mut search, Message::Hover(parent, blank));
+
+        assert_eq!(search.definitions.len(), 2);
+    }
+
+    #[test]
+    fn reentering_a_parent_blank_closes_descendants_and_discards_their_replies() {
+        let (mut search, receiver) = fixture();
+        let parent = window::Id::unique();
+        let child = window::Id::unique();
+        let session = search.session.clone();
+        for id in [parent, child] {
+            let definition = Definition::new(
+                crate::popup::canned(), session.clone(), search.theme.clone(),
+                &mut search.engine, search.media.as_mut(),
+            ).unwrap();
+            search.definitions.push((id, definition));
+        }
+        search.definitions[1].1.hovered = Some("犬".into());
+        search.definitions[1].1.generation = 4;
+        let active = Target::Hover(child, 4);
+        let _ = search.enqueue(Job {
+            target: active.clone(), query: "犬".into(), tokenize: false, session: session.clone(),
+        });
+        assert_eq!(receiver.recv().unwrap().0.query, "犬");
+        search.pending = Some(Job {
+            target: Target::Hover(child, 5), query: "猫".into(), tokenize: false,
+            session: session.clone(),
+        });
+
+        let blank = Point::new(-20.0, -20.0);
+        search.definitions[0].1.pointer = blank;
+        search.definitions[0].1.pointer_left = true;
+        let _ = update(&mut search, Message::Hover(parent, blank));
+        assert_eq!(search.definitions.len(), 1);
+        assert!(search.pending.is_none());
+
+        let _ = update(&mut search, Message::Finished(active, Ok(Box::new(Reply {
+            result: SearchResult::Found(Box::new(crate::popup::canned())),
+            tokens: Vec::new(), session,
+        }))));
+        assert_eq!(search.definitions.len(), 1);
+    }
+
+    #[test]
+    fn a_definition_click_reply_survives_leave() {
+        let (mut search, receiver) = fixture();
+        let parent = window::Id::unique();
+        let session = nested_profile_session();
+        let nested = session.nested();
+        search.session = session.clone();
+        let mut definition = Definition::new(
+            crate::popup::canned(), session.clone(), search.theme.clone(),
+            &mut search.engine, search.media.as_mut(),
+        ).unwrap();
+        let (query, hit) = definition.scene.hit_targets().into_iter().find_map(|hit| {
+            match &hit.action {
+                chibipop::controller::HitAction::DrillDown(query) => Some((query.clone(), hit)),
+                _ => None,
+            }
+        }).unwrap();
+        assert_eq!(query, "漢");
+        definition.pointer = Point::new(
+            (hit.x.unwrap_or_default() + hit.w.unwrap_or_default() / 2.0) / definition.scale,
+            (hit.y + hit.h / 2.0) / definition.scale,
+        );
+        let parent_written = definition.presentation.top.as_ref()
+            .and_then(|card| card.written.clone()).unwrap();
+        search.definitions.push((parent, definition));
+
+        let _ = update(&mut search, Message::Click(parent));
+        let job = receiver.recv().unwrap().0;
+        assert!(matches!(&job.target, Target::Click(id, 1) if *id == parent));
+        assert_eq!(job.query, query);
+        assert_eq!(job.session.id(), nested.id());
+
+        let _ = update(&mut search, Message::Leave(parent));
+        assert_eq!(search.click_generation, 1);
+        let _ = update(&mut search, Message::Finished(job.target, Ok(Box::new(Reply {
+            result: found_search_result("子辞書"),
+            tokens: Vec::new(), session: job.session,
+        }))));
+
+        assert_eq!(search.definitions.len(), 2);
+        assert_eq!(search.definitions[0].0, parent);
+        assert_eq!(search.definitions[0].1.session, session);
+        assert_eq!(search.definitions[0].1.presentation.top.as_ref()
+            .and_then(|card| card.written.as_deref()), Some(parent_written.as_str()));
+        assert_eq!(search.definitions[1].1.session, nested);
+        assert_eq!(search.definitions[1].1.session.id(), "nested");
+        assert_eq!(search.definitions[1].1.presentation.top.as_ref()
+            .and_then(|card| card.written.as_deref()), Some("子辞書"));
+    }
+
+    #[test]
+    fn a_new_definition_click_and_back_reject_old_click_replies() {
+        let (mut search, receiver) = fixture();
+        let parent = window::Id::unique();
+        let session = search.session.clone();
+        let definition = Definition::new(
+            crate::popup::canned(), session.clone(), search.theme.clone(),
+            &mut search.engine, search.media.as_mut(),
+        ).unwrap();
+        search.definitions.push((parent, definition));
+
+        let _ = search.enqueue_click(parent, "猫".into());
+        let first = receiver.recv().unwrap().0;
+        let _ = search.enqueue_click(parent, "犬".into());
+        assert!(matches!(&search.pending.as_ref().unwrap().target, Target::Click(id, 2) if *id == parent));
+        let _ = update(&mut search, Message::Finished(first.target, Ok(Box::new(Reply {
+            result: SearchResult::Found(Box::new(crate::popup::canned())),
+            tokens: Vec::new(), session: session.clone(),
+        }))));
+        assert_eq!(search.definitions.len(), 1);
+        assert_eq!(receiver.recv().unwrap().0.query, "犬");
+
+        let active = Target::Click(parent, search.click_generation);
+        let child = window::Id::unique();
+        let definition = Definition::new(
+            crate::popup::canned(), session.clone(), search.theme.clone(),
+            &mut search.engine, search.media.as_mut(),
+        ).unwrap();
+        search.definitions.push((child, definition));
+        let _ = update(&mut search, Message::Back(child));
+        assert_eq!(search.definitions.len(), 1);
+        let _ = update(&mut search, Message::Finished(active, Ok(Box::new(Reply {
+            result: SearchResult::Found(Box::new(crate::popup::canned())),
+            tokens: Vec::new(), session,
+        }))));
+        assert_eq!(search.definitions.len(), 1);
+    }
+
+    #[test]
     fn escape_from_a_definition_cancels_hover_reopen_work() {
         let (mut search, receiver) = fixture();
         let parent = window::Id::unique();
@@ -1636,15 +1883,29 @@ mod tests {
     fn escape_from_main_invalidates_all_search_work() {
         let (mut search, _) = fixture();
         search.generation = 8;
+        search.click_generation = 3;
+        let parent = window::Id::unique();
+        let session = search.session.clone();
+        let definition = Definition::new(
+            crate::popup::canned(), session.clone(), search.theme.clone(),
+            &mut search.engine, search.media.as_mut(),
+        ).unwrap();
+        search.definitions.push((parent, definition));
         search.busy = true;
         search.pending = Some(Job {
             target: Target::Input(8), query: "猫".into(), tokenize: false,
-            session: search.session.clone(),
+            session: session.clone(),
         });
         let main = search.main;
         let _ = update(&mut search, Message::Back(main));
         assert_eq!(search.generation, 9);
+        assert_eq!(search.click_generation, 4);
         assert!(search.pending.is_none());
+        assert!(search.definitions.is_empty());
+        let _ = update(&mut search, Message::Finished(Target::Click(parent, 3), Ok(Box::new(Reply {
+            result: SearchResult::Found(Box::new(crate::popup::canned())),
+            tokens: Vec::new(), session,
+        }))));
         assert!(search.definitions.is_empty());
     }
 
