@@ -5788,9 +5788,6 @@ mod tests {
             let recorded_attempts = accepted_attempts.clone();
             let done = stop.clone();
             let worker = std::thread::spawn(move || {
-                // An abandoned connection arrives with no body on a loaded
-                // runner. Ignoring one keeps the log about the request under
-                // test instead of about whatever opened a socket and left.
                 let mut attempts = 0;
                 while !done.load(Ordering::Relaxed) && attempts < ACCEPT_ATTEMPTS {
                     let Ok((mut stream, _)) = listener.accept() else {
@@ -5799,6 +5796,7 @@ mod tests {
                     };
                     attempts += 1;
                     recorded_attempts.store(attempts, Ordering::Relaxed);
+                    stream.set_nonblocking(false).expect("a blocking request stream");
                     let _ = stream.set_read_timeout(Some(SOCKET_LIMIT));
                     let _ = stream.set_write_timeout(Some(SOCKET_LIMIT));
                     let body = read_request_body(&mut stream);
