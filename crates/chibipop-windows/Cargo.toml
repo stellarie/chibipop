@@ -37,6 +37,8 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Ole",
   # Plugin host kills adapter process trees via a job object.
   "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
   "Media_Ocr",
   "Graphics_Imaging",
   "Globalization",

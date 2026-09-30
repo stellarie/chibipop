@@ -1,67 +1,129 @@
 #![cfg(windows)]
 
+#[allow(dead_code)]
+#[path = "../../ocr-performance/mod.rs"]
+mod monitor;
+
+use anyhow::{bail, Context, Result};
 use chibipop::text::OcrEngine;
 use chibipop_windows::plugin::{host, manifest, text::PluginText};
 use chibipop_windows::text::ocr::WinrtOcr;
-use std::time::Instant;
-use std::hash::{Hash, Hasher};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 #[test]
 #[ignore = "Runs installed OCR engines for performance measurements"]
-fn fixed_pixels_engine_latency() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/japanese_bgra.bin");
-    let (pixels, width, height, expected) = match std::env::var_os("CHIBIPOP_BENCH_BMP") {
-        Some(path) => {
-            let bmp = std::fs::read(path).unwrap();
-            let field = |at| i32::from_le_bytes(bmp[at..at + 4].try_into().unwrap());
-            let offset = field(10) as usize;
-            let width = field(18);
-            let height = field(22);
-            assert!(width > 0 && height != 0);
-            let depth = u16::from_le_bytes(bmp[28..30].try_into().unwrap()) as usize;
-            assert!(depth == 24 || depth == 32);
-            let pitch = (width as usize * depth).div_ceil(32) * 4;
-            let mut pixels = Vec::new();
-            for y in 0..height.unsigned_abs() as usize {
-                let row = if height > 0 { height as usize - 1 - y } else { y };
-                for x in 0..width as usize {
-                    let at = offset + row * pitch + x * (depth / 8);
-                    pixels.extend_from_slice(&[bmp[at], bmp[at + 1], bmp[at + 2], 255]);
-                }
-            }
-            (pixels, width, height.abs(), '学')
-        }
-        None => (std::fs::read(path).unwrap(), 400, 120, '昨'),
+fn fixed_pixels_engine_latency() -> Result<()> {
+    let fixture = monitor::load_fixture(&fixture_path())?;
+    let requested = std::env::var("CHIBIPOP_OCR_PERF_BACKEND")
+        .unwrap_or_else(|_| "all".to_string());
+    let reports = match requested.as_str() {
+        "windows" => vec![run_windows(&fixture)],
+        "meikiocr" => vec![run_meikiocr(&fixture)],
+        "all" => vec![run_windows(&fixture), run_meikiocr(&fixture)],
+        other => bail!("unsupported OCR performance backend: {other}"),
     };
-    let mut engines: Vec<Box<dyn OcrEngine>> = vec![Box::new(WinrtOcr::new("ja").unwrap())];
-    if let Some(dir) = std::env::var_os("CHIBIPOP_BENCH_PLUGIN") {
-        let dir = std::path::PathBuf::from(dir);
-        let spec = manifest::parse(&std::fs::read_to_string(dir.join("plugin.toml")).unwrap()).unwrap();
-        let started = Instant::now();
-        let process = host::spawn(&spec, &dir).unwrap();
-        println!("BENCH startup engine={} ms={:.3}", spec.name, started.elapsed().as_secs_f64() * 1000.0);
-        engines.push(Box::new(PluginText::new(process, &spec)));
-    }
-    for engine in engines {
-        for scale in [1, 2] {
-            let (buf, w, h) = chibipop::text::source::upscale_by(&pixels, width, height, scale);
-            let mut reference = None;
-            for sample in 0..13 {
-                let started = Instant::now();
-                let lines = engine.recognise(&buf, w, h).unwrap();
-                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-                let text: String = lines.iter().flat_map(|line| &line.words).map(|word| word.text.as_str()).collect();
-                assert!(text.contains(expected), "{}: {text}", engine.name());
-                assert!(lines.iter().flat_map(|line| &line.words).all(|word| word.rect.w > 0 && word.rect.h > 0));
-                if let Some(previous) = &reference {
-                    assert_eq!(previous, &lines, "fixed pixels must retain text and geometry");
-                }
-                let mut geometry = std::collections::hash_map::DefaultHasher::new();
-                format!("{lines:?}").hash(&mut geometry);
-                reference = Some(lines);
-                println!("BENCH engine={} scale={scale} sample={sample} ms={elapsed:.3} geometry_hash={:016x} text={text}", engine.name(), geometry.finish());
-            }
-        }
-    }
+    let report = json!({
+        "schema": "chibipop-ocr-performance/v1",
+        "mode": "report-only",
+        "fixture": fixture.metadata,
+        "backend_results": reports,
+    });
+    monitor::write_child_report(&report)
+}
+
+fn fixture_path() -> PathBuf {
+    std::env::var_os("CHIBIPOP_OCR_PERF_FIXTURE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join(monitor::FIXTURE_ID)
+        })
+}
+
+fn run_windows(fixture: &monitor::Fixture) -> Value {
+    monitor::run_benchmark_with_fixture(
+        monitor::BenchmarkOptions {
+            backend_id: "windows-ocr".to_string(),
+            version: "system".to_string(),
+            language: "ja".to_string(),
+            identity: json!({
+                "model_hashes": {},
+                "plugin_hashes": {},
+                "config_sha256": null,
+                "model_asset_count": 0,
+                "identity_complete": true,
+                "identity_incomplete_reason": null,
+                "thread_settings": {"runtime": "system"},
+                "scales": [1, 2],
+            }),
+            fixture: Value::Null,
+            phase_file: phase_file(),
+            identity_file: identity_file(),
+        },
+        fixture,
+        || WinrtOcr::new("ja").map(|engine| {
+            (Box::new(engine) as Box<dyn OcrEngine>, "system".to_string())
+        }),
+    )
+}
+
+fn run_meikiocr(fixture: &monitor::Fixture) -> Value {
+    let directory = std::env::var_os("CHIBIPOP_BENCH_PLUGIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let identity = directory
+        .as_deref()
+        .map(monitor::plugin_identity)
+        .unwrap_or_else(monitor::empty_plugin_identity);
+    let Some(dir) = directory else {
+        return monitor::run_benchmark_with_fixture(
+            monitor::BenchmarkOptions {
+                backend_id: "meikiocr".to_string(),
+                version: "manifest".to_string(),
+                language: "ja".to_string(),
+                identity,
+                fixture: Value::Null,
+                phase_file: phase_file(),
+                identity_file: identity_file(),
+            },
+            fixture,
+            || Err(anyhow::anyhow!("MeikiOCR plugin is not configured")),
+        );
+    };
+    monitor::run_benchmark_with_fixture(
+        monitor::BenchmarkOptions {
+            backend_id: "meikiocr".to_string(),
+            version: "manifest".to_string(),
+            language: "ja".to_string(),
+            identity,
+            fixture: Value::Null,
+            phase_file: phase_file(),
+            identity_file: identity_file(),
+        },
+        fixture,
+        || {
+            let manifest_path = dir.join("plugin.toml");
+            let text = std::fs::read_to_string(&manifest_path)
+                .context("reading the benchmark plugin manifest")?;
+            let spec = manifest::parse(&text).context("parsing the benchmark plugin manifest")?;
+            let process = host::spawn(&spec, &dir).context("starting the benchmark plugin")?;
+            let version = if process.ready().version.is_empty() {
+                spec.version.clone()
+            } else {
+                process.ready().version.clone()
+            };
+            Ok((Box::new(PluginText::new(process, &spec)) as Box<dyn OcrEngine>, version))
+        },
+    )
+}
+
+fn phase_file() -> Option<PathBuf> {
+    std::env::var_os("CHIBIPOP_OCR_PERF_PHASE_FILE").map(PathBuf::from)
+}
+
+fn identity_file() -> Option<PathBuf> {
+    std::env::var_os("CHIBIPOP_OCR_PERF_BACKEND_FILE").map(PathBuf::from)
 }

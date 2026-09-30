@@ -1,0 +1,639 @@
+name: OCR performance PR summary
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: read
+  issues: write
+
+concurrency:
+  group: ocr-performance-pr-summary-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_NAME: chibipop-ocr-performance-windows
+  MAX_API_BYTES: "2097152"
+  MAX_BACKENDS: "4"
+  MAX_BODY_BYTES: "8000"
+  MAX_COMMENT_PAGES: "5"
+  MAX_FAILURES: "32"
+  MAX_FIELD_LENGTH: "80"
+  MAX_PHASES: "16"
+  MAX_REPORT_BYTES: "524288"
+  MAX_ZIP_BYTES: "4194304"
+
+jobs:
+  comment:
+    name: Post Windows OCR summary
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+
+    steps:
+      - name: Download and update PR summary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import io
+          import json
+          import math
+          import os
+          import subprocess
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          ARTIFACT_NAME = os.environ["ARTIFACT_NAME"]
+          MAX_API_BYTES = int(os.environ["MAX_API_BYTES"])
+          MAX_BACKENDS = int(os.environ["MAX_BACKENDS"])
+          MAX_BODY_BYTES = int(os.environ["MAX_BODY_BYTES"])
+          MAX_COMMENT_PAGES = int(os.environ["MAX_COMMENT_PAGES"])
+          MAX_FAILURES = int(os.environ["MAX_FAILURES"])
+          MAX_FIELD_LENGTH = int(os.environ["MAX_FIELD_LENGTH"])
+          MAX_PHASES = int(os.environ["MAX_PHASES"])
+          MAX_REPORT_BYTES = int(os.environ["MAX_REPORT_BYTES"])
+          MAX_ZIP_BYTES = int(os.environ["MAX_ZIP_BYTES"])
+          MARKER = "<!-- chibipop-ocr-performance-summary -->"
+          MAX_BAR_WIDTH = 12
+          MAX_BAR_LABEL_LENGTH = 24
+          MAX_BAR_LINE_BYTES = 320
+
+
+          class OptionalDeliveryError(Exception):
+              pass
+
+
+          def optional(message):
+              safe = str(message).replace("\n", " ").replace("\r", " ")
+              print(f"::warning::OCR PR summary skipped: {safe[:200]}")
+
+
+          def gh(args, limit=MAX_API_BYTES):
+              environment = os.environ.copy()
+              if not environment.get("GH_TOKEN"):
+                  raise OptionalDeliveryError("the GitHub token is unavailable")
+              result = subprocess.run(
+                  ["gh", *args],
+                  env=environment,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  raise OptionalDeliveryError("the GitHub API request failed")
+              if len(result.stdout) > limit:
+                  raise OptionalDeliveryError("the GitHub API response is too large")
+              return result.stdout
+
+
+          def gh_json(args):
+              try:
+                  return json.loads(gh(args).decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise OptionalDeliveryError("the GitHub API returned invalid JSON") from error
+
+
+          def bounded_text(value, field):
+              if not isinstance(value, str) or len(value) > MAX_FIELD_LENGTH:
+                  raise OptionalDeliveryError(f"{field} exceeds the field limit")
+              text = value.replace("\n", " ").replace("\r", " ").replace("`", "'")
+              allowed = "._:/() +%-"
+              return "".join(
+                  character if character.isascii() and (character.isalnum() or character in allowed)
+                  else "?"
+                  for character in text
+              )
+
+
+          def finite_number(value):
+              if isinstance(value, bool) or not isinstance(value, (int, float)):
+                  return None
+              try:
+                  value = float(value)
+              except (OverflowError, TypeError, ValueError):
+                  return None
+              return value if math.isfinite(value) else None
+
+
+          def number(value):
+              value = finite_number(value)
+              if value is None:
+                  return "n/a"
+              text = f"{value:.3f}".rstrip("0").rstrip(".")
+              return text if len(text) <= MAX_FIELD_LENGTH else "n/a"
+
+
+          def text_bar(value, maximum, width=12):
+              try:
+                  width = int(width)
+              except (TypeError, ValueError):
+                  width = 0
+              width = max(0, min(width, MAX_BAR_WIDTH))
+              value = finite_number(value)
+              maximum = finite_number(maximum)
+              if value is None or maximum is None or value < 0 or maximum <= 0:
+                  return "." * width
+              ratio = min(value / maximum, 1.0)
+              filled = min(width, int(ratio * width))
+              return "#" * filled + "." * (width - filled)
+
+
+          def bounded_metric(value):
+              value = finite_number(value)
+              if value is None or value < 0 or number(value) == "n/a":
+                  return None
+              return value
+
+
+          def stats_value(stats, field):
+              if not isinstance(stats, dict):
+                  return "n/a"
+              return number(bounded_metric(stats.get(field)))
+
+
+          def available_metric(backend_result, resource_field, stat_field):
+              if not isinstance(backend_result, dict):
+                  return None
+              if backend_result.get("status") != "available":
+                  return None
+              resources = backend_result.get("resources")
+              if not isinstance(resources, dict):
+                  return None
+              aggregates = resources.get("aggregates")
+              if not isinstance(aggregates, list):
+                  return None
+              values = []
+              for aggregate in aggregates:
+                  if not isinstance(aggregate, dict) or aggregate.get("role") != "total":
+                      continue
+                  stats = aggregate.get(resource_field)
+                  if not isinstance(stats, dict):
+                      continue
+                  value = bounded_metric(stats.get(stat_field))
+                  if value is not None:
+                      values.append(value)
+              return max(values, default=None)
+
+
+          def backend_bar_values(backend_result):
+              if not isinstance(backend_result, dict) or backend_result.get("status") != "available":
+                  return (None, None, None)
+              test = backend_result.get("test") if isinstance(backend_result, dict) else None
+              latency = test.get("latency") if isinstance(test, dict) else None
+              repeated = latency.get("repeated_identical") if isinstance(latency, dict) else None
+              latency_p95 = (
+                  bounded_metric(repeated.get("p95_ms"))
+                  if isinstance(repeated, dict)
+                  else None
+              )
+              return (
+                  available_metric(backend_result, "working_set_bytes", "peak_mib"),
+                  available_metric(backend_result, "private_bytes", "peak_mib"),
+                  latency_p95,
+              )
+
+
+          def validate_list(value, field, limit):
+              if not isinstance(value, list) or len(value) > limit:
+                  raise OptionalDeliveryError(f"{field} exceeds the list limit")
+              return value
+
+
+          def report_summary(report, run_url, artifact_url, commit_sha):
+              if not isinstance(report, dict):
+                  raise OptionalDeliveryError("the report is not an object")
+              if report.get("schema") != "chibipop-ocr-performance/v1":
+                  raise OptionalDeliveryError("the report schema is invalid")
+              if report.get("mode") != "report-only":
+                  raise OptionalDeliveryError("the report mode is invalid")
+              thresholds = report.get("thresholds")
+              if not isinstance(thresholds, dict):
+                  raise OptionalDeliveryError("thresholds are missing")
+              warning_thresholds = validate_list(
+                  thresholds.get("warning"), "warning thresholds", MAX_FAILURES
+              )
+              failure_thresholds = validate_list(
+                  thresholds.get("failure"), "failure thresholds", MAX_FAILURES
+              )
+              threshold_entries = warning_thresholds + failure_thresholds
+              for entry in threshold_entries:
+                  if not isinstance(entry, dict) or not isinstance(entry.get("threshold"), dict):
+                      raise OptionalDeliveryError("threshold data is invalid")
+                  if not isinstance(entry["threshold"].get("enabled"), bool):
+                      raise OptionalDeliveryError("threshold state is invalid")
+              threshold_status = (
+                  "report-only; configured"
+                  if any(entry["threshold"]["enabled"] for entry in threshold_entries)
+                  else "report-only; disabled"
+              )
+              backends = validate_list(report.get("backends"), "backends", MAX_BACKENDS)
+              if not backends:
+                  raise OptionalDeliveryError("the report has no backends")
+              failures = validate_list(
+                  report.get("failure_categories"), "failure categories", MAX_FAILURES
+              )
+              failure_text = "none" if not failures else ", ".join(
+                  bounded_text(value, "failure category") for value in failures
+              )
+              bar_values = [backend_bar_values(backend) for backend in backends]
+              maxima = tuple(
+                  max((values[index] for values in bar_values if values[index] is not None), default=0.0)
+                  for index in range(3)
+              )
+              lines = [
+                  MARKER,
+                  "### Windows OCR performance",
+                  "",
+                  f"Commit: `{bounded_text(commit_sha, 'commit SHA')}`",
+                  f"Measurement: CI completed successfully; thresholds: {threshold_status}.",
+                  f"Run: [workflow run]({run_url}); [full JSON artifact]({artifact_url}) "
+                  f"(`{ARTIFACT_NAME}`).",
+              ]
+              for index, backend_result in enumerate(backends):
+                  if not isinstance(backend_result, dict):
+                      raise OptionalDeliveryError(f"backend {index} is invalid")
+                  backend = backend_result.get("backend")
+                  resources = backend_result.get("resources")
+                  test = backend_result.get("test")
+                  if not isinstance(backend, dict) or not isinstance(resources, dict):
+                      raise OptionalDeliveryError(f"backend {index} data is incomplete")
+                  if not isinstance(test, dict):
+                      raise OptionalDeliveryError(f"backend {index} test data is incomplete")
+                  backend_id = bounded_text(backend.get("id"), "backend ID")
+                  status = bounded_text(backend_result.get("status"), "backend status")
+                  coverage = resources.get("phase_coverage")
+                  if not isinstance(coverage, dict):
+                      raise OptionalDeliveryError(f"backend {index} coverage is missing")
+                  required = validate_list(coverage.get("required"), "required phases", MAX_PHASES)
+                  observed = validate_list(coverage.get("observed"), "observed phases", MAX_PHASES)
+                  for phase in required + observed:
+                      bounded_text(phase, "phase name")
+                  coverage_state = "complete" if coverage.get("complete") is True else "incomplete"
+                  latency = test.get("latency")
+                  repeated = latency.get("repeated_identical") if isinstance(latency, dict) else None
+                  aggregates = validate_list(resources.get("aggregates"), "resource aggregates", MAX_PHASES * 4)
+                  survivors = resources.get("cleanup_remaining_process_ids")
+                  if survivors is None:
+                      survivor_text = "unknown"
+                  else:
+                      survivors = validate_list(survivors, "cleanup survivors", MAX_FAILURES * 4)
+                      survivor_text = str(len(survivors))
+                  working = available_metric(backend_result, "working_set_bytes", "peak_mib")
+                  private = available_metric(backend_result, "private_bytes", "peak_mib")
+                  cpu = available_metric(backend_result, "cpu_percent", "peak")
+                  threads = available_metric(backend_result, "threads", "peak")
+                  handles = available_metric(backend_result, "handles", "peak")
+                  if status == "available":
+                      lines.append(
+                          f"- `{backend_id}`: status `{status}`; phases "
+                          f"`{len(observed)}/{len(required)}` ({coverage_state}); latency "
+                          f"median/p95/peak "
+                          f"`{stats_value(repeated, 'median_ms')}/{stats_value(repeated, 'p95_ms')}/"
+                          f"{stats_value(repeated, 'peak_ms')} ms`; total peak working/private "
+                          f"`{number(working)}/{number(private)} MiB`; "
+                          f"CPU/threads/handles `{number(cpu)}/{number(threads)}/{number(handles)}`; "
+                          f"cleanup survivors `{survivor_text}`."
+                      )
+                  else:
+                      unavailable = (
+                          "unavailable; harness-only resources omitted"
+                          if status == "unavailable"
+                          else f"{status}; harness-only resources omitted"
+                      )
+                      lines.append(
+                          f"- `{backend_id}`: {unavailable}; phases "
+                          f"`{len(observed)}/{len(required)}` ({coverage_state}); "
+                          f"cleanup survivors `{survivor_text}`."
+                      )
+              lines.extend([
+                  "",
+                  "#### Proportional comparison",
+                  "```text",
+                  "Shared maxima: working-set "
+                  f"{number(maxima[0])} MiB | private-bytes {number(maxima[1])} MiB | "
+                  f"latency p95 {number(maxima[2])} ms",
+                  "Backend".ljust(MAX_BAR_LABEL_LENGTH)
+                  + " | working-set MiB       | private-bytes MiB     | latency p95 ms",
+              ])
+              for index, backend_result in enumerate(backends):
+                  backend = backend_result.get("backend")
+                  backend_id = bounded_text(backend.get("id"), "backend ID")
+                  status = bounded_text(backend_result.get("status"), "backend status")
+                  label = backend_id[:MAX_BAR_LABEL_LENGTH].ljust(MAX_BAR_LABEL_LENGTH)
+                  if status == "available":
+                      values = bar_values[index]
+                      bar_line = (
+                          f"{label} | [{text_bar(values[0], maxima[0])}] {number(values[0])} MiB"
+                          f" | [{text_bar(values[1], maxima[1])}] {number(values[1])} MiB"
+                          f" | [{text_bar(values[2], maxima[2])}] {number(values[2])} ms"
+                      )
+                  else:
+                      bar_line = f"{label} | {status}; harness-only resources omitted"
+                  if len(bar_line.encode("utf-8")) > MAX_BAR_LINE_BYTES:
+                      raise OptionalDeliveryError("the performance bar line exceeds the limit")
+                  lines.append(bar_line)
+              lines.append("```")
+              lines.append(f"Report failure categories: {failure_text}.")
+              body = "\n".join(lines)
+              if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+                  raise OptionalDeliveryError("the PR summary exceeds the body limit")
+              return body
+
+
+          def visualization_self_test():
+              global MAX_BODY_BYTES
+              phases = list("abcdef")
+
+              def backend(identifier, status, working, private, latency):
+                  return {
+                      "backend": {"id": identifier},
+                      "status": status,
+                      "test": {
+                          "latency": {
+                              "repeated_identical": {
+                                  "median_ms": latency,
+                                  "p95_ms": latency,
+                                  "peak_ms": latency,
+                              }
+                          }
+                      },
+                      "resources": {
+                          "phase_coverage": {
+                              "required": phases,
+                              "observed": phases,
+                              "complete": True,
+                          },
+                          "aggregates": [{
+                              "role": "total",
+                              "working_set_bytes": {"peak_mib": working},
+                              "private_bytes": {"peak_mib": private},
+                              "cpu_percent": {"peak": 1},
+                              "threads": {"peak": 2},
+                              "handles": {"peak": 3},
+                          }],
+                          "cleanup_remaining_process_ids": [],
+                      },
+                  }
+
+              available = backend("windows-ocr", "available", 8, 4, 2)
+              available["resources"]["aggregates"].extend([
+                  {
+                      "role": "total",
+                      "working_set_bytes": {"peak_mib": None},
+                      "private_bytes": {"peak_mib": float("nan")},
+                      "cpu_percent": {"peak": -1},
+                      "threads": {"peak": None},
+                      "handles": {"peak": 80},
+                  },
+                  {
+                      "role": "total",
+                      "working_set_bytes": {"peak_mib": 80},
+                      "private_bytes": {"peak_mib": 40},
+                      "cpu_percent": {"peak": 5},
+                      "threads": {"peak": 6},
+                      "handles": {"peak": 80},
+                  },
+              ])
+              unavailable = backend("meikiocr", "unavailable", 999, 999, 999)
+              zero = backend("zero", "available", 0, 0, 0)
+              extreme = backend("extreme", "available", float("inf"), -1, float("nan"))
+              report = {
+                  "schema": "chibipop-ocr-performance/v1",
+                  "mode": "report-only",
+                  "thresholds": {
+                      "warning": [{"threshold": {"enabled": False}}],
+                      "failure": [{"threshold": {"enabled": False}}],
+                  },
+                  "failure_categories": [],
+                  "backends": [available, unavailable, zero, extreme],
+              }
+              empty_bar = "." * MAX_BAR_WIDTH
+              if any(
+                  text_bar(value, 1) != empty_bar
+                  for value in (None, -1, float("nan"), float("inf"), 10**400)
+              ):
+                  raise AssertionError("invalid bar values are not empty")
+              if available_metric(available, "working_set_bytes", "peak_mib") != 80:
+                  raise AssertionError("later working-set peak was ignored")
+              if available_metric(available, "private_bytes", "peak_mib") != 40:
+                  raise AssertionError("later private-bytes peak was ignored")
+              if available_metric(available, "cpu_percent", "peak") != 5:
+                  raise AssertionError("later CPU peak was ignored")
+              if available_metric(available, "threads", "peak") != 6:
+                  raise AssertionError("later thread peak was ignored")
+              if available_metric(available, "handles", "peak") != 80:
+                  raise AssertionError("later handle peak was ignored")
+              body = report_summary(
+                  report,
+                  "https://example.test/run/1",
+                  "https://example.test/artifact/2",
+                  "a" * 40,
+              )
+              if "#### Proportional comparison" not in body:
+                  raise AssertionError("bar section is missing")
+              if "Shared maxima: working-set 80 MiB" not in body:
+                  raise AssertionError("later phase did not set shared maximum")
+              if "[############] 80 MiB" not in body:
+                  raise AssertionError("later phase bar is missing")
+              if "[............] 0" not in body:
+                  raise AssertionError("bar values are missing")
+              if "unavailable; harness-only resources omitted" not in body:
+                  raise AssertionError("unavailable resource label is missing")
+              if "999" in body or "n/a" not in body:
+                  raise AssertionError("unavailable or null values leaked")
+              if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+                  raise AssertionError("visual summary exceeded its body limit")
+              oversized = dict(report)
+              oversized["backends"] = report["backends"] + [available]
+              try:
+                  report_summary(
+                      oversized,
+                      "https://example.test/run/1",
+                      "https://example.test/artifact/2",
+                      "a" * 40,
+                  )
+              except OptionalDeliveryError:
+                  pass
+              else:
+                  raise AssertionError("backend count limit is missing")
+              original_limit = MAX_BODY_BYTES
+              MAX_BODY_BYTES = 100
+              try:
+                  try:
+                      report_summary(
+                          report,
+                          "https://example.test/run/1",
+                          "https://example.test/artifact/2",
+                          "a" * 40,
+                      )
+                  except OptionalDeliveryError:
+                      pass
+                  else:
+                      raise AssertionError("body limit is missing")
+              finally:
+                  MAX_BODY_BYTES = original_limit
+
+
+          def load_event():
+              event_path = Path(os.environ["GITHUB_EVENT_PATH"])
+              event = json.loads(event_path.read_text(encoding="utf-8"))
+              workflow_run = event.get("workflow_run")
+              if not isinstance(workflow_run, dict):
+                  raise OptionalDeliveryError("workflow_run data is missing")
+              if workflow_run.get("name") != "CI":
+                  raise OptionalDeliveryError("the triggering workflow is not CI")
+              if workflow_run.get("event") != "pull_request":
+                  raise OptionalDeliveryError("the triggering event is not pull_request")
+              if workflow_run.get("conclusion") != "success":
+                  raise OptionalDeliveryError("the triggering CI run did not succeed")
+              pull_requests = validate_list(
+                  workflow_run.get("pull_requests"), "associated pull requests", 1
+              )
+              if len(pull_requests) != 1 or not isinstance(pull_requests[0], dict):
+                  raise OptionalDeliveryError("the CI run does not have exactly one pull request")
+              pull_number = pull_requests[0].get("number")
+              if not isinstance(pull_number, int) or pull_number <= 0:
+                  raise OptionalDeliveryError("the pull request number is invalid")
+              run_id = workflow_run.get("id")
+              if not isinstance(run_id, int) or run_id <= 0:
+                  raise OptionalDeliveryError("the workflow run ID is invalid")
+              head_sha = workflow_run.get("head_sha")
+              if not isinstance(head_sha, str) or not 7 <= len(head_sha) <= 64:
+                  raise OptionalDeliveryError("the commit SHA is invalid")
+              if any(character not in "0123456789abcdefABCDEF" for character in head_sha):
+                  raise OptionalDeliveryError("the commit SHA is invalid")
+              repository = os.environ.get("GITHUB_REPOSITORY", "")
+              if not repository or repository.count("/") != 1:
+                  raise OptionalDeliveryError("the repository name is invalid")
+              return repository, pull_number, run_id, head_sha
+
+
+          def download_report(repository, run_id):
+              query = f"repos/{repository}/actions/runs/{run_id}/artifacts?name={ARTIFACT_NAME}&per_page=100"
+              payload = gh_json(["api", query])
+              if not isinstance(payload, dict):
+                  raise OptionalDeliveryError("the artifact response is invalid")
+              artifacts = payload.get("artifacts")
+              if not isinstance(artifacts, list) or len(artifacts) != 1:
+                  raise OptionalDeliveryError("the named artifact is missing or ambiguous")
+              artifact = artifacts[0]
+              if not isinstance(artifact, dict) or artifact.get("name") != ARTIFACT_NAME:
+                  raise OptionalDeliveryError("the artifact name is invalid")
+              if artifact.get("expired") is True:
+                  raise OptionalDeliveryError("the artifact is expired")
+              artifact_run = artifact.get("workflow_run")
+              if not isinstance(artifact_run, dict) or artifact_run.get("id") != run_id:
+                  raise OptionalDeliveryError("the artifact is not bound to the triggering run")
+              artifact_id = artifact.get("id")
+              if not isinstance(artifact_id, int) or artifact_id <= 0:
+                  raise OptionalDeliveryError("the artifact ID is invalid")
+              size = artifact.get("size_in_bytes")
+              if not isinstance(size, int) or size < 0 or size > MAX_ZIP_BYTES:
+                  raise OptionalDeliveryError("the artifact size exceeds the limit")
+              archive = gh(["api", f"repos/{repository}/actions/artifacts/{artifact_id}/zip"], MAX_ZIP_BYTES)
+              if len(archive) > MAX_ZIP_BYTES:
+                  raise OptionalDeliveryError("the artifact archive exceeds the limit")
+              try:
+                  with zipfile.ZipFile(io.BytesIO(archive)) as archive_file:
+                      entries = archive_file.infolist()
+                      if len(entries) != 1 or entries[0].filename != "ocr-performance-windows.json":
+                          raise OptionalDeliveryError("the artifact archive path is invalid")
+                      entry = entries[0]
+                      if entry.is_dir() or entry.file_size > MAX_REPORT_BYTES:
+                          raise OptionalDeliveryError("the report file exceeds the limit")
+                      report_bytes = archive_file.read(entry)
+              except zipfile.BadZipFile as error:
+                  raise OptionalDeliveryError("the artifact archive is invalid") from error
+              if len(report_bytes) > MAX_REPORT_BYTES:
+                  raise OptionalDeliveryError("the report file exceeds the limit")
+              try:
+                  return json.loads(report_bytes.decode("utf-8")), artifact_id
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise OptionalDeliveryError("the report JSON is invalid") from error
+
+
+          def comments(repository, pull_number):
+              found = []
+              for page in range(1, MAX_COMMENT_PAGES + 1):
+                  payload = gh_json([
+                      "api",
+                      f"repos/{repository}/issues/{pull_number}/comments?per_page=100&page={page}",
+                  ])
+                  if not isinstance(payload, list) or len(payload) > 100:
+                      raise OptionalDeliveryError("the comment response is invalid")
+                  found.extend(payload)
+                  if len(payload) < 100:
+                      return found
+              raise OptionalDeliveryError("comment pagination reached its safety limit")
+
+
+          def update_comment(repository, pull_number, body):
+              existing = []
+              for comment in comments(repository, pull_number):
+                  if not isinstance(comment, dict):
+                      continue
+                  user = comment.get("user")
+                  comment_body = comment.get("body")
+                  comment_id = comment.get("id")
+                  if (
+                      isinstance(user, dict)
+                      and user.get("login") == "github-actions[bot]"
+                      and isinstance(comment_body, str)
+                      and MARKER in comment_body
+                      and isinstance(comment_id, int)
+                      and comment_id > 0
+                  ):
+                      existing.append(comment_id)
+              if existing:
+                  for comment_id in existing:
+                      gh([
+                          "api",
+                          "--method",
+                          "PATCH",
+                          "--header",
+                          "Accept: application/vnd.github+json",
+                          "--field",
+                          f"body={body}",
+                          f"repos/{repository}/issues/comments/{comment_id}",
+                      ], MAX_API_BYTES)
+                  print(f"Updated {len(existing)} OCR performance PR summary comment(s).")
+              else:
+                  gh([
+                      "api",
+                      "--method",
+                      "POST",
+                      "--header",
+                      "Accept: application/vnd.github+json",
+                      "--field",
+                      f"body={body}",
+                      f"repos/{repository}/issues/{pull_number}/comments",
+                  ], MAX_API_BYTES)
+                  print("Created the OCR performance PR summary comment.")
+
+
+          try:
+              visualization_self_test()
+              repository, pull_number, run_id, head_sha = load_event()
+              server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+              run_url = f"{server_url}/{repository}/actions/runs/{run_id}"
+              report, artifact_id = download_report(repository, run_id)
+              artifact_url = f"{run_url}/artifacts/{artifact_id}"
+              body = report_summary(report, run_url, artifact_url, head_sha)
+              update_comment(repository, pull_number, body)
+          except OptionalDeliveryError as error:
+              optional(error)
+              sys.exit(0)
+          except (OSError, ValueError):
+              optional("report processing failed")
+              sys.exit(0)
+          except Exception:
+              optional("report delivery failed")
+              sys.exit(0)
+          PY
