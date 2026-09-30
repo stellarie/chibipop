@@ -3,21 +3,26 @@
 //! instance lock, so both names identify one instance. The socket accepts the minimal
 //! forever verb set.
 //!
-//! **One verb per global action, and nothing else.** A verb exists only when it names
-//! an action that a user can bind to a key. No verb reads state, takes an argument, or
-//! combines actions. This transports actions from compositor binds. Portal presses use the same
-//! core action path. It is not an API for scripts. The settings window reads status through
-//! `shortcuts::state` for this reason.
-//!
 //! Wire format: one request line (`trigger-down\n`) and one reply line
 //! (`OK …` or `ERR …`). `bindsym` lines start `chibipop ctl` as a child
 //! process. A human can also use `nc -U`.
 
 use crate::lock::sanitize;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+const MAX_REQUEST_BYTES: usize = 256;
+
+/// One accepted control-socket request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlRequest {
+    Verb(Verb),
+    BindId { id: String, activated: bool },
+}
 
 /// The minimal forever verb set. It has one verb per global action and is
 /// not an API for scripts (ARCHITECTURE.md#input-ladders).
@@ -34,14 +39,8 @@ pub enum Verb {
     /// later lookup finds no text or the user clicks outside it. The verb
     /// takes no hold and no frozen grab, so a press over the popup is a miss.
     Lookup,
-    /// Add a card for the lookup on screen. This is the same action that the
-    /// portal `anki-add` shortcut performs. Both channels use this wire name.
     AnkiAdd,
-    /// Pick a region, run OCR, and place the text on the clipboard
-    /// (`actions.ocr_clipboard`). Portal and native shortcuts use this verb.
     OcrClipboard,
-    /// Draw the box that [`chibipop::config::SentenceMode::Static`] reads for
-    /// the Anki sentence. Portal and native shortcuts use this verb.
     StaticRegion,
     SelectedText,
 }
@@ -141,10 +140,25 @@ impl StubState {
     }
 }
 
+/// Shared admission state for configured bind-ID requests.
+#[derive(Debug, Clone, Default)]
+pub struct ControlPolicy {
+    bind_ids: Arc<RwLock<HashSet<String>>>,
+}
+
+impl ControlPolicy {
+    /// Replace the configured enabled bind IDs accepted by this socket.
+    pub fn set_bind_ids(&self, ids: impl IntoIterator<Item = String>) {
+        let ids = ids.into_iter().filter(|id| valid_bind_id(id)).collect();
+        *self.bind_ids.write().unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
+    }
+}
+
 /// The daemon's socket endpoint. It removes the socket file when dropped.
 pub struct ControlSocket {
     listener: UnixListener,
     path: PathBuf,
+    policy: ControlPolicy,
 }
 
 impl ControlSocket {
@@ -162,7 +176,7 @@ impl ControlSocket {
         let listener = UnixListener::bind(&path)?;
         // The calloop source polls this listener. `accept` must not block the pump.
         listener.set_nonblocking(true)?;
-        Ok(ControlSocket { listener, path })
+        Ok(ControlSocket { listener, path, policy: ControlPolicy::default() })
     }
 
     pub fn path(&self) -> &Path {
@@ -173,19 +187,28 @@ impl ControlSocket {
         &self.listener
     }
 
-    /// Serve every connection that the listener has queued. Return one
-    /// `(reply_sent, verb_if_valid)` pair per connection. The caller logs and
-    /// applies each verb, so this method does not own daemon state.
-    pub fn drain(&self) -> Vec<(String, Option<Verb>)> {
+    /// Return shared admission state for use by the daemon reload path.
+    pub fn policy(&self) -> ControlPolicy {
+        self.policy.clone()
+    }
+
+    /// Replace the configured enabled bind IDs accepted by this socket.
+    pub fn set_bind_ids(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.policy.set_bind_ids(ids);
+    }
+
+    /// Serve every queued connection. Each result contains its reply text and
+    /// an accepted request, if the request passed validation.
+    pub fn drain(&self) -> Vec<(String, Option<ControlRequest>)> {
         let mut served = Vec::new();
         loop {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    if let Some(outcome) = serve_one(stream) {
+                    if let Some(outcome) = serve_one(stream, &self.policy) {
                         served.push(outcome);
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => break,
             }
         }
@@ -202,31 +225,99 @@ impl Drop for ControlSocket {
     }
 }
 
-/// Read one request line and write one reply line.
-fn serve_one(stream: UnixStream) -> Option<(String, Option<Verb>)> {
-    // Serve this local, short-lived stream in a mode that blocks, with a deadline.
-    // The daemon must not wait forever for one stuck client.
+/// Read one bounded request line and write one reply line.
+fn serve_one(
+    stream: UnixStream,
+    policy: &ControlPolicy,
+) -> Option<(String, Option<ControlRequest>)> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     stream.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    reader
+        .by_ref()
+        .take((MAX_REQUEST_BYTES + 1) as u64)
+        .read_line(&mut line)
+        .ok()?;
     let request = line.trim();
-
-    let (reply, verb) = match Verb::parse(request) {
-        Some(verb) => (format!("OK {request}\n"), Some(verb)),
-        None => (format!("ERR unknown verb {request:?}; expected one of {}\n", verb_list()), None),
-    };
     let mut stream = reader.into_inner();
+
+    if line.len() > MAX_REQUEST_BYTES || !line.ends_with('\n') {
+        let _ = stream.write_all(b"ERR request must be one line of at most 256 bytes\n");
+        return Some((request.to_string(), None));
+    }
+
+    let bind_ids = policy.bind_ids.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (reply, parsed) = match parse_request(request, &bind_ids) {
+        Ok(parsed) => (format!("OK {request}\n"), Some(parsed)),
+        Err(reply) => (format!("ERR {reply}\n"), None),
+    };
+    drop(bind_ids);
     let _ = stream.write_all(reply.as_bytes());
-    Some((request.to_string(), verb))
+    Some((request.to_string(), parsed))
 }
 
-/// Send one verb through the socket and return the daemon's reply.
+fn parse_request(request: &str, bind_ids: &HashSet<String>) -> Result<ControlRequest, String> {
+    if let Some(verb) = Verb::parse(request) {
+        return Ok(ControlRequest::Verb(verb));
+    }
+
+    let mut words = request.split_whitespace();
+    let verb = words.next();
+    let id = words.next();
+    let extra = words.next();
+    if matches!(verb, Some("bind-down" | "bind-up")) {
+        let Some(id) = id else {
+            return Err("expected bind-down <id> or bind-up <id>".to_string());
+        };
+        if extra.is_some() || !valid_bind_id(id) {
+            return Err("malformed bind ID".to_string());
+        }
+        if !bind_ids.contains(id) {
+            return Err(format!("bind ID {id:?} is not configured or enabled"));
+        }
+        return Ok(ControlRequest::BindId {
+            id: id.to_string(),
+            activated: verb == Some("bind-down"),
+        });
+    }
+
+    Err(format!(
+        "unknown verb {request:?}; expected one of {} or bind-down <id>, bind-up <id>",
+        verb_list()
+    ))
+}
+
+fn valid_bind_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Send one fixed verb through the socket and return the daemon's reply.
 pub fn send(runtime_dir: &Path, display: &str, verb: Verb) -> std::io::Result<String> {
     send_to(&runtime_dir.join(file_name(display)), verb)
+}
+
+/// Send one configured bind activation or release through the socket.
+pub fn send_bind(
+    runtime_dir: &Path,
+    display: &str,
+    id: &str,
+    activated: bool,
+) -> std::io::Result<String> {
+    send_bind_to(&runtime_dir.join(file_name(display)), id, activated)
+}
+
+/// Send one configured bind event through an existing socket path.
+pub fn send_bind_to(path: &Path, id: &str, activated: bool) -> std::io::Result<String> {
+    if !valid_bind_id(id) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "malformed bind ID"));
+    }
+    let verb = if activated { "bind-down" } else { "bind-up" };
+    send_request_to(path, &format!("{verb} {id}\n"))
 }
 
 /// Send the same exchange through a socket path that the caller already has.
@@ -235,13 +326,14 @@ pub fn send(runtime_dir: &Path, display: &str, verb: Verb) -> std::io::Result<St
 /// live apply. An absent path means config-only. This function must not derive
 /// the path again.
 pub fn send_to(path: &Path, verb: Verb) -> std::io::Result<String> {
+    send_request_to(path, &format!("{}\n", verb.as_str()))
+}
+
+fn send_request_to(path: &Path, request: &str) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(path)?;
-    // Allow startup time: the worker pipeline can load its model for seconds on
-    // slow hardware. The pump answers when it runs. The `write_all` call sends the
-    // verb, so a real key press must outwait this period and avoid the timeout.
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    stream.write_all(format!("{}\n", verb.as_str()).as_bytes())?;
+    stream.write_all(request.as_bytes())?;
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
     Ok(reply.trim_end().to_string())
@@ -274,38 +366,31 @@ mod tests {
         );
     }
 
-    /// `anki-add` matches the portal shortcut ID. Rung 1 and rung 2 therefore
-    /// name one action, not two.
     #[test]
-    fn the_add_verb_and_the_portal_shortcut_id_share_one_name() {
-        assert_eq!(crate::shortcuts::ShortcutId::AnkiAdd.as_str(), Verb::AnkiAdd.as_str());
-    }
-
-    /// Every global action has one portal identifier and one control verb.
-    /// Keeping these names equal makes both channel rungs share the same
-    /// daemon dispatch path.
-    #[test]
-    fn every_global_action_shares_its_portal_id_and_wire_name() {
-        use crate::shortcuts::ShortcutId;
-        for (id, verb) in [
-            (ShortcutId::AnkiAdd, Verb::AnkiAdd),
-            (ShortcutId::Search, Verb::Search),
-            (ShortcutId::SentenceSearch, Verb::SentenceSearch),
-            (ShortcutId::SelectedText, Verb::SelectedText),
-            (ShortcutId::OcrClipboard, Verb::OcrClipboard),
-            (ShortcutId::StaticRegion, Verb::StaticRegion),
-        ] {
-            assert_eq!(id.as_str(), verb.as_str());
-            assert!(ShortcutId::ALL.contains(&id));
-        }
-    }
-
-    #[test]
-    fn selected_text_shares_its_portal_id() {
+    fn configured_bind_requests_require_a_valid_enabled_id() {
+        let enabled = HashSet::from(["bind-7".to_string()]);
         assert_eq!(
-            crate::shortcuts::ShortcutId::SelectedText.as_str(),
-            Verb::SelectedText.as_str()
+            Ok(ControlRequest::BindId { id: "bind-7".into(), activated: true }),
+            parse_request("bind-down bind-7", &enabled),
         );
+        assert_eq!(
+            Ok(ControlRequest::BindId { id: "bind-7".into(), activated: false }),
+            parse_request("bind-up bind-7", &enabled),
+        );
+        assert_eq!(
+            Err("malformed bind ID".to_string()),
+            parse_request("bind-down bad/id", &enabled),
+        );
+        assert!(parse_request("bind-down missing", &enabled).unwrap_err().contains("not configured"));
+        assert!(parse_request("bind-down bind-7 extra", &enabled).unwrap_err().contains("malformed"));
+    }
+
+    #[test]
+    fn all_saved_bind_ids_use_the_config_id_grammar() {
+        assert!(valid_bind_id("bind_02"));
+        assert!(!valid_bind_id(""));
+        assert!(!valid_bind_id("bad/id"));
+        assert!(!valid_bind_id(&"x".repeat(65)));
     }
 
     #[test]
@@ -350,12 +435,99 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(vec![("trigger-down".to_string(), Some(Verb::TriggerDown))], served);
+        assert_eq!(
+            vec![("trigger-down".to_string(), Some(ControlRequest::Verb(Verb::TriggerDown)))],
+            served
+        );
         assert_eq!("OK trigger-down", client.join().unwrap().expect("client reply"));
 
         let path = socket.path().to_path_buf();
         drop(socket);
         assert!(!path.exists(), "socket file must be unlinked on drop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_configured_bind_id_round_trips_over_a_real_socket() {
+        let dir = std::env::temp_dir().join(format!("chibipop_bind_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut socket = ControlSocket::bind(&dir, "test-2").expect("bind");
+        socket.set_bind_ids(["bind-7".to_string()]);
+        let path = socket.path().to_path_buf();
+
+        let client = std::thread::spawn(move || send_bind_to(&path, "bind-7", true));
+        let mut served = Vec::new();
+        for _ in 0..200 {
+            served = socket.drain();
+            if !served.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            vec![(
+                "bind-down bind-7".to_string(),
+                Some(ControlRequest::BindId { id: "bind-7".into(), activated: true }),
+            )],
+            served,
+        );
+        assert_eq!("OK bind-down bind-7", client.join().unwrap().expect("client reply"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shared_policy_rejects_bind_ids_retired_on_reload() {
+        let dir = std::env::temp_dir().join(format!("chibipop_bind_reload_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut socket = ControlSocket::bind(&dir, "test-reload").expect("bind");
+        socket.set_bind_ids(["retired-8".to_string()]);
+        socket.policy().set_bind_ids(Vec::<String>::new());
+        let path = socket.path().to_path_buf();
+
+        let client = std::thread::spawn(move || {
+            let mut stream = UnixStream::connect(&path).unwrap();
+            stream.write_all(b"bind-down retired-8\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        });
+        let mut served = Vec::new();
+        for _ in 0..200 {
+            served = socket.drain();
+            if !served.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(vec![("bind-down retired-8".to_string(), None)], served);
+        assert!(client.join().unwrap().starts_with("ERR bind ID"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unconfigured_bind_id_gets_an_err_reply_before_dispatch() {
+        let dir = std::env::temp_dir().join(format!("chibipop_bind_err_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = ControlSocket::bind(&dir, "test-3").expect("bind");
+        let path = socket.path().to_path_buf();
+
+        let client = std::thread::spawn(move || {
+            let mut stream = UnixStream::connect(&path).unwrap();
+            stream.write_all(b"bind-down missing\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        });
+        let mut served = Vec::new();
+        for _ in 0..200 {
+            served = socket.drain();
+            if !served.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(vec![("bind-down missing".to_string(), None)], served);
+        assert!(client.join().unwrap().starts_with("ERR bind ID"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

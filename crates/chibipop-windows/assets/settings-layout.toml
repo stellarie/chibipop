@@ -72,6 +72,12 @@ label = "Look up words inside the popup"
 help = "Hover over popup text to open another definition."
 
 [[tabs.sections.entries]]
+id = "nested-profile"
+label = "Nested lookup profile"
+help = "Choose which profile handles words opened from this popup. Use this profile to keep the current settings."
+
+
+[[tabs.sections.entries]]
 id = "popup-capture-exclusion"
 label = "Hide the popup in screenshots"
 help = "Keeps the popup out of screenshots and screen recordings."
@@ -129,42 +135,23 @@ id = "shortcuts"
 label = "Shortcuts"
 
 [[tabs.sections]]
-id = "shortcut-popup"
-label = "Popup shortcut"
+id = "lookup-behavior"
+label = "Lookup behavior"
 
-[[tabs.sections.entries]]
-id = "close-popup"
-label = "Close popup"
-help = "Press Escape. This shortcut cannot be changed."
 
 [[tabs.sections.entries]]
 id = "lookup-mode"
-label = "When lookups run"
-help = "While held runs lookups only while the key is down. Turn on / off reads between presses. Once per press reads one time."
-
-[[tabs.sections.entries]]
-id = "lookup-key"
-label = "Lookup key"
-help = "Used by While held, Turn on / off, and Once per press."
+label = "Follow pointer"
+help = "Runs lookups as the pointer moves. Clear this option to use configured lookup binds."
 
 [[tabs.sections]]
 id = "shortcut-actions"
-label = "Other shortcuts"
+label = "Configured shortcuts"
 
 [[tabs.sections.entries]]
-id = "anki-add-key"
-label = "Add current result to Anki"
-help = "Adds the first dictionary result to the selected Anki deck."
-
-[[tabs.sections.entries]]
-id = "static-region-key"
-label = "Set sentence area"
-help = "Press this shortcut, then select the screen area used for Anki sentences."
-
-[[tabs.sections.entries]]
-id = "ocr-clipboard-key"
-label = "Copy text from the screen"
-help = "Select a screen area. Chibipop reads and copies its text."
+id = "configured-binds"
+label = "Configured binds"
+help = "Edit actions, Windows chords, lookup modes, enabled state, and profile overrides."
 
 [[tabs.sections.entries]]
 id = "ocr-sentence-search"
@@ -172,24 +159,22 @@ label = "After copying, open sentence search"
 help = "Turn this off to copy the text only."
 
 [[tabs.sections.entries]]
-id = "search-key"
-label = "Open dictionary search"
-help = "Click the button, then press a key or key combination. Escape cancels."
-
-[[tabs.sections.entries]]
-id = "sentence-search-key"
-label = "Open sentence search"
-help = "Click the button, then press a key or key combination. Escape cancels."
-
-[[tabs.sections.entries]]
-id = "selected-text-key"
-label = "Look up selected text"
-help = "Select text in another app, then press this shortcut. Some apps do not allow Chibipop to read selections."
-
-[[tabs.sections.entries]]
 id = "selected-text-sentence-search"
 label = "Send selected text to sentence search"
 help = "Turn this off to show the normal dictionary popup near the selection."
+
+[[tabs]]
+id = "profiles"
+label = "Profiles"
+
+[[tabs.sections]]
+id = "profile-management"
+label = "Manage profiles"
+
+[[tabs.sections.entries]]
+id = "profile-catalog"
+label = "Profiles"
+help = "Create full or derived profiles, select the default, rename profiles, or remove unreferenced profiles."
 
 [[tabs]]
 id = "dictionaries"
@@ -387,7 +372,7 @@ help = "Chooses which text Chibipop puts into the card's sentence field."
 [[tabs.sections.entries]]
 id = "anki-static-overlay"
 label = "Outline the sentence area"
-help = "Configure the Set sentence area button in the Shortcuts section."
+help = "Use a Static region bind to set the sentence area."
 
 [[tabs.sections]]
 id = "anki-field-map"

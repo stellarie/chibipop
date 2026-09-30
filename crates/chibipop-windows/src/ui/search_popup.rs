@@ -4,7 +4,7 @@ use super::render::{Renderer, SceneInputs};
 use super::theme::Theme;
 use super::window::Popup;
 use anyhow::{Context, Result};
-use chibipop::config::Config;
+use chibipop::config::{ProfileSession, ResolvedConfig};
 use chibipop::controller::HitAction;
 use chibipop::geom::{PhysPoint, PhysRect};
 use chibipop::present::Presentation;
@@ -30,7 +30,7 @@ pub(super) struct SearchPopup {
     events: Box<Events>,
     presentation: Presentation,
     theme: Theme,
-    config: Config,
+    pub(super) session: ProfileSession,
     scroll: i32,
     max_scroll: i32,
     has_parent: bool,
@@ -38,7 +38,7 @@ pub(super) struct SearchPopup {
 
 pub(super) enum Action { Lookup(String), Back }
 
-fn base_theme(config: &Config) -> Theme {
+fn base_theme(config: &ResolvedConfig) -> Theme {
     let mut theme = if config.popup.theme == "light" { Theme::light() } else { Theme::dark() };
     theme.font_name.clone_from(&config.popup.font);
     theme
@@ -53,17 +53,17 @@ fn apply_css(mut theme: Theme, css: Option<&str>) -> Theme {
     theme
 }
 
-pub(super) fn theme(config: &Config) -> Theme {
+pub(super) fn theme(config: &ResolvedConfig) -> Theme {
     let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
     apply_css(base_theme(config), css.as_deref())
 }
 
-pub(super) fn controls_theme(config: &Config) -> Theme {
+pub(super) fn controls_theme(config: &ResolvedConfig) -> Theme {
     let css = std::fs::read_to_string(crate::paths::beside_exe("popup.css")).ok();
     controls_theme_with_css(config, css.as_deref())
 }
 
-fn controls_theme_with_css(config: &Config, css: Option<&str>) -> Theme {
+fn controls_theme_with_css(config: &ResolvedConfig, css: Option<&str>) -> Theme {
     let mut theme = base_theme(config);
     theme.headword_weight = 700;
     theme.collapsed_italic = true;
@@ -71,8 +71,9 @@ fn controls_theme_with_css(config: &Config, css: Option<&str>) -> Theme {
 }
 
 impl SearchPopup {
-    pub(super) fn open(database: &Path, config: &Config, owner: HWND,
+    pub(super) fn open(database: &Path, session: ProfileSession, owner: HWND,
         presentation: Presentation, anchor: PhysPoint, has_parent: bool) -> Result<Self> {
+        let config = session.config();
         let events = Box::<Events>::default();
         let window = Popup::create(config.popup.exclude_from_capture)?;
         // SAFETY: This thread owns the HWND and stable event allocation until window destruction.
@@ -94,7 +95,7 @@ impl SearchPopup {
         unsafe { SetLayeredWindowAttributes(window.hwnd(), COLORREF(0),
             (theme.opacity.clamp(0.0, 1.0) * 255.0).round() as u8, LWA_ALPHA)?; }
         let mut popup = Self { renderer, window, events, presentation, theme,
-            config: config.clone(), scroll: 0, max_scroll: 0, has_parent };
+            session, scroll: 0, max_scroll: 0, has_parent };
         popup.place(anchor)?;
         if !has_parent { popup.activate(); }
         Ok(popup)
@@ -108,17 +109,6 @@ impl SearchPopup {
         }
     }
 
-    pub(super) fn update_config(&mut self, config: &Config) -> Result<()> {
-        let anchor = self.anchor()?;
-        self.config = config.clone();
-        self.theme = theme(config);
-        // SAFETY: The window belongs to this thread. Alpha is bounded before conversion.
-        unsafe {
-            SetLayeredWindowAttributes(self.window.hwnd(), COLORREF(0),
-                (self.theme.opacity.clamp(0.0, 1.0) * 255.0).round() as u8, LWA_ALPHA)?;
-        }
-        self.place(anchor)
-    }
 
     pub(super) fn owns_window(&self, hwnd: HWND) -> bool {
         self.window.hwnd() == hwnd
@@ -145,11 +135,12 @@ impl SearchPopup {
         unsafe { GetMonitorInfoW(MonitorFromPoint(POINT { x: anchor.x, y: anchor.y },
             MONITOR_DEFAULTTONEAREST), &mut monitor).ok()?; }
         let work = monitor.rcWork;
-        let width = ((work.right - work.left) * i32::from(self.config.popup.max_width_percent) / 100).max(180);
-        let height = ((work.bottom - work.top) * i32::from(self.config.popup.max_height_percent) / 100).max(100);
+        let config = self.session.config();
+        let width = ((work.right - work.left) * i32::from(config.popup.max_width_percent) / 100).max(180);
+        let height = ((work.bottom - work.top) * i32::from(config.popup.max_height_percent) / 100).max(100);
         let (w, h, content) = self.renderer.measure(SceneInputs {
             presentation: &self.presentation, theme: &self.theme, show_back: self.has_parent,
-            side_panel: self.config.popup.side_panel, render: self.config.popup.render_settings(), selection: None,
+            side_panel: config.popup.side_panel, render: config.popup.render_settings(), selection: None,
         }, (width, height))?;
         self.max_scroll = (content - h).max(0);
         self.window.show_at(PhysRect { x: anchor.x.min(work.right - w).max(work.left),
@@ -158,15 +149,16 @@ impl SearchPopup {
     }
 
     fn paint(&mut self) -> Result<()> {
+        let config = self.session.config();
         self.renderer.paint(SceneInputs { presentation: &self.presentation, theme: &self.theme,
-            show_back: self.has_parent, side_panel: self.config.popup.side_panel,
-            render: self.config.popup.render_settings(), selection: None }, self.scroll)
+            show_back: self.has_parent, side_panel: config.popup.side_panel,
+            render: config.popup.render_settings(), selection: None }, self.scroll)
     }
 
     pub(super) fn poll(&mut self) -> Result<Option<Action>> {
         if self.events.close.replace(false) { return Ok(Some(Action::Back)); }
         let wheel = self.events.wheel.replace(0);
-        if wheel != 0 && self.config.popup.scroll_popup {
+        if wheel != 0 && self.session.config().popup.scroll_popup {
             self.scroll = self.scroll.saturating_sub(wheel / 120 * 48).clamp(0, self.max_scroll);
             self.events.repaint.set(true);
         }
@@ -176,7 +168,7 @@ impl SearchPopup {
             Some(HitAction::Back) => return Ok(Some(Action::Back)),
             Some(HitAction::DrillDown(query)) => return Ok(Some(Action::Lookup(query))),
             Some(HitAction::ExpandEntry(index)) => {
-                chibipop::present::swap_top(&mut self.presentation, index, self.config.popup.summary_chars);
+                chibipop::present::swap_top(&mut self.presentation, index, self.session.config().popup.summary_chars);
                 self.scroll = 0;
                 let anchor = self.anchor()?;
                 self.place(anchor)?;
@@ -194,7 +186,7 @@ impl SearchPopup {
     }
 
     pub(super) fn hover(&mut self) -> Option<String> {
-        if !self.config.popup.sub_popups { return None; }
+        if !self.session.config().popup.sub_popups { return None; }
         let point = self.events.pointer.get()?;
         self.renderer.hover_query(point, self.scroll)
     }
@@ -256,16 +248,16 @@ mod tests {
 
     #[test]
     fn candidate_defaults_allow_explicit_css_font_overrides() {
-        let default = controls_theme_with_css(&Config::default(), None);
+        let default = controls_theme_with_css(&ResolvedConfig::default(), None);
         assert_eq!(700, default.headword_weight);
         assert!(default.collapsed_italic);
 
         let css = ".headword { font-weight: 500; }\n.collapsed { font-style: normal; }";
-        let overridden = controls_theme_with_css(&Config::default(), Some(css));
+        let overridden = controls_theme_with_css(&ResolvedConfig::default(), Some(css));
         assert_eq!(500, overridden.headword_weight);
         assert!(!overridden.collapsed_italic);
 
-        let popup = apply_css(base_theme(&Config::default()), None);
+        let popup = apply_css(base_theme(&ResolvedConfig::default()), None);
         assert_eq!(Theme::dark().headword_weight, popup.headword_weight);
         assert_eq!(Theme::dark().collapsed_italic, popup.collapsed_italic);
     }

@@ -7,7 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::{TextKey, WordMap};
-use crate::config::{TriggerMode, TripleClick};
+
+use crate::config::{ProfileSession, TriggerMode, TripleClick};
 use crate::dict::gloss::{
     extent, leaf_text, leaves, RoleFilter, Separator,
 };
@@ -43,7 +44,7 @@ const MAX_SELECTED_TEXT_BYTES: usize = 64 * 1024;
 /// A non-sentence result becomes stale when a newer non-sentence
 /// `RequestId` exists. Sentence probes use unique IDs without replacing
 /// hover results that are already active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub u64);
 
 /// The action that a click on a region requests.
@@ -146,16 +147,12 @@ pub enum Event {
     AddRequested,
     /// A request from the Back button or Escape.
     BackRequested,
-    /// The trigger key changed to the down state.
-    TriggerDown,
-    /// The trigger key changed to the up state.
-    TriggerUp,
-    /// One trigger press in `Press` mode. It asks for one lookup at `pos`.
-    /// The press bypasses the movement gate and the sticky region, so a press
-    /// over the popup runs a lookup that the mask turns into a miss.
-    TriggerPressed { pos: PhysPoint },
+    /// One configured lookup bind became active.
+    LookupBindDown { bind_id: String, mode: TriggerMode, session: ProfileSession, pos: PhysPoint },
+    /// One configured lookup bind became inactive.
+    LookupBindUp { bind_id: String },
     /// Start a selection read.
-    SelectedTextRequested { pos: PhysPoint },
+    SelectedTextRequested { pos: PhysPoint, session: ProfileSession },
     /// Complete a selection read.
     SelectedTextReady { id: RequestId, text: Option<String>, bounds: Option<PhysRect> },
     /// A button press outside the popup while it is shown. The platform bin
@@ -175,13 +172,15 @@ pub enum Event {
     PopupPlaceFailed,
     /// The result of one duplicate check. `None` means AnkiConnect refused
     /// the request.
-    DupesChecked { generation: u64, dupes: Option<HashSet<String>> },
+    DupesChecked { generation: u64, session: ProfileSession, dupes: Option<HashSet<String>> },
     /// The result of one add-note request.
-    NoteAdded { expr: String, failed: bool },
+    NoteAdded { id: RequestId, expr: String, session: ProfileSession, failed: bool },
     /// The result of an add or verified overwrite request.
-    NoteWritten { expr: String, status: NoteWriteStatus },
-    /// The platform sent a new Controller configuration.
-    ConfigReloaded(Box<ControllerConfig>),
+    NoteWritten { id: RequestId, expr: String, session: ProfileSession, status: NoteWriteStatus },
+    /// The platform sent a new default profile configuration.
+    ConfigReloaded { cfg: Box<ControllerConfig>, session: ProfileSession },
+    /// Shared resources changed. The platform also reloads profile-independent worker state.
+    SharedResourcesReloaded { cfg: Box<ControllerConfig>, session: ProfileSession },
     TrayAction(TrayAction),
     Quit,
 }
@@ -208,7 +207,7 @@ pub enum Command {
     /// exclude the surface from its OCR input
     /// (ARCHITECTURE.md#capture-and-masking).
     /// A platform bin that already excludes the popup ignores this field.
-    RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect> },
+    RequestLookup { id: RequestId, point: PhysPoint, popup: Option<PhysRect>, session: ProfileSession },
     /// Read the full sentence around the hovered word for an Anki add.
     ///
     /// The bin hides the popup when `hide_popup` is true, sends
@@ -220,12 +219,13 @@ pub enum Command {
         anchor: PhysRect,
         orientation: Orientation,
         hide_popup: bool,
+        session: ProfileSession,
     },
     /// Request a lookup from the Dictionary data only.
-    RequestDrillDown { id: RequestId, text: String },
+    RequestDrillDown { id: RequestId, text: String, session: ProfileSession },
     /// Read application selection.
-    ReadSelectedText { id: RequestId },
-    OpenSentenceSearch { text: String },
+    ReadSelectedText { id: RequestId, session: ProfileSession },
+    OpenSentenceSearch { text: String, session: ProfileSession },
     /// Send the current settings to the Worker.
     RequestReload { id: RequestId },
     /// Measure and place the popup. Show and paint it.
@@ -253,8 +253,8 @@ pub enum Command {
     /// The platform bin tests this position and shows the hand cursor on a
     /// hit.
     SetCursorShape { local: PhysPoint, scroll: i32 },
-    CheckDupes { generation: u64, exprs: Vec<String> },
-    AddNote { expr: String, fields: HashMap<String, String> },
+    CheckDupes { generation: u64, exprs: Vec<String>, session: ProfileSession },
+    AddNote { id: RequestId, expr: String, fields: HashMap<String, String>, session: ProfileSession },
     /// Write a lookup log line when configuration enables it.
     LogLookup { headword: String, match_len: usize },
     WarnLookupFailed(String),
@@ -314,7 +314,7 @@ pub struct ControllerConfig {
 }
 
 impl ControllerConfig {
-    pub fn for_search(config: &crate::config::Config) -> Self {
+    pub fn for_search(config: &crate::config::ResolvedConfig) -> Self {
         Self {
             sub_popups: config.popup.sub_popups,
             selected_text_sentence_search: false,
@@ -324,6 +324,28 @@ impl ControllerConfig {
             anki_enabled: false,
             overwrite_duplicates: false,
             sentence_probe: false,
+            include_dictionary_name: config.anki.include_dictionary_name,
+            first_dict_only: config.anki.first_dict_only,
+            summary_chars: config.popup.summary_chars,
+            log_lookups: config.debug.show_lookup_log,
+            tick_ms: 20,
+            roles: config.popup.render_settings().roles,
+            edge_autoscroll: config.popup.edge_autoscroll,
+            primary_additive: config.anki.selection_buttons == crate::config::SelectionButtons::PrimaryAdditive,
+            separator: config.anki.selection_separator.into(),
+            triple_click: config.anki.triple_click,
+        }
+    }
+    pub fn for_profile(config: &crate::config::ResolvedConfig) -> Self {
+        Self {
+            sub_popups: config.popup.sub_popups,
+            selected_text_sentence_search: config.actions.search.selected_opens_sentence_search,
+            trigger_mode: config.trigger.mode,
+            per_character_lookup: config.trigger.per_character_lookup,
+            scroll_popup: config.popup.scroll_popup,
+            anki_enabled: config.anki.enabled,
+            overwrite_duplicates: config.anki.overwrite_duplicates,
+            sentence_probe: config.anki.sentence_mode == crate::config::SentenceMode::Sentence,
             include_dictionary_name: config.anki.include_dictionary_name,
             first_dict_only: config.anki.first_dict_only,
             summary_chars: config.popup.summary_chars,
@@ -459,10 +481,28 @@ fn bold_surface(sentence: &str, surface: Option<&str>) -> String {
 /// State saved before a drill-down so Back can restore it.
 #[derive(Debug, Clone, PartialEq)]
 struct HistoryEntry {
+    source: RootSource,
+    session: ProfileSession,
+    hovered: Option<String>,
+    anchor: PhysRect,
+    orientation: Orientation,
+    hold: PhysRect,
+    hold_char: PhysRect,
     presentation: Presentation,
     anki: AnkiPopupState,
-    /// An add-time sentence read that belongs to this popup.
-    pending_sentence: Option<PendingSentence>,
+    anki_write: Option<RequestId>,
+    scroll: i32,
+    generation: u64,
+    selection: Selections,
+    gesture: Gesture,
+    analysis: Option<(u64, WordMap)>,
+    analysis_stale: bool,
+    analysis_generation: u64,
+    pressed_link: Option<HitAction>,
+    last_drag_point: Option<PhysPoint>,
+    /// The add-time sentence read that belongs to this popup.
+    pending_sentence: Option<RequestId>,
+    placed: Option<Placed>,
 }
 
 /// The measured geometry of the popup.
@@ -481,10 +521,10 @@ struct Placed {
 /// payload independent so the result cannot retarget a newer Card.
 #[derive(Debug, Clone, PartialEq)]
 struct PendingSentence {
-    id: RequestId,
     expr: String,
     fields: HashMap<String, String>,
     surface: Option<String>,
+    session: ProfileSession,
 }
 
 /// The reason that a `ShowPopup` request is active.
@@ -504,16 +544,22 @@ enum RootSource {
     SelectedText,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SelectedTextState {
-    Capturing { id: RequestId, pos: PhysPoint },
-    LookingUp { id: RequestId, anchor: PhysRect, text: String },
+struct RootTransition {
+    source: RootSource,
+    session: ProfileSession,
+    replace_chain: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectedTextState {
+    Capturing { id: RequestId, pos: PhysPoint, session: ProfileSession },
+    LookingUp { id: RequestId, anchor: PhysRect, text: String, session: ProfileSession },
+}
 /// State for one shown popup.
 #[derive(Debug, Clone, PartialEq)]
 struct Surface {
     source: RootSource,
+    session: ProfileSession,
     hovered: Option<String>,
     /// The rectangle of the hovered glyph.
     anchor: PhysRect,
@@ -525,6 +571,7 @@ struct Surface {
     hold_char: PhysRect,
     presentation: Presentation,
     anki: AnkiPopupState,
+    anki_write: Option<RequestId>,
     /// The drill-down history stack.
     history: Vec<HistoryEntry>,
     /// The content offset. Zero places the content at the top.
@@ -549,8 +596,34 @@ struct Surface {
     /// The last popup-local pointer point during a drag.
     last_drag_point: Option<PhysPoint>,
     /// The add-time sentence read and its authorized note payload.
-    pending_sentence: Option<PendingSentence>,
+    pending_sentence: Option<RequestId>,
     placed: Option<Placed>,
+}
+
+impl HistoryEntry {
+    fn restore(self, surface: &mut Surface) {
+        surface.source = self.source;
+        surface.session = self.session;
+        surface.hovered = self.hovered;
+        surface.anchor = self.anchor;
+        surface.orientation = self.orientation;
+        surface.hold = self.hold;
+        surface.hold_char = self.hold_char;
+        surface.presentation = self.presentation;
+        surface.anki = self.anki;
+        surface.anki_write = self.anki_write;
+        surface.scroll = self.scroll;
+        surface.generation = self.generation;
+        surface.selection = self.selection;
+        surface.gesture = self.gesture;
+        surface.analysis = self.analysis;
+        surface.analysis_stale = self.analysis_stale;
+        surface.analysis_generation = self.analysis_generation;
+        surface.pressed_link = self.pressed_link;
+        surface.last_drag_point = self.last_drag_point;
+        surface.pending_sentence = self.pending_sentence;
+        surface.placed = self.placed;
+    }
 }
 
 /// State that the platform bin can read.
@@ -563,6 +636,7 @@ pub struct PopupView<'a> {
     pub view_h: i32,
     pub presentation: &'a Presentation,
     pub anki: &'a AnkiPopupState,
+    pub session: &'a ProfileSession,
     pub show_back: bool,
     pub selection: &'a Selections,
 }
@@ -570,26 +644,33 @@ pub struct PopupView<'a> {
 /// The Controller state machine for hover and popup events.
 pub struct Controller {
     hover_buttons: u8,
-    pointer_depth: Option<usize>,
-    parents: Vec<Surface>,
     hover_candidate: Option<(String, PhysPoint, u64)>,
-    hover_request: Option<(RequestId, PhysPoint)>,
+    hover_request: Option<(RequestId, PhysPoint, ProfileSession)>,
     cfg: ControllerConfig,
+    cfg_session: ProfileSession,
+    future_cfg: ControllerConfig,
+    future_session: ProfileSession,
+    active_bind: Option<ActiveBind>,
+    chain_bind: Option<ActiveBind>,
+    request_session: Option<LookupRequest>,
+    pending_sentences: HashMap<RequestId, PendingSentence>,
+    pending_writes: HashMap<RequestId, ProfileSession>,
+    /// Popup states hidden by nested hover links.
+    parents: Vec<Surface>,
+    pointer_depth: Option<usize>,
     /// The current popup, when one exists.
     surface: Option<Surface>,
     /// Scan overlay rectangles held until popup placement.
     pending_scan: Vec<ScanRect>,
     /// The kind of popup placement that awaits a result.
     awaiting: Option<PlaceKind>,
-    /// The latest cursor move received before popup placement.
-    pending_cursor: Option<PhysPoint>,
+    /// The latest cursor point that awaits the popup rectangle.
+    pending_cursor: Option<(PhysPoint, ProfileSession, bool)>,
     /// The latest cursor point that passed the movement gate.
     last_accepted: Option<PhysPoint>,
     /// The point of the newest lookup. The dwell re-check uses this point.
     last_dispatch: Option<PhysPoint>,
-    /// Whether the trigger is active. In `HoldKey` mode, this is the key state.
-    /// In `Toggle` mode, the bin sends `TriggerDown` at toggle-on and `TriggerUp`
-    /// at toggle-off, so this is the latch. `Live` mode ignores it.
+    /// Whether the active trigger is held or latched.
     trigger_held: bool,
     /// The Anki button height from the latest tick.
     button_h: i32,
@@ -611,16 +692,37 @@ pub struct Controller {
     /// The monotonic dispatch tick that times pointer gestures.
     clock: u64,
 }
+#[derive(Debug, Clone, PartialEq)]
+struct LookupRequest {
+    id: RequestId,
+    session: ProfileSession,
+    replace_chain: bool,
+}
+#[derive(Debug, Clone, PartialEq)]
+struct ActiveBind {
+    id: String,
+    mode: TriggerMode,
+    session: ProfileSession,
+}
+
 
 impl Controller {
-    pub fn new(cfg: ControllerConfig) -> Self {
+    pub fn new(cfg: ControllerConfig, session: ProfileSession) -> Self {
         Self {
             hover_buttons: 0,
             pointer_depth: None,
             parents: Vec::new(),
             hover_candidate: None,
             hover_request: None,
-            cfg,
+            cfg: cfg.clone(),
+            cfg_session: session.clone(),
+            future_cfg: cfg,
+            future_session: session,
+            active_bind: None,
+            chain_bind: None,
+            request_session: None,
+            pending_sentences: HashMap::new(),
+            pending_writes: HashMap::new(),
             surface: None,
             pending_scan: Vec::new(),
             awaiting: None,
@@ -639,6 +741,24 @@ impl Controller {
         }
     }
 
+    pub fn trigger_mode(&self) -> TriggerMode {
+        self.active_bind
+            .as_ref()
+            .or(self.chain_bind.as_ref())
+            .map_or(self.cfg.trigger_mode, |bind| bind.mode)
+    }
+
+    pub fn active_bind_id(&self) -> Option<&str> {
+        self.active_bind.as_ref().map(|bind| bind.id.as_str())
+    }
+
+    pub fn session_at(&self, depth: usize) -> Option<&ProfileSession> {
+        if depth == self.parents.len() {
+            return self.surface.as_ref().map(|surface| &surface.session);
+        }
+        self.parents.get(depth).map(|surface| &surface.session)
+    }
+
     /// The shown popup when its rectangle is known.
     pub fn popup(&self) -> Option<PopupView<'_>> {
         let s = self.surface.as_ref()?;
@@ -651,6 +771,7 @@ impl Controller {
             view_h: p.view_h,
             presentation: &s.presentation,
             anki: &s.anki,
+            session: &s.session,
             show_back: !s.history.is_empty() || !self.parents.is_empty(),
             selection: &s.selection,
         })
@@ -662,7 +783,7 @@ impl Controller {
 
     pub fn watches_outside_clicks(&self) -> bool {
         self.selected_text_active()
-            || (self.cfg.trigger_mode == TriggerMode::Press && self.surface.is_some())
+            || (self.trigger_mode() == TriggerMode::Press && self.surface.is_some())
     }
 
     pub fn popup_depth(&self) -> usize {
@@ -676,6 +797,7 @@ impl Controller {
             popup: p.popup, anchor: s.anchor, scroll: s.scroll,
             content_h: p.content_h, view_h: p.view_h,
             presentation: &s.presentation, anki: &s.anki,
+            session: &s.session,
             show_back: depth > 0 || !s.history.is_empty(), selection: &s.selection,
         })
     }
@@ -722,7 +844,13 @@ impl Controller {
     }
 
     fn popup_hover_at(&mut self, depth: usize, local: PhysPoint, query: Option<String>) -> Vec<Command> {
-        if !self.cfg.sub_popups { return Vec::new(); }
+        let enabled = if depth == self.parents.len() {
+            self.cfg.sub_popups
+        } else {
+            self.parents.get(depth)
+                .is_some_and(|parent| parent.session.config().popup.sub_popups)
+        };
+        if !enabled { return Vec::new(); }
         if depth == self.parents.len() { return self.popup_hover(local, query); }
         let Some(parent) = self.parents.get(depth) else { return Vec::new() };
         if self.hover_buttons != 0 || query.as_ref().is_none_or(String::is_empty) || parent.hovered == query {
@@ -742,9 +870,10 @@ impl Controller {
         if self.surface.as_ref().is_none_or(|s| s.placed.is_none() || s.last_drag_point.is_some()) {
             return Vec::new();
         }
+        let session = self.surface.as_ref().expect("surface checked above").session.nested();
         let id = self.next_lookup_request();
-        self.hover_request = Some((id, local));
-        vec![Command::RequestDrillDown { id, text }]
+        self.hover_request = Some((id, local, session.clone()));
+        vec![Command::RequestDrillDown { id, text, session }]
     }
 
     fn enter_parent(&mut self, depth: usize) -> Vec<Command> {
@@ -760,6 +889,9 @@ impl Controller {
         self.awaiting = None;
         self.pending_cursor = None;
         let mut out = vec![Command::RestorePopup { depth }, Command::SetDragging(false), Command::SyncAnkiButton];
+        if let Some(session) = self.surface.as_ref().map(|surface| surface.session.clone()) {
+            self.set_profile_config(&session);
+        }
         if let Some(s) = self.surface.as_ref() {
             out.push(self.repaint(s.scroll));
         }
@@ -790,7 +922,7 @@ impl Controller {
         self.enter_parent(depth)
     }
 
-    fn push_hover(&mut self, mut presentation: Presentation, local: PhysPoint) -> Vec<Command> {
+    fn push_hover(&mut self, mut presentation: Presentation, local: PhysPoint, session: ProfileSession) -> Vec<Command> {
         let Some(parent) = self.surface.as_ref() else { return Vec::new() };
         let Some(placed) = parent.placed else { return Vec::new() };
         let source = parent.source;
@@ -798,7 +930,7 @@ impl Controller {
             presentation.sentence = parent.presentation.sentence.clone();
             presentation.surface = None;
         }
-        let same_word = presentation.top.as_ref().zip(parent.presentation.top.as_ref())
+        let same_word = parent.session == session && presentation.top.as_ref().zip(parent.presentation.top.as_ref())
             .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
         if presentation.top.is_none() || same_word
             || self.parents.len() >= 16
@@ -814,14 +946,16 @@ impl Controller {
         parent.pressed_link = None;
         parent.last_drag_point = None;
         let parents = std::mem::take(&mut self.parents);
+        let pending_sentences = std::mem::take(&mut self.pending_sentences);
         let mut out = self.ready(
             presentation,
             anchor,
             Orientation::Horizontal,
             None,
             Vec::new(),
-            source,
+            RootTransition { source, session, replace_chain: false },
         );
+        self.pending_sentences = pending_sentences;
         self.parents = parents;
         self.pointer_depth = Some(self.parents.len());
         self.parents.push(parent);
@@ -831,6 +965,11 @@ impl Controller {
         }
         out.insert(0, Command::PushPopup);
         out
+    }
+
+    /// The current popup session does not need placement geometry.
+    pub fn current_session(&self) -> Option<&ProfileSession> {
+        self.surface.as_ref().map(|surface| &surface.session)
     }
 
     /// The Anki state before and after popup placement.
@@ -883,17 +1022,11 @@ impl Controller {
             Event::PointerUp { local, button } => self.pointer_up(local, button),
             Event::AddRequested => self.add_requested(),
             Event::BackRequested => self.pop_history(),
-            Event::TriggerDown => {
-                self.trigger_held = true;
-                // A press asks for a lookup at the current cursor. The press-time
-                // sample must pass the movement gate without cursor motion, even
-                // when the last accepted point is the same point.
-                self.last_accepted = None;
-                Vec::new()
+            Event::LookupBindDown { bind_id, mode, session, pos } => {
+                self.lookup_bind_down(bind_id, mode, session, pos)
             }
-            Event::TriggerUp => self.trigger_up(),
-            Event::TriggerPressed { pos } => self.trigger_pressed(pos),
-            Event::SelectedTextRequested { pos } => self.selected_text_requested(pos),
+            Event::LookupBindUp { bind_id } => self.lookup_bind_up(&bind_id),
+            Event::SelectedTextRequested { pos, session } => self.selected_text_requested(pos, session),
             Event::SelectedTextReady { id, text, bounds } => self.selected_text_ready(id, text, bounds),
             Event::PointerDownOutside => self.pointer_down_outside(),
             Event::CursorMoved { pos } => self.cursor_moved(pos),
@@ -903,19 +1036,12 @@ impl Controller {
                 self.popup_placed(rect, content_h, view_h)
             }
             Event::PopupPlaceFailed => self.place_failed(),
-            Event::DupesChecked { generation, dupes } => self.dupes_checked(generation, dupes),
+            Event::DupesChecked { generation, session, dupes } => self.dupes_checked(generation, &session, dupes),
             Event::AnalysisReady { generation, words } => self.analysis_ready(generation, words),
-            Event::NoteAdded { expr, failed } => self.note_added(expr, failed),
-            Event::NoteWritten { expr, status } => self.note_written(expr, status),
-            Event::ConfigReloaded(cfg) => {
-                self.cancel_hover();
-                self.cfg = *cfg;
-                let mut out = self.enter_parent(0);
-                if let Some(surface) = &mut self.surface { surface.hovered = None; }
-                let id = self.next_lookup_request();
-                out.push(Command::RequestReload { id });
-                out
-            }
+            Event::NoteAdded { id, expr, session, failed } => self.note_added(id, expr, &session, failed),
+            Event::NoteWritten { id, expr, session, status } => self.note_written(id, expr, &session, status),
+            Event::ConfigReloaded { cfg, session } => self.config_reloaded(*cfg, session),
+            Event::SharedResourcesReloaded { cfg, session } => self.shared_resources_reloaded(*cfg, session),
             Event::TrayAction(TrayAction::OpenSettings) => vec![Command::OpenSettings],
             Event::TrayAction(TrayAction::Quit) | Event::Quit => vec![Command::Exit],
         }
@@ -936,9 +1062,129 @@ impl Controller {
         let id = self.next_request();
         self.latest_lookup = id;
         self.selected_text = None;
+        self.request_session = None;
         id
     }
+    fn request_session_default(&self) -> ProfileSession {
+        self.active_bind.as_ref().map(|bind| &bind.session)
+            .or_else(|| self.chain_bind.as_ref().map(|bind| &bind.session))
+            .or_else(|| self.surface.as_ref().map(|surface| &surface.session))
+            .unwrap_or(&self.future_session)
+            .clone()
+    }
 
+    fn set_profile_config(&mut self, session: &ProfileSession) {
+        if self.cfg_session == *session {
+            return;
+        }
+        if self.future_session == *session {
+            self.cfg = self.future_cfg.clone();
+            self.cfg_session = session.clone();
+            return;
+        }
+        let mut cfg = ControllerConfig::for_profile(session.config());
+        cfg.tick_ms = self.future_cfg.tick_ms;
+        self.cfg = cfg;
+        self.cfg_session = session.clone();
+    }
+
+    fn lookup_bind_down(
+        &mut self,
+        bind_id: String,
+        mode: TriggerMode,
+        session: ProfileSession,
+        pos: PhysPoint,
+    ) -> Vec<Command> {
+        if let Some(active) = &self.active_bind {
+            if active.id == bind_id && active.mode == mode {
+                if mode == TriggerMode::Toggle {
+                    return self.release_active_bind();
+                }
+                if matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift) {
+                    return Vec::new();
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if self.active_bind.as_ref().is_some_and(|active| {
+            matches!(active.mode, TriggerMode::HoldKey | TriggerMode::HoldShift | TriggerMode::Toggle)
+        }) {
+            out.extend(self.release_active_bind());
+        }
+        let bind = ActiveBind { id: bind_id, mode, session: session.clone() };
+        self.chain_bind = Some(bind.clone());
+        self.active_bind = Some(bind);
+        self.set_profile_config(&session);
+        self.trigger_held = matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift | TriggerMode::Toggle);
+        self.last_accepted = Some(pos);
+        let command = if mode == TriggerMode::Press {
+            self.trigger_pressed(pos, session)
+        } else {
+            self.dispatch_lookup_for(pos, session, true)
+        };
+        out.extend(command);
+        out
+    }
+
+    fn lookup_bind_up(&mut self, bind_id: &str) -> Vec<Command> {
+        let Some(active) = self.active_bind.as_ref() else { return Vec::new() };
+        if active.id != bind_id || active.mode == TriggerMode::Toggle {
+            return Vec::new();
+        }
+        self.release_active_bind()
+    }
+
+    fn release_active_bind(&mut self) -> Vec<Command> {
+        let Some(active) = self.active_bind.as_ref() else { return Vec::new() };
+        let mode = active.mode;
+        let out = if matches!(mode, TriggerMode::HoldKey | TriggerMode::HoldShift | TriggerMode::Toggle) {
+            self.trigger_up()
+        } else {
+            Vec::new()
+        };
+        self.active_bind = None;
+        if let Some(session) = self.surface.as_ref().map(|surface| surface.session.clone()) {
+            self.set_profile_config(&session);
+        } else if let Some(session) = self.chain_bind.as_ref().map(|bind| bind.session.clone()) {
+            self.set_profile_config(&session);
+        } else {
+            self.cfg = self.future_cfg.clone();
+            self.cfg_session = self.future_session.clone();
+        }
+        if matches!(mode, TriggerMode::Live | TriggerMode::Press) {
+            self.trigger_held = false;
+        }
+        out
+    }
+
+    fn config_reloaded(&mut self, cfg: ControllerConfig, session: ProfileSession) -> Vec<Command> {
+        self.future_cfg = cfg;
+        self.future_session = session;
+        if self.surface.is_none() && self.active_bind.is_none() && self.chain_bind.is_none() {
+            self.cfg = self.future_cfg.clone();
+            self.cfg_session = self.future_session.clone();
+        }
+        let id = self.next_request();
+        vec![Command::RequestReload { id }]
+    }
+
+    fn shared_resources_reloaded(
+        &mut self,
+        cfg: ControllerConfig,
+        session: ProfileSession,
+    ) -> Vec<Command> {
+        self.future_cfg = cfg;
+        self.future_session = session;
+        self.active_bind = None;
+        self.trigger_held = false;
+        self.cfg = self.future_cfg.clone();
+        self.cfg_session = self.future_session.clone();
+        self.cancel_hover();
+        let id = self.next_lookup_request();
+        let mut out = self.hide();
+        out.push(Command::RequestReload { id });
+        out
+    }
     fn tick(&mut self, cursor: PhysPoint, button_h: i32) -> Vec<Command> {
         self.clock = self.clock.wrapping_add(1);
         let tick = self.clock;
@@ -1034,8 +1280,12 @@ impl Controller {
             Some(HitAction::Back) => self.pop_history(),
             Some(HitAction::ToggleEntry(entry)) => self.toggle_entry(entry),
             Some(HitAction::DrillDown(query)) if text.is_none() || !anki => {
+                let session = s.session.nested();
                 let id = self.next_lookup_request();
-                vec![Command::RequestDrillDown { id, text: query }]
+                self.request_session = Some(LookupRequest {
+                    id, session: session.clone(), replace_chain: false,
+                });
+                vec![Command::RequestDrillDown { id, text: query, session }]
             }
             Some(HitAction::OpenUrl(url)) if !anki => vec![Command::OpenUrl(url)],
             None if text.is_none() && local.y >= p.popup.h && anki => self.start_add(),
@@ -1164,8 +1414,15 @@ impl Controller {
                     match action {
                         Some(HitAction::OpenUrl(url)) => out.push(Command::OpenUrl(url)),
                         Some(HitAction::DrillDown(text)) => {
-                            let id = self.next_lookup_request();
-                            out.push(Command::RequestDrillDown { id, text });
+                            let session = self.surface.as_ref()
+                                .map(|surface| surface.session.nested());
+                            if let Some(session) = session {
+                                let id = self.next_lookup_request();
+                                self.request_session = Some(LookupRequest {
+                                    id, session: session.clone(), replace_chain: false,
+                                });
+                                out.push(Command::RequestDrillDown { id, text, session });
+                            }
                         }
                         _ => {}
                     }
@@ -1207,19 +1464,22 @@ impl Controller {
 
     fn add_requested(&mut self) -> Vec<Command> {
         self.cancel_hover();
-        if self.surface.is_none() || !self.cfg.anki_enabled {
+        if self.popup().is_none() || !self.cfg.anki_enabled {
             return Vec::new();
         }
         self.start_add()
     }
 
     fn add_in_flight(&self) -> bool {
-        let Some(s) = self.surface.as_ref() else { return false };
-        s.anki.adding
-            || s.pending_sentence.is_some()
-            || s.history.iter().any(|entry| {
-                entry.anki.adding || entry.pending_sentence.is_some()
-            })
+        fn surface_add_in_flight(surface: &Surface) -> bool {
+            surface.anki.adding
+                || surface.pending_sentence.is_some()
+                || surface.history.iter().any(|entry| {
+                    entry.anki.adding || entry.pending_sentence.is_some()
+                })
+        }
+        self.parents.iter().any(surface_add_in_flight)
+            || self.surface.as_ref().is_some_and(surface_add_in_flight)
     }
 
     /// Apply the same guard as the pointer path.
@@ -1235,63 +1495,53 @@ impl Controller {
             }
         }
         let sentence_probe = self.cfg.sentence_probe && !self.selected_text_active();
-        let (scroll, show_back, anchor, orientation, matched_surface) = {
+        let (scroll, show_back, anchor, orientation, matched_surface, session) = {
             let Some(s) = self.surface.as_ref() else { return Vec::new() };
             if s.placed.is_none() || s.presentation.top.is_none() {
                 return Vec::new();
             }
             let matched_surface = if sentence_probe {
-                s.presentation
-                    .surface
-                    .as_ref()
-                    .and_then(OcrSurface::as_str)
-                    .map(str::to_owned)
+                s.presentation.surface.as_ref().and_then(OcrSurface::as_str).map(str::to_owned)
             } else {
                 None
             };
-            (s.scroll, !s.history.is_empty(), s.anchor, s.orientation, matched_surface)
+            (s.scroll, !s.history.is_empty(), s.anchor, s.orientation, matched_surface, s.session.clone())
         };
 
-        // Authorize the payload before the asynchronous sentence probe starts.
         let Some((expr, fields)) = self.add_note_payload() else { return Vec::new() };
-
         if sentence_probe {
             let id = self.next_request();
-            // Only a frozen HoldKey grab predates the popup. Toggle reads a
-            // live masked grab and must hide the popup before the probe.
-            let hide_popup =
-                !(self.trigger_held && matches!(self.cfg.trigger_mode, TriggerMode::HoldKey));
+            let hide_popup = !(self.trigger_held
+                && matches!(self.trigger_mode(), TriggerMode::HoldKey | TriggerMode::HoldShift));
+            let pending = PendingSentence {
+                expr,
+                fields,
+                surface: matched_surface,
+                session: session.clone(),
+            };
             let s = self.surface.as_mut().expect("surface checked above");
             s.anki.adding = true;
             s.anki.saving = self.cfg.overwrite_duplicates;
             s.anki.failed = false;
-            s.pending_sentence = Some(PendingSentence {
-                id,
-                expr,
-                fields,
-                surface: matched_surface,
-            });
+            s.pending_sentence = Some(id);
+            self.pending_sentences.insert(id, pending);
             return vec![
                 Command::RepaintPopup { scroll, show_back },
-                Command::RequestSentence {
-                    id,
-                    anchor,
-                    orientation,
-                    hide_popup,
-                },
+                Command::RequestSentence { id, anchor, orientation, hide_popup, session },
                 Command::SyncAnkiButton,
             ];
         }
 
-        {
-            let s = self.surface.as_mut().expect("surface checked above");
-            s.anki.adding = true;
-            s.anki.saving = self.cfg.overwrite_duplicates;
-            s.anki.failed = false;
-        }
+        let id = self.next_request();
+        let s = self.surface.as_mut().expect("surface checked above");
+        s.anki.adding = true;
+        s.anki.saving = self.cfg.overwrite_duplicates;
+        s.anki.failed = false;
+        s.anki_write = Some(id);
+        self.pending_writes.insert(id, session.clone());
         vec![
             Command::RepaintPopup { scroll, show_back },
-            Command::AddNote { expr, fields },
+            Command::AddNote { id, expr, fields, session },
             Command::SyncAnkiButton,
         ]
     }
@@ -1325,23 +1575,16 @@ impl Controller {
         if self.surface.as_ref().is_some_and(|s| s.history.is_empty()) && !self.parents.is_empty() {
             return self.enter_parent(self.parents.len() - 1);
         }
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() {
-            return Vec::new();
-        }
-        let Some(entry) = s.history.pop() else { return Vec::new() };
-        let pending_sentence = s.pending_sentence.take().or(entry.pending_sentence);
-        s.presentation = entry.presentation;
-        s.anki = entry.anki;
-        s.pending_sentence = pending_sentence;
-        s.selection = Selections::default();
-        s.gesture.reset();
-        s.analysis = None;
-        s.analysis_stale = true;
-        s.pressed_link = None;
-        s.last_drag_point = None;
-        s.scroll = 0;
-        let show_back = !s.history.is_empty();
+        let (session, show_back) = {
+            let Some(s) = self.surface.as_mut() else { return Vec::new() };
+            if s.placed.is_none() {
+                return Vec::new();
+            }
+            let Some(entry) = s.history.pop() else { return Vec::new() };
+            entry.restore(s);
+            (s.session.clone(), !s.history.is_empty())
+        };
+        self.set_profile_config(&session);
         let mut out = self.begin_place(PlaceKind::Reshow);
         out.push(Command::SetBackArmed(show_back));
         out
@@ -1353,15 +1596,14 @@ impl Controller {
         if self.selected_text_active() && !was_trigger_held {
             return Vec::new();
         }
-        // Live mode ignores this key event. Press mode has no hold to end.
-        if matches!(self.cfg.trigger_mode, TriggerMode::Live | TriggerMode::Press) {
+        if matches!(self.trigger_mode(), TriggerMode::Live | TriggerMode::Press) {
             return Vec::new();
         }
+        self.chain_bind = None;
         self.last_accepted = None;
         self.cancel_hover();
         self.parents.clear();
         self.pending_cursor = None;
-        // Invalidate any lookup that has not returned.
         self.next_lookup_request();
         if self.surface.take().is_none() {
             return Vec::new();
@@ -1374,22 +1616,24 @@ impl Controller {
     /// One press asks for one lookup at `pos`. The popup then stays until a
     /// later lookup misses or the user clicks outside it. The press passes
     /// the movement gate and the sticky region because the user asked.
-    fn trigger_pressed(&mut self, pos: PhysPoint) -> Vec<Command> {
+    fn trigger_pressed(&mut self, pos: PhysPoint, session: ProfileSession) -> Vec<Command> {
         self.last_accepted = Some(pos);
-        // Wait for the popup rectangle before deciding, as a hover does.
-        if self.surface.as_ref().is_some_and(|s| s.placed.is_none()) {
-            self.pending_cursor = Some(pos);
+        if self.surface.as_ref().is_some_and(|surface| surface.placed.is_none()) {
+            self.pending_cursor = Some((pos, session, true));
             return Vec::new();
         }
-        self.dispatch_lookup(pos)
+        self.dispatch_lookup_for(pos, session, true)
     }
 
-    fn selected_text_requested(&mut self, pos: PhysPoint) -> Vec<Command> {
+    fn selected_text_requested(&mut self, pos: PhysPoint, session: ProfileSession) -> Vec<Command> {
         self.cancel_hover();
         self.trigger_held = false;
         let id = self.next_lookup_request();
-        self.selected_text = Some(SelectedTextState::Capturing { id, pos });
-        vec![Command::ReadSelectedText { id }]
+        self.request_session = Some(LookupRequest {
+            id, session: session.clone(), replace_chain: true,
+        });
+        self.selected_text = Some(SelectedTextState::Capturing { id, pos, session: session.clone() });
+        vec![Command::ReadSelectedText { id, session }]
     }
 
     fn selected_text_ready(
@@ -1398,23 +1642,26 @@ impl Controller {
         text: Option<String>,
         bounds: Option<PhysRect>,
     ) -> Vec<Command> {
-        let pos = match self.selected_text.as_ref() {
-            Some(SelectedTextState::Capturing { id: pending, pos })
-                if *pending == id && id == self.latest_lookup => *pos,
+        let (pos, session) = match self.selected_text.as_ref() {
+            Some(SelectedTextState::Capturing { id: pending, pos, session })
+                if *pending == id && id == self.latest_lookup => (*pos, session.clone()),
             _ => return Vec::new(),
         };
-        let Some(text) = text else {
-            return self.selected_text_unavailable();
-        };
+        let Some(text) = text else { return self.selected_text_unavailable() };
         let text = text.trim();
         if text.is_empty() || text.len() > MAX_SELECTED_TEXT_BYTES {
             return self.selected_text_unavailable();
         }
         let text = text.to_string();
-        if self.cfg.selected_text_sentence_search {
+        let sentence_search = if self.cfg_session == session {
+            self.cfg.selected_text_sentence_search
+        } else {
+            ControllerConfig::for_profile(session.config()).selected_text_sentence_search
+        };
+        if sentence_search {
             self.next_lookup_request();
             let mut commands = self.hide();
-            commands.push(Command::OpenSentenceSearch { text });
+            commands.push(Command::OpenSentenceSearch { text, session });
             return commands;
         }
         let anchor = bounds.filter(|rect| rect.w > 0 && rect.h > 0)
@@ -1423,8 +1670,9 @@ impl Controller {
             id,
             anchor,
             text: text.clone(),
+            session: session.clone(),
         });
-        vec![Command::RequestDrillDown { id, text }]
+        vec![Command::RequestDrillDown { id, text, session }]
     }
 
     fn selected_text_unavailable(&mut self) -> Vec<Command> {
@@ -1454,7 +1702,7 @@ impl Controller {
         if self.selected_text_active() && !self.trigger_held {
             return false;
         }
-        match self.cfg.trigger_mode {
+        match self.trigger_mode() {
             TriggerMode::Live => true,
             TriggerMode::Press => false,
             _ => self.trigger_held,
@@ -1488,7 +1736,7 @@ impl Controller {
         self.last_accepted = Some(pos);
         // Wait for the popup rectangle before deciding.
         if self.surface.as_ref().is_some_and(|s| s.placed.is_none()) {
-            self.pending_cursor = Some(pos);
+            self.pending_cursor = Some((pos, self.request_session_default(), false));
             return Vec::new();
         }
         self.dispatch_hover(pos)
@@ -1496,21 +1744,31 @@ impl Controller {
 
     /// Keep the current result when the cursor remains in the sticky region.
     fn dispatch_hover(&mut self, pos: PhysPoint) -> Vec<Command> {
+        let session = self.request_session_default();
+        self.dispatch_hover_for(pos, session)
+    }
+
+    fn dispatch_hover_for(&mut self, pos: PhysPoint, session: ProfileSession) -> Vec<Command> {
         if self.frozen(pos) {
             return Vec::new();
         }
-        self.dispatch_lookup(pos)
+        self.dispatch_lookup_for(pos, session, false)
     }
 
-    /// Ask the lookup question at `pos` with the shown popup as the mask.
-    fn dispatch_lookup(&mut self, pos: PhysPoint) -> Vec<Command> {
+
+    fn dispatch_lookup_for(
+        &mut self,
+        pos: PhysPoint,
+        session: ProfileSession,
+        replace_chain: bool,
+    ) -> Vec<Command> {
         self.cancel_hover();
         let popup = self.shown_popup();
         let id = self.next_lookup_request();
+        self.request_session = Some(LookupRequest { id, session: session.clone(), replace_chain });
         self.last_dispatch = Some(pos);
-        vec![Command::RequestLookup { id, point: pos, popup }]
+        vec![Command::RequestLookup { id, point: pos, popup, session }]
     }
-
     /// Re-ask the lookup question at the point that produced the shown popup.
     ///
     /// This check bypasses the freeze gate because the cursor did not move.
@@ -1524,10 +1782,11 @@ impl Controller {
         }
         let Some(pos) = self.last_dispatch else { return Vec::new() };
         let popup = self.shown_popup();
+        let session = self.request_session_default();
         let id = self.next_lookup_request();
-        vec![Command::RequestLookup { id, point: pos, popup }]
+        self.request_session = Some(LookupRequest { id, session: session.clone(), replace_chain: false });
+        vec![Command::RequestLookup { id, point: pos, popup, session }]
     }
-
     /// Whether the Controller has a dwell re-check to watch. The platform bin
     /// uses this value to arm its dwell watch. No popup means no watch and no
     /// idle wakeups.
@@ -1541,7 +1800,7 @@ impl Controller {
         if self.selected_text_active() {
             return false;
         }
-        let live = match self.cfg.trigger_mode {
+        let live = match self.trigger_mode() {
             TriggerMode::Live => true,
             TriggerMode::Toggle => self.trigger_held,
             _ => false,
@@ -1569,13 +1828,14 @@ impl Controller {
         })) {
             return true;
         }
-        if matches!(self.cfg.trigger_mode, TriggerMode::Press) {
+        let mode = self.trigger_mode();
+        if matches!(mode, TriggerMode::Press) {
             return false;
         }
         let Some(s) = self.surface.as_ref() else { return false };
         let Some(placed) = s.placed else { return false };
         let sticky = PhysRect { h: placed.popup.h + self.button_h, ..placed.popup };
-        let freeze = if per_char_freeze(self.cfg.per_character_lookup, self.cfg.trigger_mode) {
+        let freeze = if per_char_freeze(self.cfg.per_character_lookup, mode) {
             s.hold_char
         } else {
             s.hold
@@ -1587,8 +1847,7 @@ impl Controller {
         if let LookupOutcome::Sentence(text) = outcome {
             return self.sentence_result(id, text);
         }
-        if id < self.latest_lookup {
-            // This result is superseded, not an error.
+        if id != self.latest_lookup {
             return Vec::new();
         }
         if self.selected_text.as_ref().is_some_and(|state| {
@@ -1599,24 +1858,31 @@ impl Controller {
         if self.selected_text.as_ref().is_some_and(|state| {
             matches!(state, SelectedTextState::LookingUp { id: pending, .. } if *pending == id)
         }) {
+            if self.request_session.as_ref().is_none_or(|request| request.id != id) {
+                return Vec::new();
+            }
+            self.request_session = None;
             return self.selected_text_lookup_result(outcome);
         }
-        if self.hover_request.is_some_and(|(request, _)| request == id) {
-            let (_, local) = self.hover_request.take().expect("matching request");
+        if self.hover_request.as_ref().is_some_and(|(request, _, _)| *request == id) {
+            let (_, local, session) = self.hover_request.take().expect("matching request");
             return match outcome {
-                LookupOutcome::DrillDown(presentation) => self.push_hover(*presentation, local),
+                LookupOutcome::DrillDown(presentation) => self.push_hover(*presentation, local, session),
                 LookupOutcome::Failed(message) => vec![Command::WarnLookupFailed(message)],
                 _ => Vec::new(),
             };
         }
+        let Some(request) = self.request_session.take().filter(|request| request.id == id) else {
+            return Vec::new();
+        };
         match outcome {
             LookupOutcome::Hide => self.hide(),
-            LookupOutcome::Failed(msg) => {
-                let mut out = vec![Command::WarnLookupFailed(msg)];
+            LookupOutcome::Failed(message) => {
+                let mut out = vec![Command::WarnLookupFailed(message)];
                 out.extend(self.hide());
                 out
             }
-            LookupOutcome::DrillDown(presentation) => self.push_drilldown(*presentation),
+            LookupOutcome::DrillDown(presentation) => self.push_drilldown(*presentation, request.session),
             LookupOutcome::Ready { presentation, anchor, orientation, matched, scan } => {
                 self.ready(
                     *presentation,
@@ -1624,7 +1890,11 @@ impl Controller {
                     orientation,
                     matched,
                     scan,
-                    RootSource::Ocr,
+                    RootTransition {
+                        source: RootSource::Ocr,
+                        session: request.session,
+                        replace_chain: request.replace_chain,
+                    },
                 )
             }
             LookupOutcome::Sentence(_) => unreachable!("sentence outcomes return above"),
@@ -1632,7 +1902,7 @@ impl Controller {
     }
 
     fn selected_text_lookup_result(&mut self, outcome: LookupOutcome) -> Vec<Command> {
-        let Some(SelectedTextState::LookingUp { anchor, text, .. }) = self.selected_text.take()
+        let Some(SelectedTextState::LookingUp { anchor, text, session, .. }) = self.selected_text.take()
         else {
             return Vec::new();
         };
@@ -1645,9 +1915,7 @@ impl Controller {
             }
             LookupOutcome::DrillDown(mut presentation) => {
                 presentation.sentence = Some(text.clone());
-                presentation.surface = presentation
-                    .top
-                    .as_ref()
+                presentation.surface = presentation.top.as_ref()
                     .and_then(|top| OcrSurface::new(&text, top.match_len));
                 self.ready(
                     *presentation,
@@ -1655,7 +1923,7 @@ impl Controller {
                     Orientation::Horizontal,
                     None,
                     Vec::new(),
-                    RootSource::SelectedText,
+                    RootTransition { source: RootSource::SelectedText, session, replace_chain: true },
                 )
             }
             LookupOutcome::Ready { .. } | LookupOutcome::Sentence(_) => Vec::new(),
@@ -1663,63 +1931,64 @@ impl Controller {
     }
 
     fn sentence_result(&mut self, id: RequestId, text: Option<String>) -> Vec<Command> {
+        let Some(mut pending) = self.pending_sentences.remove(&id) else { return Vec::new() };
+        if let Some(sentence) = text {
+            pending.fields.insert(
+                "sentence".to_string(),
+                bold_surface(&sentence, pending.surface.as_deref()),
+            );
+        }
+        let mut tracked = false;
         for parent in &mut self.parents {
-            let pending = if parent.pending_sentence.as_ref().is_some_and(|pending| pending.id == id) {
-                parent.pending_sentence.take()
-            } else {
-                parent.history.iter_mut().find_map(|entry| {
-                    if entry.pending_sentence.as_ref().is_some_and(|pending| pending.id == id) {
-                        entry.pending_sentence.take()
-                    } else { None }
-                })
-            };
-            if let Some(mut pending) = pending {
-                if let Some(sentence) = text {
-                    pending.fields.insert("sentence".to_string(), bold_surface(&sentence, pending.surface.as_deref()));
-                }
-                return vec![Command::AddNote { expr: pending.expr, fields: pending.fields }];
+            tracked |= Self::mark_sentence_write(parent, id);
+        }
+        if let Some(surface) = self.surface.as_mut() {
+            tracked |= Self::mark_sentence_write(surface, id);
+        }
+        self.pending_writes.insert(id, pending.session.clone());
+        let mut commands = vec![Command::AddNote {
+            id,
+            expr: pending.expr,
+            fields: pending.fields,
+            session: pending.session,
+        }];
+        if tracked {
+            commands.push(Command::SyncAnkiButton);
+        }
+        commands
+    }
+
+    fn mark_sentence_write(surface: &mut Surface, id: RequestId) -> bool {
+        if surface.pending_sentence == Some(id) {
+            surface.pending_sentence = None;
+            surface.anki_write = Some(id);
+            return true;
+        }
+        for entry in &mut surface.history {
+            if entry.pending_sentence == Some(id) {
+                entry.pending_sentence = None;
+                entry.anki_write = Some(id);
+                return true;
             }
         }
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        let pending = if s
-            .pending_sentence
-            .as_ref()
-            .is_some_and(|pending| pending.id == id)
-        {
-            s.pending_sentence.take()
-        } else {
-            s.history.iter_mut().find_map(|entry| {
-                if entry
-                    .pending_sentence
-                    .as_ref()
-                    .is_some_and(|pending| pending.id == id)
-                {
-                    entry.pending_sentence.take()
-                } else {
-                    None
-                }
-            })
-        };
-        let Some(mut pending) = pending else { return Vec::new() };
-        if let Some(sentence) = text {
-            let sentence_field = bold_surface(&sentence, pending.surface.as_deref());
-            pending.fields.insert("sentence".to_string(), sentence_field);
-        }
-        vec![
-            Command::AddNote { expr: pending.expr, fields: pending.fields },
-            Command::SyncAnkiButton,
-        ]
+        false
     }
 
     fn hide(&mut self) -> Vec<Command> {
         self.hover_buttons = 0;
         self.cancel_hover();
+        self.chain_bind = None;
         self.parents.clear();
         self.pointer_depth = None;
         self.surface = None;
         self.awaiting = None;
         self.pending_scan.clear();
         self.pending_cursor = None;
+        self.selected_text = None;
+        self.request_session = None;
+        let session = self.active_bind.as_ref().map(|bind| bind.session.clone())
+            .unwrap_or_else(|| self.future_session.clone());
+        self.set_profile_config(&session);
         vec![Command::HidePopup, Command::SetBackArmed(false)]
     }
 
@@ -1730,18 +1999,24 @@ impl Controller {
         orientation: Orientation,
         matched: Option<PhysRect>,
         scan: Vec<ScanRect>,
-        source: RootSource,
+        transition: RootTransition,
     ) -> Vec<Command> {
-        if self
-            .surface
-            .as_ref()
-            .is_some_and(|s| {
-                s.source == source
-                    && same_content(&s.presentation, s.anchor, &presentation, anchor)
-            })
+        let RootTransition { source, session, replace_chain } = transition;
+        self.set_profile_config(&session);
+        if !replace_chain
+            && self
+                .surface
+                .as_ref()
+                .is_some_and(|s| {
+                    s.source == source
+                        && s.session == session
+                        && same_content(&s.presentation, s.anchor, &presentation, anchor)
+                })
         {
             return Vec::new();
         }
+        // A new popup invalidates probes owned by the popup it replaces.
+        self.pending_sentences.clear();
         let mut out = Vec::new();
         if self.cfg.log_lookups {
             if let Some(card) = &presentation.top {
@@ -1765,6 +2040,7 @@ impl Controller {
             self.pending_cursor = None;
         }
         self.surface = Some(Surface {
+            session,
             source,
             hovered: None,
             anchor,
@@ -1772,6 +2048,7 @@ impl Controller {
             hold,
             hold_char,
             presentation,
+            anki_write: None,
             anki: AnkiPopupState::fresh(self.cfg.anki_enabled, self.cfg.overwrite_duplicates),
             history: Vec::new(),
             scroll: 0,
@@ -1792,29 +2069,66 @@ impl Controller {
     }
 
     /// Save the current state, then replace it with the drill-down result.
-    fn push_drilldown(&mut self, mut presentation: Presentation) -> Vec<Command> {
-        let anki_enabled = self.cfg.anki_enabled;
-        let update_dupes = self.cfg.overwrite_duplicates;
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() {
+    fn push_drilldown(&mut self, mut presentation: Presentation, session: ProfileSession) -> Vec<Command> {
+        let Some(current) = self.surface.as_ref() else { return Vec::new() };
+        if current.placed.is_none() {
             return Vec::new();
         }
-        if s.source == RootSource::SelectedText {
-            presentation.sentence = s.presentation.sentence.clone();
-            presentation.surface = None;
+        let same_headword = current.session == session
+            && presentation.top.as_ref().zip(current.presentation.top.as_ref())
+                .is_some_and(|(new, old)| new.written == old.written && new.reading == old.reading);
+        if presentation.top.is_none() || same_headword {
+            return Vec::new();
         }
-        let pending_sentence = s.pending_sentence.take();
-        s.history.push(HistoryEntry {
-            presentation: std::mem::replace(&mut s.presentation, presentation),
-            anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled, update_dupes)),
-            pending_sentence,
-        });
-        s.selection = Selections::default();
-        s.gesture.reset();
-        s.analysis = None;
-        s.analysis_stale = true;
-        s.pressed_link = None;
-        s.last_drag_point = None;
+
+        let cfg_session = session.clone();
+        let cfg = if self.cfg_session == session {
+            self.cfg.clone()
+        } else {
+            let mut cfg = ControllerConfig::for_profile(session.config());
+            cfg.tick_ms = self.future_cfg.tick_ms;
+            cfg
+        };
+        let anki_enabled = cfg.anki_enabled;
+        let update_dupes = cfg.overwrite_duplicates;
+        {
+            let s = self.surface.as_mut().expect("current surface checked above");
+            if s.source == RootSource::SelectedText {
+                presentation.sentence = s.presentation.sentence.clone();
+                presentation.surface = None;
+            }
+            let entry = HistoryEntry {
+                source: s.source,
+                session: std::mem::replace(&mut s.session, session),
+                hovered: s.hovered.take(),
+                anchor: s.anchor,
+                orientation: s.orientation,
+                hold: s.hold,
+                hold_char: s.hold_char,
+                presentation: std::mem::replace(&mut s.presentation, presentation),
+                anki: std::mem::replace(&mut s.anki, AnkiPopupState::fresh(anki_enabled, update_dupes)),
+                anki_write: s.anki_write.take(),
+                scroll: s.scroll,
+                generation: s.generation,
+                selection: std::mem::take(&mut s.selection),
+                gesture: std::mem::take(&mut s.gesture),
+                analysis: s.analysis.take(),
+                analysis_stale: s.analysis_stale,
+                analysis_generation: s.analysis_generation,
+                pressed_link: s.pressed_link.take(),
+                last_drag_point: s.last_drag_point.take(),
+                pending_sentence: s.pending_sentence.take(),
+                placed: s.placed,
+            };
+            s.history.push(entry);
+            s.hovered = None;
+            s.scroll = 0;
+            s.generation = 0;
+            s.analysis_stale = true;
+            s.analysis_generation = 0;
+        }
+        self.cfg = cfg;
+        self.cfg_session = cfg_session;
         let mut out = self.begin_place(PlaceKind::DrillDown);
         out.push(Command::SetBackArmed(true));
         out
@@ -1841,6 +2155,7 @@ impl Controller {
         if self.surface.is_none() {
             return Vec::new();
         }
+        let session = self.surface.as_ref().expect("checked above").session.clone();
         let anki_enabled = self.cfg.anki_enabled;
         let roles = self.cfg.roles;
         let generation = self.generation.wrapping_add(1);
@@ -1914,14 +2229,18 @@ impl Controller {
             let s = self.surface.as_mut().expect("checked above");
             s.generation = generation;
             if !exprs.is_empty() {
-                out.push(Command::CheckDupes { generation, exprs });
+                out.push(Command::CheckDupes { generation, exprs, session: session.clone() });
             }
             out.push(Command::RequestAnalysis { generation, texts: analysis_texts });
         }
 
         // Hold this cursor move until popup placement completes.
-        if let Some(pos) = self.pending_cursor.take() {
-            out.extend(self.dispatch_hover(pos));
+        if let Some((pos, session, replace_chain)) = self.pending_cursor.take() {
+            if replace_chain {
+                out.extend(self.dispatch_lookup_for(pos, session, true));
+            } else {
+                out.extend(self.dispatch_hover_for(pos, session));
+            }
         }
         out
     }
@@ -1929,15 +2248,14 @@ impl Controller {
     fn place_failed(&mut self) -> Vec<Command> {
         let Some(kind) = self.awaiting.take() else { return Vec::new() };
         match kind {
-            // No popup exists on screen to keep.
             PlaceKind::Fresh => {
                 if !self.parents.is_empty() {
                     return self.enter_parent(self.parents.len() - 1);
                 }
                 self.surface = None;
                 self.pending_scan.clear();
-                self.pending_cursor = None;
-
+                let session = self.request_session_default();
+                self.set_profile_config(&session);
                 vec![
                     Command::HidePopup,
                     Command::SetScrollArmed(false),
@@ -1945,140 +2263,181 @@ impl Controller {
                     Command::SetBackArmed(false),
                 ]
             }
-            // Keep the old popup on screen.
-            PlaceKind::DrillDown | PlaceKind::Reshow => {
+            PlaceKind::DrillDown => {
                 let pending = self.pending_cursor.take();
-                match pending {
-                    Some(pos) => self.dispatch_hover(pos),
+                let Some(surface) = self.surface.as_mut() else { return Vec::new() };
+                let Some(entry) = surface.history.pop() else { return Vec::new() };
+                entry.restore(surface);
+                let session = surface.session.clone();
+                self.set_profile_config(&session);
+                let mut out = vec![Command::SyncAnkiButton, Command::SetBackArmed(self.has_history())];
+                if let Some((pos, session, replace_chain)) = pending {
+                    if replace_chain {
+                        out.extend(self.dispatch_lookup_for(pos, session, true));
+                    } else {
+                        out.extend(self.dispatch_hover_for(pos, session));
+                    }
+                }
+                out
+            }
+            PlaceKind::Reshow => {
+                match self.pending_cursor.take() {
+                    Some((pos, session, true)) => self.dispatch_lookup_for(pos, session, true),
+                    Some((pos, session, false)) => self.dispatch_hover_for(pos, session),
                     None => Vec::new(),
                 }
             }
         }
     }
-
     fn analysis_ready(&mut self, generation: u64, words: WordMap) -> Vec<Command> {
-        if !self.cfg.anki_enabled {
+        for parent in &mut self.parents {
+            if parent.anki.enabled
+                && parent.placed.is_some()
+                && parent.analysis_generation == generation
+            {
+                parent.analysis = Some((generation, words));
+                parent.analysis_stale = false;
+                return Vec::new();
+            }
+            if let Some(entry) = parent.history.iter_mut().find(|entry| {
+                entry.anki.enabled && entry.analysis_generation == generation && entry.placed.is_some()
+            }) {
+                entry.analysis = Some((generation, words));
+                entry.analysis_stale = false;
+                return Vec::new();
+            }
+        }
+        let Some(surface) = self.surface.as_mut() else { return Vec::new() };
+        if let Some(entry) = surface.history.iter_mut().find(|entry| {
+            entry.anki.enabled && entry.analysis_generation == generation && entry.placed.is_some()
+        }) {
+            entry.analysis = Some((generation, words));
+            entry.analysis_stale = false;
             return Vec::new();
         }
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() || s.analysis_generation != generation {
+        if !surface.anki.enabled || surface.placed.is_none() || surface.analysis_generation != generation {
             return Vec::new();
         }
-        s.analysis = Some((generation, words));
+        surface.analysis = Some((generation, words));
+        surface.analysis_stale = false;
         self.run_gesture(GestureInput::Analysis)
     }
 
     fn dupes_checked(
         &mut self,
         generation: u64,
+        session: &ProfileSession,
         dupes: Option<HashSet<String>>,
     ) -> Vec<Command> {
-        if let Some(parent) = self.parents.iter_mut().find(|s| s.generation == generation) {
-            parent.anki.checking = false;
-            parent.anki.connected = dupes.is_some();
-            if let Some(dupes) = dupes { parent.anki.dupes = dupes; }
-            return Vec::new();
-        }
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.generation != generation || s.placed.is_none() {
-            return Vec::new();
-        }
-        s.anki.checking = false;
-        match dupes {
-            Some(dupes) => {
-                s.anki.connected = true;
-                s.anki.dupes = dupes;
+        for parent in &mut self.parents {
+            if parent.generation == generation && &parent.session == session {
+                apply_dupe_status(&mut parent.anki, dupes);
+                return Vec::new();
             }
-            None => s.anki.connected = false,
+            if let Some(entry) = parent.history.iter_mut().find(|entry| {
+                entry.generation == generation && &entry.session == session
+            }) {
+                apply_dupe_status(&mut entry.anki, dupes);
+                return Vec::new();
+            }
         }
+        let Some(surface) = self.surface.as_mut() else { return Vec::new() };
+        if let Some(entry) = surface.history.iter_mut().find(|entry| {
+            entry.generation == generation && &entry.session == session
+        }) {
+            apply_dupe_status(&mut entry.anki, dupes);
+            return Vec::new();
+        }
+        if surface.generation != generation || &surface.session != session || surface.placed.is_none() {
+            return Vec::new();
+        }
+        apply_dupe_status(&mut surface.anki, dupes);
         self.begin_place(PlaceKind::Reshow)
     }
 
-    fn note_added(&mut self, expr: String, failed: bool) -> Vec<Command> {
+    fn note_added(
+        &mut self,
+        id: RequestId,
+        expr: String,
+        session: &ProfileSession,
+        failed: bool,
+    ) -> Vec<Command> {
         self.note_written(
+            id,
             expr,
+            session,
             if failed { NoteWriteStatus::Failed } else { NoteWriteStatus::Added },
         )
     }
 
-    fn note_written(&mut self, expr: String, status: NoteWriteStatus) -> Vec<Command> {
-        for parent in &mut self.parents {
-            let matches = |p: &Presentation| p.top.as_ref().is_some_and(|card| {
-                card.written.as_deref().or(card.reading.as_deref()) == Some(expr.as_str())
-            });
-            let target = if parent.anki.adding && matches(&parent.presentation) {
-                Some(&mut parent.anki)
-            } else {
-                parent.history.iter_mut().find(|entry| entry.anki.adding && matches(&entry.presentation))
-                    .map(|entry| &mut entry.anki)
-            };
-            if let Some(anki) = target {
-                anki.adding = false;
-                match status {
-                    NoteWriteStatus::Failed => anki.failed = true,
-                    NoteWriteStatus::Added => {
-                        anki.failed = false;
-                        anki.added.insert(expr);
-                    }
-                    NoteWriteStatus::Updated => {
-                        anki.failed = false;
-                        anki.updated.insert(expr);
-                    }
-                }
-                return Vec::new();
-            }
-        }
-        let Some(s) = self.surface.as_mut() else { return Vec::new() };
-        if s.placed.is_none() {
+    fn note_written(
+        &mut self,
+        id: RequestId,
+        expr: String,
+        session: &ProfileSession,
+        status: NoteWriteStatus,
+    ) -> Vec<Command> {
+        if self.pending_writes.get(&id).is_none_or(|owner| owner != session) {
             return Vec::new();
         }
-        let current_in_flight = s.anki.adding || s.pending_sentence.is_some();
-        let history_target = if current_in_flight {
-            None
-        } else {
-            s.history.iter().position(|entry| {
-                entry.anki.adding || entry.pending_sentence.is_some()
-            })
-        };
-        let fallback_current = s
-                .presentation
-                .top
-                .as_ref()
-                .and_then(|card| card.written.as_deref().or(card.reading.as_deref()))
-                .is_some_and(|current| current == expr.as_str());
-        match history_target {
-            Some(index) => {
-                let anki = &mut s.history[index].anki;
-                anki.adding = false;
-                match status {
-                    NoteWriteStatus::Failed => anki.failed = true,
-                    NoteWriteStatus::Added => {
-                        anki.failed = false;
-                        anki.added.insert(expr);
-                    }
-                    NoteWriteStatus::Updated => {
-                        anki.failed = false;
-                        anki.updated.insert(expr);
-                    }
-                }
-            }
-            None if current_in_flight || fallback_current => {
-                s.anki.adding = false;
-                match status {
-                    NoteWriteStatus::Failed => s.anki.failed = true,
-                    NoteWriteStatus::Added => {
-                        s.anki.failed = false;
-                        s.anki.added.insert(expr);
-                    }
-                    NoteWriteStatus::Updated => {
-                        s.anki.failed = false;
-                        s.anki.updated.insert(expr);
-                    }
-                }
-            }
-            None => return Vec::new(),
+        self.pending_writes.remove(&id);
+        for parent in &mut self.parents {
+            apply_note_write(parent, id, session, &expr, status);
         }
-        self.begin_place(PlaceKind::Reshow)
+        let current = self.surface.as_mut()
+            .is_some_and(|surface| apply_note_write(surface, id, session, &expr, status));
+        if current {
+            self.begin_place(PlaceKind::Reshow)
+        } else {
+            Vec::new()
+        }
+}
+}
+
+
+fn apply_dupe_status(anki: &mut AnkiPopupState, dupes: Option<HashSet<String>>) {
+    anki.checking = false;
+    match dupes {
+        Some(dupes) => {
+            anki.connected = true;
+            anki.dupes = dupes;
+        }
+        None => anki.connected = false,
+    }
+}
+fn apply_note_write(
+    surface: &mut Surface,
+    id: RequestId,
+    session: &ProfileSession,
+    expr: &str,
+    status: NoteWriteStatus,
+) -> bool {
+    if surface.anki_write == Some(id) && surface.session == *session {
+        surface.anki_write = None;
+        apply_note_status(&mut surface.anki, expr, status);
+        return true;
+    }
+    for entry in &mut surface.history {
+        if entry.anki_write == Some(id) && entry.session == *session {
+            entry.anki_write = None;
+            apply_note_status(&mut entry.anki, expr, status);
+        }
+    }
+    false
+}
+
+fn apply_note_status(anki: &mut AnkiPopupState, expr: &str, status: NoteWriteStatus) {
+    anki.adding = false;
+    match status {
+        NoteWriteStatus::Failed => anki.failed = true,
+        NoteWriteStatus::Added => {
+            anki.failed = false;
+            anki.added.insert(expr.to_string());
+        }
+        NoteWriteStatus::Updated => {
+            anki.failed = false;
+            anki.updated.insert(expr.to_string());
+        }
     }
 }
 
@@ -2099,8 +2458,173 @@ mod tests {
     use super::*;
     use crate::select::SelRange;
     use crate::present::{Card, CollapsedRow, GlossBlock};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CURRENT_TEST_SESSION: RefCell<Option<ProfileSession>> = const { RefCell::new(None) };
+    }
+
+    fn session_for_controller_cfg(cfg: &ControllerConfig) -> ProfileSession {
+        assert!(matches!(cfg.trigger_mode, TriggerMode::Live | TriggerMode::Press));
+        let mut config = crate::config::Config {
+            live_lookup: cfg.trigger_mode == TriggerMode::Live,
+            ..Default::default()
+        };
+        let default_profile = config.default_profile.clone();
+        {
+            let profile = config.profiles.iter_mut()
+                .find(|profile| profile.id == default_profile)
+                .expect("default profile exists");
+            let crate::config::ProfileData::Full { settings } = &mut profile.data else {
+                panic!("default profile has full settings");
+            };
+            settings.popup.sub_popups = cfg.sub_popups;
+            settings.popup.scroll_popup = cfg.scroll_popup;
+            settings.popup.summary_chars = cfg.summary_chars;
+            settings.popup.edge_autoscroll = cfg.edge_autoscroll;
+            settings.popup.show_examples = cfg.roles.examples;
+            settings.popup.show_attributions = cfg.roles.attributions;
+            settings.popup.show_part_of_speech = cfg.roles.part_of_speech;
+            settings.per_character_lookup = cfg.per_character_lookup;
+            settings.anki.enabled = cfg.anki_enabled;
+            settings.anki.overwrite_duplicates = cfg.overwrite_duplicates;
+            settings.anki.sentence_mode = if cfg.sentence_probe {
+                crate::config::SentenceMode::Sentence
+            } else {
+                crate::config::SentenceMode::Line
+            };
+            settings.anki.include_dictionary_name = cfg.include_dictionary_name;
+            settings.anki.first_dict_only = cfg.first_dict_only;
+            settings.anki.selection_buttons = if cfg.primary_additive {
+                crate::config::SelectionButtons::PrimaryAdditive
+            } else {
+                crate::config::SelectionButtons::PrimaryReplacing
+            };
+            settings.anki.selection_separator = match cfg.separator {
+                Separator::Ellipsis => crate::config::SelectionSeparator::Ellipsis,
+                Separator::Space => crate::config::SelectionSeparator::Space,
+                Separator::LineBreak => crate::config::SelectionSeparator::LineBreak,
+                Separator::ListItems => crate::config::SelectionSeparator::ListItems,
+            };
+            settings.anki.triple_click = cfg.triple_click;
+            settings.actions.search.selected_opens_sentence_search =
+                cfg.selected_text_sentence_search;
+        }
+        config.debug.show_lookup_log = cfg.log_lookups;
+        crate::config::ProfileCatalog::new(&config, &[])
+            .expect("test config builds")
+            .session(None)
+            .expect("default profile exists")
+    }
+    fn nested_test_sessions() -> (ProfileSession, ProfileSession, ProfileSession) {
+        let mut config = crate::config::Config::default();
+        let default_profile = config.default_profile.clone();
+        let child_settings = {
+            let profile = config.profiles.iter_mut()
+                .find(|profile| profile.id == default_profile)
+                .expect("default profile exists");
+            let crate::config::ProfileData::Full { settings } = &mut profile.data else {
+                panic!("default profile has full settings");
+            };
+            settings.nested_profile = Some("child".into());
+            let mut child = (**settings).clone();
+            child.popup.summary_chars = 91;
+            child.nested_profile = Some("grandchild".into());
+            child
+        };
+        let mut grandchild_settings = child_settings.clone();
+        grandchild_settings.popup.summary_chars = 92;
+        grandchild_settings.nested_profile = None;
+        config.profiles.push(crate::config::Profile {
+            id: "child".into(),
+            name: "Child".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(child_settings) },
+        });
+        config.profiles.push(crate::config::Profile {
+            id: "grandchild".into(),
+            name: "Grandchild".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(grandchild_settings) },
+        });
+        let catalog = crate::config::ProfileCatalog::new(&config, &[])
+            .expect("nested test config builds");
+        let root = catalog.session(None).expect("default profile exists");
+        let child = root.nested();
+        let grandchild = child.nested();
+        (root, child, grandchild)
+    }
+
+
+    fn remember_test_session(session: &ProfileSession) {
+        CURRENT_TEST_SESSION.with(|stored| *stored.borrow_mut() = Some(session.clone()));
+    }
+
+    fn test_session() -> ProfileSession {
+        CURRENT_TEST_SESSION.with(|stored| {
+            if let Some(session) = stored.borrow().clone() {
+                return session;
+            }
+            let session = session_for_controller_cfg(&cfg());
+            *stored.borrow_mut() = Some(session.clone());
+            session
+        })
+    }
+
+    fn test_controller(cfg: ControllerConfig) -> Controller {
+        let session = session_for_controller_cfg(&cfg);
+        remember_test_session(&session);
+        Controller::new(cfg, session)
+    }
+
+    fn reload(c: &mut Controller, cfg: ControllerConfig) -> Vec<Command> {
+        let session = session_for_controller_cfg(&cfg);
+        remember_test_session(&session);
+        c.handle(Event::ConfigReloaded { cfg: Box::new(cfg), session })
+    }
+
+    fn bind_down(c: &mut Controller, bind_id: &str, mode: TriggerMode, pos: PhysPoint) -> Vec<Command> {
+        let session = c.future_session.clone();
+        remember_test_session(&session);
+        c.handle(Event::LookupBindDown {
+            bind_id: bind_id.to_string(),
+            mode,
+            session,
+            pos,
+        })
+    }
+
+    fn bind_up(c: &mut Controller, bind_id: &str) -> Vec<Command> {
+        c.handle(Event::LookupBindUp { bind_id: bind_id.to_string() })
+    }
+
+    fn add_note_request(commands: &[Command]) -> (RequestId, ProfileSession) {
+        commands.iter().find_map(|command| match command {
+            Command::AddNote { id, session, .. } => Some((*id, session.clone())),
+            _ => None,
+        }).expect("the add command")
+    }
+
+    fn note_added(
+        c: &mut Controller,
+        id: RequestId,
+        expr: &str,
+        session: ProfileSession,
+    ) -> Vec<Command> {
+        c.handle(Event::NoteAdded { id, expr: expr.to_string(), session, failed: false })
+    }
+
+    fn note_written(
+        c: &mut Controller,
+        id: RequestId,
+        expr: &str,
+        session: ProfileSession,
+        status: NoteWriteStatus,
+    ) -> Vec<Command> {
+        c.handle(Event::NoteWritten { id, expr: expr.to_string(), session, status })
+    }
 
     fn hover_request(c: &mut Controller, query: &str) -> RequestId {
+        let session = c.surface.as_ref().expect("shown popup").session.nested();
+        remember_test_session(&session);
         c.handle(Event::PopupHover { local: PhysPoint { x: 50, y: 70 }, query: Some(query.into()) });
         let commands: Vec<_> = (0..16).flat_map(|_| c.handle(Event::GestureTick)).collect();
         commands.into_iter().find_map(|cmd| match cmd {
@@ -2108,9 +2632,21 @@ mod tests {
         }).expect("hover must issue dictionary lookup")
     }
 
+    fn cursor_lookup_request(c: &mut Controller, pos: PhysPoint) -> RequestId {
+        c.handle(Event::CursorMoved { pos })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("cursor movement starts a lookup")
+    }
+
     fn selected_text_request(c: &mut Controller, pos: PhysPoint) -> RequestId {
-        match c.handle(Event::SelectedTextRequested { pos }).as_slice() {
-            [Command::ReadSelectedText { id }] => *id,
+        let session = c.request_session_default();
+        remember_test_session(&session);
+        match c.handle(Event::SelectedTextRequested { pos, session }).as_slice() {
+            [Command::ReadSelectedText { id, .. }] => *id,
             commands => panic!("unexpected selection commands: {commands:?}"),
         }
     }
@@ -2135,7 +2671,7 @@ mod tests {
 
     #[test]
     fn hover_parent_reentry_restores_the_correct_level_and_preserves_state() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 700, 200);
         c.handle(Event::Scrolled { notches: -2 });
         c.surface.as_mut().unwrap().selection.card_mut(0).replace(SelRange {
@@ -2159,7 +2695,7 @@ mod tests {
 
     #[test]
     fn hover_stationary_parent_does_not_immediately_close_its_child() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         hover_child(&mut c, "犬");
         assert!(c.handle(Event::PopupEntered { depth: 0 }).is_empty());
@@ -2169,30 +2705,104 @@ mod tests {
     }
 
     #[test]
-    fn disabled_sub_popups_cancel_pending_work_and_can_be_reenabled() {
-        let mut c = Controller::new(cfg());
+    fn a_profile_reload_preserves_the_active_chain() {
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let id = hover_request(&mut c, "犬");
         let mut disabled = cfg();
         disabled.sub_popups = false;
-        c.handle(Event::ConfigReloaded(Box::new(disabled.clone())));
-        assert!(c.handle(Event::LookupResult {
+        reload(&mut c, disabled);
+        let out = c.handle(Event::LookupResult {
             id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
-        }).is_empty());
-        c.handle(Event::PopupHover { local: PhysPoint { x: 20, y: 30 }, query: Some("犬".into()) });
-        assert!((0..20).flat_map(|_| c.handle(Event::GestureTick))
-            .all(|command| !matches!(command, Command::RequestDrillDown { .. })));
-        c.handle(Event::ConfigReloaded(Box::new(cfg())));
-        hover_child(&mut c, "犬");
+        });
+        assert!(out.contains(&Command::PushPopup));
         assert_eq!(c.popup_depth(), 1);
-        c.handle(Event::ConfigReloaded(Box::new(disabled)));
-        assert_eq!(c.popup_depth(), 0);
-        assert!(c.popup().is_some());
+        assert!(c.cfg.sub_popups, "the active chain keeps its original settings");
+    }
+
+    #[test]
+    fn nested_profiles_remain_retained_across_reload_until_the_chain_ends() {
+        let (root, child, grandchild) = nested_test_sessions();
+        let root_cfg = ControllerConfig::for_profile(root.config());
+        remember_test_session(&root);
+        let mut c = Controller::new(root_cfg.clone(), root.clone());
+        shown(&mut c);
+
+        let child_request = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("犬".into())),
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestDrillDown { id, session, .. } => {
+                assert_eq!(session, child);
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("the child profile lookup");
+        c.handle(Event::LookupResult {
+            id: child_request,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(c.surface.as_ref().unwrap().session, child);
+        assert_eq!(c.cfg.summary_chars, 91);
+
+        let default_cfg = ControllerConfig { summary_chars: 75, ..cfg() };
+        let default_session = session_for_controller_cfg(&default_cfg);
+        remember_test_session(&default_session);
+        c.handle(Event::ConfigReloaded {
+            cfg: Box::new(default_cfg),
+            session: default_session.clone(),
+        });
+
+        let grandchild_request = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("鳥".into())),
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestDrillDown { id, session, .. } => {
+                assert_eq!(session, grandchild);
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("the grandchild profile lookup");
+        c.handle(Event::LookupResult {
+            id: grandchild_request,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("鳥"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(c.surface.as_ref().unwrap().session, grandchild);
+        assert_eq!(c.cfg.summary_chars, 92);
+
+        c.handle(Event::BackRequested);
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(c.surface.as_ref().unwrap().session, child);
+        assert_eq!(c.cfg.summary_chars, 91);
+        c.handle(Event::BackRequested);
+        c.handle(placed(POPUP, 200, 200));
+        assert_eq!(c.surface.as_ref().unwrap().session, root);
+        assert_eq!(c.cfg.summary_chars, root_cfg.summary_chars);
+
+        c.handle(Event::DismissRequested);
+        assert_eq!(c.cfg_session, default_session);
+        let resumed = c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        assert!(resumed.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { session, .. } if session == &default_session
+        )));
     }
 
     #[test]
     fn parent_click_is_armed_and_activates_without_ever_entering_child() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         hover_child(&mut c, "犬");
         let point = PhysPoint { x: POPUP.x + 10, y: POPUP.y + 10 };
@@ -2211,7 +2821,7 @@ mod tests {
 
     #[test]
     fn parent_scroll_is_armed_and_changes_parent_without_entering_child() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 700, 200);
         hover_child(&mut c, "犬");
         c.surface.as_mut().unwrap().placed.as_mut().unwrap().content_h = 200;
@@ -2228,7 +2838,7 @@ mod tests {
 
     #[test]
     fn parent_hover_preserves_same_item_but_activates_another_item() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         hover_child(&mut c, "犬");
         let local = PhysPoint { x: 50, y: 70 };
@@ -2244,7 +2854,7 @@ mod tests {
 
     #[test]
     fn deliberate_parent_activation_does_not_retarget_an_active_drag() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         hover_child(&mut c, "犬");
         c.handle(Event::PointerDown { local: PhysPoint { x: 10, y: 10 }, button: Button::Primary, hit: None, text: None });
@@ -2259,7 +2869,7 @@ mod tests {
     fn hover_parent_analysis_restarts_only_for_the_restored_top_card() {
         let mut config = cfg();
         config.anki_enabled = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         shown(&mut c);
         let gloss = GlossBlock::parse("Test", r#"["親の文章"]"#);
         c.surface.as_mut().unwrap().presentation.top.as_mut().unwrap().blocks = vec![gloss];
@@ -2278,15 +2888,36 @@ mod tests {
 
     #[test]
     fn hover_parent_anki_replies_cannot_mark_the_child() {
-        let mut c = Controller::new(cfg());
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = test_controller(config);
         shown(&mut c);
         let generation = c.surface.as_ref().unwrap().generation;
-        c.surface.as_mut().unwrap().anki.adding = true;
+        let analysis_generation = c.surface.as_ref().unwrap().analysis_generation;
+        let write_commands = c.handle(Event::AddRequested);
+        let (id, session) = add_note_request(&write_commands);
         hover_child(&mut c, "犬");
-        c.handle(Event::DupesChecked { generation, dupes: Some(HashSet::from(["猫".into()])) });
-        c.handle(Event::NoteAdded { expr: "猫".into(), failed: false });
+        let wrong_session = session_for_controller_cfg(&ControllerConfig {
+            anki_enabled: true,
+            ..cfg()
+        });
+        c.handle(Event::DupesChecked {
+            generation,
+            dupes: Some(HashSet::from(["猫".into()])),
+            session: wrong_session,
+        });
+        assert!(!c.parents[0].anki.dupes.contains("猫"));
+        let words = WordMap::new();
+        c.handle(Event::AnalysisReady { generation: analysis_generation, words: words.clone() });
+        c.handle(Event::DupesChecked {
+            generation,
+            dupes: Some(HashSet::from(["猫".into()])),
+            session: test_session(),
+        });
+        note_added(&mut c, id, "猫", session);
         assert!(c.parents[0].anki.dupes.contains("猫"));
         assert!(c.parents[0].anki.added.contains("猫"));
+        assert_eq!(c.parents[0].analysis, Some((analysis_generation, words)));
         assert!(!c.parents[0].anki.adding);
         assert!(c.anki().unwrap().added.is_empty());
     }
@@ -2294,7 +2925,7 @@ mod tests {
     #[test]
     fn hover_replies_after_leaving_back_and_dismiss_are_rejected() {
         for action in [0, 1, 2] {
-            let mut c = Controller::new(cfg());
+            let mut c = test_controller(cfg());
             shown(&mut c);
             hover_child(&mut c, "犬");
             let id = hover_request(&mut c, "鳥");
@@ -2311,7 +2942,7 @@ mod tests {
 
     #[test]
     fn hover_depth_is_bounded_and_dismiss_retires_every_descendant() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         for depth in 0..16 { hover_child(&mut c, &format!("語{depth}")); }
         let id = hover_request(&mut c, "限界");
@@ -2326,7 +2957,7 @@ mod tests {
 
     #[test]
     fn hover_same_query_and_same_headword_do_not_open_again() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let id = hover_request(&mut c, "猫");
         assert!(c.handle(Event::LookupResult { id, outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))) }).is_empty());
@@ -2337,7 +2968,7 @@ mod tests {
 
     #[test]
     fn hover_failure_and_failed_placement_keep_the_parent() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 700, 200);
         c.handle(Event::Scrolled { notches: -2 });
         let id = hover_request(&mut c, "失敗");
@@ -2355,7 +2986,7 @@ mod tests {
 
     #[test]
     fn hover_mouse_press_and_selection_drag_cancel_pending_lookup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let id = hover_request(&mut c, "犬");
         c.handle(Event::PointerDown { local: PhysPoint { x: 1, y: 1 }, button: Button::Primary, hit: None, text: None });
@@ -2373,10 +3004,8 @@ mod tests {
             TriggerMode::HoldKey,
             TriggerMode::Toggle,
         ] {
-            let mut config = cfg();
-            config.trigger_mode = mode;
-            let mut c = Controller::new(config);
-            c.handle(Event::TriggerDown);
+            let mut c = test_controller(if mode == TriggerMode::Live { cfg() } else { press_cfg() });
+            bind_down(&mut c, "dismiss", mode, PhysPoint { x: 110, y: 110 });
             shown(&mut c);
             hover_child(&mut c, "犬");
             let id = c.latest_lookup;
@@ -2394,7 +3023,7 @@ mod tests {
 
     #[test]
     fn selected_text_bounds_become_the_popup_anchor() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         let bounds = PhysRect { x: 300, y: 200, w: 80, h: 32 };
         let id = selected_text_request(&mut c, PhysPoint { x: 900, y: 800 });
         c.handle(Event::SelectedTextReady { id, text: Some("猫".into()), bounds: Some(bounds) });
@@ -2407,12 +3036,15 @@ mod tests {
     fn selected_sentence_search_bypasses_lookup_and_rejects_stale_capture() {
         let mut config = cfg();
         config.selected_text_sentence_search = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         let old = selected_text_request(&mut c, PhysPoint { x: 0, y: 0 });
         let id = selected_text_request(&mut c, PhysPoint { x: 0, y: 0 });
         assert!(c.handle(Event::SelectedTextReady { id: old, text: Some("古い".into()), bounds: None }).is_empty());
         let commands = c.handle(Event::SelectedTextReady { id, text: Some("猫がいる。".into()), bounds: None });
-        assert!(commands.contains(&Command::OpenSentenceSearch { text: "猫がいる。".into() }));
+        assert!(commands.contains(&Command::OpenSentenceSearch {
+            text: "猫がいる。".into(),
+            session: test_session(),
+        }));
         assert!(!commands.iter().any(|command| matches!(command, Command::RequestDrillDown { .. } | Command::RequestLookup { .. })));
         assert!(!c.watches_outside_clicks());
     }
@@ -2420,8 +3052,8 @@ mod tests {
     #[test]
     fn selected_popup_outside_click_dismisses_every_mode_and_pending_reply() {
         for mode in [TriggerMode::Live, TriggerMode::HoldKey, TriggerMode::Toggle, TriggerMode::Press] {
-            let mut config = cfg(); config.trigger_mode = mode;
-            let mut c = Controller::new(config);
+            let mut c = test_controller(if mode == TriggerMode::Live { cfg() } else { press_cfg() });
+            bind_down(&mut c, "selected", mode, PhysPoint { x: 110, y: 110 });
             shown_selected(&mut c, "猫");
             assert!(c.watches_outside_clicks());
             assert!(c.handle(Event::PointerDownOutside).contains(&Command::HidePopup));
@@ -2437,11 +3069,13 @@ mod tests {
         let mut config = cfg();
         config.anki_enabled = true;
         config.sentence_probe = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         let pos = PhysPoint { x: 320, y: 240 };
         let id = selected_text_request(&mut c, pos);
         assert_eq!(
-            vec![Command::RequestDrillDown { id, text: "日本語の文".into() }],
+            vec![Command::RequestDrillDown {
+                id, text: "日本語の文".into(), session: test_session(),
+            }],
             c.handle(Event::SelectedTextReady {
                 id,
                 text: Some("  日本語の文  ".into()), bounds: None })
@@ -2463,7 +3097,8 @@ mod tests {
         let child = c.surface.as_ref().expect("selected-text child");
         assert_eq!(RootSource::SelectedText, child.source);
         assert_eq!(Some("日本語の文"), child.presentation.sentence.as_deref());
-        c.push_drilldown(presentation_of("文"));
+        let session = c.surface.as_ref().expect("selected-text child").session.nested();
+        c.push_drilldown(presentation_of("文"), session);
         c.handle(placed(POPUP, 200, 200));
         assert_eq!(
             Some("日本語の文"),
@@ -2476,7 +3111,7 @@ mod tests {
 
     #[test]
     fn selected_text_rejects_empty_oversized_and_stale_capture_results() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         let pos = PhysPoint { x: 20, y: 30 };
         let old = selected_text_request(&mut c, pos);
         let current = selected_text_request(&mut c, pos);
@@ -2503,10 +3138,8 @@ mod tests {
             TriggerMode::HoldKey,
             TriggerMode::Toggle,
         ] {
-            let mut config = cfg();
-            config.trigger_mode = mode;
-            let mut c = Controller::new(config);
-            c.handle(Event::TriggerDown);
+            let mut c = test_controller(if mode == TriggerMode::Live { cfg() } else { press_cfg() });
+            bind_down(&mut c, "selected", mode, PhysPoint { x: 40, y: 50 });
             let id = selected_text_request(&mut c, PhysPoint { x: 40, y: 50 });
             c.handle(Event::SelectedTextReady { id, text: Some("猫".into()), bounds: None });
             c.handle(Event::LookupResult {
@@ -2514,7 +3147,11 @@ mod tests {
                 outcome: LookupOutcome::DrillDown(Box::new(presentation_of("猫"))),
             });
             c.handle(placed(POPUP, 200, 200));
-            assert!(c.handle(Event::TriggerUp).is_empty());
+            if mode == TriggerMode::Toggle {
+                bind_down(&mut c, "selected", mode, PhysPoint { x: 40, y: 50 });
+            } else {
+                bind_up(&mut c, "selected");
+            }
             assert!(c.handle(Event::CursorMoved {
                 pos: PhysPoint { x: 800, y: 700 },
             }).is_empty());
@@ -2526,42 +3163,39 @@ mod tests {
     #[test]
     fn explicit_ocr_triggers_replace_selected_text_roots() {
         for mode in [TriggerMode::HoldKey, TriggerMode::Toggle] {
-            let mut config = cfg();
-            config.trigger_mode = mode;
-            let mut c = Controller::new(config);
+            let mut c = test_controller(press_cfg());
             shown_selected(&mut c, "猫");
-            c.handle(Event::TriggerDown);
-            let commands = c.handle(Event::CursorMoved {
-                pos: PhysPoint { x: 800, y: 700 },
-            });
+            let commands = bind_down(&mut c, "ocr", mode, PhysPoint { x: 800, y: 700 });
             let id = commands.iter().find_map(|command| match command {
                 Command::RequestLookup { id, .. } => Some(*id),
                 _ => None,
             }).expect("explicit trigger must request OCR");
             c.handle(ready_id(id, "犬", ANCHOR));
             assert_eq!(RootSource::Ocr, c.surface.as_ref().expect("OCR popup").source);
-            assert!(c.handle(Event::TriggerUp).contains(&Command::HidePopup));
+            if mode == TriggerMode::Toggle {
+                assert!(bind_down(&mut c, "ocr", mode, PhysPoint { x: 800, y: 700 })
+                    .contains(&Command::HidePopup));
+            } else {
+                assert!(bind_up(&mut c, "ocr").contains(&Command::HidePopup));
+            }
         }
 
-        let mut config = cfg();
-        config.trigger_mode = TriggerMode::Press;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(press_cfg());
         shown_selected(&mut c, "猫");
-        let commands = c.handle(Event::TriggerPressed {
-            pos: PhysPoint { x: 800, y: 700 },
-        });
+        let commands = bind_down(&mut c, "ocr", TriggerMode::Press, PhysPoint { x: 800, y: 700 });
         let id = commands.iter().find_map(|command| match command {
             Command::RequestLookup { id, .. } => Some(*id),
             _ => None,
         }).expect("press must request OCR");
         c.handle(ready_id(id, "犬", ANCHOR));
         assert_eq!(RootSource::Ocr, c.surface.as_ref().expect("OCR popup").source);
+        bind_up(&mut c, "ocr");
     }
 
     #[test]
     fn unavailable_selected_text_clears_the_prior_selected_root() {
         for text in [None, Some("  ".to_string())] {
-            let mut c = Controller::new(cfg());
+            let mut c = test_controller(cfg());
             shown_selected(&mut c, "猫");
             let id = selected_text_request(&mut c, PhysPoint { x: 60, y: 70 });
             let commands = c.handle(Event::SelectedTextReady { id, text, bounds: None });
@@ -2571,9 +3205,9 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_new_request_and_reload_reject_stale_selected_text_work() {
+    fn dismissed_and_superseded_selected_text_work_is_rejected_but_reload_preserves_it() {
         let pos = PhysPoint { x: 70, y: 80 };
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         let dismissed = selected_text_request(&mut c, pos);
         c.handle(Event::DismissRequested);
         assert!(c.handle(Event::SelectedTextReady {
@@ -2600,16 +3234,20 @@ mod tests {
             outcome: LookupOutcome::DrillDown(Box::new(presentation_of("古い"))),
         }).is_empty());
 
-        let stale_after_reload = selected_text_request(&mut c, pos);
+        let pending_lookup = selected_text_request(&mut c, pos);
         c.handle(Event::SelectedTextReady {
-            id: stale_after_reload,
+            id: pending_lookup,
             text: Some("古い".into()), bounds: None });
-        c.handle(Event::ConfigReloaded(Box::new(cfg())));
-        assert!(c.handle(Event::LookupResult {
-            id: stale_after_reload,
+        let original_session = c.request_session.as_ref().expect("selected lookup request").session.clone();
+        reload(&mut c, cfg());
+        let out = c.handle(Event::LookupResult {
+            id: pending_lookup,
             outcome: LookupOutcome::DrillDown(Box::new(presentation_of("古い"))),
-        }).is_empty());
-        assert!(!c.is_shown());
+        });
+        assert!(out.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+        assert!(c.is_shown());
+        assert_eq!(c.surface.as_ref().unwrap().session, original_session);
+        assert_ne!(c.surface.as_ref().unwrap().session, test_session());
     }
 
     fn cfg() -> ControllerConfig {
@@ -2689,6 +3327,12 @@ mod tests {
         button: Button,
         hit: Option<HitAction>,
     ) -> Vec<Command> {
+        let session = if matches!(hit.as_ref(), Some(HitAction::DrillDown(_))) {
+            c.surface.as_ref().expect("shown popup").session.nested()
+        } else {
+            c.surface.as_ref().expect("shown popup").session.clone()
+        };
+        remember_test_session(&session);
         let out = c.handle(Event::PointerDown { local, button, hit, text: None });
         c.handle(Event::PointerUp { local, button });
         out
@@ -2701,6 +3345,7 @@ mod tests {
 
     /// Show a placed popup with the given content and size.
     fn shown_sized(c: &mut Controller, content_h: i32, view_h: i32) {
+        remember_test_session(&c.request_session_default());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let id = c.latest;
         c.handle(Event::LookupResult {
@@ -2727,6 +3372,7 @@ mod tests {
     }
 
     fn shown_card(c: &mut Controller, presentation: Presentation) {
+        remember_test_session(&c.request_session_default());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let id = c.latest;
         c.handle(Event::LookupResult {
@@ -2747,6 +3393,7 @@ mod tests {
         c.handle(Event::DupesChecked {
             generation: 1,
             dupes: Some(HashSet::from(["\u{732B}".to_string()])),
+            session: test_session(),
         });
         c.handle(placed(POPUP, 200, 200));
     }
@@ -2764,7 +3411,7 @@ mod tests {
 
     #[test]
     fn nothing_is_armed_without_a_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         let out = c.handle(Event::Tick { cursor: PhysPoint { x: 5, y: 5 }, button_h: 0 });
         assert_eq!(
             out,
@@ -2779,14 +3426,14 @@ mod tests {
 
     #[test]
     fn the_wheel_arms_only_over_a_scrollable_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         // view == content: no scroll range exists.
         let out = c.handle(Event::Tick { cursor: PhysPoint { x: 150, y: 200 }, button_h: 0 });
         assert!(out.contains(&Command::SetScrollArmed(false)));
         assert!(out.contains(&Command::SetClickArmed(true)));
 
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 500, 200);
         let out = c.handle(Event::Tick { cursor: PhysPoint { x: 150, y: 200 }, button_h: 0 });
         assert!(out.contains(&Command::SetScrollArmed(true)));
@@ -2794,7 +3441,7 @@ mod tests {
 
     #[test]
     fn the_click_arm_covers_the_button_strip_below_the_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let just_below = PhysPoint { x: 150, y: POPUP.y + POPUP.h + 10 };
         let out = c.handle(Event::Tick { cursor: just_below, button_h: 0 });
@@ -2805,7 +3452,7 @@ mod tests {
 
     #[test]
     fn the_cursor_shape_is_asked_for_only_over_the_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let out = c.handle(Event::Tick { cursor: PhysPoint { x: 150, y: 200 }, button_h: 0 });
         assert!(out.contains(&Command::SetCursorShape {
@@ -2818,7 +3465,7 @@ mod tests {
 
     #[test]
     fn a_long_armed_wheel_warns_once() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 500, 200);
         let over = PhysPoint { x: 150, y: 200 };
         let mut warnings = 0;
@@ -2836,7 +3483,7 @@ mod tests {
 
     #[test]
     fn the_first_move_always_dispatches() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         let out = c.handle(Event::CursorMoved { pos: PhysPoint { x: 10, y: 10 } });
         assert_eq!(
             out,
@@ -2844,13 +3491,14 @@ mod tests {
                 id: RequestId(1),
                 point: PhysPoint { x: 10, y: 10 },
                 popup: None,
+                session: test_session(),
             }]
         );
     }
 
     #[test]
     fn the_gate_is_exclusive_at_its_boundary() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 0, y: 0 } });
         // Four physical pixels do not pass the gate.
         assert!(c
@@ -2862,6 +3510,7 @@ mod tests {
                 id: RequestId(2),
                 point: PhysPoint { x: 5, y: 0 },
                 popup: None,
+                session: test_session(),
             }],
             c.handle(Event::CursorMoved { pos: PhysPoint { x: 5, y: 0 } })
         );
@@ -2869,7 +3518,7 @@ mod tests {
 
     #[test]
     fn a_rejected_move_never_becomes_the_new_reference() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 0, y: 0 } });
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 3, y: 0 } });
         // The gate still measures from x = 0.
@@ -2881,16 +3530,16 @@ mod tests {
     // -- trigger freeze --
 
     fn hold_cfg() -> ControllerConfig {
-        ControllerConfig { trigger_mode: TriggerMode::HoldKey, ..cfg() }
+        press_cfg()
     }
 
     fn press_cfg() -> ControllerConfig {
         ControllerConfig { trigger_mode: TriggerMode::Press, ..cfg() }
     }
 
-    /// Show a placed popup from one press in Press mode.
+    /// Show a placed popup from one Press bind.
     fn pressed_and_shown(c: &mut Controller, pos: PhysPoint) {
-        c.handle(Event::TriggerPressed { pos });
+        bind_down(c, "press", TriggerMode::Press, pos);
         let id = c.latest;
         c.handle(ready_id(id, "\u{732B}", ANCHOR));
         c.handle(placed(POPUP, 200, 200));
@@ -2898,13 +3547,14 @@ mod tests {
 
     #[test]
     fn press_mode_looks_up_once_per_press_and_never_follows_the_cursor() {
-        let mut c = Controller::new(press_cfg());
+        let mut c = test_controller(press_cfg());
         let pos = PhysPoint { x: 110, y: 110 };
         assert!(c.handle(Event::CursorMoved { pos }).is_empty(), "no hover before a press");
         assert_eq!(
-            vec![Command::RequestLookup { id: RequestId(1), point: pos, popup: None }],
-            c.handle(Event::TriggerPressed { pos })
+            vec![Command::RequestLookup { id: RequestId(1), point: pos, popup: None, session: test_session() }],
+            bind_down(&mut c, "press", TriggerMode::Press, pos)
         );
+        bind_up(&mut c, "press");
         c.handle(ready_id(RequestId(1), "\u{732B}", ANCHOR));
         c.handle(placed(POPUP, 200, 200));
         assert!(c.is_shown());
@@ -2915,17 +3565,16 @@ mod tests {
     }
 
     /// The press over the popup runs a lookup with the popup as the mask.
-    /// The sticky region must not swallow it, and the same point must pass
-    /// the movement gate.
     #[test]
     fn press_mode_asks_again_at_the_same_point_even_over_the_popup() {
-        let mut c = Controller::new(press_cfg());
+        let mut c = test_controller(press_cfg());
         let over_popup = PhysPoint { x: POPUP.x + 10, y: POPUP.y + 10 };
         pressed_and_shown(&mut c, over_popup);
         assert_eq!(
-            vec![Command::RequestLookup { id: RequestId(2), point: over_popup, popup: Some(POPUP) }],
-            c.handle(Event::TriggerPressed { pos: over_popup })
+            vec![Command::RequestLookup { id: RequestId(2), point: over_popup, popup: Some(POPUP), session: test_session() }],
+            bind_down(&mut c, "press", TriggerMode::Press, over_popup)
         );
+        bind_up(&mut c, "press");
         let out = c.handle(Event::LookupResult { id: RequestId(2), outcome: LookupOutcome::Hide });
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
@@ -2933,78 +3582,82 @@ mod tests {
 
     #[test]
     fn press_mode_ignores_the_key_release() {
-        let mut c = Controller::new(press_cfg());
-        pressed_and_shown(&mut c, PhysPoint { x: 110, y: 110 });
-        c.handle(Event::TriggerDown);
-        assert!(c.handle(Event::TriggerUp).is_empty());
+        let mut c = test_controller(press_cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        bind_down(&mut c, "press", TriggerMode::Press, pos);
+        let id = c.latest;
+        c.handle(ready_id(id, "\u{732B}", ANCHOR));
+        c.handle(placed(POPUP, 200, 200));
+        assert!(bind_up(&mut c, "press").is_empty());
         assert!(c.is_shown());
     }
 
     #[test]
     fn a_click_outside_hides_the_popup_and_kills_the_answer_in_flight() {
-        let mut c = Controller::new(press_cfg());
+        let mut c = test_controller(press_cfg());
         let pos = PhysPoint { x: 110, y: 110 };
         pressed_and_shown(&mut c, pos);
-        c.handle(Event::TriggerPressed { pos: PhysPoint { x: 500, y: 500 } });
+        bind_down(&mut c, "press", TriggerMode::Press, PhysPoint { x: 500, y: 500 });
         let stale = c.latest;
         let out = c.handle(Event::PointerDownOutside);
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
+        bind_up(&mut c, "press");
         assert!(c.handle(ready_id(stale, "\u{72AC}", ANCHOR)).is_empty());
         assert!(!c.is_shown());
         assert!(c.handle(Event::PointerDownOutside).is_empty(), "nothing to hide twice");
     }
 
-    /// A press while the popup is still placing waits for the rectangle, so
-    /// the lookup carries the mask.
+    /// A press while the popup is still placing waits for the rectangle.
     #[test]
     fn a_press_during_placement_waits_for_the_rectangle() {
-        let mut c = Controller::new(press_cfg());
+        let mut c = test_controller(press_cfg());
         let pos = PhysPoint { x: 110, y: 110 };
-        c.handle(Event::TriggerPressed { pos });
+        bind_down(&mut c, "press", TriggerMode::Press, pos);
+        bind_up(&mut c, "press");
         c.handle(ready_id(RequestId(1), "\u{732B}", ANCHOR));
-        assert!(c.handle(Event::TriggerPressed { pos }).is_empty());
+        assert!(bind_down(&mut c, "press", TriggerMode::Press, pos).is_empty());
+        bind_up(&mut c, "press");
         let out = c.handle(placed(POPUP, 200, 200));
         assert!(
-            out.contains(&Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP) }),
+            out.contains(&Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP), session: test_session() }),
             "{out:?}"
         );
     }
 
     #[test]
     fn hold_mode_ignores_moves_until_the_key_is_down() {
-        let mut c = Controller::new(hold_cfg());
-        assert!(c
-            .handle(Event::CursorMoved { pos: PhysPoint { x: 10, y: 10 } })
-            .is_empty());
-        c.handle(Event::TriggerDown);
+        let mut c = test_controller(hold_cfg());
+        let pos = PhysPoint { x: 10, y: 10 };
+        assert!(c.handle(Event::CursorMoved { pos }).is_empty());
         assert_eq!(
             vec![Command::RequestLookup {
                 id: RequestId(1),
-                point: PhysPoint { x: 10, y: 10 },
+                point: pos,
                 popup: None,
+                session: test_session(),
             }],
-            c.handle(Event::CursorMoved { pos: PhysPoint { x: 10, y: 10 } })
+            bind_down(&mut c, "hold", TriggerMode::HoldKey, pos)
         );
+        assert!(c.handle(Event::CursorMoved { pos }).is_empty());
     }
 
     #[test]
     fn the_key_coming_up_retracts_the_popup_in_hold_mode() {
-        let mut c = Controller::new(hold_cfg());
-        c.handle(Event::TriggerDown);
+        let mut c = test_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
         shown(&mut c);
-        let out = c.handle(Event::TriggerUp);
+        let out = bind_up(&mut c, "hold");
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
         assert!(!c.is_shown());
     }
 
     #[test]
     fn the_key_coming_up_kills_the_answer_still_in_flight() {
-        let mut c = Controller::new(hold_cfg());
-        c.handle(Event::TriggerDown);
-        c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
+        let mut c = test_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
         let stale = c.latest;
-        c.handle(Event::TriggerUp);
+        bind_up(&mut c, "hold");
         let out = c.handle(Event::LookupResult {
             id: stale,
             outcome: LookupOutcome::Ready {
@@ -3020,33 +3673,108 @@ mod tests {
     }
 
     #[test]
-    fn live_mode_never_retracts_on_the_key() {
-        let mut c = Controller::new(cfg());
+    fn live_mode_never_retracts_on_bind_release() {
+        let mut c = test_controller(cfg());
+        let pos = PhysPoint { x: 110, y: 110 };
+        bind_down(&mut c, "live", TriggerMode::Live, pos);
         shown(&mut c);
-        assert!(c.handle(Event::TriggerUp).is_empty());
+        assert!(bind_up(&mut c, "live").is_empty());
         assert!(c.is_shown());
     }
 
-    /// The daemon feeds a press and then the press-time cursor sample. The
-    /// canned demo and the control socket both press twice at one fixed point.
-    /// The second press must pass the movement gate without cursor motion.
     #[test]
-    fn a_second_press_at_the_same_point_looks_up_again_in_live_mode() {
-        let mut c = Controller::new(cfg());
+    fn a_second_press_at_the_same_point_looks_up_again_without_cursor_motion() {
+        let mut c = test_controller(press_cfg());
         let point = PhysPoint { x: 110, y: 110 };
-        c.handle(Event::TriggerDown);
-        shown(&mut c);
-        c.handle(Event::TriggerUp);
-        let id = c.latest;
-        c.handle(Event::LookupResult { id, outcome: LookupOutcome::Hide });
-        assert!(!c.is_shown());
-        c.handle(Event::TriggerDown);
-        let out = c.handle(Event::CursorMoved { pos: point });
+        pressed_and_shown(&mut c, point);
         assert_eq!(
-            out,
-            vec![Command::RequestLookup { id: RequestId(2), point, popup: None }]
+            vec![Command::RequestLookup {
+                id: RequestId(2),
+                point,
+                popup: Some(POPUP),
+                session: test_session(),
+            }],
+            bind_down(&mut c, "press", TriggerMode::Press, point)
         );
     }
+    #[test]
+    fn a_press_bind_pauses_live_until_the_chain_ends() {
+        let mut c = test_controller(cfg());
+        let press = PhysPoint { x: 110, y: 110 };
+        bind_down(&mut c, "press", TriggerMode::Press, press);
+        bind_up(&mut c, "press");
+        assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } }).is_empty());
+
+        c.handle(Event::DismissRequested);
+        let commands = c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { point, session, .. }
+                if *point == PhysPoint { x: 900, y: 900 } && session == &test_session()
+        )));
+    }
+
+    #[test]
+    fn a_displaced_bind_release_does_not_end_the_new_chain() {
+        let mut c = test_controller(press_cfg());
+        bind_down(&mut c, "old", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
+        let new_request = bind_down(&mut c, "new", TriggerMode::Toggle, PhysPoint { x: 120, y: 120 })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the new bind starts a lookup");
+        assert_eq!(c.active_bind_id(), Some("new"));
+        assert_eq!(TriggerMode::Toggle, c.trigger_mode());
+        assert!(bind_up(&mut c, "old").is_empty());
+        assert_eq!(c.active_bind_id(), Some("new"));
+        assert_eq!(TriggerMode::Toggle, c.trigger_mode());
+        assert_eq!(c.latest_lookup, new_request);
+    }
+
+    #[test]
+    fn a_new_bind_replaces_same_content_and_clears_click_history() {
+        let mut c = test_controller(cfg());
+        shown(&mut c);
+        click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("犬".into())),
+        );
+        let drill_down_id = c.latest_lookup;
+        c.handle(Event::LookupResult {
+            id: drill_down_id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        c.surface.as_mut().expect("child popup").selection.card_mut(0).replace(SelRange {
+            start: TextAddr { entry: 0, addr: crate::select::DocAddr::START },
+            end: TextAddr { entry: 0, addr: crate::select::DocAddr::END },
+        });
+        assert!(c.has_history());
+
+        let request = bind_down(
+            &mut c,
+            "replacement",
+            TriggerMode::Press,
+            PhysPoint { x: 110, y: 110 },
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestLookup { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("the new bind starts a lookup");
+        bind_up(&mut c, "replacement");
+        let commands = c.handle(ready_id(request, "犬", ANCHOR));
+        assert!(commands.iter().any(|command| matches!(command, Command::ShowPopup { .. })));
+        assert!(!c.has_history());
+        assert!(c.surface.as_ref().expect("replacement popup").history.is_empty());
+        assert!(c.selection().expect("new selection").card(0).is_none_or(CardSelection::is_empty));
+    }
+
 
     #[test]
     fn the_char_freeze_applies_only_in_live_mode() {
@@ -3056,11 +3784,12 @@ mod tests {
         assert!(!per_char_freeze(false, TriggerMode::Live));
     }
 
+
     // -- the sticky region --
 
     #[test]
     fn a_move_inside_the_hold_resolves_nothing() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
         // This point is inside the anchor hold.
@@ -3071,7 +3800,7 @@ mod tests {
 
     #[test]
     fn a_move_onto_the_popup_resolves_nothing() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
         assert!(c
@@ -3081,7 +3810,7 @@ mod tests {
 
     #[test]
     fn leaving_the_sticky_region_resolves_again() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         c.handle(Event::Tick { cursor: PhysPoint { x: 110, y: 110 }, button_h: 0 });
         let away = PhysPoint { x: 900, y: 900 };
@@ -3091,6 +3820,7 @@ mod tests {
                 point: away,
                 // The request carries the shown popup rectangle for the grab mask.
                 popup: Some(POPUP),
+                session: test_session(),
             }],
             c.handle(Event::CursorMoved { pos: away })
         );
@@ -3098,7 +3828,7 @@ mod tests {
 
     #[test]
     fn the_button_strip_holds_the_cursor_too() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let below = PhysPoint { x: 150, y: POPUP.y + POPUP.h + 10 };
         // Without the button, the point is not in the sticky region.
@@ -3118,7 +3848,7 @@ mod tests {
     /// sends a lookup.
     #[test]
     fn a_dwell_re_asks_the_question_the_popup_answers() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         assert!(c.dwell_armed(), "a placed popup is what a dwell watches");
         assert_eq!(
@@ -3127,6 +3857,7 @@ mod tests {
                 point: PhysPoint { x: 110, y: 110 },
                 // A live grab masks the core popup from its OCR input.
                 popup: Some(POPUP),
+                session: test_session(),
             }],
             c.handle(Event::DwellElapsed)
         );
@@ -3137,7 +3868,7 @@ mod tests {
     /// the dwell watch monitors.
     #[test]
     fn a_dwell_asks_where_the_hover_was_not_where_the_cursor_drifted() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         // The movement gate accepts this point, but the sticky region suppresses its lookup.
         assert!(c.handle(Event::CursorMoved { pos: PhysPoint { x: 300, y: 250 } }).is_empty());
@@ -3146,6 +3877,7 @@ mod tests {
                 id: RequestId(2),
                 point: PhysPoint { x: 110, y: 110 },
                 popup: Some(POPUP),
+                session: test_session(),
             }],
             c.handle(Event::DwellElapsed)
         );
@@ -3155,7 +3887,7 @@ mod tests {
     /// No popup means no re-check and no watch for the platform bin to arm.
     #[test]
     fn nothing_shown_is_never_re_checked() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
         // A hover without an answer is not a shown popup.
@@ -3168,45 +3900,38 @@ mod tests {
     /// re-check must wait for `PopupPlaced`.
     #[test]
     fn a_popup_awaiting_its_rect_is_never_re_checked() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
     }
 
-    /// Trigger mode uses a press-time grab that cannot change.
-    /// It has no dwell re-check by construction
-    /// (ARCHITECTURE.md#hover-cadence).
+    /// Hold mode has no dwell re-check because its grab cannot change.
     #[test]
     fn trigger_mode_has_no_dwell_re_check() {
-        let mut c = Controller::new(hold_cfg());
-        c.handle(Event::TriggerDown);
+        let mut c = test_controller(hold_cfg());
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
         shown(&mut c);
-        assert!(c.popup().is_some(), "the hold's popup is on screen");
+        assert!(c.popup().is_some(), "the hold bind popup is on screen");
         assert!(!c.dwell_armed());
         assert!(c.handle(Event::DwellElapsed).is_empty());
     }
 
-    /// Toggle mode reads live grabs, so a still cursor over a changed screen
-    /// gets the same re-check as Live mode while the latch is on. The latch
-    /// off ends the watch with the popup.
+    /// A latched Toggle bind uses live grabs until the bind turns off.
     #[test]
     fn a_latched_toggle_keeps_the_dwell_re_check() {
-        let mut c = Controller::new(ControllerConfig {
-            trigger_mode: TriggerMode::Toggle,
-            ..cfg()
-        });
+        let mut c = test_controller(press_cfg());
         assert!(!c.dwell_armed());
-        c.handle(Event::TriggerDown);
+        bind_down(&mut c, "toggle", TriggerMode::Toggle, PhysPoint { x: 110, y: 110 });
         shown(&mut c);
         assert!(c.dwell_armed(), "a latched toggle watches the screen");
         let pos = PhysPoint { x: 110, y: 110 };
         assert_eq!(
-            vec![Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP) }],
+            vec![Command::RequestLookup { id: RequestId(2), point: pos, popup: Some(POPUP), session: test_session() }],
             c.handle(Event::DwellElapsed)
         );
-        c.handle(Event::TriggerUp);
+        bind_down(&mut c, "toggle", TriggerMode::Toggle, pos);
         assert!(!c.dwell_armed(), "toggle-off ends the watch");
     }
 
@@ -3214,7 +3939,7 @@ mod tests {
     /// the history stack that the user opened.
     #[test]
     fn a_drill_down_is_never_re_checked() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         click(
             &mut c,
@@ -3240,7 +3965,7 @@ mod tests {
     /// A static screen therefore needs no extra OCR pass.
     #[test]
     fn a_dwell_answer_presents_only_a_change() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         c.handle(Event::DwellElapsed);
         assert!(
@@ -3266,7 +3991,7 @@ mod tests {
 
     #[test]
     fn a_ready_answer_asks_for_a_placement_first() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let out = c.handle(ready("\u{732B}", ANCHOR));
         assert_eq!(
@@ -3295,12 +4020,13 @@ mod tests {
 
     #[test]
     fn an_equal_card_at_a_jittered_anchor_is_never_reshown() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
+        let id = cursor_lookup_request(&mut c, PhysPoint { x: 900, y: 900 });
         let jittered = PhysRect { x: ANCHOR.x + ANCHOR_JITTER_PX, ..ANCHOR };
         assert!(c
             .handle(Event::LookupResult {
-                id: c.latest,
+                id,
                 outcome: LookupOutcome::Ready {
                     presentation: Box::new(presentation_of("\u{732B}")),
                     anchor: jittered,
@@ -3314,11 +4040,12 @@ mod tests {
 
     #[test]
     fn the_same_card_past_the_jitter_is_placed_again() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
+        let id = cursor_lookup_request(&mut c, PhysPoint { x: 900, y: 900 });
         let moved = PhysRect { x: ANCHOR.x + ANCHOR_JITTER_PX + 1, ..ANCHOR };
         let out = c.handle(Event::LookupResult {
-            id: c.latest,
+            id,
             outcome: LookupOutcome::Ready {
                 presentation: Box::new(presentation_of("\u{732B}")),
                 anchor: moved,
@@ -3332,7 +4059,7 @@ mod tests {
 
     #[test]
     fn a_move_during_placement_waits_for_the_rect() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         // This point lands on the popup.
@@ -3346,7 +4073,7 @@ mod tests {
 
     #[test]
     fn a_move_off_the_placed_rect_resolves_after_the_round_trip() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
@@ -3355,12 +4082,13 @@ mod tests {
             id: RequestId(2),
             point: PhysPoint { x: 900, y: 900 },
             popup: Some(POPUP),
+            session: test_session(),
         }));
     }
 
     #[test]
     fn clicks_and_wheel_do_nothing_while_the_rect_is_unknown() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         assert!(c.handle(Event::Scrolled { notches: -3 }).is_empty());
@@ -3376,7 +4104,7 @@ mod tests {
 
     #[test]
     fn a_failed_placement_retracts_a_new_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         let out = c.handle(Event::PopupPlaceFailed);
@@ -3394,7 +4122,7 @@ mod tests {
 
     #[test]
     fn a_failed_reshow_leaves_the_popup_where_it_was() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 500, 200);
         click(
             &mut c,
@@ -3410,7 +4138,7 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_by_whole_notches_and_clamps() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 400, 200);
         assert_eq!(
             vec![Command::RepaintPopup { scroll: SCROLL_STEP_PX, show_back: false }],
@@ -3428,19 +4156,19 @@ mod tests {
 
     #[test]
     fn a_reshow_clamps_a_scroll_the_new_content_cannot_hold() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown_sized(&mut c, 500, 200);
         c.handle(Event::Scrolled { notches: -4 });
         assert_eq!(192, c.popup().expect("placed").scroll);
         // Duplicate markers repaint in place, but the popup measures again.
-        c.handle(Event::DupesChecked { generation: 1, dupes: Some(HashSet::new()) });
+        c.handle(Event::DupesChecked { generation: 1, dupes: Some(HashSet::new()), session: test_session() });
         c.handle(placed(POPUP, 250, 200));
         assert_eq!(50, c.popup().expect("placed").scroll);
     }
 
     #[test]
     fn an_expanded_entry_starts_back_at_the_top() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown_sized(&mut c, 500, 200);
         click(
             &mut c,
@@ -3456,7 +4184,7 @@ mod tests {
 
     #[test]
     fn a_drill_down_click_asks_the_worker() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let out = click(
             &mut c,
@@ -3469,14 +4197,21 @@ mod tests {
             vec![Command::RequestDrillDown {
                 id: RequestId(2),
                 text: "\u{732B}".into(),
+                session: test_session(),
             }]
         );
     }
 
     #[test]
     fn a_drill_down_answer_pushes_history_and_back_pops_it() {
-        let mut c = Controller::new(cfg());
-        shown(&mut c);
+        let mut c = test_controller(cfg());
+        shown_sized(&mut c, 700, 200);
+        c.handle(Event::Scrolled { notches: -2 });
+        c.surface.as_mut().expect("card A surface").selection.card_mut(0).replace(SelRange {
+            start: TextAddr { entry: 0, addr: crate::select::DocAddr::START },
+            end: TextAddr { entry: 0, addr: crate::select::DocAddr::END },
+        });
+        let parent_selection = c.selection().expect("card A selection").clone();
         click(
             &mut c,
             PhysPoint { x: 10, y: 10 },
@@ -3524,30 +4259,27 @@ mod tests {
                 Command::ShowPopup {
                     presentation: Box::new(presentation_of("\u{732B}")),
                     anchor: ANCHOR,
-                    scroll: 0,
+                    scroll: 96,
                     show_back: false,
                 },
                 Command::SetBackArmed(false),
             ]
         );
-        c.handle(placed(POPUP, 200, 200));
+        c.handle(placed(POPUP, 700, 200));
         assert!(!c.popup().expect("placed").show_back);
-        assert!(
-            c.selection().expect("card A selection").card(0).is_none_or(CardSelection::is_empty),
-            "Back must not apply card B's selection to card A"
-        );
-        // No history entry remains to remove.
+        assert_eq!(c.popup().expect("placed").scroll, 96);
+        assert_eq!(c.selection().expect("card A selection"), &parent_selection);
         assert!(c.handle(Event::BackRequested).is_empty());
     }
 
     #[test]
     fn a_click_below_the_popup_adds_to_anki_only_when_enabled() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         let below = PhysPoint { x: 10, y: POPUP.h + 5 };
         assert!(click(&mut c, below, Button::Primary, None).is_empty());
 
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
         let out = click(&mut c, below, Button::Primary, None);
         assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
@@ -3560,7 +4292,7 @@ mod tests {
         let mut config = cfg();
         config.anki_enabled = true;
         config.include_dictionary_name = false;
-        let mut controller = Controller::new(config);
+        let mut controller = test_controller(config);
         let card = gloss_card("cat", "feline");
         shown_card(&mut controller, presentation_with_card(card.clone(), vec![card]));
 
@@ -3578,10 +4310,10 @@ mod tests {
 
     #[test]
     fn an_added_note_is_never_added_twice() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
-        c.handle(Event::AddRequested);
-        c.handle(Event::NoteAdded { expr: "\u{732B}".into(), failed: false });
+        let (id, session) = add_note_request(&c.handle(Event::AddRequested));
+        note_added(&mut c, id, "\u{732B}", session);
         c.handle(placed(POPUP, 200, 200));
         assert!(c.handle(Event::AddRequested).is_empty());
         assert!(c.popup().expect("placed").anki.added.contains("\u{732B}"));
@@ -3590,7 +4322,7 @@ mod tests {
     /// A duplicate that the update setting blocks does nothing at all.
     #[test]
     fn a_blocked_duplicate_add_does_nothing() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
         a_known_dupe(&mut c);
         let before = c.anki().expect("shown").clone();
@@ -3609,14 +4341,14 @@ mod tests {
             overwrite_duplicates: true,
             ..cfg()
         };
-        let mut c = Controller::new(config.clone());
+        let mut c = test_controller(config.clone());
         shown(&mut c);
         a_known_dupe(&mut c);
         let out = c.handle(Event::AddRequested);
         assert!(out.iter().any(|cmd| matches!(cmd, Command::AddNote { .. })));
         assert!(c.anki().expect("shown").saving);
 
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         shown(&mut c);
         a_known_dupe(&mut c);
         let below = PhysPoint { x: 10, y: POPUP.h + 5 };
@@ -3627,7 +4359,7 @@ mod tests {
 
     #[test]
     fn an_add_with_the_probe_asks_for_the_sentence_first() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3643,6 +4375,7 @@ mod tests {
                     anchor: ANCHOR,
                     orientation: Orientation::Horizontal,
                     hide_popup: true,
+                    session: test_session(),
                 },
                 Command::SyncAnkiButton,
             ]
@@ -3652,7 +4385,7 @@ mod tests {
 
     #[test]
     fn a_sentence_result_completes_the_add_with_the_new_sentence() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3689,7 +4422,7 @@ mod tests {
         };
         let card_a = card_for_note("card A", "A-only gloss");
         let card_b = card_for_note("card B", "B-only gloss");
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         shown_card(
             &mut c,
             presentation_with_card(card_a.clone(), vec![card_a, card_b]),
@@ -3735,7 +4468,7 @@ mod tests {
             outcome: LookupOutcome::Sentence(Some("A sentence".into())),
         });
         let (expr, fields) = match out.as_slice() {
-            [Command::AddNote { expr, fields }, Command::SyncAnkiButton] => (expr, fields),
+            [Command::AddNote { expr, fields, .. }, Command::SyncAnkiButton] => (expr, fields),
             commands => panic!("expected the original add payload, got {commands:?}"),
         };
         assert_eq!("card A", expr);
@@ -3746,7 +4479,7 @@ mod tests {
     }
     #[test]
     fn a_drill_down_during_a_sentence_probe_keeps_the_add_with_card_a() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3802,7 +4535,8 @@ mod tests {
             commands => panic!("expected card A's add command, got {commands:?}"),
         }
 
-        c.handle(Event::NoteAdded { expr: "card A".into(), failed: false });
+        let (id, session) = add_note_request(&out);
+        note_added(&mut c, id, "card A", session);
         c.handle(placed(POPUP, 200, 200));
         let popup = c.popup().expect("card B popup after the add");
         assert!(!popup.anki.adding);
@@ -3826,7 +4560,7 @@ mod tests {
 
     #[test]
     fn a_sentence_probe_survives_back_from_the_drill_down_card() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3870,15 +4604,15 @@ mod tests {
             )),
             "Back must restore card A: {back:?}"
         );
-        assert!(c.add_in_flight(), "Back must keep the probe in flight");
+        assert!(!c.add_in_flight(), "the restored card A has no pending add");
 
         let out = c.handle(Event::LookupResult {
             id: sentence_id,
             outcome: LookupOutcome::Sentence(Some("B sentence".into())),
         });
         let (expr, fields) = match out.as_slice() {
-            [Command::AddNote { expr, fields }, Command::SyncAnkiButton] => (expr, fields),
-            commands => panic!("expected card B's add command, got {commands:?}"),
+            [Command::AddNote { expr, fields, .. }] => (expr, fields),
+            commands => panic!("expected card B's isolated add command, got {commands:?}"),
         };
         assert_eq!("card B", expr);
         assert_eq!(Some("B sentence"), fields.get("sentence").map(String::as_str));
@@ -3888,7 +4622,7 @@ mod tests {
     fn a_failed_probe_keeps_the_hover_sentence() {
         let mut presentation = presentation_of("\u{732B}");
         presentation.sentence = Some("hover sentence".into());
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3911,7 +4645,7 @@ mod tests {
 
     #[test]
     fn a_stale_sentence_result_is_dropped() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3940,7 +4674,7 @@ mod tests {
 
     #[test]
     fn a_hover_result_after_a_sentence_request_is_not_stale() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..cfg()
@@ -3961,29 +4695,28 @@ mod tests {
     /// the rectangle, so `popup()` returns `None`.
     #[test]
     fn the_anki_state_reads_back_before_the_popup_has_a_rect() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         assert!(c.anki().is_none(), "nothing shown is nothing to paint");
 
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let id = c.latest;
         c.handle(ready_id(id, "\u{732B}", ANCHOR));
         assert!(c.popup().is_none(), "no rect has come back yet");
+        assert_eq!(c.current_session(), Some(&test_session()));
 
         let anki = c.anki().expect("a popup on its way still carries Anki state");
         assert!(anki.enabled, "the feature is on");
         assert!(anki.checking, "a fresh popup's first frame is already checking");
 
         c.handle(placed(POPUP, 200, 200));
-        c.handle(Event::NoteAdded { expr: "\u{732B}".into(), failed: false });
-        assert!(
-            c.anki().expect("still shown").added.contains("\u{732B}"),
-            "and it follows the add lifecycle, rect or no rect"
-        );
+        let (id, session) = add_note_request(&c.handle(Event::AddRequested));
+        note_added(&mut c, id, "\u{732B}", session);
+        assert!(c.anki().expect("the placed popup retains its Anki state").added.contains("\u{732B}"));
     }
 
     #[test]
-    fn an_external_note_add_marks_the_current_drill_down_card() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+    fn a_note_result_without_a_matching_write_is_ignored() {
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
         click(
             &mut c,
@@ -3997,36 +4730,120 @@ mod tests {
         });
         c.handle(placed(POPUP, 200, 200));
 
-        c.handle(Event::NoteAdded { expr: "card B".into(), failed: false });
+        assert!(c.handle(Event::NoteAdded {
+            id: RequestId(999),
+            expr: "card B".into(),
+            session: test_session(),
+            failed: false,
+        }).is_empty());
+        assert!(!c.anki().expect("card B Anki state").added.contains("card B"));
+    }
 
-        assert!(
-            c.anki().expect("card B Anki state").added.contains("card B"),
-            "a screenshot-filed note has no local in-flight add"
-        );
+    #[test]
+    fn hidden_click_parent_keeps_session_scoped_anki_results_for_back() {
+        let config = ControllerConfig { anki_enabled: true, ..cfg() };
+        let mut c = test_controller(config.clone());
+        shown(&mut c);
+        let generation = c.surface.as_ref().unwrap().generation;
+        let analysis_generation = c.surface.as_ref().unwrap().analysis_generation;
+        let (write_id, session) = add_note_request(&c.handle(Event::AddRequested));
+
+        let drill_down_id = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("犬".into())),
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestDrillDown { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("the click drill-down request");
+        c.handle(Event::LookupResult {
+            id: drill_down_id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+
+        c.handle(Event::DupesChecked {
+            generation,
+            session: session_for_controller_cfg(&config),
+            dupes: Some(HashSet::from(["猫".into()])),
+        });
+        assert!(c.surface.as_ref().unwrap().history[0].anki.checking);
+        let words = WordMap::new();
+        c.handle(Event::AnalysisReady { generation: analysis_generation, words: words.clone() });
+        c.handle(Event::DupesChecked {
+            generation,
+            session: session.clone(),
+            dupes: Some(HashSet::from(["猫".into()])),
+        });
+        note_added(&mut c, write_id, "猫", session.clone());
+        let parent = &c.surface.as_ref().unwrap().history[0];
+        assert!(parent.anki.dupes.contains("猫"));
+        assert!(parent.anki.added.contains("猫"));
+        assert_eq!(parent.analysis, Some((analysis_generation, words)));
+        assert!(!parent.anki.adding);
+
+        c.handle(Event::BackRequested);
+        assert_eq!(c.surface.as_ref().unwrap().session, session);
+        assert!(c.anki().unwrap().dupes.contains("猫"));
+        assert!(c.anki().unwrap().added.contains("猫"));
+        assert_eq!(c.surface.as_ref().unwrap().analysis_generation, analysis_generation);
+    }
+
+    #[test]
+    fn a_wrong_session_note_reply_keeps_the_write_pending() {
+        let config = ControllerConfig {
+            anki_enabled: true,
+            overwrite_duplicates: true,
+            ..cfg()
+        };
+        let mut c = test_controller(config.clone());
+        shown(&mut c);
+        let (id, session) = add_note_request(&c.handle(Event::AddRequested));
+        let wrong_session = session_for_controller_cfg(&config);
+        assert!(note_written(
+            &mut c,
+            id,
+            "\u{732B}",
+            wrong_session,
+            NoteWriteStatus::Updated,
+        )
+        .is_empty());
+        assert!(c.anki().expect("popup state").adding);
+        assert!(c.pending_writes.contains_key(&id));
+
+        note_written(&mut c, id, "\u{732B}", session, NoteWriteStatus::Updated);
+        assert!(c.anki().expect("popup state").updated.contains("\u{732B}"));
+        assert!(!c.pending_writes.contains_key(&id));
     }
 
     #[test]
     fn an_updated_note_blocks_a_second_write_from_the_same_popup() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             overwrite_duplicates: true,
             ..cfg()
         });
         shown(&mut c);
-        assert!(c.handle(Event::AddRequested).iter().any(|command| {
-            matches!(command, Command::AddNote { .. })
-        }));
-        c.handle(Event::NoteWritten {
-            expr: "\u{732B}".into(),
-            status: NoteWriteStatus::Updated,
-        });
+        let commands = c.handle(Event::AddRequested);
+        let (id, session) = add_note_request(&commands);
+        note_written(
+            &mut c,
+            id,
+            "\u{732B}",
+            session,
+            NoteWriteStatus::Updated,
+        );
         assert!(c.anki().expect("popup state").updated.contains("\u{732B}"));
         assert!(c.handle(Event::AddRequested).is_empty());
     }
 
     #[test]
     fn a_click_outside_any_region_does_nothing() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
         assert!(click(&mut c, PhysPoint { x: 10, y: 10 }, Button::Primary, None).is_empty());
     }
@@ -4035,7 +4852,7 @@ mod tests {
 
     #[test]
     fn a_new_popup_checks_every_headword_for_dupes() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let mut presentation = presentation_of("\u{732B}");
         presentation.collapsed.push(CollapsedRow {
@@ -4057,19 +4874,21 @@ mod tests {
         assert!(out.contains(&Command::CheckDupes {
             generation: 1,
             exprs: vec!["\u{732B}".into(), "\u{72AC}".into()],
+            session: test_session(),
         }));
     }
 
     #[test]
     fn a_dupe_answer_for_an_older_popup_is_dropped() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         shown(&mut c);
         assert!(c
-            .handle(Event::DupesChecked { generation: 99, dupes: None })
+            .handle(Event::DupesChecked { generation: 99, session: test_session(), dupes: None })
             .is_empty());
         let out = c.handle(Event::DupesChecked {
             generation: 1,
             dupes: Some(HashSet::from(["\u{732B}".to_string()])),
+            session: test_session(),
         });
         assert!(out.iter().any(|cmd| matches!(cmd, Command::ShowPopup { .. })));
         c.handle(placed(POPUP, 200, 200));
@@ -4081,7 +4900,7 @@ mod tests {
 
     #[test]
     fn a_marker_only_reshow_keeps_analysis_without_a_new_request() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         let card = gloss_card("first", "second");
         shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
         let generation = c.surface.as_ref().expect("surface").analysis_generation;
@@ -4092,7 +4911,7 @@ mod tests {
             Some((generation, words.clone()))
         );
 
-        let out = c.handle(Event::DupesChecked { generation, dupes: Some(HashSet::new()) });
+        let out = c.handle(Event::DupesChecked { generation, dupes: Some(HashSet::new()), session: test_session() });
         assert!(out.iter().any(|cmd| matches!(cmd, Command::ShowPopup { .. })));
         let out = c.handle(placed(POPUP, 200, 200));
         assert!(!out.iter().any(|cmd| matches!(cmd, Command::RequestAnalysis { .. })));
@@ -4101,7 +4920,7 @@ mod tests {
 
     #[test]
     fn expanding_entry_requests_analysis_once() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         let top = gloss_card("top", "top two");
         let second = gloss_card("second", "second two");
         shown_card(&mut c, presentation_with_card(top.clone(), vec![top, second]));
@@ -4126,10 +4945,11 @@ mod tests {
 
     #[test]
     fn a_hide_answer_retracts_the_popup() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
+        let id = cursor_lookup_request(&mut c, PhysPoint { x: 900, y: 900 });
         let out = c.handle(Event::LookupResult {
-            id: c.latest,
+            id,
             outcome: LookupOutcome::Hide,
         });
         assert_eq!(out, vec![Command::HidePopup, Command::SetBackArmed(false)]);
@@ -4138,10 +4958,11 @@ mod tests {
 
     #[test]
     fn a_failed_answer_warns_and_retracts() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         shown(&mut c);
+        let id = cursor_lookup_request(&mut c, PhysPoint { x: 900, y: 900 });
         let out = c.handle(Event::LookupResult {
-            id: c.latest,
+            id,
             outcome: LookupOutcome::Failed("ocr died".into()),
         });
         assert_eq!(
@@ -4156,7 +4977,7 @@ mod tests {
 
     #[test]
     fn a_superseded_answer_is_ignored() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 10, y: 10 } });
         let stale = c.latest;
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 100, y: 100 } });
@@ -4167,12 +4988,12 @@ mod tests {
 
     #[test]
     fn the_lookup_log_stays_quiet_unless_it_is_asked_for() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let out = c.handle(ready("\u{732B}", ANCHOR));
         assert!(!out.iter().any(|cmd| matches!(cmd, Command::LogLookup { .. })));
 
-        let mut c = Controller::new(ControllerConfig { log_lookups: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { log_lookups: true, ..cfg() });
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         let out = c.handle(ready("\u{732B}", ANCHOR));
         assert_eq!(
@@ -4184,25 +5005,27 @@ mod tests {
     // -- configuration reload --
 
     #[test]
-    fn a_reload_kills_the_answer_in_flight_and_keeps_the_popup() {
-        let mut c = Controller::new(cfg());
+    fn a_profile_reload_keeps_an_in_flight_lookup_in_its_original_session() {
+        let mut c = test_controller(cfg());
         shown(&mut c);
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
-        let stale = c.latest;
-        let out = c.handle(Event::ConfigReloaded(Box::new(ControllerConfig {
+        let pending = c.latest;
+        let out = reload(&mut c, ControllerConfig {
             per_character_lookup: true,
             ..cfg()
-        })));
+        });
         assert_eq!(out, vec![Command::RequestReload { id: RequestId(3) }]);
         assert!(c.is_shown());
-        assert!(c
-            .handle(Event::LookupResult { id: stale, outcome: LookupOutcome::Hide })
-            .is_empty());
+        assert_eq!(
+            c.handle(Event::LookupResult { id: pending, outcome: LookupOutcome::Hide }),
+            vec![Command::HidePopup, Command::SetBackArmed(false)]
+        );
+        assert!(!c.is_shown());
     }
 
     #[test]
-    fn a_reload_swaps_the_freeze_rect_mid_hover() {
-        let mut c = Controller::new(cfg());
+    fn a_profile_reload_does_not_change_the_freeze_rect_of_a_shown_popup() {
+        let mut c = test_controller(cfg());
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(Event::LookupResult {
             id: c.latest,
@@ -4221,20 +5044,21 @@ mod tests {
         let second = PhysPoint { x: 132, y: 105 };
         assert!(c.handle(Event::CursorMoved { pos: second }).is_empty());
 
-        c.handle(Event::ConfigReloaded(Box::new(ControllerConfig {
+        reload(&mut c, ControllerConfig {
             per_character_lookup: true,
             ..cfg()
-        })));
-        // The character hold covers one glyph.
+        });
+        assert!(!c.cfg.per_character_lookup);
+        // The current profile still freezes the complete matched span.
         let third = PhysPoint { x: 138, y: 105 };
-        assert!(!c.handle(Event::CursorMoved { pos: third }).is_empty());
+        assert!(c.handle(Event::CursorMoved { pos: third }).is_empty());
     }
 
     // -- tray and quit --
 
     #[test]
     fn the_tray_opens_settings_and_quits() {
-        let mut c = Controller::new(cfg());
+        let mut c = test_controller(cfg());
         assert_eq!(
             vec![Command::OpenSettings],
             c.handle(Event::TrayAction(TrayAction::OpenSettings))
@@ -4330,7 +5154,7 @@ mod tests {
     /// The add hotkey also waits for the popup rectangle.
     #[test]
     fn the_add_hotkey_waits_for_the_rect() {
-        let mut c = Controller::new(ControllerConfig { anki_enabled: true, ..cfg() });
+        let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
         c.handle(Event::CursorMoved { pos: PhysPoint { x: 110, y: 110 } });
         c.handle(ready("\u{732B}", ANCHOR));
         assert!(c.handle(Event::AddRequested).is_empty());
@@ -4340,12 +5164,12 @@ mod tests {
 
     #[test]
     fn a_held_trigger_reads_the_frozen_frame_without_a_hide() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
             ..hold_cfg()
         });
-        c.handle(Event::TriggerDown);
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
         shown(&mut c);
         let out = c.handle(Event::AddRequested);
         let request = out.iter().find_map(|command| match command {
@@ -4358,13 +5182,12 @@ mod tests {
     }
     #[test]
     fn a_latched_toggle_probe_hides_the_popup_for_live_capture() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: true,
-            trigger_mode: TriggerMode::Toggle,
-            ..cfg()
+            ..press_cfg()
         });
-        c.handle(Event::TriggerDown);
+        bind_down(&mut c, "toggle", TriggerMode::Toggle, PhysPoint { x: 110, y: 110 });
         shown(&mut c);
         let hide_popup = c
             .handle(Event::AddRequested)
@@ -4379,7 +5202,7 @@ mod tests {
 
     #[test]
     fn an_add_without_the_probe_is_unchanged() {
-        let mut c = Controller::new(ControllerConfig {
+        let mut c = test_controller(ControllerConfig {
             anki_enabled: true,
             sentence_probe: false,
             ..cfg()
@@ -4395,7 +5218,7 @@ mod tests {
     fn a_drag_over_two_glosses_updates_the_public_selection() {
         let mut config = cfg();
         config.anki_enabled = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         let card = gloss_card("first", "second");
         shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
         let first_path = crate::select::DocAddr {
@@ -4436,7 +5259,7 @@ mod tests {
     fn a_new_lookup_clears_the_current_selection() {
         let mut config = cfg();
         config.anki_enabled = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         let card = gloss_card("first", "second");
         shown_card(&mut c, presentation_with_card(card.clone(), vec![card]));
         let path = crate::dict::gloss::NodePath::ROOT.child(0).unwrap();
@@ -4459,7 +5282,8 @@ mod tests {
         });
         c.handle(Event::PointerUp { local: PhysPoint { x: 5, y: 0 }, button: Button::Primary });
         assert!(!c.selection().unwrap().card(0).unwrap().is_empty());
-        c.handle(ready_id(c.latest, "犬", ANCHOR));
+        let id = cursor_lookup_request(&mut c, PhysPoint { x: 900, y: 900 });
+        c.handle(ready_id(id, "犬", ANCHOR));
         assert!(c.selection().unwrap().card(0).is_none_or(CardSelection::is_empty));
     }
 
@@ -4467,7 +5291,7 @@ mod tests {
     fn expanding_a_collapsed_entry_swaps_its_selection() {
         let mut config = cfg();
         config.anki_enabled = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         let top = gloss_card("top", "top two");
         let second = gloss_card("second", "second two");
         let presentation = presentation_with_card(top.clone(), vec![top, second]);
@@ -4501,7 +5325,7 @@ mod tests {
     fn stale_analysis_ready_is_ignored() {
         let mut config = cfg();
         config.anki_enabled = true;
-        let mut c = Controller::new(config);
+        let mut c = test_controller(config);
         shown(&mut c);
         let generation = c.surface.as_ref().unwrap().analysis_generation;
         assert!(c

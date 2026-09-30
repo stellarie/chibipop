@@ -4,8 +4,8 @@
 //! Numeric fields use combo boxes instead of spin controls.
 
 use crate::config::{
-    LayoutMode, ScreenshotMode, SelectionButtons, SelectionSeparator, SentenceMode, TripleClick,
-    FIELD_SOURCES,
+    Bind, BindAction, LayoutMode, ProfileData, ScreenshotMode, SelectionButtons,
+    SelectionSeparator, SentenceMode, TriggerMode, TripleClick, FIELD_SOURCES, PROFILE_FIELDS,
 };
 use crate::dict::frequency::RankingStrategy;
 use crate::library::Role;
@@ -79,6 +79,19 @@ pub enum SettingsClick {
     ClearLookupCache,
 }
 
+/// One catalog action that the platform pump handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfileAction {
+    CreateFull { name: String },
+    CreateDerived { name: String, parent: String },
+    Duplicate { name: String },
+    Rename { name: String },
+    Delete { id: String },
+    Select { id: String },
+    SetDefault { id: String },
+    ResetOverride { path: String },
+}
+
 /// The mode selects how the window applies changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyMode {
@@ -114,9 +127,6 @@ impl ApplyState {
 
 const ID_APPLY: i32 = 100;
 const ID_MODE_LIVE: i32 = 102;
-const ID_MODE_HOLD: i32 = 103;
-const ID_MODE_TOGGLE: i32 = 153;
-const ID_MODE_PRESS: i32 = 154;
 const ID_THEME: i32 = 104;
 const ID_FONT: i32 = 105;
 const ID_MAX_HEIGHT: i32 = 106;
@@ -146,9 +156,7 @@ const ID_ANKI_DECK: i32 = 127;
 const ID_ANKI_MODEL: i32 = 128;
 const ID_ANKI_TEST: i32 = 129;
 const ID_TAB: i32 = 130;
-const ID_TRIGGER_KEY: i32 = 131;
 const ID_PREFER_VERT: i32 = 132;
-const ID_ANKI_ADD_KEY: i32 = 133;
 const ID_SIDE_PANEL: i32 = 134;
 const ID_FIELD_MAP_TOGGLE: i32 = 135;
 const ID_CAPTURE_W: i32 = 136;
@@ -190,18 +198,11 @@ const ID_OVERWRITE_DUPLICATES: i32 = 187;
 const ID_CSS_EDITOR: i32 = 152;
 /// The sentence mode combo box.
 const ID_SENTENCE_MODE: i32 = 156;
-/// The Static region key button.
-const ID_STATIC_REGION_KEY: i32 = 157;
-/// The Region hotkey label.
-const ID_STATIC_REGION_LABEL: i32 = 158;
-/// The Overlay outline checkbox.
 const ID_SHOW_STATIC_OVERLAY: i32 = 159;
 /// The Capture exclusion hint text.
 const ID_STATIC_CAPTURE_HINT: i32 = 160;
 /// The First dictionary only checkbox.
 const ID_FIRST_DICT_ONLY: i32 = 161;
-/// The OCR clipboard key button.
-const ID_OCR_CLIPBOARD_KEY: i32 = 162;
 /// The popup layout combo box.
 const ID_LAYOUT_MODE: i32 = 163;
 /// The Dictionary styling checkbox.
@@ -242,25 +243,42 @@ const ID_TRIPLE_CLICK: i32 = 180;
 const ID_INCLUDE_DICTIONARY_NAME: i32 = 181;
 /// Furigana filter checkbox.
 const ID_DISCARD_FURIGANA: i32 = 186;
-const ID_ANKI_ADD_KEY_CLEAR: i32 = 189;
-const ID_STATIC_REGION_KEY_CLEAR: i32 = 190;
-const ID_OCR_CLIPBOARD_KEY_CLEAR: i32 = 191;
 const ID_SHOW_LIVE_LOGS: i32 = 192;
 const ID_CLEAR_LOOKUP_CACHE: i32 = 155;
 const ID_APPLY_STATE: i32 = 193;
 const ID_RUNTIME_STATUS: i32 = 194;
 const ID_BACKGROUND_ON_CLOSE: i32 = 28000;
-const ID_SEARCH_KEY: i32 = 195;
-const ID_SENTENCE_SEARCH_KEY: i32 = 196;
-const ID_SELECTED_TEXT_KEY: i32 = 94;
-const ID_SELECTED_TEXT_KEY_CLEAR: i32 = 95;
 const ID_SELECTED_TEXT_SENTENCE_SEARCH: i32 = 96;
-const ID_SEARCH_KEY_CLEAR: i32 = 197;
-const ID_SENTENCE_SEARCH_KEY_CLEAR: i32 = 198;
 const ID_OPEN_DICTIONARY_SEARCH: i32 = 199;
 const ID_OPEN_SENTENCE_SEARCH: i32 = 91;
 const ID_OCR_SENTENCE_SEARCH: i32 = 92;
 const ID_SUB_POPUPS: i32 = 93;
+
+const ID_PROFILE_SELECT: i32 = 30000;
+const ID_PROFILE_NAME: i32 = 30001;
+const ID_PROFILE_PARENT: i32 = 30002;
+const ID_PROFILE_CREATE_FULL: i32 = 30003;
+const ID_PROFILE_CREATE_DERIVED: i32 = 30004;
+const ID_PROFILE_DUPLICATE: i32 = 30005;
+const ID_PROFILE_RENAME: i32 = 30006;
+const ID_PROFILE_DELETE: i32 = 30007;
+const ID_PROFILE_DEFAULT: i32 = 30008;
+const ID_NESTED_PROFILE: i32 = 30009;
+
+const ID_BIND_ADD_ACTION: i32 = 29990;
+const ID_BIND_ADD: i32 = 29991;
+const ID_BIND_ROW_BASE: i32 = 40000;
+const BIND_ROW_STRIDE: i32 = 8;
+const MAX_BIND_ROWS: usize = 3_192;
+const ID_BIND_ACTION_OFFSET: i32 = 0;
+const ID_BIND_ENABLED_OFFSET: i32 = 1;
+const ID_BIND_MODE_OFFSET: i32 = 2;
+const ID_BIND_CHORD_OFFSET: i32 = 3;
+const ID_BIND_CLEAR_OFFSET: i32 = 4;
+const ID_BIND_OVERRIDE_OFFSET: i32 = 5;
+const ID_BIND_PROFILE_OFFSET: i32 = 6;
+const ID_BIND_REMOVE_OFFSET: i32 = 7;
+const ID_RESET_OVERRIDE_BASE: i32 = 50000;
 
 
 /// The first field-map combo identifier.
@@ -320,7 +338,6 @@ enum HorizontalLayout {
     Fixed,
     Stretch,
     MoveRight,
-    Quarter(u8),
 }
 
 struct ControlRuntime {
@@ -360,7 +377,6 @@ struct TabRuntime {
 #[derive(Clone, Copy, Default)]
 struct ConditionalTabs {
     engine: Option<u32>,
-    static_key: Option<u32>,
     static_overlay: Option<u32>,
 }
 
@@ -579,8 +595,7 @@ const WHILE_BUSY: [i32; 26] = [
 fn anki_setting_is_dependent(id: SettingId) -> bool {
     matches!(
         id,
-        SettingId::AnkiAddKey
-            | SettingId::AnkiNotifyOnAdd
+        SettingId::AnkiNotifyOnAdd
             | SettingId::AnkiOverwriteDuplicates
             | SettingId::AnkiUrl
             | SettingId::AnkiDeck
@@ -780,6 +795,9 @@ enum Action {
     Add,
     /// The handler removes the item from all lists, regardless of its section.
     Remove(Role),
+    AddBind,
+    RemoveBind(usize),
+    ClearBind(usize),
     ConfigureEngine,
     ResetScreenshotTargets,
 }
@@ -1120,20 +1138,15 @@ thread_local! {
     // Stores button text before key capture.
     static CAPTURE_PREV: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
 
-    // Stores the captured virtual key code for each `HWND`.
-    static CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+    // Stores modifiers pressed while a bind chord is being captured.
+    static CAPTURE_MODIFIERS: Cell<Option<(isize, u8)>> = const { Cell::new(None) };
 
-    // Stores the Anki add virtual key code for each `HWND`.
-    static ANKI_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
+    // Stores captured Windows chords by bind-row button ID.
+    static BIND_CAPTURED: RefCell<Option<(isize, HashMap<i32, String>)>> =
+        const { RefCell::new(None) };
 
-    // Stores the Static region virtual key code for each `HWND`.
-    static SR_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
-
-    // Stores the OCR clipboard virtual key code for each `HWND`.
-    static OCR_CLIP_CAPTURED_VK: Cell<Option<(isize, u16)>> = const { Cell::new(None) };
-    static SEARCH_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
-    static SELECTED_TEXT_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
-    static SENTENCE_SEARCH_CAPTURED: RefCell<Option<(isize, String)>> = const { RefCell::new(None) };
+    // Stores one profile manager or override-reset action.
+    static PROFILE_ACTION: Cell<Option<(isize, i32)>> = const { Cell::new(None) };
     static SEARCH_REQUEST: Cell<Option<(isize, chibipop::search::SearchMode)>> = const { Cell::new(None) };
 
     // Stores the field-map toggle click flag for each `HWND`.
@@ -1189,7 +1202,7 @@ fn without_edit_tracking(hwnd: HWND, action: impl FnOnce()) {
 }
 
 fn user_edit_command(id: i32, notify: u16) -> bool {
-    if matches!(id, 1 | 2) {
+    if matches!(id, 1 | 2 | ID_PROFILE_SELECT | ID_PROFILE_PARENT | ID_BIND_ADD_ACTION) {
         return false;
     }
     if (ID_FIELD_MAP_BASE..ID_FIELD_MAP_BASE + 100).contains(&id) {
@@ -1198,20 +1211,21 @@ fn user_edit_command(id: i32, notify: u16) -> bool {
     if (ID_PLUGIN_ENABLE_BASE..ID_PLUGIN_ENABLE_BASE + PLUGIN_ID_SPAN).contains(&id) {
         return notify == BN_CLICKED as u16;
     }
-    if matches!(
+    if (ID_BIND_ROW_BASE..ID_BIND_ROW_BASE + BIND_ROW_STRIDE * MAX_BIND_ROWS as i32).contains(&id)
+        && (id - ID_BIND_ROW_BASE) % BIND_ROW_STRIDE == ID_BIND_CHORD_OFFSET
+    {
+        return false;
+    }
+    !matches!(
         id,
         ID_APPLY | ID_QUIT | ID_CHECK_UPDATE | ID_ANKI_TEST | ID_CSS_EDITOR
             | ID_ENGINE_CONFIGURE | ID_FIELD_MAP_TOGGLE | ID_SHOW_LIVE_LOGS
-            | ID_CLEAR_LOOKUP_CACHE
-            | ID_TRIGGER_KEY | ID_ANKI_ADD_KEY | ID_STATIC_REGION_KEY
-            | ID_OCR_CLIPBOARD_KEY | ID_STATUS
-            | ID_APPLY_STATE | ID_RUNTIME_STATUS
-            | ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY
+            | ID_CLEAR_LOOKUP_CACHE | ID_STATUS | ID_APPLY_STATE | ID_RUNTIME_STATUS
             | ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH
-    ) {
-        return false;
-    }
-    matches!(notify as u32, BN_CLICKED | CBN_SELCHANGE | CBN_EDITCHANGE | EN_CHANGE)
+    ) && matches!(
+        notify as u32,
+        BN_CLICKED | CBN_SELCHANGE | CBN_EDITCHANGE | EN_CHANGE
+    )
 }
 
 fn remember_conditional_tabs(hwnd: HWND, tabs: ConditionalTabs) {
@@ -1234,6 +1248,14 @@ fn record_action(hwnd: HWND, action: Action) {
     // SAFETY: The window procedure handles `hwnd`, so it stays valid during
     // this call. WM_NULL has no payload, and `DefWindowProcW` discards it.
     // WM_NULL wakes `GetMessageW`, so `pump` runs immediately.
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn record_profile_action(hwnd: HWND, id: i32) {
+    PROFILE_ACTION.with(|slot| slot.set(Some((hwnd.0 as isize, id))));
+    // SAFETY: The handler owns this live window and WM_NULL wakes the pump.
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
@@ -1361,39 +1383,79 @@ fn record_language_change(hwnd: HWND) {
     }
 }
 
-/// Starts key capture mode.
-unsafe fn begin_capture(hwnd: HWND, id: i32) {
-    // SAFETY: `id` is a key capture button identifier and a valid
-    // descendant of `hwnd`. `window_text` and `SetWindowTextW` define
-    // their own safety contracts.
-    unsafe {
-        let Ok(btn) = dlg_item(hwnd, id) else { return };
-        let prev = window_text(btn);
-        CAPTURE_PREV.with(|c| *c.borrow_mut() = Some((hwnd.0 as isize, prev)));
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, id))));
-        let prompt = if matches!(id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY) {
-            w!("Press keys (Esc cancels)")
-        } else {
-            // One ellipsis glyph, as the Configure caption uses.
-            w!("Press a key\u{2026}")
-        };
-        let _ = SetWindowTextW(btn, prompt);
+fn capture_modifier_bit(vk: u16) -> Option<u8> {
+    match vk {
+        0x11 | 0xA2 | 0xA3 => Some(0b001),
+        0x10 | 0xA0 | 0xA1 => Some(0b010),
+        0x12 | 0xA4 | 0xA5 => Some(0b100),
+        _ => None,
     }
 }
 
-unsafe fn clear_captured_key(
-    hwnd: HWND,
-    id: i32,
-    cell: &'static std::thread::LocalKey<Cell<Option<(isize, u16)>>>,
-) {
-    // SAFETY: Capture state belongs to this live window.
-    unsafe { cancel_capture(hwnd) };
-    cell.with(|slot| slot.set(Some((hwnd.0 as isize, 0))));
+fn is_modifier_key(vk: u16) -> bool {
+    matches!(vk, 0x10..=0x12 | 0x5B..=0x5C | 0xA0..=0xA5)
+}
+
+fn modifier_chord(modifiers: u8) -> String {
+    let mut parts = Vec::with_capacity(3);
+    if modifiers & 0b001 != 0 {
+        parts.push("Ctrl");
+    }
+    if modifiers & 0b010 != 0 {
+        parts.push("Shift");
+    }
+    if modifiers & 0b100 != 0 {
+        parts.push("Alt");
+    }
+    parts.join("+")
+}
+
+fn clear_capture_modifiers(hwnd: HWND) {
+    let owner = hwnd.0 as isize;
+    CAPTURE_MODIFIERS.with(|slot| {
+        if slot.get().is_some_and(|(capture_owner, _)| capture_owner == owner) {
+            slot.set(None);
+        }
+    });
+}
+
+fn note_capture_modifier(hwnd: HWND, vk: u16) {
+    let Some(bit) = capture_modifier_bit(vk) else {
+        return;
+    };
+    let owner = hwnd.0 as isize;
+    CAPTURE_MODIFIERS.with(|slot| {
+        let modifiers = slot
+            .get()
+            .filter(|(capture_owner, _)| *capture_owner == owner)
+            .map_or(bit, |(_, modifiers)| modifiers | bit);
+        slot.set(Some((owner, modifiers)));
+    });
+}
+
+unsafe fn capture_modifier_is_down() -> bool {
+    unsafe {
+        [0x10, 0x11, 0x12, 0x5B, 0x5C]
+            .into_iter()
+            .any(|vk| windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(vk) < 0)
+    }
+}
+
+/// Starts key capture mode.
+unsafe fn begin_capture(hwnd: HWND, id: i32) {
     // SAFETY: `id` names a live key button owned by `hwnd`.
     unsafe {
-        if let Ok(button) = dlg_item(hwnd, id) {
-            let _ = SetWindowTextW(button, w!("Not set"));
-        }
+        let Ok(button) = dlg_item(hwnd, id) else { return };
+        let previous = window_text(button);
+        CAPTURE_PREV.with(|cell| *cell.borrow_mut() = Some((hwnd.0 as isize, previous)));
+        CAPTURE_MODIFIERS.with(|slot| slot.set(Some((hwnd.0 as isize, 0))));
+        CAPTURING.with(|cell| cell.set(Some((hwnd.0 as isize, id))));
+        let prompt = if bind_row_control(id).is_some() {
+            w!("Press keys (Esc cancels)")
+        } else {
+            w!("Press a key\u{2026}")
+        };
+        let _ = SetWindowTextW(button, prompt);
     }
 }
 
@@ -1409,6 +1471,7 @@ unsafe fn cancel_capture(hwnd: HWND) {
             .and_then(|(h, id)| (h == mine).then_some(id));
         let Some(id) = captured else { return };
         CAPTURING.with(|c| c.set(None));
+        clear_capture_modifiers(hwnd);
         let prev = CAPTURE_PREV
             .with(|c| c.borrow_mut().take())
             .and_then(|(h, s)| (h == mine).then_some(s));
@@ -1441,6 +1504,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             if is_add_button(id) {
                 record_action(hwnd, Action::Add);
+                return LRESULT(0);
+            }
+            if id == ID_PROFILE_SELECT && notify == CBN_SELCHANGE as u16 {
+                record_profile_action(hwnd, id);
+                return LRESULT(0);
+            }
+            if matches!(
+                id,
+                ID_PROFILE_CREATE_FULL
+                    | ID_PROFILE_CREATE_DERIVED
+                    | ID_PROFILE_DUPLICATE
+                    | ID_PROFILE_RENAME
+                    | ID_PROFILE_DELETE
+                    | ID_PROFILE_DEFAULT
+            ) && notify == BN_CLICKED as u16
+            {
+                record_profile_action(hwnd, id);
+                return LRESULT(0);
+            }
+            if (ID_RESET_OVERRIDE_BASE..ID_RESET_OVERRIDE_BASE + PROFILE_FIELDS.len() as i32)
+                .contains(&id)
+                && notify == BN_CLICKED as u16
+            {
+                record_profile_action(hwnd, id);
+                return LRESULT(0);
+            }
+            if let Some((row, offset)) = bind_row_control(id) {
+                if offset == ID_BIND_ACTION_OFFSET && notify == CBN_SELCHANGE as u16 {
+                    unsafe { update_bind_row_controls(hwnd, row) };
+                    record_user_edit(hwnd);
+                    return LRESULT(0);
+                }
+                if offset == ID_BIND_OVERRIDE_OFFSET && notify == BN_CLICKED as u16 {
+                    unsafe { update_bind_profile_control(hwnd, row) };
+                    record_user_edit(hwnd);
+                    return LRESULT(0);
+                }
+                if offset == ID_BIND_CHORD_OFFSET && notify == BN_CLICKED as u16 {
+                    unsafe { begin_capture(hwnd, id) };
+                    return LRESULT(0);
+                }
+                if offset == ID_BIND_CLEAR_OFFSET && notify == BN_CLICKED as u16 {
+                    record_action(hwnd, Action::ClearBind(row));
+                    return LRESULT(0);
+                }
+                if offset == ID_BIND_REMOVE_OFFSET && notify == BN_CLICKED as u16 {
+                    record_action(hwnd, Action::RemoveBind(row));
+                    return LRESULT(0);
+                }
+            }
+            if id == ID_BIND_ADD && notify == BN_CLICKED as u16 {
+                record_action(hwnd, Action::AddBind);
                 return LRESULT(0);
             }
             if id == ID_OCR_LANG && notify == CBN_SELCHANGE as u16 {
@@ -1482,40 +1597,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ID_CLEAR_LOOKUP_CACHE => record_click(hwnd, SettingsClick::ClearLookupCache),
                 ID_SCREENSHOT_RESET => record_action(hwnd, Action::ResetScreenshotTargets),
                 ID_FIELD_MAP_TOGGLE => record_field_map_toggle(hwnd),
-                ID_MODE_LIVE | ID_MODE_HOLD | ID_MODE_TOGGLE | ID_MODE_PRESS => unsafe {
-                    if let Ok(c) = dlg_item(hwnd, ID_TRIGGER_KEY) {
-                        let _ = EnableWindow(c, id != ID_MODE_LIVE);
-                    }
-                    if let Ok(c) = dlg_item(hwnd, ID_PER_CHAR) {
-                        let _ = EnableWindow(c, id == ID_MODE_LIVE);
+                ID_MODE_LIVE if notify == BN_CLICKED as u16 => unsafe {
+                    if let Ok(control) = dlg_item(hwnd, ID_PER_CHAR) {
+                        let live = checkbox_is_checked(hwnd, ID_MODE_LIVE);
+                        let _ = EnableWindow(control, live);
                     }
                 },
-                ID_TRIGGER_KEY => unsafe { begin_capture(hwnd, ID_TRIGGER_KEY) },
-                ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY => unsafe { begin_capture(hwnd, id) },
-                ID_SEARCH_KEY_CLEAR | ID_SENTENCE_SEARCH_KEY_CLEAR | ID_SELECTED_TEXT_KEY_CLEAR => {
-                    let target = match id { ID_SEARCH_KEY_CLEAR => ID_SEARCH_KEY,
-                        ID_SELECTED_TEXT_KEY_CLEAR => ID_SELECTED_TEXT_KEY, _ => ID_SENTENCE_SEARCH_KEY };
-                    set_search_key(hwnd, target, String::new());
-                }
                 ID_OPEN_DICTIONARY_SEARCH | ID_OPEN_SENTENCE_SEARCH => {
-                    let mode = if id == ID_OPEN_DICTIONARY_SEARCH { chibipop::search::SearchMode::Dictionary }
-                        else { chibipop::search::SearchMode::Sentence };
+                    let mode = if id == ID_OPEN_DICTIONARY_SEARCH {
+                        chibipop::search::SearchMode::Dictionary
+                    } else {
+                        chibipop::search::SearchMode::Sentence
+                    };
                     SEARCH_REQUEST.with(|cell| cell.set(Some((hwnd.0 as isize, mode))));
                 }
-                ID_ANKI_ADD_KEY => unsafe { begin_capture(hwnd, ID_ANKI_ADD_KEY) },
-                ID_STATIC_REGION_KEY if unsafe { static_sentence_selected(hwnd) } => unsafe {
-                    begin_capture(hwnd, ID_STATIC_REGION_KEY)
-                },
-                ID_OCR_CLIPBOARD_KEY => unsafe { begin_capture(hwnd, ID_OCR_CLIPBOARD_KEY) },
-                ID_ANKI_ADD_KEY_CLEAR => unsafe {
-                    clear_captured_key(hwnd, ID_ANKI_ADD_KEY, &ANKI_CAPTURED_VK);
-                },
-                ID_STATIC_REGION_KEY_CLEAR if unsafe { static_sentence_selected(hwnd) } => unsafe {
-                    clear_captured_key(hwnd, ID_STATIC_REGION_KEY, &SR_CAPTURED_VK);
-                },
-                ID_OCR_CLIPBOARD_KEY_CLEAR => unsafe {
-                    clear_captured_key(hwnd, ID_OCR_CLIPBOARD_KEY, &OCR_CLIP_CAPTURED_VK);
-                },
                 _ => {}
             }
             LRESULT(0)
@@ -2562,36 +2657,6 @@ fn first_provider_directories(
     directories
 }
 
-fn windows_hotkey_value(
-    config: &crate::config::Config,
-    action: crate::config::HotkeyAction,
-) -> String {
-    windows_hotkey_value_with(config, action, display_trigger_key)
-}
-
-fn windows_hotkey_value_with(
-    config: &crate::config::Config,
-    action: crate::config::HotkeyAction,
-    display_key: impl Fn(u16) -> String,
-) -> String {
-    use crate::config::HotkeyAction::*;
-    let value = match action {
-        Back => "Escape",
-        Trigger => &config.trigger.trigger_key,
-        AnkiAdd => &config.anki.add_key,
-        StaticRegion => &config.anki.static_region_key,
-        Search => config.actions.search.hotkey.as_deref().unwrap_or(""),
-        SentenceSearch => config.actions.search.sentence_hotkey.as_deref().unwrap_or(""),
-        SelectedText => config.actions.search.selected_hotkey.as_deref().unwrap_or(""),
-        OcrClipboard => config
-            .actions
-            .ocr_clipboard
-            .as_ref()
-            .and_then(|action| action.hotkey.as_deref())
-            .unwrap_or(""),
-    };
-    display_search_key_with(value, display_key)
-}
 
 unsafe fn selected_tab(hwnd: HWND) -> Option<u32> {
     // SAFETY: `ID_TAB` names the live tab control when the window is built.
@@ -2628,29 +2693,15 @@ unsafe fn update_engine_controls(hwnd: HWND) {
 
 /// Updates static controls.
 unsafe fn update_static_controls(hwnd: HWND) {
-    // SAFETY: Each identifier names a valid descendant of `hwnd`
-    // created in `build`.
+    // SAFETY: Each identifier names a valid descendant of `hwnd` created in `build`.
     unsafe {
         let is_static = static_sentence_selected(hwnd);
-        let selected = selected_tab(hwnd);
         let tabs = conditional_tabs(hwnd);
-        let key_visible = selected == tabs.static_key;
-        let key_cmd = if key_visible { SW_SHOW } else { SW_HIDE };
-        for id in [
-            ID_STATIC_REGION_LABEL,
-            ID_STATIC_REGION_KEY,
-            ID_STATIC_REGION_KEY_CLEAR,
-        ] {
-            if let Ok(c) = dlg_item(hwnd, id) {
-                let _ = ShowWindow(c, key_cmd);
-                let _ = EnableWindow(c, is_static);
-            }
-        }
-        let overlay_visible = is_static && selected == tabs.static_overlay;
+        let overlay_visible = is_static && selected_tab(hwnd) == tabs.static_overlay;
         let overlay_cmd = if overlay_visible { SW_SHOW } else { SW_HIDE };
         for id in [ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
-            if let Ok(c) = dlg_item(hwnd, id) {
-                let _ = ShowWindow(c, overlay_cmd);
+            if let Ok(control) = dlg_item(hwnd, id) {
+                let _ = ShowWindow(control, overlay_cmd);
             }
         }
     }
@@ -3020,8 +3071,8 @@ fn parse_px(text: &str, fallback: i32) -> i32 {
     text.trim().parse().unwrap_or(fallback)
 }
 
-/// Returns `None` when key capture is not active.
-fn search_chord(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool) -> String {
+/// Builds a chord from a captured bind key and its modifiers.
+fn bind_chord(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool) -> String {
     let mut parts = Vec::new();
     for (held, name) in [(ctrl, "Ctrl"), (shift, "Shift"), (alt, "Alt"), (win, "Win")] {
         if held { parts.push(name.to_string()); }
@@ -3054,12 +3105,12 @@ fn display_trigger_key(vk: u16) -> String {
     mapped_trigger_key_name(vk, mapped)
 }
 
-fn display_search_key(key: &str) -> String {
-    display_search_key_with(key, display_trigger_key)
+fn display_bind_chord(chord: &str) -> String {
+    display_bind_chord_with(chord, display_trigger_key)
 }
 
-fn display_search_key_with(key: &str, display_key: impl Fn(u16) -> String) -> String {
-    key.split('+').map(|part| {
+fn display_bind_chord_with(chord: &str, display_key: impl Fn(u16) -> String) -> String {
+    chord.split('+').map(|part| {
         let part = part.trim();
         let lower = part.to_ascii_lowercase();
         match lower.as_str() {
@@ -3084,83 +3135,6 @@ fn display_search_key_with(key: &str, display_key: impl Fn(u16) -> String) -> St
     }).collect::<Vec<_>>().join("+")
 }
 
-fn set_search_key(hwnd: HWND, id: i32, key: String) {
-    let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
-        ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
-    let display = display_search_key(&key);
-    let text = if key.is_empty() { "Not set" } else { &display };
-    // SAFETY: The target is a live capture button; the string is copied synchronously.
-    unsafe {
-        if let Ok(button) = dlg_item(hwnd, id) {
-            let _ = SetWindowTextW(button, PCWSTR(wide(text).as_ptr()));
-        }
-    }
-    cell.with(|cell| *cell.borrow_mut() = Some((hwnd.0 as isize, key)));
-}
-
-fn resolved_search_key(hwnd: HWND,
-    cell: &'static std::thread::LocalKey<RefCell<Option<(isize, String)>>>,
-    template: Option<&str>) -> Option<String> {
-    let value = cell.with(|cell| cell.borrow().as_ref()
-        .filter(|(owner, _)| *owner == hwnd.0 as isize).map(|(_, key)| key.clone()))
-        .or_else(|| template.map(str::to_owned));
-    value.filter(|key| !key.is_empty())
-}
-
-fn take_captured_key(hwnd: HWND, vk: u16) -> Option<(i32, String)> {
-    let mine = hwnd.0 as isize;
-    let id = CAPTURING
-        .with(|c| c.get())
-        .and_then(|(h, id)| (h == mine).then_some(id))?;
-    CAPTURING.with(|c| c.set(None));
-    let cell = match id {
-        ID_TRIGGER_KEY => &CAPTURED_VK,
-        ID_STATIC_REGION_KEY => &SR_CAPTURED_VK,
-        ID_OCR_CLIPBOARD_KEY => &OCR_CLIP_CAPTURED_VK,
-        _ => &ANKI_CAPTURED_VK,
-    };
-    cell.with(|c| c.set(Some((mine, vk))));
-    Some((id, display_trigger_key(vk)))
-}
-
-/// Formats a captured virtual key or returns a template string.
-fn resolved_captured_key(
-    cell: &'static std::thread::LocalKey<Cell<Option<(isize, u16)>>>,
-    hwnd: HWND,
-    template: &str,
-) -> String {
-    cell.with(|c| c.get())
-        .and_then(|(h, vk)| (h == hwnd.0 as isize).then_some(vk))
-        .or_else(|| crate::config::parse_trigger_key(template))
-        .map_or_else(
-            || template.to_string(),
-            |vk| if vk == 0 { String::new() } else { stored_trigger_key(vk) },
-        )
-}
-
-/// Returns the hotkey string representation to persist.
-fn resolved_trigger_key(hwnd: HWND, template: &str) -> String {
-    resolved_captured_key(&CAPTURED_VK, hwnd, template)
-}
-
-/// Formats the Anki add hotkey string to persist.
-fn resolved_anki_add_key(hwnd: HWND, template: &str) -> String {
-    resolved_captured_key(&ANKI_CAPTURED_VK, hwnd, template)
-}
-
-/// Formats the static region hotkey string to persist.
-fn resolved_sr_key(hwnd: HWND, template: &str) -> String {
-    resolved_captured_key(&SR_CAPTURED_VK, hwnd, template)
-}
-
-/// Formats the OCR clipboard hotkey string to persist.
-///
-/// Converts a "Not set" state to `None`. Internal settings do not use
-/// empty strings to indicate disabled state. Refer to ARCHITECTURE.md#settings-and-config.
-fn resolved_ocr_clipboard_key(hwnd: HWND, template: Option<&str>) -> Option<String> {
-    let key = resolved_captured_key(&OCR_CLIP_CAPTURED_VK, hwnd, template.unwrap_or_default());
-    (!key.is_empty()).then_some(key)
-}
 
 /// Converts a virtual key code into parseable string format.
 fn stored_trigger_key(vk: u16) -> String {
@@ -3170,6 +3144,665 @@ fn stored_trigger_key(vk: u16) -> String {
         0x12 => "alt".into(),
         0x70..=0x7B => format!("f{}", vk - 0x6F),
         _ => format!("0x{vk:02X}"),
+    }
+}
+
+fn bind_control_id(row: usize, offset: i32) -> i32 {
+    ID_BIND_ROW_BASE + row as i32 * BIND_ROW_STRIDE + offset
+}
+
+fn bind_row_control(id: i32) -> Option<(usize, i32)> {
+    let offset = id.checked_sub(ID_BIND_ROW_BASE)?;
+    if !(0..BIND_ROW_STRIDE * MAX_BIND_ROWS as i32).contains(&offset) {
+        return None;
+    }
+    Some(((offset / BIND_ROW_STRIDE) as usize, offset % BIND_ROW_STRIDE))
+}
+
+fn bind_action_at(index: isize) -> BindAction {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| BindAction::ALL.get(index).copied())
+        .unwrap_or(BindAction::Lookup)
+}
+
+fn bind_action_index(action: BindAction) -> usize {
+    BindAction::ALL.iter().position(|candidate| *candidate == action).unwrap_or(0)
+}
+
+fn bind_mode_at(index: isize) -> TriggerMode {
+    match index {
+        1 => TriggerMode::HoldKey,
+        2 => TriggerMode::Toggle,
+        _ => TriggerMode::Press,
+    }
+}
+
+fn bind_mode_index(mode: TriggerMode) -> usize {
+    match mode {
+        TriggerMode::Press => 0,
+        TriggerMode::HoldKey | TriggerMode::HoldShift => 1,
+        TriggerMode::Toggle => 2,
+        TriggerMode::Live => 0,
+    }
+}
+
+fn bind_modes(action: BindAction) -> &'static [&'static str] {
+    if action == BindAction::Lookup {
+        &["Press", "Hold", "Toggle"]
+    } else {
+        &["Press"]
+    }
+}
+
+fn apply_bind_row(
+    bind: &mut Bind,
+    action: BindAction,
+    windows: String,
+    mode: TriggerMode,
+    enabled: bool,
+    profile: Option<String>,
+) {
+    bind.action = action;
+    bind.windows = windows;
+    bind.mode = if action == BindAction::Lookup { mode } else { TriggerMode::Press };
+    bind.enabled = enabled;
+    bind.profile = action.allows_profile().then_some(profile).flatten();
+}
+
+unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
+    unsafe {
+        let action = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
+            .map(|combo| bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0))
+            .unwrap_or(BindAction::Lookup);
+        if let Ok(mode) = dlg_item(hwnd, bind_control_id(row, ID_BIND_MODE_OFFSET)) {
+            let modes = bind_modes(action);
+            let lookup = action == BindAction::Lookup;
+            if SendMessageW(mode, CB_GETCOUNT, None, None).0 != modes.len() as isize {
+                SendMessageW(mode, CB_RESETCONTENT, None, None);
+                for label in modes {
+                    SendMessageW(
+                        mode,
+                        CB_ADDSTRING,
+                        None,
+                        Some(LPARAM(wide(label).as_ptr() as isize)),
+                    );
+                }
+                SendMessageW(mode, CB_SETCURSEL, Some(WPARAM(0)), None);
+            } else if !lookup {
+                SendMessageW(mode, CB_SETCURSEL, Some(WPARAM(0)), None);
+            }
+            let _ = EnableWindow(mode, lookup);
+        }
+        update_bind_profile_control(hwnd, row);
+    }
+}
+
+unsafe fn update_bind_profile_control(hwnd: HWND, row: usize) {
+    unsafe {
+        let action = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
+            .map(|combo| bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0))
+            .unwrap_or(BindAction::Lookup);
+        let allows_profile = action.allows_profile();
+        let override_id = bind_control_id(row, ID_BIND_OVERRIDE_OFFSET);
+        let profile_id = bind_control_id(row, ID_BIND_PROFILE_OFFSET);
+        if !allows_profile {
+            if let Ok(override_check) = dlg_item(hwnd, override_id) {
+                SendMessageW(override_check, BM_SETCHECK, Some(WPARAM(0)), None);
+            }
+        }
+        let has_override = allows_profile && checkbox_is_checked(hwnd, override_id);
+        if let Ok(override_check) = dlg_item(hwnd, override_id) {
+            let _ = EnableWindow(override_check, allows_profile);
+        }
+        if let Ok(profile) = dlg_item(hwnd, profile_id) {
+            let _ = EnableWindow(profile, has_override);
+        }
+    }
+}
+
+fn bind_profile_at(index: isize, profiles: &[String]) -> Option<String> {
+    let index = usize::try_from(index).ok()?;
+    index.checked_sub(1).and_then(|index| profiles.get(index).cloned())
+}
+
+fn profile_override_paths(id: SettingId) -> &'static [&'static str] {
+    match id {
+        SettingId::PopupSubPopups => &["popup.sub_popups"],
+        SettingId::NestedProfile => &["nested_profile"],
+        SettingId::PopupTheme => &["popup.theme"],
+        SettingId::PopupFont => &["popup.font"],
+        SettingId::PopupMaxWidth => &["popup.max_width_percent"],
+        SettingId::PopupMaxHeight => &["popup.max_height_percent"],
+        SettingId::PopupSummaryLength => &["popup.summary_chars"],
+        SettingId::PopupHighlight => &["popup.highlight_match"],
+        SettingId::PopupScroll => &["popup.scroll_popup"],
+        SettingId::PopupEdgeAutoscroll => &["popup.edge_autoscroll"],
+        SettingId::PopupSidePanel => &["popup.side_panel"],
+        SettingId::PopupCaptureExclusion => &["popup.exclude_from_capture"],
+        SettingId::PopupLayout => &["popup.layout_mode"],
+        SettingId::PopupDictionaryStyling => &["popup.dictionary_styling"],
+        SettingId::PopupExamples => &["popup.show_examples"],
+        SettingId::PopupAttributions => &["popup.show_attributions"],
+        SettingId::PopupImages => &["popup.show_images"],
+        SettingId::PopupPartOfSpeech => &["popup.show_part_of_speech"],
+        SettingId::OcrPasses => &["ocr.max_ocr_passes"],
+        SettingId::OcrPreferVertical => &["ocr.prefer_vertical"],
+        SettingId::OcrCaptureSize => &["ocr.capture_width", "ocr.capture_height"],
+        SettingId::OcrScanAlphanumeric => &["ocr.scan_alphanumeric"],
+        SettingId::OcrDiscardFurigana => &["ocr.discard_furigana"],
+        SettingId::OcrLanguage => &["ocr.language"],
+        SettingId::OcrEngine => &["ocr.engine"],
+        SettingId::OcrPerCharacter => &["per_character_lookup"],
+        SettingId::DictionaryTerms => &["dictionaries.terms", "dictionaries.per_language"],
+        SettingId::DictionaryPitch => &["dictionaries.pitch"],
+        SettingId::AnkiEnabled => &["anki.enabled"],
+        SettingId::AnkiOverwriteDuplicates => &["anki.overwrite_duplicates"],
+        SettingId::AnkiUrl => &["anki.url"],
+        SettingId::AnkiDeck => &["anki.deck"],
+        SettingId::AnkiModel => &["anki.model"],
+        SettingId::AnkiNotifyOnAdd => &["anki.notify_on_add"],
+        SettingId::AnkiFieldMap => &["anki.field_map"],
+        SettingId::AnkiSentenceMode => &["anki.sentence_mode", "anki.static_region"],
+        SettingId::AnkiStaticOverlay => &["anki.show_static_overlay"],
+        SettingId::AnkiIncludeDictionaryName => &["anki.include_dictionary_name"],
+        SettingId::AnkiFirstDictionaryOnly => &["anki.first_dict_only"],
+        SettingId::AnkiSelectionButtons => &["anki.selection_buttons"],
+        SettingId::AnkiSelectionSeparator => &["anki.selection_separator"],
+        SettingId::AnkiTripleClick => &["anki.triple_click"],
+        SettingId::AnkiIncludeScreenshot => &["actions.screenshot.include_on_add"],
+        SettingId::ScreenshotTargets => &[
+            "actions.screenshot.capture_mode",
+            "actions.screenshot.fixed_region",
+            "actions.screenshot.fixed_window",
+        ],
+        SettingId::SelectedTextSentenceSearch => {
+            &["actions.search.selected_opens_sentence_search"]
+        }
+        SettingId::OcrSentenceSearch => &["actions.ocr_clipboard"],
+        _ => &[],
+    }
+}
+
+fn overridden_profile_paths(form: &SettingsForm, id: SettingId) -> Vec<&'static str> {
+    let Some(profile) = form.catalog.profiles.iter().find(|profile| profile.id == form.profile_id)
+    else {
+        return Vec::new();
+    };
+    let ProfileData::Derived { overrides, .. } = &profile.data else {
+        return Vec::new();
+    };
+    profile_override_paths(id)
+        .iter()
+        .copied()
+        .filter(|path| overrides.contains_key(*path))
+        .collect()
+}
+
+unsafe fn build_configured_binds(
+    root: HWND,
+    page: HWND,
+    font: Option<HFONT>,
+    form: &SettingsForm,
+    profile_ids: &[String],
+    y: &mut i32,
+    controls: &mut Vec<HWND>,
+) -> Result<usize> {
+    anyhow::ensure!(
+        form.catalog.binds.len() <= MAX_BIND_ROWS,
+        "Windows settings supports at most {MAX_BIND_ROWS} configured binds."
+    );
+    unsafe {
+        let title_height = measured_text_height(root, font, "Configured binds", WIN_W - 2 * PAD - 20);
+        controls.push(child(
+            page,
+            w!("STATIC"),
+            "Configured binds",
+            WINDOW_STYLE(0),
+            PAD,
+            *y,
+            WIN_W - 2 * PAD - 20,
+            title_height,
+            0,
+            font,
+        )?);
+        *y += title_height + ROW_GAP;
+
+        let action_names: Vec<String> = BindAction::ALL
+            .iter()
+            .map(|action| action.name().to_string())
+            .collect();
+        let add_action = child(
+            page,
+            w!("COMBOBOX"),
+            "",
+            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+            PAD,
+            *y,
+            270,
+            180,
+            ID_BIND_ADD_ACTION,
+            font,
+        )?;
+        fill_combo_if_changed(add_action, &action_names);
+        SendMessageW(
+            add_action,
+            CB_SETCURSEL,
+            Some(WPARAM(bind_action_index(BindAction::Lookup))),
+            None,
+        );
+        controls.push(add_action);
+        controls.push(child(
+            page,
+            w!("BUTTON"),
+            "Add bind",
+            WS_TABSTOP,
+            PAD + 280,
+            *y,
+            100,
+            ROW_H,
+            ID_BIND_ADD,
+            font,
+        )?);
+        *y += ROW_H + ROW_GAP;
+
+        let mut profile_names = vec!["No override".to_string()];
+        profile_names.extend(form.catalog.profiles.iter().map(|profile| profile.name.clone()));
+        for (row, bind) in form.catalog.binds.iter().enumerate() {
+            let row_top = *y;
+            let action = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                PAD,
+                row_top,
+                220,
+                180,
+                bind_control_id(row, ID_BIND_ACTION_OFFSET),
+                font,
+            )?;
+            fill_combo_if_changed(action, &action_names);
+            SendMessageW(
+                action,
+                CB_SETCURSEL,
+                Some(WPARAM(bind_action_index(bind.action))),
+                None,
+            );
+            controls.push(action);
+
+            let enabled = child(
+                page,
+                w!("BUTTON"),
+                "Enabled",
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                PAD + 228,
+                row_top,
+                100,
+                ROW_H,
+                bind_control_id(row, ID_BIND_ENABLED_OFFSET),
+                font,
+            )?;
+            SendMessageW(
+                enabled,
+                BM_SETCHECK,
+                Some(WPARAM(if bind.enabled { 1 } else { 0 })),
+                None,
+            );
+            controls.push(enabled);
+
+            let modes: Vec<String> = bind_modes(bind.action)
+                .iter()
+                .map(|mode| (*mode).to_string())
+                .collect();
+            let mode = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                PAD + 336,
+                row_top,
+                150,
+                180,
+                bind_control_id(row, ID_BIND_MODE_OFFSET),
+                font,
+            )?;
+            fill_combo_if_changed(mode, &modes);
+            SendMessageW(
+                mode,
+                CB_SETCURSEL,
+                Some(WPARAM(bind_mode_index(bind.mode))),
+                None,
+            );
+            controls.push(mode);
+
+            let chord = if bind.windows.is_empty() {
+                "Not set".to_string()
+            } else {
+                display_bind_chord(&bind.windows)
+            };
+            controls.push(child(
+                page,
+                w!("BUTTON"),
+                &chord,
+                WS_TABSTOP,
+                PAD,
+                row_top + ROW_H + ROW_GAP,
+                260,
+                ROW_H,
+                bind_control_id(row, ID_BIND_CHORD_OFFSET),
+                font,
+            )?);
+            controls.push(child(
+                page,
+                w!("BUTTON"),
+                "Clear",
+                WS_TABSTOP,
+                PAD + 270,
+                row_top + ROW_H + ROW_GAP,
+                76,
+                ROW_H,
+                bind_control_id(row, ID_BIND_CLEAR_OFFSET),
+                font,
+            )?);
+            controls.push(child(
+                page,
+                w!("BUTTON"),
+                "Remove",
+                WS_TABSTOP,
+                PAD + 354,
+                row_top + ROW_H + ROW_GAP,
+                90,
+                ROW_H,
+                bind_control_id(row, ID_BIND_REMOVE_OFFSET),
+                font,
+            )?);
+
+            let use_profile = child(
+                page,
+                w!("BUTTON"),
+                "Use a profile",
+                WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
+                PAD,
+                row_top + 2 * (ROW_H + ROW_GAP),
+                180,
+                ROW_H,
+                bind_control_id(row, ID_BIND_OVERRIDE_OFFSET),
+                font,
+            )?;
+            SendMessageW(
+                use_profile,
+                BM_SETCHECK,
+                Some(WPARAM(if bind.profile.is_some() { 1 } else { 0 })),
+                None,
+            );
+            controls.push(use_profile);
+
+            let profile = child(
+                page,
+                w!("COMBOBOX"),
+                "",
+                WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+                PAD + 190,
+                row_top + 2 * (ROW_H + ROW_GAP),
+                280,
+                180,
+                bind_control_id(row, ID_BIND_PROFILE_OFFSET),
+                font,
+            )?;
+            fill_combo_if_changed(profile, &profile_names);
+            let profile_index = bind
+                .profile
+                .as_ref()
+                .and_then(|id| profile_ids.iter().position(|profile_id| profile_id == id))
+                .map_or(0, |index| index + 1);
+            SendMessageW(profile, CB_SETCURSEL, Some(WPARAM(profile_index)), None);
+            controls.push(profile);
+
+            *y += 3 * ROW_H + 3 * ROW_GAP;
+            update_bind_row_controls(root, row);
+        }
+        Ok(form.catalog.binds.len())
+    }
+}
+
+unsafe fn build_profile_catalog_controls(
+    root: HWND,
+    page: HWND,
+    font: Option<HFONT>,
+    form: &SettingsForm,
+    profile_ids: &[String],
+    parent_ids: &[String],
+    y: &mut i32,
+    controls: &mut Vec<HWND>,
+) -> Result<()> {
+    unsafe {
+        let profile_names: Vec<String> = form
+            .catalog
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
+        let full_profile_names: Vec<String> = parent_ids
+            .iter()
+            .filter_map(|id| {
+                form.catalog
+                    .profiles
+                    .iter()
+                    .find(|profile| &profile.id == id)
+                    .map(|profile| profile.name.clone())
+            })
+            .collect();
+        let selected_index = profile_ids
+            .iter()
+            .position(|id| id == &form.profile_id)
+            .unwrap_or(0);
+        let selected = form
+            .catalog
+            .profiles
+            .iter()
+            .find(|profile| profile.id == form.profile_id);
+        let selected_name = selected.map_or("", |profile| profile.name.as_str());
+        let mut selected_parent = selected.map(|profile| match &profile.data {
+            ProfileData::Full { .. } => profile.id.clone(),
+            ProfileData::Derived { parent, .. } => parent.clone(),
+        });
+        if !selected_parent
+            .as_ref()
+            .is_some_and(|id| parent_ids.contains(id))
+        {
+            selected_parent = parent_ids.first().cloned();
+        }
+
+        let field_w = WIN_W - FIELD_X - PAD - 20;
+        let profile_label = child(
+            page,
+            w!("STATIC"),
+            "Profile",
+            WINDOW_STYLE(0),
+            PAD,
+            *y + 4,
+            LABEL_W,
+            ROW_H,
+            0,
+            font,
+        )?;
+        controls.push(profile_label);
+        let profile = child(
+            page,
+            w!("COMBOBOX"),
+            "",
+            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+            FIELD_X,
+            *y,
+            field_w,
+            180,
+            ID_PROFILE_SELECT,
+            font,
+        )?;
+        fill_combo_if_changed(profile, &profile_names);
+        SendMessageW(
+            profile,
+            CB_SETCURSEL,
+            Some(WPARAM(selected_index)),
+            None,
+        );
+        controls.push(profile);
+        *y += ROW_H + ROW_GAP;
+
+        controls.push(child(
+            page,
+            w!("STATIC"),
+            "Name",
+            WINDOW_STYLE(0),
+            PAD,
+            *y + 4,
+            LABEL_W,
+            ROW_H,
+            0,
+            font,
+        )?);
+        controls.push(child(
+            page,
+            w!("EDIT"),
+            selected_name,
+            WINDOW_STYLE(ES_AUTOHSCROLL as u32) | WS_TABSTOP | WS_BORDER,
+            FIELD_X,
+            *y,
+            field_w,
+            ROW_H,
+            ID_PROFILE_NAME,
+            font,
+        )?);
+        *y += ROW_H + ROW_GAP;
+
+        controls.push(child(
+            page,
+            w!("STATIC"),
+            "Parent",
+            WINDOW_STYLE(0),
+            PAD,
+            *y + 4,
+            LABEL_W,
+            ROW_H,
+            0,
+            font,
+        )?);
+        let parent = child(
+            page,
+            w!("COMBOBOX"),
+            "",
+            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+            FIELD_X,
+            *y,
+            field_w,
+            180,
+            ID_PROFILE_PARENT,
+            font,
+        )?;
+        fill_combo_if_changed(parent, &full_profile_names);
+        if let Some(index) = selected_parent
+            .as_ref()
+            .and_then(|id| parent_ids.iter().position(|parent_id| parent_id == id))
+        {
+            SendMessageW(parent, CB_SETCURSEL, Some(WPARAM(index)), None);
+        }
+        controls.push(parent);
+        *y += ROW_H + ROW_GAP;
+
+        let buttons = [
+            ("Create full", ID_PROFILE_CREATE_FULL),
+            ("Create derived", ID_PROFILE_CREATE_DERIVED),
+            ("Duplicate", ID_PROFILE_DUPLICATE),
+            ("Rename", ID_PROFILE_RENAME),
+            ("Delete", ID_PROFILE_DELETE),
+            ("Set default", ID_PROFILE_DEFAULT),
+        ];
+        let button_width = 154;
+        let button_gap = 8;
+        for (index, (label, id)) in buttons.into_iter().enumerate() {
+            let row = index as i32 / 3;
+            let column = index as i32 % 3;
+            let button = child(
+                page,
+                w!("BUTTON"),
+                label,
+                WS_TABSTOP,
+                PAD + column * (button_width + button_gap),
+                *y + row * (ROW_H + ROW_GAP),
+                button_width,
+                ROW_H,
+                id,
+                font,
+            )?;
+            let enabled = match id {
+                ID_PROFILE_CREATE_DERIVED => !parent_ids.is_empty(),
+                ID_PROFILE_DELETE => profile_ids.len() > 1,
+                ID_PROFILE_DEFAULT => form.catalog.default_profile != form.profile_id,
+                _ => true,
+            };
+            let _ = EnableWindow(button, enabled);
+            controls.push(button);
+        }
+        *y += 2 * ROW_H + 3 * ROW_GAP;
+        let _ = root;
+        Ok(())
+    }
+}
+
+unsafe fn build_nested_profile_control(
+    page: HWND,
+    font: Option<HFONT>,
+    form: &SettingsForm,
+    profile_ids: &[String],
+    y: &mut i32,
+    controls: &mut Vec<HWND>,
+) -> Result<()> {
+    unsafe {
+        let label_height = measured_text_height(
+            page,
+            font,
+            "Nested profile",
+            WIN_W - 2 * PAD - 20,
+        );
+        controls.push(child(
+            page,
+            w!("STATIC"),
+            "Nested profile",
+            WINDOW_STYLE(0),
+            PAD,
+            *y,
+            WIN_W - 2 * PAD - 20,
+            label_height,
+            0,
+            font,
+        )?);
+        *y += label_height + ROW_GAP;
+        let mut names = vec!["Use this profile".to_string()];
+        names.extend(form.catalog.profiles.iter().map(|profile| profile.name.clone()));
+        let combo = child(
+            page,
+            w!("COMBOBOX"),
+            "",
+            WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
+            PAD,
+            *y,
+            WIN_W - 2 * PAD - 20,
+            180,
+            ID_NESTED_PROFILE,
+            font,
+        )?;
+        fill_combo_if_changed(combo, &names);
+        let selected = form
+            .cfg
+            .nested_profile
+            .as_ref()
+            .and_then(|id| profile_ids.iter().position(|profile_id| profile_id == id))
+            .map_or(0, |index| index + 1);
+        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(selected)), None);
+        controls.push(combo);
+        *y += ROW_H + ROW_GAP;
+        Ok(())
     }
 }
 
@@ -3519,10 +4152,6 @@ unsafe fn capture_control_runtime(
         let id = GetDlgCtrlID(hwnd);
         let horizontal = match id {
             ID_SCREENSHOT_SUMMARY => HorizontalLayout::Stretch,
-            ID_MODE_LIVE => HorizontalLayout::Quarter(0),
-            ID_MODE_HOLD => HorizontalLayout::Quarter(1),
-            ID_MODE_TOGGLE => HorizontalLayout::Quarter(2),
-            ID_MODE_PRESS => HorizontalLayout::Quarter(3),
             _ if x >= WIN_W - PAD - BTN_W - 16 => HorizontalLayout::MoveRight,
             _ if x + width >= WIN_W - PAD - BTN_W - 24 => HorizontalLayout::Stretch,
             _ => HorizontalLayout::Fixed,
@@ -3578,6 +4207,13 @@ pub struct SettingsWindow {
     engine_dirs: HashMap<String, PathBuf>,
     /// Stores changes that require an Apply update.
     staged: RefCell<SettingsForm>,
+    /// Latest form snapshot for local bind editing actions.
+    form_snapshot: RefCell<SettingsForm>,
+    layout: SettingsLayout,
+    stale: Vec<String>,
+    profile_ids: Vec<String>,
+    parent_ids: Vec<String>,
+    bind_count: usize,
     tabs: Vec<TabRuntime>,
     /// Plugin names in checkbox order.
     plugin_names: Vec<String>,
@@ -3612,6 +4248,138 @@ impl SettingsWindow {
             cell.set(None);
             Some(mode)
         })
+    }
+
+    pub(crate) fn take_profile_action(&self) -> Option<ProfileAction> {
+        let id = PROFILE_ACTION.with(|slot| match slot.get() {
+            Some((owner, id)) if owner == self.hwnd.0 as isize => {
+                slot.set(None);
+                Some(id)
+            }
+            _ => None,
+        })?;
+        let selected = || unsafe {
+            let index = dlg_item(self.hwnd, ID_PROFILE_SELECT)
+                .map(|combo| SendMessageW(combo, CB_GETCURSEL, None, None).0)
+                .unwrap_or(-1);
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| self.profile_ids.get(index))
+                .cloned()
+        };
+        let name = || unsafe {
+            dlg_item(self.hwnd, ID_PROFILE_NAME)
+                .map(|edit| window_text(edit))
+                .unwrap_or_default()
+        };
+        match id {
+            ID_PROFILE_SELECT => selected().map(|id| ProfileAction::Select { id }),
+            ID_PROFILE_CREATE_FULL => Some(ProfileAction::CreateFull { name: name() }),
+            ID_PROFILE_CREATE_DERIVED => {
+                let parent = unsafe {
+                    let index = dlg_item(self.hwnd, ID_PROFILE_PARENT)
+                        .map(|combo| SendMessageW(combo, CB_GETCURSEL, None, None).0)
+                        .unwrap_or(-1);
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| self.parent_ids.get(index))
+                        .cloned()
+                }?;
+                Some(ProfileAction::CreateDerived {
+                    name: name(),
+                    parent,
+                })
+            }
+            ID_PROFILE_DUPLICATE => Some(ProfileAction::Duplicate { name: name() }),
+            ID_PROFILE_RENAME => Some(ProfileAction::Rename { name: name() }),
+            ID_PROFILE_DELETE => selected().map(|id| ProfileAction::Delete { id }),
+            ID_PROFILE_DEFAULT => selected().map(|id| ProfileAction::SetDefault { id }),
+            reset if (ID_RESET_OVERRIDE_BASE..ID_RESET_OVERRIDE_BASE + PROFILE_FIELDS.len() as i32)
+                .contains(&reset) =>
+            {
+                PROFILE_FIELDS
+                    .get((reset - ID_RESET_OVERRIDE_BASE) as usize)
+                    .map(|path| ProfileAction::ResetOverride {
+                        path: (*path).to_string(),
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn replace_form(&mut self, form: &SettingsForm) -> Result<()> {
+        let tab = self.current_tab.get().min(self.tabs.len().saturating_sub(1) as u32);
+        self.staged.borrow_mut().clone_from(form);
+        self.form_snapshot.borrow_mut().clone_from(form);
+        self.widths.clear();
+        self.heights.clear();
+        self.summaries.clear();
+        self.passes.clear();
+        self.fonts.clear();
+        self.ocr_langs.clear();
+        self.engine_names.clear();
+        self.engine_dirs.clear();
+        self.tabs.clear();
+        self.plugin_names.clear();
+        self.profile_ids.clear();
+        self.parent_ids.clear();
+        self.bind_count = 0;
+        self.field_map_rows.borrow_mut().clear();
+        self.field_map_extra.borrow_mut().clear();
+        self.pending_field_map.borrow_mut().take();
+        self.tips.borrow_mut().clear();
+        self.screenshot_summary_height.set(0);
+        self.field_map_collapsed.set(true);
+        self.viewport = HWND::default();
+        self.content = HWND::default();
+
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), ID_TIP_TIMER);
+            while let Ok(child) = GetWindow(self.hwnd, GW_CHILD) {
+                if DestroyWindow(child).is_err() {
+                    break;
+                }
+            }
+            if self.tip != HWND::default() {
+                let _ = DestroyWindow(self.tip);
+                self.tip = HWND::default();
+            }
+        }
+        TIP_STATE.with(|state| *state.borrow_mut() = TipState::default());
+        BIND_CAPTURED.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
+                *state = None;
+            }
+        });
+        PROFILE_ACTION.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
+        CAPTURING.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
+        clear_capture_modifiers(self.hwnd);
+        CAPTURE_PREV.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
+                *slot = None;
+            }
+        });
+
+        let stale = self.stale.clone();
+        let layout = self.layout.clone();
+        unsafe { self.build(form, &stale, &layout)?; }
+        self.reflow_all_tabs();
+        self.resize_content();
+        place_bottom(self.hwnd);
+        self.switch_tab(tab);
+        self.reset_scroll();
+        self.wake();
+        Ok(())
     }
     /// Creates and displays a settings window from `form`.
     ///
@@ -3681,6 +4449,12 @@ impl SettingsWindow {
                 engine_names: Vec::new(),
                 engine_dirs: HashMap::new(),
                 staged: RefCell::new(form.clone()),
+                form_snapshot: RefCell::new(form.clone()),
+                layout: layout.clone(),
+                stale: stale.to_vec(),
+                profile_ids: Vec::new(),
+                parent_ids: Vec::new(),
+                bind_count: 0,
                 tabs: Vec::new(),
                 plugin_names: Vec::new(),
                 field_map_rows: RefCell::new(Vec::new()),
@@ -3847,10 +4621,46 @@ impl SettingsWindow {
         }
     }
 
+    fn handle_bind_catalog_action(&mut self, action: Action) {
+        let snapshot = self.form_snapshot.borrow().clone();
+        let mut form = self.read(&snapshot);
+        match action {
+            Action::AddBind => {
+                let action = unsafe {
+                    dlg_item(self.hwnd, ID_BIND_ADD_ACTION)
+                        .map(|combo| {
+                            bind_action_at(SendMessageW(combo, CB_GETCURSEL, None, None).0)
+                        })
+                        .unwrap_or(BindAction::Lookup)
+                };
+                let id = form.catalog.next_bind_id();
+                form.catalog.binds.push(Bind::new(id, action));
+            }
+            Action::RemoveBind(row) => {
+                if row >= form.catalog.binds.len() {
+                    return;
+                }
+                form.catalog.binds.remove(row);
+            }
+            Action::ClearBind(row) => {
+                let Some(bind) = form.catalog.binds.get_mut(row) else {
+                    return;
+                };
+                bind.windows.clear();
+            }
+            _ => return,
+        }
+        if let Err(error) = self.replace_form(&form) {
+            self.set_status(&format!("Could not update configured binds: {error:#}"));
+            return;
+        }
+        self.set_apply_state(ApplyState::Pending);
+    }
+
     /// Processes a queued button action.
     ///
     /// Calls the callback before it opens a file picker.
-    pub fn pump(&self, before_blocking: impl FnOnce()) {
+    pub fn pump(&mut self, before_blocking: impl FnOnce()) {
         let resized = RESIZED.with(|slot| match slot.get() {
             Some(owner) if owner == self.hwnd.0 as isize => {
                 slot.set(None);
@@ -3917,6 +4727,9 @@ impl SettingsWindow {
                     self.configure_engine();
                 }
                 Action::ResetScreenshotTargets => self.reset_screenshot_targets(),
+                Action::AddBind | Action::RemoveBind(_) | Action::ClearBind(_) => {
+                    self.handle_bind_catalog_action(action)
+                }
             }
         }
     }
@@ -4104,6 +4917,10 @@ impl SettingsWindow {
             if busy {
                 let _ = SetFocus(Some(self.hwnd));
             }
+            // Disabling this pane blocks input to all settings pages.
+            if self.content != HWND::default() {
+                let _ = EnableWindow(self.content, !busy);
+            }
             for id in WHILE_BUSY {
                 if let Ok(c) = dlg_item(self.hwnd, id) {
                     let enabled = if id == ID_SCREENSHOT_RESET && !busy {
@@ -4115,6 +4932,39 @@ impl SettingsWindow {
                         !busy
                     };
                     let _ = EnableWindow(c, enabled);
+                }
+            }
+            for id in [
+                ID_BIND_ADD_ACTION,
+                ID_BIND_ADD,
+                ID_PROFILE_SELECT,
+                ID_PROFILE_NAME,
+                ID_PROFILE_PARENT,
+                ID_PROFILE_CREATE_FULL,
+                ID_PROFILE_CREATE_DERIVED,
+                ID_PROFILE_DUPLICATE,
+                ID_PROFILE_RENAME,
+                ID_PROFILE_DELETE,
+                ID_PROFILE_DEFAULT,
+                ID_NESTED_PROFILE,
+            ] {
+                if let Ok(control) = dlg_item(self.hwnd, id) {
+                    let _ = EnableWindow(control, !busy);
+                }
+            }
+            for index in 0..PROFILE_FIELDS.len() {
+                if let Ok(control) = dlg_item(self.hwnd, ID_RESET_OVERRIDE_BASE + index as i32) {
+                    let _ = EnableWindow(control, !busy);
+                }
+            }
+            for row in 0..self.bind_count {
+                for offset in 0..BIND_ROW_STRIDE {
+                    if let Ok(control) = dlg_item(self.hwnd, bind_control_id(row, offset)) {
+                        let _ = EnableWindow(control, !busy);
+                    }
+                }
+                if !busy {
+                    update_bind_row_controls(self.hwnd, row);
                 }
             }
             self.update_anki_controls(checkbox_is_checked(self.hwnd, ID_ANKI_ENABLED));
@@ -4317,19 +5167,6 @@ impl SettingsWindow {
         })
     }
 
-    #[cfg(test)]
-    fn entry_top(&self, id: SettingId) -> Option<i32> {
-        self.tabs.iter().find_map(|tab| {
-            tab.sections.iter().find_map(|section| {
-                section
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .map(|entry| entry.top.get())
-            })
-        })
-    }
-
     fn entry_label(&self, id: SettingId) -> Option<&str> {
         self.tabs.iter().find_map(|tab| {
             tab.sections.iter().find_map(|section| {
@@ -4348,26 +5185,7 @@ impl SettingsWindow {
     }
 
     pub fn validate_hotkeys(&self, pending: &crate::config::Config) -> Result<()> {
-        let error = match pending.validate_hotkeys(crate::config::Platform::Windows) {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        if let Some(&(first, second)) = pending
-            .hotkey_conflicts(crate::config::Platform::Windows)
-            .first()
-        {
-            let conflict = format!("{} conflicts with {}", second.name(), first.name());
-            if error.to_string().starts_with(&conflict) {
-                anyhow::bail!(
-                    "{} ({}) conflicts with {} ({}). Choose different keys.",
-                    second.name(),
-                    windows_hotkey_value(pending, second),
-                    first.name(),
-                    windows_hotkey_value(pending, first),
-                );
-            }
-        }
-        Err(error)
+        pending.validate_hotkeys(crate::config::Platform::Windows)
     }
 
     fn field_map_entry_height(&self, base_height: i32) -> i32 {
@@ -4405,12 +5223,6 @@ impl SettingsWindow {
                         (control.x, (control.width + delta_w).max(40))
                     }
                     HorizontalLayout::MoveRight => (control.x + delta_w, control.width),
-                    HorizontalLayout::Quarter(index) => {
-                        let area = width - 2 * PAD - 20;
-                        let gap = 8;
-                        let item_w = (area - 3 * gap) / 4;
-                        (PAD + i32::from(index) * (item_w + gap), item_w)
-                    }
                 };
                 let height = if control.wraps {
                     // SAFETY: The control remains live until `Drop`.
@@ -4660,49 +5472,111 @@ impl SettingsWindow {
         self.ensure_room_for(self.layout_bottom());
     }
 
-    /// Records captured key code `vk`. Returns true if accepted.
+    /// Records a captured bind chord. Returns true when capture handled `vk`.
     pub fn handle_capture_key(&self, vk: u16) -> bool {
-        let capturing = CAPTURING.with(|c| {
-            c.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize)
-        });
-        if capturing && vk == 0x1B {
+        let mine = self.hwnd.0 as isize;
+        let Some((_, id)) = CAPTURING
+            .with(|slot| slot.get())
+            .filter(|(owner, id)| {
+                *owner == mine
+                    && bind_row_control(*id)
+                        .is_some_and(|(_, offset)| offset == ID_BIND_CHORD_OFFSET)
+            })
+        else {
+            return false;
+        };
+        if vk == 0x1B {
             // SAFETY: Capture belongs to this live settings window.
-            unsafe { cancel_capture(self.hwnd); }
+            unsafe { cancel_capture(self.hwnd) };
             return true;
         }
-        let search = CAPTURING.with(|c| c.get()).filter(|(owner, id)|
-            *owner == self.hwnd.0 as isize && matches!(*id, ID_SEARCH_KEY | ID_SENTENCE_SEARCH_KEY | ID_SELECTED_TEXT_KEY));
-        if let Some((_, id)) = search {
-            if matches!(vk, 0x10..=0x12 | 0x5B..=0x5C | 0xA0..=0xA5) { return true; }
-            // SAFETY: GetKeyState reads the current UI thread's modifier state.
-            let key = unsafe { search_chord(vk,
+        if is_modifier_key(vk) {
+            note_capture_modifier(self.hwnd, vk);
+            return true;
+        }
+        // SAFETY: GetKeyState reads the current UI thread's modifier state.
+        let key = unsafe {
+            bind_chord(
+                vk,
                 windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x11) < 0,
                 windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x10) < 0,
                 windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x12) < 0,
                 windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x5B) < 0
-                    || windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x5C) < 0) };
-            if crate::config::parse_hotkey(&key).is_none() {
-                self.set_status("Use a key with Ctrl, Shift, or Alt. Escape cancels capture.");
-                return true;
-            }
-            CAPTURING.with(|c| c.set(None));
-            set_search_key(self.hwnd, id, key);
-            record_user_edit(self.hwnd);
+                    || windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x5C) < 0,
+            )
+        };
+        if crate::config::parse_hotkey(&key).is_none() {
+            self.set_status("Use a key with Ctrl, Shift, or Alt. Escape cancels capture.");
             return true;
         }
-        let Some((id, text)) = take_captured_key(self.hwnd, vk) else {
+        self.commit_bind_capture(id, key);
+        true
+    }
+
+    /// Commits a modifier-only chord when its final modifier is released.
+    pub fn handle_capture_key_up(&self, vk: u16) -> bool {
+        if !is_modifier_key(vk) {
+            return false;
+        }
+        let mine = self.hwnd.0 as isize;
+        let Some((_, id)) = CAPTURING
+            .with(|slot| slot.get())
+            .filter(|(owner, id)| {
+                *owner == mine
+                    && bind_row_control(*id)
+                        .is_some_and(|(_, offset)| offset == ID_BIND_CHORD_OFFSET)
+            })
+        else {
             return false;
         };
-        // SAFETY: `id` is a key capture button identifier and a valid
-        // descendant of `self.hwnd` created in `build`. `SetWindowTextW`
-        // copies the text string during the call.
+        let modifiers = CAPTURE_MODIFIERS.with(|slot| {
+            slot.get()
+                .filter(|(owner, _)| *owner == mine)
+                .map_or(0, |(_, modifiers)| modifiers)
+        });
+        // SAFETY: GetKeyState reads the current UI thread's modifier state.
+        if unsafe { capture_modifier_is_down() } {
+            return true;
+        }
+        let key = modifier_chord(modifiers);
+        if key.is_empty() || crate::config::parse_hotkey(&key).is_none() {
+            return true;
+        }
+        self.commit_bind_capture(id, key);
+        true
+    }
+
+    fn commit_bind_capture(&self, id: i32, key: String) {
+        let mine = self.hwnd.0 as isize;
+        CAPTURING.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == mine) {
+                slot.set(None);
+            }
+        });
+        CAPTURE_PREV.with(|slot| {
+            let mut previous = slot.borrow_mut();
+            if previous.as_ref().is_some_and(|(owner, _)| *owner == mine) {
+                previous.take();
+            }
+        });
+        clear_capture_modifiers(self.hwnd);
+        BIND_CAPTURED.with(|slot| {
+            let mut captured = slot.borrow_mut();
+            if !captured.as_ref().is_some_and(|(owner, _)| *owner == mine) {
+                *captured = Some((mine, HashMap::new()));
+            }
+            if let Some((_, values)) = captured.as_mut() {
+                values.insert(id, key.clone());
+            }
+        });
+        // SAFETY: `id` names the live bind-chord button captured above.
         unsafe {
-            if let Ok(btn) = dlg_item(self.hwnd, id) {
-                let _ = SetWindowTextW(btn, PCWSTR(wide(&text).as_ptr()));
+            if let Ok(button) = dlg_item(self.hwnd, id) {
+                let label = display_bind_chord(&key);
+                let _ = SetWindowTextW(button, PCWSTR(wide(&label).as_ptr()));
             }
         }
         record_user_edit(self.hwnd);
-        true
     }
 
     /// Populates Anki deck and model combos and field-map rows.
@@ -5263,123 +6137,41 @@ impl SettingsWindow {
         }
 
         match spec.id {
-            SettingId::ClosePopup => {
-                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, LABEL_W, label_h, 0, f)?);
-                controls.push(child(page, w!("STATIC"), "Escape", WINDOW_STYLE(0), FIELD_X,
-                    y + 4, FIELD_W, ROW_H, 0, f)?);
-                y += label_h.max(ROW_H) + ROW_GAP;
-                help!();
-            }
             SettingId::LookupMode => {
-                let label_h = measured_text_height(h, f, &spec.label, WIN_W - 2 * PAD - 20);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, WIN_W - 2 * PAD - 20, label_h, 0, f)?);
-                y += label_h;
-                let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
-                let is_toggle = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Toggle);
-                let is_press = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Press);
-                let is_hold = !is_live && !is_toggle && !is_press;
-                for (index, (text, id, checked)) in [
-                    ("Follow pointer", ID_MODE_LIVE, is_live),
-                    ("While held", ID_MODE_HOLD, is_hold),
-                    ("Turn on / off", ID_MODE_TOGGLE, is_toggle),
-                    ("Once per press", ID_MODE_PRESS, is_press),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let style = WINDOW_STYLE(BS_AUTORADIOBUTTON as u32)
-                        | if index == 0 { WS_GROUP | WS_TABSTOP } else { WINDOW_STYLE(0) };
-                    let control = child(page, w!("BUTTON"), text, style,
-                        PAD + index as i32 * 130, y, 120, ROW_H, id, f)?;
-                    SendMessageW(control, BM_SETCHECK,
-                        Some(WPARAM(if checked { 1 } else { 0 })), None);
-                    controls.push(control);
-                }
-                y += ROW_H + ROW_GAP;
+                checkbox!(ID_MODE_LIVE, form.catalog.live_lookup);
             }
-            SettingId::LookupKey => {
-                let key_vk = crate::config::parse_trigger_key(&form.cfg.trigger.trigger_key)
-                    .unwrap_or(0x10);
-                CAPTURED_VK.with(|cell| cell.set(Some((h.0 as isize, key_vk))));
-                let key_name = display_trigger_key(key_vk);
-                let button = labelled_row!(w!("BUTTON"), &key_name, WS_TABSTOP,
-                    ID_TRIGGER_KEY, ROW_H);
-                let is_live = matches!(form.cfg.trigger.mode, crate::config::TriggerMode::Live);
-                let _ = EnableWindow(button, !is_live);
+            SettingId::ConfiguredBinds => {
+                self.bind_count = build_configured_binds(
+                    h,
+                    page,
+                    f,
+                    form,
+                    &self.profile_ids,
+                    &mut y,
+                    &mut controls,
+                )?;
             }
-            SettingId::AnkiAddKey => {
-                let parsed = crate::config::parse_trigger_key(&form.cfg.anki.add_key);
-                ANKI_CAPTURED_VK.with(|cell| {
-                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
-                });
-                let name = parsed.map(display_trigger_key)
-                    .unwrap_or_else(|| "Not set".to_string());
-                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, LABEL_W, label_h, 0, f)?);
-                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
-                    FIELD_W - 80, ROW_H, ID_ANKI_ADD_KEY, f)?);
-                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
-                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_ANKI_ADD_KEY_CLEAR, f)?);
-                y += label_h.max(ROW_H) + ROW_GAP;
+            SettingId::ProfileCatalog => {
+                build_profile_catalog_controls(
+                    h,
+                    page,
+                    f,
+                    form,
+                    &self.profile_ids,
+                    &self.parent_ids,
+                    &mut y,
+                    &mut controls,
+                )?;
             }
-            SettingId::StaticRegionKey => {
-                let parsed = crate::config::parse_trigger_key(&form.cfg.anki.static_region_key);
-                SR_CAPTURED_VK.with(|cell| {
-                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
-                });
-                let name = parsed.map(display_trigger_key)
-                    .unwrap_or_else(|| "Not set".to_string());
-                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, LABEL_W, label_h, ID_STATIC_REGION_LABEL, f)?);
-                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
-                    FIELD_W - 80, ROW_H, ID_STATIC_REGION_KEY, f)?);
-                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
-                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_STATIC_REGION_KEY_CLEAR, f)?);
-                y += label_h.max(ROW_H) + ROW_GAP;
-            }
-            SettingId::OcrClipboardKey => {
-                let parsed = crate::config::parse_trigger_key(
-                    form.ocr_clipboard_key.as_deref().unwrap_or(""),
-                );
-                OCR_CLIP_CAPTURED_VK.with(|cell| {
-                    cell.set(parsed.map(|vk| (h.0 as isize, vk)));
-                });
-                let name = parsed.map(display_trigger_key)
-                    .unwrap_or_else(|| "Not set".to_string());
-                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, LABEL_W, label_h, 0, f)?);
-                controls.push(child(page, w!("BUTTON"), &name, WS_TABSTOP, FIELD_X, y,
-                    FIELD_W - 80, ROW_H, ID_OCR_CLIPBOARD_KEY, f)?);
-                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
-                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, ID_OCR_CLIPBOARD_KEY_CLEAR, f)?);
-                y += label_h.max(ROW_H) + ROW_GAP;
-            }
-            SettingId::SearchKey | SettingId::SentenceSearchKey | SettingId::SelectedTextKey => {
-                let (id, clear, value) = match spec.id {
-                    SettingId::SearchKey => (ID_SEARCH_KEY, ID_SEARCH_KEY_CLEAR, form.cfg.actions.search.hotkey.as_deref()),
-                    SettingId::SelectedTextKey => (ID_SELECTED_TEXT_KEY, ID_SELECTED_TEXT_KEY_CLEAR, form.cfg.actions.search.selected_hotkey.as_deref()),
-                    _ => (ID_SENTENCE_SEARCH_KEY, ID_SENTENCE_SEARCH_KEY_CLEAR, form.cfg.actions.search.sentence_hotkey.as_deref()),
-                };
-                let display = value.filter(|key| !key.is_empty()).map(display_search_key);
-                let name = display.as_deref().unwrap_or("Not set");
-                let cell = match id { ID_SEARCH_KEY => &SEARCH_CAPTURED,
-                    ID_SELECTED_TEXT_KEY => &SELECTED_TEXT_CAPTURED, _ => &SENTENCE_SEARCH_CAPTURED };
-                cell.with(|cell| *cell.borrow_mut() = None);
-                let label_h = measured_text_height(h, f, &spec.label, LABEL_W);
-                controls.push(child(page, w!("STATIC"), &spec.label, WINDOW_STYLE(0), PAD,
-                    y + 4, LABEL_W, label_h, 0, f)?);
-                controls.push(child(page, w!("BUTTON"), name, WS_TABSTOP, FIELD_X, y,
-                    FIELD_W - 80, ROW_H, id, f)?);
-                controls.push(child(page, w!("BUTTON"), "Clear", WS_TABSTOP,
-                    FIELD_X + FIELD_W - 72, y, 72, ROW_H, clear, f)?);
-                y += label_h.max(ROW_H) + ROW_GAP;
-                help!();
+            SettingId::NestedProfile => {
+                build_nested_profile_control(
+                    page,
+                    f,
+                    form,
+                    &self.profile_ids,
+                    &mut y,
+                    &mut controls,
+                )?;
             }
             SettingId::OpenDictionarySearch | SettingId::OpenSentenceSearch => {
                 let id = if spec.id == SettingId::OpenDictionarySearch { ID_OPEN_DICTIONARY_SEARCH }
@@ -5892,6 +6684,25 @@ impl SettingsWindow {
             }
         }
 
+            for path in overridden_profile_paths(form, spec.id) {
+                if let Some(index) = PROFILE_FIELDS.iter().position(|field| *field == path) {
+                    let field = path.rsplit('.').next().unwrap_or(path).replace('_', " ");
+                    let label = format!("Reset {field}");
+                    controls.push(child(
+                        page,
+                        w!("BUTTON"),
+                        &label,
+                        WS_TABSTOP,
+                        PAD,
+                        y,
+                        FIELD_W,
+                        ROW_H,
+                        ID_RESET_OVERRIDE_BASE + index as i32,
+                        f,
+                    )?);
+                    y += ROW_H + ROW_GAP;
+                }
+            }
             // Inline keeps the line; others use a tooltip.
             if !help_rendered && spec.inline_help {
                 if let Some(text) = spec.help.as_deref() {
@@ -5936,6 +6747,14 @@ impl SettingsWindow {
     ) -> Result<i32> {
         let f = self.font.get();
         let h = self.hwnd;
+        self.profile_ids = form.catalog.profiles.iter().map(|profile| profile.id.clone()).collect();
+        self.parent_ids = form
+            .catalog
+            .profiles
+            .iter()
+            .filter(|profile| matches!(&profile.data, ProfileData::Full { .. }))
+            .map(|profile| profile.id.clone())
+            .collect();
         // SAFETY: The main window owns every created child.
         unsafe {
             let controls = INITCOMMONCONTROLSEX {
@@ -6134,7 +6953,6 @@ impl SettingsWindow {
             h,
             ConditionalTabs {
                 engine: self.entry_tab(SettingId::OcrEngine),
-                static_key: self.entry_tab(SettingId::StaticRegionKey),
                 static_overlay: self.entry_tab(SettingId::AnkiStaticOverlay),
             },
         );
@@ -6269,7 +7087,11 @@ impl SettingsWindow {
     pub fn read(&self, template: &SettingsForm) -> SettingsForm {
         // SAFETY: every id below names a live descendant of `self.hwnd`.
         // `build` makes each one, and `Drop` destroys it with the window.
-        unsafe {
+        let mut base = self.staged.borrow().clone();
+        base.cfg.clone_from(&template.cfg);
+        base.catalog.clone_from(&template.catalog);
+        base.profile_id.clone_from(&template.profile_id);
+        let form = unsafe {
             let h = self.hwnd;
             let checked = |id: i32| -> bool {
                 dlg_item(h, id)
@@ -6306,6 +7128,7 @@ impl SettingsWindow {
             let pitch = role_rows(ID_PITCH, &template.pitch);
             let staged = self.staged.borrow();
             let screenshot_reset_targets = staged.screenshot_reset_targets;
+            let screenshot = staged.cfg.actions.screenshot.clone();
 
             let theme = if combo_index(ID_THEME) == 1 {
                 "light"
@@ -6352,10 +7175,13 @@ impl SettingsWindow {
                 }
             };
 
-            let trigger_key = resolved_trigger_key(h, &template.cfg.trigger.trigger_key);
-            let anki_add_key = resolved_anki_add_key(h, &template.cfg.anki.add_key);
-            let ocr_clipboard_key =
-                resolved_ocr_clipboard_key(h, template.ocr_clipboard_key.as_deref());
+            let captured_bind_chords = BIND_CAPTURED.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .filter(|(owner, _)| *owner == h.0 as isize)
+                    .map(|(_, chords)| chords.clone())
+                    .unwrap_or_default()
+            });
 
             // Each row contains one field and its selected source.
             // Merge the row values with saved mappings.
@@ -6374,20 +7200,63 @@ impl SettingsWindow {
                     (name.as_str(), src)
                 })
                 .collect();
-            let saved = template.field_map.as_deref().unwrap_or_default();
-            let field_map = Some(merged_field_map(saved, &readings));
-
-            let mut form = template.clone();
-            form.cfg.trigger.mode = if checked(ID_MODE_PRESS) {
-                crate::config::TriggerMode::Press
-            } else if checked(ID_MODE_TOGGLE) {
-                crate::config::TriggerMode::Toggle
-            } else if checked(ID_MODE_HOLD) {
-                crate::config::TriggerMode::HoldKey
+            let mut form = base;
+            let snapshot = self.form_snapshot.borrow().clone();
+            if snapshot.profile_id == form.profile_id {
+                form.catalog = snapshot.catalog;
+            }
+            let saved = form.field_map.as_deref().unwrap_or_default();
+            let field_map = if self.pending_field_map.borrow().is_some() || readings.is_empty() {
+                form.field_map.clone()
             } else {
-                crate::config::TriggerMode::Live
+                Some(merged_field_map(saved, &readings))
             };
-            form.cfg.trigger.trigger_key = trigger_key;
+
+            let bind_sources = std::mem::take(&mut form.catalog.binds);
+            let live_lookup = checked(ID_MODE_LIVE);
+            form.catalog.live_lookup = live_lookup;
+            form.cfg.trigger.mode = if live_lookup {
+                TriggerMode::Live
+            } else {
+                TriggerMode::Press
+            };
+            form.catalog.binds = bind_sources
+                .iter()
+                .enumerate()
+                .map(|(row, source)| {
+                    let action = bind_action_at(combo_index(bind_control_id(
+                        row,
+                        ID_BIND_ACTION_OFFSET,
+                    )));
+                    let windows = captured_bind_chords
+                        .get(&bind_control_id(row, ID_BIND_CHORD_OFFSET))
+                        .cloned()
+                        .unwrap_or_else(|| source.windows.clone());
+                    let profile = if action.allows_profile()
+                        && checked(bind_control_id(row, ID_BIND_OVERRIDE_OFFSET))
+                    {
+                        bind_profile_at(
+                            combo_index(bind_control_id(row, ID_BIND_PROFILE_OFFSET)),
+                            &self.profile_ids,
+                        )
+                    } else {
+                        None
+                    };
+                    let mut bind = source.clone();
+                    apply_bind_row(
+                        &mut bind,
+                        action,
+                        windows,
+                        bind_mode_at(combo_index(bind_control_id(
+                            row,
+                            ID_BIND_MODE_OFFSET,
+                        ))),
+                        checked(bind_control_id(row, ID_BIND_ENABLED_OFFSET)),
+                        profile,
+                    );
+                    bind
+                })
+                .collect();
             form.cfg.popup.theme = theme.to_string();
             form.cfg.popup.font = font;
             form.cfg.popup.max_width_percent =
@@ -6434,36 +7303,30 @@ impl SettingsWindow {
             form.library_empty = staged.library_empty;
             form.unreadable = staged.unreadable.clone();
             form.cfg.anki.enabled = checked(ID_ANKI_ENABLED);
+            form.cfg.anki.notify_on_add = checked(ID_NOTIFY_ON_ADD);
+            form.cfg.anki.overwrite_duplicates = checked(ID_OVERWRITE_DUPLICATES);
             form.cfg.anki.url = text_of(ID_ANKI_URL);
             form.cfg.anki.deck = text_of(ID_ANKI_DECK);
             form.cfg.anki.model = text_of(ID_ANKI_MODEL);
-            form.cfg.anki.add_key = anki_add_key;
-            form.field_map = field_map;
-            form.cfg.anki.notify_on_add = checked(ID_NOTIFY_ON_ADD);
-            form.cfg.anki.overwrite_duplicates = checked(ID_OVERWRITE_DUPLICATES);
-            form.cfg.anki.sentence_mode = sentence_mode;
-            form.cfg.anki.static_region_key =
-                resolved_sr_key(h, &template.cfg.anki.static_region_key);
             form.cfg.actions.screenshot.include_on_add = checked(ID_INCLUDE_SCREENSHOT);
             form.cfg.actions.screenshot.capture_mode = screenshot_capture_mode;
+            form.cfg.actions.screenshot.fixed_region = screenshot.fixed_region;
+            form.cfg.actions.screenshot.fixed_window = screenshot.fixed_window;
             form.screenshot_reset_targets = screenshot_reset_targets;
-            form.ocr_clipboard_key = ocr_clipboard_key;
-            form.cfg.actions.search.hotkey = resolved_search_key(h, &SEARCH_CAPTURED,
-                template.cfg.actions.search.hotkey.as_deref());
-            form.cfg.actions.search.sentence_hotkey = resolved_search_key(h, &SENTENCE_SEARCH_CAPTURED,
-                template.cfg.actions.search.sentence_hotkey.as_deref());
-            form.cfg.actions.search.selected_hotkey = resolved_search_key(h, &SELECTED_TEXT_CAPTURED,
-                template.cfg.actions.search.selected_hotkey.as_deref());
+            form.cfg.anki.sentence_mode = sentence_mode;
+            form.field_map = field_map;
             form.cfg.actions.search.selected_opens_sentence_search = checked(ID_SELECTED_TEXT_SENTENCE_SEARCH);
             let open_sentence_search = checked(ID_OCR_SENTENCE_SEARCH);
             if let Some(action) = &mut form.cfg.actions.ocr_clipboard {
                 action.open_sentence_search = open_sentence_search;
             } else if open_sentence_search {
                 form.cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
-                    open_sentence_search, ..Default::default()
+                    open_sentence_search,
                 });
             }
             form.cfg.popup.sub_popups = checked(ID_SUB_POPUPS);
+            form.cfg.nested_profile =
+                bind_profile_at(combo_index(ID_NESTED_PROFILE), &self.profile_ids);
             form.cfg.anki.show_static_overlay = checked(ID_SHOW_STATIC_OVERLAY);
             form.cfg.anki.include_dictionary_name = checked(ID_INCLUDE_DICTIONARY_NAME);
             form.cfg.anki.first_dict_only = checked(ID_FIRST_DICT_ONLY);
@@ -6478,7 +7341,10 @@ impl SettingsWindow {
                 .map(|(_, name)| name.clone())
                 .collect();
             form
-        }
+        };
+        self.staged.borrow_mut().clone_from(&form);
+        self.form_snapshot.borrow_mut().clone_from(&form);
+        form
     }
 }
 
@@ -6554,41 +7420,26 @@ impl Drop for SettingsWindow {
                 *slot = None;
             }
         });
-        for cell in [&SEARCH_CAPTURED, &SENTENCE_SEARCH_CAPTURED, &SELECTED_TEXT_CAPTURED] {
-            cell.with(|cell| {
-                if cell.borrow().as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
-                    *cell.borrow_mut() = None;
-                }
-            });
-        }
         SEARCH_REQUEST.with(|cell| {
             if cell.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) { cell.set(None); }
+        });
+        PROFILE_ACTION.with(|slot| {
+            if slot.get().is_some_and(|(owner, _)| owner == self.hwnd.0 as isize) {
+                slot.set(None);
+            }
+        });
+        BIND_CAPTURED.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(owner, _)| *owner == self.hwnd.0 as isize) {
+                *slot = None;
+            }
         });
         CAPTURING.with(|c| {
             if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
                 c.set(None);
             }
         });
-        CAPTURED_VK.with(|c| {
-            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
-                c.set(None);
-            }
-        });
-        ANKI_CAPTURED_VK.with(|c| {
-            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
-                c.set(None);
-            }
-        });
-        SR_CAPTURED_VK.with(|c| {
-            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
-                c.set(None);
-            }
-        });
-        OCR_CLIP_CAPTURED_VK.with(|c| {
-            if c.get().is_some_and(|(h, _)| h == self.hwnd.0 as isize) {
-                c.set(None);
-            }
-        });
+        clear_capture_modifiers(self.hwnd);
         CAPTURE_PREV.with(|c| {
             let mut slot = c.borrow_mut();
             if slot
@@ -6674,7 +7525,6 @@ mod tests {
 
     #[test]
     fn anki_dependency_gate_keeps_screenshot_target_controls_active() {
-        assert!(anki_setting_is_dependent(SettingId::AnkiAddKey));
         assert!(anki_setting_is_dependent(SettingId::AnkiUrl));
         assert!(anki_setting_is_dependent(SettingId::AnkiFieldMap));
         assert!(!anki_setting_is_dependent(SettingId::AnkiEnabled));
@@ -6685,119 +7535,57 @@ mod tests {
     }
 
     #[test]
-    fn anki_add_shortcut_follows_pending_enable_state() {
+    fn configured_bind_rows_preserve_linux_chords_and_sentence_options() {
         let mut config = crate::config::Config::default();
-        config.anki.add_key = "f9".into();
-        config.anki.enabled = false;
+        let mut selected = Bind::new(config.next_bind_id(), BindAction::SelectedText);
+        selected.windows = "ctrl+f7".into();
+        selected.linux = "SUPER+J".into();
+        config.binds.push(selected);
+        let mut settings = config.resolve("default").unwrap();
+        settings.actions.search.selected_opens_sentence_search = true;
+        config.update_profile("default", &settings).unwrap();
         let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-
-        let enabled = |id| unsafe {
-            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
-                dlg_item(window.hwnd(), id).unwrap(),
-            )
-            .as_bool()
-        };
-        assert!(!enabled(ID_ANKI_ADD_KEY));
-        assert!(!enabled(ID_ANKI_ADD_KEY_CLEAR));
-
-        // SAFETY: The checkbox and parent window belong to this test.
+        let row = form.catalog.binds.len() - 1;
+        // SAFETY: The dialog owns the configured bind control.
         unsafe {
-            SendMessageW(
-                dlg_item(window.hwnd(), ID_ANKI_ENABLED).unwrap(),
-                BM_SETCHECK,
-                Some(WPARAM(1)),
-                None,
+            assert_eq!(
+                "Ctrl+F7",
+                window_text(dlg_item(window.hwnd(), bind_control_id(row, ID_BIND_CHORD_OFFSET)).unwrap())
             );
-            let command = ID_ANKI_ENABLED as usize | ((BN_CLICKED as usize) << 16);
-            SendMessageW(window.hwnd(), WM_COMMAND, Some(WPARAM(command)), None);
         }
-        window.pump(|| {});
-        assert!(enabled(ID_ANKI_ADD_KEY));
-        assert!(enabled(ID_ANKI_ADD_KEY_CLEAR));
-        assert_eq!("f9", window.read(&form).cfg.anki.add_key);
-
-        // SAFETY: The checkbox and parent window belong to this test.
-        unsafe {
-            SendMessageW(
-                dlg_item(window.hwnd(), ID_ANKI_ENABLED).unwrap(),
-                BM_SETCHECK,
-                Some(WPARAM(0)),
-                None,
-            );
-            let command = ID_ANKI_ENABLED as usize | ((BN_CLICKED as usize) << 16);
-            SendMessageW(window.hwnd(), WM_COMMAND, Some(WPARAM(command)), None);
-        }
-        window.pump(|| {});
-        assert!(!enabled(ID_ANKI_ADD_KEY));
-        assert!(!enabled(ID_ANKI_ADD_KEY_CLEAR));
-        assert_eq!("f9", window.read(&form).cfg.anki.add_key);
-    }
-
-    #[test]
-    fn selected_shortcut_display_and_sentence_checkbox_round_trip() {
-        assert_eq!(display_search_key("f7"), "F7");
-        assert_eq!(display_search_key("ctrl+f7"), "Ctrl+F7");
-        assert_eq!(search_chord(0x76, false, false, false, false), "F7");
-        let mut cfg = crate::config::Config::default();
-        cfg.actions.search.selected_hotkey = Some("f7".into());
-        cfg.actions.search.selected_opens_sentence_search = true;
-        let form = crate::settings::from_config(&cfg, &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        // SAFETY: The dialog owns these controls for the test's lifetime.
-        unsafe { assert_eq!(window_text(dlg_item(window.hwnd(), ID_SELECTED_TEXT_KEY).unwrap()), "F7"); }
         let edited = window.read(&form);
-        assert!(crate::settings::apply_to(&edited, &cfg).actions.search.selected_opens_sentence_search);
+        let bind = edited.catalog.binds.last().unwrap();
+        assert_eq!("ctrl+f7", bind.windows);
+        assert_eq!("SUPER+J", bind.linux);
+        let applied = crate::settings::apply_to(&edited, &config);
+        assert!(applied.config.resolve("default").unwrap().actions.search.selected_opens_sentence_search);
     }
 
     #[test]
-    fn pure_search_chords_round_trip_and_preserve_unedited_values() {
-        let chord = search_chord(0x46, true, true, false, false);
-        assert_eq!(chord, "Ctrl+Shift+F");
-        assert_eq!(crate::config::parse_hotkey(&chord),
-            crate::config::parse_hotkey("Ctrl+Shift+0x46"));
-        let hwnd = HWND(0xE001usize as *mut std::ffi::c_void);
-        SEARCH_CAPTURED.with(|cell| *cell.borrow_mut() = None);
-        assert_eq!(resolved_search_key(hwnd, &SEARCH_CAPTURED, Some("Ctrl+Shift+F")),
-            Some("Ctrl+Shift+F".into()));
-        SEARCH_CAPTURED.with(|cell| *cell.borrow_mut() = Some((hwnd.0 as isize, String::new())));
-        assert_eq!(resolved_search_key(hwnd, &SEARCH_CAPTURED, Some("Ctrl+Shift+F")), None);
-        assert_eq!(resolved_search_key(HWND::default(), &SEARCH_CAPTURED, Some("Alt+F6")), Some("Alt+F6".into()));
-        SEARCH_CAPTURED.with(|cell| *cell.borrow_mut() = None);
+    fn captured_chord_format_matches_the_shared_parser() {
+        let chord = bind_chord(0x46, true, true, false, false);
+        assert_eq!("Ctrl+Shift+F", chord);
+        assert_eq!(
+            crate::config::parse_hotkey(&chord),
+            crate::config::parse_hotkey("Ctrl+Shift+0x46")
+        );
+        assert_eq!("Ctrl+Shift+F", display_bind_chord("Ctrl+Shift+0x46"));
     }
 
     #[test]
-    fn native_search_launch_requests_and_ocr_flag_survive_shortcut_clear() {
-        let mut cfg = crate::config::Config::default();
-        cfg.actions.search.hotkey = Some("Ctrl+Shift+F".into());
-        cfg.actions.search.sentence_hotkey = Some("Ctrl+Shift+G".into());
-        cfg.actions.search.selected_hotkey = Some("Ctrl+F7".into());
-        cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
-            hotkey: Some("F9".into()), hotkey_linux: None, open_sentence_search: true,
-        });
-        let form = crate::settings::from_config(&cfg, &[]);
+    fn native_search_buttons_request_their_modes() {
+        let config = crate::config::Config::default();
+        let form = crate::settings::from_config(&config, &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        for (id, mode) in [(ID_OPEN_DICTIONARY_SEARCH, chibipop::search::SearchMode::Dictionary),
-            (ID_OPEN_SENTENCE_SEARCH, chibipop::search::SearchMode::Sentence)] {
+        for (id, mode) in [
+            (ID_OPEN_DICTIONARY_SEARCH, chibipop::search::SearchMode::Dictionary),
+            (ID_OPEN_SENTENCE_SEARCH, chibipop::search::SearchMode::Sentence),
+        ] {
             send_command(&window, id);
             assert_eq!(window.take_search_request(), Some(mode));
             assert_eq!(window.take_search_request(), None);
         }
-        send_command(&window, ID_OCR_CLIPBOARD_KEY_CLEAR);
-        let edited = window.read(&form);
-        let pending = crate::settings::apply_to(&edited, &cfg);
-        assert_eq!(pending.actions.search.hotkey, cfg.actions.search.hotkey);
-        assert_eq!(pending.actions.search.sentence_hotkey, cfg.actions.search.sentence_hotkey);
-        assert_eq!(pending.actions.search.selected_hotkey, cfg.actions.search.selected_hotkey);
-        assert!(pending.actions.ocr_clipboard.as_ref().unwrap().open_sentence_search);
-        assert!(pending.actions.ocr_clipboard.as_ref().unwrap().hotkey.is_none());
-        send_command(&window, ID_SEARCH_KEY_CLEAR);
-        send_command(&window, ID_SENTENCE_SEARCH_KEY_CLEAR);
-        send_command(&window, ID_SELECTED_TEXT_KEY_CLEAR);
-        let edited = window.read(&form);
-        assert!(edited.cfg.actions.search.hotkey.is_none());
-        assert!(edited.cfg.actions.search.sentence_hotkey.is_none());
-        assert!(edited.cfg.actions.search.selected_hotkey.is_none());
     }
 
     fn remove_layout_entry(layout: &mut SettingsLayout, id: SettingId) -> EntrySpec {
@@ -6834,7 +7622,7 @@ mod tests {
         }
     }
 
-    fn select_sentence_mode(window: &SettingsWindow, mode: SentenceMode) {
+    fn select_sentence_mode(window: &mut SettingsWindow, mode: SentenceMode) {
         let index = SENTENCE_MODES
             .iter()
             .position(|(candidate, _)| *candidate == mode)
@@ -6847,6 +7635,20 @@ mod tests {
             SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(command)), None);
         }
         window.pump(|| {});
+    }
+
+    fn send_button_click(window: &SettingsWindow, id: i32) {
+        // SAFETY: The test window owns the clicked button.
+        unsafe {
+            let control = dlg_item(window.hwnd, id).expect("button control");
+            let command = id as usize | ((BN_CLICKED as usize) << 16);
+            SendMessageW(
+                window.hwnd,
+                WM_COMMAND,
+                Some(WPARAM(command)),
+                Some(LPARAM(control.0 as isize)),
+            );
+        }
     }
 
     fn send_command(window: &SettingsWindow, id: i32) {
@@ -6872,10 +7674,32 @@ mod tests {
         ids
     }
 
+    fn set_control_text(window: &SettingsWindow, id: i32, text: &str) {
+        let text = wide(text);
+        // SAFETY: The test window owns the requested control and copies this text.
+        unsafe {
+            let control = dlg_item(window.hwnd, id).expect("control should exist");
+            let _ = SetWindowTextW(control, PCWSTR(text.as_ptr()));
+        }
+    }
+
+    fn select_combo_row(window: &SettingsWindow, id: i32, index: usize) {
+        // SAFETY: The test window owns the combo and receives this selection notification.
+        unsafe {
+            let combo = dlg_item(window.hwnd, id).expect("combo should exist");
+            SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), None);
+            let command = id as usize | ((CBN_SELCHANGE as usize) << 16);
+            SendMessageW(window.hwnd, WM_COMMAND, Some(WPARAM(command)), None);
+        }
+    }
+
     fn nondefault_form() -> SettingsForm {
         let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        form.cfg.trigger.mode = crate::config::TriggerMode::Toggle;
-        form.cfg.trigger.trigger_key = "f6".into();
+        form.catalog.live_lookup = false;
+        form.cfg.trigger.mode = TriggerMode::Press;
+        form.catalog.binds[0].mode = TriggerMode::Toggle;
+        form.catalog.binds[0].windows = "f6".into();
+        form.catalog.binds[1].windows = "f2".into();
         form.cfg.trigger.per_character_lookup = true;
         form.cfg.popup.theme = "light".into();
         form.cfg.popup.exclude_from_capture = true;
@@ -6911,10 +7735,10 @@ mod tests {
         form.cfg.anki.url = "http://127.0.0.1:9999".into();
         form.cfg.anki.deck = "Akari deck".into();
         form.cfg.anki.model = "Akari model".into();
-        form.cfg.anki.add_key = "f2".into();
         form.cfg.anki.notify_on_add = false;
+        form.cfg.anki.overwrite_duplicates = true;
         form.cfg.anki.sentence_mode = SentenceMode::Static;
-        form.cfg.anki.static_region_key = "f3".into();
+        form.cfg.anki.static_region = Some([10, 20, 300, 200]);
         form.cfg.anki.show_static_overlay = false;
         form.cfg.anki.include_dictionary_name = false;
         form.cfg.anki.first_dict_only = true;
@@ -6924,6 +7748,9 @@ mod tests {
         form.cfg.actions.screenshot.include_on_add = true;
         form.cfg.actions.screenshot.capture_mode = ScreenshotMode::FixedRegion;
         form.cfg.actions.screenshot.fixed_region = Some([10, 20, 300, 200]);
+        form.cfg.actions.ocr_clipboard = Some(crate::config::OcrClipboardConfig {
+            open_sentence_search: true,
+        });
         form.terms = vec![DictRow { name: "Terms".into(), enabled: false }];
         form.frequency = vec![DictRow { name: "Frequency".into(), enabled: true }];
         form.pitch = vec![DictRow { name: "Pitch".into(), enabled: false }];
@@ -6932,7 +7759,6 @@ mod tests {
             source: "expression".into(),
         }]);
         form.background_on_close = Some(form.cfg.application.background_on_close);
-        form.ocr_clipboard_key = Some("f5".into());
         form
     }
 
@@ -6979,7 +7805,7 @@ mod tests {
     #[test]
     fn native_window_resizes_maximizes_and_tracks_a_minimum() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: The root window remains live for this test.
         unsafe {
             let style = WINDOW_STYLE(GetWindowLongW(window.hwnd, GWL_STYLE) as u32);
@@ -6996,7 +7822,7 @@ mod tests {
             assert!(limits.ptMinTrackSize.y >= dpi_scale(window.hwnd, MIN_CLIENT_H));
         }
 
-        resize_client(&window, 700, 560);
+        resize_client(&mut window, 700, 560);
         let restored = outer_rect(&window);
         // SAFETY: The test owns the native root window.
         unsafe {
@@ -7071,11 +7897,11 @@ mod tests {
     fn native_minimum_and_fitted_sizes_reserve_scrollbar_and_client_edges() {
         let _awareness = TestDpiContext::per_monitor();
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: Native DPI is read independently of the settings geometry helper.
         let dpi = unsafe { GetDpiForWindow(window.hwnd) } as i32;
         for (width, height) in [(520, 430), (560, 480), (760, 520)] {
-            resize_client(&window, width, height);
+            resize_client(&mut window, width, height);
             assert_eq!(width * dpi / 96, client_w(window.hwnd));
             assert_eq!(height * dpi / 96, client_h(window.hwnd));
             assert_native_edges(&window);
@@ -7116,20 +7942,20 @@ mod tests {
         let form = nondefault_form();
         let mut layout = SettingsLayout::embedded().unwrap();
         move_layout_entry(&mut layout, SettingId::ScreenshotTargets, 0, 0, 0);
-        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
-        resize_client(&window, 700, 460);
+        let mut window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        resize_client(&mut window, 700, 460);
         let order = visible_tabstop_ids(&window);
         // SAFETY: This thread owns the root and focusable descendants.
         unsafe { SetFocus(Some(window.hwnd)).unwrap(); }
         scroll_to(window.hwnd, |_| 180);
         assert_eq!(180, scroll_position(window.hwnd));
-        resize_client(&window, 620, 480);
+        resize_client(&mut window, 620, 480);
         assert_eq!(180, scroll_position(window.hwnd));
         let focus_top = control_top(&window, ID_SHOW_POS);
         scroll_to(window.hwnd, |_| focus_top);
         // SAFETY: The lower checkbox is visible on the active Popup tab.
         unsafe { SetFocus(Some(dlg_item(window.hwnd, ID_SHOW_POS).unwrap())).unwrap(); }
-        resize_client(&window, 520, 430);
+        resize_client(&mut window, 520, 430);
         let focus = control_rect(&window, ID_SHOW_POS, window.viewport);
         assert!(focus.top >= 0 && focus.bottom <= client_h(window.viewport), "{focus:?}");
         assert!(scroll_position(window.hwnd) > 0);
@@ -7158,8 +7984,8 @@ mod tests {
     #[test]
     fn dynamic_reflow_clamps_scroll_when_content_shrinks() {
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        resize_client(&window, 620, 480);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        resize_client(&mut window, 620, 480);
         window.switch_tab(window.field_map_tab().unwrap());
         window.populate_fields((0..20).map(|index| format!("Field {index}")).collect());
         while window.pending_field_map.borrow().is_some() { window.pump(|| {}); }
@@ -7190,7 +8016,7 @@ mod tests {
         use windows::Win32::Graphics::Gdi::GetObjectW;
         let _awareness = TestDpiContext::per_monitor();
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let mut font_heights = Vec::new();
         for dpi in [96u32, 120, 144, 96] {
             let rect = RECT { left: 30, top: 30, right: 1030, bottom: 750 };
@@ -7241,8 +8067,8 @@ mod tests {
     #[test]
     fn native_width_and_height_reflow_preserves_values() {
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        resize_client(&window, MIN_CLIENT_W, MIN_CLIENT_H);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        resize_client(&mut window, MIN_CLIENT_W, MIN_CLIENT_H);
         let narrow_field = control_rect(&window, ID_THEME, window.content);
         let narrow_status = control_rect(&window, ID_STATUS, window.hwnd);
         let narrow_viewport = control_rect(&window, ID_VIEWPORT, window.hwnd);
@@ -7251,7 +8077,7 @@ mod tests {
         assert!(narrow_viewport.bottom <= narrow_footer.top);
         assert!(narrow_status.bottom <= client_h(window.hwnd));
 
-        resize_client(&window, 760, 680);
+        resize_client(&mut window, 760, 680);
         let wide_field = control_rect(&window, ID_THEME, window.content);
         let wide_status = control_rect(&window, ID_STATUS, window.hwnd);
         let tall_viewport = control_rect(&window, ID_VIEWPORT, window.hwnd);
@@ -7265,13 +8091,13 @@ mod tests {
         window.populate_fields((0..4).map(|index| format!("Field {index}")).collect());
         window.toggle_field_map();
         let narrow_combo = {
-            resize_client(&window, MIN_CLIENT_W, 600);
+            resize_client(&mut window, MIN_CLIENT_W, 600);
             control_rect(&window, ID_FIELD_MAP_BASE, window.content)
         };
         let narrow_second = control_rect(&window, ID_FIELD_MAP_BASE + 2, window.content);
         assert!(narrow_combo.right < narrow_second.left);
         let wide_combo = {
-            resize_client(&window, 760, 600);
+            resize_client(&mut window, 760, 600);
             control_rect(&window, ID_FIELD_MAP_BASE, window.content)
         };
         let wide_second = control_rect(&window, ID_FIELD_MAP_BASE + 2, window.content);
@@ -7283,8 +8109,8 @@ mod tests {
     #[test]
     fn dynamic_reflow_preserves_user_size_and_maximized_state() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
-        resize_client(&window, 720, 560);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        resize_client(&mut window, 720, 560);
         let before = outer_rect(&window);
         let mut screenshot = form.cfg.actions.screenshot.clone();
         screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
@@ -7314,7 +8140,7 @@ mod tests {
     #[test]
     fn footer_keeps_apply_runtime_and_operation_state_separate() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: Footer controls remain live for this test.
         unsafe {
             assert_eq!("Apply: Loaded", window_text(dlg_item(window.hwnd, ID_APPLY_STATE).unwrap()));
@@ -7372,10 +8198,10 @@ mod tests {
     #[test]
     fn debug_action_is_separate_from_dirty_settings() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        assert_eq!(8, window.tab_count());
-        assert_eq!(Some("Debug"), window.tab_label(7));
-        window.switch_tab(7);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        assert_eq!(9, window.tab_count());
+        assert_eq!(Some("Debug"), window.tab_label(8));
+        window.switch_tab(8);
         send_command(&window, ID_SHOW_LIVE_LOGS);
         window.pump(|| {});
         assert!(window.take_show_logs());
@@ -7390,53 +8216,23 @@ mod tests {
     }
 
     #[test]
-    fn reordered_entries_set_positions_and_radio_group_boundaries() {
-        let mut layout = SettingsLayout::embedded().unwrap();
-        move_layout_entry(&mut layout, SettingId::LookupMode, 0, 0, 0);
-        layout.validate().unwrap();
-        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open_with_layout(
-            &form,
-            &[],
-            ApplyMode::Standalone,
-            layout,
-        )
-        .unwrap();
-        window.switch_tab(0);
-
-        assert!(window.entry_top(SettingId::LookupMode) < window.entry_top(SettingId::PopupTheme));
-        // SAFETY: These controls belong to one live dialog group.
+    fn follow_pointer_checkbox_reads_and_writes_catalog_state() {
+        let mut config = crate::config::Config::default();
+        config.live_lookup = false;
+        let form = crate::settings::from_config(&config, &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        // SAFETY: The dialog owns the follow-pointer checkbox.
         unsafe {
-            // Test the style contract that makes the boundary.
-            let lookup = window
-                .tabs
-                .iter()
-                .flat_map(|tab| &tab.sections)
-                .flat_map(|section| &section.entries)
-                .find(|entry| entry.id == SettingId::LookupMode)
-                .unwrap();
-            let styles: Vec<u32> = lookup
-                .controls
-                .iter()
-                .map(|control| GetWindowLongW(control.hwnd, GWL_STYLE) as u32)
-                .collect();
-            assert!(
-                styles[0] & WS_GROUP.0 != 0,
-                "the first control of the entry must start a dialog group",
-            );
-            for id in [ID_MODE_LIVE, ID_MODE_HOLD, ID_MODE_TOGGLE, ID_MODE_PRESS] {
-                assert!(dlg_item(window.hwnd, id).is_ok(), "missing radio {id}");
-            }
-            let mut cursor = dlg_item(window.hwnd, ID_MODE_PRESS).unwrap();
-            let theme = dlg_item(window.hwnd, ID_THEME).unwrap();
-            for _ in 0..8 {
-                cursor = GetNextDlgGroupItem(window.content, Some(cursor), false).unwrap();
-                assert_ne!(
-                    theme, cursor,
-                    "the group must not reach the next entry's control",
-                );
-            }
+            let control = dlg_item(window.hwnd, ID_MODE_LIVE).unwrap();
+            let style = GetWindowLongW(control, GWL_STYLE) as u32;
+            assert_ne!(0, style & BS_AUTOCHECKBOX as u32);
+            assert_eq!(0, SendMessageW(control, BM_GETCHECK, None, None).0);
+            SendMessageW(control, BM_SETCHECK, Some(WPARAM(1)), None);
         }
+        send_button_click(&window, ID_MODE_LIVE);
+        let edited = window.read(&form);
+        assert!(edited.catalog.live_lookup);
+        assert_eq!(TriggerMode::Live, edited.cfg.trigger.mode);
     }
 
     #[test]
@@ -7479,7 +8275,7 @@ mod tests {
         }
     }
 
-    fn resize_client(window: &SettingsWindow, width: i32, height: i32) {
+    fn resize_client(window: &mut SettingsWindow, width: i32, height: i32) {
         // No target: this helper resizes in place, as a user drag does.
         window.fit_to(width, height, None);
         window.pump(|| {});
@@ -7490,32 +8286,32 @@ mod tests {
         let mut layout = SettingsLayout::embedded().unwrap();
         move_layout_entry(&mut layout, SettingId::ScreenshotTargets, 0, 0, 0);
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
+        let mut window = SettingsWindow::open_with_layout(&form, &[], ApplyMode::Standalone, layout).unwrap();
         let before = control_top(&window, ID_THEME);
-        // SAFETY: The captured test window owns the summary for this closure's lifetime.
-        let summary_height = || unsafe {
+        // SAFETY: The test supplies a live window when it reads the summary.
+        let summary_height = |window: &SettingsWindow| unsafe {
             let control = dlg_item(window.hwnd, ID_SCREENSHOT_SUMMARY).unwrap();
             let mut rect = RECT::default();
             GetWindowRect(control, &mut rect).unwrap();
             rect.bottom - rect.top
         };
-        let initial_height = summary_height();
+        let initial_height = summary_height(&window);
         let mut screenshot = form.cfg.actions.screenshot.clone();
         screenshot.fixed_window = Some(crate::config::ScreenshotWindow {
             app_id: "test-window".into(),
             title: "A long game window title ".repeat(20),
         });
         window.refresh_screenshot_targets(&screenshot);
-        assert!(summary_height() > initial_height);
+        assert!(summary_height(&window) > initial_height);
         assert!(control_top(&window, ID_THEME) > before, "updated summary still has its initial height");
-        resize_client(&window, 760, 600);
-        let wide_height = summary_height();
-        resize_client(&window, MIN_CLIENT_W, 600);
-        assert!(summary_height() > wide_height);
-        resize_client(&window, WIN_W, 600);
+        resize_client(&mut window, 760, 600);
+        let wide_height = summary_height(&window);
+        resize_client(&mut window, MIN_CLIENT_W, 600);
+        assert!(summary_height(&window) > wide_height);
+        resize_client(&mut window, WIN_W, 600);
         send_command(&window, ID_SCREENSHOT_RESET);
         window.pump(|| {});
-        assert_eq!(initial_height, summary_height());
+        assert_eq!(initial_height, summary_height(&window));
         assert_eq!(before, control_top(&window, ID_THEME));
     }
 
@@ -7557,7 +8353,7 @@ mod tests {
         move_layout_entry(&mut layout, SettingId::AnkiFieldMap, 0, 0, 0);
         layout.validate().unwrap();
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open_with_layout(
+        let mut window = SettingsWindow::open_with_layout(
             &form,
             &[],
             ApplyMode::Standalone,
@@ -7598,7 +8394,7 @@ mod tests {
         move_layout_entry(&mut layout, SettingId::AnkiStaticOverlay, 0, 0, 0);
         layout.validate().unwrap();
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
-        let window = SettingsWindow::open_with_layout(
+        let mut window = SettingsWindow::open_with_layout(
             &form,
             &[],
             ApplyMode::Standalone,
@@ -7611,38 +8407,8 @@ mod tests {
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
         }
-        window.switch_tab(2);
-        // SAFETY: The shortcut stays visible but disabled outside Static mode.
-        unsafe {
-            for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
-                let control = dlg_item(window.hwnd, id).unwrap();
-                assert!(IsWindowVisible(control).as_bool());
-                assert!(!windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(control).as_bool());
-            }
-        }
 
-        for mode in [SentenceMode::Line, SentenceMode::All] {
-            select_sentence_mode(&window, mode);
-            window.switch_tab(2);
-            unsafe {
-                for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
-                    assert!(!windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
-                        dlg_item(window.hwnd, id).unwrap()
-                    ).as_bool());
-                }
-            }
-        }
-
-        select_sentence_mode(&window, SentenceMode::Static);
-        window.switch_tab(2);
-        // SAFETY: Static mode enables every fixed-area control.
-        unsafe {
-            for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
-                assert!(windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
-                    dlg_item(window.hwnd, id).unwrap()
-                ).as_bool());
-            }
-        }
+        select_sentence_mode(&mut window, SentenceMode::Static);
         window.switch_tab(0);
         // SAFETY: The overlay appears only on its owner tab.
         unsafe {
@@ -7655,27 +8421,15 @@ mod tests {
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
         }
-        select_sentence_mode(&window, SentenceMode::Sentence);
         window.switch_tab(0);
+        select_sentence_mode(&mut window, SentenceMode::Sentence);
+        // SAFETY: Sentence mode hides the static-area hint.
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).unwrap()).as_bool());
         }
         assert_eq!(collapsed_top, control_top(&window, ID_THEME));
     }
 
-    #[test]
-    fn fixed_sentence_area_help_names_the_shortcuts_section() {
-        let layout = SettingsLayout::embedded().unwrap();
-        let entry = layout.tabs.iter()
-            .flat_map(|tab| &tab.sections)
-            .flat_map(|section| &section.entries)
-            .find(|entry| entry.id == SettingId::AnkiStaticOverlay)
-            .expect("fixed-area guidance entry");
-        assert_eq!(
-            Some("Configure the Set sentence area button in the Shortcuts section."),
-            entry.help.as_deref()
-        );
-    }
 
     #[test]
     fn duplicate_provider_names_keep_the_first_discovered_directory() {
@@ -7711,111 +8465,261 @@ mod tests {
         let read = window.read(&form);
         assert_eq!(form, read);
         assert_eq!(
-            crate::settings::apply_to(&form, &form.cfg),
-            crate::settings::apply_to(&read, &form.cfg),
+            crate::settings::apply_to(&form, &form.catalog).config,
+            crate::settings::apply_to(&read, &form.catalog).config,
         );
     }
 
     #[test]
-    fn optional_shortcuts_preserve_untouched_and_cancelled_values() {
-        let form = nondefault_form();
+    fn profile_overrides_survive_window_reads_and_profile_selection() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let parent = form.profile_id.clone();
+        let derived = form.create_profile("Derived".into(), Some(&parent), &[]).unwrap();
+        form.cfg.popup.theme = "light".into();
+        form.save_current().unwrap();
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        assert_eq!(form, window.read(&form));
 
-        for id in [
-            ID_ANKI_ADD_KEY,
-            ID_STATIC_REGION_KEY,
-            ID_OCR_CLIPBOARD_KEY,
-        ] {
-            send_command(&window, id);
-            assert!(window.handle_capture_key(0x1B));
-        }
-        assert_eq!(form, window.read(&form));
+        select_combo_row(&window, ID_THEME, 0);
+        let mut read = window.read(&form);
+        assert_eq!("dark", read.cfg.popup.theme);
+        assert_eq!("light", read.catalog.resolve(&derived).unwrap().popup.theme);
+
+        read.select_profile(&parent, &[]).unwrap();
+        read.select_profile(&derived, &[]).unwrap();
+        assert_eq!("dark", read.cfg.popup.theme);
     }
 
     #[test]
-    fn optional_shortcuts_rebind_independently() {
-        let form = nondefault_form();
+    fn staged_dictionary_import_keeps_its_profile_owner_after_native_reads() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let owner = form.profile_id.clone();
+        let other = form.create_profile("Other".into(), None, &[]).unwrap();
+        form.select_profile(&owner, &[]).unwrap();
+        let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/yomitan/terms.zip");
+        assert!(form.stage_add(&archive).is_some());
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        for (id, key) in [
-            (ID_ANKI_ADD_KEY, 0x76),
-            (ID_STATIC_REGION_KEY, 0x77),
-            (ID_OCR_CLIPBOARD_KEY, 0x78),
-        ] {
-            send_command(&window, id);
-            assert!(window.handle_capture_key(key));
-        }
+
+        let mut read = window.read(&form);
+        read.select_profile(&other, &[]).unwrap();
+        assert!(read
+            .terms
+            .iter()
+            .any(|row| row.name == "FixtureTerms" && !row.enabled));
+        read.select_profile(&owner, &[]).unwrap();
+        assert!(read
+            .terms
+            .iter()
+            .any(|row| row.name == "FixtureTerms" && row.enabled));
+    }
+
+    #[test]
+    fn screenshot_target_reset_survives_window_reads() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.actions.screenshot.fixed_region = Some([10, 20, 300, 200]);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+
+        send_command(&window, ID_SCREENSHOT_RESET);
+        window.pump(|| {});
         let read = window.read(&form);
-        assert_eq!("f7", read.cfg.anki.add_key);
-        assert_eq!("f8", read.cfg.anki.static_region_key);
-        assert_eq!(Some("f9"), read.ocr_clipboard_key.as_deref());
-        assert_eq!("f6", read.cfg.trigger.trigger_key);
+
+        assert!(read.screenshot_reset_targets);
+        assert_eq!(None, read.cfg.actions.screenshot.fixed_region);
+        assert_eq!(None, read.cfg.actions.screenshot.fixed_window);
     }
 
     #[test]
-    fn optional_clear_cancels_active_capture_and_uses_disabled_values() {
-        let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        for (key, clear) in [
-            (ID_ANKI_ADD_KEY, ID_ANKI_ADD_KEY_CLEAR),
-            (ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR),
-            (ID_OCR_CLIPBOARD_KEY, ID_OCR_CLIPBOARD_KEY_CLEAR),
-        ] {
-            send_command(&window, key);
-            assert!(CAPTURING.with(|cell| cell.get()).is_some());
-            send_command(&window, clear);
-            assert!(CAPTURING.with(|cell| cell.get()).is_none());
-            // SAFETY: The key control stays live after Clear.
-            unsafe {
-                assert_eq!("Not set", window_text(dlg_item(window.hwnd, key).unwrap()));
-            }
-        }
-        window.switch_tab(0);
-        let read = window.read(&form);
-        assert!(read.cfg.anki.add_key.is_empty());
-        assert!(read.cfg.anki.static_region_key.is_empty());
-        assert!(read.ocr_clipboard_key.is_none());
-        assert_eq!("f6", read.cfg.trigger.trigger_key);
-    }
-
-    #[test]
-    fn static_region_controls_preserve_chord_outside_static_sentence_mode() {
-        let mut form = nondefault_form();
-        form.cfg.anki.sentence_mode = SentenceMode::Sentence;
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        window.switch_tab(2);
-        // SAFETY: The fixed-area controls stay visible but disabled outside Static mode.
-        unsafe {
-            for id in [ID_STATIC_REGION_LABEL, ID_STATIC_REGION_KEY, ID_STATIC_REGION_KEY_CLEAR] {
-                let control = dlg_item(window.hwnd, id).unwrap();
-                assert!(IsWindowVisible(control).as_bool());
-                assert!(!windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(control).as_bool());
-            }
-        }
-        send_command(&window, ID_STATIC_REGION_KEY_CLEAR);
-        assert_eq!("f3", window.read(&form).cfg.anki.static_region_key);
-
-        select_sentence_mode(&window, SentenceMode::Static);
-        unsafe {
-            assert!(windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
-                dlg_item(window.hwnd, ID_STATIC_REGION_KEY_CLEAR).unwrap()
-            ).as_bool());
-        }
-        send_command(&window, ID_STATIC_REGION_KEY_CLEAR);
-        assert!(window.read(&form).cfg.anki.static_region_key.is_empty());
-    }
-
-    #[test]
-    fn native_hotkey_conflict_names_both_actions_and_keys() {
+    fn configured_bind_capture_changes_only_the_windows_chord() {
         let mut config = crate::config::Config::default();
-        config.trigger.trigger_key = "f2".into();
-        config.actions.search.hotkey = Some("F2".into());
+        let bind_id = config.next_bind_id();
+        let mut bind = Bind::new(bind_id.clone(), BindAction::SelectedText);
+        bind.windows = "ctrl+f6".into();
+        bind.linux = "SUPER+K".into();
+        config.binds.push(bind);
         let form = crate::settings::from_config(&config, &[]);
+        let row = form
+            .catalog
+            .binds
+            .iter()
+            .position(|bind| bind.id == bind_id)
+            .unwrap();
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let chord = bind_control_id(row, ID_BIND_CHORD_OFFSET);
+        window.switch_tab(2);
 
-        let error = window.validate_hotkeys(&config).unwrap_err().to_string();
-        assert!(error.contains("Open dictionary search (F2)"), "{error}");
-        assert!(error.contains("Lookup (F2)"), "{error}");
+        send_button_click(&window, chord);
+        assert!(window.handle_capture_key(0x11));
+        window.switch_tab(0);
+        // SAFETY: The test window owns the chord control.
+        unsafe {
+            let control = dlg_item(window.hwnd, chord).unwrap();
+            assert_eq!("Ctrl+F6", window_text(control));
+        }
+        let cancelled = window.read(&form);
+        let bind = cancelled.catalog.binds.iter().find(|bind| bind.id == bind_id).unwrap();
+        assert_eq!("ctrl+f6", bind.windows);
+        assert_eq!("SUPER+K", bind.linux);
+
+        window.switch_tab(2);
+        send_button_click(&window, chord);
+        assert!(window.handle_capture_key(0x1B));
+        // SAFETY: The test window owns the chord control.
+        unsafe {
+            let control = dlg_item(window.hwnd, chord).unwrap();
+            assert_eq!("Ctrl+F6", window_text(control));
+        }
+
+        send_button_click(&window, chord);
+        assert!(window.handle_capture_key(0x76));
+        let captured = window.read(&form);
+        let bind = captured.catalog.binds.iter().find(|bind| bind.id == bind_id).unwrap();
+        assert_eq!("F7", bind.windows);
+        assert_eq!("SUPER+K", bind.linux);
+
+        let owner = window.hwnd.0 as isize;
+        drop(window);
+        assert!(!BIND_CAPTURED.with(|slot| {
+            slot.borrow().as_ref().is_some_and(|(captured_owner, _)| *captured_owner == owner)
+        }));
+        assert!(CAPTURING.with(|slot| slot.get().is_none()));
+        assert!(CAPTURE_PREV.with(|slot| slot.borrow().is_none()));
+
+    }
+
+    #[test]
+    fn modifier_only_bind_capture_commits_on_key_release() {
+        let mut config = crate::config::Config::default();
+        let bind_id = config.next_bind_id();
+        let mut bind = Bind::new(bind_id.clone(), BindAction::Lookup);
+        bind.windows = "ctrl+f6".into();
+        bind.linux = "SUPER+K".into();
+        config.binds.push(bind);
+        let form = crate::settings::from_config(&config, &[]);
+        let row = form
+            .catalog
+            .binds
+            .iter()
+            .position(|bind| bind.id == bind_id)
+            .unwrap();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let chord = bind_control_id(row, ID_BIND_CHORD_OFFSET);
+        window.switch_tab(window.entry_tab(SettingId::ConfiguredBinds).unwrap());
+
+        send_button_click(&window, chord);
+        assert!(window.handle_capture_key(0x10));
+        assert!(window.handle_capture_key_up(0x10));
+        let captured = window.read(&form);
+        let bind = captured.catalog.binds.iter().find(|bind| bind.id == bind_id).unwrap();
+        assert_eq!("Shift", bind.windows);
+        assert_eq!("SUPER+K", bind.linux);
+    }
+
+    #[test]
+    fn configured_bind_catalog_actions_add_clear_and_remove_rows() {
+        let mut config = crate::config::Config::default();
+        let original_id = config.next_bind_id();
+        let mut original = Bind::new(original_id.clone(), BindAction::SelectedText);
+        original.windows = "F6".into();
+        original.linux = "SUPER+K".into();
+        config.binds.push(original);
+        let form = crate::settings::from_config(&config, &[]);
+        let original_row = form
+            .catalog
+            .binds
+            .iter()
+            .position(|bind| bind.id == original_id)
+            .unwrap();
+        let initial_ids: Vec<String> = form.catalog.binds.iter().map(|bind| bind.id.clone()).collect();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        window.switch_tab(window.entry_tab(SettingId::ConfiguredBinds).unwrap());
+
+        send_button_click(&window, ID_BIND_ADD);
+        window.pump(|| {});
+        let added = window.read(&form);
+        assert_eq!(initial_ids.len() + 1, added.catalog.binds.len());
+        let added_id = added.catalog.binds.last().unwrap().id.clone();
+        assert!(!initial_ids.contains(&added_id));
+        assert_eq!(BindAction::Lookup, added.catalog.binds.last().unwrap().action);
+
+        send_button_click(
+            &window,
+            bind_control_id(original_row, ID_BIND_CLEAR_OFFSET),
+        );
+        window.pump(|| {});
+        let cleared = window.read(&form);
+        let cleared_bind = cleared
+            .catalog
+            .binds
+            .iter()
+            .find(|bind| bind.id == original_id)
+            .unwrap();
+        assert!(cleared_bind.windows.is_empty());
+        assert_eq!("SUPER+K", cleared_bind.linux);
+
+        send_button_click(
+            &window,
+            bind_control_id(original_row, ID_BIND_REMOVE_OFFSET),
+        );
+        window.pump(|| {});
+        let removed = window.read(&form);
+        assert!(!removed.catalog.binds.iter().any(|bind| bind.id == original_id));
+        assert!(removed.catalog.binds.iter().any(|bind| bind.id == added_id));
+    }
+
+    #[test]
+    fn changing_a_bind_to_lookup_restores_lookup_modes() {
+        let mut config = crate::config::Config::default();
+        let bind_id = config.next_bind_id();
+        config.binds.push(Bind::new(bind_id.clone(), BindAction::Search));
+        let form = crate::settings::from_config(&config, &[]);
+        let row = form
+            .catalog
+            .binds
+            .iter()
+            .position(|bind| bind.id == bind_id)
+            .unwrap();
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        window.switch_tab(window.entry_tab(SettingId::ConfiguredBinds).unwrap());
+        let action = bind_control_id(row, ID_BIND_ACTION_OFFSET);
+        let mode = bind_control_id(row, ID_BIND_MODE_OFFSET);
+        // SAFETY: The test window owns the mode combo.
+        let mode_combo = unsafe { dlg_item(window.hwnd, mode).unwrap() };
+        assert_eq!(
+            1,
+            unsafe { SendMessageW(mode_combo, CB_GETCOUNT, None, None).0 },
+        );
+
+        select_combo_row(&window, action, bind_action_index(BindAction::Lookup));
+        assert_eq!(
+            3,
+            unsafe { SendMessageW(mode_combo, CB_GETCOUNT, None, None).0 },
+        );
+        select_combo_row(&window, mode, 1);
+        let read = window.read(&form);
+        let bind = read.catalog.binds.iter().find(|bind| bind.id == bind_id).unwrap();
+        assert_eq!(TriggerMode::HoldKey, bind.mode);
+    }
+
+    #[test]
+    fn bind_action_rebuild_preserves_an_edited_field_mapping() {
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.cfg.anki.enabled = true;
+        form.field_map = Some(vec![mapping("Front", "expression")]);
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        window.populate_fields(vec!["Front".to_string()]);
+        window.switch_tab(window.field_map_tab().unwrap());
+        window.toggle_field_map();
+        let glossary = FIELD_MAP_SOURCES
+            .iter()
+            .position(|source| *source == "glossary")
+            .unwrap();
+        select_combo_row(&window, ID_FIELD_MAP_BASE, glossary);
+        window.switch_tab(window.entry_tab(SettingId::ConfiguredBinds).unwrap());
+
+        send_button_click(&window, ID_BIND_ADD);
+        window.pump(|| {});
+        let read = window.read(&form);
+        assert_eq!(Some(vec![mapping("Front", "glossary")]), read.field_map);
     }
 
     /// Reads the text that the tooltip holds for one control.
@@ -7854,11 +8758,11 @@ mod tests {
     #[test]
     fn every_supplied_help_value_renders_once() {
         let mut layout = SettingsLayout::embedded().unwrap();
-        let help = "Unique lookup key help";
+        let help = "Unique screenshot setting help";
         for tab in &mut layout.tabs {
             for section in &mut tab.sections {
                 if let Some(entry) = section.entries.iter_mut()
-                    .find(|entry| entry.id == SettingId::LookupKey)
+                    .find(|entry| entry.id == SettingId::AnkiIncludeScreenshot)
                 {
                     entry.help = Some(help.into());
                     entry.inline_help = true;
@@ -8261,10 +9165,6 @@ mod tests {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let row_ids = [
-            SettingId::LookupKey,
-            SettingId::AnkiAddKey,
-            SettingId::StaticRegionKey,
-            SettingId::OcrClipboardKey,
             SettingId::PopupTheme,
             SettingId::PopupFont,
             SettingId::PopupMaxWidth,
@@ -8335,6 +9235,29 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_apply_disables_all_settings_pages_until_completion() {
+        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
+        let apply = unsafe { dlg_item(window.hwnd, ID_APPLY).unwrap() };
+
+        window.set_busy(true);
+        assert!(!unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(window.content).as_bool()
+        });
+        assert!(!unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(apply).as_bool()
+        });
+
+        window.set_busy(false);
+        assert!(unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(window.content).as_bool()
+        });
+        assert!(unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(apply).as_bool()
+        });
+    }
+
+    #[test]
     fn focus_shows_a_hidden_settings_window() {
         let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
         let window = SettingsWindow::open(&form, &[], ApplyMode::Live).unwrap();
@@ -8357,6 +9280,7 @@ mod tests {
             source: source.into(),
         }
     }
+
 
     #[test]
     fn default_source_finds_a_matching_field() {
@@ -8777,39 +9701,6 @@ mod tests {
         );
     }
 
-    // ---- trigger-key capture ----
-
-    #[test]
-    fn take_captured_key_is_none_when_not_capturing() {
-        let hwnd = HWND(6001 as *mut core::ffi::c_void);
-        assert_eq!(None, take_captured_key(hwnd, 0x10));
-    }
-
-    /// A named key ends the capture. The call returns that name.
-    #[test]
-    fn take_captured_key_accepts_a_named_key() {
-        let hwnd = HWND(6002 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
-
-        let got = take_captured_key(hwnd, 0x11);
-
-        assert_eq!(Some((ID_TRIGGER_KEY, "Ctrl".to_string())), got);
-        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
-        CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    /// The capture accepts a virtual key code that was not listed before.
-    #[test]
-    fn take_captured_key_accepts_a_previously_unlisted_key() {
-        let hwnd = HWND(6003 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
-
-        let got = take_captured_key(hwnd, 0x41); // 'A'
-
-        assert_eq!(Some((ID_TRIGGER_KEY, "A".to_string())), got);
-        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
-        CAPTURED_VK.with(|c| c.set(None));
-    }
 
     #[test]
     fn mapped_key_labels_decode_layout_chars_and_fallbacks() {
@@ -8825,182 +9716,18 @@ mod tests {
     }
 
     #[test]
-    fn search_display_maps_layout_key_without_changing_storage() {
+    fn bind_display_maps_layout_key_without_changing_storage() {
         let display = |vk| {
             mapped_trigger_key_name(vk, if vk == 0xC0 { u32::from('`') } else { 0 })
         };
         assert_eq!(
-            display_search_key_with("Ctrl+Shift+0xC0", display),
+            display_bind_chord_with("Ctrl+Shift+0xC0", display),
             "Ctrl+Shift+`"
         );
-        assert_eq!(search_chord(0xC0, true, true, false, false), "Ctrl+Shift+0xC0");
+        assert_eq!(bind_chord(0xC0, true, true, false, false), "Ctrl+Shift+0xC0");
         assert_eq!(stored_trigger_key(0xC0), "0xC0");
     }
 
-    #[test]
-    fn initial_and_captured_trigger_key_labels_match() {
-        let mut cfg = crate::config::Config::default();
-        cfg.trigger.trigger_key = "0xC0".into();
-        let form = crate::settings::from_config(&cfg, &[]);
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
-        // SAFETY: The dialog owns this control for the test's lifetime.
-        unsafe {
-            assert_eq!(
-                window_text(dlg_item(window.hwnd(), ID_TRIGGER_KEY).unwrap()),
-                display_trigger_key(0xC0)
-            );
-        }
-        let hwnd = HWND(6004 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
-        assert_eq!(
-            take_captured_key(hwnd, 0xC0),
-            Some((ID_TRIGGER_KEY, display_trigger_key(0xC0)))
-        );
-        assert_eq!(resolved_trigger_key(hwnd, "shift"), "0xC0");
-        let read = window.read(&form);
-        assert_eq!(read.cfg.trigger.trigger_key, "0xC0");
-        CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn conflict_labels_are_readable_without_changing_tokens() {
-        use crate::config::{HotkeyAction, Platform};
-
-        let mut cfg = crate::config::Config::default();
-        cfg.trigger.trigger_key = "0xC0".into();
-        cfg.actions.search.hotkey = Some("0xC0".into());
-        assert_eq!(
-            cfg.hotkey_conflicts(Platform::Windows),
-            vec![(HotkeyAction::Trigger, HotkeyAction::Search)]
-        );
-        let display = |vk| {
-            mapped_trigger_key_name(vk, if vk == 0xC0 { u32::from('`') } else { 0 })
-        };
-        assert_eq!(
-            windows_hotkey_value_with(&cfg, HotkeyAction::Trigger, display),
-            "`"
-        );
-        assert_eq!(cfg.trigger.trigger_key, "0xC0");
-        assert_eq!(cfg.actions.search.hotkey.as_deref(), Some("0xC0"));
-    }
-
-    /// The call records the vk, so `read()` can see it later.
-    #[test]
-    fn take_captured_key_records_the_vk_for_read() {
-        let hwnd = HWND(6007 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_TRIGGER_KEY))));
-
-        take_captured_key(hwnd, 0x41);
-
-        assert_eq!("0x41", resolved_trigger_key(hwnd, "shift"));
-        CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    /// The Anki add key uses a separate capture control.
-    #[test]
-    fn take_captured_key_routes_the_anki_add_key_to_its_own_id() {
-        let hwnd = HWND(6008 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_ANKI_ADD_KEY))));
-
-        let got = take_captured_key(hwnd, 0x41);
-
-        assert_eq!(Some((ID_ANKI_ADD_KEY, "A".to_string())), got);
-        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
-        ANKI_CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn take_captured_key_routes_the_ocr_clipboard_key_to_its_own_id() {
-        let hwnd = HWND(6014 as *mut core::ffi::c_void);
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_OCR_CLIPBOARD_KEY))));
-
-        let got = take_captured_key(hwnd, 0x78);
-
-        assert_eq!(Some((ID_OCR_CLIPBOARD_KEY, "F9".to_string())), got);
-        assert_eq!(
-            Some((hwnd.0 as isize, 0x78)),
-            OCR_CLIP_CAPTURED_VK.with(|c| c.get())
-        );
-        assert_eq!(None, CAPTURING.with(|c| c.get()), "capture must end");
-        OCR_CLIP_CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    /// The Anki capture state and trigger capture state stay separate.
-    #[test]
-    fn take_captured_key_does_not_disturb_the_trigger_key_cell() {
-        let hwnd = HWND(6009 as *mut core::ffi::c_void);
-        CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0x10))));
-        CAPTURING.with(|c| c.set(Some((hwnd.0 as isize, ID_ANKI_ADD_KEY))));
-
-        take_captured_key(hwnd, 0x42);
-
-        assert_eq!(
-            Some((hwnd.0 as isize, 0x10)),
-            CAPTURED_VK.with(|c| c.get()),
-            "the trigger key's own capture must be untouched"
-        );
-        CAPTURED_VK.with(|c| c.set(None));
-        ANKI_CAPTURED_VK.with(|c| c.set(None));
-    }
-
-    #[test]
-    fn resolved_trigger_key_falls_back_to_the_template_when_uncaptured() {
-        let hwnd = HWND(6005 as *mut core::ffi::c_void);
-        CAPTURED_VK.with(|c| c.set(None));
-
-        assert_eq!("ctrl", resolved_trigger_key(hwnd, "ctrl"));
-    }
-
-    #[test]
-    fn resolved_trigger_key_falls_back_verbatim_when_unparseable() {
-        let hwnd = HWND(6006 as *mut core::ffi::c_void);
-        CAPTURED_VK.with(|c| c.set(None));
-
-        assert_eq!("garbage", resolved_trigger_key(hwnd, "garbage"));
-    }
-
-    /// The "Not set" button represents the form's `None`.
-    /// An empty string must not replace it (ARCHITECTURE.md#settings-and-config).
-    #[test]
-    fn resolved_ocr_clipboard_key_maps_an_unset_button_to_none() {
-        let hwnd = HWND(6015 as *mut core::ffi::c_void);
-        OCR_CLIP_CAPTURED_VK.with(|c| c.set(None));
-
-        assert_eq!(None, resolved_ocr_clipboard_key(hwnd, None));
-        assert_eq!(None, resolved_ocr_clipboard_key(hwnd, Some("")));
-        assert_eq!(
-            Some("f9".to_string()),
-            resolved_ocr_clipboard_key(hwnd, Some("f9"))
-        );
-    }
-
-    // ---- anki add-key capture ----
-
-    #[test]
-    fn resolved_anki_add_key_falls_back_to_the_template_when_uncaptured() {
-        let hwnd = HWND(6010 as *mut core::ffi::c_void);
-        ANKI_CAPTURED_VK.with(|c| c.set(None));
-
-        assert_eq!("ctrl", resolved_anki_add_key(hwnd, "ctrl"));
-    }
-
-    /// The code normalizes the default letter.
-    #[test]
-    fn resolved_anki_add_key_normalizes_the_default_letter() {
-        let hwnd = HWND(6013 as *mut core::ffi::c_void);
-        ANKI_CAPTURED_VK.with(|c| c.set(None));
-
-        assert_eq!("0x41", resolved_anki_add_key(hwnd, "a"));
-    }
-
-    #[test]
-    fn resolved_anki_add_key_uses_the_freshly_captured_vk() {
-        let hwnd = HWND(6011 as *mut core::ffi::c_void);
-        ANKI_CAPTURED_VK.with(|c| c.set(Some((hwnd.0 as isize, 0x73))));
-
-        assert_eq!("f4", resolved_anki_add_key(hwnd, "a"));
-        ANKI_CAPTURED_VK.with(|c| c.set(None));
-    }
 
     #[test]
     fn stored_trigger_key_names_known_keys() {
@@ -10071,13 +10798,13 @@ mod tests {
         form.terms = rows(&[("Mixed", true), ("Terms only", true)]);
         form.frequency = rows(&[("Mixed", true), ("Freq only", true)]);
         form.pitch = rows(&[("Pitch only", true)]);
-        let before = crate::settings::apply_to(&form, &crate::config::Config::default());
+        let before = crate::settings::apply_to(&form, &crate::config::Config::default()).config;
         // Create one window for each change. Otherwise changes could accumulate.
         let work = |touch: &dyn Fn(HWND)| {
             let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone)
                 .expect("opening the settings window");
             touch(window.hwnd());
-            let after = crate::settings::apply_to(&window.read(&form), &before);
+            let after = crate::settings::apply_to(&window.read(&form), &before).config;
             crate::settings::dictionary_work(&before, &after)
         };
         let reorder = |list: i32, down: i32| {
@@ -10361,7 +11088,7 @@ mod tests {
     #[test]
     fn a_corner_off_every_monitor_comes_back_inside_the_work_area() {
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let area = work_area(window.hwnd).unwrap();
         let gone = Placement { x: area.right + 5000, y: area.bottom + 5000 };
         // Move the window where the stale corner puts it.
@@ -10383,7 +11110,7 @@ mod tests {
         let path = placement::state_path();
         let _ = std::fs::remove_file(&path);
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         let area = work_area(window.hwnd).unwrap();
         // This corner fits any size, so the trim
         // does not move the window.
@@ -10404,7 +11131,7 @@ mod tests {
     #[test]
     fn a_minimized_or_maximized_window_remembers_no_corner() {
         let form = nondefault_form();
-        let window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
+        let mut window = SettingsWindow::open(&form, &[], ApplyMode::Standalone).unwrap();
         // SAFETY: The test owns this window. Both calls only change its state.
         unsafe { let _ = ShowWindow(window.hwnd, SW_MAXIMIZE); }
         window.pump(|| {});

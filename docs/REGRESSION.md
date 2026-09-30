@@ -29,9 +29,13 @@ This runner's Tier 0 commands target Windows. Use `scripts/linux_container_regre
 
 ## Recent feature case index
 
-Cases 1.31-1.42 cover the newer search, hover, clipboard, furigana, sentence-field, audit-isolation, and cache-invalidation behavior.
-Cases 1.30.11-1.30.16 cover screenshot modes and saved targets. Existing settings, plugin, and live-log cases retain their identifiers.
-Record the exact feature-bearing revision. Chinese sentence segmentation and search resize repaint require their implementation in the tested build.
+Cases 1.31-1.43 cover Search, hover, clipboard, furigana, sentence-field,
+audit-isolation, cache invalidation, and profile catalog behavior.
+Cases 1.30.11-1.30.16 cover screenshot modes and saved targets.
+Existing settings, plugin, and live-log cases retain their identifiers.
+Record the exact feature-bearing revision.
+Chinese sentence segmentation and Search resize repaint require their
+implementation in the tested build.
 A feature branch may be tested before merge; a missing feature in an older build is not a successful regression result.
 
 No new case is pre-marked as passed. The following commands are optional native regressions and do not replace visible acceptance:
@@ -1232,19 +1236,15 @@ limit 3: the fallback fixes "does nothing", not "says nothing".
 - **This is a third message, and it is not either of 1.15's.** `installed; starting with` is the
   startup substitution; the two lines in 1.15's table are reload-path only. Confusing them means
   reporting on a path you did not test.
-- **Settings will show the tag you configured, not the one that is running** — the dropdown reads
+- **Settings shows the tag you configured, not the tag that runs** — the dropdown reads
   `ko (not installed)` while OCR runs `ja`. `from_config` seeds it from `cfg.ocr.language`
-  (`src/settings.rs:302`) and the substitution is a local in the worker thread that never writes
-  the config back. Expected, not a failure.
-- **A per-language dictionary list is not applied while the pack is missing** — the list belongs to
-  the tag you configured, and the tag that is *running* is the fallback, so lookups search every
-  dictionary by `display_order` instead. Deliberate as of 2026-08-12: filtering the fallback's
-  Japanese hits through a list written for the missing language returns an **empty popup with no
-  error at all**, which is worse than an unfiltered one. The main thread makes the same
-  `startup_language` + `recogniser_available` call the worker does (`configured_recogniser_runs`,
-  `src/app.rs:2379`), so the two cannot disagree about whether the pack is there. If the entry is
-  for a language you can see results in, add it to `[dictionaries.per_language]` and confirm every
-  dictionary still answers.
+  (`src/settings.rs:302`) and the worker keeps the fallback local. The saved profile stays unchanged.
+  The active fallback searches every enabled terms Dictionary in that profile.
+  Filtering the fallback's Japanese hits through a list for the missing language returns an **empty
+  popup with no error**, which is worse than an unfiltered lookup. The main thread makes the same
+  `startup_language` + `recogniser_available` call as the worker (`src/app.rs:2379`).
+  If the tag runs, add its list to the selected profile's
+  `[profiles.settings.dictionaries.per_language]` map and confirm every Dictionary answers.
 - **Not covered by this step:** a language that *is* listed but whose engine will not build. That
   still aborts startup exactly as before, and cannot be fixed without splitting
   `init_dpi_awareness` out of `OcrTextSource::new` — BACKLOG 13, limit 2.
@@ -1265,24 +1265,21 @@ boundary. The single list split by a `──── not searched ────` ro
 `Include / exclude` button — **four** buttons only. Every step below is written against that
 shape; a divider row appearing anywhere is a failure, not a stale checklist.
 
-Set the first language's list to one dictionary and the second language's to the other, then switch
-**Text language** and press Apply.
+Select a profile with two language lists. Set one language to one Dictionary
+and the other language to another Dictionary, then switch **Text language**.
+Press Apply after each profile edit.
 
-- The **PID is unchanged** (`Get-Process chibipop`) — that is the test of "no restart", not a proxy.
-- The Dictionaries tab re-scopes **as soon as the language dropdown changes**, before Apply: both
-  boxes refill, the new language's list in *Searched* and the rest in *Not searched*. The caption
-  above the top box reads `Searched — for the selected OCR language`; the one above the bottom box
-  reads `Not searched`.
-- Hovering the same word is answered by a **different dictionary set**. That is the acceptance; the
-  tab agreeing with itself is not, and neither is the unchanged PID alone.
-- Edit one language's list, switch language, switch back **without pressing Apply**: the edit is
-  still there. Losing it is the failure this design exists to prevent.
-- A language with **no** list still searches everything, exactly as v0.7.0 did.
-- After Apply, `chibipop.toml` shows `[dictionaries.per_language]` with an entry per visited
-  language. Each name is stored cut at its first `[` or `(`, so `Jitendex.org [2026-07-09]` must
-  appear as `Jitendex.org`. **A surviving date stamp means the keying regressed**, and the entry
-  will quietly stop matching the next time that dictionary is rebuilt. A title that contains no
-  bracket (`大辞林　第四版`, `中日大辞典`) is stored whole and is **correct** — do not file it.
+- The **PID is unchanged** (`Get-Process chibipop`) across Apply.
+- The Dictionaries tab shows the selected profile's list before Apply.
+- Hovering the same word uses a **different Dictionary set** after the language change.
+- Edit one language list, switch language, then switch back before Apply.
+  The edit remains in the selected profile.
+- A missing language list searches every enabled terms Dictionary in that profile.
+- An explicit empty list searches no Dictionary.
+- After Apply, inspect
+  `[profiles.settings.dictionaries.per_language]` under the selected profile.
+  Each key uses the exact OCR language tag.
+  Each list stores exact Dictionary names.
 
 **Five checks that each cost a fix round, or a redesign. If time is short, run these.**
 
@@ -2263,6 +2260,32 @@ Restore only disposable fixture changes.
 
 ---
 
+<a id="case-1-43"></a>
+### 1.43 Profile catalog and Bind behavior
+
+**Prerequisites.** Use a disposable configuration with two imported Dictionaries.
+Use the [profile catalog example](REFERENCE.md#configuration-file) as the configuration template.
+Replace its Dictionary names with the installed Dictionary names.
+Use a word that both Dictionaries contain.
+
+Run the profile cases on each platform.
+Use configured hotkeys on Windows.
+Use configured hotkeys or `chibipop ctl` on Linux.
+
+| ID | Case | Steps and expected result |
+|---|---|---|
+| 1.43 | Full and Derived profiles | Start with `bilingual` as the default Full profile and `monolingual` as a Derived profile. Confirm stable IDs, the parent ID, and the separate display names. Change `popup.theme` in the parent. The Derived `popup.theme` override must remain. |
+| 1.43.1 | Independent role lists and empty lists | Set the Derived terms list to `enabled = ["Monolingual"]` and `disabled = ["Bilingual"]`. Set its pitch `enabled` and `disabled` arrays to empty. The terms lookup must use only Monolingual. The pitch lookup must use no Dictionary. A missing role override must inherit the parent result. |
+| 1.43.2 | Bind IDs and profile ownership | Activate the Bilingual and Monolingual lookup Binds with `chibipop ctl bind-down <id>`. Require each popup to use its Bind profile. Test Hold with matching `bind-up`. Test Toggle with two activations. Reject an unknown or disabled ID. A new lookup Bind must replace the active chain, pause Live lookup, and ignore the displaced release. |
+| 1.43.3 | Nested routing and Back | Set `nested_profile` and open a hover link and a clicked dictionary link. Require both links to use the nested profile. Press Back. Restore the parent profile, content, scroll, and selections. Same-headword suppression must include Profile ID. |
+| 1.43.4 | Search identity and retained settings | Open Search with the Bilingual and Monolingual Search Binds. Keep both windows open. Reuse each mode and Profile ID with its original settings. Confirm different Profile IDs remain separate. Linux has no Search profile picker. Apply new settings and require existing sessions to keep their catalogs while new sessions use the saved catalog. |
+| 1.43.5 | Import, deletion, and migration | Import a Dictionary while a profile is selected. Enable its detected roles in that profile and add it disabled to other explicit lists. Block deletion while the profile is the default, a Bind target, a nested choice, or a Derived parent. Load a legacy global-key TOML through `src/config/migration.rs` and confirm one default Full profile plus configured Bind records. |
+
+**Evidence and cleanup.** Record the profile IDs, Bind IDs, config path,
+screenshots, logs, and tested revision. Restore only disposable changes.
+
+---
+
 <a id="tier-2"></a>
 ## Tier 2 — mostly automatable (~5 min)
 
@@ -2434,7 +2457,7 @@ Each of these has bitten at least once. They are cheap to check and expensive to
 | **First `ShowWindow` obeys `STARTUPINFO`, not you** | A window created and sized but `WS_VISIBLE` never set. Launch-hidden makes Settings do nothing. Show via `SetWindowPos(SWP_SHOWWINDOW)`. |
 | **`&` in a button caption is an accelerator** | "Apply & Restart" renders "Apply ‗Restart". Double it. |
 | **Nested message pumps eat `WM_TIMER`** | `TrackPopupMenuEx`, `MessageBoxW`, `DialogBoxParamW`, caption drag. The wheel arm latches. Disarm before any of them. |
-| **`display_order` holds substrings, not names** | Order works today, silently stops after the next dictionary rebuild. Never write live names back. |
+| **A role list is not a shared list** | Terms, pitch, and per-language lists belong to one profile. A Derived override replaces the complete role list. An empty list means no Dictionary. |
 | **A task that adds a field must be the task that reads it** | `field never read` is a dead-code error, and the gate asserts an exact count — one extra breaks it. (Caught once as a 6th error against the 5-error gate of the day; the gate is 3 now, the trap is unchanged.) |
 | **Ghost tray icons** | A force-killed instance leaves a corpse; right-clicking it does nothing. Sweep the cursor over the tray to reap them. |
 | **Windows will not rename onto an open file** | A rebuild that ends in `Access is denied (os error 5)`. SQLite opens without `FILE_SHARE_DELETE`, so a `build-dict` cannot have its output renamed over a database another process is holding. **This is why v0.8.0 stopped renaming.** Dictionary changes now edit the live database through a second read-write connection in WAL mode; nothing is staged and nothing is renamed, so the trap is not on that path at all. It is still live for the two paths that do build a whole file: `chibipop build-dict` from a terminal, and `chibipop settings` (§1.20) — both fail at the rename against an open database, which is why every "quit chibipop first" instruction in the app says so. **The v0.7.2 answer to this trap — stage a `.new`, stop and *join* the worker, rename, respawn — is deleted**, because that join is what deadlocked the main thread and froze the desktop. |

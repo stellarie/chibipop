@@ -5,7 +5,7 @@
 //! a region, grab pixels, and restore windows. These rules do not depend on
 //! platform facts (ARCHITECTURE.md#workspace-and-seams).
 
-use crate::config::{AnkiConfig, Config};
+use crate::config::{AnkiConfig, ResolvedConfig};
 use anyhow::{Context, Result};
 use base64::Engine;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub struct ShotPlan {
 pub fn plan_add(
     expr: &str,
     fields: &HashMap<String, String>,
-    cfg: &Config,
+    cfg: &ResolvedConfig,
     save_root: &Path,
     now: u64,
 ) -> Option<ShotPlan> {
@@ -50,7 +50,7 @@ pub fn plan_add(
 fn make_plan(
     expr: String,
     fields: HashMap<String, String>,
-    cfg: &Config,
+    cfg: &ResolvedConfig,
     save_root: &Path,
     now: u64,
 ) -> ShotPlan {
@@ -168,8 +168,8 @@ mod tests {
 
     const ROOT: &str = "/tmp/chibipop-shot-tests";
 
-    fn cfg_on() -> Config {
-        let mut cfg = Config::default();
+    fn cfg_on() -> ResolvedConfig {
+        let mut cfg = ResolvedConfig::default();
         cfg.actions.screenshot.include_on_add = true;
         cfg
     }
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn include_on_add_off_plans_nothing() {
-        let cfg = Config::default();
+        let cfg = ResolvedConfig::default();
         assert!(!cfg.actions.screenshot.include_on_add, "the shipped default");
         assert_eq!(None, plan_add("宿舎", &HashMap::new(), &cfg, Path::new(ROOT), 1));
     }

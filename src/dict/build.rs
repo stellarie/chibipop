@@ -2843,10 +2843,10 @@ mod tests {
 
         let dict = SqliteDictionary::open(&out).expect("the built database opens");
         let installed = dict.dicts().unwrap();
-        // A default `Config` names no Dictionary, so it enables every installed
-        // Dictionary. This fresh-install behavior gives the card all three archives
-        // in library order.
-        let cfg = crate::config::Config::default().present_config(&installed);
+        let mut profile = crate::config::ResolvedConfig::default();
+        profile.dictionaries.terms = installed.iter().map(|dict| dict.name.clone()).collect();
+        profile.dictionaries.pitch = profile.dictionaries.terms.clone();
+        let cfg = profile.present_config();
         let card = |text: &str| {
             let hits =
                 LookupEngine::new(Deconjugator::new(Vec::new())).run(&dict, text).unwrap();

@@ -50,15 +50,21 @@ impl ProcessFixture {
         let executable = root.join("chibipop.exe");
         std::fs::copy(env!("CARGO_BIN_EXE_chibipop"), &executable).unwrap();
         let mut config = Config::default();
-        config.trigger.mode = TriggerMode::HoldKey;
-        config.trigger.trigger_key = "0x87".into();
-        config.actions.enabled = false;
-        config.anki.enabled = false;
-        config.anki.url = "http://127.0.0.1:9".into();
-        config.ocr.engine = "missing-test-provider".into();
+        config.live_lookup = false;
+        config.binds[0].enabled = true;
+        config.binds[0].mode = TriggerMode::HoldKey;
+        config.binds[0].windows = "0x87".into();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id).unwrap();
+        profile.actions.enabled = false;
+        profile.anki.enabled = false;
+        profile.anki.url = "http://127.0.0.1:9".into();
+        profile.ocr.engine = "missing-test-provider".into();
+        profile.dictionaries.terms.enabled = vec!["FixtureTerms".into()];
         if let Some((_, language)) = chibipop_windows::text::ocr::installed_recognisers().first() {
-            config.ocr.language = language.clone();
+            profile.ocr.language = language.clone();
         }
+        config.update_profile(&profile_id, &profile).unwrap();
         let config_path = root.join("chibipop.toml");
         config.save(&config_path).unwrap();
         if let Some(enabled) = enabled {
@@ -76,10 +82,10 @@ impl ProcessFixture {
             std::fs::write(&config_path, toml::to_string_pretty(&saved).unwrap()).unwrap();
         }
         let expected_language = if mode == "run" {
-            let engine = chibipop_windows::text::ocr::WinrtOcr::new(&config.ocr.language).unwrap();
+            let engine = chibipop_windows::text::ocr::WinrtOcr::new(&profile.ocr.language).unwrap();
             engine.engine().RecognizerLanguage().unwrap().LanguageTag().unwrap().to_string()
         } else {
-            config.ocr.language.clone()
+            profile.ocr.language.clone()
         };
         let config_permissions = std::fs::metadata(root.join("chibipop.toml")).unwrap().permissions();
         let child = Command::new(executable).arg(mode)
@@ -429,8 +435,9 @@ fn daemon_reports_real_ocr_saves_truthfully_and_exits_when_background_is_disable
     wait_until("save success", || text(control(window, 193)).contains("Applied"));
     wait_until("applied Anki state", || text(control(window, 194)).contains("Anki: enabled"));
     let saved: Config = toml::from_str(&std::fs::read_to_string(process.root.join("chibipop.toml")).unwrap()).unwrap();
-    assert_eq!("light", saved.popup.theme);
-    assert!(saved.anki.enabled);
+    let profile = saved.resolve(&saved.default_profile).unwrap();
+    assert_eq!("light", profile.popup.theme);
+    assert!(profile.anki.enabled);
     let closed = corner_of(window);
     system_command(window, SC_CLOSE);
     process.wait_exit();

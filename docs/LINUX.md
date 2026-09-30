@@ -24,24 +24,17 @@ target.
    cp -r crates/chibipop-linux/models target/release/
    ```
 
-2. **Wire up the compositor.** Copy [`extras/hyprland.conf`](../extras/hyprland.conf)
-   to `~/.config/hypr/chibipop.conf` and include it from your main config:
+2. **Start the daemon.** Add `exec-once = chibipop run` to your Hyprland
+   session, or start `chibipop run` by hand.
 
-   ```
-   source = ~/.config/hypr/chibipop.conf
-   ```
+3. **Configure a Bind.** Open `chibipop settings`, select **Shortcuts**, and
+   set a lookup action, mode, profile, and `ALT+F` chord.
 
-   It starts the daemon (`exec-once = chibipop run`) and binds the default
-   `ALT+F` trigger chord. Reload Hyprland or start the daemon by hand.
+4. **Add dictionaries.** On **Dictionaries**, click **Browse…** and select
+   Yomitan `.zip` archives. Press **Rebuild** to import the staged archives.
 
-3. **Add dictionaries.** `chibipop settings` opens the settings window (its
-   own process — a settings crash never takes the daemon down). On
-   **Dictionaries**, **Browse…** opens the desktop's own file dialog and takes
-   as many Yomitan `.zip` archives as you select at once; the entry beside it
-   still takes a typed path, which is the fallback on a desktop with no
-   file-chooser portal. Adds are staged — press **Rebuild** to build them in.
+5. **Read.** Activate the configured lookup Bind over Japanese text.
 
-4. **Read.** Hold `ALT+F` and hover Japanese text anywhere on screen.
 
 Every snippet in this document writes the bare command name `chibipop`, which
 assumes an installed binary on `PATH`. Running from `cargo run` or an
@@ -52,19 +45,21 @@ names the running binary's full path, quoted.
 
 `chibipop settings` opens **General**. The six tabs are **General**,
 **Shortcuts**, **Popup**, **Dictionaries**, **Text recognition**, and **Anki**.
-The **Shortcuts** tab holds every chord and its compositor bind or portal key.
+The **Shortcuts** tab edits Bind IDs, actions, modes, enabled state, and
+platform chords. A Bind can select an optional profile.
 
 Apply requests direct global shortcuts where the desktop supports them.
-For native bindings, each supported configured shortcut has a **Copy bind snippet** button.
-Every snippet runs `chibipop ctl`. chibipop does not edit compositor configuration files.
-The compositor selector changes snippet syntax, not shortcut ownership.
+For native bindings, each configured Bind has a **Copy bind snippet** button.
+Each snippet uses `chibipop ctl bind-down ID` or `bind-up ID`.
+The compositor selector changes snippet syntax, not Bind ownership.
 
-KDE and GNOME show **Copy daemon command** for a press action when no portal binding exists.
-Their shortcut editors accept this command, but they cannot send a key release.
-Hold mode on those desktops needs a portal binding. Otherwise, select Toggle or Press mode.
+KDE and GNOME show **Copy daemon command** for a Press action when no portal
+binding exists. Their shortcut editors cannot send a key release.
+Hold mode on those desktops needs a portal binding.
+Otherwise, select Toggle or Press mode.
 GNOME repeats a held custom shortcut, so tap the chord.
 Niri snippets go inside the existing `binds` block.
-Niri supports press bindings but has no key-release bind for Hold mode.
+Niri supports Press bindings but has no key-release bind for Hold mode.
 Screen capture exclusion stays on **Popup**.
 
 **Ctrl+Tab** selects the next tab. **Ctrl+Shift+Tab** selects the previous tab.
@@ -126,130 +121,64 @@ and templated in [`packaging/aur/`](../packaging/aur/). Both are described in
 
 ## The trigger key
 
-Wayland has no global key observation. If the desktop cannot assign global shortcuts
-directly, its compositor keybind runs `chibipop ctl`. This command sends a verb to
-the daemon over a UNIX socket. The default `ALT+F` hold chord needs two Hyprland lines:
+Wayland does not provide global key observation.
+Configure a Bind in **Settings > Shortcuts**.
+The Bind stores its stable ID, action, mode, profile, enabled state, and chord.
+The settings window provides the compositor command for that Bind.
 
-```
-bind  = ALT, F, exec, chibipop ctl trigger-down
-bindr = ALT, F, exec, chibipop ctl trigger-up
-```
+For native compositor bindings, use the Bind ID:
 
-and like this on sway:
-
-```
-bindsym --no-repeat Mod1+f exec chibipop ctl trigger-down
-bindsym --release   Mod1+f exec chibipop ctl trigger-up
+```text
+bind = ALT, F, exec, chibipop ctl bind-down my-lookup
+bindr = ALT, F, exec, chibipop ctl bind-up my-lookup
 ```
 
-In hold-key mode, `trigger-down` freezes one full grab of the monitor under the cursor *before*
-the popup appears, and every lookup while you hold the chord reads that frozen screen. The popup
-can cover the very word it defines, and the next lookup still reads through it. Moving onto another
-monitor mid-hold grabs that one.
-`trigger-up` drops the frame and hides the popup. `chibipop ctl toggle` is the hands-free version:
-it latches the trigger and reads live grabs with the popup masked until toggle-off. Lookups see
-screen changes while the latch is on.
-Toggle mode in the settings window selects this path for the portal channel and prints the
-one-line press bind for the native channel.
+Use both commands for Hold mode.
+Use only `bind-down` for Press and Toggle modes.
+Use `bind-down` for one-shot actions.
+The daemon rejects an ID that is absent or disabled.
 
-**Press mode** runs one lookup at the cursor for each trigger-key press. The lookup reads a live
-grab with the popup masked, so Press mode does not use a Frozen grab. If it finds text, the popup
-shows and stays. OCR does not follow cursor movement, and no Dwell re-check runs. A press with no text
-hides the popup. A press over the popup also hides it because the mask gives no text. A button press
-outside the popup also hides it.
-The key release does nothing. Per-character lookup is inert in Press mode.
-Hovering Japanese text inside a popup still opens a child popup. Its parent stays visible.
+The fixed socket verbs remain supported:
+`trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`,
+`ocr-clipboard`, `static-region`, `search`, `sentence-search`,
+`selected-text`, and `reload`.
+These verbs keep their legacy routing and do not replace configured Binds.
 
-On Hyprland, bind Press mode with one line:
+Hold mode freezes one full grab before the popup appears.
+Each lookup during the hold reads that frozen screen.
+Moving to another monitor starts a grab for that monitor.
+Release drops the frame and hides the popup.
 
-```
-bind = ALT, F, exec, chibipop ctl lookup
-```
+Toggle mode latches the trigger.
+It reads live grabs with the popup masked until toggle-off.
+Press mode runs one masked live lookup for each activation.
+Press mode does not follow cursor movement or run a Dwell re-check.
+The key release does nothing in Press mode.
+Per-character lookup is inert in Press and Toggle modes.
 
-On sway, use:
+Hovering text in an existing popup can open a child popup.
+The parent stays visible.
+The click catcher exists in Press mode while a popup has a rectangle.
+It consumes an outside click and clears its input region when the popup hides.
 
-```
-bindsym --no-repeat Mod1+f exec chibipop ctl lookup
-```
-The settings window prints these lines for the selected Press mode.
+Apply requests changed portal bindings without a daemon restart.
+The desktop can keep a previously approved chord.
+The **Current key** line shows the confirmed chord.
+Hyprland registers portal action names but does not assign their keys.
+Hyprland therefore uses native compositor bindings.
 
-The click catcher exists only in Press mode while a popup is placed. The daemon gives every
-output a transparent full-output layer surface at the popup layer. Its input region covers the
-output except a hole over the popup rectangle. The catcher is never unmapped. When the daemon hides
-the popup, it clears the input region. The catcher swallows the outside click, so it does not reach
-the window under it. Wayland gives a client no other way to observe the click because there is no
-evdev path and the popup takes no focus.
+KDE and GNOME can assign portal shortcuts when the daemon has an app ID.
+Start it from the desktop entry or systemd user unit for portal ownership.
+Hold mode needs a portal binding when the editor cannot send key releases.
 
-**One Hyprland defect to know about** (present through at least 0.55.4,
-verified in source and live): if you release the modifier before the key —
-ALT up, then F up — Hyprland fires **no release bind at all**
-([hyprwm/Hyprland#5032](https://github.com/hyprwm/Hyprland/discussions/5032),
-[#7675](https://github.com/hyprwm/Hyprland/issues/7675)). The `trigger-up` is
-lost and the popup sticks, following the cursor as if the chord were still
-held. No bind arrangement works around it, so make a habit of releasing `F`
-first; if the popup does stick, tap the chord again (releasing `F` first), or
-bind the toggle instead — one press bind, nothing to release, nothing to
-wedge:
+Hyprland can lose a release when the modifier rises before the key.
+Release the key before the modifier.
+If the popup stays visible, activate and release the Hold Bind again.
+Toggle mode avoids this release path.
 
-```
-bind = ALT, F, exec, chibipop ctl toggle
-```
-Toggle mode cannot wedge on Hyprland because it has no release bind.
-Press mode has no release bind, so this defect does not apply to its `lookup` bind.
-
-sway is not affected — it arms the release binding at press time and fires it
-on whichever key of the chord comes up first.
-
-**Holding a bare modifier** (the Windows default's hold-Shift feel) is one line
-on Hyprland, which can bind a modifier as the key itself:
-
-```
-bind  = SHIFT, Shift_L, exec, chibipop ctl trigger-down
-bindr = SHIFT, Shift_L, exec, chibipop ctl trigger-up
-```
-
-sway's equivalent is `bindsym --release Shift_L`. It is a real cost, not a free
-upgrade: every Shift press then spawns a short-lived `chibipop ctl`, so it
-suits a reading machine more than a typing one. On Hyprland it is also in the
-same wedge family as above — pressing any other key while Shift is held loses
-that release too, sticking the hold until the next clean Shift tap. And it is
-impossible on the portal shortcuts channel (KDE, GNOME 48+), whose spec
-requires modifier-plus-key — which is why `ALT+F` is the default everywhere.
-
-**The portal route** requests each configured shortcut when the desktop can assign
-keys without compositor configuration edits. Start chibipop with an app ID through
-its desktop entry, systemd user unit, or a uwsm session. KDE and GNOME can show a
-consent dialog before they register the shortcuts.
-
-**Apply** requests changed portal bindings without a daemon restart.
-The desktop can keep a previously approved key. Each **Current key** line shows
-the confirmed binding, not an assumption from the requested chord.
-For version 2 portals, Apply also requests the desktop's shortcut configuration window.
-
-Hyprland's portal registers action names but does not assign their keys.
-chibipop therefore selects native bindings on Hyprland.
-Every configured row copies a `chibipop ctl` bind. No snippet depends on a portal namespace.
-
-**The add-card chord is a one-shot action.** The popup never takes focus, so
-the key must be global. On Hyprland, use the control socket even when XDPH is
-available:
-
-```
-bind = ALT, A, exec, chibipop ctl anki-add
-```
-
-The settings window shows and copies this line. It does not guess the portal
-namespace because that namespace depends on how the daemon started. The socket
-and the portal both reach the same add-card code path.
-
-On sway, use its equivalent:
-
-```
-bindsym --no-repeat Mod1+a exec chibipop ctl anki-add
-```
-
-KDE and GNOME own the portal key through their desktop shortcut settings. The
-popup's Anki button uses the same add-card code path on every desktop.
+AnkiAdd and StaticRegion use the displayed profile.
+Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard can use a
+profile override from their Bind.
 
 ### Screenshot sources
 
@@ -416,19 +345,22 @@ compositor session, and a second launch exits with a clear message. If
 `XDG_RUNTIME_DIR` is unset (it never is under a normal session manager), the
 daemon and `ctl` say so and stop.
 
-The config file format is shared with Windows — see
-[`docs/REFERENCE.md`](REFERENCE.md) for the full reference. Linux chords use portal
-syntax such as `ALT+F`. The trigger defaults to `ALT+F`, and Anki add defaults to
-`ALT+A`. Optional action chords start unset.
-Apply requests portal bindings for configured, enabled actions where supported.
-Otherwise, each configured row supplies its native bind.
+The config file format is shared with Windows.
+See [`docs/REFERENCE.md`](REFERENCE.md) for the full profile reference.
+Linux chords use portal syntax such as `ALT+F`.
+Configure chords as Bind records in Settings.
+Each configured row supplies its stable ID and native command.
+The fixed socket verbs remain supported.
+
 
 ## Command line
 
 | Command | What it does |
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
-| `chibipop ctl <verb>` | Sends one verb over the control socket: `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `ocr-clipboard`, `static-region`, or `reload`. Answers `OK` or `ERR` on one line. |
+| `chibipop ctl <verb>` | Sends one fixed verb over the control socket. Fixed verbs include `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `ocr-clipboard`, `static-region`, and `reload`. |
+| `chibipop ctl bind-down <id>` | Activates an enabled configured Bind ID. |
+| `chibipop ctl bind-up <id>` | Releases an enabled configured Bind ID. Use it for Hold mode. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
@@ -446,35 +378,22 @@ your frequency lists there and Apply.
   a mismatch refuses the engine rather than silently reading with something
   else. Nothing is downloaded. Model location override: `CHIBIPOP_MODEL_DIR`.
 
-  The *OCR language* setting is Windows-only and hidden on Linux, but the value
-  already in your config is kept, not cleared — and it still selects the
-  `[dictionaries.per_language]` list, so the **Not searched** box works here
-  exactly as it does on Windows. One consequence: a config carrying a language
-  meikiocr does not read (anything but `ja`) searches every dictionary, because
-  that language's list was drawn up for a recogniser this build does not run.
-  Clear the key, or set it to `ja`, to have your split apply.
-- **The Fixed screen area sentence mode has a global shortcut.**
-  Select *Fixed screen area* as the Anki sentence field. Then draw its box.
-  The `static-region` verb starts this selection only in *Fixed screen area* mode.
+  The OCR language field belongs to the selected profile.
+  Linux keeps that field even though the bundled engine reads Japanese.
+  The selected profile's
+  `[profiles.settings.dictionaries.per_language]` map controls its lists.
+  A Derived profile can replace the complete map.
+  A missing map searches every enabled terms Dictionary.
+- **The Fixed screen area sentence mode has a configured Bind.**
+  Select *Fixed screen area* as the Anki sentence field.
+  Create or enable a `StaticRegion` Bind in **Shortcuts**.
+  Use its `bind-down` command to select the region.
   Use `Esc` or right-click to cancel the selection.
-  Its chord (`anki.static_region_key_linux`, unset by default) uses the portal
-  where direct registration works. Otherwise, copy its native bind from settings:
-
-  ```
-  bind = ALT, R, exec, chibipop ctl static-region
-  ```
-
-  ```
-  bindsym --no-repeat Mod1+r exec chibipop ctl static-region
-  ```
-
-  The region is saved to your config file as `anki.static_region = [x, y, w, h]`
-  in physical pixels, and the running daemon picks it up immediately — no
-  restart, no Apply. *Show the static region outline* draws a teal border around
-  it, on by default; that border is a layer surface, so like the popup it needs
-  `zwlr_layer_shell_v1`. Without the layer shell the region still serves
-  lookups, just unmarked, and the log says so once. Both the drag and the border
-  need the layer shell for the same reason.
+  The region is saved under the displayed profile's
+  `[profiles.settings.anki]` settings.
+  The daemon uses the saved region without a restart.
+  *Show the static region outline* draws a teal border around it.
+  The border needs `zwlr_layer_shell_v1`.
 - **Updates are check-only.** The *Check for updates* button reports a newer
   release and names the Linux tarball asset; chibipop never replaces its own
   binary on Linux — update with your package manager or by download.
@@ -494,23 +413,11 @@ your frequency lists there and Apply.
   Interactive modes need `slurp` and layer-shell support. The Capture channel
   supplies the pixels. A saved fixed region bypasses the selector. A saved
   fixed window still needs fresh Hyprland or Sway window metadata.
-- **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard` verb
-  dims the screen, reads the region you drag with the same engine and the same
-  OCR settings hovering uses, and puts the text on the clipboard — one line per
-  recognised line, words butted together, because the recogniser's word split
-  is an artefact and a space between them would be text the screen never had.
-  Nothing is upscaled: meikiocr reads native-resolution crops better than 2x
-  ones, which is where the Windows twin differs. Its chord
-  (`actions.ocr_clipboard.hotkey_linux`, unset by default) uses a global shortcut where the desktop can assign keys directly.
-  Otherwise, copy the compositor bind from settings:
-
-  ```
-  bind = ALT, C, exec, chibipop ctl ocr-clipboard
-  ```
-
-  ```
-  bindsym --no-repeat Mod1+c exec chibipop ctl ocr-clipboard
-  ```
+- **OCR-to-clipboard works, except on stock GNOME.** The `ocr-clipboard`
+  action uses the displayed profile's OCR settings.
+  Create or enable an `OcrClipboard` Bind in **Shortcuts**.
+  Use its configured `bind-down` command.
+  The clipboard protocol rules below remain the same.
 
   The one real gap is **the clipboard protocol**. Writing the selection without
   keyboard focus needs `ext_data_control_manager_v1` or the older
@@ -530,11 +437,10 @@ your frequency lists there and Apply.
 The settings window has an autostart checkbox that writes (or removes)
 `~/.config/autostart/chibipop.desktop` directly — the file is the whole
 state, there is no config field to drift from it. GNOME, KDE, and
-uwsm-managed sessions honour that entry. Bare Hyprland/sway sessions
-don't read XDG autostart; [`extras/`](../extras/) ships a systemd user unit
-and a Hyprland `exec-once` + trigger-bind snippet for those, each with
-its install line in [`extras/README.md`](../extras/README.md). Pick one
-mechanism, not several.
+uwsm-managed sessions honour that entry. Bare Hyprland and Sway sessions do
+not read XDG autostart. [`extras/`](../extras/) ships a systemd user unit.
+Configure Binds in Settings, then copy the generated compositor commands.
+Pick one startup mechanism.
 
 ---
 
@@ -545,12 +451,11 @@ modifier before the key, and Hyprland lost the release bind — see
 [the trigger key](#the-trigger-key). Tap the chord again releasing `F` first,
 or switch to the toggle bind.
 
-**The trigger chord does nothing.** First check the socket directly:
-`chibipop ctl trigger-down` from a terminal should answer `OK`. If it does,
-the compositor bind is execing the wrong thing — a bare `chibipop` bind needs
-the binary on `PATH`, which `cargo run` and extracted folders don't give you.
-Copy the snippet from the settings window; it names the running binary's real
-path.
+**The trigger chord does nothing.** Check the configured Bind ID.
+Run `chibipop ctl bind-down <id>` from a terminal.
+The daemon must answer `OK`.
+If it does, copy the complete command from **Settings > Shortcuts**.
+The fixed `chibipop ctl trigger-down` verb also remains supported.
 
 **Characters under the pointer flicker between misreadings.** Your compositor
 is painting a *software* cursor into the frames chibipop captures, and OCR

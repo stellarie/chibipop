@@ -1,7 +1,7 @@
 //! Direct search shares lookup ranking and presentation so typed inflections
 //! and dictionary ordering behave like popup lookups without an OCR source.
 
-use crate::config::Config;
+use crate::config::{Config, ProfileCatalog, ProfileSession, ResolvedConfig};
 use crate::dict::pitch::PitchClaim;
 use crate::lookup::deconj::Deconjugator;
 use crate::lookup::engine::LookupEngine;
@@ -14,13 +14,24 @@ use std::path::Path;
 use std::ops::Range;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SearchMode {
     #[default]
     Dictionary,
     Sentence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SearchIdentity {
+    pub mode: SearchMode,
+    pub profile_id: String,
+}
+
+impl SearchIdentity {
+    pub fn new(mode: SearchMode, profile_id: impl Into<String>) -> Self {
+        Self { mode, profile_id: profile_id.into() }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub index: usize,
@@ -126,27 +137,54 @@ pub fn selected_presentation(result: &SearchResult, index: usize) -> Option<Pres
 }
 
 impl SearchService {
-    pub fn open(database: &Path, rules: &Path, config: &Config) -> Result<Self> {
+    pub fn open(database: &Path, rules: &Path, config: &ResolvedConfig) -> Result<Self> {
         let dictionary = SqliteDictionary::open(database)?;
         let dicts = dictionary.dicts()?;
         Ok(Self {
             dictionary,
             engine: LookupEngine::new(Deconjugator::new(load_rules(rules)?)),
-            config: config.present_config(&dicts),
+            config: config.present_config(),
             dicts,
         })
+    }
+
+    pub fn open_catalog(database: &Path, rules: &Path, config: &Config, profile_id: &str)
+        -> Result<(Self, ProfileSession)> {
+        let dictionary = SqliteDictionary::open(database)?;
+        let dicts = dictionary.dicts()?;
+        let catalog = ProfileCatalog::new(config, &dicts)?;
+        let session = catalog.session(Some(profile_id))?;
+        let service = Self {
+            dictionary,
+            engine: LookupEngine::new(Deconjugator::new(load_rules(rules)?)),
+            config: session.present_config().clone(),
+            dicts,
+        };
+        Ok((service, session))
     }
 
     pub fn search(&self, query: &str) -> Result<SearchResult> {
         search(&self.dictionary, &self.engine, &self.dicts, &self.config, query)
     }
 
+    pub fn search_in(&self, session: &ProfileSession, query: &str) -> Result<SearchResult> {
+        search(&self.dictionary, &self.engine, &self.dicts, session.present_config(), query)
+    }
+
     pub fn sentence_tokens(&self, text: &str) -> Result<Vec<SentenceToken>> {
         dictionary_tokens(&enabled_dictionary(&self.dictionary, &self.dicts, &self.config), &self.engine, text)
     }
 
+    pub fn sentence_tokens_in(&self, session: &ProfileSession, text: &str) -> Result<Vec<SentenceToken>> {
+        dictionary_tokens(&enabled_dictionary(&self.dictionary, &self.dicts, session.present_config()), &self.engine, text)
+    }
+
     pub fn search_word(&self, word: &str) -> Result<SearchResult> {
         word_search(&self.dictionary, &self.engine, &self.dicts, &self.config, word)
+    }
+
+    pub fn search_word_in(&self, session: &ProfileSession, word: &str) -> Result<SearchResult> {
+        word_search(&self.dictionary, &self.engine, &self.dicts, session.present_config(), word)
     }
 }
 
@@ -360,10 +398,41 @@ mod tests {
         assert_eq!(search(&dictionary, &engine, &dicts, &disabled, "猫").unwrap(), SearchResult::Miss);
     }
 
+
+    #[test]
+    fn search_service_reuses_database_across_profile_sessions() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let database = std::env::temp_dir().join(format!("chibipop-search-profiles-{}.sqlite", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+        let _cleanup = Cleanup(database.clone());
+        crate::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")], &[], &database, &|_| {}).unwrap();
+        let rules = root.join("data/deconjugator.json");
+        let mut saved = Config::default();
+        let root_id = saved.default_profile.clone();
+        let mut root_settings = saved.resolve(&root_id).unwrap();
+        root_settings.dictionaries.terms.enabled = vec!["FixtureTerms".into()];
+        let child_id = saved.next_profile_id();
+        let mut child_settings = root_settings.clone();
+        child_settings.dictionaries.terms.enabled.clear();
+        child_settings.dictionaries.terms.disabled = vec!["FixtureTerms".into()];
+        child_settings.nested_profile = None;
+        saved.profiles.push(crate::config::Profile { id: child_id.clone(), name: "No terms".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(child_settings) } });
+        root_settings.nested_profile = Some(child_id.clone());
+        saved.update_profile(&root_id, &root_settings).unwrap();
+
+        let (service, session) = SearchService::open_catalog(&database, &rules, &saved, &root_id).unwrap();
+        let nested = session.nested();
+        assert_eq!(nested.id(), child_id);
+        assert!(matches!(service.search_in(&session, "猫").unwrap(), SearchResult::Found(_)));
+        assert_eq!(service.search_in(&nested, "猫").unwrap(), SearchResult::Miss);
+        assert!(matches!(service.search_in(&session, "猫").unwrap(), SearchResult::Found(_)));
+    }
     #[test]
     fn missing_database_reports_an_error() {
         assert!(SearchService::open(Path::new("missing-search.sqlite"), Path::new("missing-rules.json"),
-            &Config::default()).is_err());
+            &ResolvedConfig::default()).is_err());
     }
 
     #[test]
@@ -378,7 +447,8 @@ mod tests {
         crate::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")],
             &[root.join("tests/fixtures/yomitan/freq.zip")], &database, &|_| {}).unwrap();
         let rules = root.join("data/deconjugator.json");
-        let mut config = Config::default();
+        let mut config = ResolvedConfig::default();
+        config.dictionaries.terms = vec!["FixtureTerms".into()];
         {
             let service = SearchService::open(&database, &rules, &config).unwrap();
             let tokens = service.sentence_tokens("猫は食べました。").unwrap();
@@ -401,11 +471,11 @@ mod tests {
             assert!(result_text(&service.search("猫").unwrap()).contains("cat (kanji)"));
             assert_eq!(service.search("食べました").unwrap(), first);
         }
-        config.dictionaries.terms_disabled = vec!["FixtureTerms".into()];
+        config.dictionaries.terms_disabled = std::mem::take(&mut config.dictionaries.terms);
         let service = SearchService::open(&database, &rules, &config).unwrap();
         assert_eq!(service.search("猫").unwrap(), SearchResult::Miss);
         drop(service);
-        config.dictionaries.terms_disabled.clear();
+        config.dictionaries.terms = std::mem::take(&mut config.dictionaries.terms_disabled);
         let service = SearchService::open(&database, &rules, &config).unwrap();
         assert!(matches!(service.search("猫").unwrap(), SearchResult::Found(_)));
         drop(service);

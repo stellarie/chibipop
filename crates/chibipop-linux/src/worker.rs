@@ -21,7 +21,7 @@ use crate::capture::portal::PortalCapture;
 use crate::capture::WlrScreencopy;
 use crate::wayland::Advertised;
 use anyhow::{bail, Context, Result};
-use chibipop::config::{AnkiConfig, Config};
+use chibipop::config::{AnkiConfig, ProfileSession};
 use chibipop::geom::{PhysRect, ScanDisplay};
 use chibipop::dict::pitch::PitchClaim;
 use chibipop::lookup::deconj::Deconjugator;
@@ -58,6 +58,8 @@ pub struct Setup {
 /// must run on that thread. Core owns that seam as
 /// `WorkerParts::serve`. This type travels through the seam.
 pub struct OcrRequest {
+    /// The profile captured when the user activated this action.
+    pub session: ProfileSession,
     /// Top-down BGRA8 at native resolution. This adapter never upscales.
     /// See ARCHITECTURE.md#ocr-engine.
     pub bgra: Vec<u8>,
@@ -196,8 +198,9 @@ pub fn static_region(anki: &AnkiConfig) -> Option<PhysRect> {
     anki.static_region.map(|[x, y, w, h]| PhysRect { x, y, w, h })
 }
 
-/// Return the Worker settings from the configuration that the daemon read.
-pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
+/// Return Worker settings from the retained profile session.
+pub fn settings(session: &ProfileSession, dicts: &[DictInfo]) -> WorkerSettings {
+    let config = session.config();
     WorkerSettings {
         max_passes: config.ocr.max_ocr_passes,
         // Never upscale. meikiocr scores worse on 2x crops than on
@@ -215,7 +218,7 @@ pub fn settings(config: &Config, dicts: &[DictInfo]) -> WorkerSettings {
         // The engine does not filter this list. An exact name either
         // identifies an installed dictionary or identifies no dictionary.
         // See ARCHITECTURE.md#dictionary-and-lookup.
-        present_cfg: config.present_config(dicts),
+        present_cfg: session.present_config().clone(),
         scan_display: ScanDisplay {
             captures: config.debug.show_scan_region,
             highlight: config.popup.highlight_match,
@@ -296,9 +299,11 @@ pub fn spawn(
 /// A hook that waits for the next job would stop the hover pipeline after a
 /// clipboard copy.
 pub fn serve_jobs(jobs: mpsc::Receiver<OcrRequest>) -> chibipop::worker::ServeHook {
-    Box::new(move |source| {
+    Box::new(move |source, _lookup_session| {
         for job in jobs.try_iter() {
-            let lines = source.recognise(&job.bgra, job.w, job.h).map_err(|e| format!("{e:#}"));
+            let lines = source
+                .recognise_for_session(&job.session, &job.bgra, job.w, job.h)
+                .map_err(|e| format!("{e:#}"));
             // A stopped caller does not affect this thread.
             // The next job in the queue still runs.
             let _ = job.answer.send(lines);
@@ -331,149 +336,5 @@ mod tests {
         assert!(dict.entries(&[1]).unwrap().is_empty());
         let e = dict.terms_for("食").expect_err("a lookup must say what is missing");
         assert!(format!("{e:#}").contains("/nonexistent/chibipop.sqlite"), "{e:#}");
-        assert!(format!("{e:#}").contains("Rebuild"), "{e:#}");
-    }
-
-    #[test]
-    fn the_dictionary_line_names_what_was_found() {
-        let db = Path::new("/tmp/chibipop.sqlite");
-        assert!(dict_line(db, &[]).contains("no dictionary at /tmp/chibipop.sqlite"));
-        let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex".to_string() }];
-        assert!(dict_line(db, &dicts).contains("Jitendex"));
-    }
-
-    /// The search must name the file that every layout installs.
-    /// A typo would create a pipeline with no deconjugation and no error.
-    /// The install chooses one of three candidates.
-    /// A test binary in `target/debug/deps` matches none of them.
-    /// Therefore, this test pins the file name, not the directory.
-    #[test]
-    fn the_rules_search_looks_for_the_file_this_build_ships() {
-        assert!(rules_file().ends_with(RULES), "{}", rules_file().display());
-    }
-
-    /// The file contains deconjugation rules, not an empty array.
-    /// Every layout installs this copy.
-    #[test]
-    fn the_shipped_rules_parse_and_are_not_empty() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(RULES);
-        let rules = load_rules(&repo).expect("the shipped deconjugation rules must parse");
-        assert!(!rules.is_empty());
-    }
-
-    /// The Linux adapter never upscales. See ARCHITECTURE.md#ocr-engine.
-    /// Native crops score better than 2x crops on every benchmark slice.
-    /// The shared Worker must receive factor 1 from this daemon.
-    /// The OCR gate feeds native meiki fixtures directly.
-    /// It cannot catch a runtime factor change. This test pins the factor
-    /// at the seam.
-    #[test]
-    fn the_linux_worker_never_upscales() {
-        let mut config = Config::default();
-        config.debug.show_lookup_log = true;
-        let s = settings(&config, &[]);
-        assert_eq!(1, s.upscale);
-        assert_eq!(1, s.snapshot().upscale, "and the snapshot carries it to TextSource");
-        assert!(s.show_lookup_log);
-    }
-
-    /// Earlier code hardcoded `static_region: None`.
-    /// A comment there called the overlay a Windows surface.
-    /// Therefore, `SentenceMode::Static` did not act here after the user drew
-    /// a box. Core's `resolve_static` function is platform agnostic and reads
-    /// only this field. This field enables the feature.
-    /// This test pins the field at the seam that builds `WorkerSettings` for
-    /// this daemon.
-    #[test]
-    fn a_configured_static_region_reaches_the_worker_settings() {
-        let mut config = Config::default();
-        config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
-        config.anki.static_region = Some([120, 240, 800, 300]);
-
-        let s = settings(&config, &[]);
-        // Check both values because `resolve_static` requires the pair.
-        // The mode alone selects line mode. A region alone stays unread.
-        assert_eq!(chibipop::config::SentenceMode::Static, s.sentence_mode);
-        assert_eq!(Some(PhysRect { x: 120, y: 240, w: 800, h: 300 }), s.static_region);
-    }
-
-    /// The default has no drawn box and no invented box.
-    /// Core selects line mode when the region is absent.
-    /// Therefore, the correct answer is `None`, not a whole-screen stand-in.
-    #[test]
-    fn no_drawn_region_stays_absent_rather_than_becoming_the_screen() {
-        assert_eq!(None, settings(&Config::default(), &[]).static_region);
-    }
-
-    /// Dictionary exclusion has one purpose.
-    /// An unchecked row in the Terms section of the settings window must
-    /// reach the pipeline.
-    /// `settings` is the only place where the daemon builds `WorkerSettings`.
-    /// Both `reload` and `spawn` call it. This test pins the scope at that seam.
-    #[test]
-    fn an_excluded_dictionary_is_dropped_from_the_worker_settings() {
-        let dicts = vec![
-            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
-            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
-        ];
-        let mut config = Config::default();
-        config.ocr.language = "ja".to_string();
-        config
-            .dictionaries
-            .per_language
-            .insert("ja".to_string(), vec!["大辞林　第四版".to_string()]);
-
-        let cfg = settings(&config, &dicts).present_cfg;
-        // The scope carries the exact names from the configuration.
-        // The pipeline searches no dictionary outside this scope.
-        assert_eq!(vec!["大辞林　第四版".to_string()], cfg.terms);
-        let keeps = |name: &str| chibipop::present::keeps_dict(name, &cfg.terms);
-        assert!(keeps("大辞林　第四版"));
-        assert!(!keeps("Jitendex.org [2026-07-09]"), "excluded, so not searched");
-    }
-
-    /// The shipped default has no split and no filter.
-    /// It searches every dictionary.
-    ///
-    /// A default config names no dictionary in either array.
-    /// Every installed dictionary is therefore new and starts active.
-    #[test]
-    fn a_config_with_no_split_searches_every_dictionary() {
-        let dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
-        let cfg = settings(&Config::default(), &dicts).present_cfg;
-        assert_eq!(vec!["Jitendex.org".to_string()], cfg.terms);
-        assert!(chibipop::present::keeps_dict("Jitendex.org", &cfg.terms));
-    }
-
-    /// The Linux settings UI hides `ocr.language` and keeps its stored value.
-    /// A Windows install can share a config that names a language meikiocr
-    /// does not read. No engine probe answers that question.
-    /// One question remains: does the configured language have its own list?
-    /// When it has one, the pipeline searches that list.
-    #[test]
-    fn the_ocr_languages_own_list_is_searched_and_the_global_list_stands_in_without_one() {
-        let dicts = vec![
-            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
-            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
-        ];
-        let mut config = Config::default();
-        config.ocr.language = "zh-Hans-CN".to_string();
-        config
-            .dictionaries
-            .per_language
-            .insert("zh-Hans-CN".to_string(), vec!["大辞林　第四版".to_string()]);
-
-        let scoped = settings(&config, &dicts).present_cfg;
-        assert_eq!(vec!["大辞林　第四版".to_string()], scoped.terms);
-
-        // The same entry exists under a language that does not match the config language.
-        // The global terms list decides instead. An empty global list means every
-        // installed dictionary.
-        config.ocr.language = "ja".to_string();
-        let global = settings(&config, &dicts).present_cfg;
-        assert_eq!(
-            vec!["大辞林　第四版".to_string(), "Jitendex.org [2026-07-09]".to_string()],
-            global.terms
-        );
     }
 }

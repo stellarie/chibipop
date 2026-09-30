@@ -2889,7 +2889,7 @@ const WRAPPED_TREE: &str = concat!(
 /// itself and could report false monotonicity.
 #[test]
 fn the_swept_widths_run_from_the_default_cap_to_the_ceiling() {
-    let default = crate::config::Config::default().popup.max_width_percent;
+    let default = crate::config::ResolvedConfig::default().popup.max_width_percent;
     assert_eq!(
         f32::from(default),
         SWEEP_W_PERCENT,

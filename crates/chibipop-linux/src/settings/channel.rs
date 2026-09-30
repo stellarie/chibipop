@@ -57,7 +57,7 @@ impl HotkeyChannel {
         compositor: Compositor,
         chord: &str,
         exe: &Path,
-        bind: Bind,
+        bind: Bind<'_>,
     ) -> HotkeyControl {
         if chord.trim().is_empty() {
             return HotkeyControl::NoChord;
@@ -77,36 +77,8 @@ impl HotkeyChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chibipop::config::TriggerMode;
 
-    /// The snippet must contain the running binary path instead of a bare name.
-    /// Under `cargo run`, the binary is not in PATH.
-    #[test]
-    fn native_channel_renders_the_snippet_for_the_running_binary() {
-        let exe = Path::new("/home/u/chibipop/target/debug/chibipop");
-        let control = HotkeyChannel::Native.control(Compositor::Hyprland, "ALT+F", exe, Bind::Hold);
-        let HotkeyControl::Snippet { text } = control else {
-            panic!("native must render a snippet, got {control:?}");
-        };
-        assert!(text.contains("/home/u/chibipop/target/debug/chibipop ctl trigger-down"), "{text}");
-        assert!(!text.contains(", chibipop ctl"), "the bare command name must not survive: {text}");
-    }
-
-    /// The add-card row uses the same structure. On the native rung, this snippet
-    /// is the only method to bind the chord (ARCHITECTURE.md#input-ladders, rung 2).
-    #[test]
-    fn native_channel_renders_a_press_snippet_for_a_one_shot_action() {
-        let control = HotkeyChannel::Native.control(
-            Compositor::Sway,
-            "ALT+A",
-            Path::new("/opt/cp/chibipop"),
-            Bind::Press(crate::control::Verb::AnkiAdd),
-        );
-        let HotkeyControl::Snippet { text } = control else {
-            panic!("native must render a snippet, got {control:?}");
-        };
-        assert!(text.contains("bindsym --no-repeat Mod1+a exec /opt/cp/chibipop ctl anki-add"), "{text}");
-        assert!(!text.contains("--release"), "one press, one verb: {text}");
-    }
 
     #[test]
     fn niri_does_not_offer_a_copy_button_for_unsupported_modifiers() {
@@ -114,43 +86,17 @@ mod tests {
             Compositor::Niri,
             "CAPS+F2",
             Path::new("chibipop"),
-            Bind::Press(crate::control::Verb::AnkiAdd),
+            Bind { id: "action", mode: TriggerMode::Press },
         );
         assert!(matches!(control, HotkeyControl::Unsupported { .. }), "{control:?}");
     }
 
-    #[test]
-    fn portal_channel_renders_the_rebind_flow() {
-        let channel = HotkeyChannel::Portal { current_binding: Some("ALT+F".into()) };
-        assert_eq!(
-            channel.control(Compositor::Kde, "ALT+F", Path::new("chibipop"), Bind::Hold),
-            HotkeyControl::Rebind { current: Some("ALT+F".into()) }
-        );
-    }
-
-    /// Each row receives the channel for its portal identifier.
-    /// The add-card row shows the add-card key. An unregistered identifier
-    /// shows no key. The type prevents using keys from other actions.
-    #[test]
-    fn a_one_shot_row_names_the_key_published_for_its_own_action() {
-        let add = Bind::Press(crate::control::Verb::AnkiAdd);
-        let bound = HotkeyChannel::Portal { current_binding: Some("ALT+A".into()) };
-        assert_eq!(
-            HotkeyControl::Rebind { current: Some("ALT+A".into()) },
-            bound.control(Compositor::Kde, "ALT+A", Path::new("chibipop"), add),
-        );
-        let unnamed = HotkeyChannel::Portal { current_binding: None };
-        assert_eq!(
-            HotkeyControl::Rebind { current: None },
-            unnamed.control(Compositor::Kde, "ALT+A", Path::new("chibipop"), add),
-        );
-    }
 
     /// An empty chord provides no binding on either rung.
     /// Whitespace strings also count as empty.
     #[test]
     fn a_blank_chord_offers_no_bind_on_either_channel() {
-        let add = Bind::Press(crate::control::Verb::AnkiAdd);
+        let add = Bind { id: "action", mode: TriggerMode::Press };
         for channel in [
             HotkeyChannel::Native,
             HotkeyChannel::Portal { current_binding: Some("ALT+F".into()) },

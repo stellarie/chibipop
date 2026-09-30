@@ -3,12 +3,13 @@
 //! accessibility providers away from the window pump. Unsupported controls
 //! return no selection; clipboard fallback could silently use unrelated text.
 
+use crate::config::ProfileSession;
 use crate::controller::RequestId;
 use crate::geom::PhysRect;
 use windows::Win32::System::Variant::{VARIANT, VT_R8};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
@@ -23,12 +24,17 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection { pub text: String, pub bounds: Option<PhysRect> }
 
-struct Request { id: RequestId, window: usize, started: Instant }
+struct Request {
+    id: RequestId,
+    window: usize,
+    started: Instant,
+    session: ProfileSession,
+}
 
 pub struct Reader {
     tx: SyncSender<Request>,
-    rx: Receiver<(RequestId, Option<Selection>)>,
-    pending: Option<(RequestId, Instant)>,
+    rx: Receiver<(RequestId, ProfileSession, Option<Selection>)>,
+    pending: Option<(RequestId, Instant, ProfileSession)>,
 }
 
 impl Reader {
@@ -48,7 +54,7 @@ impl Reader {
                         }
                     }
                 } else { None };
-                if results.send((request.id, text)).is_err() { break; }
+                if results.send((request.id, request.session, text)).is_err() { break; }
             }
             if initialized {
                 // SAFETY: This balances the successful initialization above.
@@ -58,25 +64,29 @@ impl Reader {
         Self { tx, rx, pending: None }
     }
 
-    pub fn request(&mut self, id: RequestId) {
+    pub fn request(&mut self, id: RequestId, session: ProfileSession) {
         let started = Instant::now();
         // SAFETY: This query does not retain or mutate a window resource.
         let window = unsafe { GetForegroundWindow() }.0 as usize;
-        self.pending = Some((id, started));
-        if self.tx.try_send(Request { id, window, started }).is_err() {
-            self.pending = Some((id, started - TIMEOUT));
+        self.pending = Some((id, started, session.clone()));
+        match self.tx.try_send(Request { id, window, started, session }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) => {
+                self.pending = Some((id, started - TIMEOUT, request.session));
+            }
         }
     }
 
-    pub fn poll(&mut self) -> Option<(RequestId, Option<Selection>)> {
-        while let Ok((id, text)) = self.rx.try_recv() {
-            if self.pending.is_some_and(|(pending, _)| pending == id) {
-                let (_, started) = self.pending.take()?;
-                return Some((id, if started.elapsed() < TIMEOUT { text } else { None }));
+    pub fn poll(&mut self) -> Option<(RequestId, ProfileSession, Option<Selection>)> {
+        while let Ok((id, result_session, text)) = self.rx.try_recv() {
+            let Some((pending_id, _, session)) = &self.pending else { continue };
+            if *pending_id == id && *session == result_session {
+                let (_, started, session) = self.pending.take()?;
+                return Some((id, session, if started.elapsed() < TIMEOUT { text } else { None }));
             }
         }
-        if self.pending.is_some_and(|(_, started)| started.elapsed() >= TIMEOUT) {
-            return self.pending.take().map(|(id, _)| (id, None));
+        if self.pending.as_ref().is_some_and(|(_, started, _)| started.elapsed() >= TIMEOUT) {
+            return self.pending.take().map(|(id, _, session)| (id, session, None));
         }
         None
     }
@@ -274,6 +284,44 @@ fn append_range(text: &mut String, part: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_sessions() -> (ProfileSession, ProfileSession) {
+        let mut config = crate::config::Config::default();
+        let mut default = config.resolve("default").unwrap();
+        default.anki.deck = "Retained deck".into();
+        default.actions.search.selected_opens_sentence_search = true;
+        config.update_profile("default", &default).unwrap();
+
+        let mut alternate = default.clone();
+        alternate.anki.deck = "Current deck".into();
+        alternate.actions.search.selected_opens_sentence_search = false;
+        config.profiles.push(crate::config::Profile {
+            id: "alternate".into(),
+            name: "Alternate".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(alternate) },
+        });
+        let catalog = crate::config::ProfileCatalog::new(&config, &[]).unwrap();
+        (
+            catalog.session(Some("default")).unwrap(),
+            catalog.session(Some("alternate")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_full_request_channel_returns_the_rejected_request_identity() {
+        let (first_session, rejected_session) = test_sessions();
+        let (tx, _requests) = mpsc::sync_channel(1);
+        let (_results, rx) = mpsc::channel();
+        assert!(tx.try_send(Request {
+            id: RequestId(1),
+            window: 0,
+            started: Instant::now(),
+            session: first_session,
+        }).is_ok());
+        let mut reader = Reader { tx, rx, pending: None };
+        reader.request(RequestId(2), rejected_session.clone());
+        assert_eq!(Some((RequestId(2), rejected_session, None)), reader.poll());
+    }
+
 
     struct ComApartment;
 
@@ -385,23 +433,49 @@ mod tests {
     }
 
     #[test]
-    fn late_capture_cannot_replace_a_newer_selection() {
+    fn late_selection_replies_require_the_current_request_and_profile_session() {
+        let (retained, current) = test_sessions();
+        let id = RequestId(2);
         let (tx, _requests) = mpsc::sync_channel(1);
         let (results, rx) = mpsc::channel();
-        let mut reader = Reader { tx, rx, pending: Some((RequestId(2), Instant::now())) };
-        results.send((RequestId(1), Some(Selection { text: "古い".into(), bounds: None }))).unwrap();
+        let mut reader = Reader {
+            tx,
+            rx,
+            pending: Some((id, Instant::now(), current.clone())),
+        };
+
+        results
+            .send((RequestId(1), retained.clone(), Some(Selection { text: "古い".into(), bounds: None })))
+            .unwrap();
+        results
+            .send((id, retained, Some(Selection { text: "別の設定".into(), bounds: None })))
+            .unwrap();
         assert_eq!(reader.poll(), None);
-        results.send((RequestId(2), Some(Selection { text: "猫".into(), bounds: None }))).unwrap();
-        assert_eq!(reader.poll(), Some((RequestId(2), Some(Selection { text: "猫".into(), bounds: None }))));
+
+        results
+            .send((id, current.clone(), Some(Selection { text: "猫".into(), bounds: None })))
+            .unwrap();
+        assert_eq!(
+            reader.poll(),
+            Some((id, current, Some(Selection { text: "猫".into(), bounds: None }))),
+        );
         assert_eq!(reader.poll(), None);
     }
 
     #[test]
     fn timed_out_capture_does_not_deliver_queued_text() {
+        let (session, _) = test_sessions();
+        let id = RequestId(1);
         let (tx, _requests) = mpsc::sync_channel(1);
         let (results, rx) = mpsc::channel();
-        let mut reader = Reader { tx, rx, pending: Some((RequestId(1), Instant::now() - TIMEOUT)) };
-        results.send((RequestId(1), Some(Selection { text: "猫".into(), bounds: None }))).unwrap();
-        assert_eq!(reader.poll(), Some((RequestId(1), None)));
+        let mut reader = Reader {
+            tx,
+            rx,
+            pending: Some((id, Instant::now() - TIMEOUT, session.clone())),
+        };
+        results
+            .send((id, session.clone(), Some(Selection { text: "猫".into(), bounds: None })))
+            .unwrap();
+        assert_eq!(reader.poll(), Some((id, session, None)));
     }
 }

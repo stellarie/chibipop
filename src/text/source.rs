@@ -4,6 +4,7 @@
 //! Platform code supplies the two seams.
 //! Core shares all code below the seams.
 
+use crate::config::ProfileSession;
 use crate::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use crate::lookup::engine::MAX_LOOKUP_CHARS;
 use crate::text::layout::{
@@ -175,6 +176,8 @@ pub struct TextSource {
     capture: Box<dyn RegionCapture>,
     ocr: RefCell<Box<dyn OcrEngine>>,
     settings: SettingsSnapshot,
+    language: RefCell<String>,
+    profile_scope: Option<ProfileSession>,
     show_lookup_log: bool,
     /// This is the press-time grab for the active trigger hold.
     /// Every lookup reads from it, so the backend receives no more calls.
@@ -198,6 +201,42 @@ impl TextSource {
     /// The job cannot create a second engine elsewhere.
     /// This method gives one-off OCR calls the same seam as lookups.
     pub fn recognise(&self, bgra: &[u8], w: i32, h: i32) -> Result<Vec<OcrLine>> {
+        self.recognise_with(
+            bgra,
+            w,
+            h,
+            self.settings.discard_furigana,
+            self.show_lookup_log,
+        )
+    }
+
+    pub fn recognise_for_session(
+        &self,
+        session: &ProfileSession,
+        bgra: &[u8],
+        w: i32,
+        h: i32,
+    ) -> Result<Vec<OcrLine>> {
+        let config = session.config();
+        self.ocr.borrow_mut().set_language(&config.ocr.language);
+        *self.language.borrow_mut() = config.ocr.language.clone();
+        self.recognise_with(
+            bgra,
+            w,
+            h,
+            config.ocr.discard_furigana,
+            self.show_lookup_log,
+        )
+    }
+
+    fn recognise_with(
+        &self,
+        bgra: &[u8],
+        w: i32,
+        h: i32,
+        discard_ruby: bool,
+        show_log: bool,
+    ) -> Result<Vec<OcrLine>> {
         let started = std::time::Instant::now();
         let lines = match self.ocr.borrow().recognise(bgra, w, h) {
             Ok(lines) => lines,
@@ -212,7 +251,7 @@ impl TextSource {
                 return Err(error);
             }
         };
-        let lines = if self.settings.discard_furigana {
+        let lines = if discard_ruby {
             discard_furigana(lines)
         } else {
             lines
@@ -227,7 +266,7 @@ impl TextSource {
             lines.len(),
             words,
         );
-        if self.show_lookup_log {
+        if show_log {
             use std::fmt::Write;
             let mut message = String::new();
             for (line_index, line) in lines.iter().enumerate() {
@@ -266,6 +305,8 @@ impl TextSource {
             capture,
             ocr: RefCell::new(ocr),
             settings,
+            language: RefCell::new(String::new()),
+            profile_scope: None,
             show_lookup_log: false,
             frozen: None,
             recognised: Vec::new(),
@@ -279,11 +320,21 @@ impl TextSource {
 
     /// Replace the OCR settings.
     pub fn apply_settings(&mut self, settings: SettingsSnapshot, language: &str) {
-        self.ocr.borrow_mut().set_language(language);
-        self.settings = settings;
-        // A new language or capture size produces a new answer.
-        self.recognised.clear();
-        self.previous.clear();
+        if self.settings != settings || self.language.borrow().as_str() != language {
+            self.ocr.borrow_mut().set_language(language);
+            *self.language.borrow_mut() = language.to_string();
+            self.settings = settings;
+            self.recognised.clear();
+            self.previous.clear();
+        }
+    }
+
+    pub fn set_profile_scope(&mut self, session: &ProfileSession) {
+        if self.profile_scope.as_ref() != Some(session) {
+            self.profile_scope = Some(session.clone());
+            self.recognised.clear();
+            self.previous.clear();
+        }
     }
 
     /// Freeze the output that contains `at`.
@@ -329,6 +380,7 @@ impl TextSource {
     /// Swap OCR backend.
     pub fn replace_ocr(&self, ocr: Box<dyn OcrEngine>) {
         drop(self.ocr.replace(ocr));
+        self.language.borrow_mut().clear();
     }
 
     /// Return the box covered by the hold's frozen grab, if one exists.

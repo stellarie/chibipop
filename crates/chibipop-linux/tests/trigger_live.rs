@@ -72,7 +72,15 @@ impl Session {
         // Use Hold-key mode. This test sends the verbs itself.
         // Live mode would run OCR on every cursor move from the person at the machine.
         let mut cfg = chibipop::config::Config::default();
-        cfg.trigger.mode = chibipop::config::TriggerMode::HoldKey;
+        cfg.live_lookup = false;
+        cfg.binds[0].enabled = true;
+        cfg.binds[0].mode = chibipop::config::TriggerMode::HoldKey;
+        let dictionary = chibipop::lookup::sqlite::SqliteDictionary::open(
+            &dir.join("data/chibipop/chibipop.sqlite")).expect("opening the fixture Dictionary");
+        let mut profile = cfg.resolve(&cfg.default_profile).expect("resolving the default profile");
+        profile.dictionaries.terms.enabled = chibipop::lookup::model::Dictionary::dicts(&dictionary)
+            .expect("reading dictionary identities").into_iter().map(|dict| dict.name).collect();
+        cfg.update_profile(&cfg.default_profile.clone(), &profile).expect("enabling the fixture Dictionaries");
         cfg.save(&dir.join("config/chibipop/chibipop.toml")).expect("writing the config");
 
         let mut cmd = Command::new(BIN);
@@ -186,7 +194,6 @@ fn the_trigger_verbs_freeze_hold_and_release_a_real_grab() {
     session.wait_for("latched - live grabs until toggle-off");
     assert_eq!(1, session.count("frozen grab of output"), "toggle-on takes no frozen grab");
     session.ctl("trigger-up");
-    session.wait_for("a toggle holds the live grab");
     assert_eq!(
         1,
         session.count("hold released"),

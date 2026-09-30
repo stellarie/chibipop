@@ -26,7 +26,7 @@ use super::{paint, physical_theme, text::TextEngine};
 use crate::cursor::outputs::OutputGeometry;
 use crate::daemon::App;
 use anyhow::{anyhow, Context, Result};
-use chibipop::config::{Config, PopupLayer};
+use chibipop::config::{ProfileSession, ResolvedConfig, PopupLayer};
 use chibipop::geom::PhysPoint;
 use chibipop::geom::PhysRect;
 use chibipop::controller::Button;
@@ -98,6 +98,7 @@ const FRAME_GRACE: Duration = Duration::from_millis(100);
 /// Every measured value lives on this side of the seam.
 #[derive(Debug, Clone)]
 pub struct ShowRequest {
+    pub session: ProfileSession,
     pub presentation: Presentation,
     pub anchor: PhysRect,
     /// Physical pixels, as the Controller counts them.
@@ -160,6 +161,7 @@ struct Panel {
     /// The output's layout facts, in the cursor channel's convention.
     geo: OutputGeometry,
     layer: LayerSurface,
+    layer_kind: Layer,
     /// `wp_viewport`: buffer pixels in, logical size out.
     viewport: Option<WpViewport>,
     /// The code keeps this object alive so `preferred_scale`
@@ -231,6 +233,7 @@ pub struct Popup {
     db: std::path::PathBuf,
     /// The logical theme. Every render scales a copy of this theme.
     theme: Theme,
+    default_layer: Layer,
     layer: Layer,
     /// Width and height caps, percent of the output.
     caps: (u8, u8),
@@ -266,6 +269,7 @@ pub struct Popup {
 struct SavedPopup {
     shown: Shown,
     request: ShowRequest,
+    theme: Theme,
     scene: Option<PopupScene>,
     hits: Option<HitScene>,
 }
@@ -310,7 +314,7 @@ impl Popup {
     pub fn bind(
         globals: &GlobalList,
         qh: &QueueHandle<App>,
-        config: &Config,
+        config: &ResolvedConfig,
         db: &std::path::Path,
     ) -> Result<Popup> {
         let compositor = CompositorState::bind(globals, qh)
@@ -409,9 +413,10 @@ impl Popup {
             db: db.to_path_buf(),
             theme,
             layer: layer_of(config.popup.layer),
+            default_layer: layer_of(config.popup.layer),
             caps: (config.popup.max_width_percent, config.popup.max_height_percent),
-            side_panel: config.popup.side_panel,
             render: config.popup.render_settings(),
+            side_panel: config.popup.side_panel,
             vis: Visibility::Hidden,
             current: None,
             scene: None,
@@ -492,11 +497,10 @@ impl Popup {
         &self.compositor
     }
 
-    /// The layer that carries every popup panel.
+    /// The layer that carries the active popup panel.
     ///
     /// The Press-mode catcher must share this layer. A lower layer cannot
-    /// receive a click that the popup owns, so the catcher reads this value
-    /// instead of keeping a second config mapping.
+    /// receive a click that the popup owns, so the catcher reads this value.
     pub fn layer(&self) -> Layer {
         self.layer
     }
@@ -670,7 +674,7 @@ impl Popup {
             let hits = parent.hits.as_ref()?;
             let local = hits.local(pos);
             let query = parent.scene.as_ref()?.hover_query(
-                (local.x as f32, local.y as f32), hits.scroll, &self.theme.font_name, &mut self.text,
+                (local.x as f32, local.y as f32), hits.scroll, &parent.theme.font_name, &mut self.text,
             ).ok().flatten();
             return Some(Interaction::HoverAt { depth, local, query });
         }
@@ -760,7 +764,11 @@ impl Popup {
         let Some(shown) = self.vis.shown() else { return };
         let Some(request) = self.current.take() else { return };
         self.parents.push(SavedPopup {
-            shown, request, scene: self.scene.take(), hits: self.hits.take(),
+            shown,
+            request,
+            theme: self.theme.clone(),
+            scene: self.scene.take(),
+            hits: self.hits.take(),
         });
         self.vis = Visibility::Hidden;
     }
@@ -775,8 +783,15 @@ impl Popup {
             if let Some(slot) = self.slot(saved.shown.output) { self.clear(slot); }
         }
         let saved = self.parents.pop().expect("parent exists");
+        let config = saved.request.session.config();
+        self.layer = layer_of(config.popup.layer);
+        self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
+        self.side_panel = config.popup.side_panel;
+        self.render = config.popup.render_settings();
+        self.pointer.set_wheel_enabled(config.popup.scroll_popup);
         self.vis = Visibility::Shown(saved.shown);
         self.current = Some(saved.request);
+        self.theme = saved.theme;
         self.scene = saved.scene;
         self.hits = saved.hits;
     }
@@ -794,8 +809,10 @@ impl Popup {
             let saved = &self.parents[depth];
             let Some(scene) = saved.scene.clone() else { continue };
             let pending = Pending {
-                placement: saved.shown.placement, scale: saved.shown.scale,
-                theme: physical_theme(&self.theme, saved.shown.scale), scene,
+                placement: saved.shown.placement,
+                scale: saved.shown.scale,
+                theme: physical_theme(&saved.theme, saved.shown.scale),
+                scene,
                 scroll: saved.request.scroll as f32,
             };
             if let Some(slot) = self.slot(saved.shown.output) {
@@ -941,11 +958,16 @@ impl Popup {
     /// xdg-output info completes. Two surfaces on one output would
     /// show two popups.
     pub fn map_one(&mut self, output: &WlOutput) {
-        self.map_depth(output, 0);
+        self.map_depth(output, 0, self.default_layer);
     }
 
-    fn map_depth(&mut self, output: &WlOutput, depth: usize) {
-        if self.panels.iter().any(|p| &p.output == output && p.depth == depth) {
+    fn map_depth(&mut self, output: &WlOutput, depth: usize, layer_kind: Layer) {
+        if let Some(panel) = self.panels.iter_mut().find(|p| &p.output == output && p.depth == depth) {
+            if panel.layer_kind != layer_kind {
+                panel.layer.set_layer(layer_kind);
+                panel.layer.commit();
+                panel.layer_kind = layer_kind;
+            }
             return;
         }
         let qh = self.qh.clone();
@@ -963,8 +985,7 @@ impl Popup {
         let surface = self.compositor.create_surface(qh);
         let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, ()));
         let scale = self.fractional.as_ref().map(|f| f.get_fractional_scale(&surface, qh, id));
-        let layer = shell.create_layer_surface(qh, surface, self.layer, Some(NAMESPACE), Some(output));
-        self.next_id += 1;
+        let layer = shell.create_layer_surface(qh, surface, layer_kind, Some(NAMESPACE), Some(output));
         // Fixed rules: the popup must never reserve space, the popup
         // must never take keyboard focus, and the popup's position
         // must use margins from the top-left corner of this output.
@@ -984,7 +1005,7 @@ impl Popup {
             geo.physical_w(),
             place::output_physical(&geo).h,
             geo.scale(),
-            layer_name(self.layer),
+            layer_name(layer_kind),
         ));
         self.panels.push(Panel {
             depth,
@@ -992,6 +1013,7 @@ impl Popup {
             output: output.clone(),
             geo,
             layer,
+            layer_kind,
             viewport,
             _scale: scale,
             preferred,
@@ -999,6 +1021,7 @@ impl Popup {
             awaiting_frame: None,
             pending: None,
         });
+        self.next_id += 1;
     }
 
     /// An output went away, or the compositor closed its surface.
@@ -1021,77 +1044,46 @@ impl Popup {
         }
     }
 
-    /// Re-read the settings that a reload can change, and reopen the
-    /// dictionary that a rebuild replaced. `set_layer` needs no
-    /// recreation. This is exactly why `popup.layer` is a runtime
-    /// toggle, not a restart setting.
-    pub fn reconfigure(&mut self, config: &Config) {
-        // This is the popup's half of the reload. `reload` arrives
-        // here for two different reasons at once. Either the
-        // settings window applied a config change, or the settings
-        // window finished a rebuild. The control socket carries no
-        // way to tell these two reasons apart
-        // (ARCHITECTURE.md#settings-and-config: the config file is
-        // the only truth), and this code does not need to tell them
-        // apart. Reopening on a plain config reload costs one
-        // `sqlite3_open` call and an emptied cache. Skipping the
-        // reopen after a real rebuild costs the popup every gaiji
-        // that it draws, because a rebuild renames a new file over
-        // this path and renumbers the `dict_id` that this cache uses
-        // as a key. The worker reopens its own handle in response to
-        // the same event.
+    /// Refresh shared media after a reload.
+    /// Existing popup requests keep their retained sessions.
+    pub fn reconfigure(&mut self, config: &ResolvedConfig) {
         self.media = open_media(&self.db, &mut self.notes);
-        let layer = layer_of(config.popup.layer);
-        if layer != self.layer {
-            self.layer = layer;
-            for panel in &self.panels {
-                panel.layer.set_layer(layer);
-                panel.layer.commit();
-            }
-            self.notes.push(format!("popup: layer -> {}", layer_name(layer)));
-        }
-        self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
-        self.side_panel = config.popup.side_panel;
-        self.render = config.popup.render_settings();
-        // Windows arms its wheel hook on each dispatch tick from the
-        // same setting. The popup's own region has nothing to arm, so
-        // the gate lives on the pointer instead.
-        self.pointer.set_wheel_enabled(config.popup.scroll_popup);
-
-        let theme = theme_from_config(config);
-        let refont = theme.font_name != self.theme.font_name;
-        self.theme = theme;
-        if refont {
-            let choice = chibipop::config::resolve_font(
-                &config.popup.font,
-                chibipop::config::Platform::Linux,
-                |f| self.text.resolvable(f),
-            );
-            if let chibipop::config::FontChoice::Fallback { requested, family } = &choice {
-                self.notes
-                    .push(format!("font: {requested:?} is not installed - falling back to {family}"));
-            }
-            self.theme.font_name = choice.family().to_string();
-            self.text.set_family(&self.theme.font_name);
-            if let Some(warning) = super::text::warning(&self.text.probe()) {
-                self.notes.push(warning);
-            }
-        }
-        // The code re-measures a shown popup at the new settings.
-        if self.vis.shown().is_some() {
-            if let Some(req) = self.current.clone() {
-                let _ = self.show(&req);
-            }
-        }
+        self.default_layer = layer_of(config.popup.layer);
     }
 
     /// Measure, place, raster, and commit. The daemon feeds the
     /// returned [`Placed`] back to the Controller as
     /// `Event::PopupPlaced`.
     pub fn show(&mut self, req: &ShowRequest) -> Result<Placed> {
+        let config = req.session.config();
+        let layer = layer_of(config.popup.layer);
+        self.layer = layer;
+        self.caps = (config.popup.max_width_percent, config.popup.max_height_percent);
+        self.side_panel = config.popup.side_panel;
+        self.render = config.popup.render_settings();
+        self.pointer.set_wheel_enabled(config.popup.scroll_popup);
+        let mut logical_theme = theme_from_config(config);
+        let choice = chibipop::config::resolve_font(
+            &config.popup.font,
+            chibipop::config::Platform::Linux,
+            |family| self.text.resolvable(family),
+        );
+        if let chibipop::config::FontChoice::Fallback { requested, family } = &choice {
+            if self.theme.font_name != *family {
+                self.notes.push(format!("font: {requested:?} is not installed - falling back to {family}"));
+            }
+        }
+        logical_theme.font_name = choice.family().to_string();
+        if logical_theme.font_name != self.theme.font_name {
+            self.text.set_family(&logical_theme.font_name);
+            if let Some(warning) = super::text::warning(&self.text.probe()) {
+                self.notes.push(warning);
+            }
+        }
+        self.theme = logical_theme;
         let depth = self.parents.len();
         let outputs: Vec<_> = self.outputs.outputs().collect();
-        for output in outputs { self.map_depth(&output, depth); }
+        for output in outputs { self.map_depth(&output, depth, layer); }
         self.restore_parent_pixels()?;
         if self.panels.is_empty() {
             return Err(anyhow!("no layer surface exists yet"));
@@ -1446,7 +1438,7 @@ fn open_media(
 /// also reads and parses `popup.css`, which Linux never does. A CSS
 /// override therefore works on Windows and is silently ignored here
 /// (issue #53).
-fn theme_from_config(config: &Config) -> Theme {
+fn theme_from_config(config: &ResolvedConfig) -> Theme {
     let mut theme = match config.popup.theme.as_str() {
         "light" => Theme::light(),
         _ => Theme::dark(),

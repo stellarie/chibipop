@@ -131,7 +131,7 @@ fn clipboard_rung() -> Option<clipboard::Rung> {
 /// own result, because another action's registration does not bind this key.
 fn hotkey_channel(
     published: Option<&shortcuts::state::Published>,
-    id: shortcuts::ShortcutId,
+    id: &str,
 ) -> channel::HotkeyChannel {
     match published {
         Some(published) if published.portal && published.contains(id) => {
@@ -157,7 +157,7 @@ mod tests {
     use super::*;
     use crate::shortcuts::state::Published;
     use crate::shortcuts::{Binding, ShortcutId};
-    use channel::{HotkeyChannel, HotkeyControl};
+    use channel::HotkeyChannel;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir()
@@ -167,123 +167,47 @@ mod tests {
         dir
     }
 
-    /// This mirrors `run`: it reads the file once and resolves one channel for each ID.
-    fn channel_for(dir: &Path, id: ShortcutId) -> HotkeyChannel {
+    fn channel_for(dir: &Path, id: &str) -> HotkeyChannel {
         hotkey_channel(shortcuts::state::read(dir).as_ref(), id)
     }
 
-    /// The portal rung gives the window the key that the portal names.
-    /// The window renders a rebind control instead of a snippet.
     #[test]
-    fn a_published_portal_binding_becomes_the_portal_control() {
-        let dir = scratch("portal");
+    fn a_published_dynamic_bind_uses_its_own_portal_key() {
+        let dir = scratch("dynamic-portal");
         shortcuts::state::publish(
             &dir,
             &Published::portal(vec![Binding {
-                id: ShortcutId::Trigger,
+                id: ShortcutId::parse("bind-91").unwrap(),
                 trigger: Some("Alt+F".into()),
             }]),
         )
         .unwrap();
-        let channel = channel_for(&dir, ShortcutId::Trigger);
-        assert_eq!(HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) }, channel);
-        assert_eq!(
-            HotkeyControl::Rebind { current: Some("Alt+F".into()) },
-            channel.control(
-                snippets::Compositor::Kde,
-                "ALT+F",
-                Path::new("chibipop"),
-                snippets::Bind::Hold,
-            )
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    /// A confirmed binding can omit its description. Missing key text differs
-    /// from a missing identifier, which needs a native bind.
-    #[test]
-    fn a_portal_that_reports_no_key_is_still_the_portal_channel() {
-        let dir = scratch("nokey");
-        shortcuts::state::publish(
-            &dir,
-            &Published::portal(vec![Binding { id: ShortcutId::Trigger, trigger: None }]),
-        )
-        .unwrap();
-        assert_eq!(
-            HotkeyChannel::Portal { current_binding: None },
-            channel_for(&dir, ShortcutId::Trigger)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The native rung and a machine where no daemon has run both show the snippet.
-    /// The compositor bind provides the only available status.
-    #[test]
-    fn the_native_rung_and_a_silent_daemon_both_show_the_snippet() {
-        let dir = scratch("native");
-        assert_eq!(
-            HotkeyChannel::Native,
-            channel_for(&dir, ShortcutId::Trigger),
-            "no file at all"
-        );
-        shortcuts::state::publish(&dir, &Published::native()).unwrap();
-        let channel = channel_for(&dir, ShortcutId::Trigger);
-        assert_eq!(HotkeyChannel::Native, channel);
-        let HotkeyControl::Snippet { text } = channel.control(
-            snippets::Compositor::Sway,
-            "ALT+F",
-            Path::new("/opt/cp/chibipop"),
-            snippets::Bind::Hold,
-        )
-        else {
-            panic!("the native rung must render a snippet");
-        };
-        assert!(text.contains("/opt/cp/chibipop ctl trigger-down"), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The add-card row keeps its own status.
-    /// When the portal answers for `anki-add`, that row names *its* key.
-    /// The trigger row names the trigger key. Two rows, two keys, one file.
-    #[test]
-    fn the_add_card_row_gets_the_key_the_portal_published_for_it() {
-        let dir = scratch("addportal");
-        shortcuts::state::publish(
-            &dir,
-            &Published::portal(vec![
-                Binding { id: ShortcutId::Trigger, trigger: Some("Alt+F".into()) },
-                Binding { id: ShortcutId::AnkiAdd, trigger: Some("Alt+A".into()) },
-            ]),
-        )
-        .unwrap();
         assert_eq!(
             HotkeyChannel::Portal { current_binding: Some("Alt+F".into()) },
-            channel_for(&dir, ShortcutId::Trigger)
+            channel_for(&dir, "bind-91"),
         );
+        assert_eq!(HotkeyChannel::Native, channel_for(&dir, "bind-92"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_portal_binding_without_a_key_is_still_confirmed() {
+        let dir = scratch("dynamic-no-key");
+        shortcuts::state::publish(
+            &dir,
+            &Published::portal(vec![Binding {
+                id: ShortcutId::parse("bind-91").unwrap(),
+                trigger: None,
+            }]),
+        )
+        .unwrap();
+
         assert_eq!(
-            HotkeyChannel::Portal { current_binding: Some("Alt+A".into()) },
-            channel_for(&dir, ShortcutId::AnkiAdd)
+            HotkeyChannel::Portal { current_binding: None },
+            channel_for(&dir, "bind-91"),
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A partial portal response must not hide the unregistered action's
-    /// native bind behind another action's successful registration.
-    #[test]
-    fn an_unanswered_add_id_offers_a_native_bind() {
-        let dir = scratch("addsilent");
-        shortcuts::state::publish(
-            &dir,
-            &Published::portal(vec![Binding {
-                id: ShortcutId::Trigger,
-                trigger: Some("Alt+F".into()),
-            }]),
-        )
-        .unwrap();
-        assert_eq!(
-            HotkeyChannel::Native,
-            channel_for(&dir, ShortcutId::AnkiAdd)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

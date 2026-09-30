@@ -11,7 +11,7 @@ use crate::capture::backend::{self as capture_backend, Backend};
 use crate::capture::portal::{self, PortalCapture, PortalSession};
 use crate::capture::software_cursor;
 use crate::clipboard;
-use crate::control::{ControlSocket, StubState, Verb};
+use crate::control::{ControlPolicy, ControlSocket, ControlRequest, StubState, Verb};
 use crate::cursor::{self, budget, hyprctl, image_copy};
 use crate::cursor::image_copy::{CursorHandler, CursorState};
 use crate::settings::child::{self, SettingsChild, SpawnOutcome};
@@ -40,6 +40,7 @@ use chibipop::controller::{
     Command, Controller, ControllerConfig, Event, LookupOutcome, NoteWriteStatus, RequestId,
     CLICK_CHAIN_MS,
 };
+use chibipop::config::{Config, ProfileCatalog, ProfileSession, ResolvedConfig, TriggerMode};
 use chibipop::geom::{PhysPoint, PhysRect, ScanKind, ScanRect};
 use chibipop::present::DictInfo;
 use chibipop::text::layout::{OcrLine, Orientation};
@@ -78,6 +79,11 @@ use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV
 const DISPATCH_TICK_MS: u32 = 20;
 const GESTURE_TIMER_TICKS: u64 =
     CLICK_CHAIN_MS.div_ceil(DISPATCH_TICK_MS as u64).saturating_add(1);
+/// Fixed socket actions use IDs outside the configured bind-ID grammar.
+const LEGACY_TRIGGER_BIND_ID: &str = "legacy:trigger";
+const LEGACY_TOGGLE_BIND_ID: &str = "legacy:toggle";
+const LEGACY_LOOKUP_BIND_ID: &str = "legacy:lookup";
+const LEGACY_DEMO_BIND_ID: &str = "legacy:demo";
 
 /// The environment hook for the surface probe and its pick deadline.
 /// See [`App::probe_surfaces`].
@@ -101,15 +107,21 @@ const DEMO_ANCHOR: PhysRect = PhysRect { x: 200, y: 200, w: 120, h: 32 };
 pub(crate) struct App {
     log: Log,
     stub: StubState,
+    signal: LoopSignal,
     /// Directories that this daemon reads or writes.
     /// The daemon resolves them once at startup.
     /// They contain published trigger state, the config file for reload, and
     /// the folder for mined pictures (`Paths::screenshots_dir`).
     paths: Paths,
-    /// Loaded Config. A reload rebuilds Worker data from the same source that
-    /// the Controller reads.
-    config: chibipop::config::Config,
-    signal: LoopSignal,
+    /// Saved configuration. Runtime actions write one profile field to this data.
+    saved: Config,
+    /// Immutable configuration catalog for new operations.
+    catalog: Arc<ProfileCatalog>,
+    /// Current default profile session for legacy daemon actions.
+    default_session: ProfileSession,
+    /// Default profile's materialized settings for shared popup and controller setup.
+    config: ResolvedConfig,
+    control_policy: ControlPolicy,
     /// ProtocolError that ended this session, if any.
     /// This error cannot recover. The Wayland source stops the pump like a signal
     /// and stores the error here.
@@ -145,9 +157,7 @@ pub(crate) struct App {
     /// The tray Settings item starts it. The settings-scoped flock guards
     /// cross-process use. This field guards the daemon.
     settings: SettingsChild,
-    search: SettingsChild,
-    sentence_search: SettingsChild,
-    prefilled_searches: Vec<std::process::Child>,
+    searches: HashMap<chibipop::search::SearchIdentity, SearchChild>,
     search_focused: bool,
     search_focus_error: bool,
     /// The trigger transport selected at startup. Automatic Hyprland always
@@ -269,6 +279,8 @@ pub(crate) struct App {
     /// The answer diagnostic names this region.
     /// This field also limits each key press to one queued job.
     ocr_job: Option<PhysRect>,
+    /// Profile session captured when the OCR action starts.
+    ocr_session: Option<ProfileSession>,
     /// Writable selection. This field is `None` when a compositor advertises no
     /// data-control protocol.
     /// Stock GNOME has this state. The bind discovers an absent layer shell.
@@ -323,15 +335,17 @@ pub(crate) struct App {
 
 /// One popup job. It blocks the thread that runs it.
 enum AnkiCall {
-    Dupes { generation: u64, exprs: Vec<String> },
-    Add { expr: String, fields: HashMap<String, String> },
-    /// Pixels selected for an Anki card. The job encodes pixels, writes the PNG, and
-    /// files the card that points to it.
-    /// It runs here instead of on the grab thread because file work calls
-    /// AnkiConnect.
-    /// It reads the same `[anki]` snapshot as other calls.
-    /// It also encodes here because deflate for a 4K region is not pump work.
-    Shot { plan: chibipop::shot::ShotPlan, bgra: Vec<u8>, w: i32, h: i32 },
+    Dupes { session: ProfileSession, generation: u64, exprs: Vec<String> },
+    Add { id: RequestId, session: ProfileSession, expr: String, fields: HashMap<String, String> },
+    /// The call carries the session that authorized the note.
+    Shot {
+        id: RequestId,
+        session: ProfileSession,
+        plan: chibipop::shot::ShotPlan,
+        bgra: Vec<u8>,
+        w: i32,
+        h: i32,
+    },
 }
 
 /// One answer that the pump receives.
@@ -340,15 +354,20 @@ enum AnkiCall {
 /// failure at its source.
 enum AnkiOutcome {
     /// `Err` means that AnkiConnect refused the request or does not run.
-    Dupes { generation: u64, dupes: Result<HashSet<String>, String> },
-    Added { expr: String, note: Result<chibipop::anki::WriteResult, String> },
-    /// Complete answer for a picture attached to an Anki card.
-    /// `Ok(note)` means that the picture was saved and filed.
-    /// `Err` means that a step failed.
-    /// `dir` is the folder that received the file, not the file itself.
-    /// The filename carries the word. The word is screen content, so
-    /// diagnostics must not hold it (ARCHITECTURE.md#platform-integration).
-    Shot { expr: String, dir: PathBuf, filed: Result<chibipop::anki::WriteResult, String> },
+    Dupes { session: ProfileSession, generation: u64, dupes: Result<HashSet<String>, String> },
+    Added {
+        id: RequestId,
+        session: ProfileSession,
+        expr: String,
+        note: Result<chibipop::anki::WriteResult, String>,
+    },
+    Shot {
+        id: RequestId,
+        session: ProfileSession,
+        expr: String,
+        dir: PathBuf,
+        filed: Result<chibipop::anki::WriteResult, String>,
+    },
 }
 
 /// Complete life of one screenshot on this side of the seam.
@@ -375,10 +394,9 @@ enum Shot {
     Grabbing(Pending),
 }
 struct Pending {
-    /// Core owns every file and note rule (`chibipop::shot`).
-    /// This bin picks a region and grabs pixels.
+    id: RequestId,
+    session: ProfileSession,
     plan: chibipop::shot::ShotPlan,
-    /// Snapshot the mode when the add request is authorized.
     mode: chibipop::config::ScreenshotMode,
 }
 fn outcome_selection(outcome: screenshot::Outcome) -> Result<Option<screenshot::Selection>> {
@@ -461,13 +479,14 @@ struct DeferredPopup {
     request: ShowRequest,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PendingSentence {
     id: RequestId,
     anchor: PhysRect,
     orientation: Orientation,
     mask: CaptureMask,
     generation: u64,
+    session: ProfileSession,
     /// Portal content counter recorded before the hide commit.
     portal_seq: Option<u64>,
     owns_hide: bool,
@@ -491,9 +510,10 @@ struct SentenceSync {
 struct HideBarrier;
 impl AnkiCall {
     /// Network part of the call. It runs outside the pump.
-    fn run(self, anki: &chibipop::config::AnkiConfig) -> AnkiOutcome {
+    fn run(self) -> AnkiOutcome {
         match self {
-            AnkiCall::Dupes { generation, exprs } => {
+            AnkiCall::Dupes { session, generation, exprs } => {
+                let anki = &session.config().anki;
                 let refs: Vec<&str> = exprs.iter().map(String::as_str).collect();
                 let dupes = chibipop::anki::find_duplicates(
                     &anki.url,
@@ -502,9 +522,10 @@ impl AnkiCall {
                     &refs,
                     &anki.field_map,
                 );
-                AnkiOutcome::Dupes { generation, dupes: dupes.map_err(|e| format!("{e:#}")) }
+                AnkiOutcome::Dupes { session, generation, dupes: dupes.map_err(|e| format!("{e:#}")) }
             }
-            AnkiCall::Add { expr, fields } => {
+            AnkiCall::Add { id, session, expr, fields } => {
+                let anki = &session.config().anki;
                 let note = chibipop::anki::write_note(
                     &anki.url,
                     &anki.deck,
@@ -514,36 +535,118 @@ impl AnkiCall {
                     None,
                     anki.overwrite_duplicates,
                 );
-                AnkiOutcome::Added { expr, note: note.map_err(|e| format!("{e:#}")) }
+                AnkiOutcome::Added { id, session, expr, note: note.map_err(|e| format!("{e:#}")) }
             }
-            // Core owns the filename, field lookup, payload, and AnkiConnect call.
-            AnkiCall::Shot { plan, bgra, w, h } => {
+            AnkiCall::Shot { id, session, plan, bgra, w, h } => {
+                let anki = &session.config().anki;
                 let filed = (|| -> Result<chibipop::anki::WriteResult> {
                     let png = chibipop::image::encode_bgra_to_png(&bgra, w, h)?;
                     chibipop::shot::save_and_add(&png, &plan, anki)
                 })();
                 AnkiOutcome::Shot {
+                    id,
+                    session,
                     dir: plan.path.parent().unwrap_or(plan.path.as_path()).to_path_buf(),
                     expr: plan.expr,
                     filed: filed.map_err(|e| format!("{e:#}")),
                 }
             }
         }
-    }
+}
 }
 
 /// The portal session inputs that can change shortcut ownership.
-/// The preferred list includes the enablement gates and normalized chords.
+/// The preferred list includes the configured bind IDs and normalized chords.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShortcutConfig {
-    preferred: Vec<(shortcuts::ShortcutId, String)>,
+    preferred: Vec<shortcuts::ShortcutSpec>,
 }
 
 impl ShortcutConfig {
-    fn from_config(config: &chibipop::config::Config) -> Self {
+    fn from_config(config: &Config) -> Self {
         Self { preferred: shortcuts::preferred(config) }
     }
 }
+
+#[derive(Default)]
+struct SearchChild {
+    child: Option<std::process::Child>,
+}
+
+impl SearchChild {
+    fn spawn(
+        &mut self,
+        paths: &Paths,
+        identity: &chibipop::search::SearchIdentity,
+        command: &mut std::process::Command,
+        input: Option<&str>,
+    ) -> std::io::Result<SpawnOutcome> {
+        if input.is_some_and(|text| text.len() > crate::search::MAX_SEARCH_TEXT_BYTES) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                "search text exceeds 65536 bytes"));
+        }
+        if let Some(child) = &mut self.child {
+            match child.try_wait()? {
+                None => {
+                    let pid = child.id();
+                    let paths = paths.clone();
+                    let identity = identity.clone();
+                    let text = input.map(str::to_owned);
+                    std::thread::Builder::new().name("search-activate".into()).spawn(move || {
+                        if let Err(error) = crate::search::activate_existing(
+                            &paths, &identity, text.as_deref(),
+                        ) {
+                            eprintln!("chibipop: activating Search window failed: {error}");
+                        }
+                    })?;
+                    return Ok(SpawnOutcome::AlreadyRunning(pid));
+                }
+                Some(_) => self.child = None,
+            }
+        }
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        if let Some(text) = input {
+            let Some(mut stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::other("search child has no stdin pipe"));
+            };
+            let text = text.to_owned();
+            if let Err(error) = std::thread::Builder::new().name("search-stdin".into()).spawn(move || {
+                if let Err(error) = std::io::Write::write_all(&mut stdin, text.as_bytes()) {
+                    eprintln!("chibipop: sending search text through stdin failed: {error}");
+                }
+            }) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+        self.child = Some(child);
+        Ok(SpawnOutcome::Spawned(pid))
+    }
+
+    fn invalidate(
+        &mut self,
+        paths: &Paths,
+        identity: &chibipop::search::SearchIdentity,
+    ) -> std::io::Result<()> {
+        if let Some(child) = &mut self.child {
+            if child.try_wait()?.is_some() {
+                self.child = None;
+                return Ok(());
+            }
+        }
+        match crate::search::invalidate_existing(paths, identity) {
+            Ok(()) => Ok(()),
+            Err(error) if matches!(error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 
 /// Values that a second consent request needs. Retry uses the startup path.
 struct PortalRetry {
@@ -597,77 +700,268 @@ fn open_portal(retry: &PortalRetry, log: &mut Log) -> (Option<PortalCapture>, Ch
 }
 
 impl App {
-    fn handle_request(&mut self, request: &str, verb: Option<Verb>) {
-        let Some(verb) = verb else {
+    fn handle_request(&mut self, request: &str, control: Option<ControlRequest>) {
+        let Some(control) = control else {
             self.log.diag(&format!("control: rejected {request:?}"));
             return;
         };
-        if verb == Verb::StaticRegion
-            && self.config.anki.sentence_mode != chibipop::config::SentenceMode::Static
-        {
-            self.log
-                .diag("control: static-region - requires Fixed screen area");
-            return;
+        match control {
+            ControlRequest::Verb(verb) => {
+                if verb == Verb::StaticRegion
+                    && self.displayed_session().config().anki.sentence_mode
+                        != chibipop::config::SentenceMode::Static
+                {
+                    self.log.diag("control: static-region - requires Fixed screen area");
+                    return;
+                }
+                let outcome = self.stub.apply(verb);
+                self.log.diag(&format!("control: {} - {}", verb.as_str(), outcome));
+                self.apply_verb(verb);
+            }
+            ControlRequest::BindId { id, activated } => {
+                self.log.diag(&format!("control: bind {} {}", id, if activated { "down" } else { "up" }));
+                self.apply_configured_bind(&id, activated);
+            }
         }
-        let outcome = self.stub.apply(verb);
-        self.log.diag(&format!("control: {} - {}", verb.as_str(), outcome));
-        self.apply_verb(verb);
+    }
+
+    fn displayed_session(&self) -> ProfileSession {
+        self.controller
+            .popup()
+            .map(|view| view.session.clone())
+            .or_else(|| self.popup.as_ref().and_then(Popup::request).map(|request| request.session.clone()))
+            .unwrap_or_else(|| self.default_session.clone())
     }
 
     /// Apply one Verb from either channel.
     /// The control socket is rung 2 and the GlobalShortcuts portal is rung 1.
-    /// Both channels call this method. A Portal press and
-    /// `chibipop ctl trigger-down` produce the same result.
-    /// `Verb::AnkiAdd` is the only keyboard path to AnkiConnect.
-    /// The socket `anki-add` and Portal `anki-add` shortcut therefore match.
     fn apply_verb(&mut self, verb: Verb) {
-        if self.refresh_search_focus() && !matches!(verb, Verb::Search | Verb::SentenceSearch | Verb::Reload | Verb::TriggerUp) {
+        if self.refresh_search_focus()
+            && !matches!(verb, Verb::Search | Verb::SentenceSearch | Verb::Reload | Verb::TriggerUp)
+        {
             return;
         }
         match verb {
             Verb::Reload => self.reload_config(),
-            // The demo replaces lookup data so a missing Dictionary does not
-            // prevent a surface check.
-            Verb::TriggerDown | Verb::Toggle | Verb::Lookup if self.demo.armed => self.demo_show(),
+            Verb::TriggerDown if self.demo.armed => self.demo_show(TriggerMode::HoldKey),
+            Verb::Toggle if self.demo.armed => self.demo_show(TriggerMode::Toggle),
+            Verb::Lookup if self.demo.armed => self.demo_show(TriggerMode::Press),
             Verb::TriggerUp if self.demo.armed => self.demo_hide(),
-            Verb::TriggerDown => self.trigger(trigger::down(self.hold)),
-            Verb::TriggerUp => self.trigger(trigger::up(self.hold)),
-            Verb::Toggle => self.trigger(trigger::toggle(self.hold)),
+            Verb::TriggerDown => self.lookup_bind(
+                LEGACY_TRIGGER_BIND_ID,
+                TriggerMode::HoldKey,
+                self.default_session.clone(),
+            ),
+            Verb::TriggerUp => self.lookup_bind_up(LEGACY_TRIGGER_BIND_ID),
+            Verb::Toggle => self.lookup_bind(
+                LEGACY_TOGGLE_BIND_ID,
+                TriggerMode::Toggle,
+                self.default_session.clone(),
+            ),
             Verb::Lookup => self.lookup_at_cursor(),
-            Verb::Search => self.spawn_search(),
-            Verb::SentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
-            Verb::SelectedText => self.lookup_selected_text(),
-            // The in-panel Anki slot raises the same Event, so every card path
-            // uses one AnkiConnect flow.
+            Verb::Search => self.spawn_search_mode(
+                chibipop::search::SearchMode::Dictionary,
+                None,
+                self.default_session.clone(),
+            ),
+            Verb::SentenceSearch => self.spawn_search_mode(
+                chibipop::search::SearchMode::Sentence,
+                None,
+                self.default_session.clone(),
+            ),
+            Verb::SelectedText => self.lookup_selected_text(self.default_session.clone()),
             Verb::AnkiAdd => self.feed(Event::AddRequested),
-            Verb::OcrClipboard => self.ocr_to_clipboard(),
-            Verb::StaticRegion if self.config.anki.sentence_mode == chibipop::config::SentenceMode::Static => {
-                self.pick_static_region()
+            Verb::OcrClipboard => self.ocr_to_clipboard(self.default_session.clone()),
+            Verb::StaticRegion => {
+                let session = self.displayed_session();
+                if session.config().anki.sentence_mode == chibipop::config::SentenceMode::Static {
+                    self.pick_static_region(session);
+                }
             }
-            Verb::StaticRegion => {}
         }
     }
 
-    /// Ask the Controller for one lookup at the latest cursor sample.
-    ///
-    /// This verb takes no frozen grab because a press can land while the popup
-    /// is shown, and the frozen-grab rule requires a grab before any popup exists.
-    fn lookup_at_cursor(&mut self) {
-        let Some(at) = self.cursor_now() else {
-            self.log.diag("lookup: no cursor sample yet - nothing to look up");
+    fn apply_configured_bind(&mut self, id: &str, activated: bool) {
+        if !activated {
+            self.lookup_bind_up(id);
+            return;
+        }
+
+        let Some(bind) = self.saved.binds.iter().find(|bind| bind.id == id && bind.enabled).cloned() else {
+            self.log.diag(&format!("control: rejected unconfigured bind ID {id:?}"));
             return;
         };
-        self.feed(Event::TriggerPressed { pos: at });
+        if self.refresh_search_focus()
+            && !matches!(
+                bind.action,
+                chibipop::config::BindAction::Search | chibipop::config::BindAction::SentenceSearch
+            )
+        {
+            return;
+        }
+        let session = match self.catalog.for_bind(&bind.id) {
+            Ok(session) => session,
+            Err(error) => {
+                self.log.diag(&format!("control: bind {} has no profile session - {error}", bind.id));
+                return;
+            }
+        };
+        if bind.action == chibipop::config::BindAction::Lookup {
+            self.lookup_bind(&bind.id, bind.mode, session);
+            return;
+        }
+        match bind.action {
+            chibipop::config::BindAction::Lookup => unreachable!(),
+            chibipop::config::BindAction::SelectedText => self.lookup_selected_text(session),
+            chibipop::config::BindAction::Search => self.spawn_search_mode(
+                chibipop::search::SearchMode::Dictionary,
+                None,
+                session,
+            ),
+            chibipop::config::BindAction::SentenceSearch => self.spawn_search_mode(
+                chibipop::search::SearchMode::Sentence,
+                None,
+                session,
+            ),
+            chibipop::config::BindAction::OcrClipboard => self.ocr_to_clipboard(session),
+            chibipop::config::BindAction::AnkiAdd => self.feed(Event::AddRequested),
+            chibipop::config::BindAction::StaticRegion => {
+                let displayed = self.displayed_session();
+                if displayed.config().anki.sentence_mode == chibipop::config::SentenceMode::Static {
+                    self.pick_static_region(displayed);
+                }
+            }
+        }
+    }
+    fn lookup_bind_up(&mut self, id: &str) {
+        if self.controller.active_bind_id() != Some(id) {
+            return;
+        }
+        if self.controller.trigger_mode() == TriggerMode::Toggle {
+            return;
+        }
+        if self.controller.trigger_mode() == TriggerMode::HoldKey {
+            self.apply_bind_trigger(trigger::up(self.hold), None);
+        }
+        self.feed(Event::LookupBindUp { bind_id: id.to_string() });
+    }
+    fn release_active_lookup_bind(&mut self) {
+        let Some(id) = self.controller.active_bind_id().map(str::to_owned) else {
+            return;
+        };
+        match self.controller.trigger_mode() {
+            TriggerMode::HoldKey => {
+                if self.hold.is_some() {
+                    self.apply_bind_trigger(trigger::up(self.hold), None);
+                }
+                self.feed(Event::LookupBindUp { bind_id: id });
+            }
+            TriggerMode::Toggle => {
+                if self.hold.is_some() {
+                    self.apply_bind_trigger(trigger::toggle(self.hold), None);
+                }
+                let session = self.controller.session_at(0)
+                    .cloned()
+                    .unwrap_or_else(|| self.default_session.clone());
+                let event = Event::LookupBindDown {
+                    bind_id: id,
+                    mode: TriggerMode::Toggle,
+                    session,
+                    pos: self.last_cursor.unwrap_or(PhysPoint { x: 0, y: 0 }),
+                };
+                for command in self.controller.handle(event) {
+                    self.execute(command);
+                }
+                self.sync_dwell();
+            }
+            _ => self.feed(Event::LookupBindUp { bind_id: id }),
+        }
     }
 
-    fn lookup_selected_text(&mut self) {
+    fn lookup_bind(&mut self, id: &str, mode: TriggerMode, session: ProfileSession) {
+        let same_owner = self.controller.active_bind_id() == Some(id)
+            && self.controller.trigger_mode() == mode;
+        if !same_owner && self.hold.is_some() {
+            let step = if self.hold.is_some_and(|hold| hold.latched) {
+                trigger::toggle(self.hold)
+            } else {
+                trigger::up(self.hold)
+            };
+            self.apply_bind_trigger(step, None);
+        }
+        let point = if mode == TriggerMode::Toggle && same_owner {
+            self.cursor_now().unwrap_or(PhysPoint { x: 0, y: 0 })
+        } else {
+            let Some(point) = self.cursor_now() else {
+                self.log.diag("lookup: no cursor sample yet - nothing to look up");
+                return;
+            };
+            point
+        };
+        match mode {
+            TriggerMode::Press | TriggerMode::Live => {}
+            TriggerMode::HoldKey => {
+                self.apply_bind_trigger(trigger::down(self.hold), Some(point));
+            }
+            TriggerMode::Toggle => {
+                self.apply_bind_trigger(trigger::toggle(self.hold), Some(point));
+            }
+            _ => return,
+        }
+        self.feed(Event::LookupBindDown {
+            bind_id: id.to_string(),
+            mode,
+            session,
+            pos: point,
+        });
+    }
+
+    /// Apply freeze and thaw effects for a configured bind without sending a
+    /// legacy trigger event that could release a different bind owner.
+    fn apply_bind_trigger(&mut self, step: trigger::Step, point: Option<PhysPoint>) {
+        match step {
+            trigger::Step::Freeze => {
+                let Some(at) = point else { return };
+                let output = self.output_containing(at);
+                self.freeze_at(at, output);
+                self.hold = Some(Hold { output, latched: false });
+            }
+            trigger::Step::Latch => {
+                let Some(at) = point else { return };
+                let output = self.output_containing(at);
+                self.hold = Some(Hold { output, latched: true });
+                self.log.diag("trigger: latched - live grabs until toggle-off");
+            }
+            trigger::Step::Release => {
+                if self.hold.is_some_and(|hold| !hold.latched) {
+                    self.thaw();
+                } else if self.hold.is_some_and(|hold| hold.latched) {
+                    self.log.diag("trigger: latch released");
+                }
+                self.hold = None;
+            }
+            trigger::Step::Nothing(why) => self.log.diag(&format!("trigger: {why}")),
+        }
+    }
+
+    /// The fixed `lookup` verb owns a one-shot Press bind with a retained
+    /// default-profile session.
+    fn lookup_at_cursor(&mut self) {
+        self.lookup_bind(
+            LEGACY_LOOKUP_BIND_ID,
+            TriggerMode::Press,
+            self.default_session.clone(),
+        );
+        self.lookup_bind_up(LEGACY_LOOKUP_BIND_ID);
+    }
+
+    fn lookup_selected_text(&mut self, session: ProfileSession) {
         let Some(pos) = self.cursor_now() else {
             self.log.diag("selected-text: no cursor sample yet - lookup skipped");
             return;
         };
-        self.feed(Event::SelectedTextRequested { pos });
+        self.feed(Event::SelectedTextRequested { pos, session });
     }
-
     /// One Event from the GlobalShortcuts session thread.
     ///
     /// Session generations reject queued events from a retired portal session.
@@ -695,10 +989,7 @@ impl App {
                     if activated { "activated" } else { "deactivated" },
                     id.as_str()
                 ));
-                match shortcuts::action(id, activated, self.config.trigger.mode) {
-                    shortcuts::Action::Verb(verb) => self.apply_verb(verb),
-                    shortcuts::Action::Nothing => {}
-                }
+                self.apply_configured_bind(id.as_str(), activated);
             }
             shortcuts::Event::Unavailable { session, reason, advice } => {
                 if !self.current_shortcut_session(session) {
@@ -748,12 +1039,12 @@ impl App {
             self.retire_shortcut_session();
             return;
         }
-        let desired = ShortcutConfig::from_config(&self.config);
+        let desired = ShortcutConfig::from_config(&self.saved);
         if self.shortcut_config.as_ref() == Some(&desired) {
             return;
         }
         if self.hold.is_some() {
-            self.trigger(trigger::toggle(self.hold));
+            self.release_active_lookup_bind();
         }
         self.retire_shortcut_session();
         self.shortcut_config = Some(desired.clone());
@@ -804,9 +1095,9 @@ impl App {
             return;
         }
         if let Some(config) = &self.shortcut_config {
-            bindings.retain(|binding| config.preferred.iter().any(|(id, _)| *id == binding.id));
+            bindings.retain(|binding| config.preferred.iter().any(|spec| spec.id == binding.id));
         }
-        self.confirmed_shortcuts = bindings.iter().map(|binding| binding.id).collect();
+        self.confirmed_shortcuts = bindings.iter().map(|binding| binding.id.clone()).collect();
         let detail = shortcuts::portal_detail(&bindings);
         self.log.diag(&format!("trigger: portal {what} - {detail}"));
         self.note_channel(ChannelId::Trigger, ChannelState::up(detail));
@@ -822,54 +1113,6 @@ impl App {
         }
     }
 
-    /// One trigger Verb effect (ARCHITECTURE.md#hover-cadence).
-    ///
-    /// A press freezes the output under the cursor and looks up text there.
-    /// A toggle latch keeps live grabs with the popup masked.
-    /// A latch can last minutes while the screen changes under it.
-    /// A release drops a frozen frame or releases a live latch, then retracts
-    /// the popup.
-    /// The frozen press sends its grab to the Worker before the lookup.
-    /// The Worker serves its queue in order, so that grab predates the popup by
-    /// rule, not by assumption.
-    fn trigger(&mut self, step: trigger::Step) {
-        match step {
-            trigger::Step::Freeze => {
-                let Some(at) = self.cursor_now() else {
-                    self.log.diag("trigger: no cursor sample yet - nothing to look up");
-                    return;
-                };
-                let output = self.output_containing(at);
-                self.freeze_at(at, output);
-                self.hold = Some(Hold { output, latched: false });
-                self.feed(Event::TriggerDown);
-                // The press supplies the first cursor sample. The first lookup
-                // needs no cursor motion.
-                self.feed(Event::CursorMoved { pos: at });
-            }
-            trigger::Step::Latch => {
-                let Some(at) = self.cursor_now() else {
-                    self.log.diag("trigger: no cursor sample yet - nothing to look up");
-                    return;
-                };
-                let output = self.output_containing(at);
-                self.hold = Some(Hold { output, latched: true });
-                self.log.diag("trigger: latched - live grabs until toggle-off");
-                self.feed(Event::TriggerDown);
-                self.feed(Event::CursorMoved { pos: at });
-            }
-            trigger::Step::Release => {
-                if self.hold.is_some_and(|hold| hold.latched) {
-                    self.log.diag("trigger: latch released");
-                } else {
-                    self.thaw();
-                }
-                self.hold = None;
-                self.feed(Event::TriggerUp);
-            }
-            trigger::Step::Nothing(why) => self.log.diag(&format!("trigger: {why}")),
-        }
-    }
 
     /// Take the press-time grab of `output` on the Worker's thread.
     fn freeze_at(&mut self, at: PhysPoint, output: PhysRect) {
@@ -955,11 +1198,11 @@ impl App {
     /// The layout must receive no selection when Anki is disabled, even if
     /// an old Controller surface still has selection data.
     fn popup_selection(&self) -> Option<chibipop::select::Selections> {
-        if self.config.anki.enabled {
-            self.controller.selection().cloned()
-        } else {
-            None
-        }
+        let enabled = self
+            .controller
+            .popup()
+            .is_some_and(|popup| popup.session.config().anki.enabled);
+        enabled.then(|| self.controller.selection().cloned()).flatten()
     }
 
     /// Repeat text hit checks after a drag repaint.
@@ -1193,14 +1436,12 @@ impl App {
     /// The method hides the old border first.
     /// It shares `Layer::Overlay` with the selector.
     /// Without this step, the old box could cover the new drag.
-    fn pick_static_region(&mut self) {
+    fn pick_static_region(&mut self, session: ProfileSession) {
         if let Some(outline) = self.static_outline.as_mut() {
             outline.hide();
         }
-        // `None` uses the product deadline (`select::PICK_TIMEOUT`).
-        // A second constant would conflict with the product pick duration.
         let picked = self.pick_region(None, HideOwner::Picker);
-        self.took_static_region(picked);
+        self.took_static_region(picked, session);
     }
 
     /// Interpret a finished pick.
@@ -1211,21 +1452,17 @@ impl App {
     /// This split keeps nested pump work in [`App::pick_static_region`] and
     /// keeps pure state here.
     /// Tests drive this state seam.
-    fn took_static_region(&mut self, picked: Option<PhysRect>) {
+    fn took_static_region(&mut self, picked: Option<PhysRect>, session: ProfileSession) {
         let Some(rect) = picked else {
             self.log.diag("static region: pick cancelled - nothing changed");
             self.sync_static_outline();
             return;
         };
-        self.config.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
-        // The config file is the sole source of truth
-        // (ARCHITECTURE.md#settings-and-config).
-        // Save the region before the daemon derives any other state.
-        // TOML is small, and this call already blocks on the user drag.
-        // A write error logs a diagnostic. The current region stays until the
-        // next reload.
-        match self.config.save(&self.paths.config_file) {
-            Ok(()) => self.log.diag(&format!(
+        let value = chibipop::config::FieldOverride::from_value([rect.x, rect.y, rect.w, rect.h]);
+        match value
+            .and_then(|value| self.save_profile_field(session.id(), "anki.static_region", value, None, false))
+        {
+            Ok(true) => self.log.diag(&format!(
                 "static region: set to {}x{} at {},{} and saved to {}",
                 rect.w,
                 rect.h,
@@ -1233,8 +1470,12 @@ impl App {
                 rect.y,
                 self.paths.config_file.display()
             )),
-            Err(e) => self.log.diag(&format!(
-                "static region: set to {}x{} at {},{} but saving {} failed: {e:#}",
+            Ok(false) => self.log.diag(&format!(
+                "static region: profile {} no longer exists; saved config was not changed",
+                session.id()
+            )),
+            Err(error) => self.log.diag(&format!(
+                "static region: set to {}x{} at {},{} but saving {} failed: {error:#}",
                 rect.w,
                 rect.h,
                 rect.x,
@@ -1242,12 +1483,6 @@ impl App {
                 self.paths.config_file.display()
             )),
         }
-        // The Controller handles this with `RequestReload`.
-        // It carries fresh `WorkerSettings` and the new region into the
-        // pipeline.
-        // This matches `reload_config` without another file read.
-        let cfg = controller_config(&self.config);
-        self.feed(Event::ConfigReloaded(Box::new(cfg)));
         self.sync_static_outline();
     }
 
@@ -1259,7 +1494,7 @@ impl App {
     /// This matches the Windows bin rule in
     /// `LiveSettings::static_overlay_region`.
     fn sync_static_outline(&mut self) {
-        let wanted = static_overlay_region(&self.config);
+        let wanted = static_overlay_region(self.displayed_session().config());
         let screens = self.screens();
         let Some(outline) = self.static_outline.as_mut() else {
             // No layer shell means no border.
@@ -1301,26 +1536,23 @@ impl App {
     /// Resolve `actions.screenshot.save_dir`.
     /// Absolute values stay absolute. Relative values use the executable
     /// directory in Portable mode and the XDG data directory otherwise.
-    fn screenshots_dir(&self) -> PathBuf {
-        self.paths.screenshots_dir(&self.config.actions.screenshot.save_dir)
+    fn screenshots_dir(&self, session: &ProfileSession) -> PathBuf {
+        self.paths.screenshots_dir(&session.config().actions.screenshot.save_dir)
     }
 
     /// Return the picture for the already-authorized add, or `None` when the
     /// screenshot-on-add setting is off.
-    ///
-    /// The Controller has already built and authorized this `Command::AddNote`
-    /// payload. Pass it through unchanged: the popup can now hold a different
-    /// Card while the platform performs the screenshot.
     fn plan_shot_for_add(
         &self,
+        session: &ProfileSession,
         expr: &str,
         fields: &HashMap<String, String>,
     ) -> Option<chibipop::shot::ShotPlan> {
         chibipop::shot::plan_add(
             expr,
             fields,
-            &self.config,
-            &self.screenshots_dir(),
+            session.config(),
+            &self.screenshots_dir(session),
             chibipop::shot::epoch_secs(),
         )
     }
@@ -1354,13 +1586,10 @@ impl App {
         let Some(Shot::Parked(shot)) = self.shot.take() else { return };
         self.begin_capture_hide(HideOwner::Screenshot);
         let geometries = self.cursor.geometries();
+        let screenshot = &shot.session.config().actions.screenshot;
         let interactive = match shot.mode {
-            chibipop::config::ScreenshotMode::FixedRegion => {
-                self.config.actions.screenshot.fixed_region.is_none()
-            }
-            chibipop::config::ScreenshotMode::FixedWindow => {
-                self.config.actions.screenshot.fixed_window.is_none()
-            }
+            chibipop::config::ScreenshotMode::FixedRegion => screenshot.fixed_region.is_none(),
+            chibipop::config::ScreenshotMode::FixedWindow => screenshot.fixed_window.is_none(),
             chibipop::config::ScreenshotMode::Region | chibipop::config::ScreenshotMode::Window => true,
         };
         let started = Instant::now();
@@ -1371,19 +1600,15 @@ impl App {
                 // barrier above flushes the same connection before selection.
                 self.flush_surface_notes();
                 match shot.mode {
-                    chibipop::config::ScreenshotMode::FixedRegion => {
-                        match self.config.actions.screenshot.fixed_region {
-                            Some(target) => screenshot::fixed_region(target)
-                                .map(|rect| Some(screenshot::Selection { rect, window: None })),
-                            None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
-                        }
-                    }
-                    chibipop::config::ScreenshotMode::FixedWindow => {
-                        match self.config.actions.screenshot.fixed_window.as_ref() {
-                            Some(target) => screenshot::resolve_window(target, &geometries).map(Some),
-                            None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
-                        }
-                    }
+                    chibipop::config::ScreenshotMode::FixedRegion => match screenshot.fixed_region {
+                        Some(target) => screenshot::fixed_region(target)
+                            .map(|rect| Some(screenshot::Selection { rect, window: None })),
+                        None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
+                    },
+                    chibipop::config::ScreenshotMode::FixedWindow => match screenshot.fixed_window.as_ref() {
+                        Some(target) => screenshot::resolve_window(target, &geometries).map(Some),
+                        None => screenshot::select(shot.mode, &geometries).and_then(outcome_selection),
+                    },
                     chibipop::config::ScreenshotMode::Region
                     | chibipop::config::ScreenshotMode::Window => {
                         screenshot::select(shot.mode, &geometries).and_then(outcome_selection)
@@ -1413,7 +1638,7 @@ impl App {
     ) {
         match selected {
             Ok(Some(selection)) => {
-                if let Err(error) = self.save_fixed_target(shot.mode, &selection) {
+                if let Err(error) = self.save_fixed_target(&shot.session, shot.mode, &selection) {
                     self.log.diag(&format!("screenshot: could not save the fixed target - {error:#}"));
                 }
                 self.spawn_shot(selection.rect, shot);
@@ -1433,73 +1658,30 @@ impl App {
     /// Save only the target type that the fixed mode owns.
     fn save_fixed_target(
         &mut self,
+        session: &ProfileSession,
         mode: chibipop::config::ScreenshotMode,
         selection: &screenshot::Selection,
-    ) -> Result<()> {
-        enum FixedTarget {
-            Region([i32; 4]),
-            Window(chibipop::config::ScreenshotWindow),
-        }
-
-        let fixed = match mode {
-            chibipop::config::ScreenshotMode::FixedRegion
-                if self.config.actions.screenshot.fixed_region.is_none() =>
-            {
-                Some(FixedTarget::Region([
+    ) -> Result<bool> {
+        let settings = &session.config().actions.screenshot;
+        let (path, value) = match mode {
+            chibipop::config::ScreenshotMode::FixedRegion if settings.fixed_region.is_none() => (
+                "actions.screenshot.fixed_region",
+                chibipop::config::FieldOverride::from_value([
                     selection.rect.x,
                     selection.rect.y,
                     selection.rect.w,
                     selection.rect.h,
-                ]))
-            }
-            chibipop::config::ScreenshotMode::FixedWindow
-                if self.config.actions.screenshot.fixed_window.is_none() =>
-            {
-                Some(FixedTarget::Window(
-                    selection.window.clone().context("the selected target has no window identity")?,
-                ))
-            }
-            _ => None,
+                ])?,
+            ),
+            chibipop::config::ScreenshotMode::FixedWindow if settings.fixed_window.is_none() => (
+                "actions.screenshot.fixed_window",
+                chibipop::config::FieldOverride::from_value(
+                    selection.window.as_ref().context("the selected target has no window identity")?,
+                )?,
+            ),
+            _ => return Ok(false),
         };
-        let Some(fixed) = fixed else { return Ok(()) };
-
-        // Settings can save a newer config while this shot waits for `slurp`.
-        // Load that file, change only the target, and save it before changing
-        // the daemon snapshot. A failed save leaves the live target unchanged.
-        let mut latest = chibipop::config::load_or_create(&self.paths.config_file)
-            .with_context(|| format!("loading {}", self.paths.config_file.display()))?;
-        if latest.actions.screenshot.capture_mode != mode {
-            return Ok(());
-        }
-        let already_saved = match mode {
-            chibipop::config::ScreenshotMode::FixedRegion => {
-                latest.actions.screenshot.fixed_region.is_some()
-            }
-            chibipop::config::ScreenshotMode::FixedWindow => {
-                latest.actions.screenshot.fixed_window.is_some()
-            }
-            _ => false,
-        };
-        if !already_saved {
-            match fixed {
-                FixedTarget::Region(target) => latest.actions.screenshot.fixed_region = Some(target),
-                FixedTarget::Window(target) => latest.actions.screenshot.fixed_window = Some(target),
-            }
-            latest
-                .save(&self.paths.config_file)
-                .with_context(|| format!("saving screenshot target to {}", self.paths.config_file.display()))?;
-            self.log.diag("screenshot: fixed target selected and saved");
-        }
-        match mode {
-            chibipop::config::ScreenshotMode::FixedRegion => {
-                self.config.actions.screenshot.fixed_region = latest.actions.screenshot.fixed_region;
-            }
-            chibipop::config::ScreenshotMode::FixedWindow => {
-                self.config.actions.screenshot.fixed_window = latest.actions.screenshot.fixed_window;
-            }
-            _ => {}
-        }
-        Ok(())
+        self.save_profile_field(session.id(), path, value, Some(mode), true)
     }
 
     /// Grab an arbitrary rect on its own thread.
@@ -1554,6 +1736,8 @@ impl App {
                     frame.w, frame.h, frame.source
                 ));
                 self.spawn_anki(AnkiCall::Shot {
+                    id: shot.id,
+                    session: shot.session.clone(),
                     plan: shot.plan,
                     bgra: frame.buf,
                     w: frame.w,
@@ -1576,8 +1760,8 @@ impl App {
     /// This dispatch alone clears "Adding…".
     fn shot_without_picture(&mut self, shot: Pending, why: &str) {
         self.log.diag(&format!("screenshot: {why} - the card goes in without a picture"));
-        let Pending { plan, .. } = shot;
-        self.spawn_anki(AnkiCall::Add { expr: plan.expr, fields: plan.fields });
+        let Pending { id, session, plan, .. } = shot;
+        self.spawn_anki(AnkiCall::Add { id, session, expr: plan.expr, fields: plan.fields });
     }
 
     fn hide_surfaces(&mut self) {
@@ -1608,6 +1792,7 @@ impl App {
                 show_back: view.show_back,
                 anki: self.controller.anki().cloned(),
                 selection: self.popup_selection(),
+                session: view.session.clone(),
             });
         }
         self.controller.is_shown().then(|| saved.clone())
@@ -1680,12 +1865,15 @@ impl App {
         &self,
         presentation: &chibipop::present::Presentation,
         anchor: PhysRect,
+        session: &ProfileSession,
     ) -> bool {
         if self.controller_hidden {
             return false;
         }
         self.current_popup_request().is_some_and(|request| {
-            request.anchor == anchor && request.presentation == *presentation
+            request.anchor == anchor
+                && request.presentation == *presentation
+                && request.session.id() == session.id()
         })
     }
 
@@ -1740,7 +1928,7 @@ impl App {
     /// A compositor without data-control has no clipboard that chibipop can
     /// write.
     /// A region that still waits for the recognizer owns the answer channel.
-    fn ocr_to_clipboard(&mut self) {
+    fn ocr_to_clipboard(&mut self, session: ProfileSession) {
         if self.clipboard.is_none() {
             self.log.diag(&clipboard::unavailable_line());
             return;
@@ -1753,10 +1941,8 @@ impl App {
             ));
             return;
         }
-        // `None` uses the product deadline (`select::PICK_TIMEOUT`).
-        // A second constant would conflict with the product pick duration.
         let picked = self.pick_region(None, HideOwner::Ocr);
-        self.took_ocr_region(picked);
+        self.took_ocr_region(picked, session);
     }
 
     /// Interpret a completed pick.
@@ -1765,12 +1951,13 @@ impl App {
     /// [`App::took_static_region`] and `pick_static_region`.
     /// The pick uses a nested pump and needs a compositor.
     /// This part holds state for daemon tests.
-    fn took_ocr_region(&mut self, picked: Option<PhysRect>) {
+    fn took_ocr_region(&mut self, picked: Option<PhysRect>, session: ProfileSession) {
         let Some(region) = picked else {
             self.log.diag("ocr-clipboard: pick cancelled - the clipboard is untouched");
             self.release_capture_hide(HideOwner::Ocr);
             return;
         };
+        self.ocr_session = Some(session);
         self.ocr_job = Some(region);
         self.spawn_ocr_read(region);
     }
@@ -1786,6 +1973,7 @@ impl App {
     /// (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_ocr_read(&mut self, region: PhysRect) {
         let setup = self.capture_setup();
+        let session = self.ocr_session.clone().expect("an OCR job retains its profile session");
         let jobs = self.ocr_jobs.clone();
         let answer = self.ocr_tx.clone();
         let spawned = std::thread::Builder::new()
@@ -1801,6 +1989,7 @@ impl App {
                             bgra: frame.buf,
                             w: frame.w,
                             h: frame.h,
+                            session,
                             answer: answer.clone(),
                         };
                         // A queue without a pipeline returns an error here.
@@ -1817,6 +2006,7 @@ impl App {
         if let Err(e) = spawned {
             self.log.diag(&format!("ocr-clipboard: no thread for the grab - {e}"));
             self.ocr_job = None;
+            self.ocr_session = None;
             self.release_capture_hide(HideOwner::Ocr);
         }
     }
@@ -1883,6 +2073,11 @@ impl App {
             self.log.diag("ocr-clipboard: text arrived with no region waiting for it");
             return;
         };
+        let Some(session) = self.ocr_session.take() else {
+            self.log.diag("ocr-clipboard: the region lost its profile session");
+            self.release_capture_hide(HideOwner::Ocr);
+            return;
+        };
         self.release_capture_hide(HideOwner::Ocr);
         let lines = match read {
             Ok(lines) => lines,
@@ -1902,8 +2097,14 @@ impl App {
         // Log counts, not text. The text is screen content, and diagnostics do
         // not use lookup opt-in (ARCHITECTURE.md#platform-integration).
         let chars = text.chars().count();
-        if self.config.actions.ocr_clipboard.as_ref().is_some_and(|action| action.open_sentence_search) {
-            self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text));
+        if session
+            .config()
+            .actions
+            .ocr_clipboard
+            .as_ref()
+            .is_some_and(|action| action.open_sentence_search)
+        {
+            self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text), session);
         }
         let Some(board) = self.clipboard.as_ref() else {
             self.log.diag(&clipboard::unavailable_line());
@@ -2327,9 +2528,9 @@ impl App {
         };
         if focused && !self.search_focused {
             self.search_focused = true;
-            if self.hold.take().is_some() { self.thaw(); }
-            for event in [Event::TriggerUp, Event::DismissRequested] {
-                for command in self.controller.handle(event) { self.execute(command); }
+            self.release_active_lookup_bind();
+            for command in self.controller.handle(Event::DismissRequested) {
+                self.execute(command);
             }
             self.sync_dwell();
         }
@@ -2369,7 +2570,7 @@ impl App {
 
     /// Return whether the dwell re-check has something to watch now.
     fn dwell_wanted(&self) -> bool {
-        dwell_wanted(self.hold, self.controller.dwell_armed())
+        self.controller.dwell_armed()
     }
 
     /// Arm the dwell watch when a target exists.
@@ -2516,6 +2717,7 @@ impl App {
                     anchor: pending.anchor,
                     orientation: pending.orientation,
                     mask: pending.mask,
+                    session: pending.session.clone(),
                 }),
                 pending.id,
             );
@@ -2577,9 +2779,8 @@ impl App {
         anchor: PhysRect,
         orientation: Orientation,
         hide_popup: bool,
+        session: ProfileSession,
     ) {
-        // A second add supersedes the first one. Clear its timer and hide owner
-        // before recording the new frame baseline.
         self.cancel_pending_sentence();
         let live_sentence_hide = hide_popup
             && self.display.is_some()
@@ -2598,6 +2799,7 @@ impl App {
             orientation,
             mask: CaptureMask::for_mode(self.capture_mode(), None),
             generation: self.popup_generation,
+            session,
             portal_seq,
             owns_hide: hide_popup,
         };
@@ -2651,26 +2853,32 @@ impl App {
             // A live probe owns a temporary transparent hide. The request is
             // deferred until an asynchronous `wl_display.sync` callback proves
             // that hide reached the compositor.
-            Command::RequestSentence { id, anchor, orientation, hide_popup } => {
-                self.request_sentence(id, anchor, orientation, hide_popup);
+            Command::RequestSentence { id, anchor, orientation, hide_popup, session } => {
+                self.request_sentence(id, anchor, orientation, hide_popup, session);
             }
-            Command::RequestLookup { id, point, popup } => {
+            Command::RequestLookup { id, point, popup, session } => {
                 let mut rectangles = self.controller.popup_rects();
                 if let Some(rect) = popup.filter(|rect| !rectangles.contains(rect)) {
                     rectangles.push(rect);
                 }
                 match CaptureMask::for_rects(self.capture_mode(), &rectangles) {
-                    Ok(mask) => { self.send_trigger(TriggerKind::Hover(Hover { at: point, mask }), id); }
+                    Ok(mask) => {
+                        self.send_trigger(TriggerKind::Hover(Hover { at: point, mask, session }), id);
+                    }
                     Err(error) => self.feed(Event::LookupResult {
                         id, outcome: LookupOutcome::Failed(error.to_string()),
                     }),
                 }
             }
-            Command::RequestDrillDown { id, text } => {
-                self.send_trigger(TriggerKind::DrillDown(text), id);
+            Command::RequestDrillDown { id, text, session } => {
+                self.send_trigger(TriggerKind::DrillDown { text, session }, id);
             }
-            Command::OpenSentenceSearch { text } => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, Some(&text)),
-            Command::ReadSelectedText { id } => {
+            Command::OpenSentenceSearch { text, session } => self.spawn_search_mode(
+                chibipop::search::SearchMode::Sentence,
+                Some(&text),
+                session,
+            ),
+            Command::ReadSelectedText { id, session: _ } => {
                 if !self.arm_selected_text_timer(id) {
                     self.feed(Event::SelectedTextReady { id, text: None, bounds: None });
                     return;
@@ -2691,14 +2899,17 @@ impl App {
                 }
             }
             Command::RequestReload { id } => {
-                let settings = worker::settings(&self.config, &self.dicts);
+                let settings = worker::settings(&self.default_session, &self.dicts);
                 self.send_trigger(TriggerKind::Reload(Box::new(settings)), id);
             }
             // New content needs one scripted pass from this frame.
             // Do not arm a pass for `RepaintPopup`. A scroll repaint would
             // otherwise call itself.
             Command::ShowPopup { presentation, anchor, scroll, show_back } => {
-                let same_popup = self.same_popup(&presentation, anchor);
+                let session = self.controller.current_session()
+                    .expect("a ShowPopup command has a retained profile session")
+                    .clone();
+                let same_popup = self.same_popup(&presentation, anchor, &session);
                 if !same_popup {
                     self.cancel_pending_sentence();
                     self.popup_generation = self.popup_generation.wrapping_add(1);
@@ -2709,10 +2920,9 @@ impl App {
                     anchor,
                     scroll,
                     show_back,
-                    // The slot is part of the panel, not a separate Windows
-                    // window. Every raster carries its state.
                     anki: self.controller.anki().cloned(),
                     selection: self.popup_selection(),
+                    session,
                 };
                 if self.hide_owners.is_empty() {
                     // A changed popup replaces the old one. A same-popup
@@ -2806,20 +3016,22 @@ impl App {
                 }
             }
             Command::SyncAnkiButton => self.sync_anki_slot(),
-            Command::CheckDupes { generation, exprs } => {
-                self.spawn_anki(AnkiCall::Dupes { generation, exprs });
+            Command::CheckDupes { generation, exprs, session } => {
+                self.spawn_anki(AnkiCall::Dupes { session, generation, exprs });
             }
-            // Screenshot-on-add seam. A plan carries a picture, so do not
-            // dispatch the plain add.
-            // The picture call files the authorized command payload.
-            // OS work stays in [`App::park_shot`].
-            Command::AddNote { expr, fields } => match self.plan_shot_for_add(&expr, &fields) {
-                Some(plan) => self.park_shot(Pending {
-                    plan,
-                    mode: self.config.actions.screenshot.capture_mode,
-                }),
-                None => self.spawn_anki(AnkiCall::Add { expr, fields }),
-            },
+            // A screenshot plan carries the authorized profile and request.
+            Command::AddNote { id, expr, fields, session } => {
+                if let Some(plan) = self.plan_shot_for_add(&session, &expr, &fields) {
+                    self.park_shot(Pending {
+                        plan,
+                        id,
+                        mode: session.config().actions.screenshot.capture_mode,
+                        session,
+                    });
+                } else {
+                    self.spawn_anki(AnkiCall::Add { id, session, expr, fields });
+                }
+            }
             // Rows that arm (`Set*Armed`, `SetCursorShape`) come from the Windows
             // dispatch tick.
             // This daemon has no such tick or seat hook, so no row is armed per
@@ -2833,14 +3045,14 @@ impl App {
             Command::PushPopup => "action=push_popup".to_string(),
             Command::RestorePopup { depth } => format!("action=restore_popup depth={depth}"),
             Command::ClearPopupParents => "action=clear_popup_parents".to_string(),
-            Command::RequestLookup { id, point, popup } => format!(
+            Command::RequestLookup { id, point, popup, .. } => format!(
                 "action=request_lookup id={} point=({}, {}) popup={}",
                 id.0,
                 point.x,
                 point.y,
                 popup.is_some()
             ),
-            Command::RequestSentence { id, anchor, orientation, hide_popup } => format!(
+            Command::RequestSentence { id, anchor, orientation, hide_popup, .. } => format!(
                 "action=request_sentence id={} anchor=({}, {}, {}x{}) orientation={orientation:?} hide_popup={hide_popup}",
                 id.0,
                 anchor.x,
@@ -2848,17 +3060,17 @@ impl App {
                 anchor.w,
                 anchor.h
             ),
-            Command::RequestDrillDown { id, text } => format!(
+            Command::RequestDrillDown { id, text, .. } => format!(
                 "action=request_drill_down id={} text_len={}",
                 id.0,
                 text.chars().count()
             ),
-            Command::ReadSelectedText { id } => {
+            Command::ReadSelectedText { id, .. } => {
                 format!("action=read_selected_text id={}", id.0)
             }
-            Command::OpenSentenceSearch { text } => format!("action=open_sentence_search text_len={}", text.len()),
+            Command::OpenSentenceSearch { text, .. } => format!("action=open_sentence_search text_len={}", text.len()),
             Command::RequestReload { id } => format!("action=request_reload id={}", id.0),
-            Command::ShowPopup { presentation, anchor, scroll, show_back } => format!(
+            Command::ShowPopup { presentation, anchor, scroll, show_back, .. } => format!(
                 "action=show_popup anchor=({}, {}, {}x{}) scroll={} show_back={} top={} cards={} collapsed={} sentence={} surface={}",
                 anchor.x,
                 anchor.y,
@@ -2890,11 +3102,11 @@ impl App {
                 local.x,
                 local.y
             ),
-            Command::CheckDupes { generation, exprs } => format!(
+            Command::CheckDupes { generation, exprs, .. } => format!(
                 "action=check_dupes generation={generation} expressions={}",
                 exprs.len()
             ),
-            Command::AddNote { expr, fields } => format!(
+            Command::AddNote { expr, fields, .. } => format!(
                 "action=add_note expr_len={} fields={}",
                 expr.chars().count(),
                 fields.len()
@@ -2939,8 +3151,10 @@ impl App {
     /// A latched hold reads live pixels with the popup masked.
     /// Other modes also read the current screen.
     fn capture_mode(&self) -> CaptureMode {
-        match self.hold {
-            Some(h) if !h.latched => CaptureMode::Frozen,
+        match (self.controller.trigger_mode(), self.hold) {
+            (TriggerMode::HoldKey | TriggerMode::HoldShift, Some(hold)) if !hold.latched => {
+                CaptureMode::Frozen
+            }
             _ => CaptureMode::Live,
         }
     }
@@ -3011,12 +3225,11 @@ impl App {
     /// The answer returns as an Event, like the Worker's path
     /// (ARCHITECTURE.md#workspace-and-seams).
     fn spawn_anki(&mut self, call: AnkiCall) {
-        let anki = self.config.anki.clone();
         let tx = self.anki_tx.clone();
         let spawned = std::thread::Builder::new()
             .name("chibipop-anki".to_string())
             .spawn(move || {
-                let _ = tx.send(call.run(&anki));
+                let _ = tx.send(call.run());
             });
         if let Err(e) = spawned {
             self.log.diag(&format!("anki: no thread for the AnkiConnect call - {e}"));
@@ -3030,7 +3243,7 @@ impl App {
     /// diagnostics (ARCHITECTURE.md#platform-integration).
     fn handle_anki(&mut self, outcome: AnkiOutcome) {
         match outcome {
-            AnkiOutcome::Dupes { generation, dupes } => {
+            AnkiOutcome::Dupes { session, generation, dupes } => {
                 let dupes = match dupes {
                     Ok(dupes) => {
                         self.log.diag(&format!(
@@ -3044,9 +3257,9 @@ impl App {
                         None
                     }
                 };
-                self.feed(Event::DupesChecked { generation, dupes });
+                self.feed(Event::DupesChecked { generation, session, dupes });
             }
-            AnkiOutcome::Added { expr, note } => {
+            AnkiOutcome::Added { id, session, expr, note } => {
                 let status = match note {
                     Ok(chibipop::anki::WriteResult::Added(id)) => {
                         self.log.diag(&format!("anki: card added as note {id}"));
@@ -3061,9 +3274,9 @@ impl App {
                         NoteWriteStatus::Failed
                     }
                 };
-                self.feed(Event::NoteWritten { expr, status });
+                self.feed(Event::NoteWritten { id, expr, session, status });
             }
-            AnkiOutcome::Shot { expr, dir, filed } => {
+            AnkiOutcome::Shot { id, session, expr, dir, filed } => {
                 let status = match filed {
                     Ok(chibipop::anki::WriteResult::Added(id)) => {
                         self.log.diag(&format!(
@@ -3084,7 +3297,7 @@ impl App {
                         NoteWriteStatus::Failed
                     }
                 };
-                self.feed(Event::NoteWritten { expr, status });
+                self.feed(Event::NoteWritten { id, expr, session, status });
             }
         }
     }
@@ -3211,34 +3424,27 @@ impl App {
         self.flush_surface_notes();
     }
 
-    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the same Controller
-    /// path as a real lookup, but answers its lookup with canned data.
+    /// The canned popup (`CHIBIPOP_POPUP_DEMO=1`) follows the Controller
+    /// bind path, but answers its lookup with canned data.
     /// It does not need capture, OCR, or a Dictionary.
-    /// Press mode ignores a cursor move, so the demo feeds the same press
-    /// Event that `lookup` feeds.
-    fn demo_show(&mut self) {
+    fn demo_show(&mut self, mode: TriggerMode) {
         let anchor = self.demo_anchor();
         self.log.diag(&format!(
             "popup: demo show at anchor {},{} {}x{}",
             anchor.x, anchor.y, anchor.w, anchor.h
         ));
         let point = PhysPoint { x: anchor.x, y: anchor.y };
-        if self.config.trigger.mode == chibipop::config::TriggerMode::Press {
-            self.feed(Event::TriggerPressed { pos: point });
-            return;
-        }
-        self.feed(Event::TriggerDown);
-        self.feed(Event::CursorMoved { pos: point });
+        self.feed(Event::LookupBindDown {
+            bind_id: LEGACY_DEMO_BIND_ID.to_string(),
+            mode,
+            session: self.default_session.clone(),
+            pos: point,
+        });
     }
 
     /// Hide the canned popup with the Controller.
-    ///
-    /// A key release hides the popup only in a hold mode. The demo answers its
-    /// own lookup, so it can also answer `Hide` for that lookup. That answer
-    /// hides the popup in Live mode. The Controller forgets the surface after
-    /// it hides the popup.
     fn demo_hide(&mut self) {
-        self.feed(Event::TriggerUp);
+        self.release_active_lookup_bind();
         if let Some(id) = self.demo.request.take() {
             self.feed(Event::LookupResult { id, outcome: LookupOutcome::Hide });
         }
@@ -3264,7 +3470,30 @@ impl App {
     fn handle_tray(&mut self, request: TrayRequest) {
         match request {
             TrayRequest::OpenSearch => self.spawn_search(),
-            TrayRequest::OpenSentenceSearch => self.spawn_search_mode(chibipop::search::SearchMode::Sentence, None),
+            TrayRequest::OpenSentenceSearch => self.spawn_search_mode(
+                chibipop::search::SearchMode::Sentence,
+                None,
+                self.default_session.clone(),
+            ),
+            TrayRequest::SetDefaultProfile(id) => {
+                let result = (|| -> Result<()> {
+                    let mut latest = chibipop::config::load_or_create(&self.paths.config_file)?;
+                    if !latest.profiles.iter().any(|profile| profile.id == id) {
+                        bail!("profile {id:?} does not exist");
+                    }
+                    if latest.default_profile == id {
+                        return Ok(());
+                    }
+                    latest.default_profile = id.clone();
+                    latest.validate()?;
+                    latest.save(&self.paths.config_file)?;
+                    self.install_saved_config(latest)
+                })();
+                match result {
+                    Ok(()) => self.log.diag(&format!("tray: default profile set to {id:?}")),
+                    Err(error) => self.log.diag(&format!("tray: could not set default profile - {error:#}")),
+                }
+            }
             TrayRequest::OpenSettings => self.spawn_settings(),
             TrayRequest::Quit => {
                 self.log.diag("tray: quit requested - shutting down");
@@ -3335,21 +3564,40 @@ impl App {
     }
 
     fn spawn_search(&mut self) {
-        self.spawn_search_mode(chibipop::search::SearchMode::Dictionary, None);
+        self.spawn_search_mode(
+            chibipop::search::SearchMode::Dictionary,
+            None,
+            self.default_session.clone(),
+        );
     }
 
-    fn spawn_search_mode(&mut self, mode: chibipop::search::SearchMode, text: Option<&str>) {
+    fn spawn_search_mode(
+        &mut self,
+        mode: chibipop::search::SearchMode,
+        text: Option<&str>,
+        session: ProfileSession,
+    ) {
         self.dismiss_popup_tree();
-        self.prefilled_searches.retain_mut(|child| child.try_wait().ok().flatten().is_none());
-        let prefill = text.filter(|text| !text.trim().is_empty());
-        let outcome = if let Some(text) = prefill {
-            self.spawn_prefilled_search(mode, text)
-        } else {
-            crate::search::search_command_mode(&self.paths, mode, None).and_then(|mut command| {
-                if mode == chibipop::search::SearchMode::Sentence {
-                    self.sentence_search.spawn_if_absent(&mut command)
-                } else { self.search.spawn_if_absent(&mut command) }
-            })
+        let launch = match text {
+            Some(_) => crate::search::search_stdin_command_mode(&self.paths, mode, &session),
+            None => crate::search::search_command_mode(&self.paths, mode, &session),
+        };
+        let outcome = match launch {
+            Ok(mut launch) => {
+                let identity = chibipop::search::SearchIdentity::new(mode, session.id());
+                let outcome = self
+                    .searches
+                    .entry(identity.clone())
+                    .or_default()
+                    .spawn(&self.paths, &identity, launch.command_mut(), text);
+                if !matches!(outcome, Ok(SpawnOutcome::Spawned(_))) {
+                    if let Err(error) = launch.remove_catalog() {
+                        self.log.diag(&format!("search: could not remove catalog snapshot: {error}"));
+                    }
+                }
+                outcome
+            }
+            Err(error) => Err(error),
         };
         match outcome {
             Ok(SpawnOutcome::Spawned(pid)) => self.log.diag(&format!("search: spawned pid {pid}")),
@@ -3360,28 +3608,15 @@ impl App {
         }
     }
 
-    fn spawn_prefilled_search(&mut self, mode: chibipop::search::SearchMode,
-        text: &str) -> std::io::Result<SpawnOutcome> {
-        let mut command = crate::search::search_stdin_command_mode(&self.paths, mode)?;
-        let mut child = command.spawn()?;
-        let pid = child.id();
-        let Some(mut input) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::other("search child has no stdin pipe"));
-        };
-        let text = text.to_owned();
-        if let Err(error) = std::thread::Builder::new().name("search-stdin".into()).spawn(move || {
-            if let Err(error) = std::io::Write::write_all(&mut input, text.as_bytes()) {
-                eprintln!("chibipop: sending search text through stdin failed: {error}");
+    fn invalidate_searches(&mut self) {
+        let paths = &self.paths;
+        let searches = &mut self.searches;
+        let log = &mut self.log;
+        for (identity, child) in searches {
+            if let Err(error) = child.invalidate(paths, identity) {
+                log.diag(&format!("search: invalidation failed: {error}"));
             }
-        }) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
         }
-        self.prefilled_searches.push(child);
-        Ok(SpawnOutcome::Spawned(pid))
     }
 
     /// Give a glossary citation to the desktop browser.
@@ -3410,6 +3645,106 @@ impl App {
         }
     }
 
+    fn save_profile_field(
+        &mut self,
+        profile_id: &str,
+        path: &str,
+        value: chibipop::config::FieldOverride,
+        screenshot_mode: Option<chibipop::config::ScreenshotMode>,
+        only_if_target_missing: bool,
+    ) -> Result<bool> {
+        let loaded = chibipop::config::load_or_create(&self.paths.config_file)
+            .with_context(|| format!("loading {}", self.paths.config_file.display()))?;
+        let catalog = ProfileCatalog::new(&loaded, &self.dicts)?;
+        if self.dicts.is_empty() && loaded != catalog.config {
+            anyhow::bail!("profile targets cannot be saved until dictionary identities are available");
+        }
+        let mut latest = catalog.config.clone();
+        if !latest.profiles.iter().any(|profile| profile.id == profile_id) {
+            return Ok(false);
+        }
+        let mut settings = latest.resolve(profile_id)?;
+        if screenshot_mode.is_some_and(|mode| settings.actions.screenshot.capture_mode != mode) {
+            return Ok(false);
+        }
+        if only_if_target_missing {
+            let exists = match path {
+                "actions.screenshot.fixed_region" => settings.actions.screenshot.fixed_region.is_some(),
+                "actions.screenshot.fixed_window" => settings.actions.screenshot.fixed_window.is_some(),
+                _ => false,
+            };
+            if exists {
+                return Ok(false);
+            }
+        }
+        settings.set_field(path, value)?;
+        latest.update_profile(profile_id, &settings)?;
+        latest
+            .save(&self.paths.config_file)
+            .with_context(|| format!("saving {} to {}", path, self.paths.config_file.display()))?;
+        self.install_saved_config(latest)?;
+        Ok(true)
+    }
+
+    fn install_saved_config(&mut self, loaded: Config) -> Result<()> {
+        let catalog = ProfileCatalog::new(&loaded, &self.dicts)?;
+        let saved = if self.dicts.is_empty() && loaded != catalog.config {
+            loaded
+        } else {
+            catalog.config.clone()
+        };
+        let default_session = catalog.session(None)?;
+        let config = default_session.config().clone();
+        let shared_resources_changed = self.catalog.config.dictionaries != catalog.config.dictionaries
+            || self.catalog.config.plugins.enabled != catalog.config.plugins.enabled;
+        if shared_resources_changed {
+            self.invalidate_searches();
+        }
+        self.saved = saved;
+        self.catalog = catalog;
+        self.default_session = default_session.clone();
+        self.config = config.clone();
+        self.log.set_show_lookup(config.debug.show_lookup_log);
+        self.control_policy.set_bind_ids(
+            self.saved.binds.iter().filter(|bind| bind.enabled).map(|bind| bind.id.clone()),
+        );
+        self.tray.set_profiles(
+            self.saved.profiles.iter().map(|profile| (profile.id.clone(), profile.name.clone())),
+            &self.saved.default_profile,
+        );
+        if let Some(popup) = self.popup.as_mut() {
+            popup.reconfigure(&config);
+        }
+        self.flush_popup_notes();
+        self.sync_shortcuts();
+        if shared_resources_changed && self.hold.take().is_some() {
+            self.thaw();
+        }
+        let cfg = Box::new(controller_config(&config));
+        if shared_resources_changed {
+            self.feed(Event::SharedResourcesReloaded { cfg, session: default_session });
+        } else {
+            self.feed(Event::ConfigReloaded { cfg, session: default_session });
+        }
+        let layer = self.popup.as_ref().map(Popup::layer);
+        let shown = self.popup.as_ref().and_then(Popup::shown).map(|shown| shown.placement.rect);
+        let screens = self.screens();
+        if let Some(catcher) = self.catcher.as_mut() {
+            if let Some(layer) = layer {
+                catcher.set_layer(layer);
+            }
+            if self.controller.watches_outside_clicks() {
+                if let Some(rect) = shown {
+                    catcher.show(&screens, &[rect]);
+                }
+            } else {
+                catcher.hide();
+            }
+        }
+        self.flush_surface_notes();
+        self.sync_static_outline();
+        Ok(())
+    }
     /// `reload` reads the file again and applies daemon settings.
     /// It updates the lookup-log gate and the popup settings.
     /// `popup.layer` needs no surface recreation, so it acts as a runtime
@@ -3421,51 +3756,19 @@ impl App {
     /// socket.
     fn reload_config(&mut self) {
         self.retry_portal_capture();
-        match chibipop::config::load_or_create(&self.paths.config_file) {
-            Ok(config) => {
-                let was = self.log.show_lookup();
-                let now = config.debug.show_lookup_log;
-                self.log.set_show_lookup(now);
+        let was = self.log.show_lookup();
+        match chibipop::config::load_or_create(&self.paths.config_file)
+            .and_then(|config| self.install_saved_config(config))
+        {
+            Ok(()) => {
                 self.log.diag(&format!(
                     "config: reloaded {}; lookup log {} -> {}",
                     self.paths.config_file.display(),
                     on_off(was),
-                    on_off(now),
+                    on_off(self.log.show_lookup()),
                 ));
-                if let Some(popup) = self.popup.as_mut() {
-                    popup.reconfigure(&config);
-                }
-                self.flush_popup_notes();
-                // The Controller answers with `RequestReload`.
-                // This sends new settings to the Worker and reopens the
-                // dictionary after a rebuild rename.
-                self.config = config;
-                self.sync_shortcuts();
-                let cfg = controller_config(&self.config);
-                self.feed(Event::ConfigReloaded(Box::new(cfg)));
-                let layer = self.popup.as_ref().map(Popup::layer);
-                let shown = self.popup.as_ref().and_then(Popup::shown).map(|shown| shown.placement.rect);
-                let screens = self.screens();
-                if let Some(catcher) = self.catcher.as_mut() {
-                    if let Some(layer) = layer {
-                        catcher.set_layer(layer);
-                    }
-                    if self.controller.watches_outside_clicks() {
-                        if let Some(rect) = shown {
-                            catcher.show(&screens, &[rect]);
-                        }
-                    } else {
-                        catcher.hide();
-                    }
-                }
-                self.flush_surface_notes();
-                // The mode, checkbox, and region are editable in the settings
-                // window.
-                // Reload is the second of the predicate's three call sites.
-                // A switch from Static removes the border.
-                self.sync_static_outline();
             }
-            Err(e) => self.log.diag(&format!("config: reload failed: {e:#}")),
+            Err(error) => self.log.diag(&format!("config: reload failed: {error:#}")),
         }
     }
 
@@ -3488,9 +3791,7 @@ impl App {
         // The old queue sender goes away with it.
         // A job that the dead Worker never read cannot reach the new one.
         self.ocr_jobs = worker::OcrJobs::disconnected();
-        let settings = worker::settings(&self.config, &self.dicts);
-        // Resolve settings against the identities already held.
-        // The first spawn has none. See `rescope_lookups`.
+        let settings = worker::settings(&self.default_session, &self.dicts);
         let sent_scope = settings.present_cfg.clone();
         let started = Instant::now();
         // Create a fresh queue for each spawn.
@@ -3508,39 +3809,24 @@ impl App {
                 self.ocr_jobs = worker::OcrJobs::new(jobs_tx, worker.serve_nudge());
                 self.worker = Some(worker);
                 self.portal_frames = portal_frames;
-                self.rescope_lookups(&sent_scope);
+                if let Err(error) = self.install_saved_config(self.saved.clone()) {
+                    self.log.diag(&format!("config: could not apply installed dictionaries - {error:#}"));
+                }
+                let present_cfg = worker::settings(&self.default_session, &self.dicts).present_cfg;
+                if present_cfg != sent_scope {
+                    self.log.diag(&format!(
+                        "worker: {} searches {} of {} dictionary/ies",
+                        self.default_session.config().ocr.language,
+                        present_cfg.terms.len(),
+                        self.dicts.len(),
+                    ));
+                }
                 self.look_where_the_cursor_is();
             }
             Err(e) => self.log.diag(&format!("worker: unavailable - {e:#}")),
         }
     }
 
-    /// The terms list after the dictionary identities become known.
-    ///
-    /// `Config::present_config` resolves terms against installed dictionary
-    /// names.
-    /// The config names enabled dictionaries and includes each installed
-    /// dictionary that appears in neither array.
-    /// The pipeline's first read supplies those names.
-    /// Settings sent to `spawn_worker` use an empty library, so they select no
-    /// dictionary.
-    /// Send the real answer now.
-    /// A fresh daemon must honor the config value from its first lookup, not its
-    /// first reload.
-    /// A respawn normally leaves the answer unchanged, so it needs no log.
-    fn rescope_lookups(&mut self, sent: &chibipop::present::PresentConfig) {
-        let settings = worker::settings(&self.config, &self.dicts);
-        if settings.present_cfg == *sent {
-            return;
-        }
-        self.log.diag(&format!(
-            "worker: {} searches {} of {} dictionary/ies",
-            self.config.ocr.language,
-            settings.present_cfg.terms.len(),
-            self.dicts.len(),
-        ));
-        self.send_trigger(TriggerKind::Reload(Box::new(settings)), RequestId(0));
-    }
 
     /// Ask for one lookup at the cursor's current position, if known.
     ///
@@ -3683,14 +3969,14 @@ fn selected_text_on_time(
 fn search_blocks_event(event: &Event) -> bool {
     matches!(event, Event::Tick { .. } | Event::GestureTick | Event::Scrolled { .. }
         | Event::PointerDown { .. } | Event::PointerMoved { .. } | Event::PointerUp { .. }
-        | Event::AddRequested | Event::BackRequested | Event::TriggerDown
+        | Event::AddRequested | Event::BackRequested | Event::LookupBindDown { .. }
         | Event::SelectedTextRequested { .. }
-        | Event::TriggerPressed { .. } | Event::CursorMoved { .. } | Event::DwellElapsed
+        | Event::CursorMoved { .. } | Event::DwellElapsed
         | Event::PopupHover { .. } | Event::PopupEntered { .. }
         | Event::PopupHoverAt { .. } | Event::PopupActivated { .. })
 }
 
-fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
+fn controller_config(config: &chibipop::config::ResolvedConfig) -> ControllerConfig {
     ControllerConfig {
         sub_popups: config.popup.sub_popups,
         selected_text_sentence_search: config.actions.search.selected_opens_sentence_search,
@@ -3723,26 +4009,13 @@ fn controller_config(config: &chibipop::config::Config) -> ControllerConfig {
 /// Startup, config reload, and a fresh region all call this method.
 /// Keep the condition in one place.
 /// A mode other than Static returns `None`, which removes the border.
-fn static_overlay_region(config: &chibipop::config::Config) -> Option<PhysRect> {
+fn static_overlay_region(config: &chibipop::config::ResolvedConfig) -> Option<PhysRect> {
     if config.anki.sentence_mode != chibipop::config::SentenceMode::Static
         || !config.anki.show_static_overlay
     {
         return None;
     }
     worker::static_region(&config.anki)
-}
-
-/// Return whether the dwell re-check has a target
-/// (ARCHITECTURE.md#hover-cadence).
-///
-/// The method uses two conditions.
-/// `armed` belongs to the Controller: live mode, a popup rect, and no
-/// drill-down.
-/// `hold` belongs to the daemon because only it knows the frozen grab.
-/// A frozen hold has immutable pixels and blocks the watch.
-/// A latched hold has live pixels and allows the watch.
-fn dwell_wanted(hold: Option<Hold>, armed: bool) -> bool {
-    !hold.is_some_and(|h| !h.latched) && armed
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -3956,7 +4229,11 @@ pub fn run(paths: Paths) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating the config dir {}", parent.display()))?;
     }
-    let config = chibipop::config::load_or_create(&paths.config_file)?;
+    let loaded = chibipop::config::load_or_create(&paths.config_file)?;
+    let catalog = ProfileCatalog::new(&loaded, &[])?;
+    let default_session = catalog.session(None)?;
+    let saved = loaded;
+    let config = default_session.config().clone();
     log.set_show_lookup(config.debug.show_lookup_log);
     log.diag(&format!(
         "config: loaded; lookup log {} (debug.show_lookup_log)",
@@ -4048,8 +4325,10 @@ pub fn run(paths: Paths) -> Result<()> {
         None => (None, tray::status::capture_state(&capture_selection)),
     };
 
-    let socket = ControlSocket::bind(runtime_dir, &display)
+    let mut socket = ControlSocket::bind(runtime_dir, &display)
         .with_context(|| format!("binding the control socket in {}", runtime_dir.display()))?;
+    socket.set_bind_ids(saved.binds.iter().filter(|bind| bind.enabled).map(|bind| bind.id.clone()));
+    let control_policy = socket.policy();
     log.diag(&format!("control: listening on {}", socket.path().display()));
 
     // Trigger channel ladder (ARCHITECTURE.md#input-ladders).
@@ -4081,7 +4360,7 @@ pub fn run(paths: Paths) -> Result<()> {
     let (shortcut_tx, shortcut_rx) = calloop::channel::sync_channel::<shortcuts::Event>(32);
     let (trigger_state, shortcut_session, shortcut_config) = match trigger_selection {
         shortcuts::Selection::Portal => {
-            let desired = ShortcutConfig::from_config(&config);
+            let desired = ShortcutConfig::from_config(&saved);
             if desired.preferred.is_empty() {
                 (
                     ChannelState::up("control socket only - no configured global shortcuts"),
@@ -4142,6 +4421,10 @@ pub fn run(paths: Paths) -> Result<()> {
     // Publish the row with that owner from the first update.
     statuses.set(ChannelId::Trigger, trigger_state);
     let (mut tray_handle, tray_diagnostics) = tray::spawn(statuses, tray_tx);
+    tray_handle.set_profiles(
+        saved.profiles.iter().map(|profile| (profile.id.clone(), profile.name.clone())),
+        &saved.default_profile,
+    );
     for line in tray_diagnostics {
         log.diag(&line);
     }
@@ -4276,8 +4559,11 @@ pub fn run(paths: Paths) -> Result<()> {
     let mut app = App {
         log,
         stub: StubState::default(),
-        paths: paths.clone(),
         signal: event_loop.get_signal(),
+        paths: paths.clone(),
+        saved,
+        catalog,
+        default_session: default_session.clone(),
         fatal: None,
         display: Some(conn.clone()),
         wayland_qh: Some(queue.handle()),
@@ -4290,7 +4576,7 @@ pub fn run(paths: Paths) -> Result<()> {
         gesture_tick: None,
         gesture_ticks_left: 0,
         cursor: CursorState::default(),
-        controller: Controller::new(controller_config(&config)),
+        controller: Controller::new(controller_config(&config), default_session.clone()),
         trace,
         last_poll: None,
         last_cursor: None,
@@ -4300,9 +4586,7 @@ pub fn run(paths: Paths) -> Result<()> {
         },
         last_move: Instant::now(),
         settings: SettingsChild::new(),
-        search: SettingsChild::new(),
-        sentence_search: SettingsChild::new(),
-        prefilled_searches: Vec::new(),
+        searches: HashMap::new(),
         search_focused: false,
         search_focus_error: false,
         shortcut_selection: trigger_selection,
@@ -4326,6 +4610,7 @@ pub fn run(paths: Paths) -> Result<()> {
         ocr_jobs: worker::OcrJobs::disconnected(),
         ocr_tx,
         ocr_job: None,
+        ocr_session: None,
         clipboard,
         shot: None,
         dicts: Vec::new(),
@@ -4351,6 +4636,7 @@ pub fn run(paths: Paths) -> Result<()> {
         demo,
         scripting: false,
         config,
+        control_policy,
     };
 
     // Bind the selected rung and settle it before the pump starts.
@@ -4430,8 +4716,8 @@ pub fn run(paths: Paths) -> Result<()> {
     event_loop
         .handle()
         .insert_source(Generic::new(Listening(socket), Interest::READ, Mode::Level), |_, listening, app: &mut App| {
-            for (request, verb) in listening.0.drain() {
-                app.handle_request(&request, verb);
+            for (request, control) in listening.0.drain() {
+                app.handle_request(&request, control);
             }
             Ok(PostAction::Continue)
         })
@@ -4540,39 +4826,52 @@ mod tests {
     use wayland_client::backend::ObjectId;
 
     #[test]
-    fn shortcut_configuration_tracks_each_enabled_chord() {
-        let mut config = chibipop::config::Config::default();
-        config.actions.enabled = true;
-        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+F".into());
+    fn shortcut_configuration_tracks_enabled_bind_ids_and_chords() {
+        let mut config = Config::default();
+        let mut bind = chibipop::config::Bind::new(
+            "search-main".into(),
+            chibipop::config::BindAction::Search,
+        );
+        bind.enabled = true;
+        bind.linux = "CTRL+SHIFT+F".into();
+        config.binds.push(bind);
+
         let current = ShortcutConfig::from_config(&config);
-        assert!(current.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+f".into())));
-        config.actions.search.hotkey_linux = Some("CTRL+SHIFT+G".into());
+        assert!(current.preferred.iter().any(|spec| {
+            spec.id.as_str() == "search-main" && spec.trigger == "CTRL+SHIFT+f"
+        }));
+
+        config.binds.last_mut().unwrap().linux = "CTRL+SHIFT+G".into();
         let changed = ShortcutConfig::from_config(&config);
-        assert!(!changed.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+f".into())));
-        assert!(changed.preferred.contains(&(ShortcutId::Search, "CTRL+SHIFT+g".into())));
-        config.actions.enabled = false;
+        assert!(!changed.preferred.iter().any(|spec| {
+            spec.id.as_str() == "search-main" && spec.trigger == "CTRL+SHIFT+f"
+        }));
+        assert!(changed.preferred.iter().any(|spec| {
+            spec.id.as_str() == "search-main" && spec.trigger == "CTRL+SHIFT+g"
+        }));
+
+        config.binds.last_mut().unwrap().enabled = false;
         assert!(!ShortcutConfig::from_config(&config)
             .preferred
             .iter()
-            .any(|(id, _)| *id == ShortcutId::Search));
+            .any(|spec| spec.id.as_str() == "search-main"));
     }
 
     #[test]
-    fn selected_text_shortcut_configuration_requires_actions() {
-        let mut config = chibipop::config::Config::default();
-        config.actions.search.selected_hotkey_linux = Some("SUPER+H".into());
-        assert!(ShortcutConfig::from_config(&config)
-            .preferred
-            .iter()
-            .any(|(id, _)| *id == ShortcutId::SelectedText));
-        config.actions.search.selected_hotkey_linux = Some("SUPER+J".into());
-        let changed = ShortcutConfig::from_config(&config);
-        assert!(changed.preferred.contains(&(ShortcutId::SelectedText, "LOGO+j".into())));
-        config.actions.enabled = false;
-        assert!(!ShortcutConfig::from_config(&config)
-            .preferred
-            .iter()
-            .any(|(id, _)| *id == ShortcutId::SelectedText));
+    fn selected_text_shortcut_uses_its_configured_bind_id() {
+        let mut config = Config::default();
+        let mut bind = chibipop::config::Bind::new(
+            "selected-source".into(),
+            chibipop::config::BindAction::SelectedText,
+        );
+        bind.enabled = true;
+        bind.linux = "SUPER+H".into();
+        config.binds.push(bind);
+
+        let current = ShortcutConfig::from_config(&config);
+        assert!(current.preferred.iter().any(|spec| {
+            spec.id.as_str() == "selected-source" && spec.trigger == "LOGO+h"
+        }));
     }
 
     #[test]
@@ -4588,13 +4887,27 @@ mod tests {
     #[test]
     fn focused_search_blocks_input_but_allows_releases_and_worker_results() {
         let point = PhysPoint { x: 50, y: 60 };
-        for event in [Event::CursorMoved { pos: point }, Event::TriggerDown,
-            Event::TriggerPressed { pos: point }, Event::AddRequested,
-            Event::DwellElapsed, Event::Tick { cursor: point, button_h: 0 }] {
+        let catalog = ProfileCatalog::new(&Config::default(), &[]).unwrap();
+        let session = catalog.session(None).unwrap();
+        for event in [
+            Event::CursorMoved { pos: point },
+            Event::LookupBindDown {
+                bind_id: LEGACY_TRIGGER_BIND_ID.to_string(),
+                mode: TriggerMode::Press,
+                session: session.clone(),
+                pos: point,
+            },
+            Event::AddRequested,
+            Event::DwellElapsed,
+            Event::Tick { cursor: point, button_h: 0 },
+        ] {
             assert!(search_blocks_event(&event), "{event:?}");
         }
-        for event in [Event::TriggerUp, Event::DismissRequested,
-            Event::LookupResult { id: RequestId(1), outcome: LookupOutcome::Hide }] {
+        for event in [
+            Event::LookupBindUp { bind_id: LEGACY_TRIGGER_BIND_ID.to_string() },
+            Event::DismissRequested,
+            Event::LookupResult { id: RequestId(1), outcome: LookupOutcome::Hide },
+        ] {
             assert!(!search_blocks_event(&event), "{event:?}");
         }
     }
@@ -4616,12 +4929,12 @@ mod tests {
 
         cfg.debug.show_lookup_log = true;
         cfg.save(&config_file).unwrap();
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
         assert!(app.log.show_lookup(), "reload must re-read the file");
 
         cfg.debug.show_lookup_log = false;
         cfg.save(&config_file).unwrap();
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
         assert!(!app.log.show_lookup(), "and follow it back down");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4716,7 +5029,10 @@ mod tests {
             dir.join("missing-analysis-model"),
             || {},
         );
-        let config = chibipop::config::Config::default();
+        let saved = Config::default();
+        let catalog = ProfileCatalog::new(&saved, &[]).unwrap();
+        let default_session = catalog.session(None).unwrap();
+        let config = default_session.config().clone();
         let (shortcut_tx, _shortcut_rx) =
             calloop::channel::sync_channel::<shortcuts::Event>(32);
         App {
@@ -4734,6 +5050,9 @@ mod tests {
                 cache_dir: dir.to_path_buf(),
                 runtime_dir: Some(dir.to_path_buf()),
             },
+            saved: saved.clone(),
+            catalog: Arc::clone(&catalog),
+            default_session: default_session.clone(),
             config: config.clone(),
             signal: event_loop.get_signal(),
             fatal: None,
@@ -4748,20 +5067,18 @@ mod tests {
             gesture_tick: None,
             gesture_ticks_left: 0,
             settings: SettingsChild::new(),
-            search: SettingsChild::new(),
-            sentence_search: SettingsChild::new(),
-            prefilled_searches: Vec::new(),
+            searches: HashMap::new(),
             search_focused: false,
             search_focus_error: false,
             shortcut_selection: shortcuts::Selection::Portal,
             shortcut_tx,
             shortcut_session: None,
             shortcut_session_id: Some(shortcuts::SessionId::new(1)),
-            shortcut_config: Some(ShortcutConfig::from_config(&config)),
-            confirmed_shortcuts: shortcuts::ShortcutId::ALL.to_vec(),
+            shortcut_config: Some(ShortcutConfig::from_config(&saved)),
+            confirmed_shortcuts: shortcuts::preferred(&saved).into_iter().map(|spec| spec.id).collect(),
             next_shortcut_session: 2,
             cursor: CursorState::default(),
-            controller: Controller::new(controller_config(&chibipop::config::Config::default())),
+            controller: Controller::new(controller_config(&config), default_session.clone()),
             trace: false,
             last_poll: None,
             last_cursor: None,
@@ -4791,6 +5108,7 @@ mod tests {
             ocr_tx: channel(&event_loop.handle(), "OCR text channel", App::handle_ocr_text)
                 .expect("the OCR text channel"),
             ocr_job: None,
+            ocr_session: None,
             // No compositor means no data-control connection.
             // This also matches the GNOME state that these tests can assert
             // without one.
@@ -4819,7 +5137,95 @@ mod tests {
             sentence_requests: HashSet::new(),
             demo: Demo::default(),
             scripting: false,
+            control_policy: ControlPolicy::default(),
         }
+    }
+    fn install_test_config(app: &mut App, config: Config) {
+        let catalog = ProfileCatalog::new(&config, &app.dicts).unwrap();
+        let saved = catalog.config.clone();
+        let default_session = catalog.session(None).unwrap();
+        let resolved = default_session.config().clone();
+        app.saved = saved;
+        app.catalog = catalog;
+        app.default_session = default_session.clone();
+        app.config = resolved.clone();
+        app.controller = Controller::new(controller_config(&resolved), default_session);
+        app.control_policy.set_bind_ids(
+            app.saved.binds.iter().filter(|bind| bind.enabled).map(|bind| bind.id.clone()),
+        );
+        app.shortcut_config = (app.shortcut_selection == shortcuts::Selection::Portal)
+            .then(|| ShortcutConfig::from_config(&app.saved));
+        app.confirmed_shortcuts =
+            shortcuts::preferred(&app.saved).into_iter().map(|spec| spec.id).collect();
+        app.tray.set_profiles(
+            app.saved.profiles.iter().map(|profile| (profile.id.clone(), profile.name.clone())),
+            &app.saved.default_profile,
+        );
+    }
+
+    fn add_test_profile(config: &mut Config, name: &str, resolved: &ResolvedConfig) -> String {
+        let id = config.next_profile_id();
+        config.profiles.push(chibipop::config::Profile {
+            id: id.clone(),
+            name: name.to_string(),
+            data: chibipop::config::ProfileData::Full {
+                settings: Box::new(chibipop::config::ProfileSettings::from_resolved(resolved)),
+            },
+        });
+        id
+    }
+
+    fn show_popup_for_session(app: &mut App, session: ProfileSession) {
+        let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
+        let commands = app.controller.handle(Event::LookupBindDown {
+            bind_id: "test-popup".to_string(),
+            mode: TriggerMode::Press,
+            session,
+            pos: AT,
+        });
+        let id = commands.iter().find_map(|command| match command {
+            Command::RequestLookup { id, .. } => Some(*id),
+            _ => None,
+        }).expect("press requests one lookup");
+        app.controller.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::Ready {
+                presentation: Box::new(popup::canned()),
+                anchor,
+                orientation: Orientation::Horizontal,
+                matched: None,
+                scan: Vec::new(),
+            },
+        });
+        app.controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 150, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+    }
+
+    fn update_default_config(app: &mut App, edit: impl FnOnce(&mut ResolvedConfig)) {
+        let mut resolved = app.config.clone();
+        edit(&mut resolved);
+        let mut saved = app.saved.clone();
+        let id = saved.default_profile.clone();
+        let settings = chibipop::config::ProfileSettings::from_resolved(&resolved);
+        saved.update_profile(&id, &settings).unwrap();
+        install_test_config(app, saved);
+    }
+
+    fn configured_shortcut_id(id: &str) -> ShortcutId {
+        ShortcutId::parse(id).expect("a configured bind ID")
+    }
+    fn send_fixed(app: &mut App, request: &str) {
+        let control = Verb::parse(request).map(ControlRequest::Verb);
+        app.handle_request(request, control);
+    }
+    fn update_saved_default(config: &mut Config, edit: impl FnOnce(&mut chibipop::config::ProfileSettings)) {
+        let id = config.default_profile.clone();
+        let mut settings = config.resolve(&id).unwrap();
+        edit(&mut settings);
+        config.update_profile(&id, &settings).unwrap();
     }
 
     /// `reload` retries only portal capture and only when the one-shot guard
@@ -4838,7 +5244,7 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
         let before = app.tray.statuses().row(ChannelId::Capture);
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(!written.contains("retrying the portal consent"), "log was: {written}");
@@ -4869,18 +5275,22 @@ mod tests {
         // The fake Worker represents a finished spawn. It must leave the
         // identity.
         app.dicts = fake_dicts();
-        // The user chose Static in the settings. Only the box is absent.
-        app.config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        update_default_config(&mut app, |config| {
+            config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+            config.dictionaries.terms = vec!["FakeDict".into()];
+        });
+        app.saved.save(&app.paths.config_file).unwrap();
 
         // Place `AT` near (600,300), but outside the cursor-centered tile.
         // The anchor then distinguishes the two regions.
         let region = PhysRect { x: 500, y: 250, w: 200, h: 100 };
-        app.took_static_region(Some(region));
+        let session = app.default_session.clone();
+        app.took_static_region(Some(region), session);
 
         let saved = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
         assert_eq!(
             Some([500, 250, 200, 100]),
-            saved.anki.static_region,
+            saved.resolved(None).unwrap().anki.static_region,
             "the rect has to survive a restart, so it goes in the file"
         );
         let written = std::fs::read_to_string(&log_file).unwrap();
@@ -4913,6 +5323,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+    #[test]
+    fn a_static_pick_updates_only_the_retained_popup_profile_in_the_latest_catalog() {
+        let dir = scratch("static_profile");
+        let log_file = dir.join("chibipop.log");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let mut saved = app.saved.clone();
+        let mut popup_config = app.config.clone();
+        popup_config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        let profile_id = add_test_profile(&mut saved, "Popup profile", &popup_config);
+        install_test_config(&mut app, saved);
+        let retained = app.catalog.session(Some(&profile_id)).unwrap();
+        show_popup_for_session(&mut app, retained.clone());
+        app.saved.save(&app.paths.config_file).unwrap();
+
+        let mut latest = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        let default_id = latest.default_profile.clone();
+        let mut default_settings = latest.resolve(&default_id).unwrap();
+        default_settings.anki.deck = "Latest default".to_string();
+        latest.update_profile(&default_id, &default_settings).unwrap();
+        let mut popup_settings = latest.resolve(&profile_id).unwrap();
+        popup_settings.anki.deck = "Latest popup".to_string();
+        latest.update_profile(&profile_id, &popup_settings).unwrap();
+        latest.save(&app.paths.config_file).unwrap();
+
+        let region = PhysRect { x: 500, y: 250, w: 200, h: 100 };
+        let session = app.displayed_session();
+        app.took_static_region(Some(region), session);
+
+        let saved = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        assert_eq!(None, saved.resolved(Some(&default_id)).unwrap().anki.static_region);
+        assert_eq!(Some([500, 250, 200, 100]), saved.resolved(Some(&profile_id)).unwrap().anki.static_region);
+        assert_eq!("Latest default", saved.resolve(&default_id).unwrap().anki.deck);
+        assert_eq!("Latest popup", saved.resolve(&profile_id).unwrap().anki.deck);
+        assert_eq!(None, retained.config().anki.static_region, "the retained session stays immutable");
+        assert_eq!(profile_id.as_str(), app.displayed_session().id(), "the shown popup keeps its origin profile");
+        assert_eq!(
+            Some([500, 250, 200, 100]),
+            app.catalog.session(Some(&profile_id)).unwrap().config().anki.static_region,
+            "a new session sees the saved target"
+        );
+        let mut latest = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        latest.remove_profile(&profile_id).unwrap();
+        latest.save(&app.paths.config_file).unwrap();
+        app.took_static_region(Some(PhysRect { x: 700, y: 300, w: 80, h: 60 }), retained);
+        let after_delete = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        assert!(!after_delete.profiles.iter().any(|profile| profile.id == profile_id));
+        assert_eq!(None, after_delete.resolved(None).unwrap().anki.static_region);
+    }
+
+    #[test]
+    fn profile_reload_keeps_the_popup_but_shared_resource_reload_invalidates_it() {
+        let dir = scratch("profile_reload");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let mut saved = app.saved.clone();
+        let profile_id = add_test_profile(&mut saved, "Popup profile", &app.config);
+        install_test_config(&mut app, saved);
+        let session = app.catalog.session(Some(&profile_id)).unwrap();
+        show_popup_for_session(&mut app, session);
+
+        let mut latest = app.saved.clone();
+        let mut settings = latest.resolve(&profile_id).unwrap();
+        settings.anki.deck = "Changed profile deck".to_string();
+        latest.update_profile(&profile_id, &settings).unwrap();
+        app.install_saved_config(latest.clone()).unwrap();
+        assert!(app.controller.popup().is_some(), "profile settings do not invalidate a retained popup");
+
+        latest.dictionaries.frequency.push("Changed shared frequency".to_string());
+        app.install_saved_config(latest).unwrap();
+        assert!(app.controller.popup().is_none(), "shared resources invalidate the retained popup");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// A canceled pick changes nothing: no file, memory region, or reload.
     /// Esc, a right click, a short drag, and no layer shell all return `None`.
     /// The socket verb enters this path through `handle_request`, `apply_verb`,
@@ -4924,10 +5408,12 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
-        app.config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        update_default_config(&mut app, |config| {
+            config.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        });
         assert!(!app.paths.config_file.exists(), "the fixture starts with no config file");
 
-        app.handle_request("static-region", Verb::parse("static-region"));
+        send_fixed(&mut app, "static-region");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(
@@ -4950,9 +5436,11 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
-        app.config.anki.sentence_mode = chibipop::config::SentenceMode::Sentence;
+        update_default_config(&mut app, |config| {
+            config.anki.sentence_mode = chibipop::config::SentenceMode::Sentence;
+        });
 
-        app.handle_request("static-region", Verb::parse("static-region"));
+        send_fixed(&mut app, "static-region");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(written.contains("control: static-region"), "log was: {written}");
@@ -4970,7 +5458,7 @@ mod tests {
     #[test]
     fn the_outline_wants_a_drawn_region_in_static_mode_with_the_box_ticked() {
         use chibipop::config::SentenceMode;
-        let mut cfg = chibipop::config::Config::default();
+        let mut cfg = chibipop::config::ResolvedConfig::default();
         let rect = PhysRect { x: 10, y: 20, w: 300, h: 40 };
         cfg.anki.static_region = Some([10, 20, 300, 40]);
 
@@ -5007,10 +5495,12 @@ mod tests {
         let file = app.paths.config_file.clone();
 
         let mut cfg = chibipop::config::load_or_create(&file).unwrap();
-        cfg.anki.sentence_mode = chibipop::config::SentenceMode::Static;
-        cfg.anki.static_region = Some([10, 20, 300, 40]);
+        update_saved_default(&mut cfg, |settings| {
+            settings.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+            settings.anki.static_region = Some([10, 20, 300, 40]);
+        });
         cfg.save(&file).unwrap();
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert_eq!(
@@ -5020,13 +5510,15 @@ mod tests {
         );
         assert_eq!(
             Some(PhysRect { x: 10, y: 20, w: 300, h: 40 }),
-            worker::settings(&app.config, &app.dicts).static_region,
+            worker::settings(&app.default_session, &app.dicts).static_region,
             "an undrawable border must not cost the lookups"
         );
 
-        cfg.anki.sentence_mode = chibipop::config::SentenceMode::Line;
+        update_saved_default(&mut cfg, |settings| {
+            settings.anki.sentence_mode = chibipop::config::SentenceMode::Line;
+        });
         cfg.save(&file).unwrap();
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert_eq!(
@@ -5056,7 +5548,7 @@ mod tests {
             Some(PortalRetry { state_dir: dir.clone(), globals: Vec::new(), cursor: None });
         app.note_channel(ChannelId::Capture, ChannelState::up("portal ScreenCast + PipeWire"));
 
-        app.handle_request("reload", Some(Verb::Reload));
+        send_fixed(&mut app, "reload");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(!written.contains("retrying the portal consent"), "log was: {written}");
@@ -5092,7 +5584,7 @@ mod tests {
         let mut app = test_app(&dir, &log_file, &event_loop);
         assert!(app.clipboard.is_none(), "no compositor, so no selection to own");
 
-        app.handle_request("ocr-clipboard", Verb::parse("ocr-clipboard"));
+        send_fixed(&mut app, "ocr-clipboard");
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(
@@ -5118,7 +5610,8 @@ mod tests {
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
 
-        app.took_ocr_region(None);
+        let session = app.default_session.clone();
+        app.took_ocr_region(None, session);
 
         let written = std::fs::read_to_string(&log_file).unwrap();
         assert!(
@@ -5139,6 +5632,7 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
+        app.ocr_session = Some(app.default_session.clone());
         app.ocr_job = Some(PhysRect { x: 10, y: 20, w: 300, h: 40 });
 
         app.handle_ocr_text(Ok(vec![OcrLine { words: Vec::new() }]));
@@ -5159,6 +5653,7 @@ mod tests {
         let log_file = dir.join("chibipop.log");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &log_file, &event_loop);
+        app.ocr_session = Some(app.default_session.clone());
         app.ocr_job = Some(PhysRect { x: 0, y: 0, w: 64, h: 48 });
 
         app.handle_ocr_text(Err("grabbing the region failed - no backend".to_string()));
@@ -5197,12 +5692,12 @@ mod tests {
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
 
-        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+        send_fixed(&mut app, "trigger-down");
         let hold = app.hold.expect("a press holds");
         assert!(!hold.latched, "a key press is not a latch");
         assert!(hold.output.contains(PhysPoint { x: 400, y: 300 }), "{:?}", hold.output);
 
-        app.handle_request("trigger-up", Some(Verb::TriggerUp));
+        send_fixed(&mut app, "trigger-up");
         assert_eq!(None, app.hold, "a release ends the hold");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5221,7 +5716,7 @@ mod tests {
         let (worker, log) = fake_worker(None, None);
         app.worker = Some(worker);
 
-        app.handle_request("toggle", Some(Verb::Toggle));
+        send_fixed(&mut app, "toggle");
         assert!(app.hold.is_some_and(|h| h.latched), "toggle-on latches");
         assert_eq!(CaptureMode::Live, app.capture_mode(), "a latch reads live grabs");
         answer(&app);
@@ -5232,15 +5727,11 @@ mod tests {
         );
         assert!(!done(&log).iter().any(|line| line == "freeze"));
 
-        app.handle_request("trigger-up", Some(Verb::TriggerUp));
+        send_fixed(&mut app, "trigger-up");
         assert!(app.hold.is_some(), "a stray release must not end a toggle");
-        app.handle_request("toggle", Some(Verb::Toggle));
+        send_fixed(&mut app, "toggle");
         assert_eq!(None, app.hold, "toggle-off ends it");
 
-        let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
-        assert!(written.contains("a toggle holds the live grab"), "log was: {written}");
-        assert!(written.contains("trigger: latch released"), "log was: {written}");
-        assert!(!written.contains("frozen grab dropped"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5253,7 +5744,7 @@ mod tests {
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
 
-        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+        send_fixed(&mut app, "trigger-down");
 
         assert_eq!(None, app.hold, "nothing to freeze on");
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
@@ -5273,7 +5764,7 @@ mod tests {
         let (worker, log) = fake_worker(None, None);
         app.worker = Some(worker);
 
-        app.handle_request("lookup", Some(Verb::Lookup));
+        send_fixed(&mut app, "lookup");
 
         assert_eq!(None, app.hold, "a lookup press never starts a hold");
         assert_eq!(CaptureMode::Live, app.capture_mode(), "the lookup uses a live capture");
@@ -5296,7 +5787,7 @@ mod tests {
         let (worker, log) = fake_worker(None, None);
         app.worker = Some(worker);
 
-        app.handle_request("lookup", Some(Verb::Lookup));
+        send_fixed(&mut app, "lookup");
 
         assert!(app.worker.as_ref().expect("the pipeline").results().try_recv().is_err());
         assert!(done(&log).is_empty(), "no cursor sample means no pipeline request");
@@ -5434,40 +5925,58 @@ mod tests {
 
     // ---- trigger channel Portal rung ----
 
-    fn binding(id: shortcuts::ShortcutId, trigger: Option<&str>) -> shortcuts::Binding {
-        shortcuts::Binding { id, trigger: trigger.map(str::to_string) }
+    fn binding(id: &str, trigger: Option<&str>) -> shortcuts::Binding {
+        shortcuts::Binding {
+            id: configured_shortcut_id(id),
+            trigger: trigger.map(str::to_string),
+        }
+    }
+
+    fn enable_lookup_bind(app: &mut App, mode: TriggerMode) {
+        let mut config = app.saved.clone();
+        let bind = config.binds.iter_mut().find(|bind| bind.id == "lookup").unwrap();
+        bind.enabled = true;
+        bind.linux = "ALT+F".into();
+        bind.mode = mode;
+        install_test_config(app, config);
     }
 
     fn enable_anki_shortcut(app: &mut App) {
-        app.config.anki.enabled = true;
-        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
+        update_default_config(app, |config| config.anki.enabled = true);
+        let mut config = app.saved.clone();
+        let bind = config.binds.iter_mut().find(|bind| bind.id == "anki-add").unwrap();
+        bind.enabled = true;
+        bind.linux = "ALT+A".into();
+        install_test_config(app, config);
     }
+
     fn portal_session() -> shortcuts::SessionId {
         shortcuts::SessionId::new(1)
     }
 
-    /// Portal press and release use the same trigger semantics as
-    /// `ctl trigger-down` and `trigger-up`.
-    /// Two sources feed one trigger.
+
+    /// A configured HoldKey bind freezes the grab on activation.
+    /// Its release drops that same hold.
     #[test]
-    fn a_portal_press_takes_the_same_frozen_grab_as_the_socket_verb() {
+    fn a_portal_hold_bind_takes_a_frozen_grab() {
         let dir = scratch("portalhold");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(PhysPoint { x: 400, y: 300 });
 
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::Trigger, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("lookup"), activated: true });
         let hold = app.hold.expect("a portal press holds");
         assert!(!hold.latched, "a key press is not a latch");
         assert!(hold.output.contains(PhysPoint { x: 400, y: 300 }), "{:?}", hold.output);
 
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::Trigger, activated: false });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("lookup"), activated: false });
         assert_eq!(None, app.hold, "a portal release ends the hold");
 
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
-        assert!(written.contains("trigger: portal activated trigger"), "log was: {written}");
-        assert!(written.contains("trigger: portal deactivated trigger"), "log was: {written}");
+        assert!(written.contains("trigger: portal activated lookup"), "log was: {written}");
+        assert!(written.contains("trigger: portal deactivated lookup"), "log was: {written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5484,13 +5993,13 @@ mod tests {
 
         app.handle_shortcut(shortcuts::Event::Fired {
             session: portal_session(),
-            id: shortcuts::ShortcutId::AnkiAdd,
+            id: configured_shortcut_id("anki-add"),
             activated: true,
         });
         assert_eq!(None, app.hold, "anki-add is not the trigger");
         app.handle_shortcut(shortcuts::Event::Fired {
             session: portal_session(),
-            id: shortcuts::ShortcutId::AnkiAdd,
+            id: configured_shortcut_id("anki-add"),
             activated: false,
         });
         assert_eq!(None, app.hold);
@@ -5508,16 +6017,16 @@ mod tests {
         let dir = scratch("portalbound");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
         enable_anki_shortcut(&mut app);
-
         app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![
-            binding(shortcuts::ShortcutId::Trigger, Some("Alt+F")),
-            binding(shortcuts::ShortcutId::AnkiAdd, None),
+            binding("lookup", Some("Alt+F")),
+            binding("anki-add", None),
         ] });
 
         let row = app.tray.statuses().row(ChannelId::Trigger);
         assert!(row.contains("GlobalShortcuts portal"), "{row}");
-        assert!(row.contains("trigger Alt+F"), "{row}");
+        assert!(row.contains("lookup Alt+F"), "{row}");
         assert!(row.contains("anki-add (key not reported)"), "{row}");
         // A trigger that works never raises the tray's attention icon: the
         // socket and the portal both work.
@@ -5525,7 +6034,7 @@ mod tests {
 
         let published = shortcuts::state::read(&dir).expect("the daemon publishes the channel");
         assert!(published.portal);
-        assert_eq!(Some("Alt+F".to_string()), published.description(ShortcutId::Trigger));
+        assert_eq!(Some("Alt+F".to_string()), published.description("lookup"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5536,13 +6045,13 @@ mod tests {
         let dir = scratch("portalchanged");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
         app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![binding(
-            shortcuts::ShortcutId::Trigger,
+            "lookup",
             Some("Alt+F"),
         )] });
         app.handle_shortcut(shortcuts::Event::Changed { session: portal_session(), bindings: vec![binding(
-            shortcuts::ShortcutId::Trigger,
+            "lookup",
             Some("Meta+Shift+R"),
         )] });
 
@@ -5551,7 +6060,7 @@ mod tests {
         assert!(!row.contains("Alt+F"), "the old key must be gone: {row}");
         assert_eq!(
             Some("Meta+Shift+R".to_string()),
-            shortcuts::state::read(&dir).expect("published").description(ShortcutId::Trigger)
+            shortcuts::state::read(&dir).expect("published").description("lookup")
         );
         let written = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         assert!(written.contains("trigger: portal re-bound"), "log was: {written}");
@@ -5567,9 +6076,9 @@ mod tests {
         let dir = scratch("portalgone");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
         app.handle_shortcut(shortcuts::Event::Bound { session: portal_session(), bindings: vec![binding(
-            shortcuts::ShortcutId::Trigger,
+            "lookup",
             Some("Alt+F"),
         )] });
         app.handle_shortcut(shortcuts::Event::Unavailable { session: portal_session(), reason: "CreateSession: the portal requires an app id".to_string(), advice: Some("launch chibipop from its desktop entry".to_string()) });
@@ -5587,7 +6096,7 @@ mod tests {
 
         let published = shortcuts::state::read(&dir).expect("published");
         assert!(!published.portal);
-        assert_eq!(None, published.description(ShortcutId::Trigger));
+        assert_eq!(None, published.description("lookup"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5608,15 +6117,16 @@ mod tests {
         let dir = scratch("portalstale");
         let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        enable_lookup_bind(&mut app, TriggerMode::HoldKey);
         app.handle_shortcut(shortcuts::Event::Bound {
             session: portal_session(),
-            bindings: vec![binding(shortcuts::ShortcutId::Trigger, Some("Alt+F"))],
+            bindings: vec![binding("lookup", Some("Alt+F"))],
         });
         app.retire_shortcut_session();
         let before = std::fs::read_to_string(dir.join("chibipop.log")).unwrap();
         app.handle_shortcut(shortcuts::Event::Fired {
             session: portal_session(),
-            id: shortcuts::ShortcutId::Trigger,
+            id: configured_shortcut_id("lookup"),
             activated: true,
         });
         assert_eq!(before, std::fs::read_to_string(dir.join("chibipop.log")).unwrap());
@@ -5773,12 +6283,13 @@ mod tests {
         let log = seams();
         let capture_log = log.clone();
         let ocr_log = log.clone();
-                // Use a named dictionary, not `&[]`.
-                // An empty terms list searches nothing
-                // (ARCHITECTURE.md#dictionary-and-lookup).
-                // A pipeline without its identity would read every lookup and
-                // present none.
-        let settings = worker::settings(&chibipop::config::Config::default(), &fake_dicts());
+        // Use a named dictionary, not an empty identity list.
+        // An empty terms list searches nothing.
+        // A pipeline without its identity would read every lookup and present none.
+        let dicts = fake_dicts();
+        let catalog = ProfileCatalog::new(&Config::default(), &dicts).unwrap();
+        let session = catalog.session(None).unwrap();
+        let settings = worker::settings(&session, &dicts);
         let (worker, _dicts) = Worker::spawn(
             settings,
             move || {
@@ -5850,7 +6361,8 @@ mod tests {
         let jobs = worker::OcrJobs::new(jobs_tx, worker.serve_nudge());
         let (answer, answers) = calloop::channel::channel::<Result<Vec<OcrLine>, String>>();
 
-        jobs.send(worker::OcrRequest { bgra: vec![0xFF; 8 * 4 * 4], w: 8, h: 4, answer })
+        let session = ProfileCatalog::new(&Config::default(), &[]).unwrap().session(None).unwrap();
+        jobs.send(worker::OcrRequest { bgra: vec![0xFF; 8 * 4 * 4], w: 8, h: 4, answer, session })
             .expect("a live pipeline takes the job");
         let lines = ocr_answer(&answers).expect("the fake engine answers");
 
@@ -5877,8 +6389,9 @@ mod tests {
         let jobs = worker::OcrJobs::disconnected();
         let (answer, _answers) = calloop::channel::channel::<Result<Vec<OcrLine>, String>>();
 
+        let session = ProfileCatalog::new(&Config::default(), &[]).unwrap().session(None).unwrap();
         let refused = jobs
-            .send(worker::OcrRequest { bgra: vec![0u8; 4], w: 1, h: 1, answer })
+            .send(worker::OcrRequest { bgra: vec![0u8; 4], w: 1, h: 1, answer, session })
             .expect_err("a disconnected queue must refuse");
 
         assert!(
@@ -5959,63 +6472,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The pipeline's first read provides names for the terms list.
-    /// `spawn_worker` cannot resolve the list before the pipeline exists, so it
-    /// resolves it again.
-    /// Without this step, a fresh daemon uses an empty list until reload.
-    /// This is the same empty-list defect one step later.
-    #[test]
-    fn a_fresh_pipeline_is_told_the_split_once_the_names_are_known() {
-        let dir = scratch("rescope");
-        let log_file = dir.join("chibipop.log");
-        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        app.config.ocr.language = "ja".to_string();
-        // The settings Terms section can contain an unchecked name.
-        // The config stores the exact name in the disabled list.
-        // An installed dictionary absent from both lists is new and searchable.
-        app.config.dictionaries.terms_disabled =
-            vec!["Jitendex.org [2026-07-09]".to_string()];
-        // `spawn_worker` sent no identities, so no new names and an empty list.
-        let sent = worker::settings(&app.config, &[]).present_cfg;
-        assert!(sent.terms.is_empty(), "an empty library names nothing to search");
-
-        let (worker, _seams) = fake_worker(None, None);
-        app.worker = Some(worker);
-        app.dicts = vec![
-            DictInfo { dict_id: 1, name: "大辞林　第四版".to_string() },
-            DictInfo { dict_id: 2, name: "Jitendex.org [2026-07-09]".to_string() },
-        ];
-        app.rescope_lookups(&sent);
-
-        let written = std::fs::read_to_string(&log_file).unwrap();
-        assert!(written.contains("ja searches 1 of 2"), "log was: {written}");
-        assert!(app.worker.is_some(), "the reload must have reached the pipeline");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// If the scope has no change, do nothing.
-    /// Every respawn already has names, so re-resolve matches the sent scope.
-    #[test]
-    fn a_pipeline_whose_scope_did_not_change_is_left_alone() {
-        let dir = scratch("norescope");
-        let log_file = dir.join("chibipop.log");
-        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-        let mut app = test_app(&dir, &log_file, &event_loop);
-        let (worker, _seams) = fake_worker(None, None);
-        app.worker = Some(worker);
-        app.dicts = vec![DictInfo { dict_id: 1, name: "Jitendex.org".to_string() }];
-        // The respawn has known identities. `spawn_worker` therefore resolves
-        // the same list.
-        let sent = worker::settings(&app.config, &app.dicts).present_cfg;
-
-        app.rescope_lookups(&sent);
-
-        let written = std::fs::read_to_string(&log_file).unwrap();
-        assert!(!written.contains("searches"), "log was: {written}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A live grab must mask the popup. A frozen key hold reads through it
     /// (ARCHITECTURE.md#capture-and-masking).
     /// The fake recognizer reports whether input has a mask, so both cases are
@@ -6030,7 +6486,12 @@ mod tests {
         // Put the popup over the hovered point, as a shown popup can be.
         let popup = PhysRect { x: AT.x - 40, y: AT.y - 40, w: 200, h: 120 };
 
-        app.execute(Command::RequestLookup { id: RequestId(1), point: AT, popup: Some(popup) });
+        app.execute(Command::RequestLookup {
+            id: RequestId(1),
+            point: AT,
+            popup: Some(popup),
+            session: app.default_session.clone(),
+        });
         answer(&app);
         assert_eq!(
             done(&log),
@@ -6040,7 +6501,7 @@ mod tests {
 
         app.cursor_rung = Some(cursor::Rung::ImageCopyCapture);
         app.last_cursor = Some(AT);
-        app.handle_request("trigger-down", Some(Verb::TriggerDown));
+        send_fixed(&mut app, "trigger-down");
         assert_eq!(CaptureMode::Frozen, app.capture_mode());
         answer(&app);
         // The press takes a full grab and brackets it like every read.
@@ -6103,6 +6564,7 @@ mod tests {
             anchor: PhysRect { x: 580, y: 280, w: 40, h: 40 },
             orientation: Orientation::Horizontal,
             hide_popup: true,
+            session: app.default_session.clone(),
         });
         let result = answer(&app);
 
@@ -6124,6 +6586,7 @@ mod tests {
     ) {
         let presentation = popup::canned();
         let anchor = PhysRect { x: 580, y: 280, w: 40, h: 40 };
+        let _ = app.controller.handle(Event::CursorMoved { pos: AT });
         let _ = app.controller.handle(Event::LookupResult {
             id: RequestId(1),
             outcome: LookupOutcome::Ready {
@@ -6149,6 +6612,7 @@ mod tests {
             orientation: Orientation::Horizontal,
             mask: CaptureMask::NONE,
             generation,
+            session: app.default_session.clone(),
             portal_seq: Some(store.content_seq()),
             owns_hide: true,
         });
@@ -6287,17 +6751,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-    /// Test the daemon half of the arm rule.
-    /// A frozen hold has immutable pixels, but a latched hold reads live pixels.
-    #[test]
-    fn a_frozen_hold_blocks_dwell_but_a_latched_hold_allows_it() {
-        let output = PhysRect { x: 0, y: 0, w: 1920, h: 1080 };
-        assert!(dwell_wanted(None, true), "a shown popup in live mode is watched");
-        assert!(!dwell_wanted(Some(Hold { output, latched: false }), true));
-        assert!(dwell_wanted(Some(Hold { output, latched: true }), true));
-        assert!(!dwell_wanted(None, false), "nothing shown is nothing to watch");
-    }
-
     #[test]
     fn hide_ownership_waits_for_every_capture_completion() {
         let mut owners = HideOwners::default();
@@ -6334,6 +6787,7 @@ mod tests {
 
         // Give the Controller the same shown content and anchor that the
         // platform is about to reshow. No native surface is needed here.
+        let _ = app.controller.handle(Event::CursorMoved { pos: AT });
         let _ = app.controller.handle(Event::LookupResult {
             id: RequestId(1),
             outcome: LookupOutcome::Ready {
@@ -6358,8 +6812,9 @@ mod tests {
             id: RequestId(42),
             anchor,
             orientation: Orientation::Horizontal,
-            mask: CaptureMask::NONE,
             generation,
+            mask: CaptureMask::NONE,
+            session: app.default_session.clone(),
             portal_seq: None,
             owns_hide: true,
         });
@@ -6372,6 +6827,7 @@ mod tests {
                 show_back: false,
                 anki: None,
                 selection: None,
+                session: app.default_session.clone(),
             },
             marks: Vec::new(),
         });
@@ -6400,6 +6856,7 @@ mod tests {
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
         let presentation = popup::canned();
         let anchor = PhysRect { x: 600, y: 300, w: 40, h: 40 };
+        let _ = app.controller.handle(Event::CursorMoved { pos: AT });
 
         let _ = app.controller.handle(Event::LookupResult {
             id: RequestId(1),
@@ -6434,6 +6891,7 @@ mod tests {
                 show_back: false,
                 anki: None,
                 selection: None,
+                session: app.default_session.clone(),
             },
             marks: marks.clone(),
         });
@@ -6504,9 +6962,10 @@ mod tests {
         let dir = scratch("gestureclock");
         let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
         let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
-        app.config.anki.enabled = true;
-        app.config.anki.selection_buttons = SelectionButtons::PrimaryAdditive;
-        app.controller = Controller::new(controller_config(&app.config));
+        update_default_config(&mut app, |config| {
+            config.anki.enabled = true;
+            config.anki.selection_buttons = SelectionButtons::PrimaryAdditive;
+        });
 
         let anchor = PhysRect { x: 100, y: 100, w: 40, h: 40 };
         app.controller.handle(Event::CursorMoved { pos: AT });
@@ -6670,12 +7129,17 @@ mod tests {
 
     /// Point the daemon at the fake server and enable the feature.
     fn anki_at(app: &mut App, url: &str) {
-        app.config.anki.enabled = true;
-        app.config.anki.url = url.to_string();
-        app.config.anki.deck = "Mining".to_string();
-        app.config.anki.model = "Lapis".to_string();
-        app.controller = Controller::new(controller_config(&app.config));
-        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
+        update_default_config(app, |config| {
+            config.anki.enabled = true;
+            config.anki.url = url.to_string();
+            config.anki.deck = "Mining".to_string();
+            config.anki.model = "Lapis".to_string();
+        });
+        let mut saved = app.saved.clone();
+        let bind = saved.binds.iter_mut().find(|bind| bind.id == "anki-add").unwrap();
+        bind.enabled = true;
+        bind.linux = "ALT+A".into();
+        install_test_config(app, saved);
     }
 
     /// Run the pump until `wanted` appears or `budget` passes pass.
@@ -6722,6 +7186,7 @@ mod tests {
         app.execute(Command::CheckDupes {
             generation: 7,
             exprs: vec![WORD.to_string(), "\u{732B}".to_string()],
+            session: app.default_session.clone(),
         });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: dupe check", 60);
 
@@ -6755,7 +7220,12 @@ mod tests {
         let mut fields = HashMap::new();
         fields.insert("expression".to_string(), WORD.to_string());
         fields.insert("reading".to_string(), "\u{305F}\u{3079}".to_string());
-        app.execute(Command::AddNote { expr: WORD.to_string(), fields });
+        app.execute(Command::AddNote {
+            id: RequestId(1),
+            expr: WORD.to_string(),
+            fields,
+            session: app.default_session.clone(),
+        });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
 
         let seen = anki.seen();
@@ -6788,7 +7258,12 @@ mod tests {
         };
         anki_at(&mut app, &format!("http://{dead}"));
 
-        app.execute(Command::AddNote { expr: WORD.to_string(), fields: HashMap::new() });
+        app.execute(Command::AddNote {
+            id: RequestId(1),
+            expr: WORD.to_string(),
+            fields: HashMap::new(),
+            session: app.default_session.clone(),
+        });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: Anki write failed", 60);
 
         assert!(written.contains("anki: Anki write failed"), "log was: {written}");
@@ -6809,7 +7284,7 @@ mod tests {
         let anki = FakeAnki::start(1);
         anki_at(&mut app, &anki.url);
 
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: true });
         app.pointer_interactions(vec![popup::Interaction::Anki {
             local: PhysPoint { x: 10, y: 10 },
         }]);
@@ -6889,6 +7364,48 @@ mod tests {
         })
     }
 
+
+    #[test]
+    fn an_anki_add_uses_the_retained_popup_profile_for_request_and_reply() {
+        let dir = scratch("ankiprofileroute");
+        let log_file = dir.join("chibipop.log");
+        let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let default_anki = FakeAnki::start(1);
+        let popup_anki = FakeAnki::start(1);
+
+        let mut saved = app.saved.clone();
+        let default_id = saved.default_profile.clone();
+        let mut default_config = app.config.clone();
+        default_config.anki.enabled = true;
+        default_config.anki.url = default_anki.url.clone();
+        default_config.anki.deck = "Default deck".to_string();
+        default_config.anki.model = "Default model".to_string();
+        saved.update_profile(
+            &default_id,
+            &chibipop::config::ProfileSettings::from_resolved(&default_config),
+        ).unwrap();
+        let mut popup_config = default_config.clone();
+        popup_config.anki.url = popup_anki.url.clone();
+        popup_config.anki.deck = "Popup deck".to_string();
+        popup_config.anki.model = "Popup model".to_string();
+        let profile_id = add_test_profile(&mut saved, "Popup profile", &popup_config);
+        install_test_config(&mut app, saved);
+        let session = app.catalog.session(Some(&profile_id)).unwrap();
+        show_popup_for_session(&mut app, session);
+
+        app.feed(Event::AddRequested);
+        let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added as note", 60);
+
+        let seen = popup_anki.seen();
+        assert_eq!(1, seen.len(), "the displayed profile receives the add: {seen:?}");
+        assert!(default_anki.seen().is_empty(), "the latest default profile is not the popup profile");
+        assert_eq!(Some("Popup deck"), seen[0]["params"]["note"]["deckName"].as_str());
+        assert_eq!(Some("Popup model"), seen[0]["params"]["note"]["modelName"].as_str());
+        assert_eq!(1, app.controller.anki().expect("shown").added.len(), "the matching Anki reply updates the retained popup");
+        assert!(written.contains("anki: card added as note 1729"), "log was: {written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// The `anki-add` Portal shortcut creates a card for the current lookup.
     /// This test cannot synthesize a Portal press because it needs an app ID and
     /// a real key.
@@ -6904,7 +7421,7 @@ mod tests {
         anki_at(&mut app, &anki.url);
         place_a_popup(&mut app);
 
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: true });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
 
         let seen = anki.seen();
@@ -6919,8 +7436,8 @@ mod tests {
 
         // Release does not add again (`Action::Nothing`).
         // The Controller rejects a repeat after the first add.
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: false });
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: false });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: true });
         pump_until(&mut event_loop, &mut app, &log_file, "never logged", 4);
         assert_eq!(1, anki.seen().len(), "one card, however often it is asked for");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6943,7 +7460,7 @@ mod tests {
         anki_at(&mut app, &anki.url);
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
 
         let seen = anki.seen();
@@ -6963,7 +7480,7 @@ mod tests {
         // Both rungs use one path, not two.
         // A Portal press after the socket add creates nothing because the
         // Controller knows that the lookup was added.
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: true });
         pump_until(&mut event_loop, &mut app, &log_file, "never logged", 4);
         assert_eq!(1, anki.seen().len(), "one card, whichever rung asks");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6980,14 +7497,10 @@ mod tests {
         let mut app = test_app(&dir, &log_file, &event_loop);
         let anki = FakeAnki::start(1);
         anki_at(&mut app, &anki.url);
-        app.config.anki.enabled = false;
-        app.controller = Controller::new(controller_config(&app.config));
-        app.shortcut_config = Some(ShortcutConfig::from_config(&app.config));
-        app.confirmed_shortcuts =
-            shortcuts::preferred(&app.config).into_iter().map(|(id, _)| id).collect();
+        update_default_config(&mut app, |config| config.anki.enabled = false);
         place_a_popup(&mut app);
 
-        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: shortcuts::ShortcutId::AnkiAdd, activated: true });
+        app.handle_shortcut(shortcuts::Event::Fired { session: portal_session(), id: configured_shortcut_id("anki-add"), activated: true });
         let written = pump_until(&mut event_loop, &mut app, &log_file, "anki: ", 8);
 
         assert!(anki.seen().is_empty(), "anki off, nothing on the wire: {:?}", anki.seen());
@@ -7012,6 +7525,65 @@ mod tests {
     // Only slurp and `capture::oneshot` remain outside these tests.
     // A live compositor smoke test covers them.
 
+
+    #[test]
+    fn a_screenshot_pick_keeps_its_target_and_origin_session_after_catalog_update() {
+        let dir = scratch("shot_profile");
+        let log_file = dir.join("chibipop.log");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &log_file, &event_loop);
+        let mut saved = app.saved.clone();
+        let mut popup_config = app.config.clone();
+        popup_config.anki.enabled = true;
+        popup_config.anki.deck = "Popup original".to_string();
+        popup_config.actions.screenshot.include_on_add = true;
+        popup_config.actions.screenshot.capture_mode = chibipop::config::ScreenshotMode::FixedRegion;
+        popup_config.actions.screenshot.fixed_region = None;
+        popup_config.actions.screenshot.save_dir = "shots".to_string();
+        let profile_id = add_test_profile(&mut saved, "Popup profile", &popup_config);
+        install_test_config(&mut app, saved);
+        let retained = app.catalog.session(Some(&profile_id)).unwrap();
+        show_popup_for_session(&mut app, retained.clone());
+        app.saved.save(&app.paths.config_file).unwrap();
+
+        let mut latest = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        let default_id = latest.default_profile.clone();
+        let mut default_settings = latest.resolve(&default_id).unwrap();
+        default_settings.anki.deck = "Latest default".to_string();
+        latest.update_profile(&default_id, &default_settings).unwrap();
+        let mut popup_settings = latest.resolve(&profile_id).unwrap();
+        popup_settings.anki.deck = "Latest popup".to_string();
+        latest.update_profile(&profile_id, &popup_settings).unwrap();
+        latest.save(&app.paths.config_file).unwrap();
+
+        let plan = app.plan_shot_for_add(&retained, WORD, &HashMap::new()).expect("the add has a screenshot plan");
+        app.took_shot_selection(
+            Ok(Some(screenshot::Selection {
+                rect: PhysRect { x: 500, y: 250, w: 200, h: 100 },
+                window: None,
+            })),
+            Pending { id: RequestId(44), session: retained.clone(), plan, mode: chibipop::config::ScreenshotMode::FixedRegion },
+        );
+
+        let saved = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        assert_eq!(None, saved.resolved(Some(&default_id)).unwrap().actions.screenshot.fixed_region);
+        assert_eq!(
+            Some([500, 250, 200, 100]),
+            saved.resolved(Some(&profile_id)).unwrap().actions.screenshot.fixed_region
+        );
+        assert_eq!("Latest default", saved.resolve(&default_id).unwrap().anki.deck);
+        assert_eq!("Latest popup", saved.resolve(&profile_id).unwrap().anki.deck);
+        assert_eq!(None, retained.config().actions.screenshot.fixed_region);
+        match app.shot.as_ref().expect("the grab is in flight") {
+            Shot::Grabbing(pending) => {
+                assert_eq!(RequestId(44), pending.id);
+                assert_eq!(profile_id.as_str(), pending.session.id());
+                assert_eq!("Popup original", pending.session.config().anki.deck);
+            }
+            Shot::Parked(_) => panic!("the selected region must start the grab"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// Two by two solid blue pixels.
     /// This is the smallest input `encode_bgra_to_png` accepts: BGRA8,
     /// top-down, `w * h * 4`.
@@ -7032,11 +7604,13 @@ mod tests {
     /// `data_dir`, the scratch directory.
     /// This uses the same `Paths::screenshots_dir` as the daemon.
     fn screenshots_on(app: &mut App) {
-        app.config.actions.screenshot.include_on_add = true;
-        app.config.actions.screenshot.save_dir = "shots".to_string();
-        app.config.anki.field_map.push(chibipop::config::FieldMapping {
-            anki_field: "Screenshot".to_string(),
-            source: "screenshot".to_string(),
+        update_default_config(app, |config| {
+            config.actions.screenshot.include_on_add = true;
+            config.actions.screenshot.save_dir = "shots".to_string();
+            config.anki.field_map.push(chibipop::config::FieldMapping {
+                anki_field: "Screenshot".to_string(),
+                source: "screenshot".to_string(),
+            });
         });
     }
 
@@ -7064,7 +7638,7 @@ mod tests {
         screenshots_on(&mut app);
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
 
         // The plan is parked and the plain add is suppressed.
         // Core owns the filename and picture field, so the assertions check
@@ -7130,10 +7704,12 @@ mod tests {
         let anki = FakeAnki::start(1);
         anki_at(&mut app, &anki.url);
         screenshots_on(&mut app);
-        app.config.actions.screenshot.include_on_add = false;
+        update_default_config(&mut app, |config| {
+            config.actions.screenshot.include_on_add = false;
+        });
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
         assert!(app.shot.is_none(), "the gate is off, so nothing is parked");
         let written =
             pump_until(&mut event_loop, &mut app, &log_file, "anki: card added", 60);
@@ -7164,7 +7740,7 @@ mod tests {
         screenshots_on(&mut app);
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
         let shot = match app.shot.take() {
             Some(Shot::Parked(shot)) => shot,
             Some(Shot::Grabbing(_)) => panic!("the pick must not run inside the command batch"),
@@ -7199,7 +7775,7 @@ mod tests {
         screenshots_on(&mut app);
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
         let shot = parked(&mut app);
         app.shot = Some(Shot::Grabbing(shot));
         app.handle_shot(Err("this compositor advertises no capture protocol".to_string()));
@@ -7228,11 +7804,12 @@ mod tests {
         anki_at(&mut app, &anki.url);
         screenshots_on(&mut app);
         std::fs::write(dir.join("blocked"), b"not a directory").unwrap();
-        app.config.actions.screenshot.save_dir =
-            dir.join("blocked").display().to_string();
+        update_default_config(&mut app, |config| {
+            config.actions.screenshot.save_dir = dir.join("blocked").display().to_string();
+        });
         place_a_popup(&mut app);
 
-        app.handle_request("anki-add", Verb::parse("anki-add"));
+        send_fixed(&mut app, "anki-add");
         let shot = parked(&mut app);
         app.shot = Some(Shot::Grabbing(shot));
         app.handle_shot(Ok(test_frame()));
