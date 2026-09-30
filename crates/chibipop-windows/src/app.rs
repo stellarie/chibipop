@@ -5724,13 +5724,10 @@ mod tests {
         });
         assert!(screenshot_restore_view(&controller).is_some());
 
-        controller.handle(Event::LookupResult {
-            id,
-            outcome: LookupOutcome::Hide,
-        });
+        controller.handle(Event::DismissRequested);
         assert!(
             screenshot_restore_view(&controller).is_none(),
-            "a later Hide must prevent stale native-window restoration"
+            "a dismissed popup must not return after capture"
         );
     }
 

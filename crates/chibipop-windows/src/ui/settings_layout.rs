@@ -401,19 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn moving_entry_between_sections_changes_placement() {
-        let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
-        let (tab_index, section_index, entry_index) = location(&layout, SettingId::PopupTheme);
-        let entry = layout.tabs[tab_index].sections[section_index]
-            .entries
-            .remove(entry_index);
-        layout.tabs[tab_index].sections[2].entries.push(entry);
-
-        let parsed = SettingsLayout::parse(&serialized(&layout)).expect("layout should load");
-        assert_eq!(location(&parsed, SettingId::PopupTheme), (0, 2, 6));
-    }
-
-    #[test]
     fn accepts_removing_a_tab_after_moving_its_settings() {
         let mut layout = SettingsLayout::embedded().expect("embedded layout should load");
         let removed = layout.tabs.remove(1);

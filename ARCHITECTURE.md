@@ -421,7 +421,8 @@ Worker: capture -> mask -> OCR -> lookup -> present --result--> Controller
   roles from a filename, and a user never declares them.
 - Each role has an ordered, independently enabled list. Enabled state belongs to each
   role for each Dictionary.
-- New imports go to the end of each relevant list in the enabled state.
+- New imports enter the edited profile's term and pitch lists as enabled.
+  Other explicit profile lists add them as disabled. Shared frequency lists add them as enabled.
 - The identity of a Dictionary is its exact installed name.
 - `term.freq` is a denormalized column. The hot lookup path reads it without a join.
 - Reindex is an in-place SQL transaction that must never read an archive. It runs after

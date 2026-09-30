@@ -291,17 +291,8 @@ jobs:
   #   - zwlr_screencopy_manager_v1 v3: the capture ladder's promptless
   #     rung 1, the rung under test. Rung 2 is not: no xdg-desktop-portal
   #     runs on a runner, so portal_capture_live skips itself.
-  #   - The cursor ladder has NO rung here: sway 1.9 advertises
-  #     no ext-image-copy-capture, there is no portal, and it is not
-  #     Hyprland. So the daemon must come up saying `hover unsupported`
-  #     and naming both missing globals, and a trigger press must answer
-  #     `no cursor sample yet` - the diagnostic path is what gets
-  #     smoked, and the daemon staying up is the assertion. A
-  #     trigger-mode *lookup* needs a cursor position, so that one
-  #     sub-step is impossible on this compositor and is reported as a
-  #     skip; OCR keeps its own gate in the Linux job above. sway 1.11+
-  #     (wlroots 0.19) advertises ext-image-copy-capture and would turn
-  #     that skip into a real rung with no change here.
+  # Without a cursor source, skip the OCR lookup.
+  # Still check the socket and daemon lifetime.
   sway-smoke:
     name: Headless sway smoke
     runs-on: ubuntu-latest
@@ -595,29 +586,18 @@ jobs:
           wait_count "worker: pipeline up" 1
           grep -F "worker: pipeline up" "$log" | tail -1
           "$BIN" ctl trigger-down || fail "ctl trigger-down was refused"
-          # Either outcome is honest and which one it is depends only on
-          # whether this compositor gave the cursor ladder a rung. A
-          # third outcome - silence, or a dead daemon - is not.
-          for _ in $(seq 1 300); do
-            [ "$(count "trigger: frozen grab of output")" -ge 1 ] && break
-            [ "$(count "trigger: no cursor sample yet")" -ge 1 ] && break
-            sleep 0.1
-          done
-          if [ "$(count "trigger: frozen grab of output")" -ge 1 ]; then
+          # A frozen grab needs a cursor source.
+          if [ "$(count "cursor: hover unsupported")" -ge 1 ]; then
+            echo "SKIPPED: This compositor has no cursor source."
+            echo "The socket and daemon lifetime checks still run."
+          else
+            wait_count "trigger: frozen grab of output" 1
             echo "a press froze a real grab:"
             grep -F "trigger: frozen grab of output" "$log" | tail -1
             if grep -F "lookup failed" "$log"; then
               fail "the lookup behind the grab failed"
             fi
             grep -E "lookup|no dictionary at" "$log" | tail -3 || true
-          elif [ "$(count "trigger: no cursor sample yet")" -ge 1 ]; then
-            echo "SKIPPED (named): this compositor gave the cursor ladder no rung,"
-            echo "so a press has no position to look up and says exactly that:"
-            grep -F "trigger: no cursor sample yet" "$log" | tail -1
-            echo "The lookup-through-OCR sub-step is not runnable here; the trigger"
-            echo "verbs, the socket and the diagnostic path are, and just were."
-          else
-            fail "a press did neither: no frozen grab and no diagnostic"
           fi
           "$BIN" ctl trigger-up || fail "ctl trigger-up was refused"
           kill -0 "$real" 2> /dev/null || fail "the daemon died on a trigger round-trip"

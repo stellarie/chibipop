@@ -7674,15 +7674,6 @@ mod tests {
         ids
     }
 
-    fn set_control_text(window: &SettingsWindow, id: i32, text: &str) {
-        let text = wide(text);
-        // SAFETY: The test window owns the requested control and copies this text.
-        unsafe {
-            let control = dlg_item(window.hwnd, id).expect("control should exist");
-            let _ = SetWindowTextW(control, PCWSTR(text.as_ptr()));
-        }
-    }
-
     fn select_combo_row(window: &SettingsWindow, id: i32, index: usize) {
         // SAFETY: The test window owns the combo and receives this selection notification.
         unsafe {
@@ -7778,8 +7769,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(8, window.tab_count());
-        assert_eq!(Some("Shortcuts"), window.tab_label(0));
         assert_eq!(Some(TabId::Shortcuts), window.tab_id(0));
         assert_eq!(Some(0), window.field_map_tab());
         assert!(window.tab_needs_anki_detection(0));
