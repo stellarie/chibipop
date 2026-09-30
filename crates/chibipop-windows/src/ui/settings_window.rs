@@ -3568,7 +3568,6 @@ unsafe fn build_configured_binds(
 }
 
 unsafe fn build_profile_catalog_controls(
-    root: HWND,
     page: HWND,
     font: Option<HFONT>,
     form: &SettingsForm,
@@ -3746,7 +3745,6 @@ unsafe fn build_profile_catalog_controls(
             controls.push(button);
         }
         *y += 2 * ROW_H + 3 * ROW_GAP;
-        let _ = root;
         Ok(())
     }
 }
@@ -6155,7 +6153,6 @@ impl SettingsWindow {
             }
             SettingId::ProfileCatalog => {
                 build_profile_catalog_controls(
-                    h,
                     page,
                     f,
                     form,
