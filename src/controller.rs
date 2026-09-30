@@ -898,7 +898,11 @@ impl Controller {
         self.awaiting = None;
         self.pending_cursor = None;
         let mut out = vec![Command::RestorePopup { depth }, Command::SetDragging(false), Command::SyncAnkiButton];
-        let session = self.request_session_default();
+        let session = self.active_bind.as_ref().map(|bind| &bind.session)
+            .or_else(|| self.chain_bind.as_ref().map(|bind| &bind.session))
+            .or_else(|| self.surface.as_ref().map(|surface| &surface.session))
+            .unwrap_or(&self.future_session)
+            .clone();
         self.set_profile_config(&session);
         if let Some(s) = self.surface.as_ref() {
             out.push(self.repaint(s.scroll));
@@ -1078,9 +1082,12 @@ impl Controller {
         id
     }
     fn request_session_default(&self) -> ProfileSession {
+        let root_session = self.parents.first().or(self.surface.as_ref()).map(|surface| {
+            surface.history.first().map_or(&surface.session, |entry| &entry.session)
+        });
         self.active_bind.as_ref().map(|bind| &bind.session)
             .or_else(|| self.chain_bind.as_ref().map(|bind| &bind.session))
-            .or_else(|| self.surface.as_ref().map(|surface| &surface.session))
+            .or(root_session)
             .unwrap_or(&self.future_session)
             .clone()
     }
@@ -1539,7 +1546,8 @@ impl Controller {
                 return Vec::new();
             }
         }
-        let sentence_probe = sentence_probe && !self.selected_text_active();
+        let has_hover_parent = !self.parents.is_empty();
+        let sentence_probe = sentence_probe && !self.selected_text_active() && !has_hover_parent;
         let (scroll, show_back, anchor, orientation, matched_surface, session) = {
             let Some(s) = self.surface.as_ref() else { return Vec::new() };
             if s.placed.is_none() || s.presentation.top.is_none() {
@@ -1628,6 +1636,9 @@ impl Controller {
             }
             let Some(entry) = s.history.pop() else { return Vec::new() };
             entry.restore(s);
+            if s.analysis.is_none() {
+                s.analysis_stale = true;
+            }
             (s.session.clone(), !s.history.is_empty())
         };
         self.set_profile_config(&session);
@@ -2274,9 +2285,10 @@ impl Controller {
         };
 
         if refresh_analysis && anki_enabled {
-            let s = self.surface.as_mut().expect("checked above");
-            s.generation = generation;
             if !exprs.is_empty() {
+                // An analysis-only reshow must not invalidate a pending duplicate check.
+                let s = self.surface.as_mut().expect("checked above");
+                s.generation = generation;
                 out.push(Command::CheckDupes { generation, exprs, session: session.clone() });
             }
             out.push(Command::RequestAnalysis { generation, texts: analysis_texts });
@@ -2854,6 +2866,60 @@ mod tests {
     }
 
     #[test]
+    fn live_lookup_after_hover_child_uses_root_profile_session() {
+        let (root, _, _) = nested_test_sessions();
+        let mut c = Controller::new(ControllerConfig::for_profile(root.config()), root.clone());
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+
+        let commands = c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { session, .. } if session == &root
+        )));
+    }
+
+    #[test]
+    fn live_lookup_after_clicked_child_uses_retained_root_session() {
+        let (root, child, _) = nested_test_sessions();
+        let mut c = Controller::new(ControllerConfig::for_profile(root.config()), root.clone());
+        shown(&mut c);
+
+        let id = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("犬".into())),
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestDrillDown { id, session, .. } => {
+                assert_eq!(session, child);
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("the child profile lookup");
+        c.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+
+        let replacement = session_for_controller_cfg(&ControllerConfig { summary_chars: 75, ..cfg() });
+        c.handle(Event::ConfigReloaded {
+            cfg: Box::new(ControllerConfig::for_profile(replacement.config())),
+            session: replacement,
+        });
+        let commands = c.handle(Event::CursorMoved { pos: PhysPoint { x: 900, y: 900 } });
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::RequestLookup { session, .. } if session == &root
+        )));
+    }
+
+
+    #[test]
     fn parent_click_is_armed_and_activates_without_ever_entering_child() {
         let mut c = test_controller(cfg());
         shown(&mut c);
@@ -2937,6 +3003,64 @@ mod tests {
         assert_eq!(texts[0].1, "親の文章");
         assert!(c.handle(Event::AnalysisReady { generation: child_generation, words: WordMap::new() }).is_empty());
         assert!(c.surface.as_ref().unwrap().analysis.is_none());
+    }
+
+    #[test]
+    fn clicked_back_restarts_parent_analysis_without_invalidating_pending_duplicate_check() {
+        let mut config = cfg();
+        config.anki_enabled = true;
+        let mut c = test_controller(config);
+        let mut parent = presentation_of("親");
+        parent.top.as_mut().unwrap().blocks = vec![
+            GlossBlock::parse("Test", r#"["親の文章"]"#),
+        ];
+        shown_card(&mut c, parent);
+        let parent_generation = c.surface.as_ref().unwrap().analysis_generation;
+        let parent_dupe_generation = c.surface.as_ref().unwrap().generation;
+        let parent_session = c.surface.as_ref().unwrap().session.clone();
+        assert!(c.surface.as_ref().unwrap().anki.checking);
+
+        let id = click(
+            &mut c,
+            PhysPoint { x: 10, y: 10 },
+            Button::Primary,
+            Some(HitAction::DrillDown("犬".into())),
+        )
+        .into_iter()
+        .find_map(|command| match command {
+            Command::RequestDrillDown { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("the child lookup");
+        c.handle(Event::LookupResult {
+            id,
+            outcome: LookupOutcome::DrillDown(Box::new(presentation_of("犬"))),
+        });
+        c.handle(placed(POPUP, 200, 200));
+        let child_generation = c.surface.as_ref().unwrap().analysis_generation;
+
+        let mut commands = c.handle(Event::BackRequested);
+        commands.extend(c.handle(placed(POPUP, 200, 200)));
+        let (generation, texts) = commands.iter().find_map(|command| match command {
+            Command::RequestAnalysis { generation, texts } => Some((*generation, texts)),
+            _ => None,
+        }).expect("Back must restart the pending parent analysis");
+        assert!(generation > child_generation);
+        assert_ne!(generation, parent_generation);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].1, "親の文章");
+        assert!(c.surface.as_ref().unwrap().anki.checking);
+
+        c.handle(Event::AnalysisReady { generation, words: WordMap::new() });
+        c.handle(Event::DupesChecked {
+            generation: parent_dupe_generation,
+            dupes: Some(HashSet::from(["親".into()])),
+            session: parent_session,
+        });
+        let parent = c.surface.as_ref().unwrap();
+        assert!(!parent.anki.checking);
+        assert!(parent.anki.connected);
+        assert!(parent.anki.dupes.contains("親"));
     }
 
     #[test]
@@ -5413,6 +5537,22 @@ mod tests {
             _ => None,
         });
         assert_eq!(request, Some((ANCHOR, Orientation::Horizontal, false)));
+    }
+
+    #[test]
+    fn add_from_hover_child_under_hold_skips_sentence_probe() {
+        let mut c = test_controller(ControllerConfig {
+            anki_enabled: true,
+            sentence_probe: true,
+            ..hold_cfg()
+        });
+        bind_down(&mut c, "hold", TriggerMode::HoldKey, PhysPoint { x: 110, y: 110 });
+        shown(&mut c);
+        hover_child(&mut c, "犬");
+
+        let commands = c.handle(Event::AddRequested);
+        assert!(commands.iter().any(|command| matches!(command, Command::AddNote { .. })));
+        assert!(!commands.iter().any(|command| matches!(command, Command::RequestSentence { .. })));
     }
     #[test]
     fn a_latched_toggle_probe_hides_the_popup_for_live_capture() {

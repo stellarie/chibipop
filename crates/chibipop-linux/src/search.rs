@@ -688,9 +688,9 @@ impl Worker {
 impl Search {
     fn enqueue(&mut self, job: Job) -> Task<Message> {
         if self.busy {
-            let input_pending = self.pending.as_ref().is_some_and(|pending|
-                matches!(pending.target, Target::Input(_) | Target::Word(_)));
-            if !input_pending || !matches!(job.target, Target::Hover(_, _)) { self.pending = Some(job); }
+            let explicit_pending = self.pending.as_ref().is_some_and(|pending|
+                matches!(pending.target, Target::Input(_) | Target::Word(_) | Target::Click(_, _)));
+            if !explicit_pending || !matches!(job.target, Target::Hover(_, _)) { self.pending = Some(job); }
             return Task::none();
         }
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
@@ -1625,6 +1625,35 @@ mod tests {
         }))));
         assert_eq!(search.result, SearchResult::Empty);
         assert!(receiver.recv().unwrap().0.query.is_empty());
+    }
+
+    #[test]
+    fn hover_cannot_displace_a_pending_explicit_click() {
+        let (mut search, receiver) = fixture();
+        let _ = update(&mut search, Message::Input("active".into()));
+        let (active, _) = receiver.recv().unwrap();
+        let session = search.session.clone();
+        search.pending = Some(Job {
+            target: Target::Click(window::Id::unique(), 3),
+            query: "explicit click".into(),
+            tokenize: false,
+            session: session.clone(),
+        });
+
+        let _ = search.enqueue(Job {
+            target: Target::Hover(window::Id::unique(), 4),
+            query: "passive hover".into(),
+            tokenize: false,
+            session,
+        });
+
+        assert!(matches!(
+            search.pending.as_ref().map(|job| &job.target),
+            Some(Target::Click(_, 3))
+        ));
+        assert_eq!(search.pending.as_ref().unwrap().query, "explicit click");
+        let _ = update(&mut search, Message::Finished(active.target, Err("done".into())));
+        assert_eq!(receiver.recv().unwrap().0.query, "explicit click");
     }
 
     #[test]

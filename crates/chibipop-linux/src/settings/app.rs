@@ -416,10 +416,12 @@ impl App {
         if let Some(rows) = self.form.field_map.as_mut() {
             rows.retain(|mapping| !mapping.anki_field.trim().is_empty());
         }
-        if self.form.cfg.actions.screenshot.save_dir.trim().is_empty() {
-            self.form.cfg.actions.screenshot.save_dir =
-                chibipop::config::ResolvedConfig::default().actions.screenshot.save_dir;
-        }
+        let save_dir = self.form.cfg.actions.screenshot.save_dir.trim();
+        self.form.cfg.actions.screenshot.save_dir = if save_dir.is_empty() {
+            chibipop::config::ResolvedConfig::default().actions.screenshot.save_dir
+        } else {
+            save_dir.to_string()
+        };
         match apply::apply(
             &self.form,
             &self.linux,
@@ -924,7 +926,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.form.screenshot_reset_targets = true;
         }
         Message::ScreenshotSaveDir(v) => {
-            app.form.cfg.actions.screenshot.save_dir = v.trim().to_string();
+            app.form.cfg.actions.screenshot.save_dir = v;
         }
         Message::LaunchSearch(mode) => return launch_search(app, mode),
         Message::SearchClosed(Err(error)) => app.status = error,
@@ -2732,25 +2734,12 @@ mod tests {
         bind.linux = "ALT+F".into();
         app.form.catalog.binds.push(bind);
 
-        let press = app.bind_snippet("bind-42").unwrap();
-        assert_eq!(
-            "bind = ALT, F, exec, /usr/bin/chibipop ctl bind-down bind-42",
-            press
-        );
-
         let _ = update(&mut app, Message::BindLinux("bind-42".into(), "CTRL+Q".into()));
         let bind = &app.form.catalog.binds[0];
         assert_eq!("CTRL+ALT+F", bind.windows);
         assert_eq!("CTRL+Q", bind.linux);
         let _ = update(&mut app, Message::BindModePicked("bind-42".into(), TriggerMode::HoldKey));
-        let hold = app.bind_snippet("bind-42").unwrap();
-        assert!(hold.contains("ctl bind-down bind-42"), "{hold}");
-        assert!(hold.contains("ctl bind-up bind-42"), "{hold}");
 
-        let _ = update(&mut app, Message::BindModePicked("bind-42".into(), TriggerMode::Toggle));
-        let toggle = app.bind_snippet("bind-42").unwrap();
-        assert!(toggle.contains("ctl bind-down bind-42"), "{toggle}");
-        assert!(!toggle.contains("bind-up"), "{toggle}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3021,8 +3010,12 @@ mod tests {
         let _ = update(&mut app, Message::IncludeScreenshot(true));
         assert!(saved_resolved(&app).actions.screenshot.include_on_add);
 
-        let _ = update(&mut app, Message::ScreenshotSaveDir("  /tmp/mining  ".to_string()));
-        assert_eq!("/tmp/mining", saved_resolved(&app).actions.screenshot.save_dir);
+        let _ = update(&mut app, Message::ScreenshotSaveDir("  My Pictures  ".to_string()));
+        assert_eq!("  My Pictures  ", app.form.cfg.actions.screenshot.save_dir);
+        assert_eq!("  My Pictures  ", saved_resolved(&app).actions.screenshot.save_dir);
+
+        app.apply();
+        assert_eq!("My Pictures", saved_resolved(&app).actions.screenshot.save_dir);
 
         let default_dir = chibipop::config::ResolvedConfig::default().actions.screenshot.save_dir;
         let _ = update(&mut app, Message::ScreenshotSaveDir(String::new()));

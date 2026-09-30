@@ -121,10 +121,14 @@ enum CacheBustPoll {
 fn poll_cache_bust(
     pending: &mut Option<PendingCacheBust>,
     now: std::time::Instant,
+    dismiss_popup: impl FnOnce(),
 ) -> Option<CacheBustPoll> {
     let wait = pending.as_mut()?;
     match wait.rx.try_recv() {
         Ok(result) => {
+            if result.is_ok() {
+                dismiss_popup();
+            }
             *pending = None;
             Some(CacheBustPoll::Complete(result))
         }
@@ -2264,7 +2268,11 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
         }
 
         if msg.message == WM_TIMER && msg.wParam.0 == timer_id {
-            if let Some(result) = poll_cache_bust(&mut cache_bust, std::time::Instant::now()) {
+            if let Some(result) = poll_cache_bust(
+                &mut cache_bust,
+                std::time::Instant::now(),
+                || drive!(Event::DismissRequested),
+            ) {
                 match result {
                     CacheBustPoll::Complete(Ok(new_dicts)) => {
                         dicts = new_dicts;
@@ -2436,31 +2444,42 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             }
                             let previous = cfg.clone();
                             let previous_dicts = dicts.clone();
-                            if let Some(updated) = update_profile_settings(
+                            let mut save_failed = false;
+                            let updated = persist_static_region(
                                 config_path,
                                 session.id(),
-                                |profile| {
-                                    profile.anki.static_region =
-                                        Some([rect.x, rect.y, rect.w, rect.h]);
-                                    true
+                                rect,
+                                |error| {
+                                    save_failed = true;
+                                    if let Some(window) = &settings {
+                                        window.set_status(&format!(
+                                            "Could not save the static region: {error:#}"
+                                        ));
+                                    }
+                                    eprintln!("chibipop: saving static region failed: {error:#}");
                                 },
-                            )? {
+                            );
+                            if let Some(updated) = updated {
                                 install_runtime_catalog!(updated, previous, previous_dicts);
                             }
                             let selected = derive_session(&session);
-                            if selected.sentence_mode == crate::config::SentenceMode::Static
-                                && selected.show_static_overlay
-                            {
-                                if let Some(overlay) = &static_overlay {
-                                    if let Err(error) = overlay.show(rect) {
-                                        eprintln!("chibipop: showing static region overlay failed: {error:#}");
+                            if save_failed {
+                                sync_static_region_overlay(static_overlay.as_ref(), &selected);
+                            } else {
+                                if selected.sentence_mode == crate::config::SentenceMode::Static
+                                    && selected.show_static_overlay
+                                {
+                                    if let Some(overlay) = &static_overlay {
+                                        if let Err(error) = overlay.show(rect) {
+                                            eprintln!("chibipop: showing static region overlay failed: {error:#}");
+                                        }
                                     }
                                 }
+                                eprintln!(
+                                    "chibipop: static region set to ({}, {}, {}x{})",
+                                    rect.x, rect.y, rect.w, rect.h
+                                );
                             }
-                            eprintln!(
-                                "chibipop: static region set to ({}, {}, {}x{})",
-                                rect.x, rect.y, rect.w, rect.h
-                            );
                         }
                         if had_popup && controller.popup().is_some() {
                             set_parent_visibility(&parent_popups, true);
@@ -4430,6 +4449,24 @@ fn update_profile_settings(
     Ok(Some(latest))
 }
 
+fn persist_static_region(
+    config_path: &Path,
+    profile_id: &str,
+    rect: PhysRect,
+    on_error: impl FnOnce(&anyhow::Error),
+) -> Option<Config> {
+    match update_profile_settings(config_path, profile_id, |profile| {
+        profile.anki.static_region = Some([rect.x, rect.y, rect.w, rect.h]);
+        true
+    }) {
+        Ok(updated) => updated,
+        Err(error) => {
+            on_error(&error);
+            None
+        }
+    }
+}
+
 fn shared_resources_changed(
     before: &Config,
     after: &Config,
@@ -4447,34 +4484,42 @@ fn persist_screenshot_target(
     target: &crate::action::selection::SelectionTarget,
     config_path: &Path,
 ) -> Result<Option<Config>> {
-    let mode = session.config().actions.screenshot.capture_mode;
+    let snapshot = &session.config().actions.screenshot;
+    let mode = snapshot.capture_mode;
     match (mode, target) {
         (
             crate::config::ScreenshotMode::FixedRegion,
             crate::action::selection::SelectionTarget::Region(rect),
-        ) => update_profile_settings(config_path, session.id(), |settings| {
-            let screenshot = &mut settings.actions.screenshot;
-            if screenshot.capture_mode != mode {
-                return false;
-            }
-            screenshot.fixed_region = Some([rect.x, rect.y, rect.w, rect.h]);
-            true
-        }),
+        ) => {
+            let expected_region = snapshot.fixed_region;
+            update_profile_settings(config_path, session.id(), |settings| {
+                let screenshot = &mut settings.actions.screenshot;
+                if screenshot.capture_mode != mode || screenshot.fixed_region != expected_region {
+                    return false;
+                }
+                screenshot.fixed_region = Some([rect.x, rect.y, rect.w, rect.h]);
+                true
+            })
+        }
         (
             crate::config::ScreenshotMode::FixedWindow,
             crate::action::selection::SelectionTarget::Window { target, .. },
-        ) => update_profile_settings(config_path, session.id(), |settings| {
-            let screenshot = &mut settings.actions.screenshot;
-            if screenshot.capture_mode != mode {
-                return false;
-            }
-            screenshot.fixed_window = Some(target.clone());
-            true
-        }),
+        ) => {
+            let expected_window = &snapshot.fixed_window;
+            update_profile_settings(config_path, session.id(), |settings| {
+                let screenshot = &mut settings.actions.screenshot;
+                if screenshot.capture_mode != mode
+                    || screenshot.fixed_window.as_ref() != expected_window.as_ref()
+                {
+                    return false;
+                }
+                screenshot.fixed_window = Some(target.clone());
+                true
+            })
+        }
         _ => Ok(None),
     }
 }
-
 /// Joins a completed save without blocking the message pump.
 fn join_save_if_finished(job: &mut Option<thread::JoinHandle<()>>) {
     if job.as_ref().is_some_and(|handle| handle.is_finished()) {
@@ -4885,6 +4930,163 @@ mod tests {
         assert!(
             latest.profiles.iter().all(|profile| profile.id != selected_id),
             "a deleted profile must not be recreated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_region_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
+        let (dir, _guard) = edit_scratch("stale_region_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedRegion;
+        profile.actions.screenshot.fixed_region = Some([1, 2, 3, 4]);
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let retained_target = crate::action::selection::SelectionTarget::Region(PhysRect {
+            x: 1, y: 2, w: 3, h: 4,
+        });
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_region = Some([9, 8, 7, 6]);
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            Some([9, 8, 7, 6]),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_region
+        );
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_region = None;
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            None,
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_region
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_window_session_does_not_restore_a_replaced_or_reset_target() -> Result<()> {
+        let (dir, _guard) = edit_scratch("stale_window_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        let retained = crate::config::ScreenshotWindow {
+            app_id: "app-a".into(),
+            title: "Window A".into(),
+        };
+        profile.actions.screenshot.fixed_window = Some(retained.clone());
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let retained_target = crate::action::selection::SelectionTarget::Window {
+            rect: PhysRect { x: 1, y: 2, w: 3, h: 4 },
+            target: retained,
+        };
+        let replacement = crate::config::ScreenshotWindow {
+            app_id: "app-b".into(),
+            title: "Window B".into(),
+        };
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_window = Some(replacement.clone());
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            Some(replacement),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_window
+        );
+
+        update_profile_settings(&config_path, &profile_id, |settings| {
+            settings.actions.screenshot.fixed_window = None;
+            true
+        })?;
+        assert!(persist_screenshot_target(&session, &retained_target, &config_path)?.is_none());
+        assert_eq!(
+            None,
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .actions.screenshot.fixed_window
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn newly_picked_fixed_window_persists_when_its_snapshot_is_unchanged() -> Result<()> {
+        let (dir, _guard) = edit_scratch("new_window_target");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.actions.screenshot.capture_mode = crate::config::ScreenshotMode::FixedWindow;
+        profile.actions.screenshot.fixed_window = None;
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        let session = ProfileCatalog::new(&config, &[])?.session(Some(&profile_id))?;
+        let selected = crate::config::ScreenshotWindow {
+            app_id: "app-new".into(),
+            title: "New window".into(),
+        };
+        let target = crate::action::selection::SelectionTarget::Window {
+            rect: PhysRect { x: 10, y: 20, w: 30, h: 40 },
+            target: selected.clone(),
+        };
+
+        let updated = persist_screenshot_target(&session, &target, &config_path)?
+            .expect("the unchanged profile snapshot must accept the selected target");
+        assert_eq!(
+            Some(selected),
+            updated.resolve(&profile_id)?.actions.screenshot.fixed_window
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn static_region_save_failure_is_reported_without_escaping_local_handler() -> Result<()> {
+        let (dir, _guard) = edit_scratch("static_region_save_failure");
+        let config_path = dir.join("config.toml");
+        let mut config = Config::default();
+        let profile_id = config.default_profile.clone();
+        let mut profile = config.resolve(&profile_id)?;
+        profile.anki.static_region = Some([1, 2, 3, 4]);
+        config.update_profile(&profile_id, &profile)?;
+        config.save(&config_path)?;
+        std::fs::create_dir(config_path.with_extension("toml.tmp"))?;
+
+        let mut reported = None;
+        let saved = persist_static_region(
+            &config_path,
+            &profile_id,
+            PhysRect { x: 10, y: 20, w: 30, h: 40 },
+            |error| reported = Some(format!("{error:#}")),
+        );
+
+        assert!(saved.is_none());
+        assert!(
+            reported.as_deref().is_some_and(|text| text.contains("Write configuration to")),
+            "{reported:?}"
+        );
+        assert_eq!(
+            Some([1, 2, 3, 4]),
+            crate::config::load_or_create(&config_path)?
+                .resolve(&profile_id)?
+                .anki.static_region
         );
         Ok(())
     }
@@ -5669,17 +5871,31 @@ mod tests {
             timeout_reported: false,
         });
         assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT),
+            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
             Some(CacheBustPoll::TimedOut)
         ));
         assert!(pending.is_some(), "a late completion remains observable");
-        assert!(poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT).is_none());
+        assert!(poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}).is_none());
         tx.send(Ok(Vec::new())).unwrap();
         assert!(matches!(
-            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT),
+            poll_cache_bust(&mut pending, started + CACHE_BUST_TIMEOUT, || {}),
             Some(CacheBustPoll::Complete(Ok(dicts))) if dicts.is_empty()
         ));
         assert!(pending.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("cache clear failed".to_string())).unwrap();
+        let mut pending = Some(PendingCacheBust {
+            rx,
+            started,
+            timeout_reported: false,
+        });
+        let mut dismissed = false;
+        assert!(matches!(
+            poll_cache_bust(&mut pending, started, || dismissed = true),
+            Some(CacheBustPoll::Complete(Err(reason))) if reason == "cache clear failed"
+        ));
+        assert!(!dismissed, "an unchanged cache must keep its popup");
 
         let (tx, rx) = mpsc::channel::<std::result::Result<Vec<DictInfo>, String>>();
         drop(tx);
@@ -5689,10 +5905,110 @@ mod tests {
             timeout_reported: false,
         });
         assert!(matches!(
-            poll_cache_bust(&mut pending, started),
+            poll_cache_bust(&mut pending, started, || {}),
             Some(CacheBustPoll::Disconnected)
         ));
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn cache_clear_completion_hides_popup_and_invalidates_pending_popup_work() {
+        let cfg = Config::default();
+        let session = ProfileCatalog::new(&cfg, &[]).unwrap().session(None).unwrap();
+        let mut controller =
+            Controller::new(controller_config(&derive_session(&session)), session.clone());
+        let point = PhysPoint { x: 110, y: 110 };
+        let initial_id = controller
+            .handle(Event::LookupBindDown {
+                bind_id: "cache-clear-initial".into(),
+                mode: crate::config::TriggerMode::Press,
+                session: session.clone(),
+                pos: point,
+            })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the first lookup must be requested");
+        let outcome = LookupOutcome::Ready {
+            presentation: Box::new(crate::present::Presentation {
+                top: Some(crate::present::Card {
+                    written: Some("猫".to_string()),
+                    reading: None,
+                    pos: Vec::new(),
+                    inflections: Vec::new(),
+                    freq: None,
+                    blocks: Vec::new(),
+                    match_len: 1,
+                    pitch: Vec::new(),
+                }),
+                collapsed: Vec::new(),
+                all_cards: Vec::new(),
+                sentence: None,
+                surface: None,
+            }),
+            anchor: PhysRect { x: 100, y: 100, w: 20, h: 20 },
+            orientation: crate::text::layout::Orientation::Horizontal,
+            matched: None,
+            scan: Vec::new(),
+        };
+        assert!(controller
+            .handle(Event::LookupResult { id: initial_id, outcome: outcome.clone() })
+            .iter()
+            .any(|command| matches!(command, Command::ShowPopup { .. })));
+        controller.handle(Event::PopupPlaced {
+            rect: PhysRect { x: 100, y: 160, w: 300, h: 200 },
+            content_h: 200,
+            view_h: 200,
+        });
+        assert!(controller.popup().is_some());
+
+        let pending_id = controller
+            .handle(Event::LookupBindDown {
+                bind_id: "cache-clear-pending".into(),
+                mode: crate::config::TriggerMode::Press,
+                session,
+                pos: PhysPoint { x: 900, y: 900 },
+            })
+            .into_iter()
+            .find_map(|command| match command {
+                Command::RequestLookup { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a lookup must remain in flight when the cache clear completes");
+        assert!(controller.popup().is_some(), "the cache clear must race with a visible popup");
+
+        let (tx, rx) = mpsc::channel();
+        let started = std::time::Instant::now();
+        let mut cache_bust = Some(PendingCacheBust {
+            rx,
+            started,
+            timeout_reported: false,
+        });
+        tx.send(Ok(Vec::new())).unwrap();
+        let mut dismissal_commands = Vec::new();
+        assert!(matches!(
+            poll_cache_bust(&mut cache_bust, started, || {
+                dismissal_commands = controller.handle(Event::DismissRequested);
+            }),
+            Some(CacheBustPoll::Complete(Ok(dicts))) if dicts.is_empty()
+        ));
+        assert!(cache_bust.is_none());
+        assert!(dismissal_commands.contains(&Command::HidePopup));
+        assert!(controller.popup().is_none());
+        assert!(controller
+            .handle(Event::LookupResult { id: pending_id, outcome: outcome.clone() })
+            .is_empty());
+        assert!(controller.handle(Event::LookupResult { id: initial_id, outcome }).is_empty());
+        assert!(controller
+            .handle(Event::PopupPlaced {
+                rect: PhysRect { x: 100, y: 160, w: 300, h: 200 },
+                content_h: 200,
+                view_h: 200,
+            })
+            .is_empty());
+        assert!(controller.popup().is_none());
     }
 
     #[test]

@@ -181,6 +181,28 @@ struct Panel {
     pending: Option<Pending>,
 }
 
+enum ConfigureAction<T> {
+    Draw(T),
+    Hide,
+    Idle,
+}
+
+fn configured_action<T>(pending: &mut Option<T>, logical: (i32, i32)) -> ConfigureAction<T> {
+    match pending.take() {
+        Some(pending) => ConfigureAction::Draw(pending),
+        None if logical == (1, 1) => ConfigureAction::Hide,
+        None => ConfigureAction::Idle,
+    }
+}
+
+fn cancel_pending_show<T>(
+    configured: Option<(i32, i32)>,
+    pending: &mut Option<T>,
+) -> Option<(i32, i32)> {
+    pending.take();
+    configured
+}
+
 /// Everything the popup owns.
 pub struct Popup {
     parents: Vec<SavedPopup>,
@@ -1211,14 +1233,18 @@ impl Popup {
     pub fn configured(&mut self, layer: &LayerSurface, size: (u32, u32)) {
         let Some(idx) = self.panels.iter().position(|p| &p.layer == layer) else { return };
         let logical = (size.0 as i32, size.1 as i32);
-        self.panels[idx].configured = Some(logical);
-        if let Some(pending) = self.panels[idx].pending.take() {
-            if let Err(e) = self.draw(idx, pending) {
-                self.notes.push(format!("popup: painting after configure failed: {e:#}"));
+        let action = {
+            self.panels[idx].configured = Some(logical);
+            configured_action(&mut self.panels[idx].pending, logical)
+        };
+        match action {
+            ConfigureAction::Draw(pending) => {
+                if let Err(e) = self.draw(idx, pending) {
+                    self.notes.push(format!("popup: painting after configure failed: {e:#}"));
+                }
             }
-        } else if self.panels[idx].configured == Some((1, 1)) {
-            // The startup configure: map the surface hidden.
-            self.hidden_frame(idx, (1, 1));
+            ConfigureAction::Hide => self.hidden_frame(idx, (1, 1)),
+            ConfigureAction::Idle => {}
         }
     }
 
@@ -1353,8 +1379,10 @@ impl Popup {
     /// Controller believes is clear. The pointer's frame goes too,
     /// for the same reason.
     fn clear(&mut self, idx: usize) {
-        let logical = self.panels[idx].configured.unwrap_or((1, 1));
-        self.panels[idx].pending = None;
+        let logical = {
+            let panel = &mut self.panels[idx];
+            cancel_pending_show(panel.configured, &mut panel.pending)
+        };
         if self.hits.as_ref().is_some_and(|h| h.panel == self.panels[idx].id) {
             self.hits = None;
             self.scene = None;
@@ -1364,7 +1392,9 @@ impl Popup {
         if self.pointer.focus().is_some_and(|focus| focus.panel == self.panels[idx].id) {
             self.pointer.cancel();
         }
-        self.hidden_frame(idx, logical);
+        if let Some(logical) = logical {
+            self.hidden_frame(idx, logical);
+        }
     }
 
     /// The hidden frame. The code never frame-gates this commit. A
@@ -1734,4 +1764,25 @@ mod tests {
         assert!(!rescale_popups(&mut active, [parent].into_iter(), 7, 2.0));
         assert!(!rescale_popups(&mut Visibility::Hidden, std::iter::empty(), 7, 2.0));
     }
+
+    #[test]
+    fn clear_before_configure_cancels_show_without_buffer_attachment() {
+        let mut pending = Some(());
+        assert_eq!(None, cancel_pending_show(None, &mut pending));
+        assert!(pending.is_none(), "a later configure must not restore the child");
+        assert!(matches!(
+            configured_action(&mut pending, (300, 160)),
+            ConfigureAction::Idle
+        ));
+    }
+
+    #[test]
+    fn clear_after_configure_keeps_the_hide_frame_size() {
+        let mut pending = None::<()>;
+        assert_eq!(
+            Some((240, 120)),
+            cancel_pending_show(Some((240, 120)), &mut pending)
+        );
+    }
+
 }

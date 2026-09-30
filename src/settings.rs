@@ -576,11 +576,7 @@ impl SettingsForm {
                     Role::Frequency => &mut self.frequency,
                     Role::Pitch => &mut self.pitch,
                 };
-                if let Some(row) = rows.iter_mut().find(|row| row.name == add.name) {
-                    if enabled {
-                        row.enabled = true;
-                    }
-                } else {
+                if !rows.iter().any(|row| row.name == add.name) {
                     rows.push(DictRow { name: add.name.clone(), enabled });
                 }
             }
@@ -1250,13 +1246,17 @@ fn merge_catalog_changes(
                             if *path == "dictionaries.per_language"
                                 && matches!(value, FieldOverride::Set(_)) =>
                         {
-                            Some(FieldOverride::from_value(merge_language_lists(
-                                &old_settings.dictionaries.per_language,
-                                &wanted_settings.dictionaries.per_language,
-                                &latest_settings.dictionaries.per_language,
-                                removed,
-                            ))
-                            .expect("language map must serialize"))
+                            if old_overrides.contains_key(*path) {
+                                Some(FieldOverride::from_value(merge_language_lists(
+                                    &old_settings.dictionaries.per_language,
+                                    &wanted_settings.dictionaries.per_language,
+                                    &latest_settings.dictionaries.per_language,
+                                    removed,
+                                ))
+                                .expect("language map must serialize"))
+                            } else {
+                                Some(value.clone())
+                            }
                         }
                         Some(value) => Some(value.clone()),
                         None => None,
@@ -1504,7 +1504,7 @@ fn dictionary_added_to_profile(
                 changed = true;
             }
         }
-        if is_selected && roles.has(Role::Terms) {
+        if is_selected && roles.has(Role::Terms) && !preserve_existing {
             if let Some(list) = settings.dictionaries.per_language.get_mut(&settings.ocr.language) {
                 if !list.iter().any(|entry| entry == name) {
                     list.push(name.to_string());
@@ -2004,6 +2004,74 @@ mod tests {
     }
 
     #[test]
+    fn a_new_derived_language_override_replaces_parent_changes_made_in_the_same_form() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.ocr.language = "ja".into();
+        parent.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("derived", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+        form.select_profile("default", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "B").unwrap().enabled = true;
+        form.select_profile("derived", &dicts).unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+
+        assert!(applied.resolve("derived").unwrap().dictionaries.per_language["ja"].is_empty());
+        assert_eq!(
+            vec!["A".to_string(), "B".to_string()],
+            applied.resolve("default").unwrap().dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
+    fn an_existing_derived_language_override_keeps_a_concurrent_scope_addition() {
+        let mut saved = Config::default();
+        let mut parent = saved.resolve("default").unwrap();
+        parent.ocr.language = "ja".into();
+        parent.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &parent).unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "dictionaries.per_language".into(),
+            FieldOverride::Set(toml::Value::try_from(BTreeMap::from([
+                ("ja".to_string(), vec!["A".to_string()]),
+            ])).unwrap()),
+        );
+        insert_derived(&mut saved, "derived", "Derived", "default", overrides);
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.select_profile("derived", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+
+        let mut latest = saved.clone();
+        let mut latest_derived = latest.resolve("derived").unwrap();
+        latest_derived.dictionaries.per_language.insert("ja".into(), vec!["A".into(), "B".into()]);
+        latest.update_profile("derived", &latest_derived).unwrap();
+
+        let applied = super::apply_to(&form, &latest).config;
+
+        assert_eq!(
+            vec!["B".to_string()],
+            applied.resolve("derived").unwrap().dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
     fn a_mixed_staged_import_keeps_checkbox_state_and_role_order() {
         let mut saved = Config::default();
         let mut settings = saved.resolve("default").unwrap();
@@ -2124,6 +2192,35 @@ mod tests {
         assert!(inherited.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
         let child = applied.resolve("explicit-derived").unwrap();
         assert!(child.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+    }
+
+    #[test]
+    fn an_unchecked_staged_import_keeps_its_role_and_language_state_after_profile_switches() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.disabled = vec!["FixtureTerms".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["Existing".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [DictInfo { dict_id: 1, name: "FixtureTerms".into() }];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+
+        assert!(owner.dictionaries.terms.enabled.is_empty());
+        assert_eq!(vec!["FixtureTerms".to_string()], owner.dictionaries.terms.disabled);
+        assert_eq!(
+            vec!["Existing".to_string()],
+            owner.dictionaries.per_language["ja"],
+        );
     }
 
     #[test]

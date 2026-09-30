@@ -65,6 +65,8 @@ The two binaries do not share a command line. Windows first, then Linux.
 `chibipop search` opens Dictionary search. Candidates update while you type.
 Select a candidate to open its definition in the normal popup layout.
 The search interface follows the popup theme, font, and spacing.
+A passive Search hover does not cancel an explicit definition click.
+Windows Search uses its initial monitor DPI when it opens.
 
 Search uses the Profile session's configured Dictionary database,
 enabled Dictionaries, and order.
@@ -98,8 +100,9 @@ optional profile override.
 Linux native compositor bindings use a configured Bind ID:
 
 ```bash
-chibipop ctl bind-down search-bilingual
-chibipop ctl bind-up search-bilingual
+chibipop ctl bind-down -- search-bilingual
+chibipop ctl bind-up -- search-bilingual
+chibipop ctl bind-down -- -lookup
 ```
 
 Use `bind-up` for lookup Hold mode. Use `bind-down` for Press, Toggle, and
@@ -180,7 +183,7 @@ settings process, control-socket verbs, and three diagnostics.
 `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`,
 `ocr-clipboard`, `static-region`, `search`, `sentence-search`, and
 `selected-text`. They provide one compatibility verb for each global action.
-Configured Binds use `bind-down ID` and `bind-up ID` when they need a
+Configured Binds use `bind-down -- ID` and `bind-up -- ID` when they need a
 profile override or a stable action ID.
 
 The three diagnostics are lock-free and socket-free, so all three are safe to
@@ -310,10 +313,12 @@ Escape retains its independent live-settings hide behavior.
 
 **Debug > Clear lookup cache** applies to the running Windows daemon. Confirmation names cached
 OCR pixels and text, parsed definitions, dictionary styles, frequencies, and decoded dictionary
-images. The action closes the current popup, reopens the read-only dictionary connection, and
-leaves the database, library, settings, role cache, and logs unchanged. The next lookup recaptures
-text and rereads dictionary data. A separate Search window clears its current results; a future
-query opens a fresh SearchService. The standalone settings process reports that no daemon is running.
+images. A successful clear dismisses the current popup and pending lookup or sentence work.
+It reopens the read-only dictionary connection and leaves the database, library, settings, role cache,
+and logs unchanged.
+The next lookup recaptures text and rereads dictionary data.
+A separate Search window clears its current results.
+A future query opens a fresh `SearchService`. The standalone settings process reports that no daemon is running.
 
 The embedded `crates/chibipop-windows/assets/settings-layout.toml` controls organization
 and labels. Developers can reorder entries or move them between sections and tabs, then rebuild.
@@ -471,6 +476,7 @@ Frequency arrays and `ranking_strategy` are shared by all profiles.
 Reindex reads local SQL rows and never reads Dictionary archives.
 An import enables detected Dictionary roles in the edited profile.
 Other explicit lists receive the imported Dictionary as disabled.
+Profile switches and Apply preserve each staged Dictionary's enabled or disabled state and language membership.
 
 The application blocks profile deletion while the profile is the default,
 belongs to a Bind, is a nested choice, or is a Derived parent.
@@ -485,14 +491,16 @@ Supported actions are `lookup`, `selected-text`, `search`,
 Only `lookup` accepts `hold-key` or `toggle`.
 Other actions use `press`.
 Profile overrides are valid for the first five actions.
-`anki-add` and `static-region` use the displayed profile.
+`anki-add` and `static-region` use the displayed profile. A dismissed popup does not own
+`static-region`.
 
 The `ProfileCatalog` keeps one saved catalog for each session.
 Popups and Search windows retain their Profile session until they close.
 New sessions use later saved settings.
 Nested routing selects a profile for hover links and clicked dictionary links.
 It is separate from inheritance.
-Back restores the parent profile, content, scroll, and selections.
+Screen lookup retains its root Profile session after nested routing.
+Back restores the parent profile, content, scroll, selections, and missing Japanese analysis.
 Same-headword suppression includes Profile ID.
 
 Live lookup pauses while a configured lookup Bind owns a popup chain.
@@ -512,7 +520,7 @@ Out-of-range values load as clamped values and name the field on stderr.
 The root uses the new profile schema.
 The old global trigger and action chord keys are not part of this schema.
 Use `[[binds]]` records for all configurable chords.
-Use `chibipop ctl bind-down ID` and `chibipop ctl bind-up ID` for Linux binds.
+Use `chibipop ctl bind-down -- ID` and `chibipop ctl bind-up -- ID` for Linux binds.
 The fixed socket verbs remain supported for compatibility.
 
 This example shows one Full profile, one Derived profile, and profile Binds.
@@ -669,6 +677,7 @@ select the other target type for one capture, but it does not save that target i
 wrong fixed-target field.
 After a first fixed-mode selection, chibipop saves the target in the config. Later
 captures bypass interactive selection until you reset the target.
+An existing Windows session does not overwrite a newer target change or reset.
 
 `fixed_region` stores `[x, y, width, height]` in global physical pixels. The width and
 height must be positive. The saved rectangle remains unchanged until you reset it.
@@ -699,8 +708,10 @@ below the hovered word across the output. It cuts the sentence at `。！？`; a
 heading, ends the sentence. A paragraph gap also ends the sentence. The probe
 uses one or more tiles along the output's reading axis. It uses one OCR pass
 for each tile. The tile count follows the output span, and each tile's band
-follows the text thickness. The sentence probe runs no OCR pass on hover. A
-held `hold-key` trigger reads the frozen grab without hiding the popup. Windows
+follows the text thickness. The sentence probe runs no OCR pass on hover.
+A dictionary-only hover child does not OCR-probe its popup placement for an Anki sentence.
+A clicked-link probe keeps valid source geometry for popup placement.
+A held `hold-key` trigger reads the frozen grab without hiding the popup. Windows
 ignores the hide flag because it excludes the popup from its own captures at the
 OS level. When the probe fails, the sentence falls back to the hover-time
 sentence.
@@ -963,8 +974,8 @@ An absent per-language list searches every enabled terms Dictionary.
 
 Derived profiles inherit the complete parent list when they have no override.
 An override replaces the complete ordered enabled and disabled lists.
-This rule also applies to `per_language`, which replaces the complete map.
-The override keeps values that equal the parent value.
+A `per_language` override replaces the complete language map.
+It replaces inherited values even when a language scope is empty.
 
 Frequency lists are not profile fields.
 `frequency`, `frequency_disabled`, and `ranking_strategy` are shared.

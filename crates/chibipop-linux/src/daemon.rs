@@ -699,6 +699,23 @@ fn open_portal(retry: &PortalRetry, log: &mut Log) -> (Option<PortalCapture>, Ch
     }
 }
 
+fn session_for_displayed_popup(
+    controller_session: Option<ProfileSession>,
+    native_popup_shown: bool,
+    native_request_session: Option<&ProfileSession>,
+    default_session: &ProfileSession,
+) -> ProfileSession {
+    controller_session
+        .or_else(|| {
+            if native_popup_shown {
+                native_request_session.cloned()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| default_session.clone())
+}
+
 impl App {
     fn handle_request(&mut self, request: &str, control: Option<ControlRequest>) {
         let Some(control) = control else {
@@ -726,11 +743,13 @@ impl App {
     }
 
     fn displayed_session(&self) -> ProfileSession {
-        self.controller
-            .popup()
-            .map(|view| view.session.clone())
-            .or_else(|| self.popup.as_ref().and_then(Popup::request).map(|request| request.session.clone()))
-            .unwrap_or_else(|| self.default_session.clone())
+        let native_popup = self.popup.as_ref();
+        session_for_displayed_popup(
+            self.controller.popup().map(|view| view.session.clone()),
+            native_popup.is_some_and(|popup| popup.shown().is_some()),
+            native_popup.and_then(Popup::request).map(|request| &request.session),
+            &self.default_session,
+        )
     }
 
     /// Apply one Verb from either channel.
@@ -5391,6 +5410,45 @@ mod tests {
         let after_delete = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
         assert!(!after_delete.profiles.iter().any(|profile| profile.id == profile_id));
         assert_eq!(None, after_delete.resolved(None).unwrap().anki.static_region);
+    }
+
+    #[test]
+    fn static_region_after_dismissed_popup_targets_default_profile() {
+        let dir = scratch("dismissed_static_profile");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+
+        let mut saved = app.saved.clone();
+        let default_id = saved.default_profile.clone();
+        let mut default_settings = saved.resolve(&default_id).unwrap();
+        default_settings.anki.sentence_mode = chibipop::config::SentenceMode::Static;
+        saved.update_profile(&default_id, &default_settings).unwrap();
+        let popup_settings = saved.resolved(Some(&default_id)).unwrap();
+        let popup_id = add_test_profile(&mut saved, "Popup profile", &popup_settings);
+        install_test_config(&mut app, saved);
+        app.saved.save(&app.paths.config_file).unwrap();
+
+        let popup_session = app.catalog.session(Some(&popup_id)).unwrap();
+        show_popup_for_session(&mut app, popup_session.clone());
+        app.feed(Event::DismissRequested);
+        assert!(app.controller.popup().is_none(), "dismissal retires the Controller popup");
+
+        let session = session_for_displayed_popup(
+            app.controller.popup().map(|view| view.session.clone()),
+            false,
+            Some(&popup_session),
+            &app.default_session,
+        );
+        assert_eq!(default_id.as_str(), session.id());
+        app.took_static_region(Some(PhysRect { x: 500, y: 250, w: 200, h: 100 }), session);
+
+        let saved = chibipop::config::load_or_create(&app.paths.config_file).unwrap();
+        assert_eq!(
+            Some([500, 250, 200, 100]),
+            saved.resolved(Some(&default_id)).unwrap().anki.static_region
+        );
+        assert_eq!(None, saved.resolved(Some(&popup_id)).unwrap().anki.static_region);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

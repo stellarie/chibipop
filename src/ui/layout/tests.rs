@@ -495,11 +495,22 @@ fn with_collapsed() -> Presentation {
 /// Build a `PopupScene` with the supplied maximum width and height.
 fn laid_out(p: &Presentation, max_w: f32, max_h: f32, show_back: bool, side: bool) -> PopupScene {
     let theme = Theme::dark();
+    laid_out_with_theme(p, max_w, max_h, show_back, side, &theme)
+}
+
+fn laid_out_with_theme(
+    p: &Presentation,
+    max_w: f32,
+    max_h: f32,
+    show_back: bool,
+    side: bool,
+    theme: &Theme,
+) -> PopupScene {
     let mut m = FakeMeasure::default();
     scene(
         &SceneRequest {
             presentation: p,
-            theme: &theme,
+            theme,
             max_w,
             max_h,
             show_back,
@@ -4876,6 +4887,69 @@ fn a_stylesheet_width_on_the_container_sizes_a_gaiji_its_node_leaves_unsized() {
     let bare = laid_out(&styled_image(node, "", &media), 424.0, 4000.0, false, false);
     let huge = one_image(&bare);
     assert!(huge.rect.w > 20.0 * BOX_EM, "without the sheet the gaiji fills the column");
+}
+
+#[test]
+fn a_container_pixel_width_tracks_the_text_scale() {
+    let p = styled_image(
+        r#"{"tag":"img","path":"g/x.png"}"#,
+        ".gloss-image-container { width: 14px !important }",
+        &[("g/x.png", recorded(MediaFormat::Png, 40.0, 20.0))],
+    );
+
+    for (body_size, expected) in [(14.0, 14.0), (28.0, 28.0)] {
+        let theme = Theme { body_size, ..Theme::dark() };
+        let s = laid_out_with_theme(&p, 424.0, 4000.0, false, false, &theme);
+        let image = one_image(&s);
+        assert_eq!((expected, expected / 2.0), (image.rect.w, image.rect.h));
+    }
+}
+
+#[test]
+fn a_container_pixel_max_width_tracks_the_text_scale() {
+    let p = styled_image(
+        r#"{"tag":"img","path":"g/x.png"}"#,
+        ".gloss-image-container { max-width: 14px !important }",
+        &[("g/x.png", recorded(MediaFormat::Png, 40.0, 20.0))],
+    );
+
+    for (body_size, expected) in [(14.0, 14.0), (28.0, 28.0)] {
+        let theme = Theme { body_size, ..Theme::dark() };
+        let s = laid_out_with_theme(&p, 424.0, 4000.0, false, false, &theme);
+        let image = one_image(&s);
+        assert_eq!((expected, expected / 2.0), (image.rect.w, image.rect.h));
+    }
+}
+
+#[test]
+fn unitless_zero_image_widths_match_zero_px() {
+    let media = [("g/x.png", recorded(MediaFormat::Png, 40.0, 20.0))];
+    for (css, property) in [
+        (".gloss-image-container { width: 0 !important }", "width"),
+        (".gloss-image-container { width: 0px !important }", "width"),
+        (".gloss-image-container { max-width: 0 !important }", "max-width"),
+        (".gloss-image-container { max-width: 0px !important }", "max-width"),
+    ] {
+        let p = styled_image(r#"{"tag":"img","path":"g/x.png"}"#, css, &media);
+        let image = one_image(&laid_out(&p, 424.0, 4000.0, false, false)).rect;
+        assert_eq!((0.0, 0.0), (image.w, image.h), "{property}: {css}");
+    }
+}
+
+#[test]
+fn invalid_container_image_lengths_are_ignored() {
+    let media = [("g/x.png", recorded(MediaFormat::Png, 40.0, 20.0))];
+    for css in [
+        ".gloss-image-container { width: 75 !important }",
+        ".gloss-image-container { max-width: 75 !important }",
+        ".gloss-image-container { width: -1px !important }",
+        ".gloss-image-container { max-width: -1px !important }",
+        ".gloss-image-container { width: 999999999999999999999999999999999999999999999999px !important }",
+    ] {
+        let p = styled_image(r#"{"tag":"img","path":"g/x.png"}"#, css, &media);
+        let image = one_image(&laid_out(&p, 424.0, 4000.0, false, false)).rect;
+        assert_eq!((40.0, 20.0), (image.w, image.h), "{css}");
+    }
 }
 
 /// The container's em is the text em when the node declares `sizeUnits: "em"`

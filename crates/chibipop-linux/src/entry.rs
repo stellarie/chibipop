@@ -285,4 +285,16 @@ mod tests {
             "chibipop", "sentence-search", "--text", "猫", "--read-stdin",
         ]).is_err());
     }
+
+    #[test]
+    fn leading_hyphen_bind_ids_parse_as_positionals() {
+        let cli = Cli::try_parse_from([
+            "chibipop", "ctl", "bind-down", "--", "-lookup",
+        ]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ctl { verb, bind_id })
+                if verb == "bind-down" && bind_id.as_deref() == Some("-lookup")
+        ));
+    }
 }

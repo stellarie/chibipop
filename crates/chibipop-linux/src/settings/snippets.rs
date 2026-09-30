@@ -262,7 +262,7 @@ struct CtlCommand<'a> {
 
 impl fmt::Display for CtlCommand<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", if self.activated { "bind-down" } else { "bind-up" }, self.id)
+        write!(f, "{} -- {}", if self.activated { "bind-down" } else { "bind-up" }, self.id)
     }
 }
 
@@ -344,7 +344,7 @@ struct NiriArgs<'a>(CtlCommand<'a>);
 
 impl fmt::Display for NiriArgs<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "\"ctl\" \"{}\" \"{}\"",
+        write!(f, "\"ctl\" \"{}\" \"--\" \"{}\"",
             if self.0.activated { "bind-down" } else { "bind-up" }, self.0.id)
     }
 }
@@ -418,8 +418,8 @@ mod tests {
         assert_eq!(
             snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
             [
-                "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down lookup",
-                "bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-up lookup",
+                "bind = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down -- lookup",
+                "bindr = ALT, F, exec, /home/u/chibipop/target/debug/chibipop ctl bind-up -- lookup",
             ]
         );
     }
@@ -431,8 +431,8 @@ mod tests {
         assert_eq!(
             snippet.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
             [
-                "bind = CTRL SHIFT, K, exec, chibipop ctl bind-down lookup",
-                "bindr = CTRL SHIFT, K, exec, chibipop ctl bind-up lookup",
+                "bind = CTRL SHIFT, K, exec, chibipop ctl bind-down -- lookup",
+                "bindr = CTRL SHIFT, K, exec, chibipop ctl bind-up -- lookup",
             ]
         );
     }
@@ -449,7 +449,7 @@ mod tests {
         );
         assert_eq!(
             snippet,
-            "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down action"
+            "bind = ALT, A, exec, /home/u/chibipop/target/debug/chibipop ctl bind-down -- action"
         );
     }
 
@@ -462,7 +462,7 @@ mod tests {
                 Path::new(DEV_EXE),
                 Bind { id: "bind-7", mode: TriggerMode::Toggle },
             );
-            assert!(toggle.contains("ctl bind-down bind-7"), "{toggle}");
+            assert!(toggle.contains("ctl bind-down -- bind-7"), "{toggle}");
             assert!(!toggle.contains("bind-up"), "{toggle}");
 
             let press = bind_snippet(
@@ -471,7 +471,7 @@ mod tests {
                 Path::new(DEV_EXE),
                 Bind { id: "bind-7", mode: TriggerMode::Press },
             );
-            assert!(press.contains("ctl bind-down bind-7"), "{press}");
+            assert!(press.contains("ctl bind-down -- bind-7"), "{press}");
             assert!(!press.contains("bind-up"), "{press}");
 
             let hold = bind_snippet(
@@ -480,8 +480,21 @@ mod tests {
                 Path::new(DEV_EXE),
                 Bind { id: "bind-7", mode: TriggerMode::HoldKey },
             );
-            assert!(hold.contains("ctl bind-down bind-7"), "{hold}");
-            assert!(hold.contains("ctl bind-up bind-7"), "{hold}");
+            assert!(hold.contains("ctl bind-down -- bind-7"), "{hold}");
+            assert!(hold.contains("ctl bind-up -- bind-7"), "{hold}");
+        }
+    }
+
+    #[test]
+    fn native_shell_bind_ids_start_after_the_option_delimiter() {
+        for compositor in [Compositor::Hyprland, Compositor::Sway] {
+            let snippet = bind_snippet(
+                compositor,
+                "ALT+F",
+                Path::new(DEV_EXE),
+                Bind { id: "-lookup", mode: TriggerMode::Press },
+            );
+            assert!(snippet.contains("ctl bind-down -- -lookup"), "{snippet}");
         }
     }
 
@@ -489,10 +502,10 @@ mod tests {
     fn sway_bind_normalizes_portal_modifiers() {
         let snippet = bind_snippet(Compositor::Sway, "ALT+SUPER+CTRL+SHIFT+F", Path::new(DEV_EXE), Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(snippet.contains(&format!(
-            "bindsym --no-repeat Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-down lookup"
+            "bindsym --no-repeat Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-down -- lookup"
         )));
         assert!(snippet.contains(&format!(
-            "bindsym --release Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-up lookup"
+            "bindsym --release Mod1+Mod4+Control+Shift+f exec {DEV_EXE} ctl bind-up -- lookup"
         )));
     }
 
@@ -506,7 +519,7 @@ mod tests {
         );
         assert_eq!(
             snippet,
-            format!("bindsym --no-repeat Mod4+a exec {DEV_EXE} ctl bind-down action")
+            format!("bindsym --no-repeat Mod4+a exec {DEV_EXE} ctl bind-down -- action")
         );
         assert!(!snippet.contains("--release"), "a press bind has no release line: {snippet}");
     }
@@ -525,7 +538,7 @@ mod tests {
                 Path::new(DEV_EXE),
                 Bind { id: "action", mode: TriggerMode::Press },
             ),
-            format!("{DEV_EXE} ctl bind-down action")
+            format!("{DEV_EXE} ctl bind-down -- action")
         );
     }
 
@@ -538,29 +551,29 @@ mod tests {
         let exe = Path::new("/home/u/my builds/chibipop");
         let hypr = bind_snippet(Compositor::Hyprland, "ALT+F", exe, Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(
-            hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-down lookup"),
+            hypr.contains("bind = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-down -- lookup"),
             "{hypr}"
         );
         assert!(
-            hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-up lookup"),
+            hypr.contains("bindr = ALT, F, exec, '/home/u/my builds/chibipop' ctl bind-up -- lookup"),
             "{hypr}"
         );
         let sway = bind_snippet(Compositor::Sway, "ALT+F", exe, Bind { id: "lookup", mode: TriggerMode::HoldKey });
         assert!(
             sway.contains(
-                "bindsym --no-repeat Mod1+f exec '/home/u/my builds/chibipop' ctl bind-down lookup"
+                "bindsym --no-repeat Mod1+f exec '/home/u/my builds/chibipop' ctl bind-down -- lookup"
             ),
             "{sway}"
         );
         assert!(
             sway.contains(
-                "bindsym --release Mod1+f exec '/home/u/my builds/chibipop' ctl bind-up lookup"
+                "bindsym --release Mod1+f exec '/home/u/my builds/chibipop' ctl bind-up -- lookup"
             ),
             "{sway}"
         );
         let press = bind_snippet(Compositor::Hyprland, "ALT+A", exe, Bind { id: "action", mode: TriggerMode::Press });
         assert_eq!(
-            "bind = ALT, A, exec, '/home/u/my builds/chibipop' ctl bind-down action",
+            "bind = ALT, A, exec, '/home/u/my builds/chibipop' ctl bind-down -- action",
             press
         );
     }
@@ -579,11 +592,11 @@ mod tests {
             Compositor::Niri,
             "SUPER+CTRL+A",
             Path::new("/home/u/my builds/chibipop"),
-            Bind { id: "action", mode: TriggerMode::Press },
+            Bind { id: "-lookup", mode: TriggerMode::Press },
         );
         assert_eq!(
             press,
-            "\"Super+Ctrl+a\" repeat=false { spawn \"/home/u/my builds/chibipop\" \"ctl\" \"bind-down\" \"action\"; };"
+            "\"Super+Ctrl+a\" repeat=false { spawn \"/home/u/my builds/chibipop\" \"ctl\" \"bind-down\" \"--\" \"-lookup\"; };"
         );
         assert!(!Compositor::Niri.supports_bind("ALT+F", Bind { id: "lookup", mode: TriggerMode::HoldKey }));
     }
@@ -591,7 +604,7 @@ mod tests {
     #[test]
     fn niri_quotes_a_digit_key_as_a_node_name() {
         let snippet = bind_snippet(Compositor::Niri, "1", Path::new("chibipop"), Bind { id: "action", mode: TriggerMode::Press });
-        assert_eq!(snippet, "\"1\" repeat=false { spawn \"chibipop\" \"ctl\" \"bind-down\" \"action\"; };");
+        assert_eq!(snippet, "\"1\" repeat=false { spawn \"chibipop\" \"ctl\" \"bind-down\" \"--\" \"action\"; };");
     }
 
     #[test]
@@ -607,7 +620,7 @@ mod tests {
     fn desktop_editors_get_commands_for_press_and_guidance_for_hold() {
         let add = Bind { id: "action", mode: TriggerMode::Press };
         let press = bind_snippet(Compositor::Kde, "ALT+A", Path::new(DEV_EXE), add);
-        assert_eq!(format!("{DEV_EXE} ctl bind-down action"), press);
+        assert_eq!(format!("{DEV_EXE} ctl bind-down -- action"), press);
         assert_eq!(press, bind_snippet(Compositor::Gnome, "ALT+A", Path::new(DEV_EXE), add));
         assert!(Compositor::Kde.supports_bind("ALT+A", add));
 
@@ -628,7 +641,7 @@ mod tests {
         assert_eq!(
             snippet,
             format!(
-                "bind = SUPER CTRL ALT SHIFT, F, exec, {DEV_EXE} ctl bind-down action"
+                "bind = SUPER CTRL ALT SHIFT, F, exec, {DEV_EXE} ctl bind-down -- action"
             )
         );
     }

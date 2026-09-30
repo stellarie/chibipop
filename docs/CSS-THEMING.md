@@ -101,8 +101,14 @@ These parts of the popup do not respond to CSS.
 **Hex colours.** `#rrggbb` (six digits) or `#rgb` (three digits, expanded).
 Named colours like `red` are not supported.
 
-**Pixel values.** A number followed by `px`. No spaces between the number and `px`.
-Other units (`em`, `rem`, `%`) are not supported.
+**Pixel values.** For `popup.css` properties, use a number followed by `px`.
+Other units (`em`, `rem`, `%`) are not supported for `popup.css` properties.
+
+**Dictionary image sizes.** Dictionary styles can set image `width` and `max-width`.
+For these properties, `px` scales from a 14 CSS-pixel base with the popup font size.
+`em` uses the size of the element that carries the property.
+`rem` uses the panel body size. `%` uses the available image space.
+A unitless `0` is valid. Other unitless values are not valid.
 
 **Font weight.** `normal` (= 400), `bold` (= 700), or a number from 100 to 900
 in steps of 100.

@@ -35,7 +35,7 @@ target.
 4. **Install the native binding.** Copy the Bind's **Copy bind snippet**
    output into `~/.config/hypr/hyprland.conf`.
 
-   Hold mode needs both `bind-down ID` and `bind-up ID`.
+   Hold mode needs both `bind-down -- ID` and `bind-up -- ID`.
 
 5. **Reload Hyprland.** Run `hyprctl reload`.
 
@@ -61,7 +61,7 @@ platform chords. A Bind can select an optional profile.
 
 Apply requests direct global shortcuts where the desktop supports them.
 For native bindings, each configured Bind has a **Copy bind snippet** button.
-Each snippet uses `chibipop ctl bind-down ID` or `bind-up ID`.
+Each snippet uses `chibipop ctl bind-down -- ID` or `chibipop ctl bind-up -- ID`.
 The compositor selector changes snippet syntax, not Bind ownership.
 
 KDE and GNOME show **Copy daemon command** for a Press action when no portal
@@ -140,9 +140,10 @@ The settings window provides the compositor command for that Bind.
 For native compositor bindings, use the Bind ID:
 
 ```text
-bind = ALT, F, exec, chibipop ctl bind-down my-lookup
-bindr = ALT, F, exec, chibipop ctl bind-up my-lookup
+bind = ALT, F, exec, chibipop ctl bind-down -- my-lookup
+bindr = ALT, F, exec, chibipop ctl bind-up -- my-lookup
 ```
+Use `chibipop ctl bind-down -- -lookup` when a Bind ID starts with a hyphen.
 
 Use both commands for Hold mode.
 Use only `bind-down` for Press and Toggle modes.
@@ -187,7 +188,8 @@ Release the key before the modifier.
 If the popup stays visible, activate and release the Hold Bind again.
 Toggle mode avoids this release path.
 
-AnkiAdd and StaticRegion use the displayed profile.
+AnkiAdd and StaticRegion use the displayed profile. A dismissed popup does not own
+`StaticRegion`.
 Lookup, SelectedText, Search, SentenceSearch, and OcrClipboard can use a
 profile override from their Bind.
 
@@ -370,8 +372,8 @@ The fixed socket verbs remain supported.
 |---|---|
 | `chibipop run` | Starts the daemon. The default when no subcommand is given. |
 | `chibipop ctl <verb>` | Sends one fixed verb over the control socket. Fixed verbs include `trigger-down`, `trigger-up`, `toggle`, `lookup`, `anki-add`, `search`, `sentence-search`, `selected-text`, `ocr-clipboard`, `static-region`, and `reload`. |
-| `chibipop ctl bind-down <id>` | Activates an enabled configured Bind ID. |
-| `chibipop ctl bind-up <id>` | Releases an enabled configured Bind ID. Use it for Hold mode. |
+| `chibipop ctl bind-down -- <id>` | Activates an enabled configured Bind ID. |
+| `chibipop ctl bind-up -- <id>` | Releases an enabled configured Bind ID. Use it for Hold mode. |
 | `chibipop settings` | Opens the settings window as its own process. |
 | `chibipop probe` | Prints `WAYLAND_DISPLAY` and the capability report for this session. |
 | `chibipop capture-dump --region X,Y,W,H` | Grabs that region through the live capture backend and writes a PNG (default to `/tmp`, `--out DIR` to change). The proof tool for capture problems. |
@@ -391,18 +393,17 @@ your frequency lists there and Apply.
 
   The OCR language field belongs to the selected profile.
   Linux keeps that field even though the bundled engine reads Japanese.
-  The selected profile's
-  `[profiles.settings.dictionaries.per_language]` map controls its lists.
+  The selected profile's `[profiles.settings.dictionaries.per_language]` map controls its lists.
   A Derived profile can replace the complete map.
-  A missing map searches every enabled terms Dictionary.
+  The replacement can contain empty language scopes and replaces inherited values.
 - **The Fixed screen area sentence mode has a configured Bind.**
   Select *Fixed screen area* as the Anki sentence field.
-  Create or enable a `StaticRegion` Bind in **Shortcuts**.
-  Use its `bind-down` command to select the region.
+  Use its `bind-down -- ID` command to select the region.
   Use `Esc` or right-click to cancel the selection.
   The region is saved under the displayed profile's
   `[profiles.settings.anki]` settings.
   The daemon uses the saved region without a restart.
+  If the daemon cannot save the region, it reports an error and stays active.
   *Show the static region outline* draws a teal border around it.
   The border needs `zwlr_layer_shell_v1`.
 - **Updates are check-only.** The *Check for updates* button reports a newer
@@ -417,9 +418,10 @@ your frequency lists there and Apply.
   *Include screenshot when adding* uses the selected mode described above.
   The PNG lands in
   `$XDG_DATA_HOME/chibipop/screenshots` by default —
-  `~/.local/share/chibipop/screenshots` when that is unset, or beside the
-  executable in portable mode. The *Anki* tab's **Screenshots folder** box
-  changes this path. Absolute paths stay exactly as typed.
+  `~/.local/share/chibipop/screenshots` when that is unset, or beside
+  the executable in portable mode. The *Anki* tab's **Screenshots folder** box
+  changes this path. The box trims whitespace at both ends when you press Apply.
+  It keeps spaces inside the path. Absolute paths remain absolute after this trim.
 
   Interactive modes need `slurp` and layer-shell support. The Capture channel
   supplies the pixels. A saved fixed region bypasses the selector. A saved
@@ -463,7 +465,7 @@ modifier before the key, and Hyprland lost the release bind — see
 or switch to the toggle bind.
 
 **The trigger chord does nothing.** Check the configured Bind ID.
-Run `chibipop ctl bind-down <id>` from a terminal.
+Run `chibipop ctl bind-down -- <id>` from a terminal.
 The daemon must answer `OK`.
 If it does, copy the complete command from **Settings > Shortcuts**.
 The fixed `chibipop ctl trigger-down` verb also remains supported.

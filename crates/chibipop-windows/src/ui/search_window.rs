@@ -146,7 +146,8 @@ impl From<&Config> for SharedPolicy {
 
 struct Query {
     generation: u64, text: String, session: ProfileSession, mode: SearchMode,
-    clicked: Option<usize>, definition: Option<(usize, bool)>, click_generation: Option<u64>,
+    clicked: Option<usize>, definition: Option<(usize, bool)>,
+    click_generation: Option<u64>, click_epoch: u64,
 }
 
 struct Reply {
@@ -165,6 +166,26 @@ impl Reply {
 }
 
 enum SearchRequest { Run(Query), Clear }
+
+fn coalesce_request(query: &mut Option<Query>, request: SearchRequest) -> bool {
+    match request {
+        SearchRequest::Run(next) => {
+            let passive_hover = next.definition.is_some_and(|(_, hover)| hover);
+            let preserve_current_click = passive_hover && query.as_ref().is_some_and(|pending| {
+                pending.definition.is_some_and(|(_, hover)| !hover)
+                    && pending.click_generation == Some(next.click_epoch)
+            });
+            if !preserve_current_click {
+                *query = Some(next);
+            }
+            false
+        }
+        SearchRequest::Clear => {
+            *query = None;
+            true
+        }
+    }
+}
 
 pub struct SearchWindow {
     hwnd: HWND,
@@ -263,15 +284,10 @@ impl SearchWindow {
         if let Err(error) = std::thread::Builder::new().name("dictionary-search".into()).spawn(move || {
             let mut service = None;
             while let Ok(first) = inbox.recv() {
-                let mut query = match first {
-                    SearchRequest::Run(query) => Some(query),
-                    SearchRequest::Clear => { service = None; None }
-                };
+                let mut query = None;
+                if coalesce_request(&mut query, first) { service = None; }
                 while let Ok(request) = inbox.try_recv() {
-                    match request {
-                        SearchRequest::Run(next) => query = Some(next),
-                        SearchRequest::Clear => { service = None; query = None; }
-                    }
+                    if coalesce_request(&mut query, request) { service = None; }
                 }
                 let Some(query) = query else { continue };
                 let reply = if let Some(service) = &service {
@@ -298,6 +314,7 @@ impl SearchWindow {
             resource_check: Instant::now(), database_signature: file_signature(database),
             generation: 0, click_generation: 0, click_parent: None, requests, replies, result: SearchResult::Empty,
             tokens: Vec::new(), definitions: Vec::new(), hover: None };
+        window.update_dpi();
         window.switch_mode(mode, text);
         Ok(window)
     }
@@ -425,6 +442,7 @@ impl SearchWindow {
 
     fn update_dpi(&mut self) {
         let scale = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0;
+        if self.state.palette.borrow().scale == scale { return; }
         match Palette::new(self.session.config(), scale) {
             Ok(palette) => {
                 // SAFETY: Controls switch fonts before old GDI objects drop.
@@ -629,7 +647,8 @@ impl SearchWindow {
     fn enqueue(&self, text: String, mode: SearchMode, clicked: Option<usize>,
         definition: Option<(usize, bool)>, session: ProfileSession) {
         let click_generation = definition.filter(|(_, hover)| !*hover).map(|_| self.click_generation);
-        let query = Query { generation: self.generation, text, session, mode, clicked, definition, click_generation };
+        let query = Query { generation: self.generation, text, session, mode, clicked, definition,
+            click_generation, click_epoch: self.click_generation };
         if self.requests.send(SearchRequest::Run(query)).is_err() {
             self.set_status("Search stopped. Reopen the application to retry.");
         }
@@ -1223,6 +1242,52 @@ mod tests {
     }
 
     #[test]
+    fn explicit_definition_click_survives_hover_and_clear_preserves_order() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let run = |text: &str, definition: Option<(usize, bool)>, generation, click_epoch| SearchRequest::Run(Query {
+            generation, text: text.into(), session: session.clone(),
+            mode: SearchMode::Dictionary, clicked: None,
+            click_generation: definition.filter(|(_, hover)| !*hover).map(|_| click_epoch),
+            click_epoch, definition,
+        });
+        let mut pending = None;
+        assert!(!coalesce_request(&mut pending, run("clicked definition", Some((0, false)), 1, 9)));
+        assert!(!coalesce_request(&mut pending, run("passive hover", Some((0, true)), 2, 9)));
+        let click = pending.as_ref().unwrap();
+        assert_eq!(click.text, "clicked definition");
+        assert_eq!(click.definition, Some((0, false)));
+
+        assert!(coalesce_request(&mut pending, SearchRequest::Clear));
+        assert!(pending.is_none());
+        assert!(!coalesce_request(&mut pending, run("older input", None, 1, 9)));
+        assert!(!coalesce_request(&mut pending, run("latest input", None, 2, 9)));
+        assert_eq!(pending.as_ref().unwrap().text, "latest input");
+    }
+
+    #[test]
+    fn canceled_queued_click_does_not_suppress_parent_hover() {
+        let saved = Config::default();
+        let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
+            .session(None).unwrap();
+        let request = |text: &str, definition: Option<(usize, bool)>, generation: u64, click_epoch: u64| SearchRequest::Run(Query {
+            generation, text: text.into(), session: session.clone(),
+            mode: SearchMode::Dictionary, clicked: None,
+            click_generation: definition.filter(|(_, hover)| !*hover).map(|_| click_epoch),
+            click_epoch, definition,
+        });
+        let mut pending = None;
+        assert!(!coalesce_request(&mut pending, request("queued click", Some((0, false)), 4, 9)));
+
+        // Back invalidates the click generation before the parent hover is queued.
+        assert!(!coalesce_request(&mut pending, request("parent hover", Some((0, true)), 6, 10)));
+        let hover = pending.as_ref().unwrap();
+        assert_eq!(hover.text, "parent hover");
+        assert_eq!(hover.definition, Some((0, true)));
+    }
+
+    #[test]
     fn click_replies_survive_pointer_changes_but_not_navigation_or_new_clicks() {
         let saved = Config::default();
         let session = chibipop::config::ProfileCatalog::new(&saved, &[]).unwrap()
@@ -1266,6 +1331,17 @@ mod tests {
         let (_, session) = SearchService::open_catalog(&database, &rules, &saved, &root_id).unwrap();
         let window = SearchWindow::open(&database, &rules, session).unwrap();
         (window, Fixture(database), guard)
+    }
+
+    #[test]
+    fn initial_palette_uses_window_dpi_without_dpi_changed_message() {
+        let (window, _fixture, _guard) = fixture();
+        // SAFETY: The window remains live during the DPI query.
+        let dpi = unsafe { GetDpiForWindow(window.hwnd) };
+        assert_ne!(dpi, 0);
+        let scale = dpi.max(96) as f32 / 96.0;
+        assert_eq!(window.state.palette.borrow().scale, scale);
+        assert!(!window.state.dpi_changed.get());
     }
 
     fn wait(window: &mut SearchWindow, expected: &str) {
