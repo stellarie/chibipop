@@ -633,9 +633,9 @@ variable takes priority.
 
 #### Select the plugin
 
-1. On the **Text recognition** tab, choose **meikiocr** under **Text reader**.
-2. Click **Apply**.
-3. Restart chibipop.
+1. On the **Extensions** tab, check **Enable** beside **meikiocr**.
+2. On the **Text recognition** tab, choose **meikiocr** under **Text reader**.
+3. Click **Apply**. Apply changes the active OCR engine without a restart.
 
 If you use a virtual environment, start chibipop from that environment.
 For an existing installation, `meikiocr_path` must name the package's import

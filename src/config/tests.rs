@@ -327,6 +327,23 @@ include_on_add = true
 }
 
 #[test]
+fn legacy_hold_shift_keeps_shift_without_changing_other_platform_chords() {
+    for (mode, windows) in [("hold-shift", "shift"), ("hold-key", "F2")] {
+        let path = tmp(mode);
+        std::fs::write(&path, format!(
+            "[trigger]\nmode = '{mode}'\ntrigger_key = 'F2'\ntrigger_key_linux = 'SUPER+J'\n[popup]\n[dictionaries]\n"
+        )).unwrap();
+        let config = load_or_create(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let bind = config.binds.iter().find(|bind| bind.action == BindAction::Lookup).unwrap();
+        assert_eq!(TriggerMode::HoldKey, bind.mode);
+        assert_eq!(windows, bind.windows);
+        assert_eq!("SUPER+J", bind.linux);
+        assert!(bind.enabled);
+    }
+}
+
+#[test]
 fn legacy_substrings_and_empty_language_lists_migrate_before_explicit_scopes() {
     let text = "[trigger]\nmode = 'hold-shift'\n[popup]\n[dictionaries]\ndisplay_order = ['Jiten', 'Missing']\n[dictionaries.per_language]\nja = []\nzh = ['大辞']\n";
     let config: Config = toml::from_str(text).unwrap();

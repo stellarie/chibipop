@@ -52,6 +52,155 @@ fn hover_queries_join_ruby_base_with_following_kana() {
     assert_eq!(scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(), Some("食べる".into()));
 }
 
+#[test]
+fn hover_queries_probe_only_near_the_pointer_in_a_long_paragraph() {
+    let text = "𠮷野家食".repeat(10_000);
+    let p = card_with(vec![block("Test", &[&text])]);
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text == text).unwrap();
+    let spans: Vec<_> = elem.styled_spans("Fake").collect();
+    let run = MeasureRun { spans: &spans, max_w: elem.wrap_w };
+    let mut carets = Vec::new();
+    FakeMeasure::default().caret_boxes(run, &[0, 49_998], &mut carets).unwrap();
+    for (glyph, expected) in carets.into_iter().zip(["𠮷野家食".repeat(8), "家食".into()]) {
+        let scroll = (elem.pen.1 + glyph.y - 20.0).max(0.0);
+        let point = (
+            elem.pen.0 + glyph.x + glyph.w * 0.25,
+            elem.pen.1 + glyph.y + 1.0 - scroll,
+        );
+        let mut measure = FakeMeasure::default();
+        assert_eq!(Some(expected), scene.hover_query(point, scroll, "Fake", &mut measure).unwrap());
+        assert_eq!(1, measure.hit_queries);
+        assert!(measure.caret_offsets <= 2, "hover must not probe the complete paragraph");
+    }
+}
+
+#[test]
+fn hover_queries_reject_whitespace_and_keep_the_trailing_half_of_a_glyph() {
+    let p = card_with(vec![block("Test", &["猫 犬"])]);
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text == "猫 犬").unwrap();
+    let advance = elem.font_size * ADVANCE;
+    for (at, expected) in [
+        (-0.1, None), (0.9, Some("猫")), (1.1, None),
+        (1.9, None), (2.9, Some("犬")), (3.1, None),
+    ] {
+        let point = (elem.pen.0 + advance * at, elem.pen.1 + 1.0);
+        assert_eq!(
+            expected.map(str::to_string),
+            scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn hover_queries_follow_positive_and_negative_baseline_shifts() {
+    let p = rich(&sc(r#"{"tag":"span","style":{"fontSize":"0.5em"},"content":"猫"}"#));
+    for (shift, inside, outside) in [(5.0, -3.0, 12.0), (-5.0, 17.0, 2.0)] {
+        let mut scene = laid_out(&p, 424.0, 4000.0, false, false);
+        scene.elems.retain(|elem| elem.text == "猫");
+        let elem = &mut scene.elems[0];
+        assert_eq!(15.0, elem.rect.h);
+        elem.pen = (20.0, 20.0);
+        elem.spans[0].shift = shift;
+        for scroll in [0.0, 10.0] {
+            assert_eq!(
+                Some("猫".into()),
+                scene.hover_query(
+                    (21.0, 20.0 + inside - scroll), scroll, "Fake", &mut FakeMeasure::default(),
+                ).unwrap(),
+            );
+            assert_eq!(
+                None,
+                scene.hover_query(
+                    (21.0, 20.0 + outside - scroll), scroll, "Fake", &mut FakeMeasure::default(),
+                ).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn hover_queries_shift_only_the_styled_span() {
+    let p = rich(&sc(
+        r#"["猫",{"tag":"span","style":{"verticalAlign":"super"},"content":"犬"},"鳥"]"#,
+    ));
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text == "猫犬鳥").unwrap();
+    assert_eq!(vec![0.0, 5.0, 0.0], elem.spans.iter().map(|span| span.shift).collect::<Vec<_>>());
+    let advance = elem.font_size * ADVANCE;
+    for (column, above, below) in [
+        (0.25, None, Some("猫犬鳥")),
+        (1.25, Some("犬鳥"), None),
+        (2.25, None, Some("鳥")),
+    ] {
+        for (dy, expected) in [(-3.0, above), (28.0, below)] {
+            let point = (elem.pen.0 + advance * column, elem.pen.1 + dy);
+            assert_eq!(
+                expected.map(str::to_string),
+                scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn hover_queries_keep_alignment_wrapping_and_surrogate_pair_hits_after_a_shift() {
+    for align in ["center", "end"] {
+        let p = rich(&sc(&format!(
+            r#"{{"tag":"div","style":{{"textAlign":"{align}"}},"content":{{"tag":"span","style":{{"verticalAlign":"super"}},"content":"𠮷野家 食べる。猫"}}}}"#,
+        )));
+        let scene = laid_out(&p, 80.0, 4000.0, false, false);
+        let elem = scene.elems.iter().find(|elem| elem.text == "𠮷野家 食べる。猫").unwrap();
+        assert_eq!(vec![5.0], elem.spans.iter().map(|span| span.shift).collect::<Vec<_>>());
+        assert!(elem.lines > 1);
+        let spans: Vec<_> = elem.styled_spans("Fake").collect();
+        let run = MeasureRun { spans: &spans, max_w: elem.wrap_w };
+        let mut measured = Measured::default();
+        let mut measure = FakeMeasure::default();
+        measure.measure(run, &mut measured).unwrap();
+        let mut carets = Vec::new();
+        measure.caret_boxes(run, &[0, 1, 2, 4, 5, 7, 8, 9], &mut carets).unwrap();
+        for (glyph, expected) in carets.into_iter().zip([
+            Some("𠮷野家"), Some("𠮷野家"), Some("野家"), None,
+            Some("食べる"), Some("る"), None, Some("猫"),
+        ]) {
+            let line = measured.lines.iter().find(|line| line.y == glyph.y).unwrap();
+            let slack = (elem.wrap_w - line.w).max(0.0) * elem.align.slack_before();
+            for fraction in [0.25, 0.9] {
+                let point = (
+                    elem.pen.0 + slack + glyph.x + glyph.w * fraction,
+                    elem.pen.1 + glyph.y - 3.0,
+                );
+                assert_eq!(
+                    expected.map(str::to_string),
+                    scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hover_queries_skip_zero_width_ruby_joiners_at_glyph_boundaries() {
+    let p = rich(&sc(
+        r#"[{"tag":"ruby","content":["食",{"tag":"rt","content":"た"}]},"べる。猫"]"#,
+    ));
+    let scene = laid_out(&p, 424.0, 4000.0, false, false);
+    let elem = scene.elems.iter().find(|elem| elem.text.contains('食')).unwrap();
+    let advance = elem.font_size * ADVANCE;
+    for (at, expected) in [
+        (0.9, Some("食べる")), (1.0, Some("べる")),
+        (2.9, Some("る")), (3.1, None), (4.9, Some("猫")),
+    ] {
+        let point = (elem.pen.0 + advance * at, elem.pen.1 + 1.0);
+        assert_eq!(
+            expected.map(str::to_string),
+            scene.hover_query(point, 0.0, "Fake", &mut FakeMeasure::default()).unwrap(),
+        );
+    }
+}
+
 /// This constant sets the advance per UTF-16 unit as a fraction of the font size.
 const ADVANCE: f32 = 0.5;
 /// This constant sets the line height as a multiple of the font size.
@@ -64,6 +213,8 @@ const LINE_H: f32 = 2.0;
 struct FakeMeasure {
     /// Every span in request order.
     asked: Vec<Asked>,
+    caret_offsets: usize,
+    hit_queries: usize,
 }
 
 /// One span that layout gives to a measurer.
@@ -266,6 +417,7 @@ impl TextMeasure for FakeMeasure {
         at: &[u32],
         out: &mut Vec<GlyphBox>,
     ) -> Result<(), MeasureError> {
+        self.caret_offsets += at.len();
         let (frags, m) = wrap(run);
         // An offset past the end returns the pen position after the last unit.
         // Core never asks for this value. Each offset that core probes starts a
@@ -295,6 +447,7 @@ impl TextMeasure for FakeMeasure {
         x: f32,
         y: f32,
     ) -> Result<u32, MeasureError> {
+        self.hit_queries += 1;
         let (frags, measured) = wrap(run);
         let total = frags.last().map_or(0, |f| f.from + f.units);
         let Some(first) = measured.lines.first() else {

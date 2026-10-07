@@ -115,7 +115,8 @@ fn migrate(mut value: toml::Value) -> Result<Config> {
         .map(|order| order.try_into()).transpose().context("Read the legacy dictionary order.")?
         .unwrap_or_default();
     let mut old: ResolvedConfig = value.clone().try_into().context("Read the legacy configuration.")?;
-    if old.trigger.mode == TriggerMode::HoldShift { old.trigger.mode = TriggerMode::HoldKey; }
+    let hold_shift = old.trigger.mode == TriggerMode::HoldShift;
+    if hold_shift { old.trigger.mode = TriggerMode::HoldKey; }
     old.clamp_ranges(None);
     let bindings = [
         ("lookup", BindAction::Lookup, &["trigger", "trigger_key"][..], &["trigger", "trigger_key_linux"][..], "shift", "ALT+F"),
@@ -128,7 +129,11 @@ fn migrate(mut value: toml::Value) -> Result<Config> {
     ];
     let binds = bindings.into_iter().map(|(id, action, windows, linux, win_default, linux_default)| {
         let mut bind = Bind::new(id.to_string(), action);
-        bind.windows = old_string(&value, windows, win_default);
+        bind.windows = if action == BindAction::Lookup && hold_shift {
+            "shift".to_string()
+        } else {
+            old_string(&value, windows, win_default)
+        };
         bind.linux = old_string(&value, linux, linux_default);
         bind.enabled = match action {
             BindAction::Lookup => old.trigger.mode != TriggerMode::Live,

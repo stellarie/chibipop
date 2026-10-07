@@ -10,7 +10,7 @@ use crate::config::{
 use crate::library::{roles_of, Library, Pending, Role, Roles};
 use crate::present::DictInfo;
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// This module re-exports these names for config.rs.
@@ -112,7 +112,7 @@ struct ListPosition {
 struct StagedProfileDictionaryState {
     terms: Option<ListPosition>,
     pitch: Option<ListPosition>,
-    languages: BTreeSet<String>,
+    languages: BTreeMap<String, usize>,
     terms_override: bool,
     pitch_override: bool,
     languages_override: bool,
@@ -147,7 +147,7 @@ fn staged_dictionary_state(form: &SettingsForm, name: &str) -> StagedDictionaryS
     };
     for profile in &form.catalog.profiles {
         let Ok(settings) = form.catalog.resolve(&profile.id) else { continue };
-        let (terms_override, pitch_override, languages_override) = match &profile.data {
+        let (mut terms_override, mut pitch_override, mut languages_override) = match &profile.data {
             ProfileData::Full { .. } => (true, true, true),
             ProfileData::Derived { overrides, .. } => (
                 overrides.contains_key("dictionaries.terms"),
@@ -155,42 +155,41 @@ fn staged_dictionary_state(form: &SettingsForm, name: &str) -> StagedDictionaryS
                 overrides.contains_key("dictionaries.per_language"),
             ),
         };
+        for prior in form.staged_add_before.values()
+            .filter_map(|state| state.profiles.get(&profile.id))
+        {
+            terms_override &= prior.terms_override;
+            pitch_override &= prior.pitch_override;
+            languages_override &= prior.languages_override;
+        }
         let mut profile_state = StagedProfileDictionaryState {
             terms: role_position(&settings.dictionaries.terms, name),
             pitch: role_position(&settings.dictionaries.pitch, name),
             languages: settings.dictionaries.per_language.iter()
-                .filter(|(_, names)| names.iter().any(|entry| entry == name))
-                .map(|(language, _)| language.clone())
+                .filter_map(|(language, names)| {
+                    names.iter().position(|entry| entry == name)
+                        .map(|index| (language.clone(), index))
+                })
                 .collect(),
             terms_override,
             pitch_override,
             languages_override,
         };
         if profile.id == form.profile_id {
-            profile_state.terms = row_position(&form.terms, name);
             profile_state.pitch = row_position(&form.pitch, name);
             if is_scoped(form) {
                 let language = &form.cfg.ocr.language;
                 profile_state.languages.remove(language);
-                if form.terms.iter().any(|row| row.name == name && row.enabled) {
-                    profile_state.languages.insert(language.clone());
+                if let Some(prior) = row_position(&form.terms, name).filter(|prior| prior.enabled) {
+                    profile_state.languages.insert(language.clone(), prior.index);
                 }
+            } else {
+                profile_state.terms = row_position(&form.terms, name);
             }
         }
         state.profiles.insert(profile.id.clone(), profile_state);
     }
     state
-}
-
-fn restore_dict_row(rows: &mut Vec<DictRow>, name: &str, prior: Option<ListPosition>) {
-    match prior {
-        Some(prior) => {
-            if let Some(row) = rows.iter_mut().find(|row| row.name == name) {
-                row.enabled = prior.enabled;
-            }
-        }
-        None => rows.retain(|row| row.name != name),
-    }
 }
 
 fn restore_role_name(list: &mut RoleList, name: &str, prior: Option<ListPosition>) -> bool {
@@ -212,16 +211,25 @@ fn restore_role_name(list: &mut RoleList, name: &str, prior: Option<ListPosition
     true
 }
 
-fn restore_language_name(names: &mut Vec<String>, name: &str, was_present: bool) -> bool {
-    if !was_present {
+fn restore_language_name(names: &mut Vec<String>, name: &str, prior: Option<usize>) -> bool {
+    let Some(index) = prior else {
         let before = names.len();
         names.retain(|entry| entry != name);
         return names.len() != before;
+    };
+    if names.iter().any(|entry| entry == name) {
+        return false;
     }
-    false
+    names.insert(index.min(names.len()), name.to_string());
+    true
 }
 
-fn restore_staged_dictionary(cfg: &mut Config, name: &str, before: &StagedDictionaryState) {
+fn restore_staged_dictionary(
+    cfg: &mut Config,
+    name: &str,
+    before: &StagedDictionaryState,
+    remaining: &[StagedAdd],
+) {
     let mut frequency = RoleList {
         enabled: cfg.dictionaries.frequency.clone(),
         disabled: cfg.dictionaries.frequency_disabled.clone(),
@@ -244,30 +252,34 @@ fn restore_staged_dictionary(cfg: &mut Config, name: &str, before: &StagedDictio
         let mut changed = restore_role_name(&mut settings.dictionaries.terms, name, prior.terms);
         changed |= restore_role_name(&mut settings.dictionaries.pitch, name, prior.pitch);
         for (language, names) in &mut settings.dictionaries.per_language {
-            changed |= restore_language_name(names, name, prior.languages.contains(language));
+            changed |= restore_language_name(names, name, prior.languages.get(language).copied());
         }
         if changed {
             cfg.update_profile(&id, &settings)
                 .expect("a valid catalog must update its profile");
         }
         let Some(profile) = cfg.profiles.iter().find(|profile| profile.id == id) else { continue };
-        let ProfileData::Derived { parent, .. } = &profile.data else { continue };
-        let Ok(parent_settings) = cfg.resolve(parent) else { continue };
-        let current = cfg.resolve(&id).expect("the profile must resolve after cleanup");
-        if !prior.terms_override
-            && current.dictionaries.terms == parent_settings.dictionaries.terms
+        if !matches!(&profile.data, ProfileData::Derived { .. }) {
+            continue;
+        }
+        if !prior.terms_override && !remaining.iter().any(|add| {
+            role_position(&settings.dictionaries.terms, &add.name).is_some()
+        })
         {
             cfg.reset_override(&id, "dictionaries.terms")
                 .expect("the terms override must be valid");
         }
-        if !prior.pitch_override
-            && current.dictionaries.pitch == parent_settings.dictionaries.pitch
+        if !prior.pitch_override && !remaining.iter().any(|add| {
+            role_position(&settings.dictionaries.pitch, &add.name).is_some()
+        })
         {
             cfg.reset_override(&id, "dictionaries.pitch")
                 .expect("the pitch override must be valid");
         }
-        if !prior.languages_override
-            && current.dictionaries.per_language == parent_settings.dictionaries.per_language
+        if !prior.languages_override && !remaining.iter().any(|add| {
+            settings.dictionaries.per_language.values()
+                .any(|names| names.contains(&add.name))
+        })
         {
             cfg.reset_override(&id, "dictionaries.per_language")
                 .expect("the language override must be valid");
@@ -311,6 +323,7 @@ impl SettingsForm {
             return None;
         }
         let name = archive_title(source)?;
+        self.track_staged_dictionary_edits();
         if !self.staged_add_before.contains_key(&name) {
             let before = staged_dictionary_state(self, &name);
             self.staged_add_before.insert(name.clone(), before);
@@ -338,38 +351,24 @@ impl SettingsForm {
     /// Cancels a staged import or stages a saved Dictionary for removal.
     pub fn stage_remove(&mut self, name: &str) {
         let was_freq = self.frequency.iter().any(|row| row.name == name);
-        let canceled = self.staged_adds.iter().any(|add| add.name == name);
-        let before = canceled.then(|| self.staged_add_before.get(name).cloned()).flatten();
-        for role in Role::EVERY {
-            let state = before.as_ref().and_then(|state| {
-                state.profiles.get(&self.profile_id).and_then(|profile| match role {
-                    Role::Terms => profile.terms,
-                    Role::Frequency => state.frequency,
-                    Role::Pitch => profile.pitch,
-                })
+        if self.is_staged_add(name) {
+            self.save_current().expect("the selected profile must save before cancellation");
+            self.staged_adds.retain(|add| add.name != name);
+            self.staged_add_profiles.retain(|source, _| {
+                self.staged_adds.iter().any(|add| add.source == *source)
             });
-            if canceled {
-                restore_dict_row(self.list_mut(role), name, state);
-            } else {
+            if let Some(before) = self.staged_add_before.remove(name) {
+                restore_staged_dictionary(&mut self.catalog, name, &before, &self.staged_adds);
+            }
+            let id = self.profile_id.clone();
+            self.load_profile(&id, None).expect("the selected profile must reload after cancellation");
+        } else {
+            for role in Role::EVERY {
                 self.list_mut(role).retain(|row| row.name != name);
             }
-        }
-        let staged_sources: Vec<PathBuf> = self.staged_adds.iter()
-            .filter(|add| add.name == name)
-            .map(|add| add.source.clone())
-            .collect();
-        self.staged_adds.retain(|add| add.name != name);
-        for source in staged_sources {
-            self.staged_add_profiles.remove(&source);
-        }
-        if canceled {
-            if !self.staged_adds.iter().any(|add| add.name == name) {
-                if let Some(before) = self.staged_add_before.remove(name) {
-                    restore_staged_dictionary(&mut self.catalog, name, &before);
-                }
+            if !self.staged_removes.iter().any(|entry| entry == name) {
+                self.staged_removes.push(name.to_string());
             }
-        } else if !self.staged_removes.iter().any(|entry| entry == name) {
-            self.staged_removes.push(name.to_string());
         }
         if was_freq {
             self.freq_changed = true;
@@ -427,6 +426,7 @@ impl SettingsForm {
             }
             self.screenshot_reset_targets = false;
         }
+        self.track_staged_dictionary_edits();
         self.catalog = catalog;
         self.refresh_baseline()?;
         Ok(())
@@ -452,14 +452,14 @@ impl SettingsForm {
             self.dicts.clear();
             self.dicts.extend_from_slice(dicts);
         }
-        self.load_profile(&applied.profile_id, dicts)
+        self.load_profile(&applied.profile_id, Some(dicts))
     }
 
     /// Saves current edits and loads a profile by stable ID.
     pub fn select_profile(&mut self, id: &str, dicts: &[DictInfo]) -> Result<()> {
         self.catalog.resolve(id)?;
         self.save_current()?;
-        self.load_profile(id, dicts)
+        self.load_profile(id, Some(dicts))
     }
 
     /// Creates and selects a full default profile or a derived profile.
@@ -484,7 +484,7 @@ impl SettingsForm {
             None => ProfileData::Full { settings: Box::new(ProfileSettings::default()) },
         };
         self.catalog.profiles.push(Profile { id: id.clone(), name, data });
-        self.load_profile(&id, dicts)?;
+        self.load_profile(&id, Some(dicts))?;
         Ok(id)
     }
 
@@ -499,7 +499,7 @@ impl SettingsForm {
             name,
             data: ProfileData::Full { settings: Box::new(settings) },
         });
-        self.load_profile(&id, dicts)?;
+        self.load_profile(&id, Some(dicts))?;
         Ok(id)
     }
 
@@ -520,7 +520,7 @@ impl SettingsForm {
         self.catalog.remove_profile(id)?;
         if self.profile_id == id {
             let default = self.catalog.default_profile.clone();
-            self.load_profile(&default, dicts)?;
+            self.load_profile(&default, Some(dicts))?;
         }
         Ok(())
     }
@@ -536,8 +536,66 @@ impl SettingsForm {
     pub fn reset_profile_override(&mut self, path: &str, dicts: &[DictInfo]) -> Result<()> {
         self.save_current()?;
         self.catalog.reset_override(&self.profile_id, path)?;
+        for state in self.staged_add_before.values_mut() {
+            if let Some(prior) = state.profiles.get_mut(&self.profile_id) {
+                match path {
+                    "dictionaries.terms" => prior.terms_override = false,
+                    "dictionaries.pitch" => prior.pitch_override = false,
+                    "dictionaries.per_language" => prior.languages_override = false,
+                    _ => {}
+                }
+            }
+        }
         let id = self.profile_id.clone();
-        self.load_profile(&id, dicts)
+        self.load_profile(&id, Some(dicts))
+    }
+
+    fn track_staged_dictionary_edits(&mut self) {
+        if self.staged_add_before.is_empty() {
+            return;
+        }
+        let same_names = |before: &[String], after: &[String]| {
+            before.iter().filter(|name| !self.is_staged_add(name))
+                .eq(after.iter().filter(|name| !self.is_staged_add(name)))
+        };
+        let same_rows = |before: &[DictRow], after: &[DictRow]| {
+            [true, false].into_iter().all(|enabled| {
+                let unchanged = |row: &&DictRow| row.enabled == enabled && !self.is_staged_add(&row.name);
+                before.iter().filter(unchanged).eq(after.iter().filter(unchanged))
+            })
+        };
+        let before = &self.baseline_cfg.dictionaries;
+        let after = &self.cfg.dictionaries;
+        let terms_changed = !same_rows(&self.baseline_terms, &self.terms);
+        let scoped = is_scoped(self);
+        let terms_override = (!scoped && terms_changed)
+            || !same_names(&before.terms, &after.terms)
+            || !same_names(&before.terms_disabled, &after.terms_disabled);
+        let pitch_override = !same_rows(&self.baseline_pitch, &self.pitch)
+            || !same_names(&before.pitch, &after.pitch)
+            || !same_names(&before.pitch_disabled, &after.pitch_disabled);
+        let languages_override = (scoped && terms_changed)
+            || before.per_language.len() != after.per_language.len()
+            || before.per_language.iter().any(|(language, names)| {
+                after.per_language.get(language).is_none_or(|current| !same_names(names, current))
+            });
+        if !terms_override && !pitch_override && !languages_override {
+            return;
+        }
+        for state in self.staged_add_before.values_mut() {
+            if let Some(prior) = state.profiles.get_mut(&self.profile_id) {
+                prior.terms_override |= terms_override;
+                prior.pitch_override |= pitch_override;
+                prior.languages_override |= languages_override;
+            } else {
+                state.profiles.insert(self.profile_id.clone(), StagedProfileDictionaryState {
+                    terms_override,
+                    pitch_override,
+                    languages_override,
+                    ..Default::default()
+                });
+            }
+        }
     }
 
     fn refresh_baseline(&mut self) -> Result<()> {
@@ -550,10 +608,10 @@ impl SettingsForm {
         Ok(())
     }
 
-    fn load_profile(&mut self, id: &str, dicts: &[DictInfo]) -> Result<()> {
+    fn load_profile(&mut self, id: &str, dicts: Option<&[DictInfo]>) -> Result<()> {
         let cfg = self.catalog.resolved(Some(id))?;
         let settings = self.catalog.resolve(id)?;
-        let (mut terms, frequency, pitch) = rows_for_profile(&cfg, dicts);
+        let (mut terms, frequency, pitch) = rows_for_profile(&cfg, dicts.unwrap_or(&self.dicts));
         if let Some(library) = &self.library {
             apply_library_rows(&mut terms, Role::Terms, library);
             let mut frequency = frequency;
@@ -577,6 +635,8 @@ impl SettingsForm {
                     Role::Pitch => &mut self.pitch,
                 };
                 if !rows.iter().any(|row| row.name == add.name) {
+                    let enabled = enabled && (role != Role::Terms
+                        || !cfg.dictionaries.per_language.contains_key(&cfg.ocr.language));
                     rows.push(DictRow { name: add.name.clone(), enabled });
                 }
             }
@@ -588,6 +648,9 @@ impl SettingsForm {
             if !self.terms.iter().any(|row| row.name == *file) {
                 self.terms.push(DictRow { name: file.clone(), enabled: false });
             }
+        }
+        for rows in [&mut self.terms, &mut self.frequency, &mut self.pitch] {
+            rows.retain(|row| !self.staged_removes.contains(&row.name));
         }
         self.dict_list_language = self.cfg.ocr.language.clone();
         self.field_map = Some(self.cfg.anki.field_map.clone());
@@ -1483,6 +1546,9 @@ fn dictionary_added_to_profile(
             if !roles.has(role) || (!is_selected && !full && !explicit) {
                 continue;
             }
+            let enabled = !preserve_existing || role != Role::Terms
+                || settings.dictionaries.per_language.get(&settings.ocr.language)
+                    .is_none_or(|names| names.iter().any(|entry| entry == name));
             let list = match role {
                 Role::Terms => &mut settings.dictionaries.terms,
                 Role::Pitch => &mut settings.dictionaries.pitch,
@@ -1491,13 +1557,18 @@ fn dictionary_added_to_profile(
             if is_selected {
                 let already_listed = list.enabled.iter().chain(&list.disabled).any(|entry| entry == name);
                 if !preserve_existing || !already_listed {
-                    let before = list.disabled.len();
-                    list.disabled.retain(|entry| entry != name);
-                    if !list.enabled.iter().any(|entry| entry == name) {
-                        list.enabled.push(name.to_string());
+                    let (selected, unselected) = if enabled {
+                        (&mut list.enabled, &mut list.disabled)
+                    } else {
+                        (&mut list.disabled, &mut list.enabled)
+                    };
+                    let before = unselected.len();
+                    unselected.retain(|entry| entry != name);
+                    if !selected.iter().any(|entry| entry == name) {
+                        selected.push(name.to_string());
                         changed = true;
                     }
-                    changed |= list.disabled.len() != before;
+                    changed |= unselected.len() != before;
                 }
             } else if !list.enabled.iter().chain(&list.disabled).any(|entry| entry == name) {
                 list.disabled.push(name.to_string());
@@ -2220,6 +2291,277 @@ mod tests {
         assert_eq!(
             vec!["Existing".to_string()],
             owner.dictionaries.per_language["ja"],
+        );
+    }
+
+    #[test]
+    fn a_new_unchecked_scoped_staged_import_stays_unchecked_after_profile_switches() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["A".into(), "B".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+
+        let mut form = super::from_config(&saved, &dicts);
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled);
+        form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+        form.save_current().unwrap();
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+
+        assert!(!owner.dictionaries.terms.enabled.contains(&"FixtureTerms".into()));
+        assert!(owner.dictionaries.terms.disabled.contains(&"FixtureTerms".into()));
+        assert_eq!(vec!["B".to_string()], owner.dictionaries.per_language["ja"]);
+    }
+
+    #[test]
+    fn a_scoped_staged_import_keeps_each_profiles_role_checkboxes() {
+        let mut saved = Config::default();
+        let mut owner = saved.resolve("default").unwrap();
+        owner.ocr.language = "ja".into();
+        owner.dictionaries.terms.enabled = vec!["A".into()];
+        owner.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+        saved.update_profile("default", &owner).unwrap();
+        insert_full(&mut saved, "other", "Other", owner);
+        let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+        let mut form = super::from_config(&saved, &dicts);
+
+        form.stage_add(&fixture("both.zip")).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureBoth").unwrap().enabled = false;
+        form.select_profile("other", &dicts).unwrap();
+        form.terms.iter_mut().find(|row| row.name == "FixtureBoth").unwrap().enabled = true;
+        form.select_profile("default", &dicts).unwrap();
+
+        assert!(!form.terms.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        assert!(form.pitch.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        form.select_profile("other", &dicts).unwrap();
+        assert!(form.terms.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        assert!(!form.pitch.iter().find(|row| row.name == "FixtureBoth").unwrap().enabled);
+        form.save_current().unwrap();
+
+        let applied = super::apply_to(&form, &saved).config;
+        let owner = applied.resolve("default").unwrap();
+        let other = applied.resolve("other").unwrap();
+        assert_eq!(vec!["A".to_string()], owner.dictionaries.per_language["ja"]);
+        assert_eq!(vec!["FixtureBoth".to_string()], owner.dictionaries.pitch.enabled);
+        assert_eq!(
+            vec!["A".to_string(), "FixtureBoth".to_string()],
+            other.dictionaries.per_language["ja"],
+        );
+        assert!(other.dictionaries.pitch.enabled.is_empty());
+    }
+
+    #[test]
+    fn canceling_a_scoped_import_restores_its_independent_role_and_language_state() {
+        for scoped_enabled in [false, true] {
+            let mut saved = Config::default();
+            let mut settings = saved.resolve("default").unwrap();
+            settings.ocr.language = "ja".into();
+            settings.dictionaries.terms.enabled = vec!["A".into(), "FixtureTerms".into()];
+            let scope = if scoped_enabled {
+                vec!["FixtureTerms".into(), "A".into()]
+            } else {
+                vec!["A".into()]
+            };
+            settings.dictionaries.per_language.insert("ja".into(), scope.clone());
+            settings.dictionaries.per_language.insert("zh".into(), vec!["FixtureTerms".into()]);
+            saved.update_profile("default", &settings).unwrap();
+            let dicts = [
+                DictInfo { dict_id: 1, name: "A".into() },
+                DictInfo { dict_id: 2, name: "FixtureTerms".into() },
+            ];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.stage_add(&fixture("terms.zip")).unwrap();
+            form.terms.iter_mut().find(|row| row.name == "FixtureTerms").unwrap().enabled = !scoped_enabled;
+            form.save_current().unwrap();
+            form.stage_remove("FixtureTerms");
+            form.save_current().unwrap();
+
+            assert_eq!(
+                scoped_enabled,
+                form.terms.iter().find(|row| row.name == "FixtureTerms").unwrap().enabled,
+            );
+            let applied = super::apply_to(&form, &saved).config;
+            let profile = applied.resolve("default").unwrap();
+            assert_eq!(settings.dictionaries.terms, profile.dictionaries.terms);
+            assert_eq!(scope, profile.dictionaries.per_language["ja"]);
+            assert_eq!(
+                vec!["FixtureTerms".to_string()],
+                profile.dictionaries.per_language["zh"],
+            );
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_keeps_explicit_derived_dictionary_overrides() {
+        for (role, scoped, source, name) in [
+            (Role::Terms, false, "terms.zip", "FixtureTerms"),
+            (Role::Pitch, false, "pitch.zip", "FixturePitch"),
+            (Role::Terms, true, "terms.zip", "FixtureTerms"),
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.ocr.language = "ja".into();
+            match role {
+                Role::Terms => parent.dictionaries.terms.enabled = vec!["A".into()],
+                Role::Pitch => parent.dictionaries.pitch.enabled = vec!["A".into()],
+                Role::Frequency => unreachable!(),
+            }
+            if scoped {
+                parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+            }
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture(source)).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(name);
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = true;
+            form.select_profile("derived", &dicts).unwrap();
+            form.save_current().unwrap();
+
+            assert!(!form.list(role).iter().find(|row| row.name == "A").unwrap().enabled);
+            assert!(!form.list(role).iter().any(|row| row.name == name));
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            let enabled = match role {
+                Role::Terms if scoped => &child.dictionaries.per_language["ja"],
+                Role::Terms => &child.dictionaries.terms.enabled,
+                Role::Pitch => &child.dictionaries.pitch.enabled,
+                Role::Frequency => unreachable!(),
+            };
+            assert!(enabled.is_empty(), "{role:?}, scoped: {scoped}");
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_without_other_edits_restores_dictionary_inheritance() {
+        for (role, scoped, source, name) in [
+            (Role::Terms, false, "terms.zip", "FixtureTerms"),
+            (Role::Pitch, false, "pitch.zip", "FixturePitch"),
+            (Role::Terms, true, "terms.zip", "FixtureTerms"),
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.ocr.language = "ja".into();
+            match role {
+                Role::Terms => parent.dictionaries.terms.enabled = vec!["A".into()],
+                Role::Pitch => parent.dictionaries.pitch.enabled = vec!["A".into()],
+                Role::Frequency => unreachable!(),
+            }
+            if scoped {
+                parent.dictionaries.per_language.insert("ja".into(), vec!["A".into()]);
+            }
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture(source)).unwrap();
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(name);
+            form.save_current().unwrap();
+
+            assert!(!form.list(role).iter().find(|row| row.name == "A").unwrap().enabled);
+            assert!(!form.list(role).iter().any(|row| row.name == name));
+            form.select_profile("default", &dicts).unwrap();
+            form.list_mut(role).iter_mut().find(|row| row.name == "A").unwrap().enabled = true;
+            form.select_profile("derived", &dicts).unwrap();
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            let enabled = match role {
+                Role::Terms if scoped => &child.dictionaries.per_language["ja"],
+                Role::Terms => &child.dictionaries.terms.enabled,
+                Role::Pitch => &child.dictionaries.pitch.enabled,
+                Role::Frequency => unreachable!(),
+            };
+            assert_eq!(vec!["A".to_string()], *enabled, "{role:?}, scoped: {scoped}");
+        }
+    }
+
+    #[test]
+    fn canceling_multiple_imports_restores_inheritance_in_either_order() {
+        for canceled in [
+            ["FixtureTerms", "FixtureBoth"],
+            ["FixtureBoth", "FixtureTerms"],
+        ] {
+            let mut saved = Config::default();
+            let mut parent = saved.resolve("default").unwrap();
+            parent.dictionaries.terms.enabled = vec!["A".into()];
+            parent.dictionaries.pitch.enabled = vec!["A".into()];
+            saved.update_profile("default", &parent).unwrap();
+            insert_derived(&mut saved, "derived", "Derived", "default", BTreeMap::new());
+            let dicts = [DictInfo { dict_id: 1, name: "A".into() }];
+            let mut form = super::from_config(&saved, &dicts);
+
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_add(&fixture("terms.zip")).unwrap();
+            form.save_current().unwrap();
+            form.stage_add(&fixture("both.zip")).unwrap();
+            form.select_profile("default", &dicts).unwrap();
+            form.terms.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.pitch.iter_mut().find(|row| row.name == "A").unwrap().enabled = false;
+            form.select_profile("derived", &dicts).unwrap();
+            form.stage_remove(canceled[0]);
+            assert!(form.terms.iter().any(|row| row.name == canceled[1]));
+            form.stage_remove(canceled[1]);
+            form.save_current().unwrap();
+
+            assert!(!form.has_staged());
+            assert!(enabled_names(&form.terms).is_empty());
+            assert!(enabled_names(&form.pitch).is_empty());
+            let applied = super::apply_to(&form, &saved).config;
+            let child = applied.resolve("derived").unwrap();
+            assert_eq!(vec!["A".to_string()], child.dictionaries.terms.disabled);
+            assert_eq!(vec!["A".to_string()], child.dictionaries.pitch.disabled);
+        }
+    }
+
+    #[test]
+    fn canceling_an_import_keeps_other_staged_removals() {
+        let mut saved = Config::default();
+        let mut settings = saved.resolve("default").unwrap();
+        settings.dictionaries.terms.enabled = vec!["A".into(), "B".into()];
+        saved.update_profile("default", &settings).unwrap();
+        let dicts = [
+            DictInfo { dict_id: 1, name: "A".into() },
+            DictInfo { dict_id: 2, name: "B".into() },
+        ];
+        let mut form = super::from_config(&saved, &dicts);
+
+        form.stage_remove("A");
+        form.stage_add(&fixture("terms.zip")).unwrap();
+        form.stage_remove("FixtureTerms");
+        form.save_current().unwrap();
+
+        assert_eq!(vec!["B".to_string()], names(&form.terms));
+        assert_eq!(vec!["A".to_string()], form.staged_removes);
+        let applied = super::apply_to(&form, &saved).config;
+        assert_eq!(
+            vec!["B".to_string()],
+            applied.resolve("default").unwrap().dictionaries.terms.enabled,
         );
     }
 

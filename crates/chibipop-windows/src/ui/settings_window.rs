@@ -2700,7 +2700,11 @@ unsafe fn update_static_controls(hwnd: HWND) {
         let tabs = conditional_tabs(hwnd);
         let overlay_visible = is_static && selected_tab(hwnd) == tabs.static_overlay;
         let overlay_cmd = if overlay_visible { SW_SHOW } else { SW_HIDE };
-        for id in [ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT] {
+        let reset_ids = profile_override_paths(SettingId::AnkiStaticOverlay).iter().filter_map(|path| {
+            PROFILE_FIELDS.iter().position(|field| field == path)
+                .map(|index| ID_RESET_OVERRIDE_BASE + index as i32)
+        });
+        for id in [ID_SHOW_STATIC_OVERLAY, ID_STATIC_CAPTURE_HINT].into_iter().chain(reset_ids) {
             if let Ok(control) = dlg_item(hwnd, id) {
                 let _ = ShowWindow(control, overlay_cmd);
             }
@@ -8419,7 +8423,12 @@ mod tests {
         let mut layout = SettingsLayout::embedded().unwrap();
         move_layout_entry(&mut layout, SettingId::AnkiStaticOverlay, 0, 0, 0);
         layout.validate().unwrap();
-        let form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        let mut form = crate::settings::from_config(&crate::config::Config::default(), &[]);
+        form.create_profile("Derived".to_string(), Some("default"), &[]).unwrap();
+        form.cfg.anki.show_static_overlay = !form.cfg.anki.show_static_overlay;
+        form.save_current().unwrap();
+        let reset = ID_RESET_OVERRIDE_BASE + PROFILE_FIELDS.iter()
+            .position(|path| *path == "anki.show_static_overlay").unwrap() as i32;
         let mut window = SettingsWindow::open_with_layout(
             &form,
             &[],
@@ -8432,6 +8441,7 @@ mod tests {
         // SAFETY: The overlay is hidden when sentence mode is not static.
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, reset).unwrap()).as_bool());
         }
 
         select_sentence_mode(&mut window, SentenceMode::Static);
@@ -8440,18 +8450,21 @@ mod tests {
         unsafe {
             assert!(IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
             assert!(IsWindowVisible(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).unwrap()).as_bool());
+            assert!(IsWindowVisible(dlg_item(window.hwnd, reset).unwrap()).as_bool());
         }
         assert!(control_top(&window, ID_THEME) > collapsed_top);
         window.switch_tab(5);
         // SAFETY: The owner tab is hidden.
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_SHOW_STATIC_OVERLAY).unwrap()).as_bool());
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, reset).unwrap()).as_bool());
         }
         window.switch_tab(0);
         select_sentence_mode(&mut window, SentenceMode::Sentence);
         // SAFETY: Sentence mode hides the static-area hint.
         unsafe {
             assert!(!IsWindowVisible(dlg_item(window.hwnd, ID_STATIC_CAPTURE_HINT).unwrap()).as_bool());
+            assert!(!IsWindowVisible(dlg_item(window.hwnd, reset).unwrap()).as_bool());
         }
         assert_eq!(collapsed_top, control_top(&window, ID_THEME));
     }

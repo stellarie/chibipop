@@ -914,11 +914,17 @@ fn update(search: &mut Search, message: Message) -> Task<Message> {
                             Target::Hover(id, _) | Target::Click(id, _) => {
                                 if let Some(presentation) = selected_presentation(&result, 0) {
                                     if let Some(depth) = search.definitions.iter().position(|(known, _)| *known == id) {
-                                        if matches!(target, Target::Click(_, _)) {
-                                            search.cancel_hovers();
+                                        let parent = &search.definitions[depth].1;
+                                        let same_word = parent.session == session
+                                            && presentation.top.as_ref().zip(parent.presentation.top.as_ref())
+                                                .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
+                                        if !same_word {
+                                            if matches!(target, Target::Click(_, _)) {
+                                                search.cancel_hovers();
+                                            }
+                                            tasks.push(search.close_from(depth + 1));
+                                            tasks.push(search.open_definition(presentation, session));
                                         }
-                                        tasks.push(search.close_from(depth + 1));
-                                        tasks.push(search.open_definition(presentation, session));
                                     }
                                 }
                             }
@@ -1780,6 +1786,58 @@ mod tests {
             tokens: Vec::new(), session,
         }))));
         assert_eq!(search.definitions.len(), 1);
+    }
+
+    #[test]
+    fn same_word_replies_do_not_open_same_profile_children() {
+        for hover in [false, true] {
+            let (mut search, _receiver) = fixture();
+            let parent = window::Id::unique();
+            let session = search.session.clone();
+            let result = found_search_result("猫");
+            let mut definition = Definition::new(
+                selected_presentation(&result, 0).unwrap(), session.clone(), search.theme.clone(),
+                &mut search.engine, search.media.as_mut(),
+            ).unwrap();
+            definition.hovered = Some("猫".into());
+            definition.generation = 7;
+            search.definitions.push((parent, definition));
+            let target = if hover { Target::Hover(parent, 7) }
+                else { Target::Click(parent, search.click_generation) };
+
+            let _ = update(&mut search, Message::Finished(target, Ok(Box::new(Reply {
+                result, tokens: Vec::new(), session,
+            }))));
+
+            assert_eq!(search.definitions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn same_word_replies_keep_cross_profile_children() {
+        for hover in [false, true] {
+            let (mut search, _receiver) = fixture();
+            let parent = window::Id::unique();
+            let session = nested_profile_session();
+            let nested = session.nested();
+            let result = found_search_result("猫");
+            let mut definition = Definition::new(
+                selected_presentation(&result, 0).unwrap(), session, search.theme.clone(),
+                &mut search.engine, search.media.as_mut(),
+            ).unwrap();
+            definition.hovered = Some("猫".into());
+            definition.generation = 7;
+            search.definitions.push((parent, definition));
+            let target = if hover { Target::Hover(parent, 7) }
+                else { Target::Click(parent, search.click_generation) };
+
+            let _ = update(&mut search, Message::Finished(target, Ok(Box::new(Reply {
+                result, tokens: Vec::new(), session: nested.clone(),
+            }))));
+
+            assert_eq!(search.definitions.len(), 2);
+            assert_eq!(search.definitions[1].1.session, nested);
+        }
     }
 
     #[test]

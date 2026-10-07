@@ -71,6 +71,20 @@ pub fn model_field_names(url: &str, model: &str) -> Result<Vec<String>> {
     string_list(&post(url, &body)?)
 }
 
+fn deck_id(url: &str, deck: &str) -> Result<i64> {
+    let resp = post(url, &serde_json::json!({
+        "action": "deckNamesAndIds",
+        "version": VERSION,
+    }))?;
+    let decks = resp.get("result")
+        .and_then(|result| result.as_object())
+        .context("deckNamesAndIds: no result object")?;
+    decks.get(deck)
+        .with_context(|| format!("AnkiConnect: deck was not found: {deck}"))?
+        .as_i64()
+        .context("deckNamesAndIds returned a non-integer deck ID")
+}
+
 /// Identifies the note mutation that completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteResult {
@@ -166,22 +180,14 @@ fn quote_search(value: &str) -> String {
 }
 
 fn build_find_notes_body(
-    deck: &str,
+    deck_id: i64,
     model: &str,
-    first_field: &str,
     expression: &str,
 ) -> serde_json::Value {
-    let field_predicate = format!(
-        "{}:{}",
-        escape_search(first_field),
-        escape_search(expression)
-    );
     let query = format!(
-        "deck:{} -deck:\"{}::*\" note:{} \"{}\"",
-        quote_search(deck),
-        escape_search(deck),
+        "did:{deck_id} note:{} \"*:{}\"",
         quote_search(model),
-        field_predicate
+        escape_search(expression)
     );
     serde_json::json!({
         "action": "findNotes",
@@ -208,6 +214,8 @@ fn build_notes_info_body(ids: &[i64]) -> serde_json::Value {
 }
 
 fn exact_note_ids(
+    url: &str,
+    deck: &str,
     resp: &serde_json::Value,
     candidate_ids: &[i64],
     model: &str,
@@ -218,7 +226,7 @@ fn exact_note_ids(
         .get("result")
         .and_then(|r| r.as_array())
         .context("notesInfo: no result array")?;
-    Ok(records
+    let matches: Vec<_> = records
         .iter()
         .filter_map(|record| {
             let note_id = record.get("noteId").and_then(|id| id.as_i64())?;
@@ -228,9 +236,37 @@ fn exact_note_ids(
                 .and_then(|fields| fields.get(first_field))
                 .and_then(|field| field.get("value"))
                 .and_then(|value| value.as_str())?;
+            let cards = record.get("cards").and_then(|cards| cards.as_array())?;
             (candidate_ids.contains(&note_id) && note_model == model && value == expression)
-                .then_some(note_id)
+                .then_some((note_id, cards))
         })
+        .collect();
+    let cards: Vec<_> = matches.iter()
+        .flat_map(|(_, cards)| cards.iter().filter_map(|id| id.as_i64()))
+        .collect();
+    if cards.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resp = post(url, &serde_json::json!({
+        "action": "getDecks",
+        "version": VERSION,
+        "params": { "cards": cards },
+    }))?;
+    let decks = resp.get("result")
+        .and_then(|result| result.as_object())
+        .context("getDecks: no result object")?;
+    let Some(deck_cards) = decks.get(deck) else {
+        return Ok(Vec::new());
+    };
+    let deck_cards: HashSet<_> = deck_cards.as_array()
+        .context("getDecks: no card ID array")?
+        .iter()
+        .map(|id| id.as_i64().context("getDecks returned a non-integer card ID"))
+        .collect::<Result<_>>()?;
+    Ok(matches.into_iter()
+        .filter(|(_, cards)| cards.iter()
+            .any(|id| id.as_i64().is_some_and(|id| deck_cards.contains(&id))))
+        .map(|(note_id, _)| note_id)
         .collect())
 }
 
@@ -403,14 +439,17 @@ pub fn write_note(
         anyhow::bail!("expression must map to the note type's first field");
     }
 
+    let deck_id = deck_id(url, deck)?;
     let ids = note_ids(&post(
         url,
-        &build_find_notes_body(deck, model, first_field, expression),
+        &build_find_notes_body(deck_id, model, expression),
     )?)?;
     let matches = if ids.is_empty() {
         Vec::new()
     } else {
         exact_note_ids(
+            url,
+            deck,
             &post(url, &build_notes_info_body(&ids))?,
             &ids,
             model,
@@ -1272,26 +1311,6 @@ mod tests {
         );
     }
 
-    /// The update lookup must not read another deck's notes.
-    #[test]
-    fn find_notes_scopes_the_query_to_the_deck_and_excludes_its_children() {
-        let body = build_find_notes_body("My Deck", "Lapis", "Expression", "食べる");
-        assert_eq!(
-            r#"deck:"My Deck" -deck:"My Deck::*" note:"Lapis" "Expression:食べる""#,
-            body["params"]["query"].as_str().expect("query text"),
-        );
-    }
-
-    /// Escape the deck name, but keep the child wildcard raw.
-    #[test]
-    fn find_notes_escapes_the_deck_name_and_keeps_the_child_wildcard_raw() {
-        let body = build_find_notes_body("N5_Tango*", "Model", "Field", "猫");
-        assert_eq!(
-            r#"deck:"N5\_Tango\*" -deck:"N5\_Tango\*::*" note:"Model" "Field:猫""#,
-            body["params"]["query"].as_str().expect("query text"),
-        );
-    }
-
     /// Confirms that the field-map check runs before network access, as the add test does.
     #[test]
     fn find_duplicates_rejects_a_field_map_that_drops_the_word() {
@@ -1472,18 +1491,27 @@ mod tests {
     }
 
     fn scripted_anki(replies: Vec<serde_json::Value>) -> ScriptedAnki {
+        let count = replies.len();
+        let mut replies = replies.into_iter();
+        replying_anki(count, move |_| replies.next().expect("a scripted reply"))
+    }
+
+    fn replying_anki(
+        count: usize,
+        mut reply: impl FnMut(&serde_json::Value) -> serde_json::Value + Send + 'static,
+    ) -> ScriptedAnki {
         use std::io::Write;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let url = format!("http://{}", listener.local_addr().expect("the bound address"));
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = seen.clone();
         std::thread::spawn(move || {
-            for reply in replies {
+            for _ in 0..count {
                 let Ok((mut stream, _)) = listener.accept() else { return };
                 let request = serde_json::from_str(&read_body(&mut stream))
                     .unwrap_or(serde_json::Value::Null);
+                let text = reply(&request).to_string();
                 recorded.lock().expect("the request log").push(request);
-                let text = reply.to_string();
                 let _ = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
@@ -1514,6 +1542,7 @@ mod tests {
             "noteId": id,
             "modelName": model,
             "fields": { field: { "value": value } },
+            "cards": [id + 1000],
         })
     }
 
@@ -1539,6 +1568,7 @@ mod tests {
     fn overwrite_on_adds_when_no_exact_note_matches() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [], "error": null }),
             serde_json::json!({ "result": 8, "error": null }),
         ]);
@@ -1556,44 +1586,144 @@ mod tests {
         let seen = server.seen.lock().unwrap();
         let actions: Vec<_> = seen.iter()
             .map(|request| request["action"].as_str().unwrap()).collect();
-        assert_eq!(vec!["modelFieldNames", "findNotes", "addNote"], actions);
+        assert_eq!(vec!["modelFieldNames", "deckNamesAndIds", "findNotes", "addNote"], actions);
     }
 
     #[test]
-    fn overwrite_searches_the_selected_deck_only() {
+    fn overwrite_resolves_literal_deck_names_before_selecting_a_note() {
+        for deck in ["current", "filtered", "Mining", "N5_Tango*", "日本語 <Deck>"] {
+            let server = replying_anki(6, move |request| {
+                let result = match request["action"].as_str().unwrap() {
+                    "modelFieldNames" => json!(["Front", "Back"]),
+                    "deckNamesAndIds" => json!({
+                        deck: 101,
+                        format!("{deck}::Child"): 102,
+                        "Other": 103,
+                    }),
+                    "findNotes" => {
+                        let query = request["params"]["query"].as_str().unwrap();
+                        let deck_id = query.split_whitespace()
+                            .find_map(|term| term.strip_prefix("did:"))
+                            .and_then(|id| id.parse::<i64>().ok());
+                        if deck_id == Some(101) { json!([42]) } else { json!([43]) }
+                    }
+                    "notesInfo" => {
+                        let id = request["params"]["notes"][0].as_i64().unwrap();
+                        json!([one_note_info("Basic", id, "Front", "猫")])
+                    }
+                    "getDecks" => json!({ deck: [1042], "Other": [1043] }),
+                    "updateNoteFields" => serde_json::Value::Null,
+                    action => panic!("unexpected action: {action}"),
+                };
+                json!({ "result": result, "error": null })
+            });
+            let result = write_note(
+                &server.url, deck, "Basic", &write_input(), &write_fields(), None, true,
+            )
+            .expect("the literal deck has one exact note");
+            assert_eq!(WriteResult::Updated(42), result, "{deck}");
+            let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let update = seen.last().unwrap();
+            assert_eq!("updateNoteFields", update["action"]);
+            assert_eq!(42, update["params"]["note"]["id"], "{deck}");
+        }
+    }
+
+    #[test]
+    fn overwrite_does_not_update_child_other_or_filtered_deck_cards() {
+        for other_deck in ["Mining::Child", "Other", "Filtered Review"] {
+            let server = scripted_anki(vec![
+                json!({ "result": ["Front", "Back"], "error": null }),
+                json!({ "result": { "Mining": 101, other_deck: 102 }, "error": null }),
+                json!({ "result": [42], "error": null }),
+                json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+                json!({ "result": { other_deck: [1042] }, "error": null }),
+                json!({ "result": 8, "error": null }),
+            ]);
+            let result = write_note(
+                &server.url, "Mining", "Basic", &write_input(), &write_fields(), None, true,
+            )
+            .expect("the configured deck has no duplicate");
+            assert_eq!(WriteResult::Added(8), result, "{other_deck}");
+            let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(seen.iter().all(|request| request["action"] != "updateNoteFields"));
+            let add = seen.last().unwrap();
+            assert_eq!("addNote", add["action"]);
+            assert_eq!("Mining", add["params"]["note"]["deckName"]);
+            assert_eq!(
+                json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
+                add["params"]["note"]["options"],
+            );
+        }
+    }
+
+    #[test]
+    fn overwrite_selects_the_exact_note_with_a_card_in_the_configured_deck() {
+        let mut shared_note = one_note_info("Basic", 42, "Front", "猫");
+        shared_note["cards"] = json!([1042, 2042]);
         let server = scripted_anki(vec![
-            serde_json::json!({ "result": ["Front", "Back"], "error": null }),
-            serde_json::json!({ "result": [], "error": null }),
-            serde_json::json!({ "result": 8, "error": null }),
+            json!({ "result": ["Front", "Back"], "error": null }),
+            json!({ "result": { "Mining": 101, "Other": 102 }, "error": null }),
+            json!({ "result": [42, 43], "error": null }),
+            json!({ "result": [shared_note, one_note_info("Basic", 43, "Front", "猫")], "error": null }),
+            json!({ "result": { "Mining": [2042], "Other": [1042, 1043] }, "error": null }),
+            json!({ "result": null, "error": null }),
         ]);
         let result = write_note(
-            &server.url,
-            "My Deck",
-            "Basic",
-            &write_input(),
-            &write_fields(),
-            None,
-            true,
+            &server.url, "Mining", "Basic", &write_input(), &write_fields(), None, true,
         )
-        .expect("the unmatched add path");
-        assert_eq!(WriteResult::Added(8), result);
-        let seen = server.seen.lock().unwrap();
-        let query = seen[1]["params"]["query"].as_str().expect("a findNotes query");
-        assert!(query.contains(r#"deck:"My Deck""#), "{query}");
-        assert!(query.contains(r#"-deck:"My Deck::*""#), "{query}");
-        assert_eq!(Some("My Deck"), seen[2]["params"]["note"]["deckName"].as_str());
-        assert_eq!(
-            json!({ "allowDuplicate": false, "duplicateScope": "deck" }),
-            seen[2]["params"]["note"]["options"],
-        );
+        .expect("one exact note has a card in Mining");
+        assert_eq!(WriteResult::Updated(42), result);
+        let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(42, seen.last().unwrap()["params"]["note"]["id"]);
+    }
+
+    #[test]
+    fn overwrite_matches_a_first_field_named_note() {
+        for field in ["Note", "Deck", "Card", "Tag", "Is"] {
+            let server = replying_anki(6, move |request| {
+                let result = match request["action"].as_str().unwrap() {
+                    "modelFieldNames" => json!([field, "Back"]),
+                    "deckNamesAndIds" => json!({ "Mining": 101 }),
+                    "findNotes" => {
+                        let query = request["params"]["query"].as_str().unwrap();
+                        if query.to_ascii_lowercase().contains(&format!("{}:猫", field.to_ascii_lowercase())) {
+                            json!([])
+                        } else {
+                            json!([42])
+                        }
+                    }
+                    "notesInfo" => json!([one_note_info("Basic", 42, field, "猫")]),
+                    "getDecks" => json!({ "Mining": [1042] }),
+                    "updateNoteFields" => serde_json::Value::Null,
+                    "addNote" => return json!({ "result": null, "error": "duplicate note" }),
+                    action => panic!("unexpected action: {action}"),
+                };
+                json!({ "result": result, "error": null })
+            });
+            let field_map = vec![crate::config::FieldMapping {
+                anki_field: field.into(),
+                source: "expression".into(),
+            }];
+            let result = write_note(
+                &server.url, "Mining", "Basic", &write_input(), &field_map, None, true,
+            )
+            .expect("the reserved field name does not hide a duplicate");
+            assert_eq!(WriteResult::Updated(42), result, "{field}");
+            let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(seen.iter().all(|request| request["action"] != "addNote"));
+            assert_eq!("猫", seen.last().unwrap()["params"]["note"]["fields"][field]);
+        }
     }
 
     #[test]
     fn overwrite_on_updates_the_only_exact_matching_note_id() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042] }, "error": null }),
             serde_json::json!({ "result": null, "error": null }),
         ]);
         let result = write_note(
@@ -1608,7 +1738,7 @@ mod tests {
         .expect("the exact update path");
         assert_eq!(WriteResult::Updated(42), result);
         let seen = server.seen.lock().unwrap();
-        let update = &seen[3];
+        let update = seen.last().unwrap();
         assert_eq!("updateNoteFields", update["action"]);
         assert_eq!(42, update["params"]["note"]["id"]);
         assert_eq!("猫", update["params"]["note"]["fields"]["Front"]);
@@ -1621,7 +1751,7 @@ mod tests {
         let deck = "Japanese <Mining>";
         let model = "Japanese <Mining>";
         let field = "Word \"Text\"\\_*:Name";
-        let expression = "猫\"\\*:";
+        let expression = r#"<font title="cat">猫\a*b_c: re:.*</font>"#;
         let map = vec![crate::config::FieldMapping {
             anki_field: field.into(),
             source: "expression".into(),
@@ -1629,19 +1759,24 @@ mod tests {
         let fields = HashMap::from([("expression".into(), expression.into())]);
         let server = scripted_anki(vec![
             serde_json::json!({ "result": [field], "error": null }),
-            serde_json::json!({ "result": [42], "error": null }),
-            serde_json::json!({ "result": [one_note_info(model, 42, field, expression)], "error": null }),
+            serde_json::json!({ "result": { deck: 101 }, "error": null }),
+            serde_json::json!({ "result": [41, 42, 43], "error": null }),
+            serde_json::json!({ "result": [
+                one_note_info(model, 41, field, "猫\\a*b_c: re:.*"),
+                one_note_info(model, 42, field, expression),
+                one_note_info("Other", 43, field, expression),
+            ], "error": null }),
+            serde_json::json!({ "result": { deck: [1041, 1042, 1043] }, "error": null }),
             serde_json::json!({ "result": null, "error": null }),
         ]);
         let result = write_note(&server.url, deck, model, &fields, &map, None, true)
             .expect("the exact update path");
         assert_eq!(WriteResult::Updated(42), result);
         let seen = server.seen.lock().unwrap();
-        assert_eq!(
-            r#"deck:"Japanese <Mining>" -deck:"Japanese <Mining>::*" note:"Japanese <Mining>" "Word \"Text\"\\\_\*\:Name:猫\"\\\*\:""#,
-            seen[1]["params"]["query"].as_str().expect("the overwrite query"),
-        );
-        assert_eq!(42, seen[3]["params"]["note"]["id"]);
+        let update = seen.last().unwrap();
+        assert_eq!("updateNoteFields", update["action"]);
+        assert_eq!(42, update["params"]["note"]["id"]);
+        assert_eq!(expression, update["params"]["note"]["fields"][field]);
     }
 
     #[test]
@@ -1652,8 +1787,10 @@ mod tests {
         ];
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042] }, "error": null }),
             serde_json::json!({ "result": null, "error": null }),
         ]);
         let result = write_note(
@@ -1673,11 +1810,13 @@ mod tests {
     fn overwrite_refuses_multiple_exact_matches_without_mutation() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42, 43], "error": null }),
             serde_json::json!({ "result": [
                 one_note_info("Basic", 42, "Front", "猫"),
                 one_note_info("Basic", 43, "Front", "猫"),
             ], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042, 1043] }, "error": null }),
         ]);
         let error = write_note(
             &server.url,
@@ -1693,13 +1832,14 @@ mod tests {
         let seen = server.seen.lock().unwrap();
         let actions: Vec<_> = seen.iter()
             .map(|request| request["action"].as_str().unwrap()).collect();
-        assert_eq!(vec!["modelFieldNames", "findNotes", "notesInfo"], actions);
+        assert_eq!(vec!["modelFieldNames", "deckNamesAndIds", "findNotes", "notesInfo", "getDecks"], actions);
     }
 
     #[test]
     fn overwrite_ignores_a_stale_or_mismatched_notes_info_record() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Other", 42, "Front", "猫")], "error": null }),
             serde_json::json!({ "result": 9, "error": null }),
@@ -1721,6 +1861,7 @@ mod tests {
     fn overwrite_ignores_note_info_outside_the_candidate_ids() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 99, "Front", "猫")], "error": null }),
             serde_json::json!({ "result": 9, "error": null }),
@@ -1739,6 +1880,96 @@ mod tests {
     }
 
     #[test]
+    fn overwrite_does_not_match_a_later_field_instead_of_the_first() {
+        let mut note = one_note_info("Basic", 42, "Front", "犬");
+        note["fields"]["Back"] = json!({ "value": "猫" });
+        let server = scripted_anki(vec![
+            json!({ "result": ["Front", "Back"], "error": null }),
+            json!({ "result": { "Default": 1 }, "error": null }),
+            json!({ "result": [42], "error": null }),
+            json!({ "result": [note], "error": null }),
+            json!({ "result": 9, "error": null }),
+        ]);
+        let result = write_note(
+            &server.url, "Default", "Basic", &write_input(), &write_fields(), None, true,
+        )
+        .expect("a later field cannot select an update target");
+        assert_eq!(WriteResult::Added(9), result);
+        let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(seen.iter().all(|request| request["action"] != "updateNoteFields"));
+    }
+
+    #[test]
+    fn overwrite_ignores_deck_cards_outside_the_matching_note() {
+        let server = scripted_anki(vec![
+            json!({ "result": ["Front", "Back"], "error": null }),
+            json!({ "result": { "Default": 1 }, "error": null }),
+            json!({ "result": [42], "error": null }),
+            json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            json!({ "result": { "Default": [1043], "Other": [1042] }, "error": null }),
+            json!({ "result": 9, "error": null }),
+        ]);
+        let result = write_note(
+            &server.url, "Default", "Basic", &write_input(), &write_fields(), None, true,
+        )
+        .expect("an unrelated card cannot select an update target");
+        assert_eq!(WriteResult::Added(9), result);
+        let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(seen.iter().all(|request| request["action"] != "updateNoteFields"));
+    }
+
+    #[test]
+    fn overwrite_stops_without_mutation_when_deck_resolution_fails() {
+        for (reply, message) in [
+            (json!({ "result": null, "error": "deck lookup failed" }), "deck lookup failed"),
+            (json!({ "result": { "Other": 2 }, "error": null }), "deck was not found: Default"),
+            (json!({ "result": { "Default": "1" }, "error": null }), "non-integer deck ID"),
+            (json!({ "result": [], "error": null }), "no result object"),
+        ] {
+            let server = scripted_anki(vec![
+                json!({ "result": ["Front", "Back"], "error": null }),
+                reply,
+            ]);
+            let error = write_note(
+                &server.url, "Default", "Basic", &write_input(), &write_fields(), None, true,
+            )
+            .expect_err("the deck lookup must succeed before mutation");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(seen.iter().all(|request| {
+                request["action"] != "updateNoteFields" && request["action"] != "addNote"
+            }));
+        }
+    }
+
+    #[test]
+    fn overwrite_stops_without_mutation_when_card_deck_lookup_fails() {
+        for (reply, message) in [
+            (json!({ "result": null, "error": "card deck lookup failed" }), "card deck lookup failed"),
+            (json!({ "result": [], "error": null }), "no result object"),
+            (json!({ "result": { "Default": null }, "error": null }), "no card ID array"),
+            (json!({ "result": { "Default": ["1042"] }, "error": null }), "non-integer card ID"),
+        ] {
+            let server = scripted_anki(vec![
+                json!({ "result": ["Front", "Back"], "error": null }),
+                json!({ "result": { "Default": 1 }, "error": null }),
+                json!({ "result": [42], "error": null }),
+                json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+                reply,
+            ]);
+            let error = write_note(
+                &server.url, "Default", "Basic", &write_input(), &write_fields(), None, true,
+            )
+            .expect_err("the card deck lookup must succeed before mutation");
+            assert!(format!("{error:#}").contains(message), "{error:#}");
+            let seen = server.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(seen.iter().all(|request| {
+                request["action"] != "updateNoteFields" && request["action"] != "addNote"
+            }));
+        }
+    }
+
+    #[test]
     fn update_replaces_the_mapped_screenshot_field() {
         let map = vec![
             crate::config::FieldMapping { anki_field: "Front".into(), source: "expression".into() },
@@ -1752,8 +1983,10 @@ mod tests {
         };
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Picture", "Picture2"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042] }, "error": null }),
             serde_json::json!({ "result": "stored.png", "error": null }),
             serde_json::json!({ "result": null, "error": null }),
         ]);
@@ -1769,11 +2002,13 @@ mod tests {
         .expect("the media update");
         assert_eq!(WriteResult::Updated(42), result);
         let seen = server.seen.lock().unwrap();
-        assert_eq!("storeMediaFile", seen[3]["action"]);
-        assert_eq!(false, seen[3]["params"]["deleteExisting"]);
-        assert_eq!("updateNoteFields", seen[4]["action"]);
-        assert_eq!("<img src=\"stored.png\">", seen[4]["params"]["note"]["fields"]["Picture"]);
-        assert_eq!("<img src=\"stored.png\">", seen[4]["params"]["note"]["fields"]["Picture2"]);
+        let media = &seen[5];
+        assert_eq!("storeMediaFile", media["action"]);
+        assert_eq!(false, media["params"]["deleteExisting"]);
+        let update = seen.last().unwrap();
+        assert_eq!("updateNoteFields", update["action"]);
+        assert_eq!("<img src=\"stored.png\">", update["params"]["note"]["fields"]["Picture"]);
+        assert_eq!("<img src=\"stored.png\">", update["params"]["note"]["fields"]["Picture2"]);
     }
 
     #[test]
@@ -1789,8 +2024,10 @@ mod tests {
         };
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Picture"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042] }, "error": null }),
             serde_json::json!({ "result": null, "error": "media failed" }),
         ]);
         let error = write_note(
@@ -1813,8 +2050,10 @@ mod tests {
     fn update_failure_never_falls_back_to_add_note() {
         let server = scripted_anki(vec![
             serde_json::json!({ "result": ["Front", "Back"], "error": null }),
+            serde_json::json!({ "result": { "Default": 1 }, "error": null }),
             serde_json::json!({ "result": [42], "error": null }),
             serde_json::json!({ "result": [one_note_info("Basic", 42, "Front", "猫")], "error": null }),
+            serde_json::json!({ "result": { "Default": [1042] }, "error": null }),
             serde_json::json!({ "result": null, "error": "update failed" }),
         ]);
         let error = write_note(
@@ -1831,22 +2070,6 @@ mod tests {
         assert!(server.seen.lock().unwrap().iter().all(|request| {
             request["action"] != "addNote"
         }));
-    }
-
-    #[test]
-    fn anki_query_escapes_search_operators_but_preserves_angle_brackets() {
-        let body = build_find_notes_body("N5_Deck", "Model", "Field", "a\\b\"c*d_e<font>");
-        let query = body["params"]["query"].as_str().expect("query text");
-        assert!(
-            query.starts_with("deck:\"N5\\_Deck\" -deck:\"N5\\_Deck::*\" note:\"Model\" "),
-            "{query}"
-        );
-        assert!(!query.contains("\"Field\":"), "{query}");
-        assert!(query.contains("a\\\\b"), "{query}");
-        assert!(query.contains("\\\"c"), "{query}");
-        assert!(query.contains("\\*d\\_e"), "{query}");
-        assert!(query.contains("<font>"), "{query}");
-        assert!(!query.contains("\\<") && !query.contains("\\>"), "{query}");
     }
 
     // Tests for pitch fields.

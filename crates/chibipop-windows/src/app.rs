@@ -1461,7 +1461,7 @@ fn service_settings_click(
 struct WorkerUi {
     requests: mpsc::Receiver<crate::action::OcrRequest>,
     monitor: OcrMonitor,
-    default_session: Arc<Mutex<Option<ProfileSession>>>,
+    pending_reload: Arc<Mutex<Option<ProfileSession>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1564,6 +1564,33 @@ fn activate_session_ocr(
     *active = requested;
 }
 
+fn worker_serve(ui: WorkerUi, mut active: OcrSelection) -> chibipop::worker::ServeHook {
+    Box::new(move |source, session| {
+        let reload = ui.pending_reload.lock().ok().and_then(|mut pending| pending.take());
+        if let Some(session) = reload {
+            activate_session_ocr(source, &mut active, &session, &ui.monitor);
+        }
+        while let Ok(request) = ui.requests.try_recv() {
+            activate_session_ocr(source, &mut active, &request.session, &ui.monitor);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                source
+                    .recognise_for_session(
+                        &request.session,
+                        &request.bgra_buf,
+                        request.width,
+                        request.height,
+                    )
+                    .map_err(|e| format!("{e:#}"))
+            }))
+            .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
+            let _ = request.result_tx.send(result);
+        }
+        if let Some(session) = session {
+            activate_session_ocr(source, &mut active, session, &ui.monitor);
+        }
+    })
+}
+
 fn sync_runtime_status(
     window: Option<&SettingsWindow>,
     monitor: &OcrMonitor,
@@ -1598,11 +1625,9 @@ fn worker_open(
     ui: WorkerUi,
 ) -> impl FnOnce() -> Result<WorkerParts> + Send + 'static {
     move || {
-        let WorkerUi { requests: ocr_request_rx, monitor, default_session } = ui;
-        let backend = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &monitor)?;
+        let backend = open_ocr_backend(&ocr_engine, &enabled_plugins, &language, &ui.monitor)?;
         let OcrBackend { engine: ocr, name: active_engine, language: active_language } = backend;
-        let reload_monitor = monitor.clone();
-        let mut active_selection = OcrSelection {
+        let active_selection = OcrSelection {
             engine: ocr_engine,
             enabled_plugins,
             language,
@@ -1617,7 +1642,7 @@ fn worker_open(
         })?;
         let rules = load_rules(&rules_path)?;
         let engine = LookupEngine::new(Deconjugator::new(rules));
-        monitor.publish(&active_engine, &active_language, true);
+        ui.monitor.publish(&active_engine, &active_language, true);
         Ok(WorkerParts {
             capture: Box::new(capture),
             ocr,
@@ -1630,36 +1655,7 @@ fn worker_open(
                 }
             })),
             engine,
-            // The Worker owns this callback so OCR stays on the thread that owns the engine.
-            serve: Some(Box::new(move |source, session| {
-                while let Ok(request) = ocr_request_rx.try_recv() {
-                    activate_session_ocr(
-                        source,
-                        &mut active_selection,
-                        &request.session,
-                        &reload_monitor,
-                    );
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        source
-                            .recognise_for_session(
-                                &request.session,
-                                &request.bgra_buf,
-                                request.width,
-                                request.height,
-                            )
-                            .map_err(|e| format!("{e:#}"))
-                    }))
-                    .unwrap_or_else(|_| Err("OCR worker panicked".to_string()));
-                    let _ = request.result_tx.send(result);
-                }
-                if let Some(session) = session {
-                    activate_session_ocr(source, &mut active_selection, session, &reload_monitor);
-                } else if let Ok(session) = default_session.lock() {
-                    if let Some(session) = session.as_ref() {
-                        activate_session_ocr(source, &mut active_selection, session, &reload_monitor);
-                    }
-                }
-            })),
+            serve: Some(worker_serve(ui, active_selection)),
         })
     }
 }
@@ -1684,7 +1680,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let initial_resolved = cfg.resolved(None)?;
     let mut live = derive(&initial_resolved);
     let ocr_monitor = OcrMonitor::default();
-    let worker_default_session = Arc::new(Mutex::new(None));
+    let pending_ocr_reload = Arc::new(Mutex::new(None));
     // Do not join the Worker. `join` hangs.
     let (worker, mut dicts) = Worker::spawn(
         // `Worker::spawn` reads the file itself.
@@ -1703,7 +1699,7 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             WorkerUi {
                 requests: ocr_request_rx,
                 monitor: ocr_monitor.clone(),
-                default_session: worker_default_session.clone(),
+                pending_reload: pending_ocr_reload.clone(),
             },
         ),
         // The Worker posts a message after it pushes a result.
@@ -1714,9 +1710,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
     let mut catalog = ProfileCatalog::new(&cfg, &dicts)?;
     cfg = catalog.config.clone();
     let mut default_session = catalog.session(None)?;
-    *worker_default_session
+    *pending_ocr_reload
         .lock()
-        .map_err(|_| anyhow!("the Worker default profile lock is poisoned"))? =
+        .map_err(|_| anyhow!("the Worker OCR reload lock is poisoned"))? =
         Some(default_session.clone());
     live = derive_session(&default_session);
     worker.trigger().send(Trigger {
@@ -2054,9 +2050,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
             catalog = next_catalog;
             default_session = catalog.session(None)?;
             live = derive_session(&default_session);
-            *worker_default_session
+            *pending_ocr_reload
                 .lock()
-                .map_err(|_| anyhow!("the Worker default profile lock is poisoned"))? =
+                .map_err(|_| anyhow!("the Worker OCR reload lock is poisoned"))? =
                 Some(default_session.clone());
             Hooks::set_configured_binds(&catalog.config.binds);
             tray.update_profiles(&cfg);
@@ -2326,18 +2322,6 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                             Err(error) => eprintln!("chibipop: resolving lookup bind failed: {error:#}"),
                         }
                     } else if !edge.down {
-                        if controller.active_bind_id() == Some(edge.id.as_ref())
-                            && matches!(
-                                controller.trigger_mode(),
-                                crate::config::TriggerMode::HoldKey
-                                    | crate::config::TriggerMode::HoldShift
-                                    | crate::config::TriggerMode::Toggle
-                            )
-                        {
-                            capture_guard_prev_visible.set(false);
-                            overlay_prev_visible.set(false);
-                            btn_prev_visible.set(false);
-                        }
                         drive!(Event::LookupBindUp { bind_id: edge.id.to_string() });
                     }
                     continue;
@@ -2481,6 +2465,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 );
                             }
                         }
+                        for event in selection_release_events(Hooks::take_configured_binds()) {
+                            drive!(event);
+                        }
                         if had_popup && controller.popup().is_some() {
                             set_parent_visibility(&parent_popups, true);
                             let _ = popup.show_without_activating();
@@ -2549,6 +2536,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                                 }
                             }
                             _ => {}
+                        }
+                        for event in selection_release_events(Hooks::take_configured_binds()) {
+                            drive!(event);
                         }
                         if had_popup && controller.popup().is_some() {
                             set_parent_visibility(&parent_popups, true);
@@ -3219,6 +3209,9 @@ pub fn run(mut cfg: Config, dict_path: &Path, rules_path: &Path, config_path: &P
                     None
                 }
             };
+            for event in selection_release_events(Hooks::take_configured_binds()) {
+                drive!(event);
+            }
             let view = screenshot_restore_view(&controller);
             if view.is_some() {
                 set_parent_visibility(&parent_popups, true);
@@ -3489,11 +3482,20 @@ fn set_parent_visibility(parents: &std::cell::RefCell<Vec<(Popup, Renderer)>>, v
     }
 }
 
+fn selection_release_events(
+    edges: Vec<crate::input::hooks::BindEvent>,
+) -> impl Iterator<Item = Event> {
+    edges.into_iter()
+        .filter(|edge| edge.action == crate::config::BindAction::Lookup && !edge.down)
+        .map(|edge| Event::LookupBindUp { bind_id: edge.id.to_string() })
+}
+
 /// Disarms hooks for a pump.
 fn disarm_for_selection(popup: &Popup, pointer_buttons: &mut u8) {
     Hooks::set_scroll_armed(false);
     Hooks::set_click_armed(false);
     Hooks::discard_pointer_state();
+    crate::input::hooks::discard_keyboard_actions();
     *pointer_buttons = 0;
     popup.release_pointer();
 }
@@ -3709,6 +3711,18 @@ struct Exec<'a> {
 /// The function handles `ShowPopup` immediately, so `PopupPlaced` or
 /// `PopupPlaceFailed` enters the queue at once.
 fn drive(controller: &mut Controller, event: Event, x: &mut Exec<'_>) {
+    if let Event::LookupBindUp { bind_id } = &event {
+        if controller.active_bind_id() == Some(bind_id.as_str())
+            && matches!(
+                controller.trigger_mode(),
+                crate::config::TriggerMode::HoldKey
+                    | crate::config::TriggerMode::HoldShift
+                    | crate::config::TriggerMode::Toggle
+            )
+        {
+            for visible in x.capture_restore { visible.set(false); }
+        }
+    }
     let mut queue = std::collections::VecDeque::new();
     if x.cancel_hidden_hover.replace(false) {
         queue.push_back(Event::PopupHover { local: PhysPoint { x: 0, y: 0 }, query: None });
@@ -4565,6 +4579,93 @@ fn startup_language(
 mod tests {
     use super::*;
     use crate::config::PopupConfig;
+
+    #[test]
+    fn worker_serve_preserves_idle_backend_and_applies_explicit_reload() -> Result<()> {
+        let mut config = Config::default();
+        let mut alternate = config.resolve(&config.default_profile)?;
+        alternate.ocr.engine = "meikiocr".into();
+        config.plugins.enabled.clear();
+        config.profiles.push(crate::config::Profile {
+            id: "alternate-ocr".into(),
+            name: "Alternate OCR".into(),
+            data: crate::config::ProfileData::Full { settings: Box::new(alternate) },
+        });
+        let catalog = ProfileCatalog::new(&config, &[])?;
+        let default = catalog.session(None)?;
+        let alternate = catalog.session(Some("alternate-ocr"))?;
+        let pending_reload = Arc::new(Mutex::new(Some(default.clone())));
+        let (request_tx, requests) = mpsc::channel();
+        let mut serve = worker_serve(
+            WorkerUi {
+                requests,
+                monitor: OcrMonitor::default(),
+                pending_reload: pending_reload.clone(),
+            },
+            OcrSelection::from_session(&default),
+        );
+        let source = chibipop::text::TextSource::new(
+            Box::new(WinCapture::new(None)?),
+            Box::new(UnavailableOcr { name: "builtin".into(), reason: "initial backend".into() }),
+            worker_settings(&derive_session(&default), &[]).snapshot(),
+        );
+        serve(&source, None);
+        serve(&source, Some(&alternate));
+        source.replace_ocr(Box::new(UnavailableOcr {
+            name: "meikiocr".into(),
+            reason: "retained alternate backend".into(),
+        }));
+        for session in [None, Some(&alternate), None, Some(&alternate), None] {
+            serve(&source, session);
+            assert_eq!(
+                "OCR engine unavailable: retained alternate backend",
+                source.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
+            );
+        }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        request_tx.send(crate::action::OcrRequest {
+            bgra_buf: vec![255; 4],
+            width: 1,
+            height: 1,
+            session: alternate.clone(),
+            result_tx,
+        })?;
+        serve(&source, None);
+        assert_eq!(
+            "OCR engine unavailable: retained alternate backend",
+            result_rx.try_recv()?.unwrap_err(),
+        );
+
+        *pending_reload.lock().map_err(|_| anyhow!("the OCR reload lock is poisoned"))? = Some(default.clone());
+        serve(&source, None);
+        assert_ne!(
+            Some("OCR engine unavailable: retained alternate backend".to_string()),
+            source.recognise(&[255; 4], 1, 1).err().map(|error| error.to_string()),
+        );
+        *pending_reload.lock().map_err(|_| anyhow!("the OCR reload lock is poisoned"))? = Some(default);
+        let (result_tx, result_rx) = mpsc::channel();
+        request_tx.send(crate::action::OcrRequest {
+            bgra_buf: vec![255; 4],
+            width: 1,
+            height: 1,
+            session: alternate.clone(),
+            result_tx,
+        })?;
+        serve(&source, None);
+        let _ = result_rx.try_recv()?;
+        source.replace_ocr(Box::new(UnavailableOcr {
+            name: "meikiocr".into(),
+            reason: "backend after Apply".into(),
+        }));
+        serve(&source, Some(&alternate));
+        serve(&source, None);
+        assert_eq!(
+            "OCR engine unavailable: backend after Apply",
+            source.recognise(&[255; 4], 1, 1).unwrap_err().to_string(),
+        );
+        Ok(())
+    }
 
     #[test]
     fn closed_search_identity_reopens_with_the_new_profile_session() {
@@ -6041,8 +6142,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn screenshot_restore_uses_the_current_popup_state() {
+    fn selection_popup(mode: crate::config::TriggerMode) -> Controller {
         let cfg = Config::default();
         let catalog = ProfileCatalog::new(&cfg, &[]).unwrap();
         let session = catalog.session(None).unwrap();
@@ -6053,8 +6153,8 @@ mod tests {
         let point = PhysPoint { x: 110, y: 110 };
         let id = controller
             .handle(Event::LookupBindDown {
-                bind_id: "screenshot-test".into(),
-                mode: crate::config::TriggerMode::Press,
+                bind_id: "selection-test".into(),
+                mode,
                 session,
                 pos: point,
             })
@@ -6105,6 +6205,45 @@ mod tests {
             view_h: 200,
         });
         assert!(screenshot_restore_view(&controller).is_some());
+        controller
+    }
+
+    #[test]
+    fn selection_release_reconciles_only_the_active_hold_before_popup_restore() {
+        use crate::input::hooks::BindEvent;
+        use crate::config::{BindAction, TriggerMode};
+
+        let mut controller = selection_popup(TriggerMode::HoldKey);
+        let unrelated = vec![
+            BindEvent { id: Arc::from("selection-test"), action: BindAction::Lookup, down: true },
+            BindEvent { id: Arc::from("search"), action: BindAction::Search, down: true },
+            BindEvent { id: Arc::from("displaced"), action: BindAction::Lookup, down: false },
+        ];
+        let events: Vec<_> = selection_release_events(unrelated).collect();
+        assert_eq!(vec![Event::LookupBindUp { bind_id: "displaced".into() }], events);
+        for event in events {
+            assert!(controller.handle(event).is_empty());
+        }
+        assert_eq!(Some("selection-test"), controller.active_bind_id());
+        assert!(screenshot_restore_view(&controller).is_some());
+
+        let release = BindEvent {
+            id: Arc::from("selection-test"),
+            action: BindAction::Lookup,
+            down: false,
+        };
+        let mut commands = Vec::new();
+        for event in selection_release_events(vec![release]) {
+            commands.extend(controller.handle(event));
+        }
+        assert!(commands.contains(&Command::HidePopup));
+        assert_eq!(None, controller.active_bind_id());
+        assert!(screenshot_restore_view(&controller).is_none());
+    }
+
+    #[test]
+    fn screenshot_restore_uses_the_current_popup_state() {
+        let mut controller = selection_popup(crate::config::TriggerMode::Press);
 
         controller.handle(Event::DismissRequested);
         assert!(

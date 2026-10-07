@@ -444,7 +444,7 @@ pub fn discard_keyboard_actions() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .pending
-        .clear();
+        .retain(|event| event.action == crate::config::BindAction::Lookup && !event.down);
 }
 
 #[cfg(test)]
@@ -1627,6 +1627,53 @@ mod tests {
         // SAFETY: The same live payload is valid for this second callback.
         unsafe { record_mouse_move(LPARAM(&data as *const MSLLHOOKSTRUCT as isize)); }
         assert_eq!(Some(PhysPoint { x: 12, y: 34 }), Hooks::take_pending());
+    }
+
+    #[test]
+    fn selection_exit_keeps_hold_release_and_discards_other_keyboard_actions() {
+        for cancelled in [false, true] {
+            let _guard = keyboard_guard();
+            Hooks::set_configured_binds(&[
+                configured_bind("lookup", crate::config::BindAction::Lookup, "F8", TriggerMode::HoldKey),
+                configured_bind("clipboard", crate::config::BindAction::OcrClipboard, "F9", TriggerMode::Press),
+                configured_bind("search", crate::config::BindAction::Search, "F10", TriggerMode::Press),
+            ]);
+            action_hotkey_hit(true, 0x77, 0);
+            assert_eq!(1, Hooks::take_configured_binds().len());
+            action_hotkey_hit(true, 0x78, 0);
+            assert_eq!(1, Hooks::take_configured_binds().len());
+            Hooks::set_back_armed(true);
+            Hooks::set_selection_active(true);
+
+            let mut keys = vec![(0x77, WM_KEYUP), (0x79, WM_KEYDOWN), (0x78, WM_KEYUP)];
+            if cancelled {
+                keys.push((VK_ESCAPE as u32, WM_KEYDOWN));
+            }
+            for (vk, message) in keys {
+                let data = KBDLLHOOKSTRUCT { vkCode: vk, ..Default::default() };
+                // SAFETY: The payload stays live for the hook call.
+                unsafe {
+                    record_key_state(
+                        WPARAM(message as usize),
+                        LPARAM(&data as *const KBDLLHOOKSTRUCT as isize),
+                    );
+                }
+            }
+            Hooks::set_selection_active(false);
+            discard_keyboard_actions();
+            assert_eq!(
+                vec![BindEvent {
+                    id: Arc::from("lookup"),
+                    action: crate::config::BindAction::Lookup,
+                    down: false,
+                }],
+                Hooks::take_configured_binds(),
+                "selection cancellation: {cancelled}",
+            );
+            assert!(!Hooks::take_back());
+            assert!(!Hooks::take_escape());
+            assert!(Hooks::take_configured_binds().is_empty());
+        }
     }
 
     // ---- back (Escape) ----

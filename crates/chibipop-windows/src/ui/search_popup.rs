@@ -49,7 +49,7 @@ pub(super) struct SearchPopup {
     renderer: Renderer,
     window: Popup,
     events: Box<Events>,
-    presentation: Presentation,
+    pub(super) presentation: Presentation,
     theme: Theme,
     pub(super) session: ProfileSession,
     scroll: i32,
@@ -57,7 +57,7 @@ pub(super) struct SearchPopup {
     has_parent: bool,
 }
 
-pub(super) enum Action { Lookup(String), Back }
+pub(super) enum Action { Lookup(String), ExpandEntry(usize), Back }
 
 fn base_theme(config: &ResolvedConfig) -> Theme {
     let mut theme = if config.popup.theme == "light" { Theme::light() } else { Theme::dark() };
@@ -190,20 +190,19 @@ impl SearchPopup {
         if self.events.close.replace(false) { return Ok(Some(Action::Back)); }
         let wheel = self.events.wheel.replace(0);
         if wheel != 0 && self.session.config().popup.scroll_popup {
-            self.scroll = self.scroll.saturating_sub(wheel / 120 * 48).clamp(0, self.max_scroll);
-            self.events.repaint.set(true);
+            self.events.wheel.set(wheel % 120);
+            let steps = wheel / 120;
+            if steps != 0 {
+                self.scroll = self.scroll.saturating_sub(steps * 48).clamp(0, self.max_scroll);
+                self.events.repaint.set(true);
+            }
         }
         let action = self.events.click.take().and_then(|point|
             self.renderer.hit_test(point.x, point.y, self.scroll));
         match action {
             Some(HitAction::Back) => return Ok(Some(Action::Back)),
             Some(HitAction::DrillDown(query)) => return Ok(Some(Action::Lookup(query))),
-            Some(HitAction::ExpandEntry(index)) => {
-                chibipop::present::swap_top(&mut self.presentation, index, self.session.config().popup.summary_chars);
-                self.scroll = 0;
-                let anchor = self.anchor()?;
-                self.place(anchor)?;
-            }
+            Some(HitAction::ExpandEntry(index)) => return Ok(Some(Action::ExpandEntry(index))),
             Some(HitAction::OpenUrl(url)) if url.starts_with("https://") || url.starts_with("http://") => {
                     let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
                     // SAFETY: ShellExecuteW reads this terminated buffer during the call.
@@ -214,6 +213,13 @@ impl SearchPopup {
         }
         if self.events.repaint.replace(false) { self.paint()?; }
         Ok(None)
+    }
+
+    pub(super) fn expand_entry(&mut self, index: usize) -> Result<()> {
+        let anchor = self.anchor()?;
+        chibipop::present::swap_top(&mut self.presentation, index, self.session.config().popup.summary_chars);
+        self.scroll = 0;
+        self.place(anchor)
     }
 
     pub(super) fn hover(&mut self) -> Option<String> {
@@ -280,8 +286,39 @@ unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    pub(crate) fn scroll(popup: &SearchPopup) -> i32 { popup.scroll }
+
+    pub(crate) fn action_point(popup: &SearchPopup, action: HitAction) -> PhysPoint {
+        let mut rect = RECT::default();
+        // SAFETY: The live HWND writes to local storage.
+        unsafe { GetClientRect(popup.hwnd(), &mut rect).unwrap(); }
+        for y in 0..rect.bottom {
+            for x in (0..rect.right).step_by(4) {
+                if popup.renderer.hit_test(x, y, popup.scroll).as_ref() == Some(&action) {
+                    return PhysPoint { x, y };
+                }
+            }
+        }
+        panic!("The definition has no target for {action:?}");
+    }
+
+    pub(crate) fn hover_point(popup: &mut SearchPopup, query: &str) -> PhysPoint {
+        let mut rect = RECT::default();
+        // SAFETY: The live HWND writes to local storage.
+        unsafe { GetClientRect(popup.hwnd(), &mut rect).unwrap(); }
+        for y in (0..rect.bottom).step_by(4) {
+            for x in (0..rect.right).step_by(4) {
+                let point = PhysPoint { x, y };
+                if popup.renderer.hover_query(point, popup.scroll).as_deref() == Some(query) {
+                    return point;
+                }
+            }
+        }
+        panic!("The definition has no hover target for {query:?}");
+    }
 
     #[test]
     fn pointer_reentry_requires_movement_after_the_child_opens() {

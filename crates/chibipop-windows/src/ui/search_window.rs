@@ -315,6 +315,7 @@ impl SearchWindow {
             generation: 0, click_generation: 0, click_parent: None, requests, replies, result: SearchResult::Empty,
             tokens: Vec::new(), definitions: Vec::new(), hover: None };
         window.update_dpi();
+        window.size_initial()?;
         window.switch_mode(mode, text);
         Ok(window)
     }
@@ -438,6 +439,26 @@ impl SearchWindow {
                 _ => false,
             }
         }
+    }
+
+    fn size_initial(&self) -> Result<()> {
+        let mut rect = RECT::default();
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        // SAFETY: The live HWND and monitor write to local output buffers.
+        unsafe {
+            GetWindowRect(self.hwnd, &mut rect)?;
+            GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor).ok()?;
+            let work = monitor.rcWork;
+            let scale = self.state.palette.borrow().scale;
+            let width = scaled(760.0, scale).min(work.right - work.left);
+            let height = scaled(680.0, scale).min(work.bottom - work.top);
+            SetWindowPos(self.hwnd, None,
+                rect.left.clamp(work.left, work.right - width),
+                rect.top.clamp(work.top, work.bottom - height), width, height,
+                SWP_NOZORDER | SWP_NOACTIVATE).context("Cannot size the Search window")?;
+        }
+        Ok(())
     }
 
     fn update_dpi(&mut self) {
@@ -584,6 +605,7 @@ impl SearchWindow {
                 self.enqueue(read_text(self.state.input.get()), SearchMode::Sentence, Some(offset), None, self.session.clone());
             }
         }
+        self.poll_definitions();
         while let Ok(reply) = self.replies.try_recv() {
             if !reply.is_current(self.generation, self.click_generation) || self.state.composing.get() { continue; }
             if let Some((parent, hover)) = reply.definition {
@@ -598,6 +620,10 @@ impl SearchWindow {
                 }
                 if let Ok(SearchResult::Found(presentation)) = reply.result {
                     if let Some(popup) = self.definitions.get(parent) {
+                        let same_word = popup.session == reply.session
+                            && presentation.top.as_ref().zip(popup.presentation.top.as_ref())
+                                .is_some_and(|(a, b)| a.written == b.written && a.reading == b.reading);
+                        if same_word { continue; }
                         if let Ok(anchor) = popup.child_anchor() {
                             match SearchPopup::open(&self.database, reply.session.clone(), self.hwnd,
                                 *presentation, anchor, true) {
@@ -641,7 +667,6 @@ impl SearchWindow {
                 }
             }
         }
-        self.poll_definitions();
     }
 
     fn enqueue(&self, text: String, mode: SearchMode, clicked: Option<usize>,
@@ -662,6 +687,14 @@ impl SearchWindow {
                     self.invalidate_clicks();
                     self.definitions.truncate(index); self.hover = None; self.restore_focus(); return;
                 }
+                Ok(Some(Action::ExpandEntry(entry))) => {
+                    self.cancel_pending();
+                    self.definitions.truncate(index + 1);
+                    if let Err(error) = self.definitions[index].expand_entry(entry) {
+                        self.set_status(&format!("Cannot expand definition: {error:#}"));
+                    }
+                    return;
+                }
                 Ok(Some(Action::Lookup(query))) => {
                     if index >= 15 {
                         self.invalidate_clicks();
@@ -678,20 +711,17 @@ impl SearchWindow {
             }
         }
         let hovered = self.definitions.iter().rposition(SearchPopup::contains_pointer);
+        if let Some(parent) = hovered.filter(|parent| self.definitions.len() > *parent + 1) {
+            if !self.definitions[parent].pointer_moved_since_child_open() { return; }
+            if self.click_parent.is_some_and(|owner| owner > parent) {
+                self.invalidate_clicks();
+            }
+            self.generation = self.generation.wrapping_add(1);
+            self.definitions.truncate(parent + 1);
+            self.hover = None;
+        }
         let next = hovered.and_then(|index| self.definitions[index].hover().map(|query| (index, query)));
         let Some((index, query)) = next else {
-            if let Some(parent) = hovered.filter(|parent| self.definitions.len() > *parent + 1
-                && self.definitions[*parent].pointer_moved_since_child_open()) {
-                if self.click_parent.is_some_and(|owner| owner > parent) {
-                    self.invalidate_clicks();
-                }
-                if self.hover.as_ref().is_some_and(|(_, _, _, sent)| *sent) {
-                    self.generation = self.generation.wrapping_add(1);
-                }
-                self.definitions.truncate(parent + 1);
-                self.hover = None;
-                return;
-            }
             if self.hover.as_ref().is_some_and(|(_, _, _, sent)| *sent) {
                 self.generation = self.generation.wrapping_add(1);
             }
@@ -986,10 +1016,19 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let label_h = (scaled(palette.theme.dimmed_size + 6.0, palette.scale)).max(20);
         let width = (rect.right - pad * 2).max(80);
         let sentence = state.mode.get() == SearchMode::Sentence;
-        let input_h = if sentence { (line * 4).max(scaled(160.0, palette.scale)) }
+        let mut input_h = if sentence { (line * 4).max(scaled(160.0, palette.scale)) }
             else { (line * 2).max(scaled(72.0, palette.scale)) };
         let top = pad.max(scaled(12.0, palette.scale));
         let gap = scaled(8.0 + palette.theme.border_width, palette.scale);
+        let mut sentence_h = if sentence { line * 3 } else { 0 };
+        let fixed_h = top + label_h * 3 + gap * 2 + line * 2
+            + pad * if sentence { 4 } else { 3 };
+        let text_h = (rect.bottom - fixed_h - card_height(&palette))
+            .max(if sentence { line * 2 } else { line });
+        if input_h + sentence_h > text_h {
+            input_h = text_h * input_h / (input_h + sentence_h);
+            sentence_h = text_h - input_h;
+        }
         let _ = MoveWindow(state.input_label.get(), pad, top, width, label_h, true);
         let input_y = top + label_h + gap;
         let _ = MoveWindow(state.input.get(), pad, input_y, width, input_h, true);
@@ -1003,8 +1042,8 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let _ = MoveWindow(state.sentence_label.get(), pad, sentence_label_y, width, label_h, true);
         let sentence_y = sentence_label_y + label_h + gap;
         let _ = ShowWindow(state.sentence.get(), if sentence { SW_SHOW } else { SW_HIDE });
-        let _ = MoveWindow(state.sentence.get(), pad, sentence_y, width, line * 3, true);
-        let status_y = if sentence { sentence_y + line * 3 + pad } else { sentence_y };
+        let _ = MoveWindow(state.sentence.get(), pad, sentence_y, width, sentence_h, true);
+        let status_y = if sentence { sentence_y + sentence_h + pad } else { sentence_y };
         let _ = MoveWindow(state.status.get(), pad, status_y, width, line, true);
         let results_label_y = status_y + line;
         let _ = MoveWindow(state.results_label.get(), pad, results_label_y, width, label_h, true);
@@ -1344,6 +1383,53 @@ mod tests {
         assert!(!window.state.dpi_changed.get());
     }
 
+    #[test]
+    fn native_initial_size_and_sentence_layout_fit_work_area_at_double_scale() {
+        let (mut window, _fixture, _guard) = fixture();
+        let palette = Palette::new(window.session.config(), 2.0).unwrap();
+        let previous = window.state.palette.replace(palette);
+        // SAFETY: Replace fonts before their previous GDI objects drop.
+        unsafe { apply_fonts(&window.state); }
+        drop(previous);
+        window.size_initial().unwrap();
+        window.switch_mode(SearchMode::Sentence, None);
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        let mut outer = RECT::default();
+        let mut client = RECT::default();
+        let mut results = RECT::default();
+        let mut origin = POINT::default();
+        // SAFETY: All HWNDs and rectangle output buffers remain live.
+        unsafe {
+            GetMonitorInfoW(MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor).ok().unwrap();
+            GetWindowRect(window.hwnd, &mut outer).unwrap();
+            GetClientRect(window.hwnd, &mut client).unwrap();
+            GetWindowRect(window.state.results.get(), &mut results).unwrap();
+            ClientToScreen(window.hwnd, &mut origin).ok().unwrap();
+        }
+        let work = monitor.rcWork;
+        assert_eq!(outer.right - outer.left, 1520i32.min(work.right - work.left));
+        assert_eq!(outer.bottom - outer.top, 1360i32.min(work.bottom - work.top));
+        assert!(outer.left >= work.left && outer.top >= work.top);
+        assert!(outer.right <= work.right && outer.bottom <= work.bottom);
+        assert!(results.top >= origin.y);
+        assert!(results.bottom <= origin.y + client.bottom);
+        assert!(results.bottom > results.top);
+
+        // SAFETY: This test resizes only its own native window.
+        unsafe {
+            SetWindowPos(window.hwnd, None, 0, 0, outer.right - outer.left - 40,
+                outer.bottom - outer.top - 40, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+            GetWindowRect(window.hwnd, &mut outer).unwrap();
+        }
+        window.switch_mode(SearchMode::Dictionary, None);
+        window.switch_mode(SearchMode::Sentence, None);
+        let mut resized = RECT::default();
+        // SAFETY: This live HWND writes to local storage.
+        unsafe { GetWindowRect(window.hwnd, &mut resized).unwrap(); }
+        assert_eq!(resized, outer);
+    }
+
     fn wait(window: &mut SearchWindow, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -1363,6 +1449,70 @@ mod tests {
         }
     }
 
+    fn click_definition(popup: &SearchPopup, action: chibipop::controller::HitAction) {
+        let point = search_popup::tests::action_point(popup, action);
+        // SAFETY: The point is inside this live HWND.
+        unsafe {
+            SendMessageW(popup.hwnd(), WM_LBUTTONUP, None,
+                Some(LPARAM(((point.y as isize) << 16) | point.x as isize)));
+        }
+    }
+
+    #[test]
+    fn native_expansion_retires_children_and_pending_link_and_hover_replies() {
+        use chibipop::controller::HitAction;
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        let mut presentation = selected_presentation(&window.result, 0).unwrap();
+        let mut card = presentation.top.clone().unwrap();
+        card.blocks = vec![chibipop::present::GlossBlock::parse("FixtureTerms",
+            r#"[{"type":"structured-content","content":{"tag":"a","href":"?query=犬","content":"犬"}}]"#)];
+        presentation.top = Some(card.clone());
+        presentation.all_cards[0] = card.clone();
+        card.written = Some("犬".into());
+        card.reading = Some("いぬ".into());
+        presentation.collapsed.push(chibipop::present::collapsed_from_card(&card, 40));
+        presentation.all_cards.push(card);
+        let parent = SearchPopup::open(&window.database, window.session.clone(), window.hwnd,
+            presentation, PhysPoint { x: 20, y: 20 }, false).unwrap();
+        let child_presentation = selected_presentation(&window.result, 0).unwrap();
+        let child = SearchPopup::open(&window.database, window.session.nested(), window.hwnd,
+            child_presentation.clone(), PhysPoint { x: 400, y: 40 }, true).unwrap();
+        window.definitions = vec![parent, child];
+        let (requests, inbox) = mpsc::channel();
+        window.requests = requests;
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+
+        click_definition(&window.definitions[0], HitAction::DrillDown("犬".into()));
+        window.poll();
+        let SearchRequest::Run(query) = inbox.try_recv().unwrap() else { panic!("Expected a link lookup"); };
+        assert_eq!(query.definition, Some((0, false)));
+        let old_generation = window.generation;
+        let old_click_generation = window.click_generation;
+        window.hover = Some((0, "犬".into(), Instant::now(), true));
+        for hover in [false, true] {
+            sender.send(Reply {
+                generation: old_generation,
+                result: Ok(SearchResult::Found(Box::new(child_presentation.clone()))),
+                tokens: Vec::new(), selected: None, definition: Some((0, hover)),
+                click_generation: (!hover).then_some(old_click_generation), session: query.session.clone(),
+            }).unwrap();
+        }
+        click_definition(&window.definitions[0], HitAction::ExpandEntry(0));
+        window.poll();
+
+        assert_eq!(window.definitions.len(), 1);
+        assert_eq!(window.definitions[0].presentation.top.as_ref().unwrap().written.as_deref(), Some("犬"));
+        assert_ne!(window.generation, old_generation);
+        assert_ne!(window.click_generation, old_click_generation);
+        assert!(window.click_parent.is_none());
+        assert!(window.hover.is_none());
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+    }
+
     fn replace_input(window: &SearchWindow, value: &str) {
         let value = wide(value);
         // SAFETY: The edit owns its text. Replacement sends the normal edit-change notification.
@@ -1370,6 +1520,139 @@ mod tests {
             SendMessageW(window.state.input.get(), EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
             SendMessageW(window.state.input.get(), EM_REPLACESEL, Some(WPARAM(0)), Some(LPARAM(value.as_ptr() as isize)));
         }
+    }
+
+    #[test]
+    fn native_partial_wheel_deltas_survive_separate_polls() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        let mut presentation = selected_presentation(&window.result, 0).unwrap();
+        let card = presentation.top.as_mut().unwrap();
+        card.blocks = vec![chibipop::present::GlossBlock::parse("FixtureTerms",
+            &serde_json::to_string(&vec!["long definition"; 200]).unwrap())];
+        presentation.all_cards[0] = card.clone();
+        let mut popup = SearchPopup::open(&window.database, window.session.clone(), window.hwnd,
+            presentation, PhysPoint { x: 20, y: 20 }, false).unwrap();
+        for _ in 0..8 {
+            // SAFETY: The wheel message targets this live HWND.
+            unsafe { SendMessageW(popup.hwnd(), WM_MOUSEWHEEL,
+                Some(WPARAM(((-15i16) as u16 as usize) << 16)), None); }
+            assert!(popup.poll().unwrap().is_none());
+        }
+        assert_eq!(search_popup::tests::scroll(&popup), 48);
+        for delta in [15i16, -15, 30, 30, 30, 30] {
+            // SAFETY: The wheel message targets this live HWND.
+            unsafe { SendMessageW(popup.hwnd(), WM_MOUSEWHEEL,
+                Some(WPARAM(((delta as u16) as usize) << 16)), None); }
+            assert!(popup.poll().unwrap().is_none());
+        }
+        assert_eq!(search_popup::tests::scroll(&popup), 0);
+    }
+
+    #[test]
+    fn native_same_word_reply_requires_a_different_profile_session() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        window.state.selected.set(Some(0));
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+        let presentation = selected_presentation(&window.result, 0).unwrap();
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+
+        for (session, expected) in [(window.session.clone(), 1), (window.session.nested(), 2)] {
+            window.begin_click(0);
+            sender.send(Reply {
+                generation: window.generation,
+                result: Ok(SearchResult::Found(Box::new(presentation.clone()))),
+                tokens: Vec::new(), selected: None, definition: Some((0, false)),
+                click_generation: Some(window.click_generation), session: session.clone(),
+            }).unwrap();
+            window.poll();
+            assert_eq!(window.definitions.len(), expected);
+            assert_eq!(window.definitions.last().unwrap().session, session);
+        }
+    }
+
+    #[test]
+    #[ignore = "Moves the real desktop pointer over native search definitions"]
+    fn native_parent_reentry_closes_children_before_a_replacement_miss() {
+        let (mut window, _fixture, _guard) = fixture();
+        replace_input(&window, "猫");
+        wait(&mut window, "candidate");
+        window.state.selected.set(Some(0));
+        window.poll();
+        let mut saved = POINT::default();
+        // SAFETY: This buffer receives the desktop pointer.
+        unsafe { GetCursorPos(&mut saved).unwrap(); }
+        struct RestorePointer(POINT);
+        impl Drop for RestorePointer {
+            fn drop(&mut self) {
+                // SAFETY: Restore the saved desktop pointer.
+                unsafe { let _ = SetCursorPos(self.0.x, self.0.y); }
+            }
+        }
+        let _restore = RestorePointer(saved);
+        let point = search_popup::tests::hover_point(&mut window.definitions[0], "猫");
+        let anchor = window.definitions[0].anchor().unwrap();
+        let position = LPARAM(((point.y as isize) << 16) | point.x as isize);
+        // SAFETY: This test moves the pointer to its own live HWND.
+        unsafe {
+            SetCursorPos(anchor.x + point.x, anchor.y + point.y).unwrap();
+            SendMessageW(window.definitions[0].hwnd(), WM_MOUSEMOVE, None, Some(position));
+        }
+        let mut monitor = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default() };
+        // SAFETY: The live parent selects a monitor for this local output buffer.
+        unsafe {
+            GetMonitorInfoW(MonitorFromWindow(window.definitions[0].hwnd(),
+                MONITOR_DEFAULTTONEAREST), &mut monitor).ok().unwrap();
+        }
+        let work = monitor.rcWork;
+        let child_x = if anchor.x + point.x < work.left + (work.right - work.left) / 2 {
+            work.right - 1
+        } else { work.left };
+        let child = SearchPopup::open(&window.database, window.session.nested(), window.hwnd,
+            selected_presentation(&window.result, 0).unwrap(),
+            PhysPoint { x: child_x, y: work.top }, true).unwrap();
+        window.definitions[0].note_child_opened();
+        window.definitions.push(child);
+        window.hover = Some((0, "猫".into(), Instant::now(), true));
+        window.poll();
+        assert_eq!(window.definitions.len(), 2, "A stationary pointer keeps the child");
+
+        let (requests, inbox) = mpsc::channel();
+        window.requests = requests;
+        let (sender, replies) = mpsc::channel();
+        window.replies = replies;
+        window.begin_click(1);
+        let old_click_generation = window.click_generation;
+        let child_anchor = window.definitions[1].anchor().unwrap();
+        // SAFETY: Both pointer positions belong to this explicit desktop test.
+        unsafe {
+            SetCursorPos(child_anchor.x + 2, child_anchor.y + 2).unwrap();
+            SetCursorPos(anchor.x + point.x, anchor.y + point.y).unwrap();
+            SendMessageW(window.definitions[0].hwnd(), WM_MOUSEMOVE, None, Some(position));
+        }
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
+        assert_ne!(window.click_generation, old_click_generation);
+        assert!(inbox.try_recv().is_err());
+        let (_, _, since, sent) = window.hover.as_mut().unwrap();
+        *since = Instant::now() - Duration::from_millis(400);
+        assert!(!*sent);
+        window.poll();
+        let SearchRequest::Run(query) = inbox.try_recv().unwrap() else { panic!("Expected a hover lookup"); };
+        assert_eq!(query.definition, Some((0, true)));
+        sender.send(Reply {
+            generation: query.generation, result: Ok(SearchResult::Miss),
+            tokens: Vec::new(), selected: None, definition: query.definition,
+            click_generation: None, session: query.session,
+        }).unwrap();
+        window.poll();
+        assert_eq!(window.definitions.len(), 1);
     }
 
     #[test]

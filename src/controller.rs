@@ -904,8 +904,13 @@ impl Controller {
             .unwrap_or(&self.future_session)
             .clone();
         self.set_profile_config(&session);
-        if let Some(s) = self.surface.as_ref() {
-            out.push(self.repaint(s.scroll));
+        let gesture_commands = self.run_gesture(GestureInput::Tick { tick: self.clock });
+        if gesture_commands.is_empty() {
+            if let Some(s) = self.surface.as_ref() {
+                out.push(self.repaint(s.scroll));
+            }
+        } else {
+            out.extend(gesture_commands);
         }
         out.push(Command::SetBackArmed(self.has_history()));
         let (anki_enabled, roles) = self
@@ -958,7 +963,6 @@ impl Controller {
             y: placed.popup.y.saturating_add(local.y), w: 1, h: 1,
         };
         let mut parent = self.surface.take().expect("parent exists");
-        parent.gesture.reset();
         parent.pressed_link = None;
         parent.last_drag_point = None;
         let parents = std::mem::take(&mut self.parents);
@@ -2756,6 +2760,36 @@ mod tests {
         c.handle(Event::BackRequested);
         assert_eq!(c.surface.as_ref(), Some(&root));
         assert!(c.parents.is_empty());
+    }
+
+    #[test]
+    fn hover_parent_keeps_plain_click_clear_until_its_deadline() {
+        for (child_ticks, expired) in [(0, false), (11, true)] {
+            let mut c = test_controller(ControllerConfig { anki_enabled: true, ..cfg() });
+            let parent = gloss_card("猫", "動物");
+            let (entry, gloss) = entries(&parent).next().unwrap();
+            let text = TextAddr {
+                entry,
+                addr: crate::select::DocAddr {
+                    path: leaves(&gloss.doc, RoleFilter::default())[0].path,
+                    byte: 0,
+                },
+            };
+            shown_card(&mut c, presentation_with_card(parent.clone(), vec![parent]));
+            let local = PhysPoint { x: 20, y: 20 };
+            click(&mut c, local, Button::Primary, Some(HitAction::ToggleEntry(entry)));
+            c.handle(Event::PointerDown {
+                local, button: Button::Primary, hit: None, text: Some(text),
+            });
+            c.handle(Event::PointerUp { local, button: Button::Primary });
+            assert!(!c.selection().unwrap().card(0).unwrap().is_empty());
+            hover_child(&mut c, "犬");
+            for _ in 0..child_ticks { c.handle(Event::GestureTick); }
+            c.handle(Event::BackRequested);
+            assert_eq!(expired, c.selection().unwrap().card(0).unwrap().is_empty());
+            for _ in child_ticks..12 { c.handle(Event::GestureTick); }
+            assert!(c.selection().unwrap().card(0).unwrap().is_empty());
+        }
     }
 
     #[test]

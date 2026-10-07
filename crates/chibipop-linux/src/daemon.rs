@@ -3521,12 +3521,11 @@ impl App {
                     if !latest.profiles.iter().any(|profile| profile.id == id) {
                         bail!("profile {id:?} does not exist");
                     }
-                    if latest.default_profile == id {
-                        return Ok(());
+                    if latest.default_profile != id {
+                        latest.default_profile = id.clone();
+                        latest.validate()?;
+                        latest.save(&self.paths.config_file)?;
                     }
-                    latest.default_profile = id.clone();
-                    latest.validate()?;
-                    latest.save(&self.paths.config_file)?;
                     self.install_saved_config(latest)
                 })();
                 match result {
@@ -5448,6 +5447,31 @@ mod tests {
             saved.resolved(Some(&default_id)).unwrap().anki.static_region
         );
         assert_eq!(None, saved.resolved(Some(&popup_id)).unwrap().anki.static_region);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tray_default_selection_installs_a_matching_saved_profile() {
+        let dir = scratch("tray_saved_default");
+        let event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+        let mut app = test_app(&dir, &dir.join("chibipop.log"), &event_loop);
+        let retained = app.default_session.clone();
+        show_popup_for_session(&mut app, retained.clone());
+        let mut saved = app.saved.clone();
+        let mut alternate = app.config.clone();
+        alternate.anki.deck = "Tray default".to_string();
+        let id = add_test_profile(&mut saved, "Alternate", &alternate);
+        saved.default_profile = id.clone();
+        saved.save(&app.paths.config_file).unwrap();
+
+        app.handle_tray(TrayRequest::SetDefaultProfile(id.clone()));
+
+        assert_eq!(id, app.default_session.id());
+        assert_eq!("Tray default", app.default_session.config().anki.deck);
+        assert_eq!(retained, app.controller.current_session().unwrap().clone());
+        app.feed(Event::DismissRequested);
+        assert_eq!(id, app.displayed_session().id());
+        assert_eq!(saved, chibipop::config::load_or_create(&app.paths.config_file).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
