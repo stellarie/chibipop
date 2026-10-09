@@ -4561,7 +4561,13 @@ impl SettingsWindow {
             // why `ShowWindow` is not used here. The corner of the last run
             // decides which monitor holds the window, so read it here.
             let saved = placement::load(&placement::state_path());
-            win.fit_to(WIN_W, content_h + PAD, target(hwnd, saved));
+            let start = target(hwnd, saved);
+            // Open at half the work area, not the full content. The page scrolls.
+            let start_h = start.as_ref().map_or(content_h + PAD, |t| {
+                let half = dpi_unscale(hwnd, (t.area.bottom - t.area.top) / 2);
+                (content_h + PAD).min(half.max(MIN_CLIENT_H))
+            });
+            win.fit_to(WIN_W, start_h, start);
             win.reflow_all_tabs();
             win.resize_content();
             place_bottom(hwnd);
@@ -7431,6 +7437,12 @@ impl SettingsWindow {
                 .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
                 .map(|(_, name)| name.clone())
                 .collect();
+            // An engine that is not enabled never runs and falls back to
+            // Windows OCR, so choosing it also enables it.
+            let engine = form.cfg.ocr.engine.clone();
+            if self.engine_dirs.contains_key(&engine) && !form.cfg.plugins.enabled.contains(&engine) {
+                form.cfg.plugins.enabled.push(engine);
+            }
             form
         };
         self.staged.borrow_mut().clone_from(&form);
