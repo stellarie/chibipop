@@ -152,9 +152,9 @@ fn reindex(db: &Path, after: &ResolvedConfig) -> Frequency {
 /// The status line an outcome earns.
 pub fn describe(applied: &Applied) -> String {
     let mut line = match &applied.outcome {
-        ApplyOutcome::Live { reply } => format!("Saved; daemon reloaded ({reply})."),
+        ApplyOutcome::Live { reply } => format!("Settings saved and daemon reloaded ({reply})."),
         ApplyOutcome::ConfigOnly => {
-            "Saved. The daemon is not running - settings take effect when it starts.".to_string()
+            "Settings saved and will take effect next time the daemon starts (daemon is not running).".to_string()
         }
     };
     for notice in &applied.notices {

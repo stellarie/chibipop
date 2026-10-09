@@ -2057,10 +2057,9 @@ fn dictionaries_page(app: &App) -> Element<'_, Message> {
         card("Library", column![
             library,
             hint(
-                "Names match exactly and position is priority inside its own section. A \
-                 checkbox turns a dictionary on for the section it sits in and leaves the \
-                 others alone. Adds and removals are staged: Rebuild imports them and \
-                 rebuilds the database."
+                "Priority is determined by the position of a dict in its section. \
+                 The checkbox toggles a dictionary on/off for its section. \
+                 Adds and removals are applied via the database Rebuild button."
             ),
             rebuild_row(app),
         ].spacing(10)),
@@ -2079,7 +2078,7 @@ fn rebuild_row(app: &App) -> Element<'_, Message> {
         None if app.form.has_staged() => {
             "Staged changes are not in the database yet.".to_string()
         }
-        None => "Rebuild reads every archive again; the popup keeps working meanwhile."
+        None => "Rebuild reads every archive again. This may take some time."
             .to_string(),
     };
     row![
@@ -2249,7 +2248,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
             ),
         ),
         hint(
-            "Reuse options save a target on first use. Reset the saved targets to select \
+            "The Reuse options save a target region/window on first use. Reset the saved targets to select \
              them again. Linux window capture needs slurp and Hyprland or Sway queries."
         ),
         hint(region_summary),
@@ -2264,7 +2263,7 @@ fn screenshot_rows(app: &App) -> Vec<Element<'_, Message>> {
                 .width(260),
         ),
         hint(
-            "An absolute path is taken as typed. A relative one lands under your XDG data \
+            "An absolute path is taken as typed. Relative paths start at your XDG data \
              directory, or beside the executable in portable mode."
         ),
     ]
@@ -2340,11 +2339,9 @@ fn field_map_rows(app: &App) -> Vec<Element<'_, Message>> {
             .into(),
     );
     rows.push(
-        hint(format!(
-            "A new row arrives on \"{NEW_ROW_SOURCE}\", the one source the shipped \
-             defaults leave out; type the Anki field it belongs in, or pick another \
-             source. A row with no field name is dropped on Apply."
-        )),
+        hint(
+            "Card fields must match the name of the field on your Anki note type exactly."
+        ),
     );
     rows
 }
@@ -2466,8 +2463,8 @@ fn general_page(app: &App) -> Element<'_, Message> {
                 .label("Start chibipop at login")
                 .on_toggle(Message::Autostart),
             hint(format!(
-                "Writes {} on toggle - GNOME, KDE, and uwsm sessions read it. \
-                 Bare Hyprland/sway: see extras/ in the release.",
+                "Writes {} on toggle. GNOME, KDE, and uwsm sessions read it. \
+                 Hyprland/sway: see extras/ in the release.",
                 target.file().display()
             )),
         ]
@@ -2483,8 +2480,7 @@ fn general_page(app: &App) -> Element<'_, Message> {
             button("Check for updates")
                 .on_press_maybe((!app.checking_update).then_some(Message::CheckUpdate)),
             hint(format!(
-                "You are running {}. A check asks GitHub for the newest release \
-                 and reports it; chibipop never replaces its own binary here.",
+                "You are running {}. Use the button to check GitHub for new releases.",
                 env!("CARGO_PKG_VERSION"),
             )),
         ].spacing(10)),
