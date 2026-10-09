@@ -1353,7 +1353,10 @@ mod tests {
         use chibipop::config::{Profile, ProfileData};
         let guard = crate::input::hooks::search_keyboard_test_guard();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let database = std::env::temp_dir().join(format!("chibipop-native-search-{}.sqlite", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let database = std::env::temp_dir()
+            .join(format!("chibipop-native-search-{}-{n}.sqlite", std::process::id()));
         chibipop::dict::build::build(&[root.join("tests/fixtures/yomitan/terms.zip")], &[], &database, &|_| {}).unwrap();
         let rules = root.join("data/deconjugator.json");
         let mut saved = Config::default();
