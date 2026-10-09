@@ -4226,6 +4226,12 @@ unsafe fn capture_control_runtime(
         let id = GetDlgCtrlID(hwnd);
         let horizontal = match id {
             ID_SCREENSHOT_SUMMARY => HorizontalLayout::Stretch,
+            _ if bind_row_control(id).is_some_and(|(_, offset)| {
+                matches!(offset, ID_BIND_CLEAR_OFFSET | ID_BIND_REMOVE_OFFSET)
+            }) =>
+            {
+                HorizontalLayout::Fixed
+            }
             _ if x >= WIN_W - PAD - BTN_W - 16 => HorizontalLayout::MoveRight,
             _ if x + width >= WIN_W - PAD - BTN_W - 24 => HorizontalLayout::Stretch,
             _ => HorizontalLayout::Fixed,
