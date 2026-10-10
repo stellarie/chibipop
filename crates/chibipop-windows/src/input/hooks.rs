@@ -496,7 +496,7 @@ unsafe fn record_wheel(lparam: LPARAM) {
 
 /// Stores wheel delta values without Win32 calls.
 fn accumulate_wheel(delta: i32) {
-    let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+    let _ = PENDING_SCROLL.try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
         Some(v.saturating_add(delta))
     });
 }
@@ -709,8 +709,8 @@ impl Hooks {
     /// The rest of the delta stays stored.
     pub fn take_whole_notches() -> i32 {
         let mut whole = 0;
-        // Only the successful `fetch_update` call stores the remainder.
-        let _ = PENDING_SCROLL.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+        // Only the successful `try_update` call stores the remainder.
+        let _ = PENDING_SCROLL.try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let remainder = v % WHEEL_DELTA_UNITS;
             whole = (v - remainder) / WHEEL_DELTA_UNITS;
             Some(remainder)

@@ -280,6 +280,19 @@ const ID_BIND_PROFILE_OFFSET: i32 = 6;
 const ID_BIND_REMOVE_OFFSET: i32 = 7;
 const ID_RESET_OVERRIDE_BASE: i32 = 50000;
 
+/// Left edge of the second bind column, relative to `PAD`.
+const BIND_COL2_X: i32 = 228;
+/// Left edge of the third bind column, relative to `PAD`.
+const BIND_COL3_X: i32 = 336;
+/// Width of the first bind column.
+const BIND_COL1_W: i32 = 220;
+/// Width of the second and third columns of the button line.
+const BIND_BUTTON_W: i32 = 100;
+/// Right edge of the bind grid, relative to `PAD`.
+const BIND_GRID_W: i32 = 486;
+/// Extra space after the last line of a bind, in pixels.
+const BIND_BLOCK_GAP: i32 = 12;
+
 
 /// The first field-map combo identifier.
 const ID_FIELD_MAP_BASE: i32 = 200;
@@ -3237,6 +3250,11 @@ unsafe fn update_bind_row_controls(hwnd: HWND, row: usize) {
             } else if !lookup {
                 SendMessageW(mode, CB_SETCURSEL, Some(WPARAM(0)), None);
             }
+            // A mode that cannot change is hidden, not greyed out. Show it only
+            // while its row is on screen, so another tab keeps it hidden.
+            let row_visible = dlg_item(hwnd, bind_control_id(row, ID_BIND_ACTION_OFFSET))
+                .is_ok_and(|action| IsWindowVisible(action).as_bool());
+            let _ = ShowWindow(mode, if lookup && row_visible { SW_SHOW } else { SW_HIDE });
             let _ = EnableWindow(mode, lookup);
         }
         update_bind_profile_control(hwnd, row);
@@ -3422,7 +3440,7 @@ unsafe fn build_configured_binds(
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
                 PAD,
                 row_top,
-                220,
+                BIND_COL1_W,
                 180,
                 bind_control_id(row, ID_BIND_ACTION_OFFSET),
                 font,
@@ -3441,9 +3459,9 @@ unsafe fn build_configured_binds(
                 w!("BUTTON"),
                 "Enabled",
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
-                PAD + 228,
+                PAD + BIND_COL2_X,
                 row_top,
-                100,
+                BIND_BUTTON_W,
                 ROW_H,
                 bind_control_id(row, ID_BIND_ENABLED_OFFSET),
                 font,
@@ -3465,9 +3483,9 @@ unsafe fn build_configured_binds(
                 w!("COMBOBOX"),
                 "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                PAD + 336,
+                PAD + BIND_COL3_X,
                 row_top,
-                150,
+                BIND_GRID_W - BIND_COL3_X,
                 180,
                 bind_control_id(row, ID_BIND_MODE_OFFSET),
                 font,
@@ -3493,7 +3511,7 @@ unsafe fn build_configured_binds(
                 WS_TABSTOP,
                 PAD,
                 row_top + ROW_H + ROW_GAP,
-                260,
+                BIND_COL1_W,
                 ROW_H,
                 bind_control_id(row, ID_BIND_CHORD_OFFSET),
                 font,
@@ -3503,9 +3521,9 @@ unsafe fn build_configured_binds(
                 w!("BUTTON"),
                 "Clear",
                 WS_TABSTOP,
-                PAD + 270,
+                PAD + BIND_COL2_X,
                 row_top + ROW_H + ROW_GAP,
-                76,
+                BIND_BUTTON_W,
                 ROW_H,
                 bind_control_id(row, ID_BIND_CLEAR_OFFSET),
                 font,
@@ -3515,9 +3533,9 @@ unsafe fn build_configured_binds(
                 w!("BUTTON"),
                 "Remove",
                 WS_TABSTOP,
-                PAD + 354,
+                PAD + BIND_COL3_X,
                 row_top + ROW_H + ROW_GAP,
-                90,
+                BIND_BUTTON_W,
                 ROW_H,
                 bind_control_id(row, ID_BIND_REMOVE_OFFSET),
                 font,
@@ -3530,7 +3548,7 @@ unsafe fn build_configured_binds(
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32) | WS_TABSTOP,
                 PAD,
                 row_top + 2 * (ROW_H + ROW_GAP),
-                180,
+                BIND_COL1_W,
                 ROW_H,
                 bind_control_id(row, ID_BIND_OVERRIDE_OFFSET),
                 font,
@@ -3548,9 +3566,9 @@ unsafe fn build_configured_binds(
                 w!("COMBOBOX"),
                 "",
                 WINDOW_STYLE(CBS_DROPDOWNLIST as u32) | WS_TABSTOP | WS_VSCROLL,
-                PAD + 190,
+                PAD + BIND_COL2_X,
                 row_top + 2 * (ROW_H + ROW_GAP),
-                280,
+                BIND_GRID_W - BIND_COL2_X,
                 180,
                 bind_control_id(row, ID_BIND_PROFILE_OFFSET),
                 font,
@@ -3564,7 +3582,7 @@ unsafe fn build_configured_binds(
             SendMessageW(profile, CB_SETCURSEL, Some(WPARAM(profile_index)), None);
             controls.push(profile);
 
-            *y += 3 * ROW_H + 3 * ROW_GAP;
+            *y += 3 * ROW_H + 2 * ROW_GAP + BIND_BLOCK_GAP;
             update_bind_row_controls(root, row);
         }
         Ok(form.catalog.binds.len())
@@ -3860,7 +3878,10 @@ const TOOLINFO_V5_SIZE: u32 = 56;
 ///
 /// A control is its own window and consumes `WM_MOUSEMOVE`, so the frame never
 /// sees a hover. The window polls the cursor position instead.
-const TIP_POLL_MS: u32 = 150;
+const TIP_POLL_MS: u32 = 50;
+
+/// How long the pointer must rest on a control before its tooltip appears.
+const TIP_SHOW_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// The timer that drives the hover check.
 const ID_TIP_TIMER: usize = 0x71;
@@ -3903,6 +3924,8 @@ struct TipState {
     help: std::collections::HashMap<isize, String>,
     /// The control whose tooltip is displayed, or `None`.
     shown: Option<isize>,
+    /// The control under the pointer and when the pointer arrived on it.
+    hover: Option<(isize, std::time::Instant)>,
 }
 
 fn destroy_tip(tip: &mut HWND) {
@@ -4080,12 +4103,34 @@ unsafe fn tip_poll(tip: HWND) {
             })
         };
         let Some(target) = wanted else {
+            TIP_STATE.with(|state| state.borrow_mut().hover = None);
             if shown.is_some() {
                 let _ = SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), None);
                 TIP_STATE.with(|state| state.borrow_mut().shown = None);
             }
             return;
         };
+        if shown != Some(target) {
+            let since = TIP_STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                match state.hover {
+                    Some((hovered, since)) if hovered == target => since,
+                    _ => {
+                        let now = std::time::Instant::now();
+                        state.hover = Some((target, now));
+                        now
+                    }
+                }
+            });
+            if since.elapsed() < TIP_SHOW_DELAY {
+                // A tooltip for another control must not outlive the pointer.
+                if shown.is_some() {
+                    let _ = SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), None);
+                    TIP_STATE.with(|state| state.borrow_mut().shown = None);
+                }
+                return;
+            }
+        }
         // Clear of the pointer, so a click still lands.
         let control = HWND(target as *mut core::ffi::c_void);
         let mut rect = RECT::default();
@@ -4181,6 +4226,12 @@ unsafe fn capture_control_runtime(
         let id = GetDlgCtrlID(hwnd);
         let horizontal = match id {
             ID_SCREENSHOT_SUMMARY => HorizontalLayout::Stretch,
+            _ if bind_row_control(id).is_some_and(|(_, offset)| {
+                matches!(offset, ID_BIND_CLEAR_OFFSET | ID_BIND_REMOVE_OFFSET)
+            }) =>
+            {
+                HorizontalLayout::Fixed
+            }
             _ if x >= WIN_W - PAD - BTN_W - 16 => HorizontalLayout::MoveRight,
             _ if x + width >= WIN_W - PAD - BTN_W - 24 => HorizontalLayout::Stretch,
             _ => HorizontalLayout::Fixed,
@@ -4510,7 +4561,13 @@ impl SettingsWindow {
             // why `ShowWindow` is not used here. The corner of the last run
             // decides which monitor holds the window, so read it here.
             let saved = placement::load(&placement::state_path());
-            win.fit_to(WIN_W, content_h + PAD, target(hwnd, saved));
+            let start = target(hwnd, saved);
+            // Open at half the work area, not the full content. The page scrolls.
+            let start_h = start.as_ref().map_or(content_h + PAD, |t| {
+                let half = dpi_unscale(hwnd, (t.area.bottom - t.area.top) / 2);
+                (content_h + PAD).min(half.max(MIN_CLIENT_H))
+            });
+            win.fit_to(WIN_W, start_h, start);
             win.reflow_all_tabs();
             win.resize_content();
             place_bottom(hwnd);
@@ -5469,6 +5526,9 @@ impl SettingsWindow {
                         }
                     }
                 }
+            }
+            for row in 0..self.bind_count {
+                update_bind_row_controls(self.hwnd, row);
             }
             self.apply_field_map_visibility();
             update_engine_controls(self.hwnd);
@@ -7377,6 +7437,12 @@ impl SettingsWindow {
                 .filter(|&(idx, _)| checked(ID_PLUGIN_ENABLE_BASE + idx as i32))
                 .map(|(_, name)| name.clone())
                 .collect();
+            // An engine that is not enabled never runs and falls back to
+            // Windows OCR, so choosing it also enables it.
+            let engine = form.cfg.ocr.engine.clone();
+            if self.engine_dirs.contains_key(&engine) && !form.cfg.plugins.enabled.contains(&engine) {
+                form.cfg.plugins.enabled.push(engine);
+            }
             form
         };
         self.staged.borrow_mut().clone_from(&form);
